@@ -24,7 +24,7 @@ TASK_STATUSES = {
     "closed",
 }
 
-_SCHEMA = """
+_TABLE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS agents (
     name          TEXT PRIMARY KEY,
     description   TEXT NOT NULL DEFAULT '',
@@ -47,6 +47,9 @@ CREATE TABLE IF NOT EXISTS messages (
     lease_token TEXT,
     delivery_count INTEGER NOT NULL DEFAULT 0
 );
+"""
+
+_INDEX_SCHEMA = """
 CREATE INDEX IF NOT EXISTS idx_messages_unread
     ON messages (recipient, read_at);
 CREATE INDEX IF NOT EXISTS idx_messages_available
@@ -88,8 +91,9 @@ class Store:
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         with self._lock:
-            self._conn.executescript(_SCHEMA)
+            self._conn.executescript(_TABLE_SCHEMA)
             self._migrate()
+            self._conn.executescript(_INDEX_SCHEMA)
             self._conn.commit()
 
     def _migrate(self) -> None:

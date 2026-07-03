@@ -1,4 +1,5 @@
 from pathlib import Path
+import sqlite3
 from tempfile import TemporaryDirectory
 import time
 import unittest
@@ -139,6 +140,44 @@ class StoreTests(unittest.TestCase):
         thread = store.get_thread(task_id)
         self.assertEqual("task", thread[0]["kind"])
         self.assertEqual("created", thread[0]["task_status"])
+
+    def test_existing_old_schema_database_migrates_before_index_creation(self):
+        with TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "messages.db"
+            conn = sqlite3.connect(db_path)
+            conn.executescript(
+                """
+                CREATE TABLE agents (
+                    name          TEXT PRIMARY KEY,
+                    description   TEXT NOT NULL DEFAULT '',
+                    registered_at TEXT NOT NULL,
+                    last_seen     TEXT NOT NULL
+                );
+                CREATE TABLE messages (
+                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    sender     TEXT NOT NULL,
+                    recipient  TEXT NOT NULL,
+                    content    TEXT NOT NULL,
+                    reply_to   INTEGER,
+                    created_at TEXT NOT NULL,
+                    read_at    TEXT
+                );
+                CREATE INDEX idx_messages_unread
+                    ON messages (recipient, read_at);
+                CREATE INDEX idx_messages_reply_to
+                    ON messages (reply_to);
+                """
+            )
+            conn.close()
+
+            store = Store(db_path)
+            columns = {
+                row["name"]
+                for row in store._conn.execute("PRAGMA table_info(messages)").fetchall()
+            }
+            self.assertIn("leased_until", columns)
+            self.assertIn("task_status", columns)
+            store.close()
 
 
 if __name__ == "__main__":
