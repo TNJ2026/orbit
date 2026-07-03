@@ -455,6 +455,30 @@ def create_server(
         roles = await _to_thread(list_agent_roles, agents_dir)
         return _json(request, {"roles": roles})
 
+    @mcp.custom_route("/api/agent-roles/{role_id}", methods=["POST"])
+    async def api_save_agent_role(request: Request) -> JSONResponse:
+        if forbidden := _forbid_non_local(request):
+            return forbidden
+        role_id = request.path_params.get("role_id")
+        if not role_id or not role_id.isidentifier() or role_id.startswith("_"):
+            return _json_error("Invalid role ID", request=request)
+        data = await _read_json(request)
+        content = data.get("content")
+        if content is None:
+            return _json_error("Missing content", request=request)
+        project_root = current_project.get("project_root")
+        agents_dir = Path(project_root) / "agents" if project_root else Path.cwd() / "agents"
+        if not agents_dir.is_dir():
+            return _json_error("Agents directory not found", request=request)
+        file_path = (agents_dir / f"{role_id}.md").resolve()
+        if not str(file_path).startswith(str(agents_dir.resolve())):
+            return _json_error("Access denied", request=request)
+        def _write_role():
+            file_path.write_text(content, encoding="utf-8")
+        await _to_thread(_write_role)
+        roles = await _to_thread(list_agent_roles, agents_dir)
+        return _json(request, {"success": True, "roles": roles})
+
     @mcp.custom_route("/api/agents", methods=["POST"])
     async def api_register_agent(request: Request) -> JSONResponse:
         if forbidden := _forbid_non_local(request):

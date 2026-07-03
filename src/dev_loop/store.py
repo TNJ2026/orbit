@@ -19,6 +19,8 @@ TASK_STATUSES = {
     "created",
     "assigned",
     "in_progress",
+    "testing",
+    "bugfixing",
     "replied",
     "accepted",
     "needs_changes",
