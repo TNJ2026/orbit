@@ -2,21 +2,85 @@
 
 from __future__ import annotations
 
+import ipaddress
+import shutil
+from importlib import resources
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlparse
+
 import anyio
 
 from mcp.server.fastmcp import FastMCP
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
+from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
-from .store import DEFAULT_LEASE_SECONDS, Store, UnknownAgentError, project_db_path
+from .project_index import list_projects
+from .store import DEFAULT_LEASE_SECONDS, InvalidInputError, Store, UnknownAgentError
 
 MAX_WAIT_SECONDS = 60
 MAX_LEASE_SECONDS = 3600
 POLL_INTERVAL = 0.5
 
+# The HTTP API is a local-only control surface: agents act on what lands in
+# their inboxes, so a forged request is a prompt-injection channel. Defense is
+# layered: the peer socket IP must be loopback (the load-bearing check — it is
+# not client-controllable, so it holds even when bound beyond loopback with
+# --host 0.0.0.0), the Host header must be a loopback hostname (blocks DNS
+# rebinding), and any browser Origin must be a loopback origin (blocks CSRF).
+_LOCAL_HOSTNAMES = {"127.0.0.1", "localhost", "::1"}
+_AGENT_TOOL_CANDIDATES = [
+    {
+        "id": "claude",
+        "name": "Claude Code",
+        "command": "claude",
+        "agent_name": "claude-code",
+        "description": "Claude Code CLI",
+    },
+    {
+        "id": "codex",
+        "name": "Codex CLI",
+        "command": "codex",
+        "agent_name": "codex",
+        "description": "OpenAI Codex CLI",
+    },
+    {
+        "id": "gemini",
+        "name": "Gemini CLI",
+        "command": "gemini",
+        "agent_name": "gemini",
+        "description": "Google Gemini CLI",
+    },
+    {
+        "id": "agy",
+        "name": "Antigravity CLI",
+        "command": "agy",
+        "agent_name": "antigravity",
+        "description": "Google Antigravity CLI",
+    },
+    {
+        "id": "hermes",
+        "name": "Hermes",
+        "command": "hermes",
+        "agent_name": "hermes",
+        "description": "Hermes agent CLI",
+    },
+    {
+        "id": "openclaw",
+        "name": "OpenClaw",
+        "command": "openclaw",
+        "agent_name": "openclaw",
+        "description": "OpenClaw agent CLI",
+    },
+]
+
 # Store uses synchronous sqlite3; run every call in a worker thread so it
 # never blocks the event loop (many concurrent long-polling clients).
 _to_thread = anyio.to_thread.run_sync
+
+_UI_HTML = (
+    resources.files("dev_loop").joinpath("static/ui.html").read_text(encoding="utf-8")
+)
 
 
 async def _read_json(request: Request) -> dict:
@@ -27,16 +91,135 @@ async def _read_json(request: Request) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def _json_error(message: str, status_code: int = 400) -> JSONResponse:
-    return JSONResponse({"error": message}, status_code=status_code)
+def _cors_headers(request: Request) -> dict[str, str]:
+    origin = request.headers.get("origin")
+    if origin and urlparse(origin).hostname in _LOCAL_HOSTNAMES:
+        return {
+            "access-control-allow-origin": origin,
+            "access-control-allow-methods": "GET, POST, OPTIONS",
+            "access-control-allow-headers": "content-type",
+            "vary": "Origin",
+        }
+    return {}
+
+
+def _json(request: Request, data: Any, status_code: int = 200) -> JSONResponse:
+    return JSONResponse(data, status_code=status_code, headers=_cors_headers(request))
+
+
+def _json_error(
+    message: str, status_code: int = 400, request: Request | None = None
+) -> JSONResponse:
+    headers = _cors_headers(request) if request is not None else None
+    return JSONResponse({"error": message}, status_code=status_code, headers=headers)
+
+
+def _is_loopback_peer(request: Request) -> bool:
+    client = request.client
+    if client is None:
+        return False
+    try:
+        return ipaddress.ip_address(client.host).is_loopback
+    except ValueError:
+        return False
+
+
+def _forbid_non_local(request: Request) -> JSONResponse | None:
+    # Peer IP is not client-controllable — this is the check that holds even
+    # when the server is bound beyond loopback (--host 0.0.0.0).
+    if not _is_loopback_peer(request):
+        return _json_error("API is only served to local clients", 403, request)
+    if request.url.hostname not in _LOCAL_HOSTNAMES:
+        return _json_error("API is only served to local hostnames", 403, request)
+    origin = request.headers.get("origin")
+    if origin and urlparse(origin).hostname not in _LOCAL_HOSTNAMES:
+        return _json_error("cross-origin requests are not allowed", 403, request)
+    return None
+
+
+def _parse_int(value: Any, name: str) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise InvalidInputError(f"{name} must be an integer, got {value!r}") from None
+
+
+def detect_agent_tools() -> list[dict[str, Any]]:
+    tools = []
+    for candidate in _AGENT_TOOL_CANDIDATES:
+        path = shutil.which(candidate["command"])
+        tool = {
+            **candidate,
+            "installed": path is not None,
+            "path": path,
+        }
+        if candidate["id"] == "hermes":
+            profiles = detect_hermes_profiles()
+            tool["profiles"] = profiles
+            tool["profile_count"] = len(profiles)
+        tools.append(tool)
+    return tools
+
+
+def detect_hermes_profiles(profile_root: Path | None = None) -> list[dict[str, str]]:
+    root = profile_root or (Path.home() / ".hermes" / "profiles")
+    try:
+        children = sorted(root.iterdir(), key=lambda path: path.name.lower())
+    except OSError:
+        return []
+    return [
+        {"name": path.name, "path": str(path)}
+        for path in children
+        if path.is_dir() and not path.name.startswith(".")
+    ]
+
+
+def list_agent_roles(agents_dir: Path | None = None) -> list[dict[str, str]]:
+    root = agents_dir or (Path.cwd() / "agents")
+    try:
+        files = sorted(root.glob("*.md"), key=lambda path: path.stem)
+    except OSError:
+        return []
+    roles = []
+    for path in files:
+        if path.name.startswith("_"):
+            continue
+        try:
+            content = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        title = next(
+            (line.lstrip("#").strip() for line in content.splitlines() if line.startswith("#")),
+            path.stem,
+        )
+        roles.append(
+            {
+                "id": path.stem,
+                "name": title,
+                "path": str(path),
+                "content": content,
+            }
+        )
+    return roles
 
 
 def create_server(
     host: str = "127.0.0.1",
     port: int = 8848,
     db_path: str | None = None,
+    project: dict[str, Any] | None = None,
 ) -> FastMCP:
-    store = Store(db_path or project_db_path())
+    store = Store(db_path)
+    current_project = project or {
+        "id": "",
+        "name": "",
+        "project_root": "",
+        "db_path": str(store.db_path),
+        "server_url": f"http://{host}:{port}",
+        "host": host,
+        "port": port,
+        "last_seen": "",
+    }
 
     mcp = FastMCP(
         "dev-loop",
@@ -58,6 +241,38 @@ def create_server(
         stateless_http=True,
     )
 
+    async def _deliver(
+        sender: str,
+        to: str,
+        content: str,
+        reply_to: int | None,
+        kind: str,
+        title: str,
+        task_status: str,
+    ) -> dict:
+        """Shared delivery path for the MCP tool and the HTTP API."""
+        await _to_thread(store.touch_agent, sender)
+        try:
+            ids = await _to_thread(
+                store.send_message,
+                sender,
+                to,
+                content,
+                reply_to,
+                kind,
+                title,
+                task_status,
+            )
+        except (UnknownAgentError, InvalidInputError) as exc:
+            return {"delivered": 0, "message_ids": [], "error": str(exc)}
+        if not ids:
+            return {
+                "delivered": 0,
+                "message_ids": [],
+                "note": "no recipients (broadcast with no other registered agents?)",
+            }
+        return {"delivered": len(ids), "message_ids": ids}
+
     @mcp.tool()
     async def register_agent(name: str, description: str = "") -> dict:
         """Register yourself (or refresh your registration) in the dev-loop agent
@@ -65,8 +280,11 @@ def create_server(
         such as 'claude-code', 'codex', or 'gemini', and a one-line description of
         what you are working on. Returns the full list of registered agents so you
         can see who else is available to message."""
-        agents = await _to_thread(store.register_agent, name, description)
-        return {"registered": name, "agents": agents}
+        try:
+            agents = await _to_thread(store.register_agent, name, description)
+        except InvalidInputError as exc:
+            return {"registered": None, "agents": [], "error": str(exc)}
+        return {"registered": name.strip(), "agents": agents}
 
     @mcp.tool()
     async def list_agents() -> list[dict]:
@@ -95,26 +313,11 @@ def create_server(
         - kind: "message" or "task"; programming delegation should use "task".
         - title: optional short task title.
         - task_status: optional task status; defaults to "created" for tasks.
+          Invalid values are rejected with an error.
 
         The message is stored durably and delivered when the recipient next calls
         check_inbox. Returns the created message id(s)."""
-        await _to_thread(store.touch_agent, sender)
-        try:
-            ids = await _to_thread(
-                store.send_message,
-                sender,
-                to,
-                content,
-                reply_to,
-                kind,
-                title,
-                task_status,
-            )
-        except UnknownAgentError as exc:
-            return {"delivered": 0, "message_ids": [], "error": str(exc)}
-        if not ids:
-            return {"delivered": 0, "message_ids": [], "note": "no recipients (broadcast with no other registered agents?)"}
-        return {"delivered": len(ids), "message_ids": ids}
+        return await _deliver(sender, to, content, reply_to, kind, title, task_status)
 
     @mcp.tool()
     async def check_inbox(
@@ -183,39 +386,110 @@ def create_server(
         return RedirectResponse("/ui")
 
     @mcp.custom_route("/ui", methods=["GET"])
-    async def ui(_: Request) -> HTMLResponse:
+    async def ui(request: Request) -> HTMLResponse | JSONResponse:
+        if forbidden := _forbid_non_local(request):
+            return forbidden
         return HTMLResponse(_UI_HTML)
 
+    @mcp.custom_route("/api/{path:path}", methods=["OPTIONS"])
+    async def api_options(request: Request) -> Response:
+        if forbidden := _forbid_non_local(request):
+            return forbidden
+        return Response(status_code=204, headers=_cors_headers(request))
+
     @mcp.custom_route("/api/agents", methods=["GET"])
-    async def api_list_agents(_: Request) -> JSONResponse:
+    async def api_list_agents(request: Request) -> JSONResponse:
+        if forbidden := _forbid_non_local(request):
+            return forbidden
         agents = await _to_thread(store.list_agents)
-        return JSONResponse({"agents": agents})
+        return _json(request, {"agents": agents})
+
+    @mcp.custom_route("/api/status", methods=["GET"])
+    async def api_status(request: Request) -> JSONResponse:
+        if forbidden := _forbid_non_local(request):
+            return forbidden
+        return _json(
+            request,
+            {
+                "db_path": str(store.db_path),
+                "project": {**current_project, "db_path": str(store.db_path)},
+            },
+        )
+
+    @mcp.custom_route("/api/projects", methods=["GET"])
+    async def api_projects(request: Request) -> JSONResponse:
+        if forbidden := _forbid_non_local(request):
+            return forbidden
+        projects = await _to_thread(list_projects, current_project.get("id"))
+        if current_project.get("id") and not any(
+            project.get("id") == current_project.get("id") for project in projects
+        ):
+            projects.insert(0, {**current_project, "current": True, "online": True})
+        return _json(
+            request,
+            {
+                "current_project_id": current_project.get("id"),
+                "projects": projects,
+            },
+        )
+
+    @mcp.custom_route("/api/agent-tools", methods=["GET"])
+    async def api_agent_tools(request: Request) -> JSONResponse:
+        if forbidden := _forbid_non_local(request):
+            return forbidden
+        agents = await _to_thread(store.list_agents)
+        registered = {agent["name"]: agent for agent in agents}
+        tools = await _to_thread(detect_agent_tools)
+        for tool in tools:
+            agent = registered.get(tool["agent_name"])
+            tool["registered"] = agent is not None
+            tool["last_seen"] = agent["last_seen"] if agent else None
+        return _json(request, {"tools": tools})
+
+    @mcp.custom_route("/api/agent-roles", methods=["GET"])
+    async def api_agent_roles(request: Request) -> JSONResponse:
+        if forbidden := _forbid_non_local(request):
+            return forbidden
+        project_root = current_project.get("project_root")
+        agents_dir = Path(project_root) / "agents" if project_root else Path.cwd() / "agents"
+        roles = await _to_thread(list_agent_roles, agents_dir)
+        return _json(request, {"roles": roles})
 
     @mcp.custom_route("/api/agents", methods=["POST"])
     async def api_register_agent(request: Request) -> JSONResponse:
+        if forbidden := _forbid_non_local(request):
+            return forbidden
         data = await _read_json(request)
         name = str(data.get("name", "")).strip()
         description = str(data.get("description", "")).strip()
-        if not name:
-            return _json_error("agent name is required")
-        agents = await _to_thread(store.register_agent, name, description)
-        return JSONResponse({"registered": name, "agents": agents})
+        try:
+            agents = await _to_thread(store.register_agent, name, description)
+        except InvalidInputError as exc:
+            return _json_error(str(exc), request=request)
+        return _json(request, {"registered": name, "agents": agents})
 
     @mcp.custom_route("/api/messages", methods=["GET"])
     async def api_list_messages(request: Request) -> JSONResponse:
+        if forbidden := _forbid_non_local(request):
+            return forbidden
         params = request.query_params
         agent = params.get("agent") or None
         status = params.get("status", "all")
         kind = params.get("kind", "all")
         task_status = params.get("task_status", "all")
-        limit = int(params.get("limit", "100"))
-        messages = await _to_thread(
-            store.list_messages, agent, status, kind, task_status, limit
-        )
-        return JSONResponse({"messages": messages})
+        try:
+            limit = _parse_int(params.get("limit", "100"), "limit")
+            messages = await _to_thread(
+                store.list_messages, agent, status, kind, task_status, limit
+            )
+        except InvalidInputError as exc:
+            return _json_error(str(exc), request=request)
+        return _json(request, {"messages": messages})
 
     @mcp.custom_route("/api/messages", methods=["POST"])
     async def api_send_message(request: Request) -> JSONResponse:
+        if forbidden := _forbid_non_local(request):
+            return forbidden
         data = await _read_json(request)
         sender = str(data.get("sender", "")).strip()
         to = str(data.get("to", "")).strip()
@@ -224,571 +498,80 @@ def create_server(
         title = str(data.get("title", "")).strip()
         task_status = str(data.get("task_status", "")).strip()
         reply_to = data.get("reply_to")
-        if reply_to in ("", None):
-            reply_to = None
-        else:
-            reply_to = int(reply_to)
         if not sender or not to or not content:
-            return _json_error("sender, to, and content are required")
-        await _to_thread(store.touch_agent, sender)
+            return _json_error("sender, to, and content are required", request=request)
         try:
-            ids = await _to_thread(
-                store.send_message,
-                sender,
-                to,
-                content,
-                reply_to,
-                kind,
-                title,
-                task_status,
-            )
-        except UnknownAgentError as exc:
-            return _json_error(str(exc))
-        return JSONResponse({"delivered": len(ids), "message_ids": ids})
+            reply_to = None if reply_to in ("", None) else _parse_int(reply_to, "reply_to")
+        except InvalidInputError as exc:
+            return _json_error(str(exc), request=request)
+        result = await _deliver(sender, to, content, reply_to, kind, title, task_status)
+        if result.get("error"):
+            return _json_error(result["error"], request=request)
+        return _json(request, result)
 
     @mcp.custom_route("/api/messages/{message_id:int}/task-status", methods=["POST"])
     async def api_update_task_status(request: Request) -> JSONResponse:
+        if forbidden := _forbid_non_local(request):
+            return forbidden
         data = await _read_json(request)
         message_id = int(request.path_params["message_id"])
         task_status = str(data.get("task_status", "")).strip()
         if not task_status:
-            return _json_error("task_status is required")
-        updated = await _to_thread(store.update_task_status, message_id, task_status)
-        return JSONResponse(
+            return _json_error("task_status is required", request=request)
+        try:
+            updated = await _to_thread(store.update_task_status, message_id, task_status)
+        except InvalidInputError as exc:
+            return _json_error(str(exc), request=request)
+        return _json(
+            request,
             {"updated": updated, "message_id": message_id, "task_status": task_status}
         )
 
     @mcp.custom_route("/api/inbox/check", methods=["POST"])
     async def api_check_inbox(request: Request) -> JSONResponse:
+        if forbidden := _forbid_non_local(request):
+            return forbidden
         data = await _read_json(request)
         agent = str(data.get("agent", "")).strip()
-        lease_seconds = int(data.get("lease_seconds", DEFAULT_LEASE_SECONDS))
-        lease_seconds = max(1, min(lease_seconds, MAX_LEASE_SECONDS))
         if not agent:
-            return _json_error("agent is required")
+            return _json_error("agent is required", request=request)
+        try:
+            lease_seconds = _parse_int(
+                data.get("lease_seconds", DEFAULT_LEASE_SECONDS), "lease_seconds"
+            )
+        except InvalidInputError as exc:
+            return _json_error(str(exc), request=request)
+        lease_seconds = max(1, min(lease_seconds, MAX_LEASE_SECONDS))
         await _to_thread(store.touch_agent, agent)
         try:
             messages = await _to_thread(store.fetch_unread, agent, lease_seconds)
         except UnknownAgentError as exc:
-            return _json_error(str(exc))
-        return JSONResponse({"agent": agent, "count": len(messages), "messages": messages})
+            return _json_error(str(exc), request=request)
+        return _json(request, {"agent": agent, "count": len(messages), "messages": messages})
 
     @mcp.custom_route("/api/messages/{message_id:int}/ack", methods=["POST"])
     async def api_ack_message(request: Request) -> JSONResponse:
+        if forbidden := _forbid_non_local(request):
+            return forbidden
         data = await _read_json(request)
         agent = str(data.get("agent", "")).strip()
         lease_token = str(data.get("lease_token", "")).strip()
         message_id = int(request.path_params["message_id"])
         if not agent or not lease_token:
-            return _json_error("agent and lease_token are required")
+            return _json_error("agent and lease_token are required", request=request)
         await _to_thread(store.touch_agent, agent)
         try:
             acked = await _to_thread(store.ack_message, agent, message_id, lease_token)
         except UnknownAgentError as exc:
-            return _json_error(str(exc))
-        return JSONResponse({"acked": acked, "message_id": message_id})
+            return _json_error(str(exc), request=request)
+        return _json(request, {"acked": acked, "message_id": message_id})
 
     @mcp.custom_route("/api/thread/{message_id:int}", methods=["GET"])
     async def api_get_thread(request: Request) -> JSONResponse:
+        if forbidden := _forbid_non_local(request):
+            return forbidden
         message_id = int(request.path_params["message_id"])
         thread = await _to_thread(store.get_thread, message_id)
-        return JSONResponse({"messages": thread})
+        return _json(request, {"messages": thread})
 
     return mcp
-
-
-_UI_HTML = r"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>dev-loop</title>
-  <style>
-    :root {
-      color-scheme: light;
-      --bg: #f7f7f4;
-      --panel: #ffffff;
-      --ink: #1d2326;
-      --muted: #687176;
-      --line: #d9dedb;
-      --accent: #256c5a;
-      --accent-ink: #ffffff;
-      --warn: #9a5a12;
-      --danger: #a33b3b;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      background: var(--bg);
-      color: var(--ink);
-      font: 14px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    }
-    header {
-      height: 52px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 0 18px;
-      border-bottom: 1px solid var(--line);
-      background: var(--panel);
-    }
-    h1 { font-size: 17px; margin: 0; font-weight: 650; }
-    main {
-      display: grid;
-      grid-template-columns: 260px minmax(360px, 1fr) minmax(340px, 0.95fr);
-      height: calc(100vh - 52px);
-      min-height: 560px;
-    }
-    section {
-      min-width: 0;
-      border-right: 1px solid var(--line);
-      overflow: auto;
-      background: var(--panel);
-    }
-    section:last-child { border-right: 0; }
-    .pane-head {
-      position: sticky;
-      top: 0;
-      z-index: 2;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-      min-height: 49px;
-      padding: 10px 12px;
-      border-bottom: 1px solid var(--line);
-      background: rgba(255, 255, 255, 0.94);
-      backdrop-filter: blur(8px);
-    }
-    h2 { font-size: 13px; margin: 0; text-transform: uppercase; color: var(--muted); }
-    button, input, select, textarea {
-      font: inherit;
-      border: 1px solid var(--line);
-      border-radius: 6px;
-      background: #fff;
-      color: var(--ink);
-    }
-    button {
-      min-height: 32px;
-      padding: 5px 10px;
-      cursor: pointer;
-    }
-    button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
-    button.danger { color: var(--danger); }
-    button:disabled { opacity: .55; cursor: default; }
-    input, select, textarea { width: 100%; padding: 7px 8px; }
-    textarea { min-height: 96px; resize: vertical; }
-    .stack { display: grid; gap: 8px; padding: 12px; }
-    .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-    .row > * { min-width: 0; }
-    .row .grow { flex: 1; }
-    .agent, .message, .thread-item {
-      border-bottom: 1px solid var(--line);
-      padding: 11px 12px;
-      cursor: pointer;
-    }
-    .agent.active, .message.active { background: #eef5f1; }
-    .agent-name, .message-title {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-      font-weight: 650;
-    }
-    .meta, .preview {
-      margin-top: 3px;
-      color: var(--muted);
-      font-size: 12px;
-      overflow-wrap: anywhere;
-    }
-    .preview { color: #3f494e; }
-    .badge {
-      display: inline-flex;
-      align-items: center;
-      min-height: 22px;
-      padding: 2px 7px;
-      border: 1px solid var(--line);
-      border-radius: 999px;
-      font-size: 12px;
-      color: var(--muted);
-      background: #fff;
-      white-space: nowrap;
-    }
-    .badge.available { color: var(--accent); border-color: #9fc7b9; }
-    .badge.leased { color: var(--warn); border-color: #deb16f; }
-    .badge.read { color: var(--muted); }
-    .empty, .error {
-      padding: 18px 12px;
-      color: var(--muted);
-    }
-    .error { color: var(--danger); }
-    .composer {
-      border-top: 1px solid var(--line);
-      background: #fbfbf9;
-    }
-    .thread {
-      min-height: 220px;
-    }
-    .thread-item { cursor: default; }
-    .thread-body {
-      margin-top: 7px;
-      white-space: pre-wrap;
-      overflow-wrap: anywhere;
-    }
-    @media (max-width: 980px) {
-      main {
-        grid-template-columns: 1fr;
-        height: auto;
-      }
-      section {
-        min-height: 360px;
-        border-right: 0;
-        border-bottom: 1px solid var(--line);
-      }
-    }
-  </style>
-</head>
-<body>
-  <header>
-    <h1>dev-loop</h1>
-    <div id="status" class="meta"></div>
-  </header>
-  <main>
-    <section>
-      <div class="pane-head">
-        <h2>Agents</h2>
-        <button id="refreshAgents">Refresh</button>
-      </div>
-      <div class="stack">
-        <input id="agentName" placeholder="agent name">
-        <input id="agentDescription" placeholder="description">
-        <button id="registerAgent" class="primary">Register</button>
-      </div>
-      <div id="agents"></div>
-    </section>
-
-    <section>
-      <div class="pane-head">
-        <h2>Messages</h2>
-        <div class="row">
-          <select id="messageStatus">
-            <option value="all">All</option>
-            <option value="available">Available</option>
-            <option value="leased">Leased</option>
-            <option value="read">Read</option>
-          </select>
-          <select id="messageKind">
-            <option value="all">Any kind</option>
-            <option value="task">Tasks</option>
-            <option value="message">Messages</option>
-          </select>
-          <select id="taskStatusFilter">
-            <option value="all">Any task</option>
-            <option value="created">Created</option>
-            <option value="assigned">Assigned</option>
-            <option value="in_progress">In progress</option>
-            <option value="replied">Replied</option>
-            <option value="accepted">Accepted</option>
-            <option value="needs_changes">Needs changes</option>
-            <option value="blocked">Blocked</option>
-            <option value="closed">Closed</option>
-          </select>
-          <button id="claimInbox">Claim inbox</button>
-          <button id="refreshMessages">Refresh</button>
-        </div>
-      </div>
-      <div id="messages"></div>
-    </section>
-
-    <section>
-      <div class="pane-head">
-        <h2>Thread</h2>
-        <div class="row">
-          <select id="taskStatusAction">
-            <option value="created">Created</option>
-            <option value="assigned">Assigned</option>
-            <option value="in_progress">In progress</option>
-            <option value="replied">Replied</option>
-            <option value="accepted">Accepted</option>
-            <option value="needs_changes">Needs changes</option>
-            <option value="blocked">Blocked</option>
-            <option value="closed">Closed</option>
-          </select>
-          <button id="updateTaskStatus" disabled>Set status</button>
-          <button id="ackMessage" class="danger" disabled>Ack</button>
-        </div>
-      </div>
-      <div id="thread" class="thread empty">No message selected.</div>
-      <div class="composer stack">
-        <div class="row">
-          <select id="composeKind">
-            <option value="task">Task</option>
-            <option value="message">Message</option>
-          </select>
-          <select id="taskTemplate">
-            <option value="analyze">Analyze</option>
-            <option value="implement">Implement</option>
-            <option value="review">Review</option>
-            <option value="test">Test</option>
-            <option value="custom">Custom</option>
-          </select>
-        </div>
-        <input id="taskTitle" placeholder="task title">
-        <div class="row">
-          <input id="sendTo" class="grow" placeholder="to">
-          <input id="replyTo" style="max-width: 110px" placeholder="reply to">
-        </div>
-        <textarea id="content" placeholder="message"></textarea>
-        <button id="sendMessage" class="primary">Send</button>
-      </div>
-    </section>
-  </main>
-  <script>
-    const state = {
-      agents: [],
-      selectedAgent: "",
-      selectedMessage: null,
-      leases: new Map()
-    };
-
-    const $ = (id) => document.getElementById(id);
-
-    async function api(path, options = {}) {
-      const response = await fetch(path, {
-        headers: { "content-type": "application/json" },
-        ...options
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || response.statusText);
-      return data;
-    }
-
-    function setStatus(text, isError = false) {
-      $("status").textContent = text;
-      $("status").style.color = isError ? "var(--danger)" : "var(--muted)";
-    }
-
-    function fmtTime(value) {
-      if (!value) return "";
-      return new Date(value).toLocaleString();
-    }
-
-    function escapeHtml(value) {
-      return String(value)
-        .replaceAll("&", "&amp;")
-        .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;")
-        .replaceAll('"', "&quot;");
-    }
-
-    async function loadAgents() {
-      const data = await api("/api/agents");
-      state.agents = data.agents;
-      if (!state.selectedAgent && state.agents.length) {
-        state.selectedAgent = state.agents[0].name;
-      }
-      renderAgents();
-    }
-
-    function renderAgents() {
-      $("agents").innerHTML = state.agents.length ? state.agents.map(agent => `
-        <div class="agent ${agent.name === state.selectedAgent ? "active" : ""}" data-agent="${escapeHtml(agent.name)}">
-          <div class="agent-name">
-            <span>${escapeHtml(agent.name)}</span>
-            <span class="badge">${fmtTime(agent.last_seen)}</span>
-          </div>
-          <div class="meta">${escapeHtml(agent.description || "")}</div>
-        </div>
-      `).join("") : `<div class="empty">No agents.</div>`;
-      document.querySelectorAll(".agent").forEach(el => {
-        el.addEventListener("click", async () => {
-          state.selectedAgent = el.dataset.agent;
-          renderAgents();
-          await loadMessages();
-        });
-      });
-    }
-
-    async function loadMessages() {
-      const params = new URLSearchParams({
-        status: $("messageStatus").value,
-        kind: $("messageKind").value,
-        task_status: $("taskStatusFilter").value,
-        limit: "100"
-      });
-      if (state.selectedAgent) params.set("agent", state.selectedAgent);
-      const data = await api(`/api/messages?${params}`);
-      renderMessages(data.messages);
-    }
-
-    function renderMessages(messages) {
-      $("messages").innerHTML = messages.length ? messages.map(message => `
-        <div class="message ${state.selectedMessage && state.selectedMessage.id === message.id ? "active" : ""}" data-id="${message.id}">
-          <div class="message-title">
-            <span>#${message.id} ${escapeHtml(message.sender)} to ${escapeHtml(message.recipient)}</span>
-            <span class="badge ${escapeHtml(message.status || "available")}">${escapeHtml(message.status || "available")}</span>
-          </div>
-          <div class="meta">
-            ${escapeHtml(message.kind || "message")}
-            ${message.title ? ` - ${escapeHtml(message.title)}` : ""}
-            ${message.task_status ? ` - ${escapeHtml(message.task_status)}` : ""}
-          </div>
-          <div class="preview">${escapeHtml(message.content).slice(0, 180)}</div>
-          <div class="meta">${fmtTime(message.created_at)} - deliveries ${message.delivery_count || 0}</div>
-        </div>
-      `).join("") : `<div class="empty">No messages.</div>`;
-      document.querySelectorAll(".message").forEach(el => {
-        el.addEventListener("click", () => selectMessage(Number(el.dataset.id)));
-      });
-    }
-
-    async function selectMessage(id) {
-      const data = await api(`/api/thread/${id}`);
-      state.selectedMessage = data.messages.find(message => message.id === id) || data.messages[0] || null;
-      const selectedLease = state.leases.get(id);
-      $("ackMessage").disabled = !selectedLease;
-      $("updateTaskStatus").disabled = !state.selectedMessage || state.selectedMessage.kind !== "task";
-      if (state.selectedMessage && state.selectedMessage.task_status) {
-        $("taskStatusAction").value = state.selectedMessage.task_status;
-      }
-      $("replyTo").value = id || "";
-      if (state.selectedMessage) $("sendTo").value = state.selectedMessage.sender;
-      $("thread").className = "thread";
-      $("thread").innerHTML = data.messages.length ? data.messages.map(message => `
-        <div class="thread-item">
-          <div class="message-title">
-            <span>#${message.id} ${escapeHtml(message.sender)} to ${escapeHtml(message.recipient)}</span>
-            <span class="badge">${fmtTime(message.created_at)}</span>
-          </div>
-          <div class="meta">
-            ${escapeHtml(message.kind || "message")}
-            ${message.title ? ` - ${escapeHtml(message.title)}` : ""}
-            ${message.task_status ? ` - ${escapeHtml(message.task_status)}` : ""}
-          </div>
-          <div class="thread-body">${escapeHtml(message.content)}</div>
-        </div>
-      `).join("") : `<div class="empty">Thread not found.</div>`;
-      await loadMessages();
-    }
-
-    async function claimInbox() {
-      if (!state.selectedAgent) throw new Error("select an agent first");
-      const data = await api("/api/inbox/check", {
-        method: "POST",
-        body: JSON.stringify({ agent: state.selectedAgent, lease_seconds: 300 })
-      });
-      for (const message of data.messages) {
-        state.leases.set(message.id, message.lease_token);
-      }
-      setStatus(`Claimed ${data.count} message(s) for ${state.selectedAgent}`);
-      await loadMessages();
-      if (data.messages[0]) await selectMessage(data.messages[0].id);
-    }
-
-    async function ackSelected() {
-      if (!state.selectedMessage) return;
-      const token = state.leases.get(state.selectedMessage.id);
-      if (!token) return;
-      const data = await api(`/api/messages/${state.selectedMessage.id}/ack`, {
-        method: "POST",
-        body: JSON.stringify({ agent: state.selectedAgent, lease_token: token })
-      });
-      if (data.acked) {
-        state.leases.delete(state.selectedMessage.id);
-        $("ackMessage").disabled = true;
-      }
-      setStatus(data.acked ? `Acked #${data.message_id}` : `Ack failed for #${data.message_id}`, !data.acked);
-      await loadMessages();
-    }
-
-    async function updateSelectedTaskStatus() {
-      if (!state.selectedMessage || state.selectedMessage.kind !== "task") return;
-      const data = await api(`/api/messages/${state.selectedMessage.id}/task-status`, {
-        method: "POST",
-        body: JSON.stringify({ task_status: $("taskStatusAction").value })
-      });
-      setStatus(data.updated ? `Updated #${data.message_id} to ${data.task_status}` : `Task status unchanged`, !data.updated);
-      await selectMessage(state.selectedMessage.id);
-    }
-
-    async function registerAgent() {
-      await api("/api/agents", {
-        method: "POST",
-        body: JSON.stringify({
-          name: $("agentName").value,
-          description: $("agentDescription").value
-        })
-      });
-      $("agentName").value = "";
-      $("agentDescription").value = "";
-      await loadAgents();
-      await loadMessages();
-    }
-
-    async function sendMessage() {
-      if (!state.selectedAgent) throw new Error("select an agent first");
-      const replyTo = $("replyTo").value.trim();
-      const data = await api("/api/messages", {
-        method: "POST",
-        body: JSON.stringify({
-          sender: state.selectedAgent,
-          to: $("sendTo").value,
-          kind: $("composeKind").value,
-          title: $("taskTitle").value,
-          task_status: $("composeKind").value === "task" ? "assigned" : "",
-          content: $("content").value,
-          reply_to: replyTo || null
-        })
-      });
-      $("content").value = "";
-      $("taskTitle").value = "";
-      setStatus(`Delivered ${data.delivered} message(s)`);
-      await loadMessages();
-      if (data.message_ids[0]) await selectMessage(data.message_ids[0]);
-    }
-
-    async function run(action) {
-      try {
-        await action();
-      } catch (error) {
-        setStatus(error.message, true);
-      }
-    }
-
-    $("refreshAgents").addEventListener("click", () => run(loadAgents));
-    $("refreshMessages").addEventListener("click", () => run(loadMessages));
-    $("messageStatus").addEventListener("change", () => run(loadMessages));
-    $("messageKind").addEventListener("change", () => run(loadMessages));
-    $("taskStatusFilter").addEventListener("change", () => run(loadMessages));
-    $("registerAgent").addEventListener("click", () => run(registerAgent));
-    $("claimInbox").addEventListener("click", () => run(claimInbox));
-    $("ackMessage").addEventListener("click", () => run(ackSelected));
-    $("updateTaskStatus").addEventListener("click", () => run(updateSelectedTaskStatus));
-    $("sendMessage").addEventListener("click", () => run(sendMessage));
-    $("taskTemplate").addEventListener("change", applyTemplate);
-    $("composeKind").addEventListener("change", () => {
-      if ($("composeKind").value === "task") applyTemplate();
-    });
-
-    function applyTemplate() {
-      if ($("composeKind").value !== "task" || $("taskTemplate").value === "custom") return;
-      const templates = {
-        analyze: "Task Type: analyze\\n\\nContext:\\n- Repo path:\\n- User goal:\\n- Relevant files:\\n- Constraints:\\n\\nDeliverable:\\n- Root cause or key findings\\n- Suggested change\\n- Tests to add\\n- Risks",
-        implement: "Task Type: implement\\n\\nContext:\\n- Repo path:\\n- User goal:\\n- Files to edit:\\n- Constraints:\\n\\nDeliverable:\\n- Summary of changes\\n- Patch or exact file edits\\n- Verification command\\n- Risks",
-        review: "Task Type: review\\n\\nContext:\\n- Repo path:\\n- Change under review:\\n- Files to inspect:\\n\\nDeliverable:\\n- Findings ordered by severity\\n- File and line references\\n- Missing tests\\n- Residual risk",
-        test: "Task Type: test\\n\\nContext:\\n- Repo path:\\n- Feature or bugfix:\\n- Test target:\\n\\nDeliverable:\\n- Test plan\\n- Commands run\\n- Failures found\\n- Recommended fixes"
-      };
-      if (!$("content").value.trim()) $("content").value = templates[$("taskTemplate").value];
-      if (!$("taskTitle").value.trim()) $("taskTitle").value = `${$("taskTemplate").value} task`;
-    }
-
-    run(async () => {
-      await loadAgents();
-      await loadMessages();
-      applyTemplate();
-      setStatus("Ready");
-    });
-  </script>
-</body>
-</html>
-"""

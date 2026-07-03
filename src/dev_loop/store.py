@@ -71,6 +71,21 @@ def _future(seconds: int) -> str:
     )
 
 
+def resolve_project_root(project_dir: Path | str | None = None) -> Path:
+    """Walk up from `start` to the nearest directory containing a project
+    marker (.git or pyproject.toml), so launching the daemon from a
+    subdirectory resolves to the same database as launching from the root."""
+    start = (
+        Path.cwd().resolve()
+        if project_dir is None
+        else Path(project_dir).expanduser().resolve()
+    )
+    for candidate in (start, *start.parents):
+        if (candidate / ".git").exists() or (candidate / "pyproject.toml").exists():
+            return candidate
+    return start
+
+
 def project_db_path(
     project_dir: Path | str | None = None,
     base_dir: Path | str | None = None,
@@ -78,9 +93,10 @@ def project_db_path(
     """Return the default database path for a project directory.
 
     The path is stable for the absolute project path and includes a short hash so
-    projects with the same leaf directory name do not collide.
+    projects with the same leaf directory name do not collide. When project_dir
+    is not given, the project root is detected from the current directory.
     """
-    project_path = Path(project_dir or Path.cwd()).expanduser().resolve()
+    project_path = resolve_project_root(project_dir)
     root = Path(base_dir or DEFAULT_DB_ROOT).expanduser()
     slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", project_path.name).strip("-._")
     if not slug:
@@ -93,14 +109,36 @@ class UnknownAgentError(ValueError):
     pass
 
 
-def _clean_kind(kind: str) -> str:
+class InvalidInputError(ValueError):
+    pass
+
+
+def _validate_kind(kind: str) -> str:
     kind = (kind or "message").strip()
-    return kind if kind in MESSAGE_KINDS else "message"
+    if kind not in MESSAGE_KINDS:
+        raise InvalidInputError(
+            f"invalid kind: {kind!r} (expected one of {sorted(MESSAGE_KINDS)})"
+        )
+    return kind
 
 
-def _clean_task_status(task_status: str) -> str:
+def _validate_task_status(task_status: str) -> str:
     task_status = (task_status or "").strip()
-    return task_status if task_status in TASK_STATUSES else ""
+    if task_status not in TASK_STATUSES:
+        raise InvalidInputError(
+            f"invalid task_status: {task_status!r} "
+            f"(expected one of {sorted(s for s in TASK_STATUSES if s)})"
+        )
+    return task_status
+
+
+def _validate_agent_name(name: str) -> str:
+    name = (name or "").strip()
+    if not name:
+        raise InvalidInputError("agent name must not be empty")
+    if name == "*":
+        raise InvalidInputError('agent name "*" is reserved for broadcast')
+    return name
 
 
 class Store:
@@ -109,6 +147,7 @@ class Store:
             db_path = project_db_path()
         db_path = Path(db_path)
         db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.db_path = db_path
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
@@ -149,6 +188,7 @@ class Store:
     # -- agents ------------------------------------------------------------
 
     def register_agent(self, name: str, description: str) -> list[dict[str, Any]]:
+        name = _validate_agent_name(name)
         now = _now()
         with self._lock:
             self._conn.execute(
@@ -203,9 +243,11 @@ class Store:
         """Insert a message. Broadcast ("*") is expanded into one copy per
         registered agent other than the sender. Returns the message id(s)."""
         now = _now()
-        kind = _clean_kind(kind)
+        kind = _validate_kind(kind)
         title = title.strip()
-        task_status = _clean_task_status(task_status or ("created" if kind == "task" else ""))
+        if kind == "task" and not (task_status or "").strip():
+            task_status = "created"
+        task_status = _validate_task_status(task_status)
         ids: list[int] = []
         with self._lock:
             if not self._agent_exists_locked(sender):
@@ -322,7 +364,9 @@ class Store:
         return dict(row) if row else None
 
     def update_task_status(self, message_id: int, task_status: str) -> bool:
-        task_status = _clean_task_status(task_status)
+        task_status = _validate_task_status(task_status)
+        if not task_status:
+            raise InvalidInputError("task_status must not be empty for an update")
         with self._lock:
             cur = self._conn.execute(
                 """UPDATE messages
@@ -363,10 +407,10 @@ class Store:
             filters.append("read_at IS NULL")
         if kind != "all":
             filters.append("kind = ?")
-            params.append(_clean_kind(kind))
+            params.append(_validate_kind(kind))
         if task_status != "all":
             filters.append("task_status = ?")
-            params.append(_clean_task_status(task_status))
+            params.append(_validate_task_status(task_status))
 
         where = f"WHERE {' AND '.join(filters)}" if filters else ""
         query = f"""SELECT id, sender, recipient, content, reply_to, created_at,

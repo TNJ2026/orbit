@@ -17,3 +17,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/dev_loop"]
+# The local Web UI ships as a non-Python resource loaded via
+# importlib.resources at runtime; include it in built distributions.
+force-include = { "src/dev_loop/static/ui.html" = "dev_loop/static/ui.html" }

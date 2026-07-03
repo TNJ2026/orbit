@@ -4,7 +4,12 @@ from tempfile import TemporaryDirectory
 import time
 import unittest
 
-from dev_loop.store import Store, UnknownAgentError, project_db_path
+from dev_loop.store import (
+    InvalidInputError,
+    Store,
+    UnknownAgentError,
+    project_db_path,
+)
 
 
 class StoreTests(unittest.TestCase):
@@ -196,6 +201,64 @@ class StoreTests(unittest.TestCase):
             self.assertNotEqual(first, other)
             self.assertEqual("messages.db", first.name)
             self.assertEqual(base_dir, first.parent.parent)
+
+    def test_store_exposes_database_path_for_status_api(self):
+        with TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "messages.db"
+            store = Store(db_path)
+            self.assertEqual(db_path, store.db_path)
+            store.close()
+
+    def test_invalid_task_status_is_rejected_not_cleaned(self):
+        store = self.make_store()
+        self.register_pair(store)
+        with self.assertRaises(InvalidInputError):
+            store.send_message("a", "b", "x", kind="task", task_status="urgent")
+        [task_id] = store.send_message(
+            "a", "b", "x", kind="task", task_status="assigned"
+        )
+        with self.assertRaises(InvalidInputError):
+            store.update_task_status(task_id, "done")
+        with self.assertRaises(InvalidInputError):
+            store.update_task_status(task_id, "")
+        # status untouched by the failed updates
+        self.assertEqual("assigned", store.get_message(task_id)["task_status"])
+
+    def test_invalid_kind_is_rejected(self):
+        store = self.make_store()
+        self.register_pair(store)
+        with self.assertRaises(InvalidInputError):
+            store.send_message("a", "b", "x", kind="todo")
+
+    def test_reserved_and_empty_agent_names_are_rejected(self):
+        store = self.make_store()
+        with self.assertRaises(InvalidInputError):
+            store.register_agent("*", "broadcast impostor")
+        with self.assertRaises(InvalidInputError):
+            store.register_agent("   ", "blank")
+        # name is stripped before storage
+        store.register_agent("  a  ", "agent a")
+        self.assertEqual(["a"], store.agent_names())
+
+    def test_project_db_path_resolves_project_root_from_subdirectory(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            sub = root / "src" / "pkg"
+            sub.mkdir(parents=True)
+            (root / ".git").mkdir()
+            base_dir = Path(tmp) / "dbs"
+
+            import os
+
+            cwd = os.getcwd()
+            try:
+                os.chdir(sub)
+                from_sub = project_db_path(base_dir=base_dir)
+                os.chdir(root)
+                from_root = project_db_path(base_dir=base_dir)
+            finally:
+                os.chdir(cwd)
+            self.assertEqual(from_root, from_sub)
 
 
 if __name__ == "__main__":

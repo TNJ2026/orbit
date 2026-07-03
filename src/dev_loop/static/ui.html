@@ -1,0 +1,819 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>dev-loop</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f7f7f4;
+      --panel: #ffffff;
+      --ink: #1d2326;
+      --muted: #687176;
+      --line: #d9dedb;
+      --accent: #256c5a;
+      --accent-ink: #ffffff;
+      --warn: #9a5a12;
+      --danger: #a33b3b;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font: 14px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    header {
+      min-height: 52px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      padding: 0 18px;
+      border-bottom: 1px solid var(--line);
+      background: var(--panel);
+    }
+    .brand {
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .header-meta {
+      min-width: 0;
+      display: grid;
+      justify-items: end;
+      gap: 2px;
+    }
+    .db-path {
+      max-width: min(68vw, 760px);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    h1 { font-size: 17px; margin: 0; font-weight: 650; }
+    main {
+      display: grid;
+      grid-template-columns: 184px minmax(0, 1fr);
+      height: calc(100vh - 52px);
+      min-height: 560px;
+    }
+    .side-menu {
+      min-width: 0;
+      border-right: 1px solid var(--line);
+      background: #fbfbf9;
+      padding: 10px;
+    }
+    .menu-button {
+      width: 100%;
+      justify-content: flex-start;
+      margin-bottom: 6px;
+      border-color: transparent;
+      background: transparent;
+      color: var(--muted);
+      text-align: left;
+    }
+    .menu-button.active {
+      border-color: #9fc7b9;
+      background: #eef5f1;
+      color: var(--accent);
+    }
+    .workspace {
+      min-width: 0;
+      height: 100%;
+      overflow: hidden;
+    }
+    .page {
+      display: none;
+    }
+    .page.active {
+      display: block;
+    }
+    .mailbox-page.active {
+      display: grid;
+      grid-template-columns: 260px minmax(360px, 1fr) minmax(340px, 0.95fr);
+      height: 100%;
+    }
+    .tools-page {
+      height: 100%;
+      overflow: auto;
+      background: var(--panel);
+    }
+    .roles-page {
+      height: 100%;
+      overflow: auto;
+      background: var(--panel);
+    }
+    .tools-grid {
+      display: block;
+    }
+    .tools-grid .tool {
+      border-right: 0;
+    }
+    section {
+      min-width: 0;
+      border-right: 1px solid var(--line);
+      overflow: auto;
+      background: var(--panel);
+    }
+    section:last-child { border-right: 0; }
+    .pane-head {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      min-height: 49px;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.94);
+      backdrop-filter: blur(8px);
+    }
+    h2 { font-size: 13px; margin: 0; text-transform: uppercase; color: var(--muted); }
+    button, input, select, textarea {
+      font: inherit;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--ink);
+    }
+    button {
+      min-height: 32px;
+      padding: 5px 10px;
+      cursor: pointer;
+    }
+    button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+    button.danger { color: var(--danger); }
+    button:disabled { opacity: .55; cursor: default; }
+    input, select, textarea { width: 100%; padding: 7px 8px; }
+    textarea { min-height: 96px; resize: vertical; }
+    .stack { display: grid; gap: 8px; padding: 12px; }
+    .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .row > * { min-width: 0; }
+    .row .grow { flex: 1; }
+    .agent, .tool, .message, .thread-item {
+      border-bottom: 1px solid var(--line);
+      padding: 11px 12px;
+      cursor: pointer;
+    }
+    .agent.active, .message.active { background: #eef5f1; }
+    .tool { cursor: default; }
+    .agent-name, .tool-name, .message-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-weight: 650;
+    }
+    .meta, .preview {
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }
+    .profiles {
+      display: grid;
+      gap: 4px;
+      margin-top: 8px;
+    }
+    .profile {
+      display: grid;
+      grid-template-columns: minmax(120px, 0.28fr) minmax(0, 1fr);
+      gap: 8px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .profile-name {
+      color: var(--ink);
+      font-weight: 600;
+    }
+    .role {
+      border-bottom: 1px solid var(--line);
+      padding: 14px 16px;
+    }
+    .role-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-weight: 650;
+    }
+    .role-body {
+      margin: 10px 0 0;
+      max-width: 980px;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      color: #2f383c;
+      font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    .preview { color: #3f494e; }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 22px;
+      padding: 2px 7px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      font-size: 12px;
+      color: var(--muted);
+      background: #fff;
+      white-space: nowrap;
+    }
+    .badge.available { color: var(--accent); border-color: #9fc7b9; }
+    .badge.leased { color: var(--warn); border-color: #deb16f; }
+    .badge.read { color: var(--muted); }
+    .badge.installed { color: var(--accent); border-color: #9fc7b9; }
+    .badge.missing { color: var(--muted); }
+    .empty, .error {
+      padding: 18px 12px;
+      color: var(--muted);
+    }
+    .error { color: var(--danger); }
+    .composer {
+      border-top: 1px solid var(--line);
+      background: #fbfbf9;
+    }
+    .thread {
+      min-height: 220px;
+    }
+    .thread-item { cursor: default; }
+    .thread-body {
+      margin-top: 7px;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    @media (max-width: 980px) {
+      section {
+        min-height: 360px;
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+      }
+      header {
+        align-items: flex-start;
+        flex-direction: column;
+        padding: 10px 14px;
+      }
+      main {
+        grid-template-columns: 1fr;
+        height: auto;
+      }
+      .side-menu {
+        display: flex;
+        gap: 8px;
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+      }
+      .menu-button {
+        flex: 1;
+        margin-bottom: 0;
+        text-align: center;
+      }
+      .workspace {
+        height: auto;
+        overflow: visible;
+      }
+      .mailbox-page.active {
+        grid-template-columns: 1fr;
+        height: auto;
+      }
+      .brand {
+        width: 100%;
+        align-items: flex-start;
+        flex-direction: column;
+      }
+      .header-meta {
+        width: 100%;
+        justify-items: start;
+      }
+      .db-path {
+        max-width: 100%;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <h1>dev-loop</h1>
+    </div>
+    <div class="header-meta">
+      <div id="status" class="meta"></div>
+      <div id="dbPath" class="db-path"></div>
+    </div>
+  </header>
+  <main id="mainView">
+    <aside class="side-menu" aria-label="View">
+      <button id="mailboxTab" class="menu-button active" type="button">Mailbox</button>
+      <button id="toolsTab" class="menu-button" type="button">Agent Tools</button>
+      <button id="rolesTab" class="menu-button" type="button">Roles</button>
+    </aside>
+    <div class="workspace">
+    <div id="mailboxPage" class="page mailbox-page active">
+    <section>
+      <div class="pane-head">
+        <h2>Sessions</h2>
+        <button id="refreshAgents">Refresh</button>
+      </div>
+      <div id="agents"></div>
+    </section>
+
+    <section>
+      <div class="pane-head">
+        <h2>Messages</h2>
+        <div class="row">
+          <select id="messageStatus">
+            <option value="all">All</option>
+            <option value="available">Available</option>
+            <option value="leased">Leased</option>
+            <option value="read">Read</option>
+          </select>
+          <select id="messageKind">
+            <option value="all">Any kind</option>
+            <option value="task">Tasks</option>
+            <option value="message">Messages</option>
+          </select>
+          <select id="taskStatusFilter">
+            <option value="all">Any task</option>
+            <option value="created">Created</option>
+            <option value="assigned">Assigned</option>
+            <option value="in_progress">In progress</option>
+            <option value="replied">Replied</option>
+            <option value="accepted">Accepted</option>
+            <option value="needs_changes">Needs changes</option>
+            <option value="blocked">Blocked</option>
+            <option value="closed">Closed</option>
+          </select>
+          <button id="claimInbox">Claim inbox</button>
+          <button id="refreshMessages">Refresh</button>
+        </div>
+      </div>
+      <div id="messages"></div>
+    </section>
+
+    <section>
+      <div class="pane-head">
+        <h2>Thread</h2>
+        <div class="row">
+          <select id="taskStatusAction">
+            <option value="created">Created</option>
+            <option value="assigned">Assigned</option>
+            <option value="in_progress">In progress</option>
+            <option value="replied">Replied</option>
+            <option value="accepted">Accepted</option>
+            <option value="needs_changes">Needs changes</option>
+            <option value="blocked">Blocked</option>
+            <option value="closed">Closed</option>
+          </select>
+          <button id="updateTaskStatus" disabled>Set status</button>
+          <button id="ackMessage" class="danger" disabled>Ack</button>
+        </div>
+      </div>
+      <div id="thread" class="thread empty">No message selected.</div>
+      <div class="composer stack">
+        <div class="row">
+          <select id="composeKind">
+            <option value="task">Task</option>
+            <option value="message">Message</option>
+          </select>
+          <select id="taskTemplate">
+            <option value="analyze">Analyze</option>
+            <option value="implement">Implement</option>
+            <option value="review">Review</option>
+            <option value="test">Test</option>
+            <option value="custom">Custom</option>
+          </select>
+        </div>
+        <input id="taskTitle" placeholder="task title">
+        <div class="row">
+          <input id="sendTo" class="grow" placeholder="to">
+          <input id="replyTo" style="max-width: 110px" placeholder="reply to">
+        </div>
+        <textarea id="content" placeholder="message"></textarea>
+        <button id="sendMessage" class="primary">Send</button>
+      </div>
+    </section>
+    </div>
+
+    <div id="toolsPage" class="page tools-page">
+      <div class="pane-head">
+        <h2>Agent Tools</h2>
+        <button id="refreshTools">Refresh</button>
+      </div>
+      <div id="agentTools" class="tools-grid"></div>
+    </div>
+    <div id="rolesPage" class="page roles-page">
+      <div class="pane-head">
+        <h2>Workflow Roles</h2>
+        <button id="refreshRoles">Refresh</button>
+      </div>
+      <div id="agentRoles"></div>
+    </div>
+    </div>
+  </main>
+  <script>
+    // Leases survive page reloads via sessionStorage; losing a token would
+    // leave a claimed message un-ackable until its lease expires.
+    function leaseStorageKey(projectId) {
+      return `devloop-leases:${projectId || "default"}`;
+    }
+
+    function loadLeases(projectId) {
+      try {
+        const stored = JSON.parse(sessionStorage.getItem(leaseStorageKey(projectId)) || "{}");
+        return new Map(Object.entries(stored).map(([k, v]) => [Number(k), v]));
+      } catch {
+        return new Map();
+      }
+    }
+
+    const state = {
+      projects: [],
+      selectedProjectId: "",
+      apiBase: "",
+      agents: [],
+      tools: [],
+      roles: [],
+      selectedAgent: "",
+      selectedMessage: null,
+      leases: new Map()
+    };
+
+    function saveLeases() {
+      sessionStorage.setItem(
+        leaseStorageKey(state.selectedProjectId),
+        JSON.stringify(Object.fromEntries(state.leases))
+      );
+    }
+
+    const $ = (id) => document.getElementById(id);
+
+    function setPage(page) {
+      const tools = page === "tools";
+      const roles = page === "roles";
+      $("mailboxPage").classList.toggle("active", !tools && !roles);
+      $("toolsPage").classList.toggle("active", tools);
+      $("rolesPage").classList.toggle("active", roles);
+      $("mailboxTab").classList.toggle("active", !tools && !roles);
+      $("toolsTab").classList.toggle("active", tools);
+      $("rolesTab").classList.toggle("active", roles);
+    }
+
+    async function api(path, options = {}, base = state.apiBase) {
+      const response = await fetch(`${base}${path}`, {
+        headers: { "content-type": "application/json" },
+        ...options
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || response.statusText);
+      return data;
+    }
+
+    async function loadProjects() {
+      const data = await api("/api/projects", {}, "");
+      state.projects = data.projects || [];
+      const previousProjectId = state.selectedProjectId;
+      if (!state.selectedProjectId) {
+        const current = state.projects.find(project => project.current);
+        const firstOnline = state.projects.find(project => project.online);
+        state.selectedProjectId = (current || firstOnline || state.projects[0] || {}).id || "";
+      }
+      const selected = state.projects.find(project => project.id === state.selectedProjectId);
+      state.apiBase = selected && selected.online ? selected.server_url : "";
+      if (state.selectedProjectId !== previousProjectId) {
+        state.selectedAgent = "";
+        state.selectedMessage = null;
+        state.leases = loadLeases(state.selectedProjectId);
+      }
+    }
+
+    function clearWorkspace() {
+      state.agents = [];
+      state.tools = [];
+      state.roles = [];
+      state.selectedAgent = "";
+      state.selectedMessage = null;
+      state.leases = new Map();
+      renderTools();
+      renderRoles();
+      renderAgents();
+      renderMessages([]);
+      $("thread").className = "thread empty";
+      $("thread").textContent = "No message selected.";
+    }
+
+    function setStatus(text, isError = false) {
+      $("status").textContent = text;
+      $("status").style.color = isError ? "var(--danger)" : "var(--muted)";
+    }
+
+    function fmtTime(value) {
+      if (!value) return "";
+      return new Date(value).toLocaleString();
+    }
+
+    function escapeHtml(value) {
+      return String(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;");
+    }
+
+    async function loadAgents() {
+      if (!state.apiBase) {
+        clearWorkspace();
+        return;
+      }
+      const [agentsData, toolsData] = await Promise.all([
+        api("/api/agents"),
+        api("/api/agent-tools")
+      ]);
+      state.agents = agentsData.agents;
+      state.tools = toolsData.tools;
+      if (!state.selectedAgent && state.agents.length) {
+        state.selectedAgent = state.agents[0].name;
+      }
+      renderTools();
+      renderAgents();
+    }
+
+    async function loadRoles() {
+      if (!state.apiBase) {
+        state.roles = [];
+        renderRoles();
+        return;
+      }
+      const data = await api("/api/agent-roles");
+      state.roles = data.roles || [];
+      renderRoles();
+    }
+
+    async function loadStatus() {
+      if (!state.apiBase) {
+        $("dbPath").textContent = "offline";
+        $("dbPath").title = "";
+        return;
+      }
+      const data = await api("/api/status");
+      $("dbPath").textContent = data.db_path || "";
+      $("dbPath").title = data.db_path || "";
+    }
+
+    async function refreshWorkspace() {
+      await loadProjects();
+      await loadStatus();
+      await loadAgents();
+      await loadRoles();
+      await loadMessages();
+    }
+
+    function renderTools() {
+      $("agentTools").innerHTML = state.tools.length ? state.tools.map(tool => `
+        <div class="tool">
+          <div class="tool-name">
+            <span>${escapeHtml(tool.name)}</span>
+            <span class="badge ${tool.installed ? "installed" : "missing"}">${tool.installed ? "installed" : "missing"}</span>
+          </div>
+          <div class="meta">
+            ${escapeHtml(tool.command)}
+            ${tool.path ? ` - ${escapeHtml(tool.path)}` : ""}
+          </div>
+          <div class="meta">
+            agent: ${escapeHtml(tool.agent_name)}
+            ${tool.registered ? ` - registered ${fmtTime(tool.last_seen)}` : ""}
+          </div>
+          ${tool.profiles && tool.profiles.length ? `
+            <div class="profiles">
+              ${tool.profiles.map(profile => `
+                <div class="profile">
+                  <span class="profile-name">${escapeHtml(profile.name)}</span>
+                  <span>${escapeHtml(profile.path)}</span>
+                </div>
+              `).join("")}
+            </div>
+          ` : ""}
+        </div>
+      `).join("") : `<div class="empty">No known tools detected.</div>`;
+    }
+
+    function renderRoles() {
+      $("agentRoles").innerHTML = state.roles.length ? state.roles.map(role => `
+        <div class="role">
+          <div class="role-title">
+            <span>${escapeHtml(role.name)}</span>
+            <span class="badge">${escapeHtml(role.id)}</span>
+          </div>
+          <div class="meta">${escapeHtml(role.path)}</div>
+          <pre class="role-body">${escapeHtml(role.content)}</pre>
+        </div>
+      `).join("") : `<div class="empty">No workflow roles detected.</div>`;
+    }
+
+    function renderAgents() {
+      $("agents").innerHTML = state.agents.length ? state.agents.map(agent => `
+        <div class="agent ${agent.name === state.selectedAgent ? "active" : ""}" data-agent="${escapeHtml(agent.name)}">
+          <div class="agent-name">
+            <span>${escapeHtml(agent.name)}</span>
+            <span class="badge">${fmtTime(agent.last_seen)}</span>
+          </div>
+          <div class="meta">${escapeHtml(agent.description || "")}</div>
+        </div>
+      `).join("") : `<div class="empty">No agents.</div>`;
+      document.querySelectorAll(".agent").forEach(el => {
+        el.addEventListener("click", async () => {
+          state.selectedAgent = el.dataset.agent;
+          renderAgents();
+          await loadMessages();
+        });
+      });
+    }
+
+    async function loadMessages() {
+      if (!state.apiBase) {
+        renderMessages([]);
+        return;
+      }
+      const params = new URLSearchParams({
+        status: $("messageStatus").value,
+        kind: $("messageKind").value,
+        task_status: $("taskStatusFilter").value,
+        limit: "100"
+      });
+      if (state.selectedAgent) params.set("agent", state.selectedAgent);
+      const data = await api(`/api/messages?${params}`);
+      renderMessages(data.messages);
+    }
+
+    function renderMessages(messages) {
+      $("messages").innerHTML = messages.length ? messages.map(message => `
+        <div class="message ${state.selectedMessage && state.selectedMessage.id === message.id ? "active" : ""}" data-id="${message.id}">
+          <div class="message-title">
+            <span>#${message.id} ${escapeHtml(message.sender)} to ${escapeHtml(message.recipient)}</span>
+            <span class="badge ${escapeHtml(message.status || "available")}">${escapeHtml(message.status || "available")}</span>
+          </div>
+          <div class="meta">
+            ${escapeHtml(message.kind || "message")}
+            ${message.title ? ` - ${escapeHtml(message.title)}` : ""}
+            ${message.task_status ? ` - ${escapeHtml(message.task_status)}` : ""}
+          </div>
+          <div class="preview">${escapeHtml(message.content).slice(0, 180)}</div>
+          <div class="meta">${fmtTime(message.created_at)} - deliveries ${message.delivery_count || 0}</div>
+        </div>
+      `).join("") : `<div class="empty">No messages.</div>`;
+      document.querySelectorAll(".message").forEach(el => {
+        el.addEventListener("click", () => selectMessage(Number(el.dataset.id)));
+      });
+    }
+
+    async function selectMessage(id) {
+      const data = await api(`/api/thread/${id}`);
+      state.selectedMessage = data.messages.find(message => message.id === id) || data.messages[0] || null;
+      const selectedLease = state.leases.get(id);
+      $("ackMessage").disabled = !selectedLease;
+      $("updateTaskStatus").disabled = !state.selectedMessage || state.selectedMessage.kind !== "task";
+      if (state.selectedMessage && state.selectedMessage.task_status) {
+        $("taskStatusAction").value = state.selectedMessage.task_status;
+      }
+      $("replyTo").value = id || "";
+      if (state.selectedMessage) $("sendTo").value = state.selectedMessage.sender;
+      $("thread").className = "thread";
+      $("thread").innerHTML = data.messages.length ? data.messages.map(message => `
+        <div class="thread-item">
+          <div class="message-title">
+            <span>#${message.id} ${escapeHtml(message.sender)} to ${escapeHtml(message.recipient)}</span>
+            <span class="badge">${fmtTime(message.created_at)}</span>
+          </div>
+          <div class="meta">
+            ${escapeHtml(message.kind || "message")}
+            ${message.title ? ` - ${escapeHtml(message.title)}` : ""}
+            ${message.task_status ? ` - ${escapeHtml(message.task_status)}` : ""}
+          </div>
+          <div class="thread-body">${escapeHtml(message.content)}</div>
+        </div>
+      `).join("") : `<div class="empty">Thread not found.</div>`;
+      await loadMessages();
+    }
+
+    async function claimInbox() {
+      if (!state.selectedAgent) throw new Error("select an agent first");
+      const data = await api("/api/inbox/check", {
+        method: "POST",
+        body: JSON.stringify({ agent: state.selectedAgent, lease_seconds: 300 })
+      });
+      for (const message of data.messages) {
+        state.leases.set(message.id, message.lease_token);
+        if (message.kind === "task" && ["created", "assigned"].includes(message.task_status || "")) {
+          await api(`/api/messages/${message.id}/task-status`, {
+            method: "POST",
+            body: JSON.stringify({ task_status: "in_progress" })
+          });
+          message.task_status = "in_progress";
+        }
+      }
+      saveLeases();
+      setStatus(`Claimed ${data.count} message(s) for ${state.selectedAgent}`);
+      await loadMessages();
+      if (data.messages[0]) await selectMessage(data.messages[0].id);
+    }
+
+    async function ackSelected() {
+      if (!state.selectedMessage) return;
+      const token = state.leases.get(state.selectedMessage.id);
+      if (!token) return;
+      const data = await api(`/api/messages/${state.selectedMessage.id}/ack`, {
+        method: "POST",
+        body: JSON.stringify({ agent: state.selectedAgent, lease_token: token })
+      });
+      if (data.acked) {
+        state.leases.delete(state.selectedMessage.id);
+        saveLeases();
+        $("ackMessage").disabled = true;
+      }
+      setStatus(data.acked ? `Acked #${data.message_id}` : `Ack failed for #${data.message_id}`, !data.acked);
+      await loadMessages();
+    }
+
+    async function updateSelectedTaskStatus() {
+      if (!state.selectedMessage || state.selectedMessage.kind !== "task") return;
+      const data = await api(`/api/messages/${state.selectedMessage.id}/task-status`, {
+        method: "POST",
+        body: JSON.stringify({ task_status: $("taskStatusAction").value })
+      });
+      setStatus(data.updated ? `Updated #${data.message_id} to ${data.task_status}` : `Task status unchanged`, !data.updated);
+      await selectMessage(state.selectedMessage.id);
+    }
+
+    async function sendMessage() {
+      if (!state.selectedAgent) throw new Error("select an agent first");
+      const replyTo = $("replyTo").value.trim();
+      const data = await api("/api/messages", {
+        method: "POST",
+        body: JSON.stringify({
+          sender: state.selectedAgent,
+          to: $("sendTo").value,
+          kind: $("composeKind").value,
+          title: $("taskTitle").value,
+          task_status: $("composeKind").value === "task" ? "assigned" : "",
+          content: $("content").value,
+          reply_to: replyTo || null
+        })
+      });
+      $("content").value = "";
+      $("taskTitle").value = "";
+      setStatus(`Delivered ${data.delivered} message(s)`);
+      await loadMessages();
+      if (data.message_ids[0]) await selectMessage(data.message_ids[0]);
+    }
+
+    async function run(action) {
+      try {
+        await action();
+      } catch (error) {
+        setStatus(error.message, true);
+      }
+    }
+
+    $("refreshAgents").addEventListener("click", () => run(refreshWorkspace));
+    $("refreshTools").addEventListener("click", () => run(refreshWorkspace));
+    $("refreshRoles").addEventListener("click", () => run(loadRoles));
+    $("mailboxTab").addEventListener("click", () => setPage("mailbox"));
+    $("toolsTab").addEventListener("click", () => setPage("tools"));
+    $("rolesTab").addEventListener("click", () => setPage("roles"));
+    $("refreshMessages").addEventListener("click", () => run(loadMessages));
+    $("messageStatus").addEventListener("change", () => run(loadMessages));
+    $("messageKind").addEventListener("change", () => run(loadMessages));
+    $("taskStatusFilter").addEventListener("change", () => run(loadMessages));
+    $("claimInbox").addEventListener("click", () => run(claimInbox));
+    $("ackMessage").addEventListener("click", () => run(ackSelected));
+    $("updateTaskStatus").addEventListener("click", () => run(updateSelectedTaskStatus));
+    $("sendMessage").addEventListener("click", () => run(sendMessage));
+    $("taskTemplate").addEventListener("change", applyTemplate);
+    $("composeKind").addEventListener("change", () => {
+      if ($("composeKind").value === "task") applyTemplate();
+    });
+
+    function applyTemplate() {
+      if ($("composeKind").value !== "task" || $("taskTemplate").value === "custom") return;
+      const templates = {
+        analyze: "Task Type: analyze\\n\\nContext:\\n- Repo path:\\n- User goal:\\n- Relevant files:\\n- Constraints:\\n\\nDeliverable:\\n- Root cause or key findings\\n- Suggested change\\n- Tests to add\\n- Risks",
+        implement: "Task Type: implement\\n\\nContext:\\n- Repo path:\\n- User goal:\\n- Files to edit:\\n- Constraints:\\n\\nDeliverable:\\n- Summary of changes\\n- Patch or exact file edits\\n- Verification command\\n- Risks",
+        review: "Task Type: review\\n\\nContext:\\n- Repo path:\\n- Change under review:\\n- Files to inspect:\\n\\nDeliverable:\\n- Findings ordered by severity\\n- File and line references\\n- Missing tests\\n- Residual risk",
+        test: "Task Type: test\\n\\nContext:\\n- Repo path:\\n- Feature or bugfix:\\n- Test target:\\n\\nDeliverable:\\n- Test plan\\n- Commands run\\n- Failures found\\n- Recommended fixes"
+      };
+      if (!$("content").value.trim()) $("content").value = templates[$("taskTemplate").value];
+      if (!$("taskTitle").value.trim()) $("taskTitle").value = `${$("taskTemplate").value} task`;
+    }
+
+    run(async () => {
+      await refreshWorkspace();
+      applyTemplate();
+      setStatus("Ready");
+    });
+  </script>
+</body>
+</html>
