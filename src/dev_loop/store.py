@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import re
 import sqlite3
 import threading
 import uuid
@@ -9,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-DEFAULT_DB_PATH = Path.home() / ".dev_loop" / "messages.db"
+DEFAULT_DB_ROOT = Path.home() / ".dev_loop" / "projects"
 DEFAULT_LEASE_SECONDS = 300
 MESSAGE_KINDS = {"message", "task"}
 TASK_STATUSES = {
@@ -69,6 +71,24 @@ def _future(seconds: int) -> str:
     )
 
 
+def project_db_path(
+    project_dir: Path | str | None = None,
+    base_dir: Path | str | None = None,
+) -> Path:
+    """Return the default database path for a project directory.
+
+    The path is stable for the absolute project path and includes a short hash so
+    projects with the same leaf directory name do not collide.
+    """
+    project_path = Path(project_dir or Path.cwd()).expanduser().resolve()
+    root = Path(base_dir or DEFAULT_DB_ROOT).expanduser()
+    slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", project_path.name).strip("-._")
+    if not slug:
+        slug = "project"
+    digest = hashlib.sha256(str(project_path).encode("utf-8")).hexdigest()[:12]
+    return root / f"{slug}-{digest}" / "messages.db"
+
+
 class UnknownAgentError(ValueError):
     pass
 
@@ -84,7 +104,9 @@ def _clean_task_status(task_status: str) -> str:
 
 
 class Store:
-    def __init__(self, db_path: Path | str = DEFAULT_DB_PATH):
+    def __init__(self, db_path: Path | str | None = None):
+        if db_path is None:
+            db_path = project_db_path()
         db_path = Path(db_path)
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()

@@ -8,7 +8,7 @@ from mcp.server.fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 
-from .store import DEFAULT_DB_PATH, DEFAULT_LEASE_SECONDS, Store, UnknownAgentError
+from .store import DEFAULT_LEASE_SECONDS, Store, UnknownAgentError, project_db_path
 
 MAX_WAIT_SECONDS = 60
 MAX_LEASE_SECONDS = 3600
@@ -36,7 +36,7 @@ def create_server(
     port: int = 8848,
     db_path: str | None = None,
 ) -> FastMCP:
-    store = Store(db_path or DEFAULT_DB_PATH)
+    store = Store(db_path or project_db_path())
 
     mcp = FastMCP(
         "dev-loop",

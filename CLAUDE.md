@@ -2,7 +2,7 @@
 
 本地 MCP 信箱 server：多个 LLM CLI/Agent 通过它互传提示词。Python + FastMCP，唯一依赖 `mcp`。
 
-- 启动：`uv run dev-loop serve`（127.0.0.1:8848/mcp，db 在 `~/.dev_loop/messages.db`）
+- 启动：`uv run dev-loop serve`（127.0.0.1:8848/mcp，db 默认按当前项目目录分开存储）
 - 代码：`src/dev_loop/`（`store.py` SQLite 层，`server.py` MCP 工具层）
 - 测试：`.venv/bin/python -m unittest discover -s tests -v`
 

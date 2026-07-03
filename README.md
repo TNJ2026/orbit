@@ -4,11 +4,12 @@
 
 ```
 Claude Code ──┐
-Codex CLI  ───┼── HTTP (Streamable) ──▶ dev-loop daemon :8848/mcp ──▶ SQLite ~/.dev_loop/messages.db
+Codex CLI  ───┼── HTTP (Streamable) ──▶ dev-loop daemon :8848/mcp ──▶ SQLite ~/.dev_loop/projects/<project>/messages.db
 Gemini CLI ───┘
 ```
 
 - 单个常驻 HTTP daemon，所有客户端连同一端口，状态天然共享
+- 默认按启动目录分项目存储：不同项目的 agent / message 不会混在同一个数据库
 - 消息持久化到 SQLite：daemon 重启不丢消息，收件人晚上线也能收到
 - 异步信箱模型：`send_message` 投递，`check_inbox` 租约领取，`ack_message` 确认完成（支持最长 60s 长轮询）
 
@@ -27,9 +28,11 @@ uv sync        # 创建 .venv 并安装唯一依赖 mcp
 ## 启动
 
 ```bash
-uv run dev-loop serve                 # 默认 127.0.0.1:8848，db 在 ~/.dev_loop/messages.db
+uv run dev-loop serve                 # 默认 127.0.0.1:8848，db 按当前项目目录分开存储
 uv run dev-loop serve --port 9000 --db /tmp/test.db
 ```
+
+默认数据库路径形如 `~/.dev_loop/projects/<项目目录名>-<路径hash>/messages.db`。同一项目目录启动会复用同一个库；不同项目目录会自动隔离。需要手动共享或指定旧库时，用 `--db` 覆盖。
 
 启动后有两个入口：
 

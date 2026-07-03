@@ -4,7 +4,7 @@ from tempfile import TemporaryDirectory
 import time
 import unittest
 
-from dev_loop.store import Store, UnknownAgentError
+from dev_loop.store import Store, UnknownAgentError, project_db_path
 
 
 class StoreTests(unittest.TestCase):
@@ -178,6 +178,24 @@ class StoreTests(unittest.TestCase):
             self.assertIn("leased_until", columns)
             self.assertIn("task_status", columns)
             store.close()
+
+    def test_project_db_path_is_stable_and_project_scoped(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project_a = root / "same-name"
+            project_b = root / "nested" / "same-name"
+            project_a.mkdir()
+            project_b.mkdir(parents=True)
+            base_dir = root / "dbs"
+
+            first = project_db_path(project_a, base_dir=base_dir)
+            second = project_db_path(project_a, base_dir=base_dir)
+            other = project_db_path(project_b, base_dir=base_dir)
+
+            self.assertEqual(first, second)
+            self.assertNotEqual(first, other)
+            self.assertEqual("messages.db", first.name)
+            self.assertEqual(base_dir, first.parent.parent)
 
 
 if __name__ == "__main__":
