@@ -75,7 +75,15 @@ def create_server(
         return await _to_thread(store.list_agents)
 
     @mcp.tool()
-    async def send_message(sender: str, to: str, content: str, reply_to: int | None = None) -> dict:
+    async def send_message(
+        sender: str,
+        to: str,
+        content: str,
+        reply_to: int | None = None,
+        kind: str = "message",
+        title: str = "",
+        task_status: str = "",
+    ) -> dict:
         """Send a prompt/message to another agent's inbox.
 
         - sender: your own registered agent name.
@@ -84,12 +92,24 @@ def create_server(
         - content: the prompt or message text to deliver.
         - reply_to: optional id of the message you are replying to; set it so the
           recipient can reconstruct the conversation with get_thread.
+        - kind: "message" or "task"; programming delegation should use "task".
+        - title: optional short task title.
+        - task_status: optional task status; defaults to "created" for tasks.
 
         The message is stored durably and delivered when the recipient next calls
         check_inbox. Returns the created message id(s)."""
         await _to_thread(store.touch_agent, sender)
         try:
-            ids = await _to_thread(store.send_message, sender, to, content, reply_to)
+            ids = await _to_thread(
+                store.send_message,
+                sender,
+                to,
+                content,
+                reply_to,
+                kind,
+                title,
+                task_status,
+            )
         except UnknownAgentError as exc:
             return {"delivered": 0, "message_ids": [], "error": str(exc)}
         if not ids:
@@ -186,8 +206,12 @@ def create_server(
         params = request.query_params
         agent = params.get("agent") or None
         status = params.get("status", "all")
+        kind = params.get("kind", "all")
+        task_status = params.get("task_status", "all")
         limit = int(params.get("limit", "100"))
-        messages = await _to_thread(store.list_messages, agent, status, limit)
+        messages = await _to_thread(
+            store.list_messages, agent, status, kind, task_status, limit
+        )
         return JSONResponse({"messages": messages})
 
     @mcp.custom_route("/api/messages", methods=["POST"])
@@ -196,6 +220,9 @@ def create_server(
         sender = str(data.get("sender", "")).strip()
         to = str(data.get("to", "")).strip()
         content = str(data.get("content", "")).strip()
+        kind = str(data.get("kind", "message")).strip()
+        title = str(data.get("title", "")).strip()
+        task_status = str(data.get("task_status", "")).strip()
         reply_to = data.get("reply_to")
         if reply_to in ("", None):
             reply_to = None
@@ -205,10 +232,31 @@ def create_server(
             return _json_error("sender, to, and content are required")
         await _to_thread(store.touch_agent, sender)
         try:
-            ids = await _to_thread(store.send_message, sender, to, content, reply_to)
+            ids = await _to_thread(
+                store.send_message,
+                sender,
+                to,
+                content,
+                reply_to,
+                kind,
+                title,
+                task_status,
+            )
         except UnknownAgentError as exc:
             return _json_error(str(exc))
         return JSONResponse({"delivered": len(ids), "message_ids": ids})
+
+    @mcp.custom_route("/api/messages/{message_id:int}/task-status", methods=["POST"])
+    async def api_update_task_status(request: Request) -> JSONResponse:
+        data = await _read_json(request)
+        message_id = int(request.path_params["message_id"])
+        task_status = str(data.get("task_status", "")).strip()
+        if not task_status:
+            return _json_error("task_status is required")
+        updated = await _to_thread(store.update_task_status, message_id, task_status)
+        return JSONResponse(
+            {"updated": updated, "message_id": message_id, "task_status": task_status}
+        )
 
     @mcp.custom_route("/api/inbox/check", methods=["POST"])
     async def api_check_inbox(request: Request) -> JSONResponse:
@@ -331,7 +379,7 @@ _UI_HTML = r"""<!doctype html>
     input, select, textarea { width: 100%; padding: 7px 8px; }
     textarea { min-height: 96px; resize: vertical; }
     .stack { display: grid; gap: 8px; padding: 12px; }
-    .row { display: flex; gap: 8px; align-items: center; }
+    .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
     .row > * { min-width: 0; }
     .row .grow { flex: 1; }
     .agent, .message, .thread-item {
@@ -429,6 +477,22 @@ _UI_HTML = r"""<!doctype html>
             <option value="leased">Leased</option>
             <option value="read">Read</option>
           </select>
+          <select id="messageKind">
+            <option value="all">Any kind</option>
+            <option value="task">Tasks</option>
+            <option value="message">Messages</option>
+          </select>
+          <select id="taskStatusFilter">
+            <option value="all">Any task</option>
+            <option value="created">Created</option>
+            <option value="assigned">Assigned</option>
+            <option value="in_progress">In progress</option>
+            <option value="replied">Replied</option>
+            <option value="accepted">Accepted</option>
+            <option value="needs_changes">Needs changes</option>
+            <option value="blocked">Blocked</option>
+            <option value="closed">Closed</option>
+          </select>
           <button id="claimInbox">Claim inbox</button>
           <button id="refreshMessages">Refresh</button>
         </div>
@@ -439,10 +503,37 @@ _UI_HTML = r"""<!doctype html>
     <section>
       <div class="pane-head">
         <h2>Thread</h2>
-        <button id="ackMessage" class="danger" disabled>Ack</button>
+        <div class="row">
+          <select id="taskStatusAction">
+            <option value="created">Created</option>
+            <option value="assigned">Assigned</option>
+            <option value="in_progress">In progress</option>
+            <option value="replied">Replied</option>
+            <option value="accepted">Accepted</option>
+            <option value="needs_changes">Needs changes</option>
+            <option value="blocked">Blocked</option>
+            <option value="closed">Closed</option>
+          </select>
+          <button id="updateTaskStatus" disabled>Set status</button>
+          <button id="ackMessage" class="danger" disabled>Ack</button>
+        </div>
       </div>
       <div id="thread" class="thread empty">No message selected.</div>
       <div class="composer stack">
+        <div class="row">
+          <select id="composeKind">
+            <option value="task">Task</option>
+            <option value="message">Message</option>
+          </select>
+          <select id="taskTemplate">
+            <option value="analyze">Analyze</option>
+            <option value="implement">Implement</option>
+            <option value="review">Review</option>
+            <option value="test">Test</option>
+            <option value="custom">Custom</option>
+          </select>
+        </div>
+        <input id="taskTitle" placeholder="task title">
         <div class="row">
           <input id="sendTo" class="grow" placeholder="to">
           <input id="replyTo" style="max-width: 110px" placeholder="reply to">
@@ -521,6 +612,8 @@ _UI_HTML = r"""<!doctype html>
     async function loadMessages() {
       const params = new URLSearchParams({
         status: $("messageStatus").value,
+        kind: $("messageKind").value,
+        task_status: $("taskStatusFilter").value,
         limit: "100"
       });
       if (state.selectedAgent) params.set("agent", state.selectedAgent);
@@ -534,6 +627,11 @@ _UI_HTML = r"""<!doctype html>
           <div class="message-title">
             <span>#${message.id} ${escapeHtml(message.sender)} to ${escapeHtml(message.recipient)}</span>
             <span class="badge ${escapeHtml(message.status || "available")}">${escapeHtml(message.status || "available")}</span>
+          </div>
+          <div class="meta">
+            ${escapeHtml(message.kind || "message")}
+            ${message.title ? ` - ${escapeHtml(message.title)}` : ""}
+            ${message.task_status ? ` - ${escapeHtml(message.task_status)}` : ""}
           </div>
           <div class="preview">${escapeHtml(message.content).slice(0, 180)}</div>
           <div class="meta">${fmtTime(message.created_at)} - deliveries ${message.delivery_count || 0}</div>
@@ -549,6 +647,10 @@ _UI_HTML = r"""<!doctype html>
       state.selectedMessage = data.messages.find(message => message.id === id) || data.messages[0] || null;
       const selectedLease = state.leases.get(id);
       $("ackMessage").disabled = !selectedLease;
+      $("updateTaskStatus").disabled = !state.selectedMessage || state.selectedMessage.kind !== "task";
+      if (state.selectedMessage && state.selectedMessage.task_status) {
+        $("taskStatusAction").value = state.selectedMessage.task_status;
+      }
       $("replyTo").value = id || "";
       if (state.selectedMessage) $("sendTo").value = state.selectedMessage.sender;
       $("thread").className = "thread";
@@ -557,6 +659,11 @@ _UI_HTML = r"""<!doctype html>
           <div class="message-title">
             <span>#${message.id} ${escapeHtml(message.sender)} to ${escapeHtml(message.recipient)}</span>
             <span class="badge">${fmtTime(message.created_at)}</span>
+          </div>
+          <div class="meta">
+            ${escapeHtml(message.kind || "message")}
+            ${message.title ? ` - ${escapeHtml(message.title)}` : ""}
+            ${message.task_status ? ` - ${escapeHtml(message.task_status)}` : ""}
           </div>
           <div class="thread-body">${escapeHtml(message.content)}</div>
         </div>
@@ -594,6 +701,16 @@ _UI_HTML = r"""<!doctype html>
       await loadMessages();
     }
 
+    async function updateSelectedTaskStatus() {
+      if (!state.selectedMessage || state.selectedMessage.kind !== "task") return;
+      const data = await api(`/api/messages/${state.selectedMessage.id}/task-status`, {
+        method: "POST",
+        body: JSON.stringify({ task_status: $("taskStatusAction").value })
+      });
+      setStatus(data.updated ? `Updated #${data.message_id} to ${data.task_status}` : `Task status unchanged`, !data.updated);
+      await selectMessage(state.selectedMessage.id);
+    }
+
     async function registerAgent() {
       await api("/api/agents", {
         method: "POST",
@@ -616,11 +733,15 @@ _UI_HTML = r"""<!doctype html>
         body: JSON.stringify({
           sender: state.selectedAgent,
           to: $("sendTo").value,
+          kind: $("composeKind").value,
+          title: $("taskTitle").value,
+          task_status: $("composeKind").value === "task" ? "assigned" : "",
           content: $("content").value,
           reply_to: replyTo || null
         })
       });
       $("content").value = "";
+      $("taskTitle").value = "";
       setStatus(`Delivered ${data.delivered} message(s)`);
       await loadMessages();
       if (data.message_ids[0]) await selectMessage(data.message_ids[0]);
@@ -637,14 +758,34 @@ _UI_HTML = r"""<!doctype html>
     $("refreshAgents").addEventListener("click", () => run(loadAgents));
     $("refreshMessages").addEventListener("click", () => run(loadMessages));
     $("messageStatus").addEventListener("change", () => run(loadMessages));
+    $("messageKind").addEventListener("change", () => run(loadMessages));
+    $("taskStatusFilter").addEventListener("change", () => run(loadMessages));
     $("registerAgent").addEventListener("click", () => run(registerAgent));
     $("claimInbox").addEventListener("click", () => run(claimInbox));
     $("ackMessage").addEventListener("click", () => run(ackSelected));
+    $("updateTaskStatus").addEventListener("click", () => run(updateSelectedTaskStatus));
     $("sendMessage").addEventListener("click", () => run(sendMessage));
+    $("taskTemplate").addEventListener("change", applyTemplate);
+    $("composeKind").addEventListener("change", () => {
+      if ($("composeKind").value === "task") applyTemplate();
+    });
+
+    function applyTemplate() {
+      if ($("composeKind").value !== "task" || $("taskTemplate").value === "custom") return;
+      const templates = {
+        analyze: "Task Type: analyze\\n\\nContext:\\n- Repo path:\\n- User goal:\\n- Relevant files:\\n- Constraints:\\n\\nDeliverable:\\n- Root cause or key findings\\n- Suggested change\\n- Tests to add\\n- Risks",
+        implement: "Task Type: implement\\n\\nContext:\\n- Repo path:\\n- User goal:\\n- Files to edit:\\n- Constraints:\\n\\nDeliverable:\\n- Summary of changes\\n- Patch or exact file edits\\n- Verification command\\n- Risks",
+        review: "Task Type: review\\n\\nContext:\\n- Repo path:\\n- Change under review:\\n- Files to inspect:\\n\\nDeliverable:\\n- Findings ordered by severity\\n- File and line references\\n- Missing tests\\n- Residual risk",
+        test: "Task Type: test\\n\\nContext:\\n- Repo path:\\n- Feature or bugfix:\\n- Test target:\\n\\nDeliverable:\\n- Test plan\\n- Commands run\\n- Failures found\\n- Recommended fixes"
+      };
+      if (!$("content").value.trim()) $("content").value = templates[$("taskTemplate").value];
+      if (!$("taskTitle").value.trim()) $("taskTitle").value = `${$("taskTemplate").value} task`;
+    }
 
     run(async () => {
       await loadAgents();
       await loadMessages();
+      applyTemplate();
       setStatus("Ready");
     });
   </script>

@@ -97,6 +97,49 @@ class StoreTests(unittest.TestCase):
         self.assertEqual([message_id], [m["id"] for m in read])
         self.assertEqual("read", read[0]["status"])
 
+    def test_task_metadata_can_be_filtered_and_updated(self):
+        store = self.make_store()
+        self.register_pair(store)
+        [task_id] = store.send_message(
+            "a",
+            "b",
+            "review auth changes",
+            kind="task",
+            title="Review auth flow",
+            task_status="assigned",
+        )
+        store.send_message("a", "b", "plain message")
+
+        tasks = store.list_messages(agent="b", kind="task")
+        self.assertEqual([task_id], [m["id"] for m in tasks])
+        self.assertEqual("Review auth flow", tasks[0]["title"])
+        self.assertEqual("assigned", tasks[0]["task_status"])
+
+        self.assertTrue(store.update_task_status(task_id, "accepted"))
+        accepted = store.list_messages(agent="b", kind="task", task_status="accepted")
+        self.assertEqual([task_id], [m["id"] for m in accepted])
+
+    def test_task_metadata_is_returned_from_inbox_and_thread(self):
+        store = self.make_store()
+        self.register_pair(store)
+        [task_id] = store.send_message(
+            "a",
+            "b",
+            "implement search",
+            kind="task",
+            title="Implement search",
+        )
+
+        [inbox_task] = store.fetch_unread("b", lease_seconds=60)
+        self.assertEqual(task_id, inbox_task["id"])
+        self.assertEqual("task", inbox_task["kind"])
+        self.assertEqual("Implement search", inbox_task["title"])
+        self.assertEqual("created", inbox_task["task_status"])
+
+        thread = store.get_thread(task_id)
+        self.assertEqual("task", thread[0]["kind"])
+        self.assertEqual("created", thread[0]["task_status"])
+
 
 if __name__ == "__main__":
     unittest.main()

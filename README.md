@@ -145,7 +145,7 @@ asyncio.run(main())
 |---|---|
 | `register_agent(name, description)` | 注册自己，返回当前所有已注册 agent |
 | `list_agents()` | 查看有哪些 agent 可以收消息 |
-| `send_message(sender, to, content, reply_to?)` | 发提示词；`to="*"` 广播给所有其它 agent |
+| `send_message(sender, to, content, reply_to?, kind?, title?, task_status?)` | 发提示词或任务；`to="*"` 广播给所有其它 agent |
 | `check_inbox(agent, wait_seconds=0, lease_seconds=300)` | 租约领取未读消息；`wait_seconds=30` 长轮询近实时；未 ack 的消息在租约过期后会重投递 |
 | `ack_message(agent, message_id, lease_token)` | 确认消息已处理，之后不会再次投递；`lease_token` 来自 `check_inbox` 返回的消息 |
 | `get_thread(message_id)` | 沿 `reply_to` 链取回整个对话线程 |
@@ -156,12 +156,54 @@ asyncio.run(main())
 
 - 注册 / 刷新 agent
 - 查看最近消息，按 `available` / `leased` / `read` 过滤
+- 查看任务消息，按 `created` / `assigned` / `in_progress` / `replied` / `accepted` / `needs_changes` / `blocked` / `closed` 过滤
 - 选择 agent 后 claim inbox，拿到租约和 ack token
 - 查看消息 thread
-- 发送新消息或按 `reply_to` 回复
+- 用 Analyze / Implement / Review / Test 模板发送编程任务，或按 `reply_to` 回复
+- 标记任务状态
 - 对已 claim 的消息执行 ack
 
 UI 只通过 `/api/*` JSON route 访问本地 store。直接查看消息列表不会领取消息；只有点击 Claim inbox 才会创建租约。
+
+## 编程协作流程
+
+建议把 dev-loop 当成轻量任务分发器，而不是群聊。
+
+推荐 agent 分工：
+
+- `hub`：主编排 agent。负责拆任务、合并结论、改主工作树、最终验收
+- `impl-*`：实现型 agent。负责局部实现或 patch 建议
+- `review-*`：审查型 agent。负责找 bug、测试缺口和设计风险
+- `test-*`：验证型 agent。负责测试计划、失败复现和命令输出
+
+推荐约束：
+
+1. 默认只有 `hub` 写主工作树
+2. worker 每次只处理一个边界清楚的小任务
+3. worker 回复必须包含文件引用、结论和验证方式
+
+任务消息建议使用 `kind="task"`，并设置：
+
+```json
+{
+  "title": "Review auth flow",
+  "task_status": "assigned",
+  "content": "Task Type: review\n\nContext:\n- Repo path: ...\n- Change under review: ...\n\nDeliverable:\n- Findings ordered by severity\n- Missing tests\n- Residual risk"
+}
+```
+
+任务状态含义：
+
+| 状态 | 含义 |
+|---|---|
+| `created` | 已创建，还未正式派发 |
+| `assigned` | 已派发给目标 agent |
+| `in_progress` | worker 已 claim 并开始处理 |
+| `replied` | worker 已回复结果 |
+| `accepted` | hub 接受该结果 |
+| `needs_changes` | hub 要求继续修改或补充 |
+| `blocked` | worker 被阻塞，需要输入或环境变化 |
+| `closed` | 任务已归档 |
 
 ### 返回值格式
 

@@ -11,6 +11,18 @@ from typing import Any
 
 DEFAULT_DB_PATH = Path.home() / ".dev_loop" / "messages.db"
 DEFAULT_LEASE_SECONDS = 300
+MESSAGE_KINDS = {"message", "task"}
+TASK_STATUSES = {
+    "",
+    "created",
+    "assigned",
+    "in_progress",
+    "replied",
+    "accepted",
+    "needs_changes",
+    "blocked",
+    "closed",
+}
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS agents (
@@ -24,6 +36,9 @@ CREATE TABLE IF NOT EXISTS messages (
     sender     TEXT NOT NULL,
     recipient  TEXT NOT NULL,
     content    TEXT NOT NULL,
+    kind       TEXT NOT NULL DEFAULT 'message',
+    title      TEXT NOT NULL DEFAULT '',
+    task_status TEXT NOT NULL DEFAULT '',
     reply_to   INTEGER,
     created_at TEXT NOT NULL,
     read_at    TEXT,
@@ -55,6 +70,16 @@ class UnknownAgentError(ValueError):
     pass
 
 
+def _clean_kind(kind: str) -> str:
+    kind = (kind or "message").strip()
+    return kind if kind in MESSAGE_KINDS else "message"
+
+
+def _clean_task_status(task_status: str) -> str:
+    task_status = (task_status or "").strip()
+    return task_status if task_status in TASK_STATUSES else ""
+
+
 class Store:
     def __init__(self, db_path: Path | str = DEFAULT_DB_PATH):
         db_path = Path(db_path)
@@ -81,6 +106,18 @@ class Store:
         if "delivery_count" not in columns:
             self._conn.execute(
                 "ALTER TABLE messages ADD COLUMN delivery_count INTEGER NOT NULL DEFAULT 0"
+            )
+        if "kind" not in columns:
+            self._conn.execute(
+                "ALTER TABLE messages ADD COLUMN kind TEXT NOT NULL DEFAULT 'message'"
+            )
+        if "title" not in columns:
+            self._conn.execute(
+                "ALTER TABLE messages ADD COLUMN title TEXT NOT NULL DEFAULT ''"
+            )
+        if "task_status" not in columns:
+            self._conn.execute(
+                "ALTER TABLE messages ADD COLUMN task_status TEXT NOT NULL DEFAULT ''"
             )
 
     # -- agents ------------------------------------------------------------
@@ -128,11 +165,21 @@ class Store:
     # -- messages ----------------------------------------------------------
 
     def send_message(
-        self, sender: str, to: str, content: str, reply_to: int | None = None
+        self,
+        sender: str,
+        to: str,
+        content: str,
+        reply_to: int | None = None,
+        kind: str = "message",
+        title: str = "",
+        task_status: str = "",
     ) -> list[int]:
         """Insert a message. Broadcast ("*") is expanded into one copy per
         registered agent other than the sender. Returns the message id(s)."""
         now = _now()
+        kind = _clean_kind(kind)
+        title = title.strip()
+        task_status = _clean_task_status(task_status or ("created" if kind == "task" else ""))
         ids: list[int] = []
         with self._lock:
             if not self._agent_exists_locked(sender):
@@ -148,9 +195,12 @@ class Store:
                 recipients = [to]
             for recipient in recipients:
                 cur = self._conn.execute(
-                    """INSERT INTO messages (sender, recipient, content, reply_to, created_at)
-                       VALUES (?, ?, ?, ?, ?)""",
-                    (sender, recipient, content, reply_to, now),
+                    """INSERT INTO messages (
+                           sender, recipient, content, kind, title, task_status,
+                           reply_to, created_at
+                       )
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (sender, recipient, content, kind, title, task_status, reply_to, now),
                 )
                 ids.append(cur.lastrowid)
             self._conn.commit()
@@ -171,8 +221,8 @@ class Store:
             if not self._agent_exists_locked(agent):
                 raise UnknownAgentError(f"unknown agent: {agent}")
             rows = self._conn.execute(
-                """SELECT id, sender, recipient, content, reply_to, created_at,
-                          delivery_count
+                """SELECT id, sender, recipient, content, kind, title, task_status,
+                          reply_to, created_at, delivery_count
                    FROM messages
                    WHERE recipient = ?
                      AND read_at IS NULL
@@ -237,17 +287,32 @@ class Store:
     def get_message(self, message_id: int) -> dict[str, Any] | None:
         with self._lock:
             row = self._conn.execute(
-                """SELECT id, sender, recipient, content, reply_to, created_at, read_at,
-                          leased_until, lease_owner, lease_token, delivery_count
+                """SELECT id, sender, recipient, content, kind, title, task_status,
+                          reply_to, created_at, read_at, leased_until, lease_owner,
+                          lease_token, delivery_count
                    FROM messages WHERE id = ?""",
                 (message_id,),
             ).fetchone()
         return dict(row) if row else None
 
+    def update_task_status(self, message_id: int, task_status: str) -> bool:
+        task_status = _clean_task_status(task_status)
+        with self._lock:
+            cur = self._conn.execute(
+                """UPDATE messages
+                   SET task_status = ?
+                   WHERE id = ? AND kind = 'task'""",
+                (task_status, message_id),
+            )
+            self._conn.commit()
+        return cur.rowcount > 0
+
     def list_messages(
         self,
         agent: str | None = None,
         status: str = "all",
+        kind: str = "all",
+        task_status: str = "all",
         limit: int = 100,
     ) -> list[dict[str, Any]]:
         """Return recent messages for the local UI without leasing them."""
@@ -270,10 +335,17 @@ class Store:
             filters.append("read_at IS NOT NULL")
         elif status == "unread":
             filters.append("read_at IS NULL")
+        if kind != "all":
+            filters.append("kind = ?")
+            params.append(_clean_kind(kind))
+        if task_status != "all":
+            filters.append("task_status = ?")
+            params.append(_clean_task_status(task_status))
 
         where = f"WHERE {' AND '.join(filters)}" if filters else ""
         query = f"""SELECT id, sender, recipient, content, reply_to, created_at,
-                           read_at, leased_until, lease_owner, delivery_count,
+                           kind, title, task_status, read_at, leased_until,
+                           lease_owner, delivery_count,
                            CASE
                                WHEN read_at IS NOT NULL THEN 'read'
                                WHEN leased_until IS NOT NULL AND leased_until > ? THEN 'leased'
@@ -293,36 +365,43 @@ class Store:
             rows = self._conn.execute(
                 """WITH RECURSIVE
                    ancestors(id, sender, recipient, content, reply_to, created_at,
+                             kind, title, task_status,
                              read_at, leased_until, lease_owner, lease_token,
                              delivery_count) AS (
                        SELECT id, sender, recipient, content, reply_to, created_at,
+                              kind, title, task_status,
                               read_at, leased_until, lease_owner, lease_token,
                               delivery_count
                        FROM messages
                        WHERE id = ?
                        UNION
                        SELECT m.id, m.sender, m.recipient, m.content, m.reply_to,
-                              m.created_at, m.read_at, m.leased_until, m.lease_owner,
+                              m.created_at, m.kind, m.title, m.task_status,
+                              m.read_at, m.leased_until, m.lease_owner,
                               m.lease_token, m.delivery_count
                        FROM messages m
                        JOIN ancestors a ON m.id = a.reply_to
                    ),
                    thread(id, sender, recipient, content, reply_to, created_at,
+                          kind, title, task_status,
                           read_at, leased_until, lease_owner, lease_token,
                           delivery_count) AS (
                        SELECT id, sender, recipient, content, reply_to, created_at,
+                              kind, title, task_status,
                               read_at, leased_until, lease_owner, lease_token,
                               delivery_count
                        FROM ancestors
                        UNION
                        SELECT m.id, m.sender, m.recipient, m.content, m.reply_to,
-                              m.created_at, m.read_at, m.leased_until, m.lease_owner,
+                              m.created_at, m.kind, m.title, m.task_status,
+                              m.read_at, m.leased_until, m.lease_owner,
                               m.lease_token, m.delivery_count
                        FROM messages m
                        JOIN thread t ON m.reply_to = t.id
                    )
                    SELECT DISTINCT id, sender, recipient, content, reply_to,
-                          created_at, read_at, leased_until, lease_owner,
+                          created_at, kind, title, task_status, read_at,
+                          leased_until, lease_owner,
                           lease_token, delivery_count
                    FROM thread
                    ORDER BY id""",
