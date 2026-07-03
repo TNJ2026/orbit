@@ -244,6 +244,49 @@ class Store:
             ).fetchone()
         return dict(row) if row else None
 
+    def list_messages(
+        self,
+        agent: str | None = None,
+        status: str = "all",
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Return recent messages for the local UI without leasing them."""
+        now = _now()
+        limit = max(1, min(int(limit), 500))
+        filters = []
+        params: list[Any] = []
+        if agent:
+            filters.append("(sender = ? OR recipient = ?)")
+            params.extend([agent, agent])
+        if status == "available":
+            filters.append(
+                "read_at IS NULL AND (leased_until IS NULL OR leased_until <= ?)"
+            )
+            params.append(now)
+        elif status == "leased":
+            filters.append("read_at IS NULL AND leased_until > ?")
+            params.append(now)
+        elif status == "read":
+            filters.append("read_at IS NOT NULL")
+        elif status == "unread":
+            filters.append("read_at IS NULL")
+
+        where = f"WHERE {' AND '.join(filters)}" if filters else ""
+        query = f"""SELECT id, sender, recipient, content, reply_to, created_at,
+                           read_at, leased_until, lease_owner, delivery_count,
+                           CASE
+                               WHEN read_at IS NOT NULL THEN 'read'
+                               WHEN leased_until IS NOT NULL AND leased_until > ? THEN 'leased'
+                               ELSE 'available'
+                           END AS status
+                    FROM messages
+                    {where}
+                    ORDER BY id DESC
+                    LIMIT ?"""
+        with self._lock:
+            rows = self._conn.execute(query, [now, *params, limit]).fetchall()
+        return [dict(row) for row in rows]
+
     def get_thread(self, message_id: int) -> list[dict[str, Any]]:
         """Return the ancestor chain plus all descendants using recursive SQL."""
         with self._lock:

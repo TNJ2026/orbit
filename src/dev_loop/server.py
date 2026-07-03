@@ -5,6 +5,8 @@ from __future__ import annotations
 import anyio
 
 from mcp.server.fastmcp import FastMCP
+from starlette.requests import Request
+from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from .store import DEFAULT_DB_PATH, DEFAULT_LEASE_SECONDS, Store, UnknownAgentError
 
@@ -15,6 +17,18 @@ POLL_INTERVAL = 0.5
 # Store uses synchronous sqlite3; run every call in a worker thread so it
 # never blocks the event loop (many concurrent long-polling clients).
 _to_thread = anyio.to_thread.run_sync
+
+
+async def _read_json(request: Request) -> dict:
+    try:
+        data = await request.json()
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _json_error(message: str, status_code: int = 400) -> JSONResponse:
+    return JSONResponse({"error": message}, status_code=status_code)
 
 
 def create_server(
@@ -144,4 +158,496 @@ def create_server(
         part of an ongoing exchange."""
         return await _to_thread(store.get_thread, message_id)
 
+    @mcp.custom_route("/", methods=["GET"])
+    async def index(_: Request) -> RedirectResponse:
+        return RedirectResponse("/ui")
+
+    @mcp.custom_route("/ui", methods=["GET"])
+    async def ui(_: Request) -> HTMLResponse:
+        return HTMLResponse(_UI_HTML)
+
+    @mcp.custom_route("/api/agents", methods=["GET"])
+    async def api_list_agents(_: Request) -> JSONResponse:
+        agents = await _to_thread(store.list_agents)
+        return JSONResponse({"agents": agents})
+
+    @mcp.custom_route("/api/agents", methods=["POST"])
+    async def api_register_agent(request: Request) -> JSONResponse:
+        data = await _read_json(request)
+        name = str(data.get("name", "")).strip()
+        description = str(data.get("description", "")).strip()
+        if not name:
+            return _json_error("agent name is required")
+        agents = await _to_thread(store.register_agent, name, description)
+        return JSONResponse({"registered": name, "agents": agents})
+
+    @mcp.custom_route("/api/messages", methods=["GET"])
+    async def api_list_messages(request: Request) -> JSONResponse:
+        params = request.query_params
+        agent = params.get("agent") or None
+        status = params.get("status", "all")
+        limit = int(params.get("limit", "100"))
+        messages = await _to_thread(store.list_messages, agent, status, limit)
+        return JSONResponse({"messages": messages})
+
+    @mcp.custom_route("/api/messages", methods=["POST"])
+    async def api_send_message(request: Request) -> JSONResponse:
+        data = await _read_json(request)
+        sender = str(data.get("sender", "")).strip()
+        to = str(data.get("to", "")).strip()
+        content = str(data.get("content", "")).strip()
+        reply_to = data.get("reply_to")
+        if reply_to in ("", None):
+            reply_to = None
+        else:
+            reply_to = int(reply_to)
+        if not sender or not to or not content:
+            return _json_error("sender, to, and content are required")
+        await _to_thread(store.touch_agent, sender)
+        try:
+            ids = await _to_thread(store.send_message, sender, to, content, reply_to)
+        except UnknownAgentError as exc:
+            return _json_error(str(exc))
+        return JSONResponse({"delivered": len(ids), "message_ids": ids})
+
+    @mcp.custom_route("/api/inbox/check", methods=["POST"])
+    async def api_check_inbox(request: Request) -> JSONResponse:
+        data = await _read_json(request)
+        agent = str(data.get("agent", "")).strip()
+        lease_seconds = int(data.get("lease_seconds", DEFAULT_LEASE_SECONDS))
+        lease_seconds = max(1, min(lease_seconds, MAX_LEASE_SECONDS))
+        if not agent:
+            return _json_error("agent is required")
+        await _to_thread(store.touch_agent, agent)
+        try:
+            messages = await _to_thread(store.fetch_unread, agent, lease_seconds)
+        except UnknownAgentError as exc:
+            return _json_error(str(exc))
+        return JSONResponse({"agent": agent, "count": len(messages), "messages": messages})
+
+    @mcp.custom_route("/api/messages/{message_id:int}/ack", methods=["POST"])
+    async def api_ack_message(request: Request) -> JSONResponse:
+        data = await _read_json(request)
+        agent = str(data.get("agent", "")).strip()
+        lease_token = str(data.get("lease_token", "")).strip()
+        message_id = int(request.path_params["message_id"])
+        if not agent or not lease_token:
+            return _json_error("agent and lease_token are required")
+        await _to_thread(store.touch_agent, agent)
+        try:
+            acked = await _to_thread(store.ack_message, agent, message_id, lease_token)
+        except UnknownAgentError as exc:
+            return _json_error(str(exc))
+        return JSONResponse({"acked": acked, "message_id": message_id})
+
+    @mcp.custom_route("/api/thread/{message_id:int}", methods=["GET"])
+    async def api_get_thread(request: Request) -> JSONResponse:
+        message_id = int(request.path_params["message_id"])
+        thread = await _to_thread(store.get_thread, message_id)
+        return JSONResponse({"messages": thread})
+
     return mcp
+
+
+_UI_HTML = r"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>dev-loop</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f7f7f4;
+      --panel: #ffffff;
+      --ink: #1d2326;
+      --muted: #687176;
+      --line: #d9dedb;
+      --accent: #256c5a;
+      --accent-ink: #ffffff;
+      --warn: #9a5a12;
+      --danger: #a33b3b;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font: 14px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    header {
+      height: 52px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 18px;
+      border-bottom: 1px solid var(--line);
+      background: var(--panel);
+    }
+    h1 { font-size: 17px; margin: 0; font-weight: 650; }
+    main {
+      display: grid;
+      grid-template-columns: 260px minmax(360px, 1fr) minmax(340px, 0.95fr);
+      height: calc(100vh - 52px);
+      min-height: 560px;
+    }
+    section {
+      min-width: 0;
+      border-right: 1px solid var(--line);
+      overflow: auto;
+      background: var(--panel);
+    }
+    section:last-child { border-right: 0; }
+    .pane-head {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      min-height: 49px;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.94);
+      backdrop-filter: blur(8px);
+    }
+    h2 { font-size: 13px; margin: 0; text-transform: uppercase; color: var(--muted); }
+    button, input, select, textarea {
+      font: inherit;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--ink);
+    }
+    button {
+      min-height: 32px;
+      padding: 5px 10px;
+      cursor: pointer;
+    }
+    button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+    button.danger { color: var(--danger); }
+    button:disabled { opacity: .55; cursor: default; }
+    input, select, textarea { width: 100%; padding: 7px 8px; }
+    textarea { min-height: 96px; resize: vertical; }
+    .stack { display: grid; gap: 8px; padding: 12px; }
+    .row { display: flex; gap: 8px; align-items: center; }
+    .row > * { min-width: 0; }
+    .row .grow { flex: 1; }
+    .agent, .message, .thread-item {
+      border-bottom: 1px solid var(--line);
+      padding: 11px 12px;
+      cursor: pointer;
+    }
+    .agent.active, .message.active { background: #eef5f1; }
+    .agent-name, .message-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-weight: 650;
+    }
+    .meta, .preview {
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }
+    .preview { color: #3f494e; }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 22px;
+      padding: 2px 7px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      font-size: 12px;
+      color: var(--muted);
+      background: #fff;
+      white-space: nowrap;
+    }
+    .badge.available { color: var(--accent); border-color: #9fc7b9; }
+    .badge.leased { color: var(--warn); border-color: #deb16f; }
+    .badge.read { color: var(--muted); }
+    .empty, .error {
+      padding: 18px 12px;
+      color: var(--muted);
+    }
+    .error { color: var(--danger); }
+    .composer {
+      border-top: 1px solid var(--line);
+      background: #fbfbf9;
+    }
+    .thread {
+      min-height: 220px;
+    }
+    .thread-item { cursor: default; }
+    .thread-body {
+      margin-top: 7px;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    @media (max-width: 980px) {
+      main {
+        grid-template-columns: 1fr;
+        height: auto;
+      }
+      section {
+        min-height: 360px;
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>dev-loop</h1>
+    <div id="status" class="meta"></div>
+  </header>
+  <main>
+    <section>
+      <div class="pane-head">
+        <h2>Agents</h2>
+        <button id="refreshAgents">Refresh</button>
+      </div>
+      <div class="stack">
+        <input id="agentName" placeholder="agent name">
+        <input id="agentDescription" placeholder="description">
+        <button id="registerAgent" class="primary">Register</button>
+      </div>
+      <div id="agents"></div>
+    </section>
+
+    <section>
+      <div class="pane-head">
+        <h2>Messages</h2>
+        <div class="row">
+          <select id="messageStatus">
+            <option value="all">All</option>
+            <option value="available">Available</option>
+            <option value="leased">Leased</option>
+            <option value="read">Read</option>
+          </select>
+          <button id="claimInbox">Claim inbox</button>
+          <button id="refreshMessages">Refresh</button>
+        </div>
+      </div>
+      <div id="messages"></div>
+    </section>
+
+    <section>
+      <div class="pane-head">
+        <h2>Thread</h2>
+        <button id="ackMessage" class="danger" disabled>Ack</button>
+      </div>
+      <div id="thread" class="thread empty">No message selected.</div>
+      <div class="composer stack">
+        <div class="row">
+          <input id="sendTo" class="grow" placeholder="to">
+          <input id="replyTo" style="max-width: 110px" placeholder="reply to">
+        </div>
+        <textarea id="content" placeholder="message"></textarea>
+        <button id="sendMessage" class="primary">Send</button>
+      </div>
+    </section>
+  </main>
+  <script>
+    const state = {
+      agents: [],
+      selectedAgent: "",
+      selectedMessage: null,
+      leases: new Map()
+    };
+
+    const $ = (id) => document.getElementById(id);
+
+    async function api(path, options = {}) {
+      const response = await fetch(path, {
+        headers: { "content-type": "application/json" },
+        ...options
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || response.statusText);
+      return data;
+    }
+
+    function setStatus(text, isError = false) {
+      $("status").textContent = text;
+      $("status").style.color = isError ? "var(--danger)" : "var(--muted)";
+    }
+
+    function fmtTime(value) {
+      if (!value) return "";
+      return new Date(value).toLocaleString();
+    }
+
+    function escapeHtml(value) {
+      return String(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;");
+    }
+
+    async function loadAgents() {
+      const data = await api("/api/agents");
+      state.agents = data.agents;
+      if (!state.selectedAgent && state.agents.length) {
+        state.selectedAgent = state.agents[0].name;
+      }
+      renderAgents();
+    }
+
+    function renderAgents() {
+      $("agents").innerHTML = state.agents.length ? state.agents.map(agent => `
+        <div class="agent ${agent.name === state.selectedAgent ? "active" : ""}" data-agent="${escapeHtml(agent.name)}">
+          <div class="agent-name">
+            <span>${escapeHtml(agent.name)}</span>
+            <span class="badge">${fmtTime(agent.last_seen)}</span>
+          </div>
+          <div class="meta">${escapeHtml(agent.description || "")}</div>
+        </div>
+      `).join("") : `<div class="empty">No agents.</div>`;
+      document.querySelectorAll(".agent").forEach(el => {
+        el.addEventListener("click", async () => {
+          state.selectedAgent = el.dataset.agent;
+          renderAgents();
+          await loadMessages();
+        });
+      });
+    }
+
+    async function loadMessages() {
+      const params = new URLSearchParams({
+        status: $("messageStatus").value,
+        limit: "100"
+      });
+      if (state.selectedAgent) params.set("agent", state.selectedAgent);
+      const data = await api(`/api/messages?${params}`);
+      renderMessages(data.messages);
+    }
+
+    function renderMessages(messages) {
+      $("messages").innerHTML = messages.length ? messages.map(message => `
+        <div class="message ${state.selectedMessage && state.selectedMessage.id === message.id ? "active" : ""}" data-id="${message.id}">
+          <div class="message-title">
+            <span>#${message.id} ${escapeHtml(message.sender)} to ${escapeHtml(message.recipient)}</span>
+            <span class="badge ${escapeHtml(message.status || "available")}">${escapeHtml(message.status || "available")}</span>
+          </div>
+          <div class="preview">${escapeHtml(message.content).slice(0, 180)}</div>
+          <div class="meta">${fmtTime(message.created_at)} - deliveries ${message.delivery_count || 0}</div>
+        </div>
+      `).join("") : `<div class="empty">No messages.</div>`;
+      document.querySelectorAll(".message").forEach(el => {
+        el.addEventListener("click", () => selectMessage(Number(el.dataset.id)));
+      });
+    }
+
+    async function selectMessage(id) {
+      const data = await api(`/api/thread/${id}`);
+      state.selectedMessage = data.messages.find(message => message.id === id) || data.messages[0] || null;
+      const selectedLease = state.leases.get(id);
+      $("ackMessage").disabled = !selectedLease;
+      $("replyTo").value = id || "";
+      if (state.selectedMessage) $("sendTo").value = state.selectedMessage.sender;
+      $("thread").className = "thread";
+      $("thread").innerHTML = data.messages.length ? data.messages.map(message => `
+        <div class="thread-item">
+          <div class="message-title">
+            <span>#${message.id} ${escapeHtml(message.sender)} to ${escapeHtml(message.recipient)}</span>
+            <span class="badge">${fmtTime(message.created_at)}</span>
+          </div>
+          <div class="thread-body">${escapeHtml(message.content)}</div>
+        </div>
+      `).join("") : `<div class="empty">Thread not found.</div>`;
+      await loadMessages();
+    }
+
+    async function claimInbox() {
+      if (!state.selectedAgent) throw new Error("select an agent first");
+      const data = await api("/api/inbox/check", {
+        method: "POST",
+        body: JSON.stringify({ agent: state.selectedAgent, lease_seconds: 300 })
+      });
+      for (const message of data.messages) {
+        state.leases.set(message.id, message.lease_token);
+      }
+      setStatus(`Claimed ${data.count} message(s) for ${state.selectedAgent}`);
+      await loadMessages();
+      if (data.messages[0]) await selectMessage(data.messages[0].id);
+    }
+
+    async function ackSelected() {
+      if (!state.selectedMessage) return;
+      const token = state.leases.get(state.selectedMessage.id);
+      if (!token) return;
+      const data = await api(`/api/messages/${state.selectedMessage.id}/ack`, {
+        method: "POST",
+        body: JSON.stringify({ agent: state.selectedAgent, lease_token: token })
+      });
+      if (data.acked) {
+        state.leases.delete(state.selectedMessage.id);
+        $("ackMessage").disabled = true;
+      }
+      setStatus(data.acked ? `Acked #${data.message_id}` : `Ack failed for #${data.message_id}`, !data.acked);
+      await loadMessages();
+    }
+
+    async function registerAgent() {
+      await api("/api/agents", {
+        method: "POST",
+        body: JSON.stringify({
+          name: $("agentName").value,
+          description: $("agentDescription").value
+        })
+      });
+      $("agentName").value = "";
+      $("agentDescription").value = "";
+      await loadAgents();
+      await loadMessages();
+    }
+
+    async function sendMessage() {
+      if (!state.selectedAgent) throw new Error("select an agent first");
+      const replyTo = $("replyTo").value.trim();
+      const data = await api("/api/messages", {
+        method: "POST",
+        body: JSON.stringify({
+          sender: state.selectedAgent,
+          to: $("sendTo").value,
+          content: $("content").value,
+          reply_to: replyTo || null
+        })
+      });
+      $("content").value = "";
+      setStatus(`Delivered ${data.delivered} message(s)`);
+      await loadMessages();
+      if (data.message_ids[0]) await selectMessage(data.message_ids[0]);
+    }
+
+    async function run(action) {
+      try {
+        await action();
+      } catch (error) {
+        setStatus(error.message, true);
+      }
+    }
+
+    $("refreshAgents").addEventListener("click", () => run(loadAgents));
+    $("refreshMessages").addEventListener("click", () => run(loadMessages));
+    $("messageStatus").addEventListener("change", () => run(loadMessages));
+    $("registerAgent").addEventListener("click", () => run(registerAgent));
+    $("claimInbox").addEventListener("click", () => run(claimInbox));
+    $("ackMessage").addEventListener("click", () => run(ackSelected));
+    $("sendMessage").addEventListener("click", () => run(sendMessage));
+
+    run(async () => {
+      await loadAgents();
+      await loadMessages();
+      setStatus("Ready");
+    });
+  </script>
+</body>
+</html>
+"""

@@ -78,6 +78,25 @@ class StoreTests(unittest.TestCase):
         thread = store.get_thread(reply)
         self.assertEqual([root, reply, follow_up], [m["id"] for m in thread])
 
+    def test_list_messages_reports_ui_status_without_leasing(self):
+        store = self.make_store()
+        self.register_pair(store)
+        [message_id] = store.send_message("a", "b", "hello")
+
+        available = store.list_messages(agent="b", status="available")
+        self.assertEqual([message_id], [m["id"] for m in available])
+        self.assertEqual("available", available[0]["status"])
+
+        [leased] = store.fetch_unread("b", lease_seconds=60)
+        leased_messages = store.list_messages(agent="b", status="leased")
+        self.assertEqual([message_id], [m["id"] for m in leased_messages])
+        self.assertEqual("leased", leased_messages[0]["status"])
+
+        store.ack_message("b", message_id, leased["lease_token"])
+        read = store.list_messages(agent="b", status="read")
+        self.assertEqual([message_id], [m["id"] for m in read])
+        self.assertEqual("read", read[0]["status"])
+
 
 if __name__ == "__main__":
     unittest.main()

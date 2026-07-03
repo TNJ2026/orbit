@@ -31,6 +31,11 @@ uv run dev-loop serve                 # 默认 127.0.0.1:8848，db 在 ~/.dev_lo
 uv run dev-loop serve --port 9000 --db /tmp/test.db
 ```
 
+启动后有两个入口：
+
+- MCP endpoint：`http://127.0.0.1:8848/mcp`
+- 本地 Web UI：`http://127.0.0.1:8848/ui`
+
 ## 客户端接入
 
 ### Claude Code
@@ -144,6 +149,19 @@ asyncio.run(main())
 | `check_inbox(agent, wait_seconds=0, lease_seconds=300)` | 租约领取未读消息；`wait_seconds=30` 长轮询近实时；未 ack 的消息在租约过期后会重投递 |
 | `ack_message(agent, message_id, lease_token)` | 确认消息已处理，之后不会再次投递；`lease_token` 来自 `check_inbox` 返回的消息 |
 | `get_thread(message_id)` | 沿 `reply_to` 链取回整个对话线程 |
+
+## 本地 Web UI
+
+`/ui` 是一个最小可用的本地控制台，用来观察和操作同一个 SQLite mailbox：
+
+- 注册 / 刷新 agent
+- 查看最近消息，按 `available` / `leased` / `read` 过滤
+- 选择 agent 后 claim inbox，拿到租约和 ack token
+- 查看消息 thread
+- 发送新消息或按 `reply_to` 回复
+- 对已 claim 的消息执行 ack
+
+UI 只通过 `/api/*` JSON route 访问本地 store。直接查看消息列表不会领取消息；只有点击 Claim inbox 才会创建租约。
 
 ### 返回值格式
 
