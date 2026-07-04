@@ -8,6 +8,41 @@ from unittest import mock
 
 
 class PackagingTests(unittest.TestCase):
+    def test_init_project_bootstraps_everything_and_is_idempotent(self):
+        import json
+        from dev_loop.__main__ import init_project
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = init_project(root, port=9999)
+
+            self.assertTrue((root / "agents" / "hub.md").exists())
+            self.assertTrue((root / "agents" / "_protocol.md").exists())
+            self.assertTrue((root / ".dev_loop" / "workflow.json").exists())
+            self.assertTrue((root / ".dev_loop" / "team.json").exists())
+            mcp = json.loads((root / ".mcp.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                "http://127.0.0.1:9999/mcp", mcp["mcpServers"]["devloop"]["url"]
+            )
+            self.assertIn(".dev_loop/tasks/", (root / ".gitignore").read_text(encoding="utf-8"))
+            self.assertIn("多 agent 角色", (root / "CLAUDE.md").read_text(encoding="utf-8"))
+            self.assertTrue(first["created"])
+
+            # second run touches nothing
+            second = init_project(root, port=9999)
+            self.assertEqual([], second["created"])
+
+            # team covers the core roles
+            team = json.loads((root / ".dev_loop" / "team.json").read_text(encoding="utf-8"))
+            roles = {m["role_id"] for m in team["members"]}
+            self.assertEqual({"hub", "implementer", "reviewer"}, roles)
+
+    def test_role_templates_are_packaged(self):
+        templates = resources.files("dev_loop") / "role_templates"
+        names = {entry.name for entry in templates.iterdir()}
+        for required in ("_protocol.md", "_template.md", "hub.md", "implementer.md", "reviewer.md"):
+            self.assertIn(required, names)
+
     def test_ui_asset_is_present_and_loadable(self):
         html = (
             resources.files("dev_loop")
