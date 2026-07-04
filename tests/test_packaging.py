@@ -37,6 +37,30 @@ class PackagingTests(unittest.TestCase):
             roles = {m["role_id"] for m in team["members"]}
             self.assertEqual({"hub", "implementer", "reviewer"}, roles)
 
+    def test_agents_dir_falls_back_to_packaged_templates(self):
+        import dev_loop.server as server
+
+        with TemporaryDirectory() as project, TemporaryDirectory() as cwd:
+            with mock.patch.object(server.Path, "cwd", return_value=Path(cwd)):
+                resolved = server._agents_dir(project)
+            self.assertEqual(server._packaged_role_templates_dir(), resolved)
+            roles = server.list_agent_roles(resolved)
+            self.assertIn("hub", {role["id"] for role in roles})
+
+    def test_materialize_role_templates_fills_project_agents(self):
+        import dev_loop.server as server
+
+        with TemporaryDirectory() as tmp:
+            agents_dir = Path(tmp) / "agents"
+            server._materialize_role_templates(agents_dir)
+            names = {p.name for p in agents_dir.glob("*.md")}
+            self.assertIn("hub.md", names)
+            self.assertIn("_protocol.md", names)
+            # existing files are not overwritten
+            (agents_dir / "hub.md").write_text("custom", encoding="utf-8")
+            server._materialize_role_templates(agents_dir)
+            self.assertEqual("custom", (agents_dir / "hub.md").read_text(encoding="utf-8"))
+
     def test_role_templates_are_packaged(self):
         templates = resources.files("dev_loop") / "role_templates"
         names = {entry.name for entry in templates.iterdir()}

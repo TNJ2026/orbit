@@ -972,11 +972,12 @@
       }
       const data = await api("/api/workflow");
       state.workflow = { steps: data.steps || [], edges: data.edges || [], path: data.path || "", warnings: data.warnings || [] };
+      // Render first: overlap resolution needs real card heights from the
+      // DOM, and before the first render the fallback estimate undershoots.
+      renderWorkflow();
       const changed = resolveAllOverlaps();
       if (changed) {
         await saveWorkflow();
-      } else {
-        renderWorkflow();
       }
     }
 
@@ -1364,7 +1365,7 @@
       const rects = {};
       (state.workflow.steps || []).forEach(s => {
         const el = document.querySelector(`.workflow-node-wrap[data-id="${CSS.escape(s.id)}"]`);
-        rects[s.id] = { id: s.id, x: s.x, y: s.y, w: WF_NODE_W, h: el ? el.offsetHeight : 240 };
+        rects[s.id] = { id: s.id, x: s.x, y: s.y, w: WF_NODE_W, h: el ? el.offsetHeight : 400 };
       });
       return rects;
     }

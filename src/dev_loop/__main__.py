@@ -130,6 +130,19 @@ def init_project(
 LEGACY_DB_PATH = Path.home() / ".dev_loop" / "messages.db"
 
 
+def _serve_hint(host: str, port: int) -> str:
+    """A serve command that actually works in the caller's shell: plain
+    dev-loop when it is on PATH, otherwise route through the checkout's env."""
+    import shutil
+
+    if shutil.which("dev-loop"):
+        return f"dev-loop serve --host {host} --port {port}"
+    repo = Path(__file__).resolve().parents[2]
+    if (repo / "pyproject.toml").exists():
+        return f"uv run --project {repo} dev-loop serve --host {host} --port {port}"
+    return f"python -m dev_loop serve --host {host} --port {port}"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="dev-loop", description="Local MCP mailbox for LLM agents")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -162,7 +175,7 @@ def main() -> None:
             print(f"kept     {path}")
         print(
             f"\nproject ready: {project_root}\n"
-            f"next: dev-loop serve --host {args.host} --port {args.port}\n"
+            f"next: {_serve_hint(args.host, args.port)}\n"
             f"then open http://{args.host}:{args.port}/ui to review the team & workflow",
             flush=True,
         )

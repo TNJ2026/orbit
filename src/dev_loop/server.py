@@ -199,8 +199,10 @@ def default_workflow_steps() -> list[dict[str, Any]]:
     specs = [
         ("intake", "Intake", "hub", "created", True, 40, _DEFAULT_STEP_MID_Y),
         ("product_design", "Product Design", "product_designer", "assigned", True, 360, _DEFAULT_STEP_MID_Y),
+        # Parallel branch cards stack vertically at x=700; keep enough gap
+        # for a full card (~400px tall with the name/timeout fields).
         ("ui_design", "UI Design", "ui_designer", "assigned", False, 700, 40),
-        ("architecture", "Architecture", "architect", "assigned", True, 700, 300),
+        ("architecture", "Architecture", "architect", "assigned", True, 700, 500),
         ("implement", "Implement", "implementer", "in_progress", True, 1060, _DEFAULT_STEP_MID_Y),
         ("test", "Test", "tester", "testing", False, 1400, _DEFAULT_STEP_MID_Y),
         ("review", "Review", "reviewer", "replied", True, 1740, _DEFAULT_STEP_MID_Y),
@@ -1394,13 +1396,36 @@ def detect_hermes_profiles(profile_root: Path | None = None) -> list[dict[str, s
     ]
 
 
+def _packaged_role_templates_dir() -> Path:
+    return Path(str(resources.files("dev_loop") / "role_templates"))
+
+
 def _agents_dir(project_root: str | None) -> Path:
-    # Prefer the project's own roles; fall back to the server's bundled
-    # agents/ so projects without one still get the default role set.
+    # Prefer the project's own roles, then the server cwd's agents/, and as
+    # a last resort the templates bundled in the package — so a fresh project
+    # that never ran `dev-loop init` still gets the default role set.
     root = _project_root(project_root) / "agents"
     if root.is_dir():
         return root
-    return Path.cwd() / "agents"
+    cwd_agents = Path.cwd() / "agents"
+    if cwd_agents.is_dir():
+        return cwd_agents
+    return _packaged_role_templates_dir()
+
+
+def _materialize_role_templates(agents_dir: Path) -> None:
+    """Copy the bundled role set into a project's agents/ dir. Used before
+    the first role edit so overriding one role doesn't hide the others."""
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    templates = _packaged_role_templates_dir()
+    if not templates.is_dir():
+        return
+    for entry in templates.iterdir():
+        if entry.suffix != ".md":
+            continue
+        dest = agents_dir / entry.name
+        if not dest.exists():
+            dest.write_text(entry.read_text(encoding="utf-8"), encoding="utf-8")
 
 
 def list_agent_roles(agents_dir: Path | None = None) -> list[dict[str, str]]:
@@ -1791,7 +1816,14 @@ def create_server(
             content = _validate_role_content(data.get("content"))
         except InvalidInputError as exc:
             return _json_error(str(exc), request=request)
-        agents_dir = _agents_dir(current_project.get("project_root"))
+        project_root = current_project.get("project_root")
+        agents_dir = _agents_dir(project_root)
+        if agents_dir == _packaged_role_templates_dir():
+            # Never write into the installed package: materialize the full
+            # bundled role set into the project and edit that copy, so
+            # overriding one role doesn't hide the rest.
+            agents_dir = _project_root(project_root) / "agents"
+            await _to_thread(_materialize_role_templates, agents_dir)
         if not agents_dir.is_dir():
             return _json_error("Agents directory not found", request=request)
         file_path = (agents_dir / f"{role_id}.md").resolve()
