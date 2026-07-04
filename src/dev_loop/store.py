@@ -68,6 +68,17 @@ CREATE TABLE IF NOT EXISTS tasks (
     created_at        TEXT NOT NULL,
     updated_at        TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS task_transitions (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id    INTEGER NOT NULL,
+    from_step  TEXT NOT NULL DEFAULT '',
+    to_step    TEXT NOT NULL DEFAULT '',
+    actor      TEXT NOT NULL DEFAULT '',
+    outcome    TEXT NOT NULL DEFAULT 'done',
+    note       TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(task_id) REFERENCES tasks(id)
+);
 CREATE TABLE IF NOT EXISTS task_runs (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     task_id     INTEGER NOT NULL,
@@ -96,6 +107,8 @@ CREATE INDEX IF NOT EXISTS idx_tasks_assignee
     ON tasks (assignee);
 CREATE INDEX IF NOT EXISTS idx_task_runs_task
     ON task_runs (task_id, attempt);
+CREATE INDEX IF NOT EXISTS idx_task_transitions_task
+    ON task_transitions (task_id, id);
 """
 
 
@@ -247,6 +260,7 @@ class Store:
             "risk": "TEXT NOT NULL DEFAULT 'medium'",
             "required_capabilities": "TEXT NOT NULL DEFAULT ''",
             "exclusive_workspace": "INTEGER NOT NULL DEFAULT 1",
+            "workflow_step": "TEXT NOT NULL DEFAULT ''",
         }
         for column, definition in task_defaults.items():
             if column not in task_columns:
@@ -505,7 +519,8 @@ class Store:
                            assignee, assignee AS recipient, status AS task_status,
                            created_at, updated_at,
                            role_required, importance, size, risk,
-                           required_capabilities, exclusive_workspace
+                           required_capabilities, exclusive_workspace,
+                           workflow_step
                     FROM tasks
                     {where}
                     ORDER BY id DESC
@@ -520,7 +535,8 @@ class Store:
                 """SELECT id, source_message_id, title, content, sender,
                           assignee, assignee AS recipient, status AS task_status,
                           created_at, updated_at, role_required, importance, size,
-                          risk, required_capabilities, exclusive_workspace
+                          risk, required_capabilities, exclusive_workspace,
+                          workflow_step
                    FROM tasks
                    WHERE id = ?""",
                 (task_id,),
@@ -589,6 +605,86 @@ class Store:
                 )
             self._conn.commit()
         return cur.rowcount > 0
+
+    def set_task_workflow_state(
+        self,
+        task_id: int,
+        workflow_step: str | None = None,
+        task_status: str | None = None,
+        assignee: str | None = None,
+    ) -> bool:
+        updates: list[str] = []
+        params: list[Any] = []
+        if workflow_step is not None:
+            updates.append("workflow_step = ?")
+            params.append(workflow_step)
+        if task_status is not None:
+            updates.append("status = ?")
+            params.append(_validate_task_status(task_status))
+        if assignee is not None:
+            updates.append("assignee = ?")
+            params.append(assignee)
+        if not updates:
+            return False
+        updates.append("updated_at = ?")
+        params.append(_now())
+        params.append(task_id)
+        with self._lock:
+            cur = self._conn.execute(
+                f"UPDATE tasks SET {', '.join(updates)} WHERE id = ?", params
+            )
+            row = self._conn.execute(
+                "SELECT source_message_id, status FROM tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+            if task_status is not None and row and row["source_message_id"] is not None:
+                self._conn.execute(
+                    "UPDATE messages SET task_status = ? WHERE id = ? AND kind = 'task'",
+                    (task_status, row["source_message_id"]),
+                )
+            self._conn.commit()
+        return cur.rowcount > 0
+
+    def record_task_transition(
+        self,
+        task_id: int,
+        from_step: str,
+        to_step: str,
+        actor: str,
+        outcome: str,
+        note: str = "",
+    ) -> dict[str, Any]:
+        now = _now()
+        with self._lock:
+            cur = self._conn.execute(
+                """INSERT INTO task_transitions (
+                       task_id, from_step, to_step, actor, outcome, note, created_at
+                   )
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (task_id, from_step, to_step, actor, outcome, note[:2000], now),
+            )
+            self._conn.commit()
+        return {
+            "id": cur.lastrowid,
+            "task_id": task_id,
+            "from_step": from_step,
+            "to_step": to_step,
+            "actor": actor,
+            "outcome": outcome,
+            "note": note[:2000],
+            "created_at": now,
+        }
+
+    def list_task_transitions(self, task_id: int) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT id, task_id, from_step, to_step, actor, outcome, note,
+                          created_at
+                   FROM task_transitions
+                   WHERE task_id = ?
+                   ORDER BY id""",
+                (task_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def active_task_counts(self) -> dict[str, int]:
         with self._lock:

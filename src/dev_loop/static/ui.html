@@ -373,6 +373,20 @@
     button.danger { color: var(--danger); }
     button:disabled { opacity: .55; cursor: default; }
     button:active:not(:disabled) { transform: translateY(1px); }
+    .wf-active-badge {
+      background: var(--accent);
+      color: var(--accent-ink);
+      border-color: var(--accent);
+    }
+    .wf-step-badge {
+      background: #eef5f1;
+    }
+    .wf-transitions {
+      max-height: 220px;
+      overflow-y: auto;
+      display: grid;
+      gap: 2px;
+    }
     .refresh-btn::before {
       content: "↻";
       display: inline-block;
@@ -820,6 +834,7 @@
       selectedRunId: null,
       runFiles: {},
       assignmentCandidates: null,
+      taskWorkflow: null,
       taskDetailsCollapsed: localStorage.getItem("devloop-task-details-collapsed") !== "0"
     };
 
@@ -1417,6 +1432,16 @@
       const steps = state.workflow.steps || [];
       wfLayoutCache = wfComputeLayout();
       const layout = wfLayoutCache;
+      // Tasks currently sitting on each step (workflow_step is comma-joined
+      // when branches run in parallel).
+      const stepTaskCounts = {};
+      (state.tasks || []).forEach(task => {
+        if (task.task_status === "closed") return;
+        String(task.workflow_step || "").split(",").forEach(part => {
+          const id = part.trim();
+          if (id) stepTaskCounts[id] = (stepTaskCounts[id] || 0) + 1;
+        });
+      });
       $("workflowSteps").innerHTML = steps.length ? `
         <div class="workflow-canvas" id="wfCanvas">
           <div class="workflow-graph" id="wfGraph">
@@ -1429,7 +1454,10 @@
                     ${wfPortsHtml(escapeHtml(step.id), "out", layout.outCount[step.id] || 1)}
                     <div class="workflow-node-head" data-drag-id="${escapeHtml(step.id)}" title="Drag to move">
                       <strong><span class="grip">⠿</span> ${escapeHtml(step.name || "Step")}</strong>
-                      <span class="badge">#${index + 1}</span>
+                      <span class="row" style="gap: 4px;">
+                        ${stepTaskCounts[step.id] ? `<span class="badge wf-active-badge" title="tasks currently at this step">▶ ${stepTaskCounts[step.id]}</span>` : ""}
+                        <span class="badge">#${index + 1}</span>
+                      </span>
                     </div>
                     <div class="workflow-node-body">
                       <label>
@@ -1881,6 +1909,7 @@
                   <div class="kanban-card" onclick="showTaskDetails(${task.id})">
                     <div class="kanban-card-title">${escapeHtml(task.title || "#" + task.id + " Task")}</div>
                     <div class="kanban-card-content">${escapeHtml(task.content)}</div>
+                    ${task.workflow_step ? `<div class="meta" style="margin-bottom: 4px;"><span class="badge wf-step-badge">⚙ ${escapeHtml(task.workflow_step)}</span></div>` : ""}
                     <div class="kanban-card-meta">
                       <span>${escapeHtml(task.sender)} ➜ ${escapeHtml(task.recipient)}</span>
                       <select onclick="event.stopPropagation()" onchange="moveTask(${task.id}, this.value)" style="font-size: 11px; padding: 2px 4px; width: auto; min-height: 20px; height: 22px; line-height: 1;">
@@ -1985,10 +2014,12 @@
       if (!task) return;
       state.selectedTaskId = taskId;
       state.assignmentCandidates = null;
+      state.taskWorkflow = null;
       state.taskDetailsCollapsed = false;
       applyTaskDetailsCollapsed();
       renderTaskDetails(task);
       run(async () => {
+        await loadTaskWorkflow(taskId);
         await loadTaskRuns(taskId);
       });
     }
@@ -2020,6 +2051,12 @@
         <div class="task-detail-body">${escapeHtml(task.content)}</div>
         <div class="task-runs">
           <div class="row" style="justify-content: space-between;">
+            <strong>Workflow</strong>
+          </div>
+          ${renderTaskWorkflow(task)}
+        </div>
+        <div class="task-runs">
+          <div class="row" style="justify-content: space-between;">
             <strong>Assignment</strong>
             <button type="button" onclick="recommendAgent(${task.id})">Recommend Agent</button>
           </div>
@@ -2033,6 +2070,90 @@
           ${renderTaskRuns()}
         </div>
       `;
+    }
+
+    function renderTaskWorkflow(task) {
+      const wf = state.taskWorkflow;
+      if (!wf || wf.task_id !== task.id) {
+        return `<div class="empty" style="padding: 0;">Loading workflow state…</div>`;
+      }
+      const active = wf.active_steps || [];
+      const transitions = wf.transitions || [];
+      if (!transitions.length) {
+        if (task.task_status === "closed") {
+          return `<div class="meta">Task closed; not routed through the workflow.</div>`;
+        }
+        return `<button class="primary" type="button" onclick="startTaskWorkflow(${task.id})">▶ Start Workflow</button>`;
+      }
+      let html = "";
+      if (active.length) {
+        html += `
+          <div class="meta">active steps: ${active.map(escapeHtml).join(", ")}</div>
+          <div class="row" style="flex-wrap: wrap; gap: 6px;">
+            <select id="wfStepSel" style="width: auto;">${active.map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join("")}</select>
+            <select id="wfOutcomeSel" style="width: auto;">
+              <option value="done">done</option>
+              <option value="rework">rework</option>
+              <option value="blocked">blocked</option>
+            </select>
+            <input id="wfResultInput" placeholder="result / reason" style="flex: 1; min-width: 140px;">
+            <button class="primary" type="button" onclick="completeTaskStep(${task.id})">Submit</button>
+          </div>`;
+      } else if (task.task_status === "closed") {
+        html += `<div class="meta">Workflow finished — task closed.</div>`;
+      } else if (task.task_status === "blocked") {
+        html += `<div class="meta" style="color: var(--danger);">Blocked — no step is running; check the transition log.</div>`;
+      }
+      html += `<div class="wf-transitions">${transitions.slice(-15).reverse().map(t => `
+        <div class="meta">
+          ${t.created_at ? fmtTime(t.created_at) + " · " : ""}${escapeHtml(t.outcome)}:
+          ${t.from_step ? escapeHtml(t.from_step) : "∅"}${t.to_step ? " → " + escapeHtml(t.to_step) : ""}
+          (${escapeHtml(t.actor)})${t.note ? " — " + escapeHtml(t.note) : ""}
+        </div>
+      `).join("")}</div>`;
+      return html;
+    }
+
+    async function loadTaskWorkflow(taskId) {
+      try {
+        state.taskWorkflow = await api(`/api/tasks/${taskId}/workflow`);
+      } catch (error) {
+        state.taskWorkflow = null;
+      }
+    }
+
+    async function startTaskWorkflow(taskId) {
+      await run(async () => {
+        const data = await api(`/api/tasks/${taskId}/workflow/start`, {
+          method: "POST",
+          body: JSON.stringify({ agent: "ui" })
+        });
+        await loadTasks();
+        await loadTaskWorkflow(taskId);
+        renderTaskDetails(state.tasks.find(t => t.id === taskId) || null);
+        const to = (data.dispatched || []).map(d => `${d.step} → ${d.assignee}`).join(", ");
+        setStatus(to ? `Workflow started: ${to}` : "Workflow started");
+      });
+    }
+
+    async function completeTaskStep(taskId) {
+      const step = $("wfStepSel").value;
+      const outcome = $("wfOutcomeSel").value;
+      const result = $("wfResultInput").value.trim();
+      await run(async () => {
+        const data = await api(`/api/tasks/${taskId}/workflow/complete`, {
+          method: "POST",
+          body: JSON.stringify({ agent: "ui", step, outcome, result })
+        });
+        await loadTasks();
+        await loadTaskWorkflow(taskId);
+        renderTaskDetails(state.tasks.find(t => t.id === taskId) || null);
+        if (data.closed) setStatus(`Task #${taskId} closed`);
+        else {
+          const to = (data.dispatched || []).map(d => `${d.step} → ${d.assignee}`).join(", ");
+          setStatus(to ? `Dispatched: ${to}` : `Step ${step}: ${outcome}`);
+        }
+      });
     }
 
     function renderAssignmentCandidates() {
@@ -2129,7 +2250,7 @@
     }
     wireRefresh("refreshTools", async () => { await loadProjects(); await loadStatus(); await loadTools(); });
     wireRefresh("refreshTeam", async () => { await loadRoles(); await loadTools(); await loadTeam(); });
-    wireRefresh("refreshWorkflow", async () => { await loadRoles(); await loadWorkflow(); });
+    wireRefresh("refreshWorkflow", async () => { await loadRoles(); await loadTasks(); await loadWorkflow(); });
     wireRefresh("refreshRoles", loadRoles);
     wireRefresh("refreshTasks", loadTasks);
     $("addTeamMember").addEventListener("click", addTeamMember);

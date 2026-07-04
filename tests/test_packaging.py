@@ -76,6 +76,10 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("selectedProjectId", html)
         self.assertIn("async function refreshWorkspace()", html)
         self.assertIn("function wireRefresh(", html)
+        self.assertIn("function renderTaskWorkflow(", html)
+        self.assertIn("function startTaskWorkflow(", html)
+        self.assertIn("function completeTaskStep(", html)
+        self.assertIn("/workflow/complete", html)
         for button_id in (
             "refreshTools",
             "refreshTeam",

@@ -657,6 +657,351 @@ def rank_assignment_candidates(
     }
 
 
+# --- Workflow constraint engine ---------------------------------------------
+# The workflow graph drives task routing. Completing a step advances the task
+# along forward edges (layer increases); "rework" follows loop-back edges;
+# merge steps wait until every *required* forward predecessor has completed;
+# each dispatched step is assigned to the best-ranked team member for its
+# role. All movements are recorded in task_transitions.
+
+WORKFLOW_ENGINE_AGENT = "workflow"
+WORKFLOW_OUTCOMES = {"done", "rework", "blocked"}
+
+
+def _workflow_graph(cfg: dict[str, Any]) -> set[tuple[str, str]]:
+    """Classify loop-back edges via DFS (an edge into a node still on the
+    DFS stack closes a cycle). Every other edge is forward flow. Layer
+    numbers are not used: cycles make longest-path layering ambiguous, so
+    forward/backward is decided purely by this classification."""
+    ids = [step["id"] for step in cfg["steps"]]
+    adj: dict[str, list[str]] = {}
+    for edge in cfg["edges"]:
+        adj.setdefault(edge["from"], []).append(edge["to"])
+    color: dict[str, int] = {}  # missing=white, 1=on stack, 2=done
+    back: set[tuple[str, str]] = set()
+    for root in ids:
+        if color.get(root):
+            continue
+        color[root] = 1
+        stack = [(root, iter(adj.get(root, [])))]
+        while stack:
+            node, children = stack[-1]
+            descended = False
+            for child in children:
+                if color.get(child, 0) == 0:
+                    color[child] = 1
+                    stack.append((child, iter(adj.get(child, []))))
+                    descended = True
+                    break
+                if color[child] == 1:
+                    back.add((node, child))
+            if not descended:
+                color[node] = 2
+                stack.pop()
+    return back
+
+
+def _forward_out(
+    cfg: dict[str, Any], back: set[tuple[str, str]], step_id: str
+) -> list[str]:
+    return [
+        e["to"] for e in cfg["edges"]
+        if e["from"] == step_id and (e["from"], e["to"]) not in back
+    ]
+
+
+def _team_role_of(members: list[dict[str, Any]], agent: str) -> str | None:
+    for member in members:
+        if member["agent_name"] == agent and member.get("enabled", True):
+            return member["role_id"]
+    return None
+
+
+def _active_steps(transitions: list[dict[str, Any]]) -> list[str]:
+    dispatched: dict[str, int] = {}
+    finished: dict[str, int] = {}
+    for t in transitions:
+        if t["outcome"] == "dispatched":
+            dispatched[t["to_step"]] = dispatched.get(t["to_step"], 0) + 1
+        elif t["outcome"] in ("done", "rework") and t["from_step"]:
+            finished[t["from_step"]] = finished.get(t["from_step"], 0) + 1
+    return [s for s, n in dispatched.items() if n > finished.get(s, 0)]
+
+
+def _join_ready(
+    target: str,
+    cfg: dict[str, Any],
+    back: set[tuple[str, str]],
+    steps: dict[str, dict[str, Any]],
+    transitions: list[dict[str, Any]],
+) -> bool:
+    required_preds = [
+        e["from"] for e in cfg["edges"]
+        if e["to"] == target
+        and (e["from"], e["to"]) not in back
+        and steps[e["from"]]["required"]
+    ]
+    arrived = {
+        t["from_step"] for t in transitions
+        if t["to_step"] == target and t["outcome"] in ("done", "skipped")
+    }
+    return all(pred in arrived for pred in required_preds)
+
+
+def _pick_assignee(
+    store: Store, task: dict[str, Any], step: dict[str, Any],
+    members: list[dict[str, Any]],
+) -> str | None:
+    ranked = rank_assignment_candidates(
+        {**task, "role_required": step["role_id"]},
+        members,
+        store.active_task_counts(),
+        role_id=step["role_id"],
+    )
+    selected = ranked.get("selected")
+    return selected["agent_name"] if selected else None
+
+
+def _ensure_engine_agent(store: Store) -> None:
+    if not store.agent_exists(WORKFLOW_ENGINE_AGENT):
+        store.register_agent(
+            WORKFLOW_ENGINE_AGENT,
+            "workflow engine: routes tasks along the configured workflow",
+        )
+
+
+def _notify_hub(store: Store, members: list[dict[str, Any]], text: str) -> str:
+    hub_agent = next(
+        (m["agent_name"] for m in members
+         if m["role_id"] == "hub" and m.get("enabled", True)),
+        "hub",
+    )
+    try:
+        if not store.agent_exists(hub_agent):
+            return f"hub agent {hub_agent!r} not registered; notice dropped"
+        _ensure_engine_agent(store)
+        store.send_message(WORKFLOW_ENGINE_AGENT, hub_agent, text)
+        return f"notified {hub_agent}"
+    except (UnknownAgentError, InvalidInputError) as exc:
+        return f"hub notification failed: {exc}"
+
+
+def _dispatch_step(
+    store: Store,
+    task: dict[str, Any],
+    step: dict[str, Any],
+    assignee: str,
+    upstream_result: str,
+) -> None:
+    task_id = task["id"]
+    _ensure_engine_agent(store)
+    if not store.agent_exists(assignee):
+        # Pre-register so the dispatch waits in their inbox until they poll.
+        store.register_agent(assignee, f"team member (role: {step['role_id']})")
+    content = (
+        f"[workflow step: {step['id']}] Task #{task_id}: {task.get('title') or 'untitled'}\n\n"
+        f"{task.get('content', '')}\n"
+        + (f"\nUpstream result:\n{upstream_result}\n" if upstream_result else "")
+        + f"\nYou are acting as role '{step['role_id']}' for step '{step['name']}'.\n"
+        f"When finished call complete_step(agent=\"{assignee}\", task_id={task_id}, "
+        f"step=\"{step['id']}\", outcome=\"done\"|\"rework\"|\"blocked\", result=\"...\")."
+    )
+    store.send_message(
+        WORKFLOW_ENGINE_AGENT, assignee, content,
+        reply_to=task.get("source_message_id"),
+    )
+    store.record_task_transition(
+        task_id, "", step["id"], WORKFLOW_ENGINE_AGENT, "dispatched", assignee
+    )
+    store.set_task_workflow_state(
+        task_id, task_status=step["task_status"], assignee=assignee
+    )
+
+
+def _dispatch_targets(
+    store: Store,
+    project_root: str | None,
+    task: dict[str, Any],
+    targets: list[str],
+    cfg: dict[str, Any],
+    back: set[tuple[str, str]],
+    members: list[dict[str, Any]],
+    upstream_result: str,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    steps = {s["id"]: s for s in cfg["steps"]}
+    task_id = task["id"]
+    dispatched: list[dict[str, Any]] = []
+    notices: list[str] = []
+    queue = list(targets)
+    while queue:
+        target = queue.pop(0)
+        transitions = store.list_task_transitions(task_id)
+        if target in _active_steps(transitions):
+            continue  # already running this step
+        if not _join_ready(target, cfg, back, steps, transitions):
+            notices.append(f"step {target} is waiting for other required branches")
+            continue
+        step = steps[target]
+        assignee = _pick_assignee(store, task, step, members)
+        if assignee is None:
+            if step["required"]:
+                store.record_task_transition(
+                    task_id, "", target, WORKFLOW_ENGINE_AGENT, "blocked",
+                    f"no available team member for role {step['role_id']}",
+                )
+                store.set_task_workflow_state(task_id, task_status="blocked")
+                notices.append(_notify_hub(
+                    store, members,
+                    f"Task #{task_id} blocked: required step '{target}' has no "
+                    f"available team member for role {step['role_id']}.",
+                ))
+                continue
+            # Optional step with nobody to run it: pass through.
+            for nxt in _forward_out(cfg, back, target):
+                store.record_task_transition(
+                    task_id, target, nxt, WORKFLOW_ENGINE_AGENT, "skipped",
+                    f"no team member for optional step {target}",
+                )
+                queue.append(nxt)
+            notices.append(f"optional step {target} skipped (no team member)")
+            continue
+        _dispatch_step(store, task, step, assignee, upstream_result)
+        dispatched.append({"step": target, "assignee": assignee})
+    transitions = store.list_task_transitions(task_id)
+    active = _active_steps(transitions)
+    if active:
+        store.set_task_workflow_state(task_id, workflow_step=",".join(active))
+    return dispatched, notices
+
+
+def start_workflow_task(
+    store: Store, project_root: str | None, agent: str, task_id: int
+) -> dict[str, Any]:
+    task = store.get_task(task_id)
+    if not task:
+        raise InvalidInputError(f"unknown task: {task_id}")
+    transitions = store.list_task_transitions(task_id)
+    if transitions:
+        raise InvalidInputError(
+            f"task {task_id} is already in the workflow "
+            f"(active steps: {', '.join(_active_steps(transitions)) or 'none'})"
+        )
+    cfg = read_workflow_config(project_root)
+    back = _workflow_graph(cfg)
+    forward_in = {
+        e["to"] for e in cfg["edges"] if (e["from"], e["to"]) not in back
+    }
+    entries = [s["id"] for s in cfg["steps"] if s["id"] not in forward_in]
+    members = read_team_config(project_root)["members"]
+    dispatched, notices = _dispatch_targets(
+        store, project_root, task, entries, cfg, back, members, ""
+    )
+    return {
+        "task_id": task_id,
+        "started": True,
+        "dispatched": dispatched,
+        "notices": notices,
+    }
+
+
+def advance_workflow_task(
+    store: Store,
+    project_root: str | None,
+    agent: str,
+    task_id: int,
+    step: str,
+    outcome: str = "done",
+    result: str = "",
+) -> dict[str, Any]:
+    outcome = (outcome or "done").strip()
+    if outcome not in WORKFLOW_OUTCOMES:
+        raise InvalidInputError(
+            f"invalid outcome: {outcome!r} (expected one of {sorted(WORKFLOW_OUTCOMES)})"
+        )
+    task = store.get_task(task_id)
+    if not task:
+        raise InvalidInputError(f"unknown task: {task_id}")
+    cfg = read_workflow_config(project_root)
+    steps = {s["id"]: s for s in cfg["steps"]}
+    if step not in steps:
+        raise InvalidInputError(f"unknown workflow step: {step}")
+    members = read_team_config(project_root)["members"]
+    # Constraint: only an agent whose team role matches the step's role may
+    # complete it (hub can complete anything). Agents outside the team are
+    # allowed through so small setups without a team config still work.
+    actor_role = _team_role_of(members, agent)
+    if actor_role is not None and actor_role not in (steps[step]["role_id"], "hub"):
+        raise InvalidInputError(
+            f"agent {agent} has role {actor_role}, but step {step} "
+            f"requires role {steps[step]['role_id']}"
+        )
+    back = _workflow_graph(cfg)
+    forward = [
+        e["to"] for e in cfg["edges"]
+        if e["from"] == step and (e["from"], e["to"]) not in back
+    ]
+    backward = [
+        e["to"] for e in cfg["edges"]
+        if e["from"] == step and (e["from"], e["to"]) in back
+    ]
+
+    if outcome == "blocked":
+        store.record_task_transition(task_id, step, step, agent, "blocked", result)
+        store.set_task_workflow_state(task_id, task_status="blocked")
+        notice = _notify_hub(
+            store, members,
+            f"Task #{task_id} blocked at step '{step}' by {agent}: {result or 'no details'}",
+        )
+        return {
+            "task_id": task_id, "step": step, "outcome": "blocked",
+            "dispatched": [], "notices": [notice],
+        }
+
+    if outcome == "rework":
+        targets = backward
+        if not targets:
+            raise InvalidInputError(f"step {step} has no rework (loop-back) path")
+    else:
+        targets = forward
+
+    for target in targets:
+        store.record_task_transition(task_id, step, target, agent, outcome, result)
+
+    if outcome == "done" and not targets:
+        # Terminal step completed: the task leaves the workflow.
+        store.record_task_transition(task_id, step, "", agent, "done", result)
+        store.set_task_workflow_state(
+            task_id, workflow_step="", task_status="closed"
+        )
+        return {
+            "task_id": task_id, "step": step, "outcome": "done",
+            "closed": True, "dispatched": [], "notices": [],
+        }
+
+    dispatched, notices = _dispatch_targets(
+        store, project_root, task, targets, cfg, back, members, result
+    )
+    return {
+        "task_id": task_id, "step": step, "outcome": outcome,
+        "dispatched": dispatched, "notices": notices,
+    }
+
+
+def workflow_task_state(
+    store: Store, project_root: str | None, task_id: int
+) -> dict[str, Any]:
+    task = store.get_task(task_id)
+    if not task:
+        raise InvalidInputError(f"unknown task: {task_id}")
+    transitions = store.list_task_transitions(task_id)
+    return {
+        "task_id": task_id,
+        "status": task.get("task_status") or task.get("status"),
+        "active_steps": _active_steps(transitions),
+        "transitions": transitions,
+    }
+
+
 def _task_runs_root(project_root: str | None) -> Path:
     return _project_root(project_root) / ".dev_loop" / "tasks"
 
@@ -976,6 +1321,79 @@ def create_server(
         return {"acked": acked, "message_id": message_id}
 
     @mcp.tool()
+    async def start_workflow_task(agent: str, task_id: int) -> dict:
+        """Enter an existing task (created via send_message kind="task") into
+        the configured workflow. The engine dispatches the entry step(s) to the
+        best-ranked team member for each step's role; from then on the task
+        moves only through complete_step. Fails if the task is already in the
+        workflow."""
+        await _to_thread(store.touch_agent, agent)
+        try:
+            return await _to_thread(
+                _engine_start, agent, task_id
+            )
+        except (InvalidInputError, UnknownAgentError) as exc:
+            return {"task_id": task_id, "started": False, "error": str(exc)}
+
+    @mcp.tool()
+    async def complete_step(
+        agent: str,
+        task_id: int,
+        step: str,
+        outcome: str = "done",
+        result: str = "",
+    ) -> dict:
+        """Report the outcome of a workflow step you were dispatched.
+
+        - agent: your registered agent name (your team role must match the
+          step's role; hub may complete any step).
+        - task_id / step: from the dispatch message you received.
+        - outcome: "done" advances along forward connections (merge steps wait
+          for all required branches); "rework" sends the task back along the
+          loop-back connection (e.g. review -> implement); "blocked" pauses the
+          task and notifies the hub — use it when you cannot decide and need
+          confirmation, putting your question in result.
+        - result: summary of what you produced (file paths, conclusions). It is
+          forwarded to the next step's assignee.
+
+        Completing a terminal step closes the task."""
+        await _to_thread(store.touch_agent, agent)
+        try:
+            return await _to_thread(
+                _engine_advance, agent, task_id, step, outcome, result
+            )
+        except (InvalidInputError, UnknownAgentError) as exc:
+            return {"task_id": task_id, "step": step, "error": str(exc)}
+
+    @mcp.tool()
+    async def get_workflow_task_state(task_id: int) -> dict:
+        """Show where a task currently is in the workflow: its status, the
+        steps being worked on right now, and the full transition history
+        (dispatch/done/rework/skipped/blocked records)."""
+        try:
+            return await _to_thread(_engine_state, task_id)
+        except InvalidInputError as exc:
+            return {"task_id": task_id, "error": str(exc)}
+
+    def _engine_start(agent: str, task_id: int) -> dict:
+        return start_workflow_task(
+            store, current_project.get("project_root"), agent, task_id
+        )
+
+    def _engine_advance(
+        agent: str, task_id: int, step: str, outcome: str, result: str
+    ) -> dict:
+        return advance_workflow_task(
+            store, current_project.get("project_root"),
+            agent, task_id, step, outcome, result,
+        )
+
+    def _engine_state(task_id: int) -> dict:
+        return workflow_task_state(
+            store, current_project.get("project_root"), task_id
+        )
+
+    @mcp.tool()
     async def get_thread(message_id: int) -> list[dict]:
         """Return the full conversation thread containing the given message id:
         the reply_to chain back to the root plus all replies, ordered oldest
@@ -1284,6 +1702,49 @@ def create_server(
             request.query_params.get("role") or None,
         )
         return _json(request, {"task": task, **ranked})
+
+    @mcp.custom_route("/api/tasks/{task_id:int}/workflow", methods=["GET"])
+    async def api_task_workflow_state(request: Request) -> JSONResponse:
+        if forbidden := _forbid_non_local(request):
+            return forbidden
+        task_id = int(request.path_params["task_id"])
+        try:
+            state = await _to_thread(_engine_state, task_id)
+        except InvalidInputError as exc:
+            return _json_error(str(exc), request=request)
+        return _json(request, state)
+
+    @mcp.custom_route("/api/tasks/{task_id:int}/workflow/start", methods=["POST"])
+    async def api_task_workflow_start(request: Request) -> JSONResponse:
+        if forbidden := _forbid_non_local(request):
+            return forbidden
+        task_id = int(request.path_params["task_id"])
+        data = await _read_json(request)
+        agent = str(data.get("agent") or "hub")
+        try:
+            result = await _to_thread(_engine_start, agent, task_id)
+        except (InvalidInputError, UnknownAgentError) as exc:
+            return _json_error(str(exc), request=request)
+        return _json(request, result)
+
+    @mcp.custom_route("/api/tasks/{task_id:int}/workflow/complete", methods=["POST"])
+    async def api_task_workflow_complete(request: Request) -> JSONResponse:
+        if forbidden := _forbid_non_local(request):
+            return forbidden
+        task_id = int(request.path_params["task_id"])
+        data = await _read_json(request)
+        try:
+            result = await _to_thread(
+                _engine_advance,
+                str(data.get("agent") or ""),
+                task_id,
+                str(data.get("step") or ""),
+                str(data.get("outcome") or "done"),
+                str(data.get("result") or ""),
+            )
+        except (InvalidInputError, UnknownAgentError) as exc:
+            return _json_error(str(exc), request=request)
+        return _json(request, result)
 
     @mcp.custom_route("/api/tasks/{task_id:int}/runs", methods=["GET"])
     async def api_list_task_runs(request: Request) -> JSONResponse:
