@@ -1478,6 +1478,12 @@
                           ${statusOptionsHtml(step.task_status)}
                         </select>
                       </label>
+                      <label>
+                        <div class="meta">timeout min (0 = off)</div>
+                        <input type="number" min="0" step="5" value="${step.timeout_minutes || 0}"
+                          title="Reassign or alert hub when the step sits with one assignee longer than this"
+                          onchange="updateWorkflowStep('${escapeHtml(step.id)}', 'timeout_minutes', this.value)">
+                      </label>
                       <label class="workflow-required" ${step.required_locked ? 'title="Core step (hub/implementer/reviewer role) — always required"' : ""}>
                         <input type="checkbox" ${step.required ? "checked" : ""} ${step.required_locked ? "disabled" : ""} onchange="updateWorkflowStep('${escapeHtml(step.id)}', 'required', this.checked)">
                         <span class="meta">required${step.required_locked ? " 🔒" : ""}</span>
@@ -1743,7 +1749,9 @@
     async function updateWorkflowStep(id, field, value) {
       const step = (state.workflow.steps || []).find(s => s.id === id);
       if (!step) return;
-      step[field] = field === "required" ? Boolean(value) : value;
+      if (field === "required") step[field] = Boolean(value);
+      else if (field === "timeout_minutes") step[field] = Math.max(0, Number(value) || 0);
+      else step[field] = value;
       await run(async () => {
         await saveWorkflow();
         setStatus("Workflow updated");

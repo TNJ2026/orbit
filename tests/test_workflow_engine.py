@@ -346,5 +346,87 @@ class WorkflowEngineTests(unittest.TestCase):
             self.assertTrue(closed.get("closed"))
 
 
+class StepTimeoutTests(unittest.TestCase):
+    def _timed_steps(self, timeout=30):
+        steps = [dict(s) for s in LINEAR_STEPS]
+        for s in steps:
+            if s["id"] == "implement":
+                s["timeout_minutes"] = timeout
+        return steps
+
+    def _start_at_implement(self, h, task_id):
+        h.start(task_id)
+        h.complete("hub-agent", task_id, "intake", "done")
+
+    def test_timed_out_step_is_reassigned_to_other_member(self):
+        from datetime import datetime, timedelta, timezone
+
+        team = TEAM + [{"agent_name": "other-codex", "role_id": "implementer"}]
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, steps=self._timed_steps(), team=team)
+            task_id = h.create_task()
+            self._start_at_implement(h, task_id)
+
+            later = datetime.now(timezone.utc) + timedelta(minutes=31)
+            actions = server.check_workflow_step_timeouts(h.store, tmp, now=later)
+
+            self.assertEqual(1, len(actions))
+            self.assertEqual("reassigned", actions[0]["action"])
+            self.assertEqual("codex", actions[0]["from"])
+            self.assertEqual("other-codex", actions[0]["to"])
+            # old assignee lost the step, new one can complete it
+            with self.assertRaisesRegex(InvalidInputError, "not assigned"):
+                h.complete("codex", task_id, "implement", "done")
+            result = h.complete("other-codex", task_id, "implement", "done")
+            self.assertEqual([{"step": "review", "assignee": "rev"}], result["dispatched"])
+            # hub heard about the reassignment
+            self.assertTrue(
+                any("timed out" in c for _, c in h.inbox_senders("hub-agent"))
+            )
+
+    def test_timeout_without_alternative_notifies_hub_once(self):
+        from datetime import datetime, timedelta, timezone
+
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, steps=self._timed_steps())
+            task_id = h.create_task()
+            self._start_at_implement(h, task_id)
+
+            later = datetime.now(timezone.utc) + timedelta(minutes=31)
+            first = server.check_workflow_step_timeouts(h.store, tmp, now=later)
+            second = server.check_workflow_step_timeouts(h.store, tmp, now=later)
+
+            self.assertEqual(1, len(first))
+            self.assertEqual("notified_hub", first[0]["action"])
+            self.assertEqual([], second)  # one alert per dispatch
+            # step still active for the original assignee
+            self.assertIn("implement", h.state(task_id)["active_steps"])
+            h.complete("codex", task_id, "implement", "done")
+
+    def test_step_within_timeout_is_untouched(self):
+        from datetime import datetime, timedelta, timezone
+
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, steps=self._timed_steps())
+            task_id = h.create_task()
+            self._start_at_implement(h, task_id)
+
+            soon = datetime.now(timezone.utc) + timedelta(minutes=5)
+            self.assertEqual([], server.check_workflow_step_timeouts(h.store, tmp, now=soon))
+
+    def test_step_without_timeout_never_fires(self):
+        from datetime import datetime, timedelta, timezone
+
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)  # no timeout_minutes anywhere
+            task_id = h.create_task()
+            self._start_at_implement(h, task_id)
+
+            much_later = datetime.now(timezone.utc) + timedelta(days=7)
+            self.assertEqual(
+                [], server.check_workflow_step_timeouts(h.store, tmp, now=much_later)
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

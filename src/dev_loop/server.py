@@ -8,6 +8,7 @@ import json
 import re
 import shutil
 import threading
+import time
 from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
@@ -271,6 +272,13 @@ def _normalize_workflow_step(step: Any, index: int) -> dict[str, Any]:
             raise InvalidInputError(f"workflow step {key} must be finite")
         return max(0.0, round(value, 2))
 
+    try:
+        timeout_minutes = int(step.get("timeout_minutes", 0) or 0)
+    except (TypeError, ValueError):
+        raise InvalidInputError("workflow step timeout_minutes must be an integer") from None
+    if timeout_minutes < 0:
+        raise InvalidInputError("workflow step timeout_minutes must be >= 0")
+
     # Steps run by the mandatory team roles (hub/implementer/reviewer) are the
     # indispensable core of the dev loop; they are always required and the
     # flag cannot be toggled off.
@@ -282,6 +290,7 @@ def _normalize_workflow_step(step: Any, index: int) -> dict[str, Any]:
         "task_status": task_status or "created",
         "required": True if required_locked else bool(step.get("required", False)),
         "required_locked": required_locked,
+        "timeout_minutes": timeout_minutes,
         "x": _coord("x", 40 + index * 320),
         "y": _coord("y", _DEFAULT_STEP_MID_Y),
     }
@@ -359,8 +368,13 @@ def _workflow_graph_warnings(
 def read_workflow_config(project_root: str | None = None) -> dict[str, Any]:
     path = _workflow_config_path(project_root)
     if not path.exists():
+        # Normalize the defaults too so unsaved workflows carry the same
+        # derived fields (required_locked, timeout_minutes) as saved ones.
         return {
-            "steps": default_workflow_steps(),
+            "steps": [
+                _normalize_workflow_step(step, index)
+                for index, step in enumerate(default_workflow_steps())
+            ],
             "edges": default_workflow_edges(),
             "path": str(path),
             "warnings": [],
@@ -790,13 +804,18 @@ def _team_role_of(members: list[dict[str, Any]], agent: str) -> str | None:
     return None
 
 
+# Outcomes that close out one dispatch of a step: the agent finished it
+# (done/rework) or the engine took it away (reassigned on timeout).
+_STEP_FINISHING_OUTCOMES = ("done", "rework", "reassigned")
+
+
 def _active_steps(transitions: list[dict[str, Any]]) -> list[str]:
     dispatched: dict[str, int] = {}
     finished: dict[str, int] = {}
     for t in transitions:
         if t["outcome"] == "dispatched":
             dispatched[t["to_step"]] = dispatched.get(t["to_step"], 0) + 1
-        elif t["outcome"] in ("done", "rework") and t["from_step"]:
+        elif t["outcome"] in _STEP_FINISHING_OUTCOMES and t["from_step"]:
             finished[t["from_step"]] = finished.get(t["from_step"], 0) + 1
     return [s for s, n in dispatched.items() if n > finished.get(s, 0)]
 
@@ -807,7 +826,7 @@ def _active_step_assignees(transitions: list[dict[str, Any]]) -> dict[str, str]:
     for t in transitions:
         if t["outcome"] == "dispatched":
             dispatches.setdefault(t["to_step"], []).append(t.get("note", ""))
-        elif t["outcome"] in ("done", "rework") and t["from_step"]:
+        elif t["outcome"] in _STEP_FINISHING_OUTCOMES and t["from_step"]:
             finished[t["from_step"]] = finished.get(t["from_step"], 0) + 1
     active: dict[str, str] = {}
     for step, assignees in dispatches.items():
@@ -1149,6 +1168,102 @@ def _advance_workflow_task_locked(
     }
 
 
+# How often the background watcher scans for timed-out steps.
+WORKFLOW_TIMEOUT_POLL_SECONDS = 60
+
+
+def check_workflow_step_timeouts(
+    store: Store, project_root: str | None, now: datetime | None = None
+) -> list[dict[str, Any]]:
+    with _WORKFLOW_ENGINE_LOCK:
+        return _check_workflow_step_timeouts_locked(store, project_root, now)
+
+
+def _check_workflow_step_timeouts_locked(
+    store: Store, project_root: str | None, now: datetime | None = None
+) -> list[dict[str, Any]]:
+    """Steps with timeout_minutes > 0 whose latest dispatch is older than the
+    timeout get reassigned to the best other member for the role; when nobody
+    else is available the hub is notified instead. Each dispatch triggers at
+    most one action (the timeout/reassigned transition marks it handled)."""
+    now = now or datetime.now(timezone.utc)
+    cfg = read_workflow_config(project_root)
+    steps = {s["id"]: s for s in cfg["steps"]}
+    members = read_team_config(project_root)["members"]
+    actions: list[dict[str, Any]] = []
+    for task in store.list_tasks(status="all", limit=500):
+        if not task.get("workflow_step") or task.get("task_status") == "closed":
+            continue
+        task_id = task["id"]
+        transitions = store.list_task_transitions(task_id)
+        for step_id, assignee in _active_step_assignees(transitions).items():
+            step = steps.get(step_id)
+            if not step or int(step.get("timeout_minutes") or 0) <= 0:
+                continue
+            timeout_minutes = int(step["timeout_minutes"])
+            last_dispatch = max(
+                (
+                    t for t in transitions
+                    if t["outcome"] == "dispatched" and t["to_step"] == step_id
+                ),
+                key=lambda t: t["id"],
+                default=None,
+            )
+            if last_dispatch is None:
+                continue
+            try:
+                dispatched_at = datetime.fromisoformat(last_dispatch["created_at"])
+            except ValueError:
+                continue
+            age_minutes = (now - dispatched_at).total_seconds() / 60
+            if age_minutes < timeout_minutes:
+                continue
+            already_handled = any(
+                t["id"] > last_dispatch["id"]
+                and t["outcome"] in ("timeout", "reassigned")
+                and t["from_step"] == step_id
+                for t in transitions
+            )
+            if already_handled:
+                continue
+            other_members = [m for m in members if m["agent_name"] != assignee]
+            new_assignee = _pick_assignee(store, task, step, other_members)
+            if new_assignee:
+                store.record_task_transition(
+                    task_id, step_id, step_id, WORKFLOW_ENGINE_AGENT, "reassigned",
+                    f"step timed out after {timeout_minutes}m on {assignee}; "
+                    f"reassigned to {new_assignee}",
+                )
+                _dispatch_step(store, task, step, new_assignee, "")
+                notice = _notify_hub(
+                    store, members,
+                    f"Task #{task_id} step '{step_id}' timed out on {assignee} "
+                    f"after {timeout_minutes}m; reassigned to {new_assignee}.",
+                )
+                actions.append({
+                    "task_id": task_id, "step": step_id, "action": "reassigned",
+                    "from": assignee, "to": new_assignee, "notice": notice,
+                })
+            else:
+                store.record_task_transition(
+                    task_id, step_id, step_id, WORKFLOW_ENGINE_AGENT, "timeout",
+                    f"step timed out after {timeout_minutes}m on {assignee}; "
+                    f"no alternative member for role {step['role_id']}",
+                )
+                notice = _notify_hub(
+                    store, members,
+                    f"Task #{task_id} step '{step_id}' timed out on {assignee} "
+                    f"after {timeout_minutes}m and no other member has role "
+                    f"{step['role_id']}. Please intervene (complete_step as hub, "
+                    f"or adjust the team).",
+                )
+                actions.append({
+                    "task_id": task_id, "step": step_id, "action": "notified_hub",
+                    "from": assignee, "notice": notice,
+                })
+    return actions
+
+
 def workflow_task_state(
     store: Store, project_root: str | None, task_id: int
 ) -> dict[str, Any]:
@@ -1328,6 +1443,24 @@ def create_server(
     # atexit hook is the reliable place to checkpoint the WAL and close the
     # connection cleanly.
     atexit.register(store.close)
+
+    # Step-timeout watchdog: the engine is otherwise purely event-driven, so
+    # a dead assignee would leave its step active forever. Daemon thread dies
+    # with the process; check errors must never kill the watcher.
+    def _timeout_watcher() -> None:
+        while True:
+            time.sleep(WORKFLOW_TIMEOUT_POLL_SECONDS)
+            try:
+                check_workflow_step_timeouts(
+                    store, current_project.get("project_root")
+                )
+            except Exception:
+                pass
+
+    threading.Thread(
+        target=_timeout_watcher, name="workflow-timeout-watcher", daemon=True
+    ).start()
+
     current_project = project or {
         "id": "",
         "name": "",
