@@ -173,6 +173,25 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(["python", "sqlite"], updated["required_capabilities"])
         self.assertFalse(updated["exclusive_workspace"])
 
+    def test_task_metadata_rejects_off_list_values(self):
+        store = self.make_store()
+        self.register_pair(store)
+        store.send_message("a", "b", "migrate schema", kind="task")
+        [task] = store.list_tasks()
+
+        for field, value in (
+            ("importance", "urgent"),
+            ("size", "huge"),
+            ("risk", "extreme"),
+        ):
+            with self.assertRaisesRegex(InvalidInputError, f"invalid {field}"):
+                store.update_task_metadata(task["id"], **{field: value})
+        with self.assertRaisesRegex(InvalidInputError, "role_required"):
+            store.update_task_metadata(task["id"], role_required="  ")
+        # valid values still pass untouched
+        updated = store.update_task_metadata(task["id"], importance="high")
+        self.assertEqual("high", updated["importance"])
+
     def test_task_engine_status_syncs_back_to_source_message(self):
         store = self.make_store()
         self.register_pair(store)

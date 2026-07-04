@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 import ipaddress
 import json
 import re
@@ -1323,6 +1324,10 @@ def create_server(
     project: dict[str, Any] | None = None,
 ) -> FastMCP:
     store = Store(db_path)
+    # mcp.run() blocks until the process dies (Ctrl-C included), so a plain
+    # atexit hook is the reliable place to checkpoint the WAL and close the
+    # connection cleanly.
+    atexit.register(store.close)
     current_project = project or {
         "id": "",
         "name": "",

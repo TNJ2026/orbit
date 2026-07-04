@@ -27,6 +27,11 @@ TASK_STATUSES = {
     "blocked",
     "closed",
 }
+# Must stay in sync with the scoring tables in server.py — an off-list value
+# would silently score as the default there.
+TASK_IMPORTANCE_LEVELS = {"low", "normal", "high", "critical"}
+TASK_SIZES = {"small", "medium", "large"}
+TASK_RISKS = {"low", "medium", "high"}
 
 _TABLE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS agents (
@@ -557,15 +562,23 @@ class Store:
     ) -> dict[str, Any] | None:
         updates: list[str] = []
         params: list[Any] = []
-        for column, value in (
-            ("role_required", role_required),
-            ("importance", importance),
-            ("size", size),
-            ("risk", risk),
+        for column, value, allowed in (
+            ("role_required", role_required, None),
+            ("importance", importance, TASK_IMPORTANCE_LEVELS),
+            ("size", size, TASK_SIZES),
+            ("risk", risk, TASK_RISKS),
         ):
-            if value is not None:
-                updates.append(f"{column} = ?")
-                params.append(str(value).strip())
+            if value is None:
+                continue
+            value = str(value).strip()
+            if allowed is not None and value not in allowed:
+                raise InvalidInputError(
+                    f"invalid {column}: {value!r} (expected one of {sorted(allowed)})"
+                )
+            if column == "role_required" and not value:
+                raise InvalidInputError("role_required must not be empty")
+            updates.append(f"{column} = ?")
+            params.append(value)
         if required_capabilities is not None:
             updates.append("required_capabilities = ?")
             params.append(_encode_capabilities(required_capabilities))
