@@ -138,16 +138,66 @@ class WorkflowEngineTests(unittest.TestCase):
             second = h.complete("rev", task_id, "c", "done")
             self.assertEqual([{"step": "d", "assignee": "hub-agent"}], second["dispatched"])
 
+    def test_optional_late_branch_does_not_redispatch_join_target(self):
+        steps = [
+            {"id": "a", "name": "A", "role_id": "hub", "task_status": "created", "required": True},
+            {"id": "b", "name": "B", "role_id": "implementer", "task_status": "in_progress", "required": True},
+            {"id": "c", "name": "C", "role_id": "tester", "task_status": "testing", "required": False},
+            {"id": "d", "name": "D", "role_id": "reviewer", "task_status": "replied", "required": True},
+        ]
+        edges = [
+            {"from": "a", "to": "b"},
+            {"from": "a", "to": "c"},
+            {"from": "b", "to": "d"},
+            {"from": "c", "to": "d"},
+        ]
+        team = TEAM + [{"agent_name": "test-agent", "role_id": "tester"}]
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, steps=steps, edges=edges, team=team)
+            task_id = h.create_task()
+            h.start(task_id)
+            h.complete("hub-agent", task_id, "a", "done")
+
+            first = h.complete("codex", task_id, "b", "done")
+            self.assertEqual([{"step": "d", "assignee": "rev"}], first["dispatched"])
+            late = h.complete("test-agent", task_id, "c", "done")
+            self.assertEqual([], late["dispatched"])
+
     def test_role_mismatch_is_rejected(self):
         with TemporaryDirectory() as tmp:
             h = EngineHarness(tmp)
             task_id = h.create_task()
             h.start(task_id)
             h.complete("hub-agent", task_id, "intake", "done")
-            with self.assertRaisesRegex(InvalidInputError, "requires role reviewer"):
-                h.complete("codex", task_id, "review", "done")
+            with self.assertRaisesRegex(InvalidInputError, "not assigned"):
+                h.complete("rev", task_id, "implement", "done")
             # hub may complete any step
             h.complete("hub-agent", task_id, "implement", "done")
+
+    def test_unassigned_same_role_agent_cannot_complete_active_step(self):
+        team = TEAM + [{"agent_name": "other-codex", "role_id": "implementer"}]
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, team=team)
+            task_id = h.create_task()
+            h.start(task_id)
+            h.complete("hub-agent", task_id, "intake", "done")
+
+            with self.assertRaisesRegex(InvalidInputError, "not assigned"):
+                h.complete("other-codex", task_id, "implement", "done")
+
+    def test_inactive_step_completion_is_rejected(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            task_id = h.create_task()
+
+            with self.assertRaisesRegex(InvalidInputError, "not active"):
+                h.complete("codex", task_id, "implement", "done")
+
+            h.start(task_id)
+            h.complete("hub-agent", task_id, "intake", "done")
+            h.complete("codex", task_id, "implement", "done", "diff ready")
+            with self.assertRaisesRegex(InvalidInputError, "not active"):
+                h.complete("codex", task_id, "implement", "done", "duplicate")
 
     def test_blocked_pauses_task_and_notifies_hub(self):
         with TemporaryDirectory() as tmp:
@@ -207,6 +257,22 @@ class WorkflowEngineTests(unittest.TestCase):
             task_id = h.create_task()
             h.start(task_id)
             with self.assertRaisesRegex(InvalidInputError, "already in the workflow"):
+                h.start(task_id)
+
+    def test_start_rejects_non_executable_workflow(self):
+        steps = [
+            {"id": "a", "name": "A", "role_id": "hub", "task_status": "created", "required": True},
+            {"id": "b", "name": "B", "role_id": "implementer", "task_status": "in_progress", "required": True},
+            {"id": "c", "name": "C", "role_id": "reviewer", "task_status": "replied", "required": True},
+        ]
+        edges = [
+            {"from": "a", "to": "b"},
+            {"from": "b", "to": "a"},
+        ]
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, steps=steps, edges=edges)
+            task_id = h.create_task()
+            with self.assertRaisesRegex(InvalidInputError, "not executable"):
                 h.start(task_id)
 
 

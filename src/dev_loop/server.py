@@ -728,6 +728,37 @@ def _active_steps(transitions: list[dict[str, Any]]) -> list[str]:
     return [s for s, n in dispatched.items() if n > finished.get(s, 0)]
 
 
+def _active_step_assignees(transitions: list[dict[str, Any]]) -> dict[str, str]:
+    dispatches: dict[str, list[str]] = {}
+    finished: dict[str, int] = {}
+    for t in transitions:
+        if t["outcome"] == "dispatched":
+            dispatches.setdefault(t["to_step"], []).append(t.get("note", ""))
+        elif t["outcome"] in ("done", "rework") and t["from_step"]:
+            finished[t["from_step"]] = finished.get(t["from_step"], 0) + 1
+    active: dict[str, str] = {}
+    for step, assignees in dispatches.items():
+        remaining = assignees[finished.get(step, 0):]
+        if remaining:
+            active[step] = remaining[-1]
+    return active
+
+
+def _latest_rework_transition_id(transitions: list[dict[str, Any]]) -> int:
+    return max((t["id"] for t in transitions if t["outcome"] == "rework"), default=0)
+
+
+def _dispatched_since(
+    transitions: list[dict[str, Any]], step: str, transition_id: int
+) -> bool:
+    return any(
+        t["id"] > transition_id
+        and t["outcome"] == "dispatched"
+        and t["to_step"] == step
+        for t in transitions
+    )
+
+
 def _join_ready(
     target: str,
     cfg: dict[str, Any],
@@ -838,6 +869,8 @@ def _dispatch_targets(
         transitions = store.list_task_transitions(task_id)
         if target in _active_steps(transitions):
             continue  # already running this step
+        if _dispatched_since(transitions, target, _latest_rework_transition_id(transitions)):
+            continue  # already ran in this workflow pass
         if not _join_ready(target, cfg, back, steps, transitions):
             notices.append(f"step {target} is waiting for other required branches")
             continue
@@ -887,11 +920,17 @@ def start_workflow_task(
             f"(active steps: {', '.join(_active_steps(transitions)) or 'none'})"
         )
     cfg = read_workflow_config(project_root)
+    if cfg.get("warnings"):
+        raise InvalidInputError(
+            "workflow is not executable: " + "; ".join(cfg["warnings"])
+        )
     back = _workflow_graph(cfg)
     forward_in = {
         e["to"] for e in cfg["edges"] if (e["from"], e["to"]) not in back
     }
     entries = [s["id"] for s in cfg["steps"] if s["id"] not in forward_in]
+    if not entries:
+        raise InvalidInputError("workflow is not executable: no entry step")
     members = read_team_config(project_root)["members"]
     dispatched, notices = _dispatch_targets(
         store, project_root, task, entries, cfg, back, members, ""
@@ -926,14 +965,18 @@ def advance_workflow_task(
     if step not in steps:
         raise InvalidInputError(f"unknown workflow step: {step}")
     members = read_team_config(project_root)["members"]
-    # Constraint: only an agent whose team role matches the step's role may
-    # complete it (hub can complete anything). Agents outside the team are
-    # allowed through so small setups without a team config still work.
+    transitions = store.list_task_transitions(task_id)
+    active_assignees = _active_step_assignees(transitions)
+    if step not in active_assignees:
+        raise InvalidInputError(f"workflow step {step} is not active for task {task_id}")
+    assigned_agent = active_assignees[step]
+    # Constraint: only the agent that was dispatched the active step may
+    # complete it. Hub can override any active step for recovery.
     actor_role = _team_role_of(members, agent)
-    if actor_role is not None and actor_role not in (steps[step]["role_id"], "hub"):
+    if agent != assigned_agent and actor_role != "hub":
         raise InvalidInputError(
-            f"agent {agent} has role {actor_role}, but step {step} "
-            f"requires role {steps[step]['role_id']}"
+            f"agent {agent} is not assigned to active step {step} "
+            f"(assigned to {assigned_agent})"
         )
     back = _workflow_graph(cfg)
     forward = [
@@ -1345,8 +1388,9 @@ def create_server(
     ) -> dict:
         """Report the outcome of a workflow step you were dispatched.
 
-        - agent: your registered agent name (your team role must match the
-          step's role; hub may complete any step).
+        - agent: your registered agent name. It must be the assignee that was
+          dispatched the active step; hub may complete active steps for
+          recovery.
         - task_id / step: from the dispatch message you received.
         - outcome: "done" advances along forward connections (merge steps wait
           for all required branches); "rework" sends the task back along the
