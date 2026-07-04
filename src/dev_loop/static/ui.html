@@ -1996,14 +1996,57 @@
       });
     }
 
-    function startSprint() {
+    // Turn the sprint goal into a real task and enter it into the workflow:
+    // register the hub member (idempotent), create a kind=task message from
+    // the goal text, then start the engine so intake gets dispatched.
+    async function startSprint() {
       const goalVal = $("goalInput").value.trim();
       if (!goalVal) {
-        alert("Please enter a Sprint Goal first!");
+        setStatus("Enter a sprint goal first", true);
         return;
       }
-      setStatus("Sprint started with Goal: " + goalVal.split("\n")[0]);
-      alert("🎯 Sprint Started successfully!\n\nGoal:\n" + goalVal);
+      const hub = (state.team.members || []).find(
+        m => m.role_id === "hub" && m.enabled !== false
+      );
+      if (!hub) {
+        setStatus("Team has no enabled hub member — set one up on the Team page first", true);
+        return;
+      }
+      await run(async () => {
+        await api("/api/agents", {
+          method: "POST",
+          body: JSON.stringify({ name: hub.agent_name, description: "hub (sprint start via UI)" })
+        });
+        const title = goalVal.split("\n")[0].slice(0, 80);
+        const sent = await api("/api/messages", {
+          method: "POST",
+          body: JSON.stringify({
+            sender: hub.agent_name,
+            to: hub.agent_name,
+            content: goalVal,
+            kind: "task",
+            title
+          })
+        });
+        await loadTasks();
+        const messageId = (sent.message_ids || [])[0];
+        const task = (state.tasks || []).find(t => t.source_message_id === messageId);
+        if (!task) {
+          setStatus("Task created but could not be located on the board", true);
+          return;
+        }
+        const started = await api(`/api/tasks/${task.id}/workflow/start`, {
+          method: "POST",
+          body: JSON.stringify({})
+        });
+        await loadTasks();
+        showTaskDetails(task.id);
+        const dispatchedTo = (started.dispatched || [])
+          .map(d => `${d.step} → ${d.assignee}`).join(", ");
+        setStatus(dispatchedTo
+          ? `Sprint started: task #${task.id} (${dispatchedTo})`
+          : `Sprint started: task #${task.id}`);
+      });
     }
 
     async function moveTask(taskId, newStatus) {
