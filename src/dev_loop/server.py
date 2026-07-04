@@ -128,7 +128,10 @@ def _is_loopback_peer(request: Request) -> bool:
     if client is None:
         return False
     try:
-        return ipaddress.ip_address(client.host).is_loopback
+        ip = ipaddress.ip_address(client.host)
+        if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+            ip = ip.ipv4_mapped
+        return ip.is_loopback
     except ValueError:
         return False
 
@@ -1205,14 +1208,19 @@ def _read_run_file(run: dict[str, Any], file_key: str, tail: int = 65536) -> dic
     if not file_path.exists():
         return {"file": file_key, "path": str(file_path), "content": "", "bytes": 0}
     tail = max(1, min(int(tail), 1024 * 1024))
-    data = file_path.read_bytes()
-    truncated = len(data) > tail
-    chunk = data[-tail:] if truncated else data
+    file_size = file_path.stat().st_size
+    truncated = file_size > tail
+    if truncated:
+        with file_path.open("rb") as f:
+            f.seek(-tail, 2)
+            chunk = f.read()
+    else:
+        chunk = file_path.read_bytes()
     return {
         "file": file_key,
         "path": str(file_path),
         "content": chunk.decode("utf-8", errors="replace"),
-        "bytes": len(data),
+        "bytes": file_size,
         "truncated": truncated,
     }
 

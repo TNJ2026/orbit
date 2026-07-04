@@ -215,6 +215,8 @@ class Store:
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         with self._lock:
+            self._conn.execute("PRAGMA journal_mode=WAL;")
+            self._conn.execute("PRAGMA synchronous=NORMAL;")
             self._conn.executescript(_TABLE_SCHEMA)
             self._migrate()
             self._conn.executescript(_INDEX_SCHEMA)
