@@ -259,21 +259,91 @@ class WorkflowEngineTests(unittest.TestCase):
             with self.assertRaisesRegex(InvalidInputError, "already in the workflow"):
                 h.start(task_id)
 
-    def test_start_rejects_non_executable_workflow(self):
+    def test_cycle_component_becomes_second_entry_and_runs(self):
+        # review <-> optional_check form a cycle with no forward inbound edge.
+        # Back-edge classification makes review a second entry point, so the
+        # graph is executable: both components dispatch at start and the task
+        # can run to completion. (Stripping back edges always yields a DAG, so
+        # a non-empty workflow always has an entry and a terminal — the
+        # executability pre-check only guards degenerate configs.)
         steps = [
-            {"id": "a", "name": "A", "role_id": "hub", "task_status": "created", "required": True},
-            {"id": "b", "name": "B", "role_id": "implementer", "task_status": "in_progress", "required": True},
-            {"id": "c", "name": "C", "role_id": "reviewer", "task_status": "replied", "required": True},
+            {"id": "intake", "name": "Intake", "role_id": "hub", "task_status": "created", "required": True},
+            {"id": "implement", "name": "Implement", "role_id": "implementer", "task_status": "in_progress", "required": True},
+            {"id": "review", "name": "Review", "role_id": "reviewer", "task_status": "replied", "required": True},
+            {"id": "optional_check", "name": "Optional Check", "role_id": "tester", "task_status": "testing", "required": False},
         ]
         edges = [
-            {"from": "a", "to": "b"},
-            {"from": "b", "to": "a"},
+            {"from": "intake", "to": "implement"},
+            {"from": "review", "to": "optional_check"},
+            {"from": "optional_check", "to": "review"},
+        ]
+        team = TEAM + [{"agent_name": "test-agent", "role_id": "tester"}]
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, steps=steps, edges=edges, team=team)
+            task_id = h.create_task()
+            started = h.start(task_id)
+            self.assertEqual(
+                {"intake", "review"}, {d["step"] for d in started["dispatched"]}
+            )
+
+    def test_start_allows_warning_for_dangling_optional_step(self):
+        steps = [
+            {"id": "intake", "name": "Intake", "role_id": "hub", "task_status": "created", "required": True},
+            {"id": "implement", "name": "Implement", "role_id": "implementer", "task_status": "in_progress", "required": True},
+            {"id": "review", "name": "Review", "role_id": "reviewer", "task_status": "replied", "required": True},
+            {"id": "optional_a", "name": "Optional A", "role_id": "tester", "task_status": "testing", "required": False},
+            {"id": "optional_b", "name": "Optional B", "role_id": "tester", "task_status": "testing", "required": False},
+        ]
+        edges = [
+            {"from": "intake", "to": "implement"},
+            {"from": "implement", "to": "review"},
+            {"from": "optional_a", "to": "optional_b"},
+            {"from": "optional_b", "to": "optional_a"},
         ]
         with TemporaryDirectory() as tmp:
             h = EngineHarness(tmp, steps=steps, edges=edges)
+            cfg = server.read_workflow_config(tmp)
+            self.assertTrue(any("unreachable" in w for w in cfg["warnings"]))
             task_id = h.create_task()
-            with self.assertRaisesRegex(InvalidInputError, "not executable"):
-                h.start(task_id)
+
+            started = h.start(task_id)
+            self.assertEqual(
+                [{"step": "intake", "assignee": "hub-agent"}],
+                started["dispatched"],
+            )
+
+    def test_ui_actor_resolves_to_enabled_hub_member(self):
+        with TemporaryDirectory() as tmp:
+            EngineHarness(tmp)
+            self.assertEqual("hub-agent", server._workflow_api_actor("", tmp))
+            self.assertEqual("codex", server._workflow_api_actor("codex", tmp))
+
+    def test_ui_actor_without_hub_member_is_rejected(self):
+        team = [m for m in TEAM if m["role_id"] != "hub"] + [
+            {"agent_name": "hub-agent", "role_id": "hub", "enabled": False},
+        ]
+        with TemporaryDirectory() as tmp:
+            EngineHarness(tmp, team=team)
+            with self.assertRaisesRegex(InvalidInputError, "no enabled hub member"):
+                server._workflow_api_actor("", tmp)
+
+    def test_reopen_loop_into_entry_is_executable(self):
+        # accept -> intake is a legitimate reopen loop; entry/terminal checks
+        # must classify it as a loop-back, not "no entry step".
+        edges = LINEAR_EDGES + [{"from": "accept", "to": "intake"}]
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, edges=edges)
+            task_id = h.create_task()
+            started = h.start(task_id)
+            self.assertEqual(
+                [{"step": "intake", "assignee": "hub-agent"}],
+                started["dispatched"],
+            )
+            h.complete("hub-agent", task_id, "intake", "done")
+            h.complete("codex", task_id, "implement", "done")
+            h.complete("rev", task_id, "review", "done")
+            closed = h.complete("hub-agent", task_id, "accept", "done")
+            self.assertTrue(closed.get("closed"))
 
 
 if __name__ == "__main__":

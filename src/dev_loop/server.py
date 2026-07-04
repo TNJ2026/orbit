@@ -6,6 +6,7 @@ import ipaddress
 import json
 import re
 import shutil
+import threading
 from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
@@ -24,6 +25,7 @@ from .store import DEFAULT_LEASE_SECONDS, InvalidInputError, Store, UnknownAgent
 MAX_WAIT_SECONDS = 60
 MAX_LEASE_SECONDS = 3600
 POLL_INTERVAL = 0.5
+_WORKFLOW_ENGINE_LOCK = threading.Lock()
 
 # The HTTP API is a local-only control surface: agents act on what lands in
 # their inboxes, so a forged request is a prompt-injection channel. Defense is
@@ -710,6 +712,73 @@ def _forward_out(
     ]
 
 
+def _workflow_entry_steps(cfg: dict[str, Any], back: set[tuple[str, str]]) -> list[str]:
+    forward_in = {
+        e["to"] for e in cfg["edges"] if (e["from"], e["to"]) not in back
+    }
+    return [s["id"] for s in cfg["steps"] if s["id"] not in forward_in]
+
+
+def _workflow_terminal_steps(
+    cfg: dict[str, Any], back: set[tuple[str, str]]
+) -> list[str]:
+    forward_out_src = {
+        e["from"] for e in cfg["edges"] if (e["from"], e["to"]) not in back
+    }
+    return [s["id"] for s in cfg["steps"] if s["id"] not in forward_out_src]
+
+
+def _workflow_execution_errors(
+    cfg: dict[str, Any], back: set[tuple[str, str]]
+) -> list[str]:
+    # Entry/terminal/reachability all use the forward graph (loop-back edges
+    # excluded) — the same classification the engine routes by. Raw edges
+    # would misjudge legitimate patterns like an accept -> intake reopen
+    # loop as a workflow with no entry at all.
+    ids = [step["id"] for step in cfg["steps"]]
+    steps = {step["id"]: step for step in cfg["steps"]}
+    entries = _workflow_entry_steps(cfg, back)
+    terminals = _workflow_terminal_steps(cfg, back)
+
+    def _reach(seeds: list[str], reverse: bool = False) -> set[str]:
+        graph: dict[str, list[str]] = {}
+        for edge in cfg["edges"]:
+            if (edge["from"], edge["to"]) in back:
+                continue
+            src, dst = (
+                (edge["to"], edge["from"]) if reverse
+                else (edge["from"], edge["to"])
+            )
+            graph.setdefault(src, []).append(dst)
+        seen: set[str] = set()
+        stack = list(seeds)
+        while stack:
+            node = stack.pop()
+            if node in seen:
+                continue
+            seen.add(node)
+            stack.extend(graph.get(node, []))
+        return seen
+
+    errors: list[str] = []
+    if not entries:
+        errors.append("no entry step")
+    if not terminals:
+        errors.append("no terminal step")
+    reachable = _reach(entries) if entries else set()
+    can_finish = _reach(terminals, reverse=True) if terminals else set()
+    required_ids = [step_id for step_id in ids if steps[step_id]["required"]]
+    unreachable_required = [step_id for step_id in required_ids if step_id not in reachable]
+    if unreachable_required:
+        errors.append("required steps unreachable: " + ", ".join(unreachable_required))
+    stuck_required = [step_id for step_id in required_ids if step_id not in can_finish]
+    if stuck_required:
+        errors.append(
+            "required steps with no path to terminal: " + ", ".join(stuck_required)
+        )
+    return errors
+
+
 def _team_role_of(members: list[dict[str, Any]], agent: str) -> str | None:
     for member in members:
         if member["agent_name"] == agent and member.get("enabled", True):
@@ -817,6 +886,28 @@ def _notify_hub(store: Store, members: list[dict[str, Any]], text: str) -> str:
         return f"hub notification failed: {exc}"
 
 
+def _workflow_api_actor(raw_agent: str, project_root: str | None) -> str:
+    # The UI sends no agent name; it acts as the team's hub member so the
+    # engine's assignee/hub constraint recognizes it.
+    agent = (raw_agent or "").strip()
+    if agent:
+        return agent
+    members = read_team_config(project_root)["members"]
+    hub_agent = next(
+        (
+            m["agent_name"] for m in members
+            if m["role_id"] == "hub" and m.get("enabled", True)
+        ),
+        None,
+    )
+    if hub_agent is None:
+        raise InvalidInputError(
+            "team has no enabled hub member to act for the UI; "
+            "add one on the Team page or pass an agent name"
+        )
+    return hub_agent
+
+
 def _dispatch_step(
     store: Store,
     task: dict[str, Any],
@@ -910,6 +1001,13 @@ def _dispatch_targets(
 def start_workflow_task(
     store: Store, project_root: str | None, agent: str, task_id: int
 ) -> dict[str, Any]:
+    with _WORKFLOW_ENGINE_LOCK:
+        return _start_workflow_task_locked(store, project_root, agent, task_id)
+
+
+def _start_workflow_task_locked(
+    store: Store, project_root: str | None, agent: str, task_id: int
+) -> dict[str, Any]:
     task = store.get_task(task_id)
     if not task:
         raise InvalidInputError(f"unknown task: {task_id}")
@@ -920,17 +1018,19 @@ def start_workflow_task(
             f"(active steps: {', '.join(_active_steps(transitions)) or 'none'})"
         )
     cfg = read_workflow_config(project_root)
-    if cfg.get("warnings"):
-        raise InvalidInputError(
-            "workflow is not executable: " + "; ".join(cfg["warnings"])
-        )
     back = _workflow_graph(cfg)
-    forward_in = {
-        e["to"] for e in cfg["edges"] if (e["from"], e["to"]) not in back
-    }
-    entries = [s["id"] for s in cfg["steps"] if s["id"] not in forward_in]
-    if not entries:
-        raise InvalidInputError("workflow is not executable: no entry step")
+    execution_errors = _workflow_execution_errors(cfg, back)
+    if execution_errors:
+        raise InvalidInputError(
+            "workflow is not executable: "
+            + "; ".join(execution_errors)
+            + ". Check the Workflow page warnings."
+        )
+    steps = {s["id"]: s for s in cfg["steps"]}
+    entries = [
+        step_id for step_id in _workflow_entry_steps(cfg, back)
+        if steps[step_id]["required"] or _forward_out(cfg, back, step_id)
+    ]
     members = read_team_config(project_root)["members"]
     dispatched, notices = _dispatch_targets(
         store, project_root, task, entries, cfg, back, members, ""
@@ -944,6 +1044,21 @@ def start_workflow_task(
 
 
 def advance_workflow_task(
+    store: Store,
+    project_root: str | None,
+    agent: str,
+    task_id: int,
+    step: str,
+    outcome: str = "done",
+    result: str = "",
+) -> dict[str, Any]:
+    with _WORKFLOW_ENGINE_LOCK:
+        return _advance_workflow_task_locked(
+            store, project_root, agent, task_id, step, outcome, result
+        )
+
+
+def _advance_workflow_task_locked(
     store: Store,
     project_root: str | None,
     agent: str,
@@ -1764,8 +1879,12 @@ def create_server(
             return forbidden
         task_id = int(request.path_params["task_id"])
         data = await _read_json(request)
-        agent = str(data.get("agent") or "hub")
         try:
+            agent = await _to_thread(
+                _workflow_api_actor,
+                str(data.get("agent") or ""),
+                current_project.get("project_root"),
+            )
             result = await _to_thread(_engine_start, agent, task_id)
         except (InvalidInputError, UnknownAgentError) as exc:
             return _json_error(str(exc), request=request)
@@ -1778,9 +1897,14 @@ def create_server(
         task_id = int(request.path_params["task_id"])
         data = await _read_json(request)
         try:
+            agent = await _to_thread(
+                _workflow_api_actor,
+                str(data.get("agent") or ""),
+                current_project.get("project_root"),
+            )
             result = await _to_thread(
                 _engine_advance,
-                str(data.get("agent") or ""),
+                agent,
                 task_id,
                 str(data.get("step") or ""),
                 str(data.get("outcome") or "done"),
