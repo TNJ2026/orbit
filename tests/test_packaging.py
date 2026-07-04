@@ -75,7 +75,15 @@ class PackagingTests(unittest.TestCase):
         self.assertIn('data-role-id=', html)
         self.assertIn("selectedProjectId", html)
         self.assertIn("async function refreshWorkspace()", html)
-        self.assertIn('addEventListener("click", () => run(refreshWorkspace))', html)
+        self.assertIn("function wireRefresh(", html)
+        for button_id in (
+            "refreshTools",
+            "refreshTeam",
+            "refreshWorkflow",
+            "refreshRoles",
+            "refreshTasks",
+        ):
+            self.assertIn(f'wireRefresh("{button_id}"', html)
         self.assertNotIn('onclick="editRole', html)
         self.assertNotIn('onclick="saveRole', html)
         self.assertNotIn('onclick="cancelEdit', html)
@@ -107,7 +115,7 @@ class PackagingTests(unittest.TestCase):
         )
         by_id = {tool["id"]: tool for tool in tools}
         self.assertIn("hermes", by_id)
-        self.assertIn("openclaw", by_id)
+        self.assertNotIn("openclaw", by_id)
         self.assertNotIn("profiles", by_id["hermes"])
         self.assertNotIn("profile_count", by_id["hermes"])
 
@@ -457,27 +465,37 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual("senior", ranked["selected"]["agent_name"])
         self.assertEqual(3, junior["expertise_gap"])
 
-    def test_team_config_requires_core_enabled_roles(self):
+    def test_team_config_reports_missing_core_roles_without_rejecting(self):
         import dev_loop.server as server
-        from dev_loop.store import InvalidInputError
 
         with TemporaryDirectory() as tmp:
-            with self.assertRaisesRegex(
-                InvalidInputError,
-                "team is missing required enabled roles: reviewer",
-            ):
-                server.write_team_config(
-                    [
-                        {"agent_name": "hermes-manager", "role_id": "hub"},
-                        {"agent_name": "codex", "role_id": "implementer"},
-                        {
-                            "agent_name": "claude-code",
-                            "role_id": "reviewer",
-                            "enabled": False,
-                        },
-                    ],
-                    tmp,
-                )
+            saved = server.write_team_config(
+                [
+                    {"agent_name": "hermes-manager", "role_id": "hub"},
+                    {"agent_name": "codex", "role_id": "implementer"},
+                    {
+                        "agent_name": "claude-code",
+                        "role_id": "reviewer",
+                        "enabled": False,
+                    },
+                ],
+                tmp,
+            )
+            loaded = server.read_team_config(tmp)
+
+        self.assertEqual(["reviewer"], saved["missing_roles"])
+        self.assertEqual(3, len(loaded["members"]))
+
+    def test_team_config_saves_single_member(self):
+        import dev_loop.server as server
+
+        with TemporaryDirectory() as tmp:
+            saved = server.write_team_config(
+                [{"agent_name": "codex", "role_id": "implementer"}], tmp
+            )
+
+        self.assertEqual(1, len(saved["members"]))
+        self.assertEqual(["hub", "reviewer"], saved["missing_roles"])
 
     def test_team_config_rejects_invalid_role_id(self):
         import dev_loop.server as server

@@ -1,0 +1,13 @@
+{
+  "members": [
+    {
+      "agent_name": "hermes-manager",
+      "role_id": "hub",
+      "enabled": true,
+      "expertise_level": 3,
+      "max_concurrent_tasks": 1,
+      "capabilities": [],
+      "notes": ""
+    }
+  ]
+}

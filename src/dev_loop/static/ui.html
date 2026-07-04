@@ -372,6 +372,18 @@
     button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
     button.danger { color: var(--danger); }
     button:disabled { opacity: .55; cursor: default; }
+    button:active:not(:disabled) { transform: translateY(1px); }
+    .refresh-btn::before {
+      content: "↻";
+      display: inline-block;
+      margin-right: 5px;
+    }
+    .refresh-btn.refreshing::before {
+      animation: refresh-spin 0.7s linear infinite;
+    }
+    @keyframes refresh-spin {
+      to { transform: rotate(360deg); }
+    }
     input, select, textarea { width: 100%; padding: 7px 8px; }
     textarea { min-height: 96px; resize: vertical; }
     .stack { display: grid; gap: 8px; padding: 12px; }
@@ -435,12 +447,22 @@
     }
     .team-layout {
       display: grid;
-      grid-template-columns: minmax(240px, 0.34fr) minmax(0, 1fr);
+      grid-template-columns: minmax(0, 1fr) minmax(240px, 0.34fr);
       min-height: calc(100vh - 102px);
     }
     .team-builder {
-      border-right: 1px solid var(--line);
+      border-left: 1px solid var(--line);
       background: #fbfbf9;
+      align-content: start;
+    }
+    .team-group-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      background: #f2f5f3;
+      border-bottom: 1px solid var(--line);
+      font-weight: 600;
     }
     .team-member {
       border-bottom: 1px solid var(--line);
@@ -453,7 +475,7 @@
     }
     .team-member-grid {
       display: grid;
-      grid-template-columns: minmax(140px, 1fr) minmax(120px, 0.7fr) 92px 120px auto;
+      grid-template-columns: minmax(140px, 1fr) minmax(120px, 0.7fr) 92px 86px 86px auto;
       gap: 8px;
       align-items: center;
     }
@@ -665,8 +687,8 @@
         grid-template-columns: 1fr;
       }
       .team-builder {
-        border-right: 0;
-        border-bottom: 1px solid var(--line);
+        border-left: 0;
+        border-top: 1px solid var(--line);
       }
       .team-member-grid {
         grid-template-columns: 1fr;
@@ -731,6 +753,7 @@
         <button id="refreshTeam">Refresh</button>
       </div>
       <div class="team-layout">
+        <div id="teamMembers"></div>
         <div class="team-builder stack">
           <label>
             <div class="meta">Role</div>
@@ -744,7 +767,6 @@
           <div id="teamRequirements" class="meta"></div>
           <div id="teamPath" class="meta"></div>
         </div>
-        <div id="teamMembers"></div>
       </div>
     </div>
     <div id="workflowPage" class="page workflow-page">
@@ -935,7 +957,12 @@
       }
       const data = await api("/api/workflow");
       state.workflow = { steps: data.steps || [], edges: data.edges || [], path: data.path || "" };
-      renderWorkflow();
+      const changed = resolveAllOverlaps();
+      if (changed) {
+        await saveWorkflow();
+      } else {
+        renderWorkflow();
+      }
     }
 
     async function loadStatus() {
@@ -988,16 +1015,29 @@
       const roleSelect = $("teamRoleSelect");
       const agentSelect = $("teamAgentSelect");
       if (!roleSelect || !agentSelect) return;
-      roleSelect.innerHTML = state.roles.length ? state.roles.map(role => `
-        <option value="${escapeHtml(role.id)}">${escapeHtml(role.id)}</option>
-      `).join("") : `<option value="">No roles</option>`;
-      agentSelect.innerHTML = state.tools.length ? state.tools.map(tool => `
-        <option value="${escapeHtml(tool.agent_name)}">${escapeHtml(tool.agent_name)} - ${escapeHtml(tool.name)}</option>
-      `).join("") : `<option value="">No agents</option>`;
       const enabledRoles = new Set((state.team.members || [])
         .filter(member => member.enabled)
         .map(member => member.role_id));
       const missingRoles = REQUIRED_TEAM_ROLES.filter(roleId => !enabledRoles.has(roleId));
+      const prevRole = roleSelect.value;
+      roleSelect.innerHTML = state.roles.length ? state.roles.map(role => `
+        <option value="${escapeHtml(role.id)}">${escapeHtml(role.id)}</option>
+      `).join("") : `<option value="">No roles</option>`;
+      // Keep the user's selection across re-renders; otherwise suggest the
+      // first still-missing required role.
+      if (prevRole && state.roles.some(role => role.id === prevRole)) {
+        roleSelect.value = prevRole;
+      } else if (missingRoles.length && state.roles.some(role => role.id === missingRoles[0])) {
+        roleSelect.value = missingRoles[0];
+      }
+      const prevAgent = agentSelect.value;
+      const toolsSorted = [...state.tools].sort((a, b) => Number(b.installed) - Number(a.installed));
+      agentSelect.innerHTML = toolsSorted.length ? toolsSorted.map(tool => `
+        <option value="${escapeHtml(tool.agent_name)}">${escapeHtml(tool.agent_name)} - ${escapeHtml(tool.profile_name ? "Hermes" : tool.name)}${tool.installed ? "" : " (not installed)"}</option>
+      `).join("") : `<option value="">No agents</option>`;
+      if (prevAgent && state.tools.some(tool => tool.agent_name === prevAgent)) {
+        agentSelect.value = prevAgent;
+      }
       $("teamRequirements").textContent = missingRoles.length
         ? `required enabled roles missing: ${missingRoles.join(", ")}`
         : `required enabled roles present: ${REQUIRED_TEAM_ROLES.join(", ")}`;
@@ -1005,7 +1045,35 @@
       $("teamPath").textContent = state.team.path ? `config: ${state.team.path}` : "";
 
       const members = state.team.members || [];
-      $("teamMembers").innerHTML = members.length ? members.map((member, index) => `
+      // Group by role, ordered like the roles list; indexes stay pointed at
+      // the original members array so edit/remove handlers keep working.
+      const groups = new Map();
+      members.forEach((member, index) => {
+        const key = member.role_id || "unassigned";
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push({ member, index });
+      });
+      const roleOrder = state.roles.map(role => role.id);
+      const sortedRoleIds = [...groups.keys()].sort((a, b) => {
+        const ia = roleOrder.indexOf(a), ib = roleOrder.indexOf(b);
+        return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib) || a.localeCompare(b);
+      });
+      $("teamMembers").innerHTML = members.length ? sortedRoleIds.map(roleId => `
+        <div class="team-group">
+          <div class="team-group-head">
+            <span>${escapeHtml(roleId)}</span>
+            <span class="badge">${groups.get(roleId).length}</span>
+            ${REQUIRED_TEAM_ROLES.includes(roleId) ? `<span class="meta">required</span>` : ""}
+          </div>
+          ${groups.get(roleId).map(({ member, index }) => teamMemberHtml(member, index, groups.get(roleId).length > 1)).join("")}
+        </div>
+      `).join("") : `<div class="empty">No team members configured.</div>`;
+    }
+
+    // showExpertise: expertise only matters when a role has several agents
+    // competing for assignment, so single-agent roles hide the selector.
+    function teamMemberHtml(member, index, showExpertise) {
+      return `
         <div class="team-member ${member.enabled ? "" : "disabled"}">
           <div class="team-member-grid">
             <div>
@@ -1020,11 +1088,20 @@
                 `).join("")}
               </select>
             </label>
+            ${showExpertise ? `
             <label>
               <div class="meta">Expertise</div>
               <select onchange="updateTeamMember(${index}, 'expertise_level', this.value)">
                 ${[1, 2, 3, 4, 5].map(level => `
                   <option value="${level}" ${(member.expertise_level || 3) === level ? "selected" : ""}>L${level}</option>
+                `).join("")}
+              </select>
+            </label>` : `<div></div>`}
+            <label>
+              <div class="meta">Max tasks</div>
+              <select onchange="updateTeamMember(${index}, 'max_concurrent_tasks', this.value)">
+                ${[1, 2, 3].map(n => `
+                  <option value="${n}" ${(member.max_concurrent_tasks || 1) === n ? "selected" : ""}>${n}</option>
                 `).join("")}
               </select>
             </label>
@@ -1037,7 +1114,7 @@
           <input value="${escapeHtml((member.capabilities || []).join(', '))}" placeholder="capability subscriptions" onchange="updateTeamMember(${index}, 'capabilities', this.value)">
           <input value="${escapeHtml(member.notes || "")}" placeholder="notes" onchange="updateTeamMember(${index}, 'notes', this.value)">
         </div>
-      `).join("") : `<div class="empty">No team members configured.</div>`;
+      `;
     }
 
     function agentLabel(agentName) {
@@ -1058,6 +1135,11 @@
       const roleId = $("teamRoleSelect").value;
       const agentName = $("teamAgentSelect").value;
       if (!roleId || !agentName) return;
+      const existing = state.team.members || [];
+      if (existing.some(m => m.agent_name === agentName && m.role_id === roleId)) {
+        setStatus(`${agentName} already on the team as ${roleId}`, true);
+        return;
+      }
       state.team.members = [
         ...(state.team.members || []),
         {
@@ -1087,7 +1169,7 @@
     async function updateTeamMember(index, field, value) {
       const member = state.team.members[index];
       if (!member) return;
-      if (field === "expertise_level") {
+      if (field === "expertise_level" || field === "max_concurrent_tasks") {
         member[field] = Number(value);
       } else if (field === "enabled") {
         member[field] = Boolean(value);
@@ -1117,6 +1199,82 @@
 
     function wfById() {
       return Object.fromEntries((state.workflow.steps || []).map(s => [s.id, s]));
+    }
+
+    function resolveOverlap(draggedId, targetX, targetY, rects, gap = 20) {
+      const A = rects[draggedId];
+      if (!A) return { x: targetX, y: targetY };
+      const w = A.w;
+      const h = A.h;
+      const others = Object.values(rects).filter(r => r.id !== draggedId);
+      function overlapsAny(cx, cy) {
+        for (const r of others) {
+          if (cx + w + gap > r.x && cx < r.x + r.w + gap &&
+              cy + h + gap > r.y && cy < r.y + r.h + gap) {
+            return r;
+          }
+        }
+        return null;
+      }
+      const queue = [{ x: targetX, y: targetY }];
+      const visited = new Set();
+      visited.add(`${targetX},${targetY}`);
+      let iterations = 0;
+      const maxIterations = 200;
+      while (queue.length > 0 && iterations < maxIterations) {
+        iterations++;
+        queue.sort((a, b) => {
+          const distA = Math.pow(a.x - targetX, 2) + Math.pow(a.y - targetY, 2);
+          const distB = Math.pow(b.x - targetX, 2) + Math.pow(b.y - targetY, 2);
+          return distA - distB;
+        });
+        const curr = queue.shift();
+        const cx = Math.max(0, curr.x);
+        const cy = Math.max(0, curr.y);
+        const blocker = overlapsAny(cx, cy);
+        if (!blocker) {
+          return { x: cx, y: cy };
+        }
+        const options = [
+          { x: blocker.x - w - gap, y: cy },
+          { x: blocker.x + blocker.w + gap, y: cy },
+          { x: cx, y: blocker.y - h - gap },
+          { x: cx, y: blocker.y + blocker.h + gap }
+        ];
+        for (const opt of options) {
+          opt.x = Math.max(0, Math.round(opt.x));
+          opt.y = Math.max(0, Math.round(opt.y));
+          const key = `${opt.x},${opt.y}`;
+          if (!visited.has(key)) {
+            visited.add(key);
+            queue.push(opt);
+          }
+        }
+      }
+      return { x: targetX, y: targetY };
+    }
+
+    function resolveAllOverlaps() {
+      const steps = state.workflow.steps || [];
+      if (!steps.length) return false;
+      let changed = false;
+      for (let pass = 0; pass < 3; pass++) {
+        let passChanged = false;
+        const rects = wfNodeRects();
+        for (const step of steps) {
+          const resolved = resolveOverlap(step.id, step.x, step.y, rects);
+          if (resolved.x !== step.x || resolved.y !== step.y) {
+            step.x = resolved.x;
+            step.y = resolved.y;
+            rects[step.id].x = resolved.x;
+            rects[step.id].y = resolved.y;
+            passChanged = true;
+            changed = true;
+          }
+        }
+        if (!passChanged) break;
+      }
+      return changed;
     }
 
     // Assign each edge a port slot on both endpoints so a node with several
@@ -1260,6 +1418,12 @@
                     </div>
                     <div class="workflow-node-body">
                       <label>
+                        <div class="meta">name</div>
+                        <input type="text" data-name-input value="${escapeHtml(step.name || "")}"
+                          onchange="updateWorkflowStep('${escapeHtml(step.id)}', 'name', this.value)"
+                          onkeydown="if (event.key === 'Enter') this.blur()">
+                      </label>
+                      <label>
                         <div class="meta">role</div>
                         <select onchange="updateWorkflowStep('${escapeHtml(step.id)}', 'role_id', this.value)">
                           ${state.roles.map(role => `
@@ -1393,6 +1557,13 @@
       if (!drag) return;
       if (drag.type === "node") {
         if (!drag.moved) { drawEdges(); return; }
+        const step = wfById()[drag.id];
+        if (step) {
+          const rects = wfNodeRects();
+          const resolved = resolveOverlap(drag.id, step.x, step.y, rects);
+          step.x = resolved.x;
+          step.y = resolved.y;
+        }
         run(async () => { await saveWorkflow(); setStatus("Workflow layout saved"); });
       } else if (drag.type === "edge") {
         const target = document.elementFromPoint(event.clientX, event.clientY);
@@ -1477,24 +1648,44 @@
     async function addWorkflowStep() {
       const roleId = (state.roles[0] || {}).id || "hub";
       const steps = state.workflow.steps || [];
-      // Place the new node just right of the current rightmost node.
-      const rightmost = steps.reduce((m, s) => Math.max(m, s.x), 0);
-      state.workflow.steps = [
-        ...steps,
-        {
-          id: "step-" + Date.now().toString(36),
-          name: "New Step",
-          role_id: roleId,
-          task_status: "created",
-          required: false,
-          x: steps.length ? rightmost + 320 : 40,
-          y: 60
-        }
-      ];
+      // Place the new node at the center of the visible canvas area so it
+      // appears where the user is looking, then open its name for editing.
+      const canvas = $("wfCanvas");
+      let newX = 40, newY = 60;
+      if (canvas) {
+        newX = Math.max(0, Math.round(canvas.scrollLeft + canvas.clientWidth / 2 - WF_NODE_W / 2));
+        newY = Math.max(0, Math.round(canvas.scrollTop + canvas.clientHeight / 2 - 120));
+      }
+      const newId = "step-" + Date.now().toString(36);
+      const newStep = {
+        id: newId,
+        name: "New Step",
+        role_id: roleId,
+        task_status: "created",
+        required: false,
+        x: newX,
+        y: newY
+      };
+      state.workflow.steps = [...steps, newStep];
+      const rects = wfNodeRects();
+      rects[newId] = { id: newId, x: newX, y: newY, w: WF_NODE_W, h: 240 };
+      const resolved = resolveOverlap(newId, newX, newY, rects);
+      newStep.x = resolved.x;
+      newStep.y = resolved.y;
       await run(async () => {
         await saveWorkflow();
         setStatus("Workflow updated");
       });
+      // saveWorkflow re-rendered the canvas; put the new card's name into
+      // edit mode so it can be renamed immediately.
+      const input = document.querySelector(
+        `.workflow-node[data-id="${CSS.escape(newId)}"] input[data-name-input]`
+      );
+      if (input) {
+        input.scrollIntoView({ block: "center", inline: "center" });
+        input.focus();
+        input.select();
+      }
     }
 
     async function removeWorkflowStep(id) {
@@ -1899,11 +2090,35 @@
       }
     }
 
-    $("refreshTools").addEventListener("click", () => run(refreshWorkspace));
-    $("refreshTeam").addEventListener("click", () => run(loadTeam));
-    $("refreshWorkflow").addEventListener("click", () => run(loadWorkflow));
-    $("refreshRoles").addEventListener("click", () => run(loadRoles));
-    $("refreshTasks").addEventListener("click", () => run(loadTasks));
+    // Per-page refresh: each button reloads its page's data plus whatever
+    // that page's selects depend on, with a spinner while in flight.
+    function wireRefresh(id, loader) {
+      const button = $(id);
+      button.classList.add("refresh-btn");
+      button.addEventListener("click", async () => {
+        if (button.disabled) return;
+        button.disabled = true;
+        button.classList.add("refreshing");
+        const started = Date.now();
+        try {
+          await loader();
+          setStatus("Refreshed");
+        } catch (error) {
+          setStatus(error.message, true);
+        } finally {
+          // Keep the spinner visible long enough to register as feedback.
+          const remaining = 400 - (Date.now() - started);
+          if (remaining > 0) await new Promise(resolve => setTimeout(resolve, remaining));
+          button.classList.remove("refreshing");
+          button.disabled = false;
+        }
+      });
+    }
+    wireRefresh("refreshTools", async () => { await loadProjects(); await loadStatus(); await loadTools(); });
+    wireRefresh("refreshTeam", async () => { await loadRoles(); await loadTools(); await loadTeam(); });
+    wireRefresh("refreshWorkflow", async () => { await loadRoles(); await loadWorkflow(); });
+    wireRefresh("refreshRoles", loadRoles);
+    wireRefresh("refreshTasks", loadTasks);
     $("addTeamMember").addEventListener("click", addTeamMember);
     $("addWorkflowStep").addEventListener("click", addWorkflowStep);
     $("autoArrangeWorkflow").addEventListener("click", autoArrangeWorkflow);

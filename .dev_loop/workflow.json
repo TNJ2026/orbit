@@ -7,7 +7,7 @@
       "task_status": "created",
       "required": true,
       "x": 40.0,
-      "y": 160.0
+      "y": 40.0
     },
     {
       "id": "product_design",
@@ -15,17 +15,17 @@
       "role_id": "product_designer",
       "task_status": "assigned",
       "required": true,
-      "x": 360.0,
-      "y": 160.0
+      "x": 404.0,
+      "y": 19.0
     },
     {
       "id": "ui_design",
       "name": "UI Design",
       "role_id": "ui_designer",
       "task_status": "assigned",
-      "required": false,
-      "x": 700.0,
-      "y": 40.0
+      "required": true,
+      "x": 744.0,
+      "y": 50.0
     },
     {
       "id": "architecture",
@@ -33,8 +33,8 @@
       "role_id": "architect",
       "task_status": "assigned",
       "required": true,
-      "x": 700.0,
-      "y": 300.0
+      "x": 840.0,
+      "y": 416.0
     },
     {
       "id": "implement",
@@ -42,17 +42,8 @@
       "role_id": "implementer",
       "task_status": "in_progress",
       "required": true,
-      "x": 1085.0,
-      "y": 531.0
-    },
-    {
-      "id": "test",
-      "name": "Test",
-      "role_id": "tester",
-      "task_status": "testing",
-      "required": false,
-      "x": 1396.0,
-      "y": 303.0
+      "x": 1173.0,
+      "y": 291.0
     },
     {
       "id": "review",
@@ -60,8 +51,8 @@
       "role_id": "reviewer",
       "task_status": "replied",
       "required": true,
-      "x": 1703.0,
-      "y": 584.0
+      "x": 1502.0,
+      "y": 46.0
     },
     {
       "id": "accept",
@@ -69,8 +60,17 @@
       "role_id": "hub",
       "task_status": "accepted",
       "required": true,
-      "x": 2012.0,
-      "y": 289.0
+      "x": 2119.0,
+      "y": 355.0
+    },
+    {
+      "id": "test",
+      "name": "Test",
+      "role_id": "tester",
+      "task_status": "testing",
+      "required": true,
+      "x": 1808.0,
+      "y": 126.0
     }
   ],
   "edges": [
@@ -95,20 +95,16 @@
       "to": "implement"
     },
     {
-      "from": "implement",
+      "from": "review",
       "to": "test"
     },
     {
-      "from": "test",
+      "from": "implement",
       "to": "review"
     },
     {
-      "from": "review",
+      "from": "test",
       "to": "accept"
-    },
-    {
-      "from": "review",
-      "to": "implement"
     }
   ]
 }

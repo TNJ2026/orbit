@@ -15,6 +15,7 @@
 2. 循环 `check_inbox(agent="security_auditor", wait_seconds=30)`。
 3. 收到任务：分析目标代码（或审查其 diff/提交） → 运行安全检测/凭证扫描 → 将安全审计报告写到目录 `reports/security/`（例如 `reports/security/<audit_id>.md`） → 回复「安全评估结论（通过/发现高危漏洞等） + 报告路径」，带 `reply_to`，然后 ack。
 4. 任务描述不清或缺少待审计的代码范围：不要猜，回复提问并 ack。
+5. 遇到无法自行决定或需要选择的问题（如风险等级判定、是否阻断发布）：将当前任务置为 blocked 状态，回复说明卡点与候选项，等待确认后再继续。
 
 ## 分寸
 

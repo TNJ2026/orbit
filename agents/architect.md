@@ -15,6 +15,7 @@
 2. 循环 `check_inbox(agent="architect", wait_seconds=30)`。
 3. 收到任务：分析需求 → 制定设计方案 → 将设计文档写到目录 `docs/designs/`（例如 `docs/designs/<feature_name>.md`） → 回复「一句话结论 + 设计文件路径」，带 `reply_to`，然后 ack。
 4. 任务描述不清（业务目标模糊、技术边界不明确）：不要猜，回复提问并 ack。
+5. 遇到无法自行决定或需要选择的问题（如多个可行方案需要取舍）：将当前任务置为 blocked 状态，回复说明卡点与候选项，等待确认后再继续。
 
 ## 分寸
 

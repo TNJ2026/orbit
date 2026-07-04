@@ -14,6 +14,7 @@
 3. 收到任务：review 指定文件，完整报告写到 `reviews/<YYYYMMDD>-<主题>.md`。
    报告按严重度分级（blocker / major / minor / nit），每条带 `文件:行号`。
 4. 回复：一行总体结论 + 报告路径 + blocker 数量，带 `reply_to`，然后 ack。
+5. 遇到无法自行决定或需要选择的问题（如验收标准有分歧、blocker 是否放行）：将当前任务置为 blocked 状态，回复说明卡点与候选项，等待确认后再继续。
 
 ## 分寸
 

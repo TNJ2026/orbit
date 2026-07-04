@@ -15,6 +15,7 @@
 2. 循环 `check_inbox(agent="product_designer", wait_seconds=30)`。
 3. 收到任务：梳理需求 → 将产品文档写到 `docs/product/`（例如 `docs/product/<feature_name>.md`） → 回复「一句话结论 + 文档路径」，带 `reply_to`，然后 ack。
 4. 需求模糊（目标用户不清、成功标准缺失）：不要猜，回复提问并 ack。
+5. 遇到无法自行决定或需要选择的问题（如功能范围取舍、优先级冲突）：将当前任务置为 blocked 状态，回复说明卡点与候选项，等待确认后再继续。
 
 ## 分寸
 

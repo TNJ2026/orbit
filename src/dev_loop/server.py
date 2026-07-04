@@ -68,13 +68,6 @@ _AGENT_TOOL_CANDIDATES = [
         "agent_name": "hermes",
         "description": "Hermes agent CLI",
     },
-    {
-        "id": "openclaw",
-        "name": "OpenClaw",
-        "command": "openclaw",
-        "agent_name": "openclaw",
-        "description": "OpenClaw agent CLI",
-    },
 ]
 _TASK_RUN_FILES = {
     "events": "events.jsonl",
@@ -415,7 +408,7 @@ def _normalize_team_member(member: Any) -> dict[str, Any]:
         "role_id": role_id,
         "enabled": bool(member.get("enabled", True)),
         "expertise_level": max(1, min(expertise_level, 5)),
-        "max_concurrent_tasks": max(1, max_concurrent_tasks),
+        "max_concurrent_tasks": max(1, min(max_concurrent_tasks, 3)),
         "capabilities": [capability.strip() for capability in capabilities if capability.strip()],
         "notes": str(member.get("notes", "")).strip(),
     }
@@ -451,10 +444,21 @@ def required_expertise_for_task(task: dict[str, Any]) -> int:
     return max(1, min(required, 5))
 
 
+def _missing_team_roles(members: list[dict[str, Any]]) -> list[str]:
+    enabled_roles = {
+        member["role_id"] for member in members if member.get("enabled", True)
+    }
+    return sorted(REQUIRED_TEAM_ROLES - enabled_roles)
+
+
 def read_team_config(project_root: str | None = None) -> dict[str, Any]:
     path = _team_config_path(project_root)
     if not path.exists():
-        return {"members": [], "path": str(path)}
+        return {
+            "members": [],
+            "path": str(path),
+            "missing_roles": sorted(REQUIRED_TEAM_ROLES),
+        }
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -462,9 +466,11 @@ def read_team_config(project_root: str | None = None) -> dict[str, Any]:
     members = data.get("members", []) if isinstance(data, dict) else []
     if not isinstance(members, list):
         raise InvalidInputError("team members must be a list")
+    normalized = [_normalize_team_member(member) for member in members]
     return {
-        "members": [_normalize_team_member(member) for member in members],
+        "members": normalized,
         "path": str(path),
+        "missing_roles": _missing_team_roles(normalized),
     }
 
 
@@ -474,14 +480,10 @@ def write_team_config(
     if not isinstance(members, list):
         raise InvalidInputError("members must be a list")
     normalized = [_normalize_team_member(member) for member in members]
-    enabled_roles = {
-        member["role_id"] for member in normalized if member.get("enabled", True)
-    }
-    missing_roles = sorted(REQUIRED_TEAM_ROLES - enabled_roles)
-    if missing_roles:
-        raise InvalidInputError(
-            "team is missing required enabled roles: " + ", ".join(missing_roles)
-        )
+    # Missing core roles are reported, not rejected: a hard error here made
+    # it impossible to build a team up one member at a time. Readiness is
+    # checked where work actually starts.
+    missing_roles = _missing_team_roles(normalized)
     path = _team_config_path(project_root)
     project_root_path = _project_root(project_root)
     resolved_path = path.resolve()
@@ -493,7 +495,7 @@ def write_team_config(
         json.dumps(data, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
-    return {"members": normalized, "path": str(path)}
+    return {"members": normalized, "path": str(path), "missing_roles": missing_roles}
 
 
 def rank_assignment_candidates(
