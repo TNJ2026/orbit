@@ -125,6 +125,117 @@ class StoreTests(unittest.TestCase):
         accepted = store.list_messages(agent="b", kind="task", task_status="accepted")
         self.assertEqual([task_id], [m["id"] for m in accepted])
 
+    def test_task_message_creates_executable_task(self):
+        store = self.make_store()
+        self.register_pair(store)
+        [message_id] = store.send_message(
+            "a",
+            "b",
+            "review auth changes",
+            kind="task",
+            title="Review auth flow",
+        )
+
+        [task] = store.list_tasks()
+        self.assertEqual(message_id, task["source_message_id"])
+        self.assertEqual("Review auth flow", task["title"])
+        self.assertEqual("review auth changes", task["content"])
+        self.assertEqual("a", task["sender"])
+        self.assertEqual("b", task["assignee"])
+        self.assertEqual("b", task["recipient"])
+        self.assertEqual("created", task["task_status"])
+        self.assertEqual("implementer", task["role_required"])
+        self.assertEqual("normal", task["importance"])
+        self.assertEqual("medium", task["size"])
+        self.assertEqual("medium", task["risk"])
+        self.assertEqual([], task["required_capabilities"])
+        self.assertTrue(task["exclusive_workspace"])
+
+    def test_task_metadata_can_be_updated_for_assignment(self):
+        store = self.make_store()
+        self.register_pair(store)
+        store.send_message("a", "b", "migrate schema", kind="task")
+        [task] = store.list_tasks()
+
+        updated = store.update_task_metadata(
+            task["id"],
+            role_required="implementer",
+            importance="critical",
+            size="large",
+            risk="high",
+            required_capabilities=["python", "sqlite"],
+            exclusive_workspace=False,
+        )
+
+        self.assertEqual("critical", updated["importance"])
+        self.assertEqual("large", updated["size"])
+        self.assertEqual("high", updated["risk"])
+        self.assertEqual(["python", "sqlite"], updated["required_capabilities"])
+        self.assertFalse(updated["exclusive_workspace"])
+
+    def test_task_engine_status_syncs_back_to_source_message(self):
+        store = self.make_store()
+        self.register_pair(store)
+        [message_id] = store.send_message("a", "b", "run tests", kind="task")
+        [task] = store.list_tasks()
+
+        self.assertTrue(store.update_task_item_status(task["id"], "testing"))
+        self.assertEqual("testing", store.list_tasks()[0]["task_status"])
+        self.assertEqual("testing", store.get_message(message_id)["task_status"])
+
+    def test_message_task_status_syncs_to_task_engine(self):
+        store = self.make_store()
+        self.register_pair(store)
+        [message_id] = store.send_message("a", "b", "fix lint", kind="task")
+
+        self.assertTrue(store.update_task_status(message_id, "bugfixing"))
+        [task] = store.list_tasks(status="bugfixing", assignee="b")
+        self.assertEqual(message_id, task["source_message_id"])
+        self.assertEqual("bugfixing", task["task_status"])
+
+    def test_task_runs_track_execution_attempts(self):
+        store = self.make_store()
+        self.register_pair(store)
+        store.send_message("a", "b", "run test suite", kind="task")
+        [task] = store.list_tasks()
+
+        first = store.create_task_run(task["id"], "/tmp/task-1/run-001", "codex")
+        second = store.create_task_run(task["id"], "/tmp/task-1/run-002", "codex")
+
+        self.assertEqual(1, first["attempt"])
+        self.assertEqual(2, second["attempt"])
+        self.assertEqual("running", first["status"])
+        self.assertEqual("/tmp/task-1/run-001", first["log_dir"])
+        self.assertEqual([2, 1], [run["attempt"] for run in store.list_task_runs(task["id"])])
+
+        finished = store.finish_task_run(first["id"], "failed", 1)
+        self.assertEqual("failed", finished["status"])
+        self.assertEqual(1, finished["exit_code"])
+        self.assertIsNotNone(finished["finished_at"])
+
+    def test_task_run_log_dir_can_be_set_after_attempt_is_reserved(self):
+        store = self.make_store()
+        self.register_pair(store)
+        store.send_message("a", "b", "collect logs", kind="task")
+        [task] = store.list_tasks()
+
+        run = store.create_task_run(task["id"], worker="tester")
+        updated = store.update_task_run_log_dir(run["id"], "/tmp/task-1/run-001")
+
+        self.assertEqual("/tmp/task-1/run-001", updated["log_dir"])
+        self.assertEqual("tester", updated["worker"])
+
+    def test_active_task_counts_tracks_running_workers(self):
+        store = self.make_store()
+        self.register_pair(store)
+        store.send_message("a", "b", "run test suite", kind="task")
+        [task] = store.list_tasks()
+        running = store.create_task_run(task["id"], worker="codex")
+        done = store.create_task_run(task["id"], worker="codex")
+        store.finish_task_run(done["id"], "completed", 0)
+
+        self.assertEqual({"codex": 1}, store.active_task_counts())
+
     def test_task_metadata_is_returned_from_inbox_and_thread(self):
         store = self.make_store()
         self.register_pair(store)
@@ -182,6 +293,53 @@ class StoreTests(unittest.TestCase):
             }
             self.assertIn("leased_until", columns)
             self.assertIn("task_status", columns)
+            store.close()
+
+    def test_old_task_messages_are_backfilled_into_task_engine(self):
+        with TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "messages.db"
+            conn = sqlite3.connect(db_path)
+            conn.executescript(
+                """
+                CREATE TABLE agents (
+                    name          TEXT PRIMARY KEY,
+                    description   TEXT NOT NULL DEFAULT '',
+                    registered_at TEXT NOT NULL,
+                    last_seen     TEXT NOT NULL
+                );
+                CREATE TABLE messages (
+                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    sender     TEXT NOT NULL,
+                    recipient  TEXT NOT NULL,
+                    content    TEXT NOT NULL,
+                    kind       TEXT NOT NULL DEFAULT 'message',
+                    title      TEXT NOT NULL DEFAULT '',
+                    task_status TEXT NOT NULL DEFAULT '',
+                    reply_to   INTEGER,
+                    created_at TEXT NOT NULL,
+                    read_at    TEXT,
+                    leased_until TEXT,
+                    lease_owner TEXT,
+                    lease_token TEXT,
+                    delivery_count INTEGER NOT NULL DEFAULT 0
+                );
+                INSERT INTO agents (name, description, registered_at, last_seen)
+                VALUES ('a', 'agent a', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00'),
+                       ('b', 'agent b', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00');
+                INSERT INTO messages (sender, recipient, content, kind, title, task_status, created_at)
+                VALUES ('a', 'b', 'legacy task', 'task', 'Legacy Task', 'assigned', '2026-01-01T00:00:00+00:00'),
+                       ('a', 'b', 'plain message', 'message', '', '', '2026-01-01T00:00:00+00:00');
+                """
+            )
+            conn.close()
+
+            store = Store(db_path)
+            tasks = store.list_tasks()
+
+            self.assertEqual(1, len(tasks))
+            self.assertEqual("Legacy Task", tasks[0]["title"])
+            self.assertEqual("legacy task", tasks[0]["content"])
+            self.assertEqual("assigned", tasks[0]["task_status"])
             store.close()
 
     def test_project_db_path_is_stable_and_project_scoped(self):

@@ -1,0 +1,114 @@
+{
+  "steps": [
+    {
+      "id": "intake",
+      "name": "Intake",
+      "role_id": "hub",
+      "task_status": "created",
+      "required": true,
+      "x": 40.0,
+      "y": 160.0
+    },
+    {
+      "id": "product_design",
+      "name": "Product Design",
+      "role_id": "product_designer",
+      "task_status": "assigned",
+      "required": true,
+      "x": 360.0,
+      "y": 160.0
+    },
+    {
+      "id": "ui_design",
+      "name": "UI Design",
+      "role_id": "ui_designer",
+      "task_status": "assigned",
+      "required": false,
+      "x": 700.0,
+      "y": 40.0
+    },
+    {
+      "id": "architecture",
+      "name": "Architecture",
+      "role_id": "architect",
+      "task_status": "assigned",
+      "required": true,
+      "x": 700.0,
+      "y": 300.0
+    },
+    {
+      "id": "implement",
+      "name": "Implement",
+      "role_id": "implementer",
+      "task_status": "in_progress",
+      "required": true,
+      "x": 1085.0,
+      "y": 531.0
+    },
+    {
+      "id": "test",
+      "name": "Test",
+      "role_id": "tester",
+      "task_status": "testing",
+      "required": false,
+      "x": 1396.0,
+      "y": 303.0
+    },
+    {
+      "id": "review",
+      "name": "Review",
+      "role_id": "reviewer",
+      "task_status": "replied",
+      "required": true,
+      "x": 1703.0,
+      "y": 584.0
+    },
+    {
+      "id": "accept",
+      "name": "Accept",
+      "role_id": "hub",
+      "task_status": "accepted",
+      "required": true,
+      "x": 2012.0,
+      "y": 289.0
+    }
+  ],
+  "edges": [
+    {
+      "from": "intake",
+      "to": "product_design"
+    },
+    {
+      "from": "product_design",
+      "to": "ui_design"
+    },
+    {
+      "from": "product_design",
+      "to": "architecture"
+    },
+    {
+      "from": "ui_design",
+      "to": "implement"
+    },
+    {
+      "from": "architecture",
+      "to": "implement"
+    },
+    {
+      "from": "implement",
+      "to": "test"
+    },
+    {
+      "from": "test",
+      "to": "review"
+    },
+    {
+      "from": "review",
+      "to": "accept"
+    },
+    {
+      "from": "review",
+      "to": "implement"
+    }
+  ]
+}

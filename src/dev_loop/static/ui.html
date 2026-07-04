@@ -102,6 +102,16 @@
       overflow: auto;
       background: var(--panel);
     }
+    .team-page {
+      height: 100%;
+      overflow: auto;
+      background: var(--panel);
+    }
+    .workflow-page {
+      height: 100%;
+      overflow: auto;
+      background: var(--panel);
+    }
     .roles-page {
       height: 100%;
       overflow: auto;
@@ -111,6 +121,92 @@
       height: 100%;
       overflow: auto;
       background: var(--panel);
+    }
+    .tasks-layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(320px, 0.32fr);
+      height: calc(100vh - 102px);
+      min-height: 460px;
+      background: var(--bg);
+    }
+    .tasks-layout.details-collapsed {
+      grid-template-columns: minmax(0, 1fr) 44px;
+    }
+    .tasks-list {
+      min-width: 0;
+      overflow: auto;
+    }
+    .task-details {
+      min-width: 0;
+      overflow: auto;
+      border-left: 1px solid var(--line);
+      background: var(--panel);
+      padding: 14px 16px;
+    }
+    .tasks-layout.details-collapsed .task-details {
+      padding: 10px 6px;
+      overflow: hidden;
+    }
+    .task-details-toggle {
+      width: 100%;
+      min-height: 28px;
+      margin-bottom: 10px;
+    }
+    .tasks-layout.details-collapsed .task-detail-content {
+      display: none;
+    }
+    .tasks-layout.details-collapsed .task-details-toggle {
+      margin-bottom: 0;
+    }
+    .task-detail-title {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 10px;
+      font-weight: 650;
+    }
+    .task-detail-body {
+      margin-top: 12px;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      color: #2f383c;
+      font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    .task-runs {
+      margin-top: 16px;
+      border-top: 1px solid var(--line);
+      padding-top: 12px;
+      display: grid;
+      gap: 10px;
+    }
+    .task-run {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 9px;
+      background: #fbfbf9;
+    }
+    .task-run.active {
+      border-color: #9fc7b9;
+      background: #eef5f1;
+    }
+    .run-files {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
+    }
+    .run-file-content {
+      max-height: 300px;
+      overflow: auto;
+      margin: 8px 0 0;
+      padding: 9px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #111719;
+      color: #dce6e2;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     }
     .kanban-column.goal-column {
       background: #eef7f4;
@@ -163,7 +259,7 @@
       display: flex;
       gap: 16px;
       padding: 16px;
-      height: calc(100vh - 102px);
+      min-height: 100%;
       overflow-x: auto;
       background: var(--bg);
     }
@@ -337,6 +433,156 @@
       color: #2f383c;
       font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     }
+    .team-layout {
+      display: grid;
+      grid-template-columns: minmax(240px, 0.34fr) minmax(0, 1fr);
+      min-height: calc(100vh - 102px);
+    }
+    .team-builder {
+      border-right: 1px solid var(--line);
+      background: #fbfbf9;
+    }
+    .team-member {
+      border-bottom: 1px solid var(--line);
+      padding: 12px;
+      display: grid;
+      gap: 8px;
+    }
+    .team-member.disabled {
+      opacity: 0.62;
+    }
+    .team-member-grid {
+      display: grid;
+      grid-template-columns: minmax(140px, 1fr) minmax(120px, 0.7fr) 92px 120px auto;
+      gap: 8px;
+      align-items: center;
+    }
+    .team-member-grid input[type="checkbox"] {
+      width: auto;
+    }
+    .workflow-canvas {
+      position: relative;
+      min-height: calc(100vh - 150px);
+      overflow: auto;
+      padding: 0;
+      background:
+        radial-gradient(circle, rgba(29, 35, 38, 0.10) 1px, transparent 1px) 0 0 / 18px 18px,
+        #eef1ef;
+    }
+    .workflow-graph {
+      position: relative;
+      min-width: 100%;
+      min-height: calc(100vh - 150px);
+    }
+    .workflow-edges {
+      position: absolute;
+      left: 0;
+      top: 0;
+      pointer-events: none;
+      overflow: visible;
+      z-index: 0;
+    }
+    .wf-edge {
+      fill: none;
+      stroke: #6fae98;
+      stroke-width: 2.5;
+      pointer-events: stroke;
+      cursor: pointer;
+    }
+    .wf-edge:hover { stroke: var(--danger); stroke-width: 3.5; }
+    .wf-edge.temp {
+      stroke: var(--accent);
+      stroke-dasharray: 5 4;
+      pointer-events: none;
+    }
+    .workflow-nodes {
+      position: relative;
+      z-index: 1;
+    }
+    .workflow-node-wrap {
+      position: absolute;
+      left: 0;
+      top: 0;
+    }
+    .workflow-node {
+      position: relative;
+      width: 260px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: var(--panel);
+      color: var(--ink);
+      box-shadow: 0 6px 16px rgba(29, 35, 38, 0.08);
+    }
+    .workflow-node.required {
+      border-color: #9fc7b9;
+    }
+    .workflow-node.dragging {
+      opacity: 0.75;
+      box-shadow: 0 12px 28px rgba(29, 35, 38, 0.22);
+    }
+    .workflow-node.drop-target {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 2px rgba(37, 108, 90, 0.28);
+    }
+    .workflow-node-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      padding: 9px 10px;
+      border-bottom: 1px solid var(--line);
+      background: #eef5f1;
+      border-top-left-radius: 7px;
+      border-top-right-radius: 7px;
+      cursor: grab;
+    }
+    .workflow-node-head:active { cursor: grabbing; }
+    .workflow-node-head .grip {
+      color: var(--muted);
+      font-size: 13px;
+      letter-spacing: 1px;
+      user-select: none;
+    }
+    .workflow-node-body {
+      display: grid;
+      gap: 8px;
+      padding: 10px;
+    }
+    .workflow-node input,
+    .workflow-node select {
+      border-color: var(--line);
+      background: #fff;
+      color: var(--ink);
+    }
+    .workflow-node .meta {
+      color: var(--muted);
+    }
+    .workflow-port {
+      position: absolute;
+      top: 36px;
+      width: 14px;
+      height: 14px;
+      border-radius: 999px;
+      border: 2px solid #6fae98;
+      background: #fff;
+      z-index: 2;
+      touch-action: none;
+    }
+    .workflow-port.in { left: -7px; }
+    .workflow-port.out { right: -7px; cursor: crosshair; }
+    .workflow-port.out:hover { background: var(--accent); }
+    .workflow-node.drop-target .workflow-port.in {
+      background: var(--accent);
+      border-color: var(--accent);
+    }
+    .workflow-required {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .workflow-required input[type="checkbox"] {
+      width: auto;
+    }
     .preview { color: #3f494e; }
     .badge {
       display: inline-flex;
@@ -403,9 +649,27 @@
         height: auto;
         overflow: visible;
       }
+      .tasks-layout {
+        grid-template-columns: 1fr;
+        height: auto;
+      }
+      .task-details {
+        border-left: 0;
+        border-top: 1px solid var(--line);
+      }
       .mailbox-page.active {
         grid-template-columns: 1fr;
         height: auto;
+      }
+      .team-layout {
+        grid-template-columns: 1fr;
+      }
+      .team-builder {
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+      }
+      .team-member-grid {
+        grid-template-columns: 1fr;
       }
       .brand {
         width: 100%;
@@ -435,8 +699,10 @@
   <main id="mainView">
     <aside class="side-menu" aria-label="View">
       <button id="tasksTab" class="menu-button active" type="button">Tasks</button>
+      <button id="teamTab" class="menu-button" type="button">Team</button>
+      <button id="workflowTab" class="menu-button" type="button">Workflow</button>
       <button id="rolesTab" class="menu-button" type="button">Roles</button>
-      <button id="toolsTab" class="menu-button" type="button">Agent Tools</button>
+      <button id="toolsTab" class="menu-button" type="button">Agents</button>
     </aside>
     <div class="workspace">
     <div id="tasksPage" class="page tasks-page active">
@@ -444,14 +710,54 @@
         <h2>Development Tasks</h2>
         <button id="refreshTasks">Refresh</button>
       </div>
-      <div id="tasksList" class="tasks-list"></div>
+      <div id="tasksLayout" class="tasks-layout">
+        <div id="tasksList" class="tasks-list"></div>
+        <aside id="taskDetails" class="task-details empty">
+          <button id="toggleTaskDetails" class="task-details-toggle" type="button">›</button>
+          <div id="taskDetailContent" class="task-detail-content">No task selected.</div>
+        </aside>
+      </div>
     </div>
     <div id="toolsPage" class="page tools-page">
       <div class="pane-head">
-        <h2>Agent Tools</h2>
+        <h2>Agents</h2>
         <button id="refreshTools">Refresh</button>
       </div>
       <div id="agentTools" class="tools-grid"></div>
+    </div>
+    <div id="teamPage" class="page team-page">
+      <div class="pane-head">
+        <h2>Team</h2>
+        <button id="refreshTeam">Refresh</button>
+      </div>
+      <div class="team-layout">
+        <div class="team-builder stack">
+          <label>
+            <div class="meta">Role</div>
+            <select id="teamRoleSelect"></select>
+          </label>
+          <label>
+            <div class="meta">Agent</div>
+            <select id="teamAgentSelect"></select>
+          </label>
+          <button id="addTeamMember" class="primary" type="button">Add to Team</button>
+          <div id="teamRequirements" class="meta"></div>
+          <div id="teamPath" class="meta"></div>
+        </div>
+        <div id="teamMembers"></div>
+      </div>
+    </div>
+    <div id="workflowPage" class="page workflow-page">
+      <div class="pane-head">
+        <h2>Workflow</h2>
+        <div class="row">
+          <button id="addWorkflowStep" type="button">Add Step</button>
+          <button id="autoArrangeWorkflow" type="button" title="Re-layout steps left-to-right to untangle connections">Auto Arrange</button>
+          <button id="refreshWorkflow" type="button">Refresh</button>
+        </div>
+      </div>
+      <div id="workflowPath" class="meta" style="padding: 10px 12px;"></div>
+      <div id="workflowSteps"></div>
     </div>
     <div id="rolesPage" class="page roles-page">
       <div class="pane-head">
@@ -484,7 +790,15 @@
       apiBase: "",
       tools: [],
       roles: [],
-      tasks: []
+      team: { members: [], path: "" },
+      workflow: { steps: [], edges: [], path: "" },
+      tasks: [],
+      selectedTaskId: null,
+      taskRuns: [],
+      selectedRunId: null,
+      runFiles: {},
+      assignmentCandidates: null,
+      taskDetailsCollapsed: localStorage.getItem("devloop-task-details-collapsed") !== "0"
     };
 
     const $ = (id) => document.getElementById(id);
@@ -492,12 +806,18 @@
     function setPage(page) {
       const tasks = page === "tasks";
       const tools = page === "tools";
+      const team = page === "team";
+      const workflow = page === "workflow";
       $("tasksPage").classList.toggle("active", tasks);
       $("toolsPage").classList.toggle("active", tools);
-      $("rolesPage").classList.toggle("active", !tasks && !tools);
+      $("teamPage").classList.toggle("active", team);
+      $("workflowPage").classList.toggle("active", workflow);
+      $("rolesPage").classList.toggle("active", !tasks && !tools && !team && !workflow);
       $("tasksTab").classList.toggle("active", tasks);
       $("toolsTab").classList.toggle("active", tools);
-      $("rolesTab").classList.toggle("active", !tasks && !tools);
+      $("teamTab").classList.toggle("active", team);
+      $("workflowTab").classList.toggle("active", workflow);
+      $("rolesTab").classList.toggle("active", !tasks && !tools && !team && !workflow);
     }
 
     async function api(path, options = {}, base = state.apiBase) {
@@ -525,10 +845,35 @@
     function clearWorkspace() {
       state.tools = [];
       state.roles = [];
+      state.team = { members: [], path: "" };
+      state.workflow = { steps: [], edges: [], path: "" };
       state.tasks = [];
+      state.selectedTaskId = null;
+      state.taskRuns = [];
+      state.selectedRunId = null;
+      state.runFiles = {};
+      state.assignmentCandidates = null;
       renderTools();
       renderRoles();
+      renderTeam();
+      renderWorkflow();
       renderTasks();
+      renderTaskDetails(null);
+    }
+
+    function applyTaskDetailsCollapsed() {
+      $("tasksLayout").classList.toggle("details-collapsed", state.taskDetailsCollapsed);
+      $("toggleTaskDetails").textContent = state.taskDetailsCollapsed ? "‹" : "›";
+      $("toggleTaskDetails").title = state.taskDetailsCollapsed ? "Expand details" : "Collapse details";
+      localStorage.setItem(
+        "devloop-task-details-collapsed",
+        state.taskDetailsCollapsed ? "1" : "0"
+      );
+    }
+
+    function toggleTaskDetails() {
+      state.taskDetailsCollapsed = !state.taskDetailsCollapsed;
+      applyTaskDetailsCollapsed();
     }
 
     function setStatus(text, isError = false) {
@@ -571,6 +916,28 @@
       renderRoles();
     }
 
+    async function loadTeam() {
+      if (!state.apiBase) {
+        state.team = { members: [], path: "" };
+        renderTeam();
+        return;
+      }
+      const data = await api("/api/team");
+      state.team = { members: data.members || [], path: data.path || "" };
+      renderTeam();
+    }
+
+    async function loadWorkflow() {
+      if (!state.apiBase) {
+        state.workflow = { steps: [], edges: [], path: "" };
+        renderWorkflow();
+        return;
+      }
+      const data = await api("/api/workflow");
+      state.workflow = { steps: data.steps || [], edges: data.edges || [], path: data.path || "" };
+      renderWorkflow();
+    }
+
     async function loadStatus() {
       if (!state.apiBase) {
         $("dbPath").textContent = "offline";
@@ -587,6 +954,8 @@
       await loadStatus();
       await loadTools();
       await loadRoles();
+      await loadTeam();
+      await loadWorkflow();
       await loadTasks();
     }
 
@@ -605,18 +974,548 @@
             agent: ${escapeHtml(tool.agent_name)}
             ${tool.registered ? ` - registered ${fmtTime(tool.last_seen)}` : ""}
           </div>
-          ${tool.profiles && tool.profiles.length ? `
-            <div class="profiles">
-              ${tool.profiles.map(profile => `
-                <div class="profile">
-                  <span class="profile-name">${escapeHtml(profile.name)}</span>
-                  <span>${escapeHtml(profile.path)}</span>
-                </div>
-              `).join("")}
+          ${tool.profile_name ? `
+            <div class="meta">
+              profile: ${escapeHtml(tool.profile_name)}
+              ${tool.profile_path ? ` - ${escapeHtml(tool.profile_path)}` : ""}
             </div>
           ` : ""}
         </div>
       `).join("") : `<div class="empty">No known tools detected.</div>`;
+    }
+
+    function renderTeam() {
+      const roleSelect = $("teamRoleSelect");
+      const agentSelect = $("teamAgentSelect");
+      if (!roleSelect || !agentSelect) return;
+      roleSelect.innerHTML = state.roles.length ? state.roles.map(role => `
+        <option value="${escapeHtml(role.id)}">${escapeHtml(role.id)}</option>
+      `).join("") : `<option value="">No roles</option>`;
+      agentSelect.innerHTML = state.tools.length ? state.tools.map(tool => `
+        <option value="${escapeHtml(tool.agent_name)}">${escapeHtml(tool.agent_name)} - ${escapeHtml(tool.name)}</option>
+      `).join("") : `<option value="">No agents</option>`;
+      const enabledRoles = new Set((state.team.members || [])
+        .filter(member => member.enabled)
+        .map(member => member.role_id));
+      const missingRoles = REQUIRED_TEAM_ROLES.filter(roleId => !enabledRoles.has(roleId));
+      $("teamRequirements").textContent = missingRoles.length
+        ? `required enabled roles missing: ${missingRoles.join(", ")}`
+        : `required enabled roles present: ${REQUIRED_TEAM_ROLES.join(", ")}`;
+      $("teamRequirements").style.color = missingRoles.length ? "var(--danger)" : "var(--muted)";
+      $("teamPath").textContent = state.team.path ? `config: ${state.team.path}` : "";
+
+      const members = state.team.members || [];
+      $("teamMembers").innerHTML = members.length ? members.map((member, index) => `
+        <div class="team-member ${member.enabled ? "" : "disabled"}">
+          <div class="team-member-grid">
+            <div>
+              <strong>${escapeHtml(member.agent_name)}</strong>
+              <div class="meta">${escapeHtml(agentLabel(member.agent_name))}</div>
+            </div>
+            <label>
+              <div class="meta">Role</div>
+              <select onchange="updateTeamMember(${index}, 'role_id', this.value)">
+                ${state.roles.map(role => `
+                  <option value="${escapeHtml(role.id)}" ${member.role_id === role.id ? "selected" : ""}>${escapeHtml(role.id)}</option>
+                `).join("")}
+              </select>
+            </label>
+            <label>
+              <div class="meta">Expertise</div>
+              <select onchange="updateTeamMember(${index}, 'expertise_level', this.value)">
+                ${[1, 2, 3, 4, 5].map(level => `
+                  <option value="${level}" ${(member.expertise_level || 3) === level ? "selected" : ""}>L${level}</option>
+                `).join("")}
+              </select>
+            </label>
+            <label>
+              <div class="meta">Enabled</div>
+              <input type="checkbox" ${member.enabled ? "checked" : ""} onchange="updateTeamMember(${index}, 'enabled', this.checked)">
+            </label>
+            <button class="danger" type="button" onclick="removeTeamMember(${index})">Remove</button>
+          </div>
+          <input value="${escapeHtml((member.capabilities || []).join(', '))}" placeholder="capability subscriptions" onchange="updateTeamMember(${index}, 'capabilities', this.value)">
+          <input value="${escapeHtml(member.notes || "")}" placeholder="notes" onchange="updateTeamMember(${index}, 'notes', this.value)">
+        </div>
+      `).join("") : `<div class="empty">No team members configured.</div>`;
+    }
+
+    function agentLabel(agentName) {
+      const tool = state.tools.find(candidate => candidate.agent_name === agentName);
+      return tool ? tool.name : "unavailable";
+    }
+
+    async function saveTeam() {
+      const data = await api("/api/team", {
+        method: "POST",
+        body: JSON.stringify({ members: state.team.members || [] })
+      });
+      state.team = { members: data.members || [], path: data.path || "" };
+      renderTeam();
+    }
+
+    async function addTeamMember() {
+      const roleId = $("teamRoleSelect").value;
+      const agentName = $("teamAgentSelect").value;
+      if (!roleId || !agentName) return;
+      state.team.members = [
+        ...(state.team.members || []),
+        {
+          agent_name: agentName,
+          role_id: roleId,
+          enabled: true,
+          expertise_level: 3,
+          max_concurrent_tasks: 1,
+          capabilities: [],
+          notes: ""
+        }
+      ];
+      await run(async () => {
+        await saveTeam();
+        setStatus("Team updated");
+      });
+    }
+
+    async function removeTeamMember(index) {
+      state.team.members.splice(index, 1);
+      await run(async () => {
+        await saveTeam();
+        setStatus("Team updated");
+      });
+    }
+
+    async function updateTeamMember(index, field, value) {
+      const member = state.team.members[index];
+      if (!member) return;
+      if (field === "expertise_level") {
+        member[field] = Number(value);
+      } else if (field === "enabled") {
+        member[field] = Boolean(value);
+      } else if (field === "capabilities") {
+        member[field] = String(value).split(",").map(item => item.trim()).filter(Boolean);
+      } else {
+        member[field] = value;
+      }
+      await run(async () => {
+        await saveTeam();
+        setStatus("Team updated");
+      });
+    }
+
+    // --- Free-canvas workflow editor -------------------------------------
+    // Nodes are absolutely positioned at step.x/step.y and connected by
+    // SVG edges. Dragging a head moves a node; dragging from an out-port to
+    // another node creates a connection. Positions and edges both persist.
+    const WF_NODE_W = 260;
+    const WF_PORT_TOP = 36;   // top offset of the first port
+    const WF_PORT_GAP = 26;   // vertical spacing between ports
+    const WF_PORT_R = 7;      // port radius (center offset)
+    const WF_MAX_PORTS = 3;   // max connection points per side
+    let wfDrag = null;        // active pointer interaction
+    let wfTempPath = null;    // in-progress connection path (SVG d string)
+    let wfLayoutCache = null; // per-node port counts + per-edge port slots
+
+    function wfById() {
+      return Object.fromEntries((state.workflow.steps || []).map(s => [s.id, s]));
+    }
+
+    // Assign each edge a port slot on both endpoints so a node with several
+    // connections spreads them across up to WF_MAX_PORTS points per side
+    // instead of stacking every line on one point. Edges are ordered by the
+    // opposite node's vertical position so lines don't cross.
+    function wfComputeLayout() {
+      const steps = state.workflow.steps || [];
+      const edges = state.workflow.edges || [];
+      const byId = Object.fromEntries(steps.map(s => [s.id, s]));
+      const centerY = id => (byId[id] ? byId[id].y : 0);
+      const outGroups = {}, inGroups = {};
+      edges.forEach((e, i) => {
+        (outGroups[e.from] = outGroups[e.from] || []).push(i);
+        (inGroups[e.to] = inGroups[e.to] || []).push(i);
+      });
+      const edgeSlots = edges.map(() => ({ fromSlot: 0, toSlot: 0 }));
+      const outCount = {}, inCount = {};
+      for (const id in outGroups) {
+        const list = outGroups[id].sort((a, b) => centerY(edges[a].to) - centerY(edges[b].to));
+        const count = Math.min(list.length, WF_MAX_PORTS);
+        outCount[id] = count;
+        list.forEach((ei, idx) => { edgeSlots[ei].fromSlot = Math.min(idx, count - 1); });
+      }
+      for (const id in inGroups) {
+        const list = inGroups[id].sort((a, b) => centerY(edges[a].from) - centerY(edges[b].from));
+        const count = Math.min(list.length, WF_MAX_PORTS);
+        inCount[id] = count;
+        list.forEach((ei, idx) => { edgeSlots[ei].toSlot = Math.min(idx, count - 1); });
+      }
+      // Always show at least one port per side as a connection affordance.
+      steps.forEach(s => {
+        outCount[s.id] = Math.max(1, outCount[s.id] || 0);
+        inCount[s.id] = Math.max(1, inCount[s.id] || 0);
+      });
+      return { outCount, inCount, edgeSlots };
+    }
+
+    function wfPortTop(slot) {
+      return WF_PORT_TOP + slot * WF_PORT_GAP;
+    }
+
+    function wfPortPoint(step, side, slot = 0) {
+      return {
+        x: step.x + (side === "out" ? WF_NODE_W : 0),
+        y: step.y + wfPortTop(slot) + WF_PORT_R,
+      };
+    }
+
+    function wfPortsHtml(id, side, count) {
+      const cls = side === "out" ? "out" : "in";
+      const hint = side === "out" ? "Drag to connect to another step" : "Drag a connection here";
+      let html = "";
+      for (let i = 0; i < count; i++) {
+        html += `<span class="workflow-port ${cls}" data-id="${id}" data-slot="${i}" style="top:${wfPortTop(i)}px" title="${hint}"></span>`;
+      }
+      return html;
+    }
+
+    function wfNodeRects() {
+      const rects = {};
+      (state.workflow.steps || []).forEach(s => {
+        const el = document.querySelector(`.workflow-node-wrap[data-id="${CSS.escape(s.id)}"]`);
+        rects[s.id] = { id: s.id, x: s.x, y: s.y, w: WF_NODE_W, h: el ? el.offsetHeight : 240 };
+      });
+      return rects;
+    }
+
+    function wfCubic(p1, c1, c2, p2) {
+      return `M ${p1.x} ${p1.y} C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${p2.x} ${p2.y}`;
+    }
+
+    function wfCubicHits(p1, c1, c2, p2, obstacles) {
+      for (let i = 1; i < 24; i++) {
+        const t = i / 24, u = 1 - t;
+        const x = u * u * u * p1.x + 3 * u * u * t * c1.x + 3 * u * t * t * c2.x + t * t * t * p2.x;
+        const y = u * u * u * p1.y + 3 * u * u * t * c1.y + 3 * u * t * t * c2.y + t * t * t * p2.y;
+        if (obstacles.some(r => x > r.x - 6 && x < r.x + r.w + 6 && y > r.y - 6 && y < r.y + r.h + 6)) return true;
+      }
+      return false;
+    }
+
+    // Control-point y that makes a symmetric cubic actually pass through
+    // `target` at its midpoint (curve midpoint = (p1 + 3c1 + 3c2 + p2) / 8).
+    function wfBulgeY(p1, p2, target) {
+      return (target - (p1.y + p2.y) / 8) / 0.75;
+    }
+
+    // Route one edge. Forward edges get a plain bezier unless a card sits in
+    // the way, in which case the curve arcs over or under the blockers.
+    // Backward edges wrap around every card in their horizontal span instead
+    // of cutting straight through (and behind) them.
+    function wfEdgePath(fromId, toId, p1, p2, rects) {
+      const others = Object.values(rects).filter(r => r.id !== fromId && r.id !== toId);
+      if (p2.x > p1.x + 20) {
+        const dx = Math.max(40, (p2.x - p1.x) * 0.5);
+        const c1 = { x: p1.x + dx, y: p1.y }, c2 = { x: p2.x - dx, y: p2.y };
+        if (!wfCubicHits(p1, c1, c2, p2, others)) return wfCubic(p1, c1, c2, p2);
+        const blockers = others.filter(r => r.x + r.w > p1.x - 60 && r.x < p2.x + 60);
+        if (!blockers.length) return wfCubic(p1, c1, c2, p2);
+        const top = Math.min(...blockers.map(r => r.y)) - 30;
+        const bottom = Math.max(...blockers.map(r => r.y + r.h)) + 30;
+        const mid = (p1.y + p2.y) / 2;
+        const detour = (top >= 12 && mid - top <= bottom - mid) ? top : bottom;
+        const y = wfBulgeY(p1, p2, detour);
+        return wfCubic(p1, { x: p1.x + dx, y }, { x: p2.x - dx, y }, p2);
+      }
+      const inSpan = Object.values(rects).filter(r => r.x + r.w > p2.x - 60 && r.x < p1.x + 60);
+      const bottom = Math.max(p1.y, p2.y, ...inSpan.map(r => r.y + r.h)) + 40;
+      const top = Math.min(p1.y, p2.y, ...inSpan.map(r => r.y)) - 40;
+      const goUp = top >= 12 && (p1.y - top) + (p2.y - top) < (bottom - p1.y) + (bottom - p2.y);
+      const y = wfBulgeY(p1, p2, goUp ? top : bottom);
+      return wfCubic(p1, { x: p1.x + 90, y }, { x: p2.x - 90, y }, p2);
+    }
+
+    function wfGraphPoint(event) {
+      const graph = $("wfGraph");
+      if (!graph) return { x: 0, y: 0 };
+      const rect = graph.getBoundingClientRect();
+      return { x: event.clientX - rect.left, y: event.clientY - rect.top };
+    }
+
+    function renderWorkflow() {
+      $("workflowPath").textContent = state.workflow.path ? `config: ${state.workflow.path}` : "";
+      const steps = state.workflow.steps || [];
+      wfLayoutCache = wfComputeLayout();
+      const layout = wfLayoutCache;
+      $("workflowSteps").innerHTML = steps.length ? `
+        <div class="workflow-canvas" id="wfCanvas">
+          <div class="workflow-graph" id="wfGraph">
+            <svg class="workflow-edges" id="wfEdges"></svg>
+            <div class="workflow-nodes" id="wfNodes">
+              ${steps.map((step, index) => `
+                <div class="workflow-node-wrap" data-id="${escapeHtml(step.id)}" style="left:${step.x}px; top:${step.y}px">
+                  <div class="workflow-node ${step.required ? "required" : ""}" data-id="${escapeHtml(step.id)}">
+                    ${wfPortsHtml(escapeHtml(step.id), "in", layout.inCount[step.id] || 1)}
+                    ${wfPortsHtml(escapeHtml(step.id), "out", layout.outCount[step.id] || 1)}
+                    <div class="workflow-node-head" data-drag-id="${escapeHtml(step.id)}" title="Drag to move">
+                      <strong><span class="grip">⠿</span> ${escapeHtml(step.name || "Step")}</strong>
+                      <span class="badge">#${index + 1}</span>
+                    </div>
+                    <div class="workflow-node-body">
+                      <label>
+                        <div class="meta">role</div>
+                        <select onchange="updateWorkflowStep('${escapeHtml(step.id)}', 'role_id', this.value)">
+                          ${state.roles.map(role => `
+                            <option value="${escapeHtml(role.id)}" ${step.role_id === role.id ? "selected" : ""}>${escapeHtml(role.id)}</option>
+                          `).join("")}
+                        </select>
+                      </label>
+                      <label>
+                        <div class="meta">status</div>
+                        <select onchange="updateWorkflowStep('${escapeHtml(step.id)}', 'task_status', this.value)">
+                          ${statusOptionsHtml(step.task_status)}
+                        </select>
+                      </label>
+                      <label class="workflow-required" ${step.required_locked ? 'title="Core step (hub/implementer/reviewer role) — always required"' : ""}>
+                        <input type="checkbox" ${step.required ? "checked" : ""} ${step.required_locked ? "disabled" : ""} onchange="updateWorkflowStep('${escapeHtml(step.id)}', 'required', this.checked)">
+                        <span class="meta">required${step.required_locked ? " 🔒" : ""}</span>
+                      </label>
+                      <div class="row" style="justify-content: space-between;">
+                        <span class="meta">${escapeHtml(step.id || "")}</span>
+                        ${step.required_locked ? '<span class="meta" title="Core step (hub/implementer/reviewer role) cannot be removed">core</span>' : `<button class="danger" type="button" onclick="removeWorkflowStep('${escapeHtml(step.id)}')">Remove</button>`}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              `).join("")}
+            </div>
+          </div>
+        </div>
+      ` : `<div class="empty">No workflow steps configured.</div>`;
+      wireWorkflowInteractions();
+      drawEdges();
+    }
+
+    function drawEdges() {
+      const svg = $("wfEdges");
+      if (!svg) return;
+      const steps = state.workflow.steps || [];
+      const edges = state.workflow.edges || [];
+      const byId = wfById();
+      let maxX = 600, maxY = 400;
+      steps.forEach(s => {
+        maxX = Math.max(maxX, s.x + WF_NODE_W + 140);
+        maxY = Math.max(maxY, s.y + 380);
+      });
+      const graph = $("wfGraph");
+      if (graph) { graph.style.width = maxX + "px"; graph.style.height = maxY + "px"; }
+      svg.setAttribute("width", maxX);
+      svg.setAttribute("height", maxY);
+      const slots = (wfLayoutCache || wfComputeLayout()).edgeSlots;
+      const rects = wfNodeRects();
+      let paths = edges.map((edge, i) => {
+        const a = byId[edge.from], b = byId[edge.to];
+        if (!a || !b) return "";
+        const slot = slots[i] || { fromSlot: 0, toSlot: 0 };
+        const p1 = wfPortPoint(a, "out", slot.fromSlot), p2 = wfPortPoint(b, "in", slot.toSlot);
+        const d = wfEdgePath(edge.from, edge.to, p1, p2, rects);
+        return `<path class="wf-edge" data-edge="${i}" d="${d}"><title>Click to delete connection</title></path>`;
+      }).join("");
+      if (wfTempPath) paths += `<path class="wf-edge temp" d="${wfTempPath}"></path>`;
+      svg.innerHTML = paths;
+      svg.querySelectorAll(".wf-edge[data-edge]").forEach(path => {
+        path.addEventListener("click", () => removeWorkflowEdge(Number(path.dataset.edge)));
+      });
+    }
+
+    function wireWorkflowInteractions() {
+      document.querySelectorAll(".workflow-node-head[data-drag-id]").forEach(head => {
+        head.addEventListener("pointerdown", event => startNodeDrag(event, head.dataset.dragId));
+      });
+      document.querySelectorAll(".workflow-port.out[data-id]").forEach(port => {
+        port.addEventListener("pointerdown", event => startEdgeDrag(event, port.dataset.id, Number(port.dataset.slot) || 0));
+      });
+    }
+
+    function startNodeDrag(event, id) {
+      if (event.button !== 0) return;
+      const step = wfById()[id];
+      if (!step) return;
+      const cursor = wfGraphPoint(event);
+      wfDrag = { type: "node", id, offX: cursor.x - step.x, offY: cursor.y - step.y, moved: false };
+      const node = document.querySelector(`.workflow-node[data-id="${CSS.escape(id)}"]`);
+      if (node) node.classList.add("dragging");
+      document.addEventListener("pointermove", onWorkflowPointerMove);
+      document.addEventListener("pointerup", onWorkflowPointerUp);
+      event.preventDefault();
+    }
+
+    function startEdgeDrag(event, id, slot = 0) {
+      if (event.button !== 0) return;
+      event.stopPropagation();
+      event.preventDefault();
+      wfDrag = { type: "edge", from: id, fromSlot: slot };
+      document.addEventListener("pointermove", onWorkflowPointerMove);
+      document.addEventListener("pointerup", onWorkflowPointerUp);
+    }
+
+    function onWorkflowPointerMove(event) {
+      if (!wfDrag) return;
+      const cursor = wfGraphPoint(event);
+      if (wfDrag.type === "node") {
+        const step = wfById()[wfDrag.id];
+        if (!step) return;
+        step.x = Math.max(0, Math.round(cursor.x - wfDrag.offX));
+        step.y = Math.max(0, Math.round(cursor.y - wfDrag.offY));
+        wfDrag.moved = true;
+        const wrap = document.querySelector(`.workflow-node-wrap[data-id="${CSS.escape(wfDrag.id)}"]`);
+        if (wrap) { wrap.style.left = step.x + "px"; wrap.style.top = step.y + "px"; }
+        drawEdges();
+      } else if (wfDrag.type === "edge") {
+        const from = wfById()[wfDrag.from];
+        if (!from) return;
+        const p1 = wfPortPoint(from, "out", wfDrag.fromSlot || 0);
+        const dx = Math.max(40, Math.abs(cursor.x - p1.x) * 0.5);
+        wfTempPath = `M ${p1.x} ${p1.y} C ${p1.x + dx} ${p1.y}, ${cursor.x - dx} ${cursor.y}, ${cursor.x} ${cursor.y}`;
+        const target = document.elementFromPoint(event.clientX, event.clientY);
+        const node = target && target.closest(".workflow-node");
+        document.querySelectorAll(".workflow-node.drop-target").forEach(el => el.classList.remove("drop-target"));
+        if (node && node.dataset.id !== wfDrag.from) node.classList.add("drop-target");
+        drawEdges();
+      }
+    }
+
+    function onWorkflowPointerUp(event) {
+      document.removeEventListener("pointermove", onWorkflowPointerMove);
+      document.removeEventListener("pointerup", onWorkflowPointerUp);
+      const drag = wfDrag;
+      wfDrag = null;
+      wfTempPath = null;
+      document.querySelectorAll(".workflow-node.dragging").forEach(el => el.classList.remove("dragging"));
+      document.querySelectorAll(".workflow-node.drop-target").forEach(el => el.classList.remove("drop-target"));
+      if (!drag) return;
+      if (drag.type === "node") {
+        if (!drag.moved) { drawEdges(); return; }
+        run(async () => { await saveWorkflow(); setStatus("Workflow layout saved"); });
+      } else if (drag.type === "edge") {
+        const target = document.elementFromPoint(event.clientX, event.clientY);
+        const node = target && target.closest(".workflow-node");
+        const to = node && node.dataset.id;
+        if (to && to !== drag.from) {
+          addWorkflowEdge(drag.from, to);
+        } else {
+          drawEdges();
+        }
+      }
+    }
+
+    function addWorkflowEdge(from, to) {
+      const edges = state.workflow.edges || (state.workflow.edges = []);
+      if (edges.some(e => e.from === from && e.to === to)) { drawEdges(); return; }
+      edges.push({ from, to });
+      run(async () => { await saveWorkflow(); setStatus("Connection added"); });
+    }
+
+    function removeWorkflowEdge(index) {
+      const edges = state.workflow.edges || [];
+      if (index < 0 || index >= edges.length) return;
+      edges.splice(index, 1);
+      run(async () => { await saveWorkflow(); setStatus("Connection removed"); });
+    }
+
+    async function saveWorkflow() {
+      const data = await api("/api/workflow", {
+        method: "POST",
+        body: JSON.stringify({
+          steps: state.workflow.steps || [],
+          edges: state.workflow.edges || []
+        })
+      });
+      state.workflow = { steps: data.steps || [], edges: data.edges || [], path: data.path || "" };
+      renderWorkflow();
+    }
+
+    // Layered layout: longest-path layering left-to-right, then each column
+    // ordered by the average row of its predecessors so edges run roughly
+    // horizontal and don't cross or pass behind other cards.
+    function autoArrangeWorkflow() {
+      const steps = state.workflow.steps || [];
+      if (!steps.length) return;
+      const edges = (state.workflow.edges || []).filter(e => e.from !== e.to);
+      const layer = {};
+      steps.forEach(s => { layer[s.id] = 0; });
+      // Bounded relaxation so cycles can't loop forever.
+      for (let pass = 0; pass < steps.length; pass++) {
+        let changed = false;
+        edges.forEach(e => {
+          if (layer[e.from] === undefined || layer[e.to] === undefined) return;
+          const next = layer[e.from] + 1;
+          if (next > layer[e.to] && next < steps.length) { layer[e.to] = next; changed = true; }
+        });
+        if (!changed) break;
+      }
+      const columns = {};
+      steps.forEach(s => { (columns[layer[s.id]] = columns[layer[s.id]] || []).push(s); });
+      const layerKeys = Object.keys(columns).map(Number).sort((a, b) => a - b);
+      const row = {};
+      const bary = s => {
+        const prev = edges.filter(e => e.to === s.id && row[e.from] !== undefined).map(e => row[e.from]);
+        return prev.length ? prev.reduce((a, b) => a + b, 0) / prev.length : s.y;
+      };
+      const rects = wfNodeRects();
+      const rowH = Math.max(220, ...Object.values(rects).map(r => r.h)) + 60;
+      layerKeys.forEach((l, li) => {
+        const col = columns[l];
+        if (li > 0) col.sort((a, b) => bary(a) - bary(b) || a.y - b.y);
+        else col.sort((a, b) => a.y - b.y);
+        col.forEach((s, i) => {
+          row[s.id] = i;
+          s.x = 40 + li * (WF_NODE_W + 140);
+          s.y = 40 + i * rowH;
+        });
+      });
+      run(async () => { await saveWorkflow(); setStatus("Workflow auto-arranged"); });
+    }
+
+    async function addWorkflowStep() {
+      const roleId = (state.roles[0] || {}).id || "hub";
+      const steps = state.workflow.steps || [];
+      // Place the new node just right of the current rightmost node.
+      const rightmost = steps.reduce((m, s) => Math.max(m, s.x), 0);
+      state.workflow.steps = [
+        ...steps,
+        {
+          id: "step-" + Date.now().toString(36),
+          name: "New Step",
+          role_id: roleId,
+          task_status: "created",
+          required: false,
+          x: steps.length ? rightmost + 320 : 40,
+          y: 60
+        }
+      ];
+      await run(async () => {
+        await saveWorkflow();
+        setStatus("Workflow updated");
+      });
+    }
+
+    async function removeWorkflowStep(id) {
+      const step = (state.workflow.steps || []).find(s => s.id === id);
+      if (step && step.required_locked) { setStatus("Core steps cannot be removed"); return; }
+      state.workflow.steps = (state.workflow.steps || []).filter(s => s.id !== id);
+      state.workflow.edges = (state.workflow.edges || []).filter(e => e.from !== id && e.to !== id);
+      await run(async () => {
+        await saveWorkflow();
+        setStatus("Workflow updated");
+      });
+    }
+
+    async function updateWorkflowStep(id, field, value) {
+      const step = (state.workflow.steps || []).find(s => s.id === id);
+      if (!step) return;
+      step[field] = field === "required" ? Boolean(value) : value;
+      await run(async () => {
+        await saveWorkflow();
+        setStatus("Workflow updated");
+      });
     }
 
     function renderRoles() {
@@ -628,7 +1527,7 @@
               <span class="badge">${escapeHtml(role.id)}</span>
             </div>
             <div class="role-actions" id="actions-${escapeHtml(role.id)}" style="display: flex; gap: 6px;">
-              <button onclick="editRole('${escapeHtml(role.id)}')">Edit</button>
+              <button class="role-action" data-action="edit" data-role-id="${escapeHtml(role.id)}">Edit</button>
             </div>
           </div>
           <div class="meta">${escapeHtml(role.path)}</div>
@@ -637,6 +1536,18 @@
           </div>
         </div>
       `).join("") : `<div class="empty">No workflow roles detected.</div>`;
+      wireRoleActionButtons();
+    }
+
+    function wireRoleActionButtons() {
+      document.querySelectorAll(".role-action").forEach(button => {
+        button.addEventListener("click", () => {
+          const roleId = button.dataset.roleId || "";
+          if (button.dataset.action === "edit") editRole(roleId);
+          if (button.dataset.action === "save") saveRole(roleId);
+          if (button.dataset.action === "cancel") cancelEdit(roleId);
+        });
+      });
     }
 
     function editRole(roleId) {
@@ -644,9 +1555,10 @@
       if (!role) return;
 
       $("actions-" + roleId).innerHTML = `
-        <button onclick="saveRole('${escapeHtml(roleId)}')" class="primary">Save</button>
-        <button onclick="cancelEdit('${escapeHtml(roleId)}')">Cancel</button>
+        <button class="role-action primary" data-action="save" data-role-id="${escapeHtml(roleId)}">Save</button>
+        <button class="role-action" data-action="cancel" data-role-id="${escapeHtml(roleId)}">Cancel</button>
       `;
+      wireRoleActionButtons();
 
       $("body-container-" + roleId).innerHTML = `
         <textarea id="textarea-${escapeHtml(roleId)}" class="role-body" style="width: 100%; min-height: 400px; margin-top: 10px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; line-height: 1.45; color: #2f383c; background: #fafafa; border: 1px solid var(--line); border-radius: 6px; padding: 10px; resize: vertical;"></textarea>
@@ -659,8 +1571,9 @@
       if (!role) return;
 
       $("actions-" + roleId).innerHTML = `
-        <button onclick="editRole('${escapeHtml(roleId)}')">Edit</button>
+        <button class="role-action" data-action="edit" data-role-id="${escapeHtml(roleId)}">Edit</button>
       `;
+      wireRoleActionButtons();
 
       $("body-container-" + roleId).innerHTML = `
         <pre class="role-body">${escapeHtml(role.content)}</pre>
@@ -692,6 +1605,26 @@
       "accepted": "done",
       "closed": "done"
     };
+    // Single source of truth for task statuses, shared by the Tasks (kanban)
+    // board and the Workflow step cards so their dropdowns stay in sync.
+    const TASK_STATUS_OPTIONS = [
+      { value: "created", label: "Created" },
+      { value: "assigned", label: "Assigned" },
+      { value: "in_progress", label: "In Progress" },
+      { value: "bugfixing", label: "Bug Fixing" },
+      { value: "testing", label: "In Testing" },
+      { value: "blocked", label: "Blocked" },
+      { value: "replied", label: "Replied" },
+      { value: "needs_changes", label: "Needs Changes" },
+      { value: "accepted", label: "Accepted" },
+      { value: "closed", label: "Closed" }
+    ];
+    function statusOptionsHtml(selected) {
+      return TASK_STATUS_OPTIONS.map(opt =>
+        `<option value="${opt.value}" ${selected === opt.value ? "selected" : ""}>${opt.label}</option>`
+      ).join("");
+    }
+    const REQUIRED_TEAM_ROLES = ["hub", "implementer", "reviewer"];
 
     async function loadTasks() {
       if (!state.apiBase) {
@@ -699,8 +1632,8 @@
         renderTasks();
         return;
       }
-      const data = await api("/api/messages?kind=task&limit=200");
-      state.tasks = data.messages || [];
+      const data = await api("/api/tasks?limit=200");
+      state.tasks = data.tasks || [];
       renderTasks();
     }
 
@@ -747,16 +1680,7 @@
                     <div class="kanban-card-meta">
                       <span>${escapeHtml(task.sender)} ➜ ${escapeHtml(task.recipient)}</span>
                       <select onclick="event.stopPropagation()" onchange="moveTask(${task.id}, this.value)" style="font-size: 11px; padding: 2px 4px; width: auto; min-height: 20px; height: 22px; line-height: 1;">
-                        <option value="created" ${task.task_status === "created" ? "selected" : ""}>Created</option>
-                        <option value="assigned" ${task.task_status === "assigned" ? "selected" : ""}>Assigned</option>
-                        <option value="in_progress" ${task.task_status === "in_progress" ? "selected" : ""}>In Progress</option>
-                        <option value="bugfixing" ${task.task_status === "bugfixing" ? "selected" : ""}>Bug Fixing</option>
-                        <option value="testing" ${task.task_status === "testing" ? "selected" : ""}>In Testing</option>
-                        <option value="blocked" ${task.task_status === "blocked" ? "selected" : ""}>Blocked</option>
-                        <option value="replied" ${task.task_status === "replied" ? "selected" : ""}>Replied</option>
-                        <option value="needs_changes" ${task.task_status === "needs_changes" ? "selected" : ""}>Needs Changes</option>
-                        <option value="accepted" ${task.task_status === "accepted" ? "selected" : ""}>Accepted</option>
-                        <option value="closed" ${task.task_status === "closed" ? "selected" : ""}>Closed</option>
+                        ${statusOptionsHtml(task.task_status)}
                       </select>
                     </div>
                   </div>
@@ -776,6 +1700,60 @@
       }
     }
 
+    async function loadTaskRuns(taskId) {
+      if (!state.apiBase || !taskId) {
+        state.taskRuns = [];
+        state.selectedRunId = null;
+        state.runFiles = {};
+        return;
+      }
+      const data = await api(`/api/tasks/${taskId}/runs?limit=10`);
+      state.taskRuns = data.runs || [];
+      if (!state.taskRuns.find(run => run.id === state.selectedRunId)) {
+        state.selectedRunId = (state.taskRuns[0] || {}).id || null;
+      }
+      if (state.selectedRunId) {
+        await loadRunFile(state.selectedRunId, "events");
+      } else {
+        state.runFiles = {};
+      }
+      renderTaskDetails(state.tasks.find(t => t.id === taskId) || null);
+    }
+
+    async function createTaskRun(taskId) {
+      await run(async () => {
+        const data = await api(`/api/tasks/${taskId}/runs`, {
+          method: "POST",
+          body: JSON.stringify({ worker: "manual", status: "running" })
+        });
+        state.selectedRunId = data.run.id;
+        await loadTaskRuns(taskId);
+        setStatus("Run #" + data.run.id + " created");
+      });
+    }
+
+    async function loadRunFile(runId, fileKey) {
+      const data = await api(`/api/task-runs/${runId}/files/${fileKey}?tail=65536`);
+      state.selectedRunId = runId;
+      state.runFiles = { [fileKey]: data };
+    }
+
+    async function showRunFile(runId, fileKey) {
+      await run(async () => {
+        await loadRunFile(runId, fileKey);
+        renderTaskDetails(state.tasks.find(t => t.id === state.selectedTaskId) || null);
+      });
+    }
+
+    async function recommendAgent(taskId) {
+      await run(async () => {
+        const data = await api(`/api/tasks/${taskId}/assignment-candidates`);
+        state.assignmentCandidates = data;
+        renderTaskDetails(state.tasks.find(t => t.id === taskId) || data.task || null);
+        setStatus(data.selected ? `Recommended ${data.selected.agent_name}` : "No candidate available");
+      });
+    }
+
     function startSprint() {
       const goalVal = $("goalInput").value.trim();
       if (!goalVal) {
@@ -788,11 +1766,12 @@
 
     async function moveTask(taskId, newStatus) {
       await run(async () => {
-        await api(`/api/messages/${taskId}/task-status`, {
+        await api(`/api/tasks/${taskId}/status`, {
           method: "POST",
           body: JSON.stringify({ task_status: newStatus })
         });
         await loadTasks();
+        renderTaskDetails(state.tasks.find(t => t.id === state.selectedTaskId) || null);
         setStatus("Task #" + taskId + " moved to " + newStatus);
       });
     }
@@ -800,7 +1779,116 @@
     function showTaskDetails(taskId) {
       const task = state.tasks.find(t => t.id === taskId);
       if (!task) return;
-      alert("Task: " + (task.title || ("#" + task.id + " Task")) + "\nSender: " + task.sender + "\nRecipient: " + task.recipient + "\nStatus: " + task.task_status + "\n\nContent:\n" + task.content);
+      state.selectedTaskId = taskId;
+      state.assignmentCandidates = null;
+      state.taskDetailsCollapsed = false;
+      applyTaskDetailsCollapsed();
+      renderTaskDetails(task);
+      run(async () => {
+        await loadTaskRuns(taskId);
+      });
+    }
+
+    function renderTaskDetails(task) {
+      if (!task) {
+        $("taskDetails").className = "task-details empty";
+        $("taskDetailContent").textContent = "No task selected.";
+        return;
+      }
+      $("taskDetails").className = "task-details";
+      $("taskDetailContent").innerHTML = `
+        <div class="task-detail-title">
+          <span>${escapeHtml(task.title || "#" + task.id + " Task")}</span>
+          <span class="badge">${escapeHtml(task.task_status || "")}</span>
+        </div>
+        <div class="meta">
+          #${task.id} ${escapeHtml(task.sender)} to ${escapeHtml(task.recipient)}
+          ${task.created_at ? ` - ${fmtTime(task.created_at)}` : ""}
+        </div>
+        <div class="meta">
+          role: ${escapeHtml(task.role_required || "implementer")}
+          - importance: ${escapeHtml(task.importance || "normal")}
+          - size: ${escapeHtml(task.size || "medium")}
+          - risk: ${escapeHtml(task.risk || "medium")}
+          ${(task.required_capabilities || []).length ? ` - capabilities: ${escapeHtml(task.required_capabilities.join(", "))}` : ""}
+          ${task.exclusive_workspace ? " - exclusive workspace" : ""}
+        </div>
+        <div class="task-detail-body">${escapeHtml(task.content)}</div>
+        <div class="task-runs">
+          <div class="row" style="justify-content: space-between;">
+            <strong>Assignment</strong>
+            <button type="button" onclick="recommendAgent(${task.id})">Recommend Agent</button>
+          </div>
+          ${renderAssignmentCandidates()}
+        </div>
+        <div class="task-runs">
+          <div class="row" style="justify-content: space-between;">
+            <strong>Runs</strong>
+            <button type="button" onclick="createTaskRun(${task.id})">New Run</button>
+          </div>
+          ${renderTaskRuns()}
+        </div>
+      `;
+    }
+
+    function renderAssignmentCandidates() {
+      const data = state.assignmentCandidates;
+      if (!data || data.task.id !== state.selectedTaskId) {
+        return `<div class="empty" style="padding: 0;">No recommendation loaded.</div>`;
+      }
+      if (!data.candidates.length) {
+        return `<div class="empty" style="padding: 0;">No matching enabled team member.</div>`;
+      }
+      return `
+        <div class="meta">required expertise: L${escapeHtml(data.required_expertise_level || 3)}</div>
+        ${data.required_followups && data.required_followups.length ? `
+          <div class="meta">required follow-up roles: ${escapeHtml(data.required_followups.join(", "))}</div>
+        ` : ""}
+        ${data.candidates.slice(0, 5).map(candidate => `
+          <div class="team-member" style="padding: 8px;">
+            <div class="row" style="justify-content: space-between;">
+              <strong>${escapeHtml(candidate.agent_name)}</strong>
+              <span class="badge">score ${escapeHtml(candidate.score)}</span>
+            </div>
+            <div class="meta">
+              expertise L${escapeHtml(candidate.expertise_level || 3)}
+              - active ${escapeHtml(candidate.active_tasks)}
+              - slots ${escapeHtml(candidate.available_slots)}
+              ${candidate.expertise_gap ? ` - expertise gap ${escapeHtml(candidate.expertise_gap)}` : ""}
+              ${candidate.missing_capabilities && candidate.missing_capabilities.length ? ` - missing ${escapeHtml(candidate.missing_capabilities.join(", "))}` : ""}
+            </div>
+          </div>
+        `).join("")}
+      `;
+    }
+
+    function renderTaskRuns() {
+      if (!state.taskRuns.length) {
+        return `<div class="empty" style="padding: 0;">No runs recorded.</div>`;
+      }
+      const visibleFile = Object.values(state.runFiles)[0] || null;
+      return state.taskRuns.map(run => `
+        <div class="task-run ${run.id === state.selectedRunId ? "active" : ""}">
+          <div class="row" style="justify-content: space-between;">
+            <strong>run-${String(run.attempt).padStart(3, "0")}</strong>
+            <span class="badge">${escapeHtml(run.status)}</span>
+          </div>
+          <div class="meta">
+            ${escapeHtml(run.worker || "unknown worker")}
+            ${run.exit_code === null || run.exit_code === undefined ? "" : ` - exit ${run.exit_code}`}
+            ${run.started_at ? ` - ${fmtTime(run.started_at)}` : ""}
+          </div>
+          <div class="meta">${escapeHtml(run.log_dir || "")}</div>
+          <div class="run-files">
+            ${["events", "stdout", "stderr", "result", "diff"].map(fileKey => `
+              <button type="button" onclick="showRunFile(${run.id}, '${fileKey}')">${fileKey}</button>
+            `).join("")}
+          </div>
+          ${run.id === state.selectedRunId && visibleFile ? `
+            <pre class="run-file-content">${escapeHtml(visibleFile.content || "")}</pre>
+          ` : ""}
+        </div>
+      `).join("");
     }
 
     async function run(action) {
@@ -812,13 +1900,22 @@
     }
 
     $("refreshTools").addEventListener("click", () => run(refreshWorkspace));
+    $("refreshTeam").addEventListener("click", () => run(loadTeam));
+    $("refreshWorkflow").addEventListener("click", () => run(loadWorkflow));
     $("refreshRoles").addEventListener("click", () => run(loadRoles));
     $("refreshTasks").addEventListener("click", () => run(loadTasks));
+    $("addTeamMember").addEventListener("click", addTeamMember);
+    $("addWorkflowStep").addEventListener("click", addWorkflowStep);
+    $("autoArrangeWorkflow").addEventListener("click", autoArrangeWorkflow);
+    $("toggleTaskDetails").addEventListener("click", toggleTaskDetails);
     $("toolsTab").addEventListener("click", () => setPage("tools"));
+    $("teamTab").addEventListener("click", () => setPage("team"));
+    $("workflowTab").addEventListener("click", () => setPage("workflow"));
     $("rolesTab").addEventListener("click", () => setPage("roles"));
     $("tasksTab").addEventListener("click", () => setPage("tasks"));
 
     run(async () => {
+      applyTaskDetailsCollapsed();
       await refreshWorkspace();
       setStatus("Ready");
     });

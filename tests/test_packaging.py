@@ -20,25 +20,65 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("/api/projects", html)
         self.assertIn('id="agentTools"', html)
         self.assertIn('id="toolsTab"', html)
+        self.assertIn('id="teamTab"', html)
+        self.assertIn('id="workflowTab"', html)
         self.assertIn('id="rolesTab"', html)
         self.assertIn('id="tasksTab"', html)
         self.assertIn('id="toolsPage"', html)
+        self.assertIn('id="teamPage"', html)
+        self.assertIn('id="workflowPage"', html)
         self.assertIn('id="rolesPage"', html)
         self.assertIn('id="tasksPage"', html)
         self.assertIn('id="agentRoles"', html)
         self.assertIn('id="tasksList"', html)
+        self.assertIn('id="taskDetails"', html)
+        self.assertIn('id="toggleTaskDetails"', html)
+        self.assertIn("details-collapsed", html)
+        self.assertIn("function toggleTaskDetails()", html)
+        self.assertIn("function renderTaskDetails(task)", html)
+        self.assertIn("task-detail-body", html)
+        self.assertIn('localStorage.getItem("devloop-task-details-collapsed") !== "0"', html)
         self.assertIn('class="side-menu"', html)
         self.assertIn("menu-button", html)
         self.assertIn("display: block;", html)
-        self.assertIn("class=\"profiles\"", html)
-        self.assertIn("profile-name", html)
+        self.assertIn("tool.profile_name", html)
+        self.assertIn("tool.profile_path", html)
         self.assertIn("function setPage(page)", html)
         self.assertIn("/api/agent-tools", html)
         self.assertIn("/api/agent-roles", html)
+        self.assertIn("/api/team", html)
+        self.assertIn("/api/workflow", html)
+        self.assertIn("/api/tasks?limit=200", html)
+        self.assertIn("/api/tasks/${taskId}/status", html)
+        self.assertIn("/api/tasks/${taskId}/runs?limit=10", html)
+        self.assertIn("/api/task-runs/${runId}/files/${fileKey}?tail=65536", html)
+        self.assertIn("function createTaskRun(taskId)", html)
+        self.assertIn("function renderTaskRuns()", html)
         self.assertIn("function renderRoles()", html)
+        self.assertIn("function renderTeam()", html)
+        self.assertIn("function addTeamMember()", html)
+        self.assertIn("function renderWorkflow()", html)
+        self.assertIn("function addWorkflowStep()", html)
+        self.assertIn("workflow-canvas", html)
+        self.assertIn("workflow-node", html)
+        self.assertIn("workflow-port", html)
+        self.assertIn("function recommendAgent(taskId)", html)
+        self.assertIn("function renderAssignmentCandidates()", html)
+        self.assertIn('id="teamRequirements"', html)
+        self.assertIn('const REQUIRED_TEAM_ROLES = ["hub", "implementer", "reviewer"]', html)
+        self.assertIn("/api/tasks/${taskId}/assignment-candidates", html)
+        self.assertIn("Expertise", html)
+        self.assertIn("capability subscriptions", html)
+        self.assertNotIn("Weight", html)
+        self.assertIn("function wireRoleActionButtons()", html)
+        self.assertIn('data-action="edit"', html)
+        self.assertIn('data-role-id=', html)
         self.assertIn("selectedProjectId", html)
         self.assertIn("async function refreshWorkspace()", html)
         self.assertIn('addEventListener("click", () => run(refreshWorkspace))', html)
+        self.assertNotIn('onclick="editRole', html)
+        self.assertNotIn('onclick="saveRole', html)
+        self.assertNotIn('onclick="cancelEdit', html)
         self.assertNotIn('id="projectSelect"', html)
         self.assertNotIn('id="registerAgent"', html)
         self.assertGreater(len(html), 1000)
@@ -49,6 +89,11 @@ class PackagingTests(unittest.TestCase):
         import dev_loop.server as server
 
         self.assertTrue(server._UI_HTML)
+
+    def test_gitignore_keeps_team_config_trackable(self):
+        gitignore = Path(".gitignore").read_text(encoding="utf-8")
+        self.assertIn(".dev_loop/tasks/", gitignore)
+        self.assertNotIn(".dev_loop/\n", gitignore)
 
     def test_agent_tool_detection_shape(self):
         import dev_loop.server as server
@@ -63,8 +108,8 @@ class PackagingTests(unittest.TestCase):
         by_id = {tool["id"]: tool for tool in tools}
         self.assertIn("hermes", by_id)
         self.assertIn("openclaw", by_id)
-        self.assertIn("profiles", by_id["hermes"])
-        self.assertIn("profile_count", by_id["hermes"])
+        self.assertNotIn("profiles", by_id["hermes"])
+        self.assertNotIn("profile_count", by_id["hermes"])
 
     def test_agent_tool_detection_marks_installed_paths(self):
         import dev_loop.server as server
@@ -94,15 +139,356 @@ class PackagingTests(unittest.TestCase):
 
         self.assertEqual(["manager", "researcher"], [p["name"] for p in profiles])
 
-    def test_agent_tool_detection_includes_hermes_profiles(self):
+    def test_agent_tool_detection_splits_hermes_profiles_into_agents(self):
         import dev_loop.server as server
 
-        fake_profiles = [{"name": "manager", "path": "/tmp/manager"}]
+        fake_profiles = [
+            {"name": "default", "path": "/tmp/default"},
+            {"name": "manager", "path": "/tmp/manager"},
+        ]
         with mock.patch("dev_loop.server.detect_hermes_profiles", return_value=fake_profiles):
             tools = {tool["id"]: tool for tool in server.detect_agent_tools()}
 
-        self.assertEqual(fake_profiles, tools["hermes"]["profiles"])
-        self.assertEqual(1, tools["hermes"]["profile_count"])
+        self.assertIn("hermes", tools)
+        self.assertNotIn("profile_name", tools["hermes"])
+        self.assertIn("hermes-default", tools)
+        self.assertIn("hermes-manager", tools)
+        self.assertEqual("Hermes default", tools["hermes-default"]["name"])
+        self.assertEqual("hermes-default", tools["hermes-default"]["agent_name"])
+        self.assertEqual("default", tools["hermes-default"]["profile_name"])
+        self.assertEqual("/tmp/default", tools["hermes-default"]["profile_path"])
+        self.assertEqual("hermes --profile manager", tools["hermes-manager"]["command"])
+
+    def test_hermes_profile_agent_ids_are_slugged(self):
+        import dev_loop.server as server
+
+        fake_profiles = [
+            {"name": "manager qa", "path": "/tmp/manager-qa"},
+            {"name": "manager/qa", "path": "/tmp/manager-qa-2"},
+        ]
+        with mock.patch("dev_loop.server.detect_hermes_profiles", return_value=fake_profiles):
+            by_id = {tool["id"]: tool for tool in server.detect_agent_tools()}
+
+        self.assertIn("hermes-manager-qa", by_id)
+        self.assertIn("hermes-manager-qa-2", by_id)
+        self.assertEqual("manager qa", by_id["hermes-manager-qa"]["profile_name"])
+        self.assertEqual("manager/qa", by_id["hermes-manager-qa-2"]["profile_name"])
+
+    def test_team_config_round_trips_project_file(self):
+        import dev_loop.server as server
+
+        with TemporaryDirectory() as tmp:
+            team = server.write_team_config(
+                [
+                    {
+                        "agent_name": "hermes-manager",
+                        "role_id": "hub",
+                    },
+                    {
+                        "agent_name": "codex",
+                        "role_id": "implementer",
+                        "enabled": True,
+                        "expertise_level": "4",
+                        "max_concurrent_tasks": "2",
+                        "capabilities": "python, tests",
+                        "notes": "primary builder",
+                    },
+                    {
+                        "agent_name": "claude-code",
+                        "role_id": "reviewer",
+                    },
+                ],
+                tmp,
+            )
+            loaded = server.read_team_config(tmp)
+
+        self.assertEqual(team, loaded)
+        implementer = next(
+            member for member in loaded["members"] if member["role_id"] == "implementer"
+        )
+        self.assertEqual("codex", implementer["agent_name"])
+        self.assertEqual(4, implementer["expertise_level"])
+        self.assertEqual(2, implementer["max_concurrent_tasks"])
+        self.assertEqual(["python", "tests"], implementer["capabilities"])
+        self.assertTrue(loaded["path"].endswith(".dev_loop/team.json"))
+
+    def test_team_config_migrates_legacy_priority_to_expertise(self):
+        import dev_loop.server as server
+
+        member = server._normalize_team_member(
+            {"agent_name": "codex", "role_id": "implementer", "priority": 120}
+        )
+
+        self.assertEqual(5, member["expertise_level"])
+        self.assertNotIn("priority", member)
+        self.assertNotIn("weight", member)
+
+    def test_workflow_config_defaults_and_round_trips_project_file(self):
+        import dev_loop.server as server
+
+        with TemporaryDirectory() as tmp:
+            default = server.read_workflow_config(tmp)
+            saved = server.write_workflow_config(
+                [
+                    {
+                        "id": "plan",
+                        "name": "Plan",
+                        "role_id": "hub",
+                        "task_status": "created",
+                        "required": True,
+                    },
+                    {
+                        "id": "ship",
+                        "name": "Ship",
+                        "role_id": "implementer",
+                        "task_status": "closed",
+                    },
+                ],
+                tmp,
+            )
+            loaded = server.read_workflow_config(tmp)
+
+        self.assertEqual("intake", default["steps"][0]["id"])
+        self.assertEqual(saved, loaded)
+        self.assertEqual(["plan", "ship"], [step["id"] for step in loaded["steps"]])
+        self.assertTrue(loaded["path"].endswith(".dev_loop/workflow.json"))
+
+    def test_core_role_steps_are_always_required_and_locked(self):
+        import dev_loop.server as server
+
+        with TemporaryDirectory() as tmp:
+            saved = server.write_workflow_config(
+                [
+                    {"id": "impl", "name": "Impl", "role_id": "implementer", "required": False},
+                    {"id": "check", "name": "Check", "role_id": "reviewer", "required": False},
+                    {"id": "gate", "name": "Gate", "role_id": "hub", "required": False},
+                    {"id": "qa", "name": "QA", "role_id": "tester", "required": False},
+                ],
+                tmp,
+            )
+            loaded = server.read_workflow_config(tmp)
+
+        self.assertEqual(saved, loaded)
+        by_id = {step["id"]: step for step in loaded["steps"]}
+        for core in ("impl", "check", "gate"):
+            self.assertTrue(by_id[core]["required"], core)
+            self.assertTrue(by_id[core]["required_locked"], core)
+        self.assertFalse(by_id["qa"]["required"])
+        self.assertFalse(by_id["qa"]["required_locked"])
+
+    def test_default_workflow_has_parallel_merge_and_loopback(self):
+        import dev_loop.server as server
+
+        edges = server.default_workflow_edges()
+        ids = {s["id"] for s in server.default_workflow_steps()}
+        # every edge references a real step
+        for e in edges:
+            self.assertIn(e["from"], ids)
+            self.assertIn(e["to"], ids)
+        out_of = lambda n: [e["to"] for e in edges if e["from"] == n]
+        into = lambda n: [e["from"] for e in edges if e["to"] == n]
+        # parallel: product_design fans out to two branches
+        self.assertEqual({"ui_design", "architecture"}, set(out_of("product_design")))
+        # merge: implement is fed by both branches
+        self.assertLessEqual({"ui_design", "architecture"}, set(into("implement")))
+        # loop-back: review returns to implement
+        self.assertIn("implement", out_of("review"))
+        # config round-trips through write/read with the branching edges intact
+        from tempfile import TemporaryDirectory
+        with TemporaryDirectory() as tmp:
+            loaded = server.read_workflow_config(tmp)
+        self.assertEqual(edges, loaded["edges"])
+
+    def test_workflow_persists_positions_and_edges(self):
+        import dev_loop.server as server
+
+        with TemporaryDirectory() as tmp:
+            saved = server.write_workflow_config(
+                [
+                    {"id": "a", "name": "A", "role_id": "hub", "x": 100, "y": 50},
+                    {"id": "b", "name": "B", "role_id": "implementer", "x": 400, "y": 200},
+                ],
+                tmp,
+                [{"from": "a", "to": "b"}],
+            )
+            loaded = server.read_workflow_config(tmp)
+
+        self.assertEqual(saved, loaded)
+        self.assertEqual(100.0, loaded["steps"][0]["x"])
+        self.assertEqual(200.0, loaded["steps"][1]["y"])
+        self.assertEqual([{"from": "a", "to": "b"}], loaded["edges"])
+
+    def test_workflow_edges_drop_selfloops_and_dupes_and_reject_unknown(self):
+        import dev_loop.server as server
+        from dev_loop.store import InvalidInputError
+
+        steps = [
+            {"id": "a", "name": "A", "role_id": "hub"},
+            {"id": "b", "name": "B", "role_id": "hub"},
+        ]
+        with TemporaryDirectory() as tmp:
+            saved = server.write_workflow_config(
+                steps,
+                tmp,
+                [
+                    {"from": "a", "to": "b"},
+                    {"from": "a", "to": "b"},  # dupe -> dropped
+                    {"from": "a", "to": "a"},  # self-loop -> dropped
+                ],
+            )
+            self.assertEqual([{"from": "a", "to": "b"}], saved["edges"])
+            with self.assertRaisesRegex(InvalidInputError, "unknown step"):
+                server.write_workflow_config(steps, tmp, [{"from": "a", "to": "z"}])
+
+    def test_legacy_workflow_without_edges_gets_sequential_chain(self):
+        import dev_loop.server as server
+        import json as _json
+
+        with TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / ".dev_loop" / "workflow.json"
+            cfg.parent.mkdir(parents=True)
+            cfg.write_text(_json.dumps({"steps": [
+                {"id": "a", "name": "A", "role_id": "hub"},
+                {"id": "b", "name": "B", "role_id": "hub"},
+                {"id": "c", "name": "C", "role_id": "hub"},
+            ]}))
+            loaded = server.read_workflow_config(tmp)
+        self.assertEqual(
+            [{"from": "a", "to": "b"}, {"from": "b", "to": "c"}], loaded["edges"]
+        )
+
+    def test_workflow_config_rejects_invalid_step_role(self):
+        import dev_loop.server as server
+        from dev_loop.store import InvalidInputError
+
+        with TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(InvalidInputError, "role_id is invalid"):
+                server.write_workflow_config(
+                    [{"name": "Bad", "role_id": "bad-role"}],
+                    tmp,
+                )
+
+    def test_assignment_candidates_rank_by_capabilities_expertise_and_load(self):
+        import dev_loop.server as server
+
+        task = {
+            "id": 1,
+            "role_required": "implementer",
+            "importance": "critical",
+            "size": "large",
+            "risk": "high",
+            "required_capabilities": ["python", "sqlite"],
+            "exclusive_workspace": True,
+        }
+        members = [
+            {
+                "agent_name": "codex",
+                "role_id": "implementer",
+                "enabled": True,
+                "expertise_level": 5,
+                "max_concurrent_tasks": 2,
+                "capabilities": ["python", "sqlite"],
+            },
+            {
+                "agent_name": "gemini",
+                "role_id": "implementer",
+                "enabled": True,
+                "expertise_level": 5,
+                "max_concurrent_tasks": 1,
+                "capabilities": ["python"],
+            },
+            {
+                "agent_name": "claude-code",
+                "role_id": "reviewer",
+                "enabled": True,
+                "expertise_level": 5,
+                "max_concurrent_tasks": 1,
+                "capabilities": ["python", "sqlite"],
+            },
+        ]
+
+        ranked = server.rank_assignment_candidates(task, members, {"codex": 1})
+
+        self.assertEqual("implementer", ranked["role_id"])
+        self.assertEqual(5, ranked["required_expertise_level"])
+        self.assertEqual("codex", ranked["selected"]["agent_name"])
+        self.assertEqual(["reviewer", "tester"], ranked["required_followups"])
+        self.assertEqual([], ranked["selected"]["missing_capabilities"])
+        self.assertNotIn(
+            "claude-code", [candidate["agent_name"] for candidate in ranked["candidates"]]
+        )
+
+    def test_assignment_candidates_penalize_low_expertise_for_complex_tasks(self):
+        import dev_loop.server as server
+
+        task = {
+            "id": 1,
+            "role_required": "implementer",
+            "importance": "critical",
+            "size": "large",
+            "risk": "high",
+            "required_capabilities": ["python"],
+            "exclusive_workspace": True,
+        }
+        members = [
+            {
+                "agent_name": "junior",
+                "role_id": "implementer",
+                "enabled": True,
+                "expertise_level": 2,
+                "max_concurrent_tasks": 1,
+                "capabilities": ["python"],
+            },
+            {
+                "agent_name": "senior",
+                "role_id": "implementer",
+                "enabled": True,
+                "expertise_level": 5,
+                "max_concurrent_tasks": 1,
+                "capabilities": ["python"],
+            },
+        ]
+
+        ranked = server.rank_assignment_candidates(task, members)
+        junior = next(
+            candidate for candidate in ranked["candidates"] if candidate["agent_name"] == "junior"
+        )
+
+        self.assertEqual("senior", ranked["selected"]["agent_name"])
+        self.assertEqual(3, junior["expertise_gap"])
+
+    def test_team_config_requires_core_enabled_roles(self):
+        import dev_loop.server as server
+        from dev_loop.store import InvalidInputError
+
+        with TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(
+                InvalidInputError,
+                "team is missing required enabled roles: reviewer",
+            ):
+                server.write_team_config(
+                    [
+                        {"agent_name": "hermes-manager", "role_id": "hub"},
+                        {"agent_name": "codex", "role_id": "implementer"},
+                        {
+                            "agent_name": "claude-code",
+                            "role_id": "reviewer",
+                            "enabled": False,
+                        },
+                    ],
+                    tmp,
+                )
+
+    def test_team_config_rejects_invalid_role_id(self):
+        import dev_loop.server as server
+        from dev_loop.store import InvalidInputError
+
+        with TemporaryDirectory() as tmp:
+            with self.assertRaises(InvalidInputError):
+                server.write_team_config(
+                    [{"agent_name": "codex", "role_id": "bad-role"}],
+                    tmp,
+                )
 
     def test_agent_role_detection_lists_non_private_role_files(self):
         import dev_loop.server as server
@@ -112,6 +498,8 @@ class PackagingTests(unittest.TestCase):
             (root / "hub.md").write_text("# 角色：hub\n\nbody", encoding="utf-8")
             (root / "reviewer.md").write_text("# 角色：reviewer\n", encoding="utf-8")
             (root / "tester.md").write_text("# 角色：tester\n", encoding="utf-8")
+            (root / "bad-name.md").write_text("# bad\n", encoding="utf-8")
+            (root / "123bad.md").write_text("# bad\n", encoding="utf-8")
             (root / "_protocol.md").write_text("# protocol\n", encoding="utf-8")
 
             roles = server.list_agent_roles(root)
@@ -119,6 +507,25 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual(["hub", "reviewer", "tester"], [role["id"] for role in roles])
         self.assertEqual("角色：hub", roles[0]["name"])
         self.assertIn("body", roles[0]["content"])
+
+    def test_role_id_validation_rejects_private_and_non_identifiers(self):
+        import dev_loop.server as server
+
+        self.assertTrue(server._is_valid_role_id("tester"))
+        self.assertTrue(server._is_valid_role_id("security_auditor"))
+        self.assertFalse(server._is_valid_role_id("_protocol"))
+        self.assertFalse(server._is_valid_role_id("bad-name"))
+        self.assertFalse(server._is_valid_role_id("123bad"))
+
+    def test_role_content_validation_requires_string(self):
+        import dev_loop.server as server
+        from dev_loop.store import InvalidInputError
+
+        self.assertEqual("body", server._validate_role_content("body"))
+        with self.assertRaises(InvalidInputError):
+            server._validate_role_content(None)
+        with self.assertRaises(InvalidInputError):
+            server._validate_role_content([])
 
 
 if __name__ == "__main__":

@@ -51,6 +51,36 @@ CREATE TABLE IF NOT EXISTS messages (
     lease_token TEXT,
     delivery_count INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS tasks (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_message_id INTEGER UNIQUE,
+    title             TEXT NOT NULL DEFAULT '',
+    content           TEXT NOT NULL,
+    sender            TEXT NOT NULL,
+    assignee          TEXT NOT NULL,
+    status            TEXT NOT NULL DEFAULT 'created',
+    role_required     TEXT NOT NULL DEFAULT 'implementer',
+    importance        TEXT NOT NULL DEFAULT 'normal',
+    size              TEXT NOT NULL DEFAULT 'medium',
+    risk              TEXT NOT NULL DEFAULT 'medium',
+    required_capabilities TEXT NOT NULL DEFAULT '',
+    exclusive_workspace INTEGER NOT NULL DEFAULT 1,
+    created_at        TEXT NOT NULL,
+    updated_at        TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS task_runs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id     INTEGER NOT NULL,
+    attempt     INTEGER NOT NULL,
+    worker      TEXT NOT NULL DEFAULT '',
+    status      TEXT NOT NULL DEFAULT 'running',
+    exit_code   INTEGER,
+    log_dir     TEXT NOT NULL,
+    started_at  TEXT NOT NULL,
+    finished_at TEXT,
+    FOREIGN KEY(task_id) REFERENCES tasks(id),
+    UNIQUE(task_id, attempt)
+);
 """
 
 _INDEX_SCHEMA = """
@@ -60,6 +90,12 @@ CREATE INDEX IF NOT EXISTS idx_messages_available
     ON messages (recipient, read_at, leased_until);
 CREATE INDEX IF NOT EXISTS idx_messages_reply_to
     ON messages (reply_to);
+CREATE INDEX IF NOT EXISTS idx_tasks_status
+    ON tasks (status);
+CREATE INDEX IF NOT EXISTS idx_tasks_assignee
+    ON tasks (assignee);
+CREATE INDEX IF NOT EXISTS idx_task_runs_task
+    ON task_runs (task_id, attempt);
 """
 
 
@@ -143,6 +179,18 @@ def _validate_agent_name(name: str) -> str:
     return name
 
 
+def _encode_capabilities(capabilities: list[str] | str) -> str:
+    if isinstance(capabilities, str):
+        parts = [part.strip() for part in capabilities.split(",")]
+    else:
+        parts = [str(part).strip() for part in capabilities]
+    return ",".join(part for part in parts if part)
+
+
+def _decode_capabilities(capabilities: str) -> list[str]:
+    return [part.strip() for part in (capabilities or "").split(",") if part.strip()]
+
+
 class Store:
     def __init__(self, db_path: Path | str | None = None):
         if db_path is None:
@@ -186,6 +234,37 @@ class Store:
             self._conn.execute(
                 "ALTER TABLE messages ADD COLUMN task_status TEXT NOT NULL DEFAULT ''"
             )
+        task_columns = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(tasks)").fetchall()
+        }
+        if "source_message_id" not in task_columns:
+            self._conn.execute("ALTER TABLE tasks ADD COLUMN source_message_id INTEGER")
+        task_defaults = {
+            "role_required": "TEXT NOT NULL DEFAULT 'implementer'",
+            "importance": "TEXT NOT NULL DEFAULT 'normal'",
+            "size": "TEXT NOT NULL DEFAULT 'medium'",
+            "risk": "TEXT NOT NULL DEFAULT 'medium'",
+            "required_capabilities": "TEXT NOT NULL DEFAULT ''",
+            "exclusive_workspace": "INTEGER NOT NULL DEFAULT 1",
+        }
+        for column, definition in task_defaults.items():
+            if column not in task_columns:
+                self._conn.execute(f"ALTER TABLE tasks ADD COLUMN {column} {definition}")
+        self._backfill_tasks_from_messages()
+
+    def _backfill_tasks_from_messages(self) -> None:
+        self._conn.execute(
+            """INSERT OR IGNORE INTO tasks (
+                   source_message_id, title, content, sender, assignee,
+                   status, created_at, updated_at
+               )
+               SELECT id, title, content, sender, recipient,
+                      CASE WHEN task_status = '' THEN 'created' ELSE task_status END,
+                      created_at, created_at
+               FROM messages
+               WHERE kind = 'task'"""
+        )
 
     # -- agents ------------------------------------------------------------
 
@@ -272,7 +351,26 @@ class Store:
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                     (sender, recipient, content, kind, title, task_status, reply_to, now),
                 )
-                ids.append(cur.lastrowid)
+                message_id = cur.lastrowid
+                ids.append(message_id)
+                if kind == "task":
+                    self._conn.execute(
+                        """INSERT OR IGNORE INTO tasks (
+                               source_message_id, title, content, sender, assignee,
+                               status, created_at, updated_at
+                           )
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            message_id,
+                            title,
+                            content,
+                            sender,
+                            recipient,
+                            task_status,
+                            now,
+                            now,
+                        ),
+                    )
             self._conn.commit()
         return ids
 
@@ -376,8 +474,222 @@ class Store:
                    WHERE id = ? AND kind = 'task'""",
                 (task_status, message_id),
             )
+            if cur.rowcount:
+                self._conn.execute(
+                    """UPDATE tasks
+                       SET status = ?, updated_at = ?
+                       WHERE source_message_id = ?""",
+                    (task_status, _now(), message_id),
+                )
             self._conn.commit()
         return cur.rowcount > 0
+
+    def list_tasks(
+        self,
+        status: str = "all",
+        assignee: str | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """Return executable tasks for the Kanban UI."""
+        limit = max(1, min(int(limit), 500))
+        filters = []
+        params: list[Any] = []
+        if status != "all":
+            filters.append("status = ?")
+            params.append(_validate_task_status(status))
+        if assignee:
+            filters.append("assignee = ?")
+            params.append(assignee)
+        where = f"WHERE {' AND '.join(filters)}" if filters else ""
+        query = f"""SELECT id, source_message_id, title, content, sender,
+                           assignee, assignee AS recipient, status AS task_status,
+                           created_at, updated_at,
+                           role_required, importance, size, risk,
+                           required_capabilities, exclusive_workspace
+                    FROM tasks
+                    {where}
+                    ORDER BY id DESC
+                    LIMIT ?"""
+        with self._lock:
+            rows = self._conn.execute(query, [*params, limit]).fetchall()
+        return [self._task_row(row) for row in rows]
+
+    def get_task(self, task_id: int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT id, source_message_id, title, content, sender,
+                          assignee, assignee AS recipient, status AS task_status,
+                          created_at, updated_at, role_required, importance, size,
+                          risk, required_capabilities, exclusive_workspace
+                   FROM tasks
+                   WHERE id = ?""",
+                (task_id,),
+            ).fetchone()
+        return self._task_row(row) if row else None
+
+    def update_task_metadata(
+        self,
+        task_id: int,
+        role_required: str | None = None,
+        importance: str | None = None,
+        size: str | None = None,
+        risk: str | None = None,
+        required_capabilities: list[str] | str | None = None,
+        exclusive_workspace: bool | None = None,
+    ) -> dict[str, Any] | None:
+        updates: list[str] = []
+        params: list[Any] = []
+        for column, value in (
+            ("role_required", role_required),
+            ("importance", importance),
+            ("size", size),
+            ("risk", risk),
+        ):
+            if value is not None:
+                updates.append(f"{column} = ?")
+                params.append(str(value).strip())
+        if required_capabilities is not None:
+            updates.append("required_capabilities = ?")
+            params.append(_encode_capabilities(required_capabilities))
+        if exclusive_workspace is not None:
+            updates.append("exclusive_workspace = ?")
+            params.append(1 if exclusive_workspace else 0)
+        if not updates:
+            return self.get_task(task_id)
+        updates.append("updated_at = ?")
+        params.append(_now())
+        params.append(task_id)
+        with self._lock:
+            cur = self._conn.execute(
+                f"UPDATE tasks SET {', '.join(updates)} WHERE id = ?",
+                params,
+            )
+            self._conn.commit()
+        if cur.rowcount == 0:
+            return None
+        return self.get_task(task_id)
+
+    def update_task_item_status(self, task_id: int, task_status: str) -> bool:
+        task_status = _validate_task_status(task_status)
+        if not task_status:
+            raise InvalidInputError("task_status must not be empty for an update")
+        now = _now()
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?",
+                (task_status, now, task_id),
+            )
+            row = self._conn.execute(
+                "SELECT source_message_id FROM tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+            if row and row["source_message_id"] is not None:
+                self._conn.execute(
+                    "UPDATE messages SET task_status = ? WHERE id = ? AND kind = 'task'",
+                    (task_status, row["source_message_id"]),
+                )
+            self._conn.commit()
+        return cur.rowcount > 0
+
+    def active_task_counts(self) -> dict[str, int]:
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT worker, COUNT(*) AS active_count
+                   FROM task_runs
+                   WHERE status = 'running' AND worker != ''
+                   GROUP BY worker"""
+            ).fetchall()
+        return {row["worker"]: int(row["active_count"]) for row in rows}
+
+    def create_task_run(
+        self,
+        task_id: int,
+        log_dir: str = "",
+        worker: str = "",
+        status: str = "running",
+    ) -> dict[str, Any] | None:
+        """Create a task execution attempt and return its run metadata."""
+        now = _now()
+        worker = (worker or "").strip()
+        status = (status or "running").strip()
+        with self._lock:
+            task = self._conn.execute(
+                "SELECT id FROM tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+            if task is None:
+                return None
+            row = self._conn.execute(
+                "SELECT COALESCE(MAX(attempt), 0) + 1 AS next_attempt FROM task_runs WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+            attempt = int(row["next_attempt"])
+            cur = self._conn.execute(
+                """INSERT INTO task_runs (
+                       task_id, attempt, worker, status, log_dir, started_at
+                   )
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (task_id, attempt, worker, status, log_dir, now),
+            )
+            run_id = cur.lastrowid
+            self._conn.commit()
+        return self.get_task_run(run_id)
+
+    def update_task_run_log_dir(
+        self, run_id: int, log_dir: str
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE task_runs SET log_dir = ? WHERE id = ?", (log_dir, run_id)
+            )
+            self._conn.commit()
+        if cur.rowcount == 0:
+            return None
+        return self.get_task_run(run_id)
+
+    def list_task_runs(self, task_id: int, limit: int = 20) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 100))
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT id, task_id, attempt, worker, status, exit_code,
+                          log_dir, started_at, finished_at
+                   FROM task_runs
+                   WHERE task_id = ?
+                   ORDER BY attempt DESC
+                   LIMIT ?""",
+                (task_id, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_task_run(self, run_id: int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT id, task_id, attempt, worker, status, exit_code,
+                          log_dir, started_at, finished_at
+                   FROM task_runs
+                   WHERE id = ?""",
+                (run_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def finish_task_run(
+        self,
+        run_id: int,
+        status: str,
+        exit_code: int | None = None,
+    ) -> dict[str, Any] | None:
+        status = (status or "").strip()
+        if not status:
+            raise InvalidInputError("status is required")
+        with self._lock:
+            cur = self._conn.execute(
+                """UPDATE task_runs
+                   SET status = ?, exit_code = ?, finished_at = ?
+                   WHERE id = ?""",
+                (status, exit_code, _now(), run_id),
+            )
+            self._conn.commit()
+        if cur.rowcount == 0:
+            return None
+        return self.get_task_run(run_id)
 
     def list_messages(
         self,
@@ -490,3 +802,11 @@ class Store:
             "SELECT 1 FROM agents WHERE name = ?", (name,)
         ).fetchone()
         return row is not None
+
+    def _task_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        task = dict(row)
+        task["required_capabilities"] = _decode_capabilities(
+            task.get("required_capabilities", "")
+        )
+        task["exclusive_workspace"] = bool(task.get("exclusive_workspace", 1))
+        return task
