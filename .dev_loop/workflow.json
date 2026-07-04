@@ -105,6 +105,10 @@
     {
       "from": "test",
       "to": "accept"
+    },
+    {
+      "from": "review",
+      "to": "implement"
     }
   ]
 }

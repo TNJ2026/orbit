@@ -307,6 +307,49 @@ def _normalize_workflow_edges(
     return normalized
 
 
+# Structural problems are warnings, not errors: the canvas saves after every
+# drag/add, so a half-connected graph is a normal intermediate state.
+def _workflow_graph_warnings(
+    steps: list[dict[str, Any]], edges: list[dict[str, str]]
+) -> list[str]:
+    ids = [step["id"] for step in steps]
+    if len(ids) <= 1:
+        return []
+    adj: dict[str, list[str]] = {}
+    radj: dict[str, list[str]] = {}
+    for edge in edges:
+        adj.setdefault(edge["from"], []).append(edge["to"])
+        radj.setdefault(edge["to"], []).append(edge["from"])
+    entries = [i for i in ids if i not in radj]
+    terminals = [i for i in ids if i not in adj]
+
+    def _reach(seeds: list[str], graph: dict[str, list[str]]) -> set[str]:
+        seen: set[str] = set()
+        stack = list(seeds)
+        while stack:
+            node = stack.pop()
+            if node in seen:
+                continue
+            seen.add(node)
+            stack.extend(graph.get(node, []))
+        return seen
+
+    warnings = []
+    if not entries:
+        warnings.append("no entry step: every step has an incoming connection")
+    else:
+        unreachable = [i for i in ids if i not in _reach(entries, adj)]
+        if unreachable:
+            warnings.append("unreachable steps: " + ", ".join(unreachable))
+    if not terminals:
+        warnings.append("no terminal step: every step has an outgoing connection")
+    else:
+        stuck = [i for i in ids if i not in _reach(terminals, radj)]
+        if stuck:
+            warnings.append("steps with no path to an end: " + ", ".join(stuck))
+    return warnings
+
+
 def read_workflow_config(project_root: str | None = None) -> dict[str, Any]:
     path = _workflow_config_path(project_root)
     if not path.exists():
@@ -314,6 +357,7 @@ def read_workflow_config(project_root: str | None = None) -> dict[str, Any]:
             "steps": default_workflow_steps(),
             "edges": default_workflow_edges(),
             "path": str(path),
+            "warnings": [],
         }
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -336,7 +380,12 @@ def read_workflow_config(project_root: str | None = None) -> dict[str, Any]:
         ]
     else:
         edges = _normalize_workflow_edges(raw_edges, valid_ids)
-    return {"steps": normalized, "edges": edges, "path": str(path)}
+    return {
+        "steps": normalized,
+        "edges": edges,
+        "path": str(path),
+        "warnings": _workflow_graph_warnings(normalized, edges),
+    }
 
 
 def write_workflow_config(
@@ -352,6 +401,17 @@ def write_workflow_config(
     valid_ids = {step["id"] for step in normalized}
     if len(valid_ids) != len(normalized):
         raise InvalidInputError("workflow step ids must be unique")
+    # The UI hides Remove on core-role cards; enforce the same rule here so
+    # a raw POST can't save a workflow with the core loop deleted. Reads stay
+    # lenient so legacy configs still load.
+    missing_core = sorted(
+        REQUIRED_TEAM_ROLES - {step["role_id"] for step in normalized}
+    )
+    if missing_core:
+        raise InvalidInputError(
+            "workflow must keep steps for core roles: " + ", ".join(missing_core)
+        )
+    _reject_unknown_roles({step["role_id"] for step in normalized}, project_root)
     normalized_edges = _normalize_workflow_edges(edges, valid_ids)
     path = _workflow_config_path(project_root)
     project_root_path = _project_root(project_root)
@@ -370,7 +430,12 @@ def write_workflow_config(
         json.dumps(data, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
-    return {"steps": normalized, "edges": normalized_edges, "path": str(path)}
+    return {
+        "steps": normalized,
+        "edges": normalized_edges,
+        "path": str(path),
+        "warnings": _workflow_graph_warnings(normalized, normalized_edges),
+    }
 
 
 def _normalize_team_member(member: Any) -> dict[str, Any]:
@@ -444,6 +509,20 @@ def required_expertise_for_task(task: dict[str, Any]) -> int:
     return max(1, min(required, 5))
 
 
+def _reject_unknown_roles(role_ids: set[str], project_root: str | None) -> None:
+    # Role ids are only syntax-checked during normalization; here they must
+    # also match an actual agents/<role>.md, otherwise the UI selects (which
+    # can't represent an unknown role) would silently rewrite them. Skipped
+    # when no roles can be listed at all, so configs stay writable in bare
+    # environments.
+    known = {role["id"] for role in list_agent_roles(_agents_dir(project_root))}
+    if not known:
+        return
+    unknown = sorted(role_ids - known)
+    if unknown:
+        raise InvalidInputError("unknown roles: " + ", ".join(unknown))
+
+
 def _missing_team_roles(members: list[dict[str, Any]]) -> list[str]:
     enabled_roles = {
         member["role_id"] for member in members if member.get("enabled", True)
@@ -480,6 +559,7 @@ def write_team_config(
     if not isinstance(members, list):
         raise InvalidInputError("members must be a list")
     normalized = [_normalize_team_member(member) for member in members]
+    _reject_unknown_roles({member["role_id"] for member in normalized}, project_root)
     # Missing core roles are reported, not rejected: a hard error here made
     # it impossible to build a team up one member at a time. Readiness is
     # checked where work actually starts.
@@ -685,6 +765,15 @@ def detect_hermes_profiles(profile_root: Path | None = None) -> list[dict[str, s
         for path in children
         if path.is_dir() and not path.name.startswith(".")
     ]
+
+
+def _agents_dir(project_root: str | None) -> Path:
+    # Prefer the project's own roles; fall back to the server's bundled
+    # agents/ so projects without one still get the default role set.
+    root = _project_root(project_root) / "agents"
+    if root.is_dir():
+        return root
+    return Path.cwd() / "agents"
 
 
 def list_agent_roles(agents_dir: Path | None = None) -> list[dict[str, str]]:
@@ -963,8 +1052,7 @@ def create_server(
     async def api_agent_roles(request: Request) -> JSONResponse:
         if forbidden := _forbid_non_local(request):
             return forbidden
-        project_root = current_project.get("project_root")
-        agents_dir = Path(project_root) / "agents" if project_root else Path.cwd() / "agents"
+        agents_dir = _agents_dir(current_project.get("project_root"))
         roles = await _to_thread(list_agent_roles, agents_dir)
         return _json(request, {"roles": roles})
 
@@ -980,8 +1068,7 @@ def create_server(
             content = _validate_role_content(data.get("content"))
         except InvalidInputError as exc:
             return _json_error(str(exc), request=request)
-        project_root = current_project.get("project_root")
-        agents_dir = Path(project_root) / "agents" if project_root else Path.cwd() / "agents"
+        agents_dir = _agents_dir(current_project.get("project_root"))
         if not agents_dir.is_dir():
             return _json_error("Agents directory not found", request=request)
         file_path = (agents_dir / f"{role_id}.md").resolve()

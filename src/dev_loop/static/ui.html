@@ -956,7 +956,7 @@
         return;
       }
       const data = await api("/api/workflow");
-      state.workflow = { steps: data.steps || [], edges: data.edges || [], path: data.path || "" };
+      state.workflow = { steps: data.steps || [], edges: data.edges || [], path: data.path || "", warnings: data.warnings || [] };
       const changed = resolveAllOverlaps();
       if (changed) {
         await saveWorkflow();
@@ -1083,9 +1083,7 @@
             <label>
               <div class="meta">Role</div>
               <select onchange="updateTeamMember(${index}, 'role_id', this.value)">
-                ${state.roles.map(role => `
-                  <option value="${escapeHtml(role.id)}" ${member.role_id === role.id ? "selected" : ""}>${escapeHtml(role.id)}</option>
-                `).join("")}
+                ${roleOptionsHtml(member.role_id)}
               </select>
             </label>
             ${showExpertise ? `
@@ -1115,6 +1113,19 @@
           <input value="${escapeHtml(member.notes || "")}" placeholder="notes" onchange="updateTeamMember(${index}, 'notes', this.value)">
         </div>
       `;
+    }
+
+    // Role options for a select; if the current value has no matching role
+    // file (legacy/hand-edited config), show it explicitly instead of letting
+    // the browser silently fall back to the first option.
+    function roleOptionsHtml(selectedId) {
+      const known = state.roles.some(role => role.id === selectedId);
+      const orphan = selectedId && !known
+        ? `<option value="${escapeHtml(selectedId)}" selected>${escapeHtml(selectedId)} (missing)</option>`
+        : "";
+      return orphan + state.roles.map(role => `
+        <option value="${escapeHtml(role.id)}" ${selectedId === role.id ? "selected" : ""}>${escapeHtml(role.id)}</option>
+      `).join("");
     }
 
     function agentLabel(agentName) {
@@ -1398,7 +1409,11 @@
     }
 
     function renderWorkflow() {
-      $("workflowPath").textContent = state.workflow.path ? `config: ${state.workflow.path}` : "";
+      const wfWarnings = state.workflow.warnings || [];
+      $("workflowPath").innerHTML = [
+        state.workflow.path ? `config: ${escapeHtml(state.workflow.path)}` : "",
+        wfWarnings.length ? `<span style="color: var(--warn)">⚠ ${wfWarnings.map(escapeHtml).join(" · ")}</span>` : ""
+      ].filter(Boolean).join(" — ");
       const steps = state.workflow.steps || [];
       wfLayoutCache = wfComputeLayout();
       const layout = wfLayoutCache;
@@ -1426,9 +1441,7 @@
                       <label>
                         <div class="meta">role</div>
                         <select onchange="updateWorkflowStep('${escapeHtml(step.id)}', 'role_id', this.value)">
-                          ${state.roles.map(role => `
-                            <option value="${escapeHtml(role.id)}" ${step.role_id === role.id ? "selected" : ""}>${escapeHtml(role.id)}</option>
-                          `).join("")}
+                          ${roleOptionsHtml(step.role_id)}
                         </select>
                       </label>
                       <label>
@@ -1599,7 +1612,7 @@
           edges: state.workflow.edges || []
         })
       });
-      state.workflow = { steps: data.steps || [], edges: data.edges || [], path: data.path || "" };
+      state.workflow = { steps: data.steps || [], edges: data.edges || [], path: data.path || "", warnings: data.warnings || [] };
       renderWorkflow();
     }
 

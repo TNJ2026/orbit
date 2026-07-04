@@ -251,6 +251,12 @@ class PackagingTests(unittest.TestCase):
                         "role_id": "implementer",
                         "task_status": "closed",
                     },
+                    {
+                        "id": "check",
+                        "name": "Check",
+                        "role_id": "reviewer",
+                        "task_status": "replied",
+                    },
                 ],
                 tmp,
             )
@@ -258,8 +264,81 @@ class PackagingTests(unittest.TestCase):
 
         self.assertEqual("intake", default["steps"][0]["id"])
         self.assertEqual(saved, loaded)
-        self.assertEqual(["plan", "ship"], [step["id"] for step in loaded["steps"]])
+        self.assertEqual(["plan", "ship", "check"], [step["id"] for step in loaded["steps"]])
         self.assertTrue(loaded["path"].endswith(".dev_loop/workflow.json"))
+
+    def test_workflow_rejects_payload_missing_core_role_steps(self):
+        import dev_loop.server as server
+        from dev_loop.store import InvalidInputError
+
+        with TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(
+                InvalidInputError,
+                "workflow must keep steps for core roles: hub, reviewer",
+            ):
+                server.write_workflow_config(
+                    [{"id": "impl", "name": "Impl", "role_id": "implementer"}],
+                    tmp,
+                )
+
+    def test_write_rejects_roles_without_role_file(self):
+        import dev_loop.server as server
+        from dev_loop.store import InvalidInputError
+
+        with TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(InvalidInputError, "unknown roles: ghost_role"):
+                server.write_workflow_config(
+                    [
+                        {"id": "a", "name": "A", "role_id": "hub"},
+                        {"id": "b", "name": "B", "role_id": "implementer"},
+                        {"id": "c", "name": "C", "role_id": "reviewer"},
+                        {"id": "g", "name": "G", "role_id": "ghost_role"},
+                    ],
+                    tmp,
+                )
+            with self.assertRaisesRegex(InvalidInputError, "unknown roles: ghost_role"):
+                server.write_team_config(
+                    [{"agent_name": "codex", "role_id": "ghost_role"}], tmp
+                )
+
+    def test_workflow_reports_graph_warnings(self):
+        import dev_loop.server as server
+
+        steps = [
+            {"id": "a", "name": "A", "role_id": "hub"},
+            {"id": "b", "name": "B", "role_id": "implementer"},
+            {"id": "c", "name": "C", "role_id": "reviewer"},
+        ]
+        with TemporaryDirectory() as tmp:
+            connected = server.write_workflow_config(
+                steps, tmp, [{"from": "a", "to": "b"}, {"from": "b", "to": "c"}]
+            )
+            orphaned = server.write_workflow_config(
+                steps, tmp, [{"from": "a", "to": "b"}]
+            )
+
+        self.assertEqual([], connected["warnings"])
+        # c has no incoming edge, so it is a second entry point rather than
+        # unreachable; a fully disconnected node yields no warning about
+        # reachability but b/c both count as terminals -> no warnings there.
+        self.assertEqual([], orphaned["warnings"])
+
+    def test_workflow_warns_on_unreachable_steps(self):
+        import dev_loop.server as server
+
+        steps = [
+            {"id": "a", "name": "A", "role_id": "hub"},
+            {"id": "b", "name": "B", "role_id": "implementer"},
+            {"id": "c", "name": "C", "role_id": "reviewer"},
+        ]
+        # b <-> c form a cycle with no entry from a's component.
+        with TemporaryDirectory() as tmp:
+            saved = server.write_workflow_config(
+                steps, tmp, [{"from": "b", "to": "c"}, {"from": "c", "to": "b"}]
+            )
+
+        self.assertTrue(any("unreachable" in w for w in saved["warnings"]))
+        self.assertTrue(any("no path to an end" in w for w in saved["warnings"]))
 
     def test_core_role_steps_are_always_required_and_locked(self):
         import dev_loop.server as server
@@ -315,6 +394,7 @@ class PackagingTests(unittest.TestCase):
                 [
                     {"id": "a", "name": "A", "role_id": "hub", "x": 100, "y": 50},
                     {"id": "b", "name": "B", "role_id": "implementer", "x": 400, "y": 200},
+                    {"id": "c", "name": "C", "role_id": "reviewer", "x": 700, "y": 50},
                 ],
                 tmp,
                 [{"from": "a", "to": "b"}],
@@ -332,7 +412,8 @@ class PackagingTests(unittest.TestCase):
 
         steps = [
             {"id": "a", "name": "A", "role_id": "hub"},
-            {"id": "b", "name": "B", "role_id": "hub"},
+            {"id": "b", "name": "B", "role_id": "implementer"},
+            {"id": "c", "name": "C", "role_id": "reviewer"},
         ]
         with TemporaryDirectory() as tmp:
             saved = server.write_workflow_config(
