@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -45,7 +46,9 @@ def _read_index(index_path: Path) -> list[dict[str, Any]]:
 
 def _write_index(index_path: Path, projects: list[dict[str, Any]]) -> None:
     index_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = index_path.with_suffix(index_path.suffix + ".tmp")
+    # Unique temp name: servers for different projects share this index, and
+    # two starting at once must not race on the same temp file.
+    tmp_path = index_path.with_suffix(f".{os.getpid()}.tmp")
     tmp_path.write_text(
         json.dumps({"projects": projects}, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",

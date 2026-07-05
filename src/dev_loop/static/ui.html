@@ -373,6 +373,46 @@
     button.danger { color: var(--danger); }
     button:disabled { opacity: .55; cursor: default; }
     button:active:not(:disabled) { transform: translateY(1px); }
+    .tasks-goal-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--line);
+      background: #fbfbf9;
+      cursor: pointer;
+    }
+    .tasks-goal-row:hover { background: #f4f7f5; }
+    .goal-composer {
+      border-bottom: 1px solid var(--line);
+      background: #fbfbf9;
+    }
+    .goal-card {
+      border-bottom: 1px solid var(--line);
+      padding: 12px;
+      display: grid;
+      gap: 6px;
+      cursor: pointer;
+    }
+    .goal-card:hover { background: #f4f7f5; }
+    .goal-progress {
+      height: 6px;
+      border-radius: 3px;
+      background: #e3e8e5;
+      overflow: hidden;
+    }
+    .goal-progress-fill {
+      height: 100%;
+      background: var(--accent);
+      transition: width 0.3s ease;
+    }
+    .goal-subtasks {
+      display: grid;
+      gap: 2px;
+      padding-left: 12px;
+      border-left: 2px solid var(--line);
+    }
     .wf-active-badge {
       background: var(--accent);
       color: var(--accent-ink);
@@ -734,6 +774,7 @@
   </header>
   <main id="mainView">
     <aside class="side-menu" aria-label="View">
+      <button id="goalsTab" class="menu-button" type="button">Goals</button>
       <button id="tasksTab" class="menu-button active" type="button">Tasks</button>
       <button id="teamTab" class="menu-button" type="button">Team</button>
       <button id="workflowTab" class="menu-button" type="button">Workflow</button>
@@ -741,11 +782,26 @@
       <button id="toolsTab" class="menu-button" type="button">Agents</button>
     </aside>
     <div class="workspace">
+    <div id="goalsPage" class="page goals-page">
+      <div class="pane-head">
+        <h2>Goals</h2>
+        <button id="refreshGoals" type="button">Refresh</button>
+      </div>
+      <div class="goal-composer stack">
+        <textarea id="goalInput" class="goal-textarea" placeholder="Describe the objective, key milestones, or sprint goal here..."></textarea>
+        <div class="row" style="justify-content: space-between;">
+          <div class="meta">Start creates a goal task and enters it into the workflow; the hub splits it into subtasks.</div>
+          <button id="startGoal" class="primary" type="button">▶ Start Goal</button>
+        </div>
+      </div>
+      <div id="goalsList"></div>
+    </div>
     <div id="tasksPage" class="page tasks-page active">
       <div class="pane-head">
         <h2>Development Tasks</h2>
         <button id="refreshTasks">Refresh</button>
       </div>
+      <div id="tasksGoalBar"></div>
       <div id="tasksLayout" class="tasks-layout">
         <div id="tasksList" class="tasks-list"></div>
         <aside id="taskDetails" class="task-details empty">
@@ -835,26 +891,19 @@
       runFiles: {},
       assignmentCandidates: null,
       taskWorkflow: null,
+      goals: [],
       taskDetailsCollapsed: localStorage.getItem("devloop-task-details-collapsed") !== "0"
     };
 
     const $ = (id) => document.getElementById(id);
 
+    const PAGES = ["goals", "tasks", "tools", "team", "workflow", "roles"];
     function setPage(page) {
-      const tasks = page === "tasks";
-      const tools = page === "tools";
-      const team = page === "team";
-      const workflow = page === "workflow";
-      $("tasksPage").classList.toggle("active", tasks);
-      $("toolsPage").classList.toggle("active", tools);
-      $("teamPage").classList.toggle("active", team);
-      $("workflowPage").classList.toggle("active", workflow);
-      $("rolesPage").classList.toggle("active", !tasks && !tools && !team && !workflow);
-      $("tasksTab").classList.toggle("active", tasks);
-      $("toolsTab").classList.toggle("active", tools);
-      $("teamTab").classList.toggle("active", team);
-      $("workflowTab").classList.toggle("active", workflow);
-      $("rolesTab").classList.toggle("active", !tasks && !tools && !team && !workflow);
+      if (!PAGES.includes(page)) page = "tasks";
+      PAGES.forEach(name => {
+        $(`${name}Page`).classList.toggle("active", name === page);
+        $(`${name}Tab`).classList.toggle("active", name === page);
+      });
     }
 
     async function api(path, options = {}, base = state.apiBase) {
@@ -1000,6 +1049,7 @@
       await loadTeam();
       await loadWorkflow();
       await loadTasks();
+      await loadGoals();
     }
 
     function renderTools() {
@@ -1910,17 +1960,6 @@
 
       $("tasksList").innerHTML = `
         <div class="kanban-board">
-          <div class="kanban-column goal-column">
-            <div class="kanban-column-header">
-              <span>🎯 SPRINT GOAL</span>
-              <button class="primary" onclick="startSprint()" style="min-height: 20px; height: 20px; padding: 0px 8px; font-size: 11px; border-radius: 4px; line-height: 18px; border: none; font-weight: bold; background: var(--accent); color: #fff; cursor: pointer; transition: background 0.15s ease;">Start</button>
-            </div>
-            <div class="goal-body-container">
-              <textarea id="goalInput" class="goal-textarea" placeholder="Describe the current phase objective, key milestones, or sprint goal here..."></textarea>
-              <div class="goal-tips">💡 Saved in real-time and persists across page reloads.</div>
-            </div>
-          </div>
-
           ${Object.entries(columns).map(([colId, col]) => `
             <div class="kanban-column">
               <div class="kanban-column-header">
@@ -1932,7 +1971,11 @@
                   <div class="kanban-card" onclick="showTaskDetails(${task.id})">
                     <div class="kanban-card-title">${escapeHtml(task.title || "#" + task.id + " Task")}</div>
                     <div class="kanban-card-content">${escapeHtml(task.content)}</div>
-                    ${task.workflow_step ? `<div class="meta" style="margin-bottom: 4px;"><span class="badge wf-step-badge">⚙ ${escapeHtml(task.workflow_step)}</span></div>` : ""}
+                    ${task.workflow_step || task.parent_task_id || task.is_goal ? `<div class="meta" style="margin-bottom: 4px; display: flex; gap: 4px; flex-wrap: wrap;">
+                      ${task.is_goal ? `<span class="badge wf-step-badge">🎯 goal</span>` : ""}
+                      ${task.parent_task_id ? `<span class="badge" title="subtask of goal #${task.parent_task_id}">↳ #${task.parent_task_id}</span>` : ""}
+                      ${task.workflow_step ? `<span class="badge wf-step-badge">⚙ ${escapeHtml(task.workflow_step)}</span>` : ""}
+                    </div>` : ""}
                     <div class="kanban-card-meta">
                       <span>${escapeHtml(task.sender)} ➜ ${escapeHtml(task.recipient)}</span>
                       <select onclick="event.stopPropagation()" onchange="moveTask(${task.id}, this.value)" style="font-size: 11px; padding: 2px 4px; width: auto; min-height: 20px; height: 22px; line-height: 1;">
@@ -1947,13 +1990,6 @@
         </div>
       `;
 
-      const goalEl = $("goalInput");
-      if (goalEl) {
-        goalEl.value = localStorage.getItem("devloop-goal") || "";
-        goalEl.addEventListener("input", () => {
-          localStorage.setItem("devloop-goal", goalEl.value);
-        });
-      }
     }
 
     async function loadTaskRuns(taskId) {
@@ -2010,13 +2046,12 @@
       });
     }
 
-    // Turn the sprint goal into a real task and enter it into the workflow:
-    // register the hub member (idempotent), create a kind=task message from
-    // the goal text, then start the engine so intake gets dispatched.
-    async function startSprint() {
+    // Turn the goal text into a real task (flagged is_goal), enter it into
+    // the workflow, and let the hub's intake step split it into subtasks.
+    async function createGoal() {
       const goalVal = $("goalInput").value.trim();
       if (!goalVal) {
-        setStatus("Enter a sprint goal first", true);
+        setStatus("Enter a goal first", true);
         return;
       }
       const hub = (state.team.members || []).find(
@@ -2029,7 +2064,7 @@
       await run(async () => {
         await api("/api/agents", {
           method: "POST",
-          body: JSON.stringify({ name: hub.agent_name, description: "hub (sprint start via UI)" })
+          body: JSON.stringify({ name: hub.agent_name, description: "hub (goal start via UI)" })
         });
         const title = goalVal.split("\n")[0].slice(0, 80);
         const sent = await api("/api/messages", {
@@ -2046,21 +2081,90 @@
         const messageId = (sent.message_ids || [])[0];
         const task = (state.tasks || []).find(t => t.source_message_id === messageId);
         if (!task) {
-          setStatus("Task created but could not be located on the board", true);
+          setStatus("Goal task created but could not be located", true);
           return;
         }
+        await api(`/api/tasks/${task.id}/metadata`, {
+          method: "POST",
+          body: JSON.stringify({ is_goal: true })
+        });
         const started = await api(`/api/tasks/${task.id}/workflow/start`, {
           method: "POST",
           body: JSON.stringify({})
         });
-        await loadTasks();
-        showTaskDetails(task.id);
+        $("goalInput").value = "";
+        localStorage.removeItem("devloop-goal");
+        await loadGoals();
         const dispatchedTo = (started.dispatched || [])
           .map(d => `${d.step} → ${d.assignee}`).join(", ");
         setStatus(dispatchedTo
-          ? `Sprint started: task #${task.id} (${dispatchedTo})`
-          : `Sprint started: task #${task.id}`);
+          ? `Goal #${task.id} started (${dispatchedTo})`
+          : `Goal #${task.id} started`);
       });
+    }
+
+    async function loadGoals() {
+      if (!state.apiBase) {
+        state.goals = [];
+        renderGoals();
+        return;
+      }
+      const data = await api("/api/goals");
+      state.goals = data.goals || [];
+      renderGoals();
+      renderTasksGoalBar();
+    }
+
+    function goalProgressHtml(goal) {
+      if (!goal.subtask_total) return `<span class="meta">no subtasks yet</span>`;
+      const pct = Math.round(goal.subtask_closed / goal.subtask_total * 100);
+      return `
+        <span class="meta">${goal.subtask_closed}/${goal.subtask_total} done${goal.subtask_blocked ? ` · <span style="color: var(--danger)">${goal.subtask_blocked} blocked</span>` : ""}</span>
+        <div class="goal-progress"><div class="goal-progress-fill" style="width: ${pct}%"></div></div>`;
+    }
+
+    function renderGoals() {
+      const goals = state.goals || [];
+      $("goalsList").innerHTML = goals.length ? goals.map(goal => `
+        <div class="goal-card" onclick="openGoalTask(${goal.id})">
+          <div class="row" style="justify-content: space-between;">
+            <strong>🎯 #${goal.id} ${escapeHtml(goal.title || "Goal")}</strong>
+            <span class="badge">${escapeHtml(goal.task_status)}</span>
+          </div>
+          ${goal.workflow_step ? `<div class="meta">⚙ ${escapeHtml(goal.workflow_step)} · ${escapeHtml(goal.assignee || "")}</div>` : ""}
+          ${goalProgressHtml(goal)}
+          ${goal.subtasks.length ? `
+            <div class="goal-subtasks">
+              ${goal.subtasks.map(sub => `
+                <div class="meta" onclick="event.stopPropagation(); openGoalTask(${sub.id})" style="cursor: pointer;">
+                  #${sub.id} ${escapeHtml(sub.title || "")} — ${escapeHtml(sub.task_status)}${sub.workflow_step ? ` · ⚙ ${escapeHtml(sub.workflow_step)}` : ""}
+                </div>
+              `).join("")}
+            </div>` : ""}
+        </div>
+      `).join("") : `<div class="empty">No goals yet — describe one above and press Start.</div>`;
+    }
+
+    function openGoalTask(taskId) {
+      setPage("tasks");
+      showTaskDetails(taskId);
+    }
+
+    // Slim summary of in-flight goals above the kanban board, so the board
+    // keeps goal context after the goal composer moved to its own page.
+    function renderTasksGoalBar() {
+      const bar = $("tasksGoalBar");
+      if (!bar) return;
+      const active = (state.goals || []).filter(g => g.task_status !== "closed");
+      bar.innerHTML = active.length ? active.map(goal => `
+        <div class="tasks-goal-row" onclick="setPage('goals')" title="Open the Goals page">
+          <strong>🎯 #${goal.id} ${escapeHtml(goal.title || "Goal")}</strong>
+          <span class="badge">${escapeHtml(goal.task_status)}</span>
+          ${goal.workflow_step ? `<span class="badge wf-step-badge">⚙ ${escapeHtml(goal.workflow_step)}</span>` : ""}
+          <span class="meta">${goal.subtask_total ? `${goal.subtask_closed}/${goal.subtask_total} subtasks done` : "no subtasks yet"}${goal.subtask_blocked ? ` · <span style="color: var(--danger)">${goal.subtask_blocked} blocked</span>` : ""}</span>
+          ${goal.subtask_total ? `<div class="goal-progress" style="flex: 1; min-width: 80px;"><div class="goal-progress-fill" style="width: ${Math.round(goal.subtask_closed / goal.subtask_total * 100)}%"></div></div>` : ""}
+        </div>
+      `).join("") : "";
     }
 
     async function moveTask(taskId, newStatus) {
@@ -2106,6 +2210,11 @@
           #${task.id} ${escapeHtml(task.sender)} to ${escapeHtml(task.recipient)}
           ${task.created_at ? ` - ${fmtTime(task.created_at)}` : ""}
         </div>
+        ${task.parent_task_id ? `
+          <div class="meta">
+            goal: <a href="#" onclick="event.preventDefault(); showTaskDetails(${task.parent_task_id})">🎯 #${task.parent_task_id} ${escapeHtml(((state.tasks || []).find(t => t.id === task.parent_task_id) || {}).title || "")}</a>
+          </div>` : ""}
+        ${task.is_goal ? `<div class="meta">🎯 this is a goal — subtask progress on the <a href="#" onclick="event.preventDefault(); setPage('goals')">Goals page</a></div>` : ""}
         <div class="meta">
           role: ${escapeHtml(task.role_required || "implementer")}
           - importance: ${escapeHtml(task.importance || "normal")}
@@ -2319,6 +2428,7 @@
     wireRefresh("refreshWorkflow", async () => { await loadRoles(); await loadTasks(); await loadWorkflow(); });
     wireRefresh("refreshRoles", loadRoles);
     wireRefresh("refreshTasks", loadTasks);
+    wireRefresh("refreshGoals", loadGoals);
     $("addTeamMember").addEventListener("click", addTeamMember);
     $("addWorkflowStep").addEventListener("click", addWorkflowStep);
     $("autoArrangeWorkflow").addEventListener("click", autoArrangeWorkflow);
@@ -2327,6 +2437,12 @@
     $("teamTab").addEventListener("click", () => setPage("team"));
     $("workflowTab").addEventListener("click", () => setPage("workflow"));
     $("rolesTab").addEventListener("click", () => setPage("roles"));
+    $("goalsTab").addEventListener("click", () => setPage("goals"));
+    $("startGoal").addEventListener("click", createGoal);
+    $("goalInput").addEventListener("input", () => {
+      localStorage.setItem("devloop-goal", $("goalInput").value);
+    });
+    $("goalInput").value = localStorage.getItem("devloop-goal") || "";
     $("tasksTab").addEventListener("click", () => setPage("tasks"));
 
     run(async () => {
@@ -2353,6 +2469,8 @@
           renderTaskDetails(state.tasks.find(t => t.id === state.selectedTaskId) || null);
         }
         if ($("workflowPage").classList.contains("active")) renderWorkflow();
+        // Goals feed both the Goals page and the bar above the kanban.
+        if ($("goalsPage").classList.contains("active") || $("tasksPage").classList.contains("active")) await loadGoals();
       } catch (error) {
         // transient poll errors stay silent; manual actions still report
       } finally {

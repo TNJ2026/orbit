@@ -428,6 +428,43 @@ class StepTimeoutTests(unittest.TestCase):
             )
 
 
+class GoalTests(unittest.TestCase):
+    def test_subtask_links_to_goal_and_summary_aggregates(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            goal_id = h.create_task(title="Big goal")
+            goal = h.task(goal_id)
+            h.store.update_task_metadata(goal_id, is_goal=True)
+
+            # hub splits: subtasks reply to the goal's source message
+            for n in (1, 2):
+                h.store.send_message(
+                    "hub-agent", "hub-agent", f"part {n}", kind="task",
+                    title=f"Sub {n}", reply_to=goal["source_message_id"],
+                )
+            subs = [t for t in h.store.list_tasks() if t.get("parent_task_id") == goal_id]
+            self.assertEqual(2, len(subs))
+
+            h.store.update_task_item_status(subs[0]["id"], "closed")
+            h.store.update_task_item_status(subs[1]["id"], "blocked")
+
+            [summary] = server.goals_summary(h.store)
+            self.assertEqual(goal_id, summary["id"])
+            self.assertTrue(summary["is_goal"])
+            self.assertEqual(2, summary["subtask_total"])
+            self.assertEqual(1, summary["subtask_closed"])
+            self.assertEqual(1, summary["subtask_blocked"])
+            self.assertEqual(
+                {"Sub 1", "Sub 2"}, {s["title"] for s in summary["subtasks"]}
+            )
+
+    def test_non_goal_tasks_absent_from_summary(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            h.create_task(title="plain task")
+            self.assertEqual([], server.goals_summary(h.store))
+
+
 class TeamLockTests(unittest.TestCase):
     def test_team_locked_while_workflow_tasks_run(self):
         with TemporaryDirectory() as tmp:

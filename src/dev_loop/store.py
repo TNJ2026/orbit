@@ -268,6 +268,8 @@ class Store:
             "required_capabilities": "TEXT NOT NULL DEFAULT ''",
             "exclusive_workspace": "INTEGER NOT NULL DEFAULT 1",
             "workflow_step": "TEXT NOT NULL DEFAULT ''",
+            "parent_task_id": "INTEGER",
+            "is_goal": "INTEGER NOT NULL DEFAULT 0",
         }
         for column, definition in task_defaults.items():
             if column not in task_columns:
@@ -375,12 +377,21 @@ class Store:
                 message_id = cur.lastrowid
                 ids.append(message_id)
                 if kind == "task":
+                    # A task replying to another task's source message is a
+                    # subtask of it (goal splitting): link the parent.
+                    parent_task_id = None
+                    if reply_to is not None:
+                        parent = self._conn.execute(
+                            "SELECT id FROM tasks WHERE source_message_id = ?",
+                            (reply_to,),
+                        ).fetchone()
+                        parent_task_id = parent["id"] if parent else None
                     self._conn.execute(
                         """INSERT OR IGNORE INTO tasks (
                                source_message_id, title, content, sender, assignee,
-                               status, created_at, updated_at
+                               status, parent_task_id, created_at, updated_at
                            )
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (
                             message_id,
                             title,
@@ -388,6 +399,7 @@ class Store:
                             sender,
                             recipient,
                             task_status,
+                            parent_task_id,
                             now,
                             now,
                         ),
@@ -527,7 +539,7 @@ class Store:
                            created_at, updated_at,
                            role_required, importance, size, risk,
                            required_capabilities, exclusive_workspace,
-                           workflow_step
+                           workflow_step, parent_task_id, is_goal
                     FROM tasks
                     {where}
                     ORDER BY id DESC
@@ -543,7 +555,7 @@ class Store:
                           assignee, assignee AS recipient, status AS task_status,
                           created_at, updated_at, role_required, importance, size,
                           risk, required_capabilities, exclusive_workspace,
-                          workflow_step
+                          workflow_step, parent_task_id, is_goal
                    FROM tasks
                    WHERE id = ?""",
                 (task_id,),
@@ -559,6 +571,7 @@ class Store:
         risk: str | None = None,
         required_capabilities: list[str] | str | None = None,
         exclusive_workspace: bool | None = None,
+        is_goal: bool | None = None,
     ) -> dict[str, Any] | None:
         updates: list[str] = []
         params: list[Any] = []
@@ -585,6 +598,9 @@ class Store:
         if exclusive_workspace is not None:
             updates.append("exclusive_workspace = ?")
             params.append(1 if exclusive_workspace else 0)
+        if is_goal is not None:
+            updates.append("is_goal = ?")
+            params.append(1 if is_goal else 0)
         if not updates:
             return self.get_task(task_id)
         updates.append("updated_at = ?")
@@ -936,4 +952,5 @@ class Store:
             task.get("required_capabilities", "")
         )
         task["exclusive_workspace"] = bool(task.get("exclusive_workspace", 1))
+        task["is_goal"] = bool(task.get("is_goal", 0))
         return task

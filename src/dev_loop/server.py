@@ -552,6 +552,39 @@ def _reject_unknown_roles(role_ids: set[str], project_root: str | None) -> None:
         raise InvalidInputError("unknown roles: " + ", ".join(unknown))
 
 
+def goals_summary(store: Store) -> list[dict[str, Any]]:
+    """Goals with aggregated subtask progress for the Goals page. Children
+    are linked via parent_task_id (subtasks reply to the goal's message)."""
+    tasks = store.list_tasks(status="all", limit=500)
+    children: dict[int, list[dict[str, Any]]] = {}
+    for task in tasks:
+        parent = task.get("parent_task_id")
+        if parent:
+            children.setdefault(parent, []).append(task)
+    goals = []
+    for task in tasks:
+        if not task.get("is_goal"):
+            continue
+        subs = children.get(task["id"], [])
+        goals.append({
+            **task,
+            "subtask_total": len(subs),
+            "subtask_closed": sum(1 for s in subs if s["task_status"] == "closed"),
+            "subtask_blocked": sum(1 for s in subs if s["task_status"] == "blocked"),
+            "subtasks": [
+                {
+                    "id": s["id"],
+                    "title": s["title"],
+                    "task_status": s["task_status"],
+                    "workflow_step": s.get("workflow_step", ""),
+                    "assignee": s.get("assignee", ""),
+                }
+                for s in subs
+            ],
+        })
+    return goals
+
+
 def team_locked_reason(store: Store) -> str | None:
     """Team config is frozen while any task is actively executing workflow
     steps: reassignment math, role constraints, and running auto-runners all
@@ -2151,6 +2184,13 @@ def create_server(
             return _json_error(str(exc), request=request)
         return _json(request, {"tasks": tasks})
 
+    @mcp.custom_route("/api/goals", methods=["GET"])
+    async def api_list_goals(request: Request) -> JSONResponse:
+        if forbidden := _forbid_non_local(request):
+            return forbidden
+        goals = await _to_thread(goals_summary, store)
+        return _json(request, {"goals": goals})
+
     @mcp.custom_route("/api/messages", methods=["POST"])
     async def api_send_message(request: Request) -> JSONResponse:
         if forbidden := _forbid_non_local(request):
@@ -2228,6 +2268,7 @@ def create_server(
                 data.get("risk"),
                 data.get("required_capabilities"),
                 data.get("exclusive_workspace"),
+                data.get("is_goal"),
             )
         except InvalidInputError as exc:
             return _json_error(str(exc), request=request)
