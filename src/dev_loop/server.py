@@ -501,9 +501,8 @@ def _normalize_team_member(member: Any) -> dict[str, Any]:
         "max_concurrent_tasks": max(1, min(max_concurrent_tasks, 3)),
         "capabilities": [capability.strip() for capability in capabilities if capability.strip()],
         "notes": str(member.get("notes", "")).strip(),
-        # Auto-runner: spawn a one-shot CLI per dispatched step instead of
-        # waiting for a live session to poll the inbox.
-        "auto_run": bool(member.get("auto_run", False)),
+        # Members with a runner command/default auto-run dispatched steps.
+        # Empty means the step waits for a live session/manual completion.
         "runner_command": str(member.get("runner_command", "")).strip(),
     }
 
@@ -565,7 +564,10 @@ def goals_summary(store: Store) -> list[dict[str, Any]]:
     for task in tasks:
         if not task.get("is_goal"):
             continue
-        subs = children.get(task["id"], [])
+        subs = [
+            child for child in children.get(task["id"], [])
+            if child.get("source_message_id") is not None
+        ]
         goals.append({
             **task,
             "subtask_total": len(subs),
@@ -578,6 +580,15 @@ def goals_summary(store: Store) -> list[dict[str, Any]]:
                     "task_status": s["task_status"],
                     "workflow_step": s.get("workflow_step", ""),
                     "assignee": s.get("assignee", ""),
+                    "step_total": len(children.get(s["id"], [])),
+                    "step_closed": sum(
+                        1 for c in children.get(s["id"], [])
+                        if c["task_status"] == "closed"
+                    ),
+                    "step_blocked": sum(
+                        1 for c in children.get(s["id"], [])
+                        if c["task_status"] == "blocked"
+                    ),
                 }
                 for s in subs
             ],
@@ -845,7 +856,8 @@ def _workflow_execution_errors(
         errors.append("no entry step")
     if not terminals:
         errors.append("no terminal step")
-    reachable = _reach(entries) if entries else set()
+    main_entry = entries[0] if entries else None
+    reachable = _reach([main_entry]) if main_entry else set()
     can_finish = _reach(terminals, reverse=True) if terminals else set()
     required_ids = [step_id for step_id in ids if steps[step_id]["required"]]
     unreachable_required = [step_id for step_id in required_ids if step_id not in reachable]
@@ -857,6 +869,28 @@ def _workflow_execution_errors(
             "required steps with no path to terminal: " + ", ".join(stuck_required)
         )
     return errors
+
+
+def _main_workflow_reachable_steps(
+    cfg: dict[str, Any], back: set[tuple[str, str]]
+) -> list[dict[str, Any]]:
+    entries = _workflow_entry_steps(cfg, back)
+    if not entries:
+        return []
+    graph: dict[str, list[str]] = {}
+    for edge in cfg["edges"]:
+        if (edge["from"], edge["to"]) in back:
+            continue
+        graph.setdefault(edge["from"], []).append(edge["to"])
+    seen: set[str] = set()
+    stack = [entries[0]]
+    while stack:
+        node = stack.pop()
+        if node in seen:
+            continue
+        seen.add(node)
+        stack.extend(graph.get(node, []))
+    return [step for step in cfg["steps"] if step["id"] in seen]
 
 
 def _team_role_of(members: list[dict[str, Any]], agent: str) -> str | None:
@@ -972,10 +1006,10 @@ def _notify_hub(store: Store, members: list[dict[str, Any]], text: str) -> str:
 
 
 def _workflow_api_actor(raw_agent: str, project_root: str | None) -> str:
-    # The UI sends no agent name; it acts as the team's hub member so the
-    # engine's assignee/hub constraint recognizes it.
+    # The UI sends no agent name (older pages sent "ui"); it acts as the
+    # team's hub member so the engine's assignee/hub constraint recognizes it.
     agent = (raw_agent or "").strip()
-    if agent:
+    if agent and agent != "ui":
         return agent
     members = read_team_config(project_root)["members"]
     hub_agent = next(
@@ -995,6 +1029,261 @@ def _workflow_api_actor(raw_agent: str, project_root: str | None) -> str:
 
 def _member_named(members: list[dict[str, Any]], agent_name: str) -> dict[str, Any] | None:
     return next((m for m in members if m["agent_name"] == agent_name), None)
+
+
+def _validate_goal_auto_runners(
+    store: Store, project_root: str | None, title: str, content: str
+) -> None:
+    cfg = read_workflow_config(project_root)
+    back = _workflow_graph(cfg)
+    errors = _workflow_execution_errors(cfg, back)
+    if errors:
+        raise InvalidInputError(
+            "workflow is not executable: "
+            + "; ".join(errors)
+            + ". Check the Workflow page warnings."
+        )
+    members = read_team_config(project_root)["members"]
+    probe_task = {
+        "id": 0,
+        "title": title,
+        "content": content,
+        "importance": "normal",
+        "size": "medium",
+        "risk": "medium",
+        "required_capabilities": [],
+        "exclusive_workspace": True,
+    }
+    missing: list[str] = []
+    for step in _main_workflow_reachable_steps(cfg, back):
+        assignee = _pick_assignee(store, probe_task, step, members)
+        if assignee is None:
+            if step["required"]:
+                missing.append(f"{step['id']} ({step['role_id']}): no enabled member")
+            continue
+        member = _member_named(members, assignee) or {"agent_name": assignee}
+        if not _runner_command_for(member):
+            missing.append(f"{step['id']} ({assignee}): no runner_command/default")
+    if missing:
+        raise InvalidInputError(
+            "goal cannot auto-run until runner commands are configured: "
+            + "; ".join(missing)
+        )
+
+
+def _extract_json_object(text: str) -> dict[str, Any]:
+    text = (text or "").strip()
+    if not text:
+        raise InvalidInputError("intake produced no JSON")
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start < 0 or end <= start:
+            raise InvalidInputError("intake output is not JSON") from None
+        try:
+            data = json.loads(text[start:end + 1])
+        except json.JSONDecodeError as exc:
+            raise InvalidInputError(f"invalid intake JSON: {exc}") from None
+    if not isinstance(data, dict):
+        raise InvalidInputError("intake JSON must be an object")
+    return data
+
+
+def _parse_goal_subtasks(text: str) -> list[dict[str, str]]:
+    data = _extract_json_object(text)
+    raw_tasks = data.get("tasks")
+    if not isinstance(raw_tasks, list) or not raw_tasks:
+        raise InvalidInputError('intake JSON must include a non-empty "tasks" list')
+    tasks: list[dict[str, str]] = []
+    for index, raw in enumerate(raw_tasks, 1):
+        if not isinstance(raw, dict):
+            raise InvalidInputError(f"task {index} must be an object")
+        title = str(raw.get("title") or "").strip()
+        content = str(raw.get("content") or "").strip()
+        acceptance = str(raw.get("acceptance") or "").strip()
+        if not title:
+            raise InvalidInputError(f"task {index} title is required")
+        if not content:
+            raise InvalidInputError(f"task {index} content is required")
+        body = content
+        if acceptance:
+            body += f"\n\nAcceptance:\n{acceptance}"
+        tasks.append({"title": title[:160], "content": body})
+    return tasks
+
+
+def _start_goal_business_subtasks(
+    store: Store,
+    project_root: str | None,
+    goal: dict[str, Any],
+    actor: str,
+    subtasks: list[dict[str, str]],
+) -> list[dict[str, Any]]:
+    source_message_id = goal.get("source_message_id")
+    if source_message_id is None:
+        raise InvalidInputError("goal is missing source_message_id")
+    started: list[dict[str, Any]] = []
+    for subtask in subtasks:
+        [message_id] = store.send_message(
+            actor,
+            actor,
+            subtask["content"],
+            reply_to=source_message_id,
+            kind="task",
+            title=subtask["title"],
+        )
+        task = next(
+            t for t in store.list_tasks(status="all", limit=500)
+            if t["source_message_id"] == message_id
+        )
+        result = _start_workflow_task_locked(store, project_root, actor, task["id"])
+        started.append({"task": store.get_task(task["id"]), **result})
+    return started
+
+
+def _business_subtasks_for_goal(store: Store, goal_id: int) -> list[dict[str, Any]]:
+    return [
+        task for task in store.list_tasks(status="all", limit=500)
+        if task.get("parent_task_id") == goal_id
+        and task.get("source_message_id") is not None
+    ]
+
+
+def _maybe_accept_parent_goal(store: Store, task: dict[str, Any]) -> None:
+    parent_id = task.get("parent_task_id")
+    if not parent_id:
+        return
+    parent = store.get_task(parent_id)
+    if not parent or not parent.get("is_goal"):
+        return
+    subtasks = _business_subtasks_for_goal(store, parent_id)
+    if subtasks and all(subtask["task_status"] == "closed" for subtask in subtasks):
+        store.set_task_workflow_state(parent_id, workflow_step="", task_status="accepted")
+
+
+def _materializes_step_cards(task: dict[str, Any]) -> bool:
+    return bool(
+        task.get("is_goal")
+        or (
+            task.get("parent_task_id")
+            and task.get("source_message_id") is not None
+        )
+    )
+
+
+def _is_root_goal_entry_step(
+    project_root: str | None, task: dict[str, Any], step: dict[str, Any]
+) -> bool:
+    if not task.get("is_goal") or task.get("parent_task_id"):
+        return False
+    cfg = read_workflow_config(project_root)
+    back = _workflow_graph(cfg)
+    entries = _workflow_entry_steps(cfg, back)
+    return bool(entries and step["id"] == entries[0])
+
+
+def _complete_goal_intake_locked(
+    store: Store,
+    project_root: str | None,
+    goal: dict[str, Any],
+    step: dict[str, Any],
+    actor: str,
+    result: str,
+) -> dict[str, Any]:
+    subtasks = _parse_goal_subtasks(result)
+    started = _start_goal_business_subtasks(store, project_root, goal, actor, subtasks)
+    store.record_task_transition(goal["id"], step["id"], "", actor, "done", result)
+    store.set_task_workflow_state(
+        goal["id"], workflow_step="", task_status="in_progress"
+    )
+    _settle_step_card(store, goal, step["id"], "done")
+    return {
+        "task_id": goal["id"],
+        "step": step["id"],
+        "outcome": "done",
+        "created_subtasks": [item["task"] for item in started],
+        "started": started,
+        "dispatched": [
+            dispatched
+            for item in started
+            for dispatched in item.get("dispatched", [])
+        ],
+        "notices": [
+            notice
+            for item in started
+            for notice in item.get("notices", [])
+        ],
+    }
+
+
+# --- Step cards --------------------------------------------------------------
+# For goal tasks every dispatched workflow step is materialized as its own
+# subtask card (parent_task_id = goal), so the kanban shows the flow as cards
+# moving through columns instead of one invisible goal row. The engine still
+# tracks the workflow on the goal task itself; cards are a projection.
+
+def _role_duty_summary(project_root: str | None, role_id: str) -> str:
+    """First bullet under a role's 职责 section — a one-line description of
+    the work that role performs, used as the step card's work summary."""
+    for role in list_agent_roles(_agents_dir(project_root)):
+        if role["id"] != role_id:
+            continue
+        in_duties = False
+        for line in role["content"].splitlines():
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                in_duties = "职责" in stripped
+                continue
+            if in_duties and stripped.startswith("- "):
+                return stripped[2:].strip()
+    return ""
+
+
+def _upsert_step_card(
+    store: Store,
+    project_root: str | None,
+    parent: dict[str, Any],
+    step: dict[str, Any],
+    assignee: str,
+) -> None:
+    card = store.find_open_step_card(parent["id"], step["id"])
+    if card:
+        # Redispatch (rework loop / timeout reassign): reuse the open card.
+        store.set_task_workflow_state(
+            card["id"], task_status=step["task_status"], assignee=assignee
+        )
+        return
+    # Title = step type + what that role does; the parent linkage is carried
+    # by parent_task_id (↳ badge in the UI), not repeated in every title.
+    duty = _role_duty_summary(project_root, step["role_id"])
+    title = f"{step['name']} · {duty[:50]}" if duty else step["name"]
+    store.create_step_card(
+        parent_task_id=parent["id"],
+        workflow_step=step["id"],
+        title=title,
+        content=(
+            f"Workflow step '{step['name']}' (role {step['role_id']}) "
+            f"of task #{parent['id']}\n\n{parent.get('content', '')}"
+        ),
+        sender=WORKFLOW_ENGINE_AGENT,
+        assignee=assignee,
+        status=step["task_status"],
+        role_required=step["role_id"],
+    )
+
+
+def _settle_step_card(
+    store: Store, goal: dict[str, Any], step_id: str, outcome: str
+) -> None:
+    if not _materializes_step_cards(goal):
+        return
+    card = store.find_open_step_card(goal["id"], step_id)
+    if not card:
+        return
+    status = "blocked" if outcome == "blocked" else "closed"
+    store.set_task_workflow_state(card["id"], task_status=status)
 
 
 def _dispatch_step(
@@ -1029,7 +1318,9 @@ def _dispatch_step(
     store.set_task_workflow_state(
         task_id, task_status=step["task_status"], assignee=assignee
     )
-    if member.get("auto_run"):
+    if _materializes_step_cards(task):
+        _upsert_step_card(store, project_root, task, step, assignee)
+    if _runner_command_for(member):
         _spawn_step_worker(store, project_root, task_id, step, member, upstream_result)
 
 
@@ -1203,6 +1494,7 @@ def _advance_workflow_task_locked(
     if outcome == "blocked":
         store.record_task_transition(task_id, step, step, agent, "blocked", result)
         store.set_task_workflow_state(task_id, task_status="blocked")
+        _settle_step_card(store, task, step, "blocked")
         notice = _notify_hub(
             store, members,
             f"Task #{task_id} blocked at step '{step}' by {agent}: {result or 'no details'}",
@@ -1228,11 +1520,14 @@ def _advance_workflow_task_locked(
         store.set_task_workflow_state(
             task_id, workflow_step="", task_status="closed"
         )
+        _settle_step_card(store, task, step, "done")
+        _maybe_accept_parent_goal(store, task)
         return {
             "task_id": task_id, "step": step, "outcome": "done",
             "closed": True, "dispatched": [], "notices": [],
         }
 
+    _settle_step_card(store, task, step, outcome)
     dispatched, notices = _dispatch_targets(
         store, project_root, task, targets, cfg, back, members, result
     )
@@ -1246,10 +1541,10 @@ def _advance_workflow_task_locked(
 WORKFLOW_TIMEOUT_POLL_SECONDS = 60
 
 # --- Auto-runner -------------------------------------------------------------
-# Team members with auto_run enabled get a one-shot CLI process spawned for
-# each dispatched step instead of waiting for a live session to poll the
-# inbox. The command receives the prompt on stdin, works in the project root,
-# and its stdout tail is submitted via the engine as the step result.
+# Dispatched steps whose assignee has a runner command spawn a one-shot CLI
+# process instead of waiting for a live session to poll the inbox. The command
+# receives the prompt on stdin, works in the project root, and its stdout tail
+# is submitted via the engine as the step result.
 # runner_command on the member overrides the per-tool default.
 RUNNER_DEFAULT_TIMEOUT_SECONDS = 1800
 # Headless CLIs default to asking for permission on every file write / tool
@@ -1257,6 +1552,7 @@ RUNNER_DEFAULT_TIMEOUT_SECONDS = 1800
 # can only produce inline text. These defaults grant maximum autonomy; set
 # runner_command on the member to run with a tighter policy.
 _DEFAULT_RUNNER_COMMANDS = {
+    "antigravity": 'agy --dangerously-skip-permissions --print "$(cat)"',
     "claude-code": "claude -p --dangerously-skip-permissions",
     "codex": "codex exec --dangerously-bypass-approvals-and-sandbox -",
     # gemini additionally refuses to start headless in an untrusted dir.
@@ -1296,18 +1592,31 @@ def _build_step_prompt(
         for role in list_agent_roles(_agents_dir(project_root))
     }
     role_text = roles.get(step["role_id"], "")
+    goal_contract = ""
+    if _is_root_goal_entry_step(project_root, task, step):
+        goal_contract = (
+            "\n## Goal 拆分输出格式\n"
+            "你必须只输出一个 JSON 对象，不要 Markdown，不要代码块：\n"
+            '{"tasks":[{"title":"子任务标题","content":"要做什么",'
+            '"acceptance":"验收标准"}]}\n'
+            "每个子任务必须可独立执行，建议 3-8 个。\n"
+        )
+    final_instruction = (
+        "只输出上述 JSON 对象。"
+        if goal_contract
+        else "完成后在输出的最后打印一段简短总结：一行结论 + 产物文件路径。"
+    )
     return (
         f"你是被工作流引擎派发的一次性 worker，以角色 {step['role_id']} 执行"
         f"步骤 '{step['name']}'。当前工作目录就是项目根目录，直接读写文件完成任务。\n"
         "忽略角色说明里 register_agent / check_inbox / ack 等信箱循环要求——"
-        "本次为一次性执行，也不要调用 complete_step，派发器会代为提交结果。"
-        "例外：角色说明要求拆分/新建任务时（如 goal 拆分），可以使用 devloop 的 "
-        "send_message(kind=\"task\") 与 start_workflow_task 工具。\n\n"
+        "本次为一次性执行，也不要调用 complete_step，派发器会代为提交结果。\n\n"
         f"## 角色说明\n{role_text}\n\n"
         f"## 任务 #{task['id']}: {task.get('title') or 'untitled'}\n"
         f"{task.get('content', '')}\n\n"
+        + goal_contract
         + (f"## 上游产出\n{upstream_result}\n\n" if upstream_result else "")
-        + "完成后在输出的最后打印一段简短总结：一行结论 + 产物文件路径。"
+        + final_instruction
     )
 
 
@@ -1327,9 +1636,17 @@ def run_step_worker(
     task = store.get_task(task_id)
     if not task:
         return {"error": f"unknown task: {task_id}"}
-    run = store.create_task_run(task_id, worker=assignee)
+    # For goal tasks the run is recorded on the step's card, so each card's
+    # Runs panel shows its own execution history instead of everything piling
+    # up on the goal.
+    run_task_id = task_id
+    if _materializes_step_cards(task):
+        card = store.find_open_step_card(task_id, step["id"])
+        if card:
+            run_task_id = card["id"]
+    run = store.create_task_run(run_task_id, worker=assignee)
     if run:
-        log_dir = _task_run_dir(project_root, task_id, int(run["attempt"]))
+        log_dir = _task_run_dir(project_root, run_task_id, int(run["attempt"]))
         run = store.update_task_run_log_dir(run["id"], str(log_dir)) or run
     command = _runner_command_for(member)
     if timeout_seconds is None:
@@ -1341,7 +1658,7 @@ def run_step_worker(
     if not command:
         result = (
             f"no runner command for agent {assignee}; set runner_command on "
-            "the team member or disable auto_run"
+            "the team member"
         )
     else:
         prompt = _build_step_prompt(project_root, task, step, upstream_result)
@@ -1369,6 +1686,14 @@ def run_step_worker(
             result = f"runner timed out after {int(timeout_seconds)}s"
         except OSError as exc:
             result = f"runner failed to start: {exc}"
+    goal_intake = _is_root_goal_entry_step(project_root, task, step)
+    if outcome == "done" and goal_intake:
+        try:
+            _parse_goal_subtasks(result)
+        except InvalidInputError as exc:
+            outcome = "blocked"
+            status = "failed"
+            result = str(exc)
     if run:
         try:
             _write_run_file(run, "stdout", stdout)
@@ -1378,6 +1703,14 @@ def run_step_worker(
             store.finish_task_run(run["id"], status, exit_code)
         except (InvalidInputError, OSError):
             pass
+    if outcome == "done" and goal_intake:
+        try:
+            with _WORKFLOW_ENGINE_LOCK:
+                return _complete_goal_intake_locked(
+                    store, project_root, task, step, assignee, result
+                )
+        except (InvalidInputError, UnknownAgentError) as exc:
+            return {"task_id": task_id, "step": step["id"], "error": str(exc)}
     try:
         report = advance_workflow_task(
             store, project_root, assignee, task_id, step["id"], outcome, result
@@ -2190,6 +2523,55 @@ def create_server(
             return forbidden
         goals = await _to_thread(goals_summary, store)
         return _json(request, {"goals": goals})
+
+    @mcp.custom_route("/api/goals", methods=["POST"])
+    async def api_create_goal(request: Request) -> JSONResponse:
+        """Create a goal and enter it into the workflow in one shot, so a
+        failed follow-up request can't leave a goal stranded outside the
+        workflow waiting for a manual start."""
+        if forbidden := _forbid_non_local(request):
+            return forbidden
+        data = await _read_json(request)
+        content = str(data.get("content") or "").strip()
+        if not content:
+            return _json_error("content is required", request=request)
+        title = str(data.get("title") or "").strip() or content.splitlines()[0][:80]
+
+        def _create_and_start() -> dict:
+            actor = _workflow_api_actor(
+                str(data.get("agent") or ""), current_project.get("project_root")
+            )
+            _validate_goal_auto_runners(
+                store, current_project.get("project_root"), title, content
+            )
+            store.register_agent(actor, "hub (goal start via UI)")
+            [message_id] = store.send_message(
+                actor, actor, content, kind="task", title=title
+            )
+            task = next(
+                t for t in store.list_tasks(limit=10)
+                if t["source_message_id"] == message_id
+            )
+            store.update_task_metadata(task["id"], is_goal=True)
+            try:
+                started = start_workflow_task(
+                    store, current_project.get("project_root"), actor, task["id"]
+                )
+            except (InvalidInputError, UnknownAgentError):
+                # Don't strand a goal outside the workflow: close it so the
+                # UI never needs a manual "start workflow" recovery click.
+                store.set_task_workflow_state(task["id"], task_status="closed")
+                raise
+            return {"goal": store.get_task(task["id"]), **started}
+
+        try:
+            result = await _to_thread(_create_and_start)
+        except (InvalidInputError, UnknownAgentError) as exc:
+            return _json_error(str(exc), request=request)
+        except Exception as exc:
+            traceback.print_exc()
+            return _json_error(f"goal creation failed: {exc!r}", 500, request)
+        return _json(request, result)
 
     @mcp.custom_route("/api/messages", methods=["POST"])
     async def api_send_message(request: Request) -> JSONResponse:

@@ -637,6 +637,48 @@ class Store:
             self._conn.commit()
         return cur.rowcount > 0
 
+    def create_step_card(
+        self,
+        parent_task_id: int,
+        workflow_step: str,
+        title: str,
+        content: str,
+        sender: str,
+        assignee: str,
+        status: str,
+        role_required: str = "implementer",
+    ) -> dict[str, Any]:
+        """Materialize one workflow step of a goal as its own task card."""
+        status = _validate_task_status(status) or "created"
+        now = _now()
+        with self._lock:
+            cur = self._conn.execute(
+                """INSERT INTO tasks (
+                       title, content, sender, assignee, status, role_required,
+                       parent_task_id, workflow_step, created_at, updated_at
+                   )
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    title, content, sender, assignee, status, role_required,
+                    parent_task_id, workflow_step, now, now,
+                ),
+            )
+            self._conn.commit()
+        return self.get_task(cur.lastrowid)
+
+    def find_open_step_card(
+        self, parent_task_id: int, workflow_step: str
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT id FROM tasks
+                   WHERE parent_task_id = ? AND workflow_step = ?
+                     AND status != 'closed'
+                   ORDER BY id DESC LIMIT 1""",
+                (parent_task_id, workflow_step),
+            ).fetchone()
+        return self.get_task(row["id"]) if row else None
+
     def set_task_workflow_state(
         self,
         task_id: int,

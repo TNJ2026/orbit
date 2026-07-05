@@ -373,17 +373,16 @@
     button.danger { color: var(--danger); }
     button:disabled { opacity: .55; cursor: default; }
     button:active:not(:disabled) { transform: translateY(1px); }
-    .tasks-goal-row {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      flex-wrap: wrap;
-      padding: 8px 12px;
-      border-bottom: 1px solid var(--line);
-      background: #fbfbf9;
+    .tasks-goal-subtitle {
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: var(--muted);
+      font-size: 12px;
       cursor: pointer;
     }
-    .tasks-goal-row:hover { background: #f4f7f5; }
+    .tasks-goal-subtitle:hover { color: var(--ink); }
     .goal-composer {
       border-bottom: 1px solid var(--line);
       background: #fbfbf9;
@@ -790,7 +789,7 @@
       <div class="goal-composer stack">
         <textarea id="goalInput" class="goal-textarea" placeholder="Describe the objective, key milestones, or sprint goal here..."></textarea>
         <div class="row" style="justify-content: space-between;">
-          <div class="meta">Start creates a goal task and enters it into the workflow; the hub splits it into subtasks.</div>
+          <div class="meta">Start creates a goal, auto-splits it into tasks, and runs each task through the workflow.</div>
           <button id="startGoal" class="primary" type="button">▶ Start Goal</button>
         </div>
       </div>
@@ -798,10 +797,12 @@
     </div>
     <div id="tasksPage" class="page tasks-page active">
       <div class="pane-head">
-        <h2>Development Tasks</h2>
+        <div style="min-width: 0;">
+          <h2>Development Tasks</h2>
+          <div id="tasksGoalBar" class="tasks-goal-subtitle"></div>
+        </div>
         <button id="refreshTasks">Refresh</button>
       </div>
-      <div id="tasksGoalBar"></div>
       <div id="tasksLayout" class="tasks-layout">
         <div id="tasksList" class="tasks-list"></div>
         <aside id="taskDetails" class="task-details empty">
@@ -1177,13 +1178,7 @@
           </div>
           <input value="${escapeHtml((member.capabilities || []).join(', '))}" placeholder="capability subscriptions" onchange="updateTeamMember(${index}, 'capabilities', this.value)">
           <input value="${escapeHtml(member.notes || "")}" placeholder="notes" onchange="updateTeamMember(${index}, 'notes', this.value)">
-          <div class="row" style="gap: 8px; align-items: center;">
-            <label class="row" style="gap: 4px; width: auto; white-space: nowrap;" title="Spawn a one-shot CLI for each dispatched step (prompt on stdin) instead of waiting for a live session">
-              <input type="checkbox" style="width: auto;" ${member.auto_run ? "checked" : ""} onchange="updateTeamMember(${index}, 'auto_run', this.checked)">
-              <span class="meta">auto-run</span>
-            </label>
-            <input value="${escapeHtml(member.runner_command || "")}" placeholder="runner command (default: claude -p / codex exec -)" onchange="updateTeamMember(${index}, 'runner_command', this.value)" style="flex: 1;">
-          </div>
+          <input value="${escapeHtml(member.runner_command || "")}" placeholder="runner command (default per tool, e.g. claude -p …)" title="When set, dispatched steps spawn this CLI (prompt on stdin); empty uses a per-tool default if available" onchange="updateTeamMember(${index}, 'runner_command', this.value)">
         </div>
       `;
     }
@@ -1262,7 +1257,7 @@
       if (!member) return;
       if (field === "expertise_level" || field === "max_concurrent_tasks") {
         member[field] = Number(value);
-      } else if (field === "enabled" || field === "auto_run") {
+      } else if (field === "enabled") {
         member[field] = Boolean(value);
       } else if (field === "capabilities") {
         member[field] = String(value).split(",").map(item => item.trim()).filter(Boolean);
@@ -1953,7 +1948,10 @@
         done: { name: "Done", class: "done", tasks: [] }
       };
 
+      // Goals and business subtasks live on the Goals page; the board shows
+      // only workflow execution cards.
       (state.tasks || []).forEach(task => {
+        if (task.is_goal || !task.parent_task_id || task.source_message_id) return;
         const colId = COLUMN_MAP[task.task_status] || "todo";
         columns[colId].tasks.push(task);
       });
@@ -2046,60 +2044,28 @@
       });
     }
 
-    // Turn the goal text into a real task (flagged is_goal), enter it into
-    // the workflow, and let the hub's intake step split it into subtasks.
+    // One request: the server creates the goal task, flags it, and enters it
+    // into the workflow atomically — no separate "start workflow" click.
     async function createGoal() {
       const goalVal = $("goalInput").value.trim();
       if (!goalVal) {
         setStatus("Enter a goal first", true);
         return;
       }
-      const hub = (state.team.members || []).find(
-        m => m.role_id === "hub" && m.enabled !== false
-      );
-      if (!hub) {
-        setStatus("Team has no enabled hub member — set one up on the Team page first", true);
-        return;
-      }
       await run(async () => {
-        await api("/api/agents", {
+        const result = await api("/api/goals", {
           method: "POST",
-          body: JSON.stringify({ name: hub.agent_name, description: "hub (goal start via UI)" })
-        });
-        const title = goalVal.split("\n")[0].slice(0, 80);
-        const sent = await api("/api/messages", {
-          method: "POST",
-          body: JSON.stringify({
-            sender: hub.agent_name,
-            to: hub.agent_name,
-            content: goalVal,
-            kind: "task",
-            title
-          })
-        });
-        await loadTasks();
-        const messageId = (sent.message_ids || [])[0];
-        const task = (state.tasks || []).find(t => t.source_message_id === messageId);
-        if (!task) {
-          setStatus("Goal task created but could not be located", true);
-          return;
-        }
-        await api(`/api/tasks/${task.id}/metadata`, {
-          method: "POST",
-          body: JSON.stringify({ is_goal: true })
-        });
-        const started = await api(`/api/tasks/${task.id}/workflow/start`, {
-          method: "POST",
-          body: JSON.stringify({})
+          body: JSON.stringify({ content: goalVal })
         });
         $("goalInput").value = "";
         localStorage.removeItem("devloop-goal");
         await loadGoals();
-        const dispatchedTo = (started.dispatched || [])
+        await loadTasks();
+        const dispatchedTo = (result.dispatched || [])
           .map(d => `${d.step} → ${d.assignee}`).join(", ");
         setStatus(dispatchedTo
-          ? `Goal #${task.id} started (${dispatchedTo})`
-          : `Goal #${task.id} started`);
+          ? `Goal #${result.goal.id} started (${dispatchedTo})`
+          : `Goal #${result.goal.id} started`);
       });
     }
 
@@ -2129,7 +2095,10 @@
         <div class="goal-card" onclick="openGoalTask(${goal.id})">
           <div class="row" style="justify-content: space-between;">
             <strong>🎯 #${goal.id} ${escapeHtml(goal.title || "Goal")}</strong>
-            <span class="badge">${escapeHtml(goal.task_status)}</span>
+            <span class="row" style="gap: 6px; width: auto;">
+              <span class="badge">${escapeHtml(goal.task_status)}</span>
+              ${goal.task_status === "accepted" ? `<button type="button" onclick="event.stopPropagation(); closeGoal(${goal.id})">Close</button>` : ""}
+            </span>
           </div>
           ${goal.workflow_step ? `<div class="meta">⚙ ${escapeHtml(goal.workflow_step)} · ${escapeHtml(goal.assignee || "")}</div>` : ""}
           ${goalProgressHtml(goal)}
@@ -2150,21 +2119,38 @@
       showTaskDetails(taskId);
     }
 
-    // Slim summary of in-flight goals above the kanban board, so the board
-    // keeps goal context after the goal composer moved to its own page.
+    async function closeGoal(goalId) {
+      await run(async () => {
+        await api(`/api/tasks/${goalId}/status`, {
+          method: "POST",
+          body: JSON.stringify({ task_status: "closed" })
+        });
+        await loadGoals();
+        await loadTasks();
+        setStatus(`Goal #${goalId} closed`);
+      });
+    }
+
+    // One-line subtitle under the Tasks heading summarizing active goals;
+    // long text truncates with an ellipsis. Click opens the Goals page.
     function renderTasksGoalBar() {
       const bar = $("tasksGoalBar");
       if (!bar) return;
       const active = (state.goals || []).filter(g => g.task_status !== "closed");
-      bar.innerHTML = active.length ? active.map(goal => `
-        <div class="tasks-goal-row" onclick="setPage('goals')" title="Open the Goals page">
-          <strong>🎯 #${goal.id} ${escapeHtml(goal.title || "Goal")}</strong>
-          <span class="badge">${escapeHtml(goal.task_status)}</span>
-          ${goal.workflow_step ? `<span class="badge wf-step-badge">⚙ ${escapeHtml(goal.workflow_step)}</span>` : ""}
-          <span class="meta">${goal.subtask_total ? `${goal.subtask_closed}/${goal.subtask_total} subtasks done` : "no subtasks yet"}${goal.subtask_blocked ? ` · <span style="color: var(--danger)">${goal.subtask_blocked} blocked</span>` : ""}</span>
-          ${goal.subtask_total ? `<div class="goal-progress" style="flex: 1; min-width: 80px;"><div class="goal-progress-fill" style="width: ${Math.round(goal.subtask_closed / goal.subtask_total * 100)}%"></div></div>` : ""}
-        </div>
-      `).join("") : "";
+      if (!active.length) {
+        bar.textContent = "";
+        bar.onclick = null;
+        return;
+      }
+      const text = active.map(goal => {
+        const progress = goal.subtask_total
+          ? `${goal.subtask_closed}/${goal.subtask_total} done${goal.subtask_blocked ? `, ${goal.subtask_blocked} blocked` : ""}`
+          : goal.workflow_step ? `⚙ ${goal.workflow_step}` : goal.task_status;
+        return `🎯 #${goal.id} ${goal.title || "Goal"} — ${progress}`;
+      }).join("  ·  ");
+      bar.textContent = text;
+      bar.title = text + "  (open Goals page)";
+      bar.onclick = () => setPage("goals");
     }
 
     async function moveTask(taskId, newStatus) {
@@ -2212,7 +2198,7 @@
         </div>
         ${task.parent_task_id ? `
           <div class="meta">
-            goal: <a href="#" onclick="event.preventDefault(); showTaskDetails(${task.parent_task_id})">🎯 #${task.parent_task_id} ${escapeHtml(((state.tasks || []).find(t => t.id === task.parent_task_id) || {}).title || "")}</a>
+            parent: <a href="#" onclick="event.preventDefault(); showTaskDetails(${task.parent_task_id})">#${task.parent_task_id} ${escapeHtml(((state.tasks || []).find(t => t.id === task.parent_task_id) || {}).title || "")}</a>
           </div>` : ""}
         ${task.is_goal ? `<div class="meta">🎯 this is a goal — subtask progress on the <a href="#" onclick="event.preventDefault(); setPage('goals')">Goals page</a></div>` : ""}
         <div class="meta">

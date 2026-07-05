@@ -3,9 +3,25 @@
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 import dev_loop.server as server
 from dev_loop.store import InvalidInputError, Store
+
+# Dispatches with runner commands spawn runner threads; in tests that would
+# launch real CLIs (codex, hermes, ...) and race the manual complete() calls.
+# Mock the spawn for the whole module; run_step_worker tests call it directly.
+_spawn_patcher = None
+
+
+def setUpModule():
+    global _spawn_patcher
+    _spawn_patcher = mock.patch.object(server, "_spawn_step_worker")
+    _spawn_patcher.start()
+
+
+def tearDownModule():
+    _spawn_patcher.stop()
 
 
 LINEAR_STEPS = [
@@ -259,7 +275,7 @@ class WorkflowEngineTests(unittest.TestCase):
             with self.assertRaisesRegex(InvalidInputError, "already in the workflow"):
                 h.start(task_id)
 
-    def test_cycle_component_becomes_second_entry_and_runs(self):
+    def test_required_cycle_disconnected_from_main_entry_is_rejected(self):
         # review <-> optional_check form a cycle with no forward inbound edge.
         # Back-edge classification makes review a second entry point, so the
         # graph is executable: both components dispatch at start and the task
@@ -281,10 +297,8 @@ class WorkflowEngineTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             h = EngineHarness(tmp, steps=steps, edges=edges, team=team)
             task_id = h.create_task()
-            started = h.start(task_id)
-            self.assertEqual(
-                {"intake", "review"}, {d["step"] for d in started["dispatched"]}
-            )
+            with self.assertRaisesRegex(InvalidInputError, "required steps unreachable"):
+                h.start(task_id)
 
     def test_start_allows_warning_for_dangling_optional_step(self):
         steps = [
@@ -316,6 +330,7 @@ class WorkflowEngineTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             EngineHarness(tmp)
             self.assertEqual("hub-agent", server._workflow_api_actor("", tmp))
+            self.assertEqual("hub-agent", server._workflow_api_actor("ui", tmp))
             self.assertEqual("codex", server._workflow_api_actor("codex", tmp))
 
     def test_ui_actor_without_hub_member_is_rejected(self):
@@ -465,6 +480,163 @@ class GoalTests(unittest.TestCase):
             self.assertEqual([], server.goals_summary(h.store))
 
 
+class StepCardTests(unittest.TestCase):
+    def _goal(self, h):
+        goal_id = h.create_task(title="Ship goal")
+        h.store.update_task_metadata(goal_id, is_goal=True)
+        return goal_id
+
+    def _cards(self, h, parent_id):
+        return {
+            t["workflow_step"]: t
+            for t in h.store.list_tasks()
+            if t.get("parent_task_id") == parent_id
+            and t.get("source_message_id") is None
+        }
+
+    def _team_with_runners(self):
+        return [
+            {"agent_name": "hub-agent", "role_id": "hub", "runner_command": "cat"},
+            {"agent_name": "codex", "role_id": "implementer", "runner_command": "cat"},
+            {"agent_name": "rev", "role_id": "reviewer", "runner_command": "cat"},
+        ]
+
+    def _step(self, h, step_id):
+        cfg = server.read_workflow_config(h.root)
+        return next(s for s in cfg["steps"] if s["id"] == step_id)
+
+    def _member(self, h, name):
+        return next(
+            m for m in server.read_team_config(h.root)["members"]
+            if m["agent_name"] == name
+        )
+
+    def test_goal_intake_creates_business_tasks_and_step_cards(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, team=self._team_with_runners())
+            goal_id = self._goal(h)
+            h.start(goal_id)
+
+            cards = self._cards(h, goal_id)
+            self.assertEqual(["intake"], list(cards))
+            self.assertEqual("hub-agent", cards["intake"]["assignee"])
+            self.assertEqual("created", cards["intake"]["task_status"])
+            self.assertIn("Intake", cards["intake"]["title"])
+
+            report = server.run_step_worker(
+                h.store,
+                tmp,
+                goal_id,
+                self._step(h, "intake"),
+                {
+                    **self._member(h, "hub-agent"),
+                    "runner_command": (
+                        "printf '%s' "
+                        "'{\"tasks\":[{\"title\":\"API\",\"content\":\"Build API\",\"acceptance\":\"tests\"},"
+                        "{\"title\":\"UI\",\"content\":\"Build UI\"}]}'"
+                    ),
+                },
+            )
+            self.assertEqual("done", report["outcome"])
+            self.assertEqual(2, len(report["created_subtasks"]))
+
+            business = [
+                t for t in h.store.list_tasks(status="all")
+                if t.get("parent_task_id") == goal_id
+                and t.get("source_message_id") is not None
+            ]
+            self.assertEqual({"API", "UI"}, {t["title"] for t in business})
+            for subtask in business:
+                cards = self._cards(h, subtask["id"])
+                self.assertEqual(["intake"], list(cards))
+                self.assertEqual("hub-agent", cards["intake"]["assignee"])
+
+    def test_goal_runner_preflight_rejects_missing_command(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)  # hub-agent has no runner command/default
+            with self.assertRaisesRegex(InvalidInputError, "runner commands"):
+                server._validate_goal_auto_runners(h.store, tmp, "Goal", "Build it")
+
+    def test_goal_intake_invalid_json_blocks_goal(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, team=self._team_with_runners())
+            goal_id = self._goal(h)
+            h.start(goal_id)
+
+            report = server.run_step_worker(
+                h.store,
+                tmp,
+                goal_id,
+                self._step(h, "intake"),
+                {**self._member(h, "hub-agent"), "runner_command": "echo not-json"},
+            )
+
+            self.assertEqual("blocked", report["outcome"])
+            self.assertEqual("blocked", h.task(goal_id)["task_status"])
+            self.assertEqual("blocked", self._cards(h, goal_id)["intake"]["task_status"])
+
+    def test_business_task_step_cards_settle_and_goal_waits_for_acceptance(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, team=self._team_with_runners())
+            goal_id = self._goal(h)
+            goal = h.task(goal_id)
+            [message_id] = h.store.send_message(
+                "hub-agent",
+                "hub-agent",
+                "Build API",
+                reply_to=goal["source_message_id"],
+                kind="task",
+                title="API",
+            )
+            subtask = next(
+                t for t in h.store.list_tasks(status="all")
+                if t["source_message_id"] == message_id
+            )
+            h.start(subtask["id"])
+
+            h.complete("hub-agent", subtask["id"], "intake", "done")
+            cards = self._cards(h, subtask["id"])
+            self.assertEqual("closed", cards["intake"]["task_status"])
+            self.assertEqual("in_progress", cards["implement"]["task_status"])
+            self.assertEqual("codex", cards["implement"]["assignee"])
+
+            # blocked marks the card blocked; recovery closes it
+            h.complete("codex", subtask["id"], "implement", "blocked", "need choice")
+            self.assertEqual("blocked", self._cards(h, subtask["id"])["implement"]["task_status"])
+            h.complete("hub-agent", subtask["id"], "implement", "done")
+            cards = self._cards(h, subtask["id"])
+            self.assertEqual("closed", cards["implement"]["task_status"])
+            self.assertEqual("replied", cards["review"]["task_status"])
+
+            # rework closes the review card and opens a fresh implement card
+            h.complete("rev", subtask["id"], "review", "rework", "tests missing")
+            cards = [
+                t for t in h.store.list_tasks()
+                if t.get("parent_task_id") == subtask["id"] and t["workflow_step"] == "implement"
+            ]
+            self.assertEqual(2, len(cards))
+            open_cards = [c for c in cards if c["task_status"] != "closed"]
+            self.assertEqual(1, len(open_cards))
+
+            h.complete("codex", subtask["id"], "implement", "done")
+            h.complete("rev", subtask["id"], "review", "done")
+            h.complete("hub-agent", subtask["id"], "accept", "done")
+            leftovers = [
+                t for t in h.store.list_tasks()
+                if t.get("parent_task_id") == subtask["id"] and t["task_status"] != "closed"
+            ]
+            self.assertEqual([], leftovers)
+            self.assertEqual("accepted", h.task(goal_id)["task_status"])
+
+    def test_non_goal_tasks_get_no_step_cards(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            task_id = h.create_task(title="plain")
+            h.start(task_id)
+            h.complete("hub-agent", task_id, "intake", "done")
+            self.assertEqual({}, self._cards(h, task_id))
+
+
 class TeamLockTests(unittest.TestCase):
     def test_team_locked_while_workflow_tasks_run(self):
         with TemporaryDirectory() as tmp:
@@ -492,13 +664,10 @@ class TeamLockTests(unittest.TestCase):
 
 
 class AutoRunnerTests(unittest.TestCase):
-    # auto_run stays off for direct run_step_worker tests — a live dispatch
-    # would spawn a real background thread and race the manual call.
-    def _team_with_runner(self, command="cat", auto_run=False):
+    def _team_with_runner(self, command="cat"):
         team = [dict(m) for m in TEAM]
         for m in team:
             if m["agent_name"] == "codex":
-                m["auto_run"] = auto_run
                 m["runner_command"] = command
         return team
 
@@ -564,20 +733,55 @@ class AutoRunnerTests(unittest.TestCase):
             self.assertEqual("blocked", h.task(task_id)["task_status"])
             self.assertEqual("timeout", h.store.list_task_runs(task_id)[0]["status"])
 
-    def test_dispatch_spawns_worker_only_for_auto_run_members(self):
-        from unittest import mock
-
+    def test_dispatch_spawns_worker_only_when_runner_command_exists(self):
+        spawn = server._spawn_step_worker  # module-level mock
         with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp, team=self._team_with_runner(auto_run=True))
+            h = EngineHarness(tmp, team=self._team_with_runner())
             task_id = h.create_task()
-            with mock.patch.object(server, "_spawn_step_worker") as spawn:
-                h.start(task_id)  # intake -> hub-agent, no auto_run
-                self.assertEqual(0, spawn.call_count)
-                h.complete("hub-agent", task_id, "intake", "done")  # -> codex, auto_run
-                self.assertEqual(1, spawn.call_count)
-                self.assertEqual("implement", spawn.call_args.args[3]["id"])
+            spawn.reset_mock()
+            h.start(task_id)  # intake -> hub-agent, no default runner
+            self.assertEqual(0, spawn.call_count)
+            h.complete("hub-agent", task_id, "intake", "done")  # -> codex, explicit runner
+            self.assertEqual(1, spawn.call_count)
+            self.assertEqual("implement", spawn.call_args.args[3]["id"])
 
-    def test_hermes_runner_command_defaults(self):
+    def test_goal_step_run_recorded_on_step_card(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, team=self._team_with_runner("echo built"))
+            goal_id = h.create_task(title="Goal")
+            h.store.update_task_metadata(goal_id, is_goal=True)
+            goal = h.task(goal_id)
+            [message_id] = h.store.send_message(
+                "hub-agent",
+                "hub-agent",
+                "Build API",
+                reply_to=goal["source_message_id"],
+                kind="task",
+                title="API",
+            )
+            subtask = next(
+                t for t in h.store.list_tasks(status="all")
+                if t["source_message_id"] == message_id
+            )
+            h.start(subtask["id"])
+            h.complete("hub-agent", subtask["id"], "intake", "done")
+
+            card = h.store.find_open_step_card(subtask["id"], "implement")
+            server.run_step_worker(
+                h.store, tmp, subtask["id"], self._implement_step(h),
+                self._member(h, "codex"),
+            )
+
+            self.assertEqual([], h.store.list_task_runs(subtask["id"]))
+            runs = h.store.list_task_runs(card["id"])
+            self.assertEqual(1, len(runs))
+            self.assertEqual("succeeded", runs[0]["status"])
+            self.assertEqual("codex", runs[0]["worker"])
+
+    def test_cli_runner_command_defaults(self):
+        cmd = server._runner_command_for({"agent_name": "antigravity"})
+        self.assertEqual('agy --dangerously-skip-permissions --print "$(cat)"', cmd)
+
         cmd = server._runner_command_for({"agent_name": "hermes"})
         self.assertEqual('hermes --yolo -z "$(cat)"', cmd)
         cmd = server._runner_command_for({"agent_name": "hermes-manager"})
