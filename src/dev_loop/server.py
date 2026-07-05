@@ -7,8 +7,10 @@ import ipaddress
 import json
 import re
 import shutil
+import subprocess
 import threading
 import time
+import traceback
 from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
@@ -498,6 +500,10 @@ def _normalize_team_member(member: Any) -> dict[str, Any]:
         "max_concurrent_tasks": max(1, min(max_concurrent_tasks, 3)),
         "capabilities": [capability.strip() for capability in capabilities if capability.strip()],
         "notes": str(member.get("notes", "")).strip(),
+        # Auto-runner: spawn a one-shot CLI per dispatched step instead of
+        # waiting for a live session to poll the inbox.
+        "auto_run": bool(member.get("auto_run", False)),
+        "runner_command": str(member.get("runner_command", "")).strip(),
     }
 
 
@@ -933,13 +939,19 @@ def _workflow_api_actor(raw_agent: str, project_root: str | None) -> str:
     return hub_agent
 
 
+def _member_named(members: list[dict[str, Any]], agent_name: str) -> dict[str, Any] | None:
+    return next((m for m in members if m["agent_name"] == agent_name), None)
+
+
 def _dispatch_step(
     store: Store,
+    project_root: str | None,
     task: dict[str, Any],
     step: dict[str, Any],
-    assignee: str,
+    member: dict[str, Any],
     upstream_result: str,
 ) -> None:
+    assignee = member["agent_name"]
     task_id = task["id"]
     _ensure_engine_agent(store)
     if not store.agent_exists(assignee):
@@ -963,6 +975,8 @@ def _dispatch_step(
     store.set_task_workflow_state(
         task_id, task_status=step["task_status"], assignee=assignee
     )
+    if member.get("auto_run"):
+        _spawn_step_worker(store, project_root, task_id, step, member, upstream_result)
 
 
 def _dispatch_targets(
@@ -1014,7 +1028,11 @@ def _dispatch_targets(
                 queue.append(nxt)
             notices.append(f"optional step {target} skipped (no team member)")
             continue
-        _dispatch_step(store, task, step, assignee, upstream_result)
+        _dispatch_step(
+            store, project_root, task, step,
+            _member_named(members, assignee) or {"agent_name": assignee},
+            upstream_result,
+        )
         dispatched.append({"step": target, "assignee": assignee})
     transitions = store.list_task_transitions(task_id)
     active = _active_steps(transitions)
@@ -1173,6 +1191,157 @@ def _advance_workflow_task_locked(
 # How often the background watcher scans for timed-out steps.
 WORKFLOW_TIMEOUT_POLL_SECONDS = 60
 
+# --- Auto-runner -------------------------------------------------------------
+# Team members with auto_run enabled get a one-shot CLI process spawned for
+# each dispatched step instead of waiting for a live session to poll the
+# inbox. The command receives the prompt on stdin, works in the project root,
+# and its stdout tail is submitted via the engine as the step result.
+# runner_command on the member overrides the per-tool default.
+RUNNER_DEFAULT_TIMEOUT_SECONDS = 1800
+_DEFAULT_RUNNER_COMMANDS = {
+    "claude-code": "claude -p",
+    "codex": "codex exec -",
+    # Auto-run deliberately executes in the project dir; without the trust
+    # flag gemini refuses to start in non-interactive mode.
+    "gemini": "GEMINI_CLI_TRUST_WORKSPACE=true gemini",
+}
+
+
+def _runner_command_for(member: dict[str, Any]) -> str:
+    command = str(member.get("runner_command") or "").strip()
+    if command:
+        return command
+    return _DEFAULT_RUNNER_COMMANDS.get(member.get("agent_name", ""), "")
+
+
+def _tail(text: str, limit: int) -> str:
+    text = (text or "").strip()
+    return text if len(text) <= limit else text[-limit:]
+
+
+def _build_step_prompt(
+    project_root: str | None,
+    task: dict[str, Any],
+    step: dict[str, Any],
+    upstream_result: str,
+) -> str:
+    roles = {
+        role["id"]: role["content"]
+        for role in list_agent_roles(_agents_dir(project_root))
+    }
+    role_text = roles.get(step["role_id"], "")
+    return (
+        f"你是被工作流引擎派发的一次性 worker，以角色 {step['role_id']} 执行"
+        f"步骤 '{step['name']}'。当前工作目录就是项目根目录，直接读写文件完成任务。\n"
+        "忽略角色说明里 register_agent / check_inbox / ack 等信箱循环要求——"
+        "本次为一次性执行，也不要调用 complete_step，派发器会代为提交结果。"
+        "例外：角色说明要求拆分/新建任务时（如 goal 拆分），可以使用 devloop 的 "
+        "send_message(kind=\"task\") 与 start_workflow_task 工具。\n\n"
+        f"## 角色说明\n{role_text}\n\n"
+        f"## 任务 #{task['id']}: {task.get('title') or 'untitled'}\n"
+        f"{task.get('content', '')}\n\n"
+        + (f"## 上游产出\n{upstream_result}\n\n" if upstream_result else "")
+        + "完成后在输出的最后打印一段简短总结：一行结论 + 产物文件路径。"
+    )
+
+
+def run_step_worker(
+    store: Store,
+    project_root: str | None,
+    task_id: int,
+    step: dict[str, Any],
+    member: dict[str, Any],
+    upstream_result: str = "",
+    timeout_seconds: float | None = None,
+) -> dict[str, Any]:
+    """Execute one dispatched step via the member's CLI and submit the
+    outcome through the engine. Exit 0 -> done (stdout tail as result);
+    nonzero/timeout/missing command -> blocked, which alerts the hub."""
+    assignee = member["agent_name"]
+    task = store.get_task(task_id)
+    if not task:
+        return {"error": f"unknown task: {task_id}"}
+    run = store.create_task_run(task_id, worker=assignee)
+    if run:
+        log_dir = _task_run_dir(project_root, task_id, int(run["attempt"]))
+        run = store.update_task_run_log_dir(run["id"], str(log_dir)) or run
+    command = _runner_command_for(member)
+    if timeout_seconds is None:
+        step_timeout = int(step.get("timeout_minutes") or 0) * 60
+        timeout_seconds = step_timeout or RUNNER_DEFAULT_TIMEOUT_SECONDS
+
+    outcome, result, status, exit_code = "blocked", "", "failed", None
+    stdout, stderr = "", ""
+    if not command:
+        result = (
+            f"no runner command for agent {assignee}; set runner_command on "
+            "the team member or disable auto_run"
+        )
+    else:
+        prompt = _build_step_prompt(project_root, task, step, upstream_result)
+        try:
+            proc = subprocess.run(
+                command,
+                shell=True,
+                input=prompt,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+                cwd=str(_project_root(project_root)),
+            )
+            stdout, stderr, exit_code = proc.stdout, proc.stderr, proc.returncode
+            if exit_code == 0:
+                outcome = "done"
+                status = "succeeded"
+                result = _tail(stdout, 4000) or "runner finished with no output"
+            else:
+                result = f"runner exited {exit_code}: {_tail(stderr or stdout, 2000)}"
+        except subprocess.TimeoutExpired as exc:
+            stdout = str(exc.stdout or "")
+            stderr = str(exc.stderr or "")
+            status = "timeout"
+            result = f"runner timed out after {int(timeout_seconds)}s"
+        except OSError as exc:
+            result = f"runner failed to start: {exc}"
+    if run:
+        try:
+            _write_run_file(run, "stdout", stdout)
+            _write_run_file(run, "stderr", stderr)
+            if outcome == "done":
+                _write_run_file(run, "result", result)
+            store.finish_task_run(run["id"], status, exit_code)
+        except (InvalidInputError, OSError):
+            pass
+    try:
+        report = advance_workflow_task(
+            store, project_root, assignee, task_id, step["id"], outcome, result
+        )
+    except (InvalidInputError, UnknownAgentError) as exc:
+        # e.g. the step was reassigned while the runner worked
+        return {"task_id": task_id, "step": step["id"], "error": str(exc)}
+    return report
+
+
+def _spawn_step_worker(
+    store: Store,
+    project_root: str | None,
+    task_id: int,
+    step: dict[str, Any],
+    member: dict[str, Any],
+    upstream_result: str,
+) -> None:
+    def _worker() -> None:
+        try:
+            run_step_worker(
+                store, project_root, task_id, step, member, upstream_result
+            )
+        except Exception:
+            traceback.print_exc()
+
+    threading.Thread(
+        target=_worker, name=f"step-runner-{task_id}-{step['id']}", daemon=True
+    ).start()
+
 
 def check_workflow_step_timeouts(
     store: Store, project_root: str | None, now: datetime | None = None
@@ -1236,7 +1405,11 @@ def _check_workflow_step_timeouts_locked(
                     f"step timed out after {timeout_minutes}m on {assignee}; "
                     f"reassigned to {new_assignee}",
                 )
-                _dispatch_step(store, task, step, new_assignee, "")
+                _dispatch_step(
+                    store, project_root, task, step,
+                    _member_named(members, new_assignee) or {"agent_name": new_assignee},
+                    "",
+                )
                 notice = _notify_hub(
                     store, members,
                     f"Task #{task_id} step '{step_id}' timed out on {assignee} "
@@ -1649,8 +1822,12 @@ def create_server(
             return {"acked": False, "message_id": message_id, "error": str(exc)}
         return {"acked": acked, "message_id": message_id}
 
-    @mcp.tool()
-    async def start_workflow_task(agent: str, task_id: int) -> dict:
+    # NOTE: the local function must not reuse the module-level engine
+    # function's name — it would shadow it inside this closure and break
+    # _engine_start with a TypeError on argument count. The MCP tool name
+    # stays "start_workflow_task" via the decorator.
+    @mcp.tool(name="start_workflow_task")
+    async def start_workflow_task_tool(agent: str, task_id: int) -> dict:
         """Enter an existing task (created via send_message kind="task") into
         the configured workflow. The engine dispatches the entry step(s) to the
         best-ranked team member for each step's role; from then on the task
@@ -2066,6 +2243,9 @@ def create_server(
             result = await _to_thread(_engine_start, agent, task_id)
         except (InvalidInputError, UnknownAgentError) as exc:
             return _json_error(str(exc), request=request)
+        except Exception as exc:  # log the full story, surface a readable error
+            traceback.print_exc()
+            return _json_error(f"workflow start failed: {exc!r}", 500, request)
         return _json(request, result)
 
     @mcp.custom_route("/api/tasks/{task_id:int}/workflow/complete", methods=["POST"])
@@ -2090,6 +2270,9 @@ def create_server(
             )
         except (InvalidInputError, UnknownAgentError) as exc:
             return _json_error(str(exc), request=request)
+        except Exception as exc:
+            traceback.print_exc()
+            return _json_error(f"workflow step failed: {exc!r}", 500, request)
         return _json(request, result)
 
     @mcp.custom_route("/api/tasks/{task_id:int}/runs", methods=["GET"])

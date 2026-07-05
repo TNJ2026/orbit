@@ -428,5 +428,112 @@ class StepTimeoutTests(unittest.TestCase):
             )
 
 
+class AutoRunnerTests(unittest.TestCase):
+    # auto_run stays off for direct run_step_worker tests — a live dispatch
+    # would spawn a real background thread and race the manual call.
+    def _team_with_runner(self, command="cat", auto_run=False):
+        team = [dict(m) for m in TEAM]
+        for m in team:
+            if m["agent_name"] == "codex":
+                m["auto_run"] = auto_run
+                m["runner_command"] = command
+        return team
+
+    def _implement_step(self, h):
+        cfg = __import__("dev_loop.server", fromlist=["server"]).read_workflow_config(h.root)
+        return next(s for s in cfg["steps"] if s["id"] == "implement")
+
+    def _member(self, h, name):
+        import dev_loop.server as server
+        members = server.read_team_config(h.root)["members"]
+        return next(m for m in members if m["agent_name"] == name)
+
+    def test_worker_success_advances_step_with_stdout_result(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, team=self._team_with_runner("echo done: docs/x.md"))
+            task_id = h.create_task()
+            h.start(task_id)
+            h.complete("hub-agent", task_id, "intake", "done")
+
+            report = server.run_step_worker(
+                h.store, tmp, task_id, self._implement_step(h),
+                self._member(h, "codex"),
+            )
+
+            self.assertEqual([{"step": "review", "assignee": "rev"}], report["dispatched"])
+            runs = h.store.list_task_runs(task_id)
+            self.assertEqual("succeeded", runs[0]["status"])
+            # review dispatch message carries the runner's stdout as upstream result
+            self.assertTrue(
+                any("done: docs/x.md" in c for _, c in h.inbox_senders("rev"))
+            )
+
+    def test_worker_failure_blocks_and_notifies_hub(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, team=self._team_with_runner("echo boom >&2; exit 3"))
+            task_id = h.create_task()
+            h.start(task_id)
+            h.complete("hub-agent", task_id, "intake", "done")
+
+            server.run_step_worker(
+                h.store, tmp, task_id, self._implement_step(h),
+                self._member(h, "codex"),
+            )
+
+            self.assertEqual("blocked", h.task(task_id)["task_status"])
+            self.assertEqual("failed", h.store.list_task_runs(task_id)[0]["status"])
+            self.assertTrue(
+                any("runner exited 3" in c for _, c in h.inbox_senders("hub-agent"))
+            )
+
+    def test_worker_timeout_blocks(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, team=self._team_with_runner("sleep 5"))
+            task_id = h.create_task()
+            h.start(task_id)
+            h.complete("hub-agent", task_id, "intake", "done")
+
+            server.run_step_worker(
+                h.store, tmp, task_id, self._implement_step(h),
+                self._member(h, "codex"), timeout_seconds=0.2,
+            )
+
+            self.assertEqual("blocked", h.task(task_id)["task_status"])
+            self.assertEqual("timeout", h.store.list_task_runs(task_id)[0]["status"])
+
+    def test_dispatch_spawns_worker_only_for_auto_run_members(self):
+        from unittest import mock
+
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, team=self._team_with_runner(auto_run=True))
+            task_id = h.create_task()
+            with mock.patch.object(server, "_spawn_step_worker") as spawn:
+                h.start(task_id)  # intake -> hub-agent, no auto_run
+                self.assertEqual(0, spawn.call_count)
+                h.complete("hub-agent", task_id, "intake", "done")  # -> codex, auto_run
+                self.assertEqual(1, spawn.call_count)
+                self.assertEqual("implement", spawn.call_args.args[3]["id"])
+
+    def test_missing_runner_command_blocks(self):
+        from unittest import mock
+
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, team=self._team_with_runner(""))
+            task_id = h.create_task()
+            h.start(task_id)
+            h.complete("hub-agent", task_id, "intake", "done")
+
+            # no member override and no per-tool default -> blocked
+            with mock.patch.dict(server._DEFAULT_RUNNER_COMMANDS, {}, clear=True):
+                server.run_step_worker(
+                    h.store, tmp, task_id, self._implement_step(h),
+                    self._member(h, "codex"),
+                )
+            self.assertEqual("blocked", h.task(task_id)["task_status"])
+            self.assertTrue(
+                any("no runner command" in c for _, c in h.inbox_senders("hub-agent"))
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

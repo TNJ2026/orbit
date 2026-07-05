@@ -61,6 +61,30 @@ class PackagingTests(unittest.TestCase):
             server._materialize_role_templates(agents_dir)
             self.assertEqual("custom", (agents_dir / "hub.md").read_text(encoding="utf-8"))
 
+    def test_create_server_locals_do_not_shadow_module_functions(self):
+        # A closure-local function reusing a module-level name shadows it for
+        # every call site inside create_server (this broke workflow start:
+        # _engine_start resolved the MCP tool instead of the engine function).
+        import ast
+        import inspect
+        import dev_loop.server as server
+
+        tree = ast.parse(inspect.getsource(server))
+        module_funcs = {
+            node.name for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        create = next(
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "create_server"
+        )
+        inner_funcs = {
+            node.name for node in ast.walk(create)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node is not create
+        }
+        self.assertEqual(set(), module_funcs & inner_funcs)
+
     def test_role_templates_are_packaged(self):
         templates = resources.files("dev_loop") / "role_templates"
         names = {entry.name for entry in templates.iterdir()}

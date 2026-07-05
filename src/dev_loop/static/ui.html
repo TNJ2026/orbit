@@ -1127,6 +1127,13 @@
           </div>
           <input value="${escapeHtml((member.capabilities || []).join(', '))}" placeholder="capability subscriptions" onchange="updateTeamMember(${index}, 'capabilities', this.value)">
           <input value="${escapeHtml(member.notes || "")}" placeholder="notes" onchange="updateTeamMember(${index}, 'notes', this.value)">
+          <div class="row" style="gap: 8px; align-items: center;">
+            <label class="row" style="gap: 4px; width: auto; white-space: nowrap;" title="Spawn a one-shot CLI for each dispatched step (prompt on stdin) instead of waiting for a live session">
+              <input type="checkbox" style="width: auto;" ${member.auto_run ? "checked" : ""} onchange="updateTeamMember(${index}, 'auto_run', this.checked)">
+              <span class="meta">auto-run</span>
+            </label>
+            <input value="${escapeHtml(member.runner_command || "")}" placeholder="runner command (default: claude -p / codex exec -)" onchange="updateTeamMember(${index}, 'runner_command', this.value)" style="flex: 1;">
+          </div>
         </div>
       `;
     }
@@ -1198,7 +1205,7 @@
       if (!member) return;
       if (field === "expertise_level" || field === "max_concurrent_tasks") {
         member[field] = Number(value);
-      } else if (field === "enabled") {
+      } else if (field === "enabled" || field === "auto_run") {
         member[field] = Boolean(value);
       } else if (field === "capabilities") {
         member[field] = String(value).split(",").map(item => item.trim()).filter(Boolean);
@@ -2320,6 +2327,31 @@
       await refreshWorkspace();
       setStatus("Ready");
     });
+
+    // Live board: agents create and move tasks on their own, so poll tasks
+    // (and the open task's workflow state) instead of relying on manual
+    // Refresh. Skipped while offline or when the tab is hidden.
+    let livePolling = false;
+    setInterval(async () => {
+      if (livePolling || !state.apiBase || document.hidden) return;
+      // Re-rendering the board would steal focus mid-keystroke (goal box,
+      // status selects); wait until the user leaves the tasks pane.
+      const active = document.activeElement;
+      if (active && ($("tasksList").contains(active) || $("taskDetails").contains(active))) return;
+      livePolling = true;
+      try {
+        await loadTasks();
+        if (state.selectedTaskId) {
+          await loadTaskWorkflow(state.selectedTaskId);
+          renderTaskDetails(state.tasks.find(t => t.id === state.selectedTaskId) || null);
+        }
+        if ($("workflowPage").classList.contains("active")) renderWorkflow();
+      } catch (error) {
+        // transient poll errors stay silent; manual actions still report
+      } finally {
+        livePolling = false;
+      }
+    }, 5000);
   </script>
 </body>
 </html>
