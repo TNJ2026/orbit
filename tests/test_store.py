@@ -192,6 +192,21 @@ class StoreTests(unittest.TestCase):
         updated = store.update_task_metadata(task["id"], importance="high")
         self.assertEqual("high", updated["importance"])
 
+    def test_reap_stale_runs_frees_worker_capacity(self):
+        store = self.make_store()
+        self.register_pair(store)
+        store.send_message("a", "b", "task", kind="task")
+        [task] = store.list_tasks()
+        run = store.create_task_run(task["id"], worker="claude-code")
+        self.assertEqual({"claude-code": 1}, store.active_task_counts())
+
+        reaped = store.reap_stale_runs()
+
+        self.assertEqual(1, reaped)
+        self.assertEqual({}, store.active_task_counts())
+        self.assertEqual("orphaned", store.get_task_run(run["id"])["status"])
+        self.assertEqual(0, store.reap_stale_runs())
+
     def test_task_engine_status_syncs_back_to_source_message(self):
         store = self.make_store()
         self.register_pair(store)

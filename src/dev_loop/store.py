@@ -701,6 +701,22 @@ class Store:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def reap_stale_runs(self) -> int:
+        """Mark every 'running' task_run as orphaned. Runners live as threads
+        inside the server process, so at server startup none can actually be
+        running — leftovers would otherwise count against their worker's
+        max_concurrent_tasks forever and starve assignment."""
+        now = _now()
+        with self._lock:
+            cur = self._conn.execute(
+                """UPDATE task_runs
+                   SET status = 'orphaned', finished_at = ?
+                   WHERE status = 'running'""",
+                (now,),
+            )
+            self._conn.commit()
+        return cur.rowcount
+
     def active_task_counts(self) -> dict[str, int]:
         with self._lock:
             rows = self._conn.execute(

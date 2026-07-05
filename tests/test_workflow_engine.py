@@ -428,6 +428,32 @@ class StepTimeoutTests(unittest.TestCase):
             )
 
 
+class TeamLockTests(unittest.TestCase):
+    def test_team_locked_while_workflow_tasks_run(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            self.assertIsNone(server.team_locked_reason(h.store))
+
+            task_id = h.create_task()
+            h.start(task_id)
+            reason = server.team_locked_reason(h.store)
+            self.assertIn(f"#{task_id}", reason)
+
+            # blocked task releases the lock — fixing the team is the way out
+            h.complete("hub-agent", task_id, "intake", "blocked", "need input")
+            self.assertIsNone(server.team_locked_reason(h.store))
+
+            # resuming (hub completes the active step) locks again
+            h.complete("hub-agent", task_id, "intake", "done")
+            self.assertIsNotNone(server.team_locked_reason(h.store))
+
+            # run to completion -> closed -> unlocked
+            h.complete("codex", task_id, "implement", "done")
+            h.complete("rev", task_id, "review", "done")
+            h.complete("hub-agent", task_id, "accept", "done")
+            self.assertIsNone(server.team_locked_reason(h.store))
+
+
 class AutoRunnerTests(unittest.TestCase):
     # auto_run stays off for direct run_step_worker tests — a live dispatch
     # would spawn a real background thread and race the manual call.
@@ -513,6 +539,17 @@ class AutoRunnerTests(unittest.TestCase):
                 h.complete("hub-agent", task_id, "intake", "done")  # -> codex, auto_run
                 self.assertEqual(1, spawn.call_count)
                 self.assertEqual("implement", spawn.call_args.args[3]["id"])
+
+    def test_hermes_runner_command_defaults(self):
+        cmd = server._runner_command_for({"agent_name": "hermes"})
+        self.assertEqual('hermes --yolo -z "$(cat)"', cmd)
+        cmd = server._runner_command_for({"agent_name": "hermes-manager"})
+        self.assertEqual('hermes --profile manager --yolo -z "$(cat)"', cmd)
+        # explicit runner_command still wins
+        cmd = server._runner_command_for(
+            {"agent_name": "hermes-manager", "runner_command": "hermes chat"}
+        )
+        self.assertEqual("hermes chat", cmd)
 
     def test_missing_runner_command_blocks(self):
         from unittest import mock

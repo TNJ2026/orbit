@@ -1157,12 +1157,19 @@
     }
 
     async function saveTeam() {
-      const data = await api("/api/team", {
-        method: "POST",
-        body: JSON.stringify({ members: state.team.members || [] })
-      });
-      state.team = { members: data.members || [], path: data.path || "" };
-      renderTeam();
+      try {
+        const data = await api("/api/team", {
+          method: "POST",
+          body: JSON.stringify({ members: state.team.members || [] })
+        });
+        state.team = { members: data.members || [], path: data.path || "" };
+        renderTeam();
+      } catch (error) {
+        // Rejected (e.g. locked while workflow tasks run): reload the saved
+        // config so the board doesn't keep the phantom local edit.
+        await loadTeam();
+        throw error;
+      }
     }
 
     async function addTeamMember() {

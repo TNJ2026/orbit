@@ -6,6 +6,7 @@ import atexit
 import ipaddress
 import json
 import re
+import shlex
 import shutil
 import subprocess
 import threading
@@ -549,6 +550,26 @@ def _reject_unknown_roles(role_ids: set[str], project_root: str | None) -> None:
     unknown = sorted(role_ids - known)
     if unknown:
         raise InvalidInputError("unknown roles: " + ", ".join(unknown))
+
+
+def team_locked_reason(store: Store) -> str | None:
+    """Team config is frozen while any task is actively executing workflow
+    steps: reassignment math, role constraints, and running auto-runners all
+    read the team live, so edits mid-flight corrupt routing. Blocked tasks
+    do NOT lock — fixing the team is the documented way to unblock them."""
+    busy = [
+        task["id"]
+        for task in store.list_tasks(status="all", limit=500)
+        if task.get("workflow_step")
+        and task.get("task_status") not in ("blocked", "closed")
+    ]
+    if not busy:
+        return None
+    ids = ", ".join(f"#{task_id}" for task_id in busy[:10])
+    return (
+        f"team config is locked while workflow tasks are running ({ids}); "
+        "wait for them to finish, or block/close them first"
+    )
 
 
 def _missing_team_roles(members: list[dict[str, Any]]) -> list[str]:
@@ -1198,12 +1219,15 @@ WORKFLOW_TIMEOUT_POLL_SECONDS = 60
 # and its stdout tail is submitted via the engine as the step result.
 # runner_command on the member overrides the per-tool default.
 RUNNER_DEFAULT_TIMEOUT_SECONDS = 1800
+# Headless CLIs default to asking for permission on every file write / tool
+# call, which no one is there to answer — a runner without full permissions
+# can only produce inline text. These defaults grant maximum autonomy; set
+# runner_command on the member to run with a tighter policy.
 _DEFAULT_RUNNER_COMMANDS = {
-    "claude-code": "claude -p",
-    "codex": "codex exec -",
-    # Auto-run deliberately executes in the project dir; without the trust
-    # flag gemini refuses to start in non-interactive mode.
-    "gemini": "GEMINI_CLI_TRUST_WORKSPACE=true gemini",
+    "claude-code": "claude -p --dangerously-skip-permissions",
+    "codex": "codex exec --dangerously-bypass-approvals-and-sandbox -",
+    # gemini additionally refuses to start headless in an untrusted dir.
+    "gemini": "GEMINI_CLI_TRUST_WORKSPACE=true gemini --yolo",
 }
 
 
@@ -1211,7 +1235,16 @@ def _runner_command_for(member: dict[str, Any]) -> str:
     command = str(member.get("runner_command") or "").strip()
     if command:
         return command
-    return _DEFAULT_RUNNER_COMMANDS.get(member.get("agent_name", ""), "")
+    agent_name = member.get("agent_name", "")
+    if agent_name in _DEFAULT_RUNNER_COMMANDS:
+        return _DEFAULT_RUNNER_COMMANDS[agent_name]
+    # Hermes takes the prompt as a -z argument, not on stdin ($(cat) bridges
+    # it); profile agents are named hermes-<profile>, so match dynamically.
+    if agent_name == "hermes" or agent_name.startswith("hermes-"):
+        profile = agent_name[len("hermes-"):] if agent_name.startswith("hermes-") else ""
+        profile_arg = f"--profile {shlex.quote(profile)} " if profile else ""
+        return f'hermes {profile_arg}--yolo -z "$(cat)"'
+    return ""
 
 
 def _tail(text: str, limit: int) -> str:
@@ -1641,6 +1674,9 @@ def create_server(
     # atexit hook is the reliable place to checkpoint the WAL and close the
     # connection cleanly.
     atexit.register(store.close)
+    reaped = store.reap_stale_runs()
+    if reaped:
+        print(f"note: marked {reaped} stale running task_run(s) as orphaned", flush=True)
 
     # Step-timeout watchdog: the engine is otherwise purely event-driven, so
     # a dead assignee would leave its step active forever. Daemon thread dies
@@ -2029,6 +2065,9 @@ def create_server(
         if forbidden := _forbid_non_local(request):
             return forbidden
         data = await _read_json(request)
+        locked = await _to_thread(team_locked_reason, store)
+        if locked:
+            return _json_error(locked, 409, request)
         try:
             team = await _to_thread(
                 write_team_config,
