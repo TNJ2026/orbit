@@ -1441,11 +1441,25 @@ def _dispatch_targets(
                 queue.append(nxt)
             notices.append(f"optional step {target} skipped (no team member)")
             continue
-        _dispatch_step(
-            store, project_root, task, step,
-            _member_named(members, assignee) or {"agent_name": assignee},
-            upstream_result,
+        action = store.create_workflow_action(
+            task_id,
+            "dispatch_step",
+            step=target,
+            assignee=assignee,
+            note=f"dispatch step {target} to {assignee}",
         )
+        try:
+            _dispatch_step(
+                store, project_root, task, step,
+                _member_named(members, assignee) or {"agent_name": assignee},
+                upstream_result,
+            )
+        except Exception as exc:
+            if action:
+                store.finish_workflow_action(action["id"], "failed", str(exc))
+            raise
+        if action:
+            store.finish_workflow_action(action["id"], "done")
         dispatched.append({"step": target, "assignee": assignee})
     transitions = store.list_task_transitions(task_id)
     active = _active_steps(transitions)
@@ -2222,6 +2236,7 @@ def _check_workflow_step_timeouts_locked(
 
 # Runs left in these states mean a runner is gone, not working.
 _RUN_DEAD_STATUSES = ("orphaned", "failed")
+_PENDING_WORKFLOW_ACTION_STALE_SECONDS = 30
 
 
 def _latest_run_for_step(
@@ -2258,6 +2273,14 @@ def _task_has_running_run(store: Store, task_id: int) -> bool:
     return False
 
 
+def _is_stale_timestamp(value: str, now: datetime, seconds: int) -> bool:
+    try:
+        created_at = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return True
+    return (now - created_at).total_seconds() >= seconds
+
+
 def check_task_health(
     store: Store, project_root: str | None = None, now: datetime | None = None
 ) -> list[dict[str, Any]]:
@@ -2270,15 +2293,47 @@ def _check_task_health_locked(
 ) -> list[dict[str, Any]]:
     """Bottom-line watchdog for the otherwise purely event-driven engine: scan
     non-terminal tasks and notify the hub about stuck states nothing else
-    recovers — (A) a step whose runner died (orphaned/failed run, none running)
-    and (B) a non-goal task reading in_progress with no active step and no run
-    in progress. Alerts are deduped via a `health_alert` transition so the hub
-    is not re-pinged every cycle for the same unchanged problem."""
+    recovers — (A) a step whose runner died (orphaned/failed run, none running),
+    (B) a rework transition that never dispatched its target, and (C) a non-goal
+    task reading in_progress with no active step and no run in progress. Alerts
+    are deduped via a `health_alert` transition so the hub is not re-pinged
+    every cycle for the same unchanged problem."""
     members = read_team_config(project_root)["members"]
     cfg = read_workflow_config(project_root)
     steps = {s["id"]: s for s in cfg["steps"]}
     alerts: list[dict[str, Any]] = []
+    now = now or datetime.now(timezone.utc)
+    for action in store.list_workflow_actions(status="pending", limit=500):
+        if action.get("action_type") != "dispatch_step":
+            continue
+        if not _is_stale_timestamp(
+            action.get("created_at", ""), now, _PENDING_WORKFLOW_ACTION_STALE_SECONDS
+        ):
+            continue
+        task = store.get_task(action["task_id"])
+        if not task or task.get("task_status") in {"closed", "accepted", "blocked"}:
+            store.finish_workflow_action(action["id"], "done")
+            continue
+        notice = _notify_hub(
+            store,
+            members,
+            f"Task #{action['task_id']} has a pending dispatch action for step "
+            f"'{action['step']}' to {action['assignee']} that did not complete. "
+            "The server may have stopped mid-advance; inspect the task and re-run "
+            "or complete_step as hub.",
+        )
+        store.finish_workflow_action(action["id"], "alerted", "health alert sent")
+        alerts.append({
+            "task_id": action["task_id"],
+            "step": action["step"],
+            "problem": "pending workflow action",
+            "action_id": action["id"],
+            "notice": notice,
+        })
+
     for task in store.list_non_terminal_tasks():
+        if task.get("task_status") == "blocked":
+            continue
         task_id = task["id"]
         transitions = store.list_task_transitions(task_id)
         active = _active_step_assignees(transitions)
@@ -2321,7 +2376,54 @@ def _check_task_health_locked(
             alerts.append({"task_id": task_id, "step": step_id,
                            "problem": "dead runner", "notice": notice})
 
-        # B. A non-goal task claims to be in progress but has no active step and
+        # B. advance_workflow_task records rework before dispatching the target.
+        # If the server dies in that small window, the old step is settled but
+        # the target never becomes active.
+        if transitions and not active and not _task_has_running_run(store, task_id):
+            reworks = [
+                t for t in transitions
+                if t["outcome"] == "rework" and t["to_step"] in steps
+            ]
+            if reworks:
+                last_rework = reworks[-1]
+                target = last_rework["to_step"]
+                dispatched = any(
+                    t["id"] > last_rework["id"]
+                    and t["outcome"] == "dispatched"
+                    and t["to_step"] == target
+                    for t in transitions
+                )
+                alerted = any(
+                    t["id"] > last_rework["id"]
+                    and t["outcome"] == "health_alert"
+                    and t["from_step"] == last_rework["from_step"]
+                    and t["to_step"] == target
+                    for t in transitions
+                )
+                if not dispatched and not alerted:
+                    store.record_task_transition(
+                        task_id,
+                        last_rework["from_step"],
+                        target,
+                        WORKFLOW_ENGINE_AGENT,
+                        "health_alert",
+                        f"rework to '{target}' was recorded but never dispatched",
+                    )
+                    notice = _notify_hub(
+                        store, members,
+                        f"Task #{task_id} recorded rework from "
+                        f"'{last_rework['from_step']}' to '{target}', but the "
+                        "target step was never dispatched and nothing is running. "
+                        "Re-run it or complete_step as hub.",
+                    )
+                    alerts.append({
+                        "task_id": task_id,
+                        "step": target,
+                        "problem": "undispatched rework",
+                        "notice": notice,
+                    })
+
+        # C. A non-goal task claims to be in progress but has no active step and
         # no run in flight — orphaned (e.g. its runner was killed mid-flight).
         if (
             not task.get("is_goal")

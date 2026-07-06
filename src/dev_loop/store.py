@@ -100,6 +100,19 @@ CREATE TABLE IF NOT EXISTS task_runs (
     FOREIGN KEY(task_id) REFERENCES tasks(id),
     UNIQUE(task_id, attempt)
 );
+CREATE TABLE IF NOT EXISTS workflow_actions (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id      INTEGER NOT NULL,
+    action_type  TEXT NOT NULL,
+    step         TEXT NOT NULL DEFAULT '',
+    assignee     TEXT NOT NULL DEFAULT '',
+    status       TEXT NOT NULL DEFAULT 'pending',
+    note         TEXT NOT NULL DEFAULT '',
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL,
+    completed_at TEXT,
+    FOREIGN KEY(task_id) REFERENCES tasks(id)
+);
 """
 
 _INDEX_SCHEMA = """
@@ -123,6 +136,8 @@ CREATE INDEX IF NOT EXISTS idx_task_runs_task
     ON task_runs (task_id, attempt);
 CREATE INDEX IF NOT EXISTS idx_task_transitions_task
     ON task_transitions (task_id, id);
+CREATE INDEX IF NOT EXISTS idx_workflow_actions_pending
+    ON workflow_actions (status, task_id, id);
 """
 
 
@@ -856,6 +871,101 @@ class Store:
                    WHERE task_id = ?
                    ORDER BY id""",
                 (task_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def create_workflow_action(
+        self,
+        task_id: int,
+        action_type: str,
+        step: str = "",
+        assignee: str = "",
+        status: str = "pending",
+        note: str = "",
+    ) -> dict[str, Any] | None:
+        now = _now()
+        action_type = (action_type or "").strip()
+        status = (status or "pending").strip()
+        if not action_type:
+            raise InvalidInputError("action_type is required")
+        if not status:
+            raise InvalidInputError("status is required")
+        with self._lock:
+            task = self._conn.execute(
+                "SELECT id FROM tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+            if task is None:
+                return None
+            cur = self._conn.execute(
+                """INSERT INTO workflow_actions (
+                       task_id, action_type, step, assignee, status, note,
+                       created_at, updated_at
+                   )
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    task_id,
+                    action_type,
+                    step,
+                    assignee,
+                    status,
+                    note[:2000],
+                    now,
+                    now,
+                ),
+            )
+            self._conn.commit()
+        return self.get_workflow_action(cur.lastrowid)
+
+    def get_workflow_action(self, action_id: int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT id, task_id, action_type, step, assignee, status, note,
+                          created_at, updated_at, completed_at
+                   FROM workflow_actions
+                   WHERE id = ?""",
+                (action_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def finish_workflow_action(
+        self, action_id: int, status: str = "done", note: str = ""
+    ) -> dict[str, Any] | None:
+        status = (status or "").strip()
+        if not status:
+            raise InvalidInputError("status is required")
+        now = _now()
+        completed_at = now if status in {"done", "failed", "alerted"} else None
+        with self._lock:
+            cur = self._conn.execute(
+                """UPDATE workflow_actions
+                   SET status = ?, note = CASE WHEN ? = '' THEN note ELSE ? END,
+                       updated_at = ?, completed_at = ?
+                   WHERE id = ?""",
+                (status, note[:2000], note[:2000], now, completed_at, action_id),
+            )
+            self._conn.commit()
+        if cur.rowcount == 0:
+            return None
+        return self.get_workflow_action(action_id)
+
+    def list_workflow_actions(
+        self, status: str = "pending", limit: int = 100
+    ) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 500))
+        params: list[Any] = []
+        where = ""
+        if status != "all":
+            where = "WHERE status = ?"
+            params.append((status or "").strip())
+        with self._lock:
+            rows = self._conn.execute(
+                f"""SELECT id, task_id, action_type, step, assignee, status, note,
+                           created_at, updated_at, completed_at
+                    FROM workflow_actions
+                    {where}
+                    ORDER BY id DESC
+                    LIMIT ?""",
+                (*params, limit),
             ).fetchall()
         return [dict(row) for row in rows]
 

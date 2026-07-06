@@ -1270,6 +1270,58 @@ class TaskHealthCheckTests(unittest.TestCase):
             self.assertEqual("orphaned in_progress", alerts[0]["problem"])
             self.assertEqual([], server.check_task_health(h.store, tmp))
 
+    def test_undispatched_rework_alerts_and_dedupes(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            tid = h.create_task()
+            h.start(tid)
+            h.complete("hub-agent", tid, "intake", "done")
+            h.complete("codex", tid, "implement", "done")
+
+            h.store.record_task_transition(
+                tid, "review", "implement", "rev", "rework", "tests missing"
+            )
+
+            alerts = server.check_task_health(h.store, tmp)
+            self.assertEqual(1, len(alerts))
+            self.assertEqual("undispatched rework", alerts[0]["problem"])
+            self.assertEqual("implement", alerts[0]["step"])
+            self.assertEqual([], server.check_task_health(h.store, tmp))
+
+    def test_stale_pending_dispatch_action_alerts_and_dedupes(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            tid = h.create_task()
+            action = h.store.create_workflow_action(
+                tid, "dispatch_step", step="implement", assignee="codex"
+            )
+            h.store._conn.execute(
+                "UPDATE workflow_actions SET created_at = ? WHERE id = ?",
+                ("2000-01-01T00:00:00+00:00", action["id"]),
+            )
+            h.store._conn.commit()
+
+            alerts = server.check_task_health(h.store, tmp)
+            self.assertEqual(1, len(alerts))
+            self.assertEqual("pending workflow action", alerts[0]["problem"])
+            self.assertEqual("implement", alerts[0]["step"])
+            self.assertEqual(
+                "alerted", h.store.get_workflow_action(action["id"])["status"]
+            )
+            self.assertEqual([], server.check_task_health(h.store, tmp))
+
+    def test_normal_dispatch_completes_workflow_action(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            tid = h.create_task()
+            h.start(tid)
+
+            actions = h.store.list_workflow_actions(status="all")
+            self.assertEqual(1, len(actions))
+            self.assertEqual("dispatch_step", actions[0]["action_type"])
+            self.assertEqual("intake", actions[0]["step"])
+            self.assertEqual("done", actions[0]["status"])
+
     def test_no_alert_when_dead_run_predates_redispatch(self):
         with TemporaryDirectory() as tmp:
             h = EngineHarness(tmp)
@@ -1295,6 +1347,18 @@ class TaskHealthCheckTests(unittest.TestCase):
             tid = h.create_task()
             h.start(tid)
             h.store.create_task_run(tid, worker="hub-agent", status="running")
+            self.assertEqual([], server.check_task_health(h.store, tmp))
+
+    def test_blocked_task_ignored_after_runner_failure(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            tid = h.create_task()
+            h.start(tid)
+            run = h.store.create_task_run(tid, worker="hub-agent", status="running")
+            h.store.finish_task_run(run["id"], "failed", 1)
+            server.advance_workflow_task(
+                h.store, tmp, "hub-agent", tid, "intake", "blocked", "runner failed"
+            )
             self.assertEqual([], server.check_task_health(h.store, tmp))
 
     def test_closed_task_ignored(self):
