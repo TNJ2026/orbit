@@ -25,6 +25,7 @@ TASK_STATUSES = {
     "accepted",
     "needs_changes",
     "blocked",
+    "stalled",
     "closed",
 }
 # Must stay in sync with the scoring tables in server.py — an off-list value

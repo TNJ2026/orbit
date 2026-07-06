@@ -1066,6 +1066,55 @@ class MarkTaskRunningTests(unittest.TestCase):
             self.assertEqual("accepted", h.task(goal_id)["task_status"])
 
 
+class GoalRollupTests(unittest.TestCase):
+    def _mk(self, h, title, status, parent=None, is_goal=False):
+        tid = h.create_task(title=title)
+        if is_goal:
+            h.store._conn.execute("UPDATE tasks SET is_goal = 1 WHERE id = ?", (tid,))
+        if parent:
+            h.store._conn.execute(
+                "UPDATE tasks SET parent_task_id = ? WHERE id = ?", (parent, tid)
+            )
+        h.store._conn.commit()
+        h.store.set_task_workflow_state(tid, task_status=status)
+        return tid
+
+    def test_all_subtasks_closed_accepts_goal(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            goal = self._mk(h, "goal", "in_progress", is_goal=True)
+            self._mk(h, "s1", "closed", parent=goal)
+            s2 = self._mk(h, "s2", "closed", parent=goal)
+            server._recompute_parent_goal_status(h.store, h.task(s2))
+            self.assertEqual("accepted", h.task(goal)["task_status"])
+
+    def test_any_blocked_subtask_stalls_goal(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            goal = self._mk(h, "goal", "in_progress", is_goal=True)
+            self._mk(h, "s1", "closed", parent=goal)
+            s2 = self._mk(h, "s2", "blocked", parent=goal)
+            server._recompute_parent_goal_status(h.store, h.task(s2))
+            self.assertEqual("stalled", h.task(goal)["task_status"])
+
+    def test_mixed_subtasks_keep_goal_in_progress(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            goal = self._mk(h, "goal", "stalled", is_goal=True)
+            self._mk(h, "s1", "closed", parent=goal)
+            s2 = self._mk(h, "s2", "in_progress", parent=goal)
+            server._recompute_parent_goal_status(h.store, h.task(s2))
+            self.assertEqual("in_progress", h.task(goal)["task_status"])
+
+    def test_explicitly_closed_goal_is_left_alone(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            goal = self._mk(h, "goal", "closed", is_goal=True)
+            s1 = self._mk(h, "s1", "blocked", parent=goal)
+            server._recompute_parent_goal_status(h.store, h.task(s1))
+            self.assertEqual("closed", h.task(goal)["task_status"])
+
+
 class UnlimitedConcurrencyTests(unittest.TestCase):
     def _member(self, max_concurrent):
         return {

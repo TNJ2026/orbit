@@ -1171,16 +1171,34 @@ def _business_subtasks_for_goal(store: Store, goal_id: int) -> list[dict[str, An
     return store.list_tasks_by_parent(goal_id)
 
 
-def _maybe_accept_parent_goal(store: Store, task: dict[str, Any]) -> None:
+def _recompute_parent_goal_status(store: Store, task: dict[str, Any]) -> None:
+    """Roll a subtask status change up to its parent goal:
+    all business subtasks closed -> accepted; any blocked -> stalled;
+    otherwise in_progress. A goal that was explicitly closed is left as-is."""
     parent_id = task.get("parent_task_id")
     if not parent_id:
         return
     parent = store.get_task(parent_id)
     if not parent or not parent.get("is_goal"):
         return
-    subtasks = _business_subtasks_for_goal(store, parent_id)
-    if subtasks and all(subtask["task_status"] == "closed" for subtask in subtasks):
-        store.set_task_workflow_state(parent_id, workflow_step="", task_status="accepted")
+    if parent.get("task_status") == "closed":
+        return  # respect an explicit close of the whole goal
+    subtasks = [
+        subtask
+        for subtask in _business_subtasks_for_goal(store, parent_id)
+        if subtask.get("source_message_id") is not None
+    ]
+    if not subtasks:
+        return
+    statuses = [subtask["task_status"] for subtask in subtasks]
+    if all(status == "closed" for status in statuses):
+        new_status = "accepted"
+    elif any(status == "blocked" for status in statuses):
+        new_status = "stalled"
+    else:
+        new_status = "in_progress"
+    if parent.get("task_status") != new_status:
+        store.set_task_workflow_state(parent_id, task_status=new_status)
 
 
 def _materializes_step_cards(task: dict[str, Any]) -> bool:
@@ -1614,6 +1632,7 @@ def _advance_workflow_task_locked(
         store.record_task_transition(task_id, step, step, agent, "blocked", result)
         store.set_task_workflow_state(task_id, task_status="blocked")
         _settle_step_card(store, task, step, "blocked")
+        _recompute_parent_goal_status(store, task)
         notice = _notify_hub(
             store, members,
             f"Task #{task_id} blocked at step '{step}' by {agent}: {result or 'no details'}",
@@ -1640,7 +1659,7 @@ def _advance_workflow_task_locked(
             task_id, workflow_step="", task_status="closed"
         )
         _settle_step_card(store, task, step, "done")
-        _maybe_accept_parent_goal(store, task)
+        _recompute_parent_goal_status(store, task)
         return {
             "task_id": task_id, "step": step, "outcome": "done",
             "closed": True, "dispatched": [], "notices": [],
@@ -2994,6 +3013,11 @@ def create_server(
             )
         except InvalidInputError as exc:
             return _json_error(str(exc), request=request)
+        # Roll a manual subtask status change up to its parent goal.
+        if updated:
+            task = await _to_thread(store.get_task, task_id)
+            if task:
+                await _to_thread(_recompute_parent_goal_status, store, task)
         return _json(
             request,
             {"updated": updated, "task_id": task_id, "task_status": task_status},
