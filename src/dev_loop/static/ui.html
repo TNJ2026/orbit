@@ -2529,6 +2529,12 @@
         (state.rerunAgent && rerunAgents.includes(state.rerunAgent))
           ? state.rerunAgent
           : (rerunAgents.find(name => name !== task.assignee) || rerunAgents[0] || "");
+      // Only offer Re-run when something went wrong: the task is blocked, or its
+      // latest run failed / was orphaned (killed). A healthy/running step hides it.
+      const latestRun = (state.taskRuns || [])[0];
+      const showRerun =
+        task.task_status === "blocked" ||
+        (latestRun && (latestRun.status === "failed" || latestRun.status === "orphaned"));
       $("taskDetailContent").innerHTML = `
         <div class="task-detail-title">
           <span>${escapeHtml(task.title || "#" + task.id + " Task")}</span>
@@ -2563,6 +2569,7 @@
           <div class="row" style="justify-content: space-between;">
             <strong>Runs</strong>
           </div>
+          ${showRerun ? `
           <div class="rerun-box">
             <div class="meta">Re-run this step with a chosen agent (model):</div>
             <div class="row" style="gap: 6px; margin-top: 4px;">
@@ -2573,7 +2580,7 @@
               </select>
               <button type="button" class="primary" onclick="rerunTask(${task.id})">Re-run</button>
             </div>
-          </div>
+          </div>` : ""}
           ${renderTaskRuns()}
         </div>
       `;
