@@ -451,6 +451,29 @@ class StepTimeoutTests(unittest.TestCase):
 
 
 class GoalTests(unittest.TestCase):
+    def test_goal_intake_card_settled_even_if_subtask_dispatch_fails(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            goal_id = h.create_task(title="goal")
+            h.store.update_task_metadata(goal_id, is_goal=True)
+            h.start(goal_id)  # dispatch intake -> materialize the goal's card
+            card = h.store.find_open_step_card(goal_id, "intake")
+            self.assertIsNotNone(card)
+            step = next(
+                s for s in server.read_workflow_config(tmp)["steps"] if s["id"] == "intake"
+            )
+            result = '{"tasks":[{"title":"t","content":"c","acceptance":"a"}]}'
+            with mock.patch.object(
+                server, "_start_goal_business_subtasks", side_effect=RuntimeError("boom")
+            ):
+                with self.assertRaises(RuntimeError):
+                    server._complete_goal_intake_locked(
+                        h.store, tmp, h.task(goal_id), step, "hub-agent", result
+                    )
+            # the intake card is settled before subtasks dispatch, so it is not
+            # left stuck in_progress when dispatch blows up
+            self.assertEqual("closed", h.task(card["id"])["task_status"])
+
     def test_subtask_links_to_goal_and_summary_aggregates(self):
         with TemporaryDirectory() as tmp:
             h = EngineHarness(tmp)

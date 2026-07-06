@@ -1258,12 +1258,15 @@ def _complete_goal_intake_locked(
     result: str,
 ) -> dict[str, Any]:
     subtasks = _parse_goal_subtasks(result)
-    started = _start_goal_business_subtasks(store, project_root, goal, actor, subtasks)
+    # Settle the goal's own intake card and record the intake before dispatching
+    # the business subtasks — subtask dispatch can raise, and if it did after
+    # this point the intake card would be left stuck in_progress forever.
     store.record_task_transition(goal["id"], step["id"], "", actor, "done", result)
     store.set_task_workflow_state(
         goal["id"], workflow_step="", task_status="in_progress"
     )
     _settle_step_card(store, goal, step["id"], "done")
+    started = _start_goal_business_subtasks(store, project_root, goal, actor, subtasks)
     return {
         "task_id": goal["id"],
         "step": step["id"],
