@@ -1275,10 +1275,10 @@ def _upsert_step_card(
             card["id"], task_status=step["task_status"], assignee=assignee
         )
         return
-    # Title = step type + what that role does; the parent linkage is carried
-    # by parent_task_id (↳ badge in the UI), not repeated in every title.
-    duty = _role_duty_summary(project_root, step["role_id"])
-    title = f"{step['name']} · {duty[:50]}" if duty else step["name"]
+    # Title = step type + what THIS task is actually about (the parent task's
+    # title), so each card reflects its own work — not the generic role duty.
+    work = (parent.get("title") or "").strip()
+    title = f"{step['name']} · {work[:60]}" if work else step["name"]
     store.create_step_card(
         parent_task_id=parent["id"],
         workflow_step=step["id"],
@@ -1700,11 +1700,33 @@ def _tail(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[-limit:]
 
 
+_VERDICT_RE = re.compile(
+    r"WORKFLOW_OUTCOME\s*[:=]\s*(done|rework)", re.IGNORECASE
+)
+
+
+def _step_can_rework(cfg: dict[str, Any], back: set[tuple[str, str]], step_id: str) -> bool:
+    """True when the step has a loop-back edge, i.e. it may send the task back
+    for rework (e.g. review -> implement)."""
+    return any(
+        edge["from"] == step_id and (edge["from"], edge["to"]) in back
+        for edge in cfg["edges"]
+    )
+
+
+def _parse_runner_verdict(text: str) -> str | None:
+    """Extract a runner's self-reported WORKFLOW_OUTCOME (last one wins), or
+    None if it did not emit one."""
+    matches = _VERDICT_RE.findall(text or "")
+    return matches[-1].lower() if matches else None
+
+
 def _build_step_prompt(
     project_root: str | None,
     task: dict[str, Any],
     step: dict[str, Any],
     upstream_result: str,
+    can_rework: bool = False,
 ) -> str:
     roles = {
         role["id"]: role["content"]
@@ -1725,6 +1747,13 @@ def _build_step_prompt(
         if goal_contract
         else "完成后在输出的最后打印一段简短总结：一行结论 + 产物文件路径。"
     )
+    if can_rework and not goal_contract:
+        final_instruction += (
+            "\n\n本步骤可以打回返工。请在输出的最后单独用一行给出裁决：\n"
+            "`WORKFLOW_OUTCOME: done`（通过，进入下一步）或\n"
+            "`WORKFLOW_OUTCOME: rework`（不通过，打回上一步返工），其后可附一行原因。\n"
+            "不写该行则默认视为 done。"
+        )
     return (
         f"你是被工作流引擎派发的一次性 worker，以角色 {step['role_id']} 执行"
         f"步骤 '{step['name']}'。当前工作目录就是项目根目录，直接读写文件完成任务。\n"
@@ -1817,7 +1846,11 @@ def run_step_worker(
             "the team member"
         )
     else:
-        prompt = _build_step_prompt(project_root, task, step, upstream_result)
+        _cfg = read_workflow_config(project_root)
+        can_rework = _step_can_rework(_cfg, _workflow_graph(_cfg), step["id"])
+        prompt = _build_step_prompt(
+            project_root, task, step, upstream_result, can_rework
+        )
         if run:
             try:
                 _append_run_event(
@@ -1889,9 +1922,16 @@ def run_step_worker(
             if status == "timeout":
                 pass
             elif exit_code == 0:
-                outcome = "done"
                 status = "succeeded"
                 result = _tail(stdout, 4000) or "runner finished with no output"
+                # A runner on a rework-capable step (e.g. review) can send the
+                # task back by printing `WORKFLOW_OUTCOME: rework`; otherwise a
+                # clean exit means done.
+                outcome = (
+                    "rework"
+                    if can_rework and _parse_runner_verdict(stdout) == "rework"
+                    else "done"
+                )
             elif stdin_errors:
                 result = f"runner stdin failed: {stdin_errors[-1]}"
             else:

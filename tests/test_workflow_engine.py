@@ -694,6 +694,46 @@ class AutoRunnerTests(unittest.TestCase):
             for line in path.read_text(encoding="utf-8").splitlines()
         ]
 
+    def _review_step(self, h):
+        cfg = __import__("dev_loop.server", fromlist=["server"]).read_workflow_config(h.root)
+        return next(s for s in cfg["steps"] if s["id"] == "review")
+
+    def test_reviewer_runner_rework_verdict_loops_back(self):
+        with TemporaryDirectory() as tmp:
+            team = [dict(m) for m in TEAM]
+            for m in team:
+                m["runner_command"] = "printf 'looks off\\nWORKFLOW_OUTCOME: rework\\n'"
+            h = EngineHarness(tmp, team=team)
+            task_id = h.create_task()
+            h.start(task_id)
+            h.complete("hub-agent", task_id, "intake", "done")
+            h.complete("codex", task_id, "implement", "done")
+            self.assertEqual("rev", h.task(task_id)["assignee"])
+
+            # review runner exits 0 but votes rework -> loop back to implement
+            report = server.run_step_worker(
+                h.store, tmp, task_id, self._review_step(h), self._member(h, "rev")
+            )
+            self.assertEqual(
+                [{"step": "implement", "assignee": "codex"}], report["dispatched"]
+            )
+
+    def test_reviewer_runner_default_verdict_advances(self):
+        with TemporaryDirectory() as tmp:
+            team = [dict(m) for m in TEAM]
+            for m in team:
+                m["runner_command"] = "echo lgtm"  # no verdict line -> done
+            h = EngineHarness(tmp, team=team)
+            task_id = h.create_task()
+            h.start(task_id)
+            h.complete("hub-agent", task_id, "intake", "done")
+            h.complete("codex", task_id, "implement", "done")
+
+            report = server.run_step_worker(
+                h.store, tmp, task_id, self._review_step(h), self._member(h, "rev")
+            )
+            self.assertEqual([{"step": "accept", "assignee": "hub-agent"}], report["dispatched"])
+
     def test_worker_success_advances_step_with_stdout_result(self):
         with TemporaryDirectory() as tmp:
             h = EngineHarness(tmp, team=self._team_with_runner("echo done: docs/x.md"))
