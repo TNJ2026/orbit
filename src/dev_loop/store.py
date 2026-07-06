@@ -95,6 +95,7 @@ CREATE TABLE IF NOT EXISTS task_runs (
     log_dir     TEXT NOT NULL,
     command     TEXT NOT NULL DEFAULT '',
     tokens      INTEGER,
+    pid         INTEGER,
     started_at  TEXT NOT NULL,
     finished_at TEXT,
     FOREIGN KEY(task_id) REFERENCES tasks(id),
@@ -308,6 +309,8 @@ class Store:
             )
         if run_columns and "tokens" not in run_columns:
             self._conn.execute("ALTER TABLE task_runs ADD COLUMN tokens INTEGER")
+        if run_columns and "pid" not in run_columns:
+            self._conn.execute("ALTER TABLE task_runs ADD COLUMN pid INTEGER")
         self._backfill_tasks_from_messages()
 
     def _backfill_tasks_from_messages(self) -> None:
@@ -1108,6 +1111,65 @@ class Store:
                 (goal_id,),
             ).fetchone()
         return int(row["total"]) if row else 0
+
+    def set_task_run_pid(self, run_id: int, pid: int) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE task_runs SET pid = ? WHERE id = ?", (pid, run_id)
+            )
+            self._conn.commit()
+
+    def running_run_pids_in_tree(self, root_id: int) -> list[int]:
+        """PIDs of runners still running anywhere in a task's subtree (the task,
+        its subtasks, and their step cards) — for force-terminating a goal."""
+        with self._lock:
+            rows = self._conn.execute(
+                """WITH RECURSIVE tree(id) AS (
+                       SELECT ?
+                       UNION
+                       SELECT t.id FROM tasks t JOIN tree ON t.parent_task_id = tree.id
+                   )
+                   SELECT pid FROM task_runs
+                   WHERE status = 'running' AND pid IS NOT NULL
+                     AND task_id IN (SELECT id FROM tree)""",
+                (root_id,),
+            ).fetchall()
+        return [int(r["pid"]) for r in rows]
+
+    def close_task_tree(self, root_id: int) -> int:
+        """Close a task and its whole subtree and orphan any running runs there.
+        Returns the number of tasks closed."""
+        now = _now()
+        tree_cte = """WITH RECURSIVE tree(id) AS (
+                          SELECT ?
+                          UNION
+                          SELECT t.id FROM tasks t JOIN tree ON t.parent_task_id = tree.id
+                      )"""
+        with self._lock:
+            # rowcount is unreliable for CTE UPDATEs, so count up front.
+            row = self._conn.execute(
+                tree_cte + """
+                   SELECT COUNT(*) AS n FROM tasks
+                   WHERE status NOT IN ('closed', 'accepted')
+                     AND id IN (SELECT id FROM tree)""",
+                (root_id,),
+            ).fetchone()
+            n = int(row["n"]) if row else 0
+            self._conn.execute(
+                tree_cte + """
+                   UPDATE task_runs SET status = 'orphaned', finished_at = ?
+                   WHERE status = 'running' AND task_id IN (SELECT id FROM tree)""",
+                (root_id, now),
+            )
+            self._conn.execute(
+                tree_cte + """
+                   UPDATE tasks SET status = 'closed', updated_at = ?
+                   WHERE status NOT IN ('closed', 'accepted')
+                     AND id IN (SELECT id FROM tree)""",
+                (root_id, now),
+            )
+            self._conn.commit()
+        return n
 
     def list_messages(
         self,

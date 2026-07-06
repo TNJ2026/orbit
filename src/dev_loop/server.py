@@ -9,6 +9,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import threading
 import time
@@ -1593,6 +1594,32 @@ def rerun_workflow_step(
         }
 
 
+def force_close_goal(
+    store: Store, project_root: str | None, task_id: int
+) -> dict[str, Any]:
+    """Force-end a goal (or any task): terminate every runner still running in
+    its subtree and close the whole tree. Straggler runners that finish
+    afterwards no-op (advance ignores terminal tasks), so the goal stays closed."""
+    task = store.get_task(task_id)
+    if not task:
+        raise InvalidInputError(f"unknown task: {task_id}")
+    with _WORKFLOW_ENGINE_LOCK:
+        pids = store.running_run_pids_in_tree(task_id)
+        killed = 0
+        for pid in pids:
+            try:
+                os.killpg(os.getpgid(pid), signal.SIGTERM)
+                killed += 1
+            except (ProcessLookupError, PermissionError, OSError):
+                pass  # already gone / not our group
+        closed = store.close_task_tree(task_id)
+    return {
+        "task_id": task_id,
+        "closed_tasks": closed,
+        "killed_runners": killed,
+    }
+
+
 def _start_workflow_task_locked(
     store: Store, project_root: str | None, agent: str, task_id: int
 ) -> dict[str, Any]:
@@ -1663,6 +1690,15 @@ def _advance_workflow_task_locked(
     task = store.get_task(task_id)
     if not task:
         raise InvalidInputError(f"unknown task: {task_id}")
+    if task.get("task_status") == "closed":
+        # A straggler runner finishing after the task was force-closed must not
+        # re-open or re-dispatch it. (Only "closed" is terminal here — "accepted"
+        # is also the accept step's own in-progress status.)
+        return {
+            "task_id": task_id, "step": step, "outcome": outcome,
+            "closed": True, "dispatched": [], "notices": [],
+            "note": "task already terminal; advance ignored",
+        }
     cfg = read_workflow_config(project_root)
     steps = {s["id"]: s for s in cfg["steps"]}
     if step not in steps:
@@ -1996,7 +2032,13 @@ def run_step_worker(
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 cwd=str(_project_root(project_root)),
+                start_new_session=True,  # own process group, so force-end can kill the whole CLI tree
             )
+            if run:
+                try:
+                    store.set_task_run_pid(run["id"], proc.pid)
+                except (InvalidInputError, OSError):
+                    pass
             stdout_chunks: list[str] = []
             stderr_chunks: list[str] = []
             stdout_thread = threading.Thread(
@@ -3011,6 +3053,11 @@ def create_server(
             store, current_project.get("project_root"), task_id, agent, step or None
         )
 
+    def _engine_force_close(task_id: int) -> dict:
+        return force_close_goal(
+            store, current_project.get("project_root"), task_id
+        )
+
     @mcp.tool()
     async def get_thread(message_id: int) -> list[dict]:
         """Return the full conversation thread containing the given message id:
@@ -3479,6 +3526,20 @@ def create_server(
         except Exception as exc:
             traceback.print_exc()
             return _json_error(f"re-run failed: {exc!r}", 500, request)
+        return _json(request, result)
+
+    @mcp.custom_route("/api/tasks/{task_id:int}/force-close", methods=["POST"])
+    async def api_task_force_close(request: Request) -> JSONResponse:
+        if forbidden := _forbid_non_local(request):
+            return forbidden
+        task_id = int(request.path_params["task_id"])
+        try:
+            result = await _to_thread(_engine_force_close, task_id)
+        except (InvalidInputError, UnknownAgentError) as exc:
+            return _json_error(str(exc), request=request)
+        except Exception as exc:
+            traceback.print_exc()
+            return _json_error(f"force-close failed: {exc!r}", 500, request)
         return _json(request, result)
 
     @mcp.custom_route("/api/tasks/{task_id:int}/runs", methods=["GET"])

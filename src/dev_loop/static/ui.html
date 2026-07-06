@@ -2422,6 +2422,7 @@
             <span class="row" style="gap: 6px; width: auto;">
               <span class="badge">${escapeHtml(goal.task_status)}</span>
               ${goal.task_status === "accepted" ? `<button type="button" onclick="event.stopPropagation(); closeGoal(${goal.id})">Close</button>` : ""}
+              ${(goal.task_status !== "closed" && goal.task_status !== "accepted") ? `<button type="button" class="danger" onclick="event.stopPropagation(); forceCloseGoal(${goal.id})" title="Kill all running runners in this goal and close the whole tree">Force End</button>` : ""}
             </span>
           </div>
           ${goal.workflow_step ? `<div class="meta">⚙ ${escapeHtml(goal.workflow_step)} · ${escapeHtml(goal.assignee || "")}</div>` : ""}
@@ -2454,6 +2455,16 @@
         await loadGoals();
         await loadTasks();
         setStatus(`Goal #${goalId} closed`);
+      });
+    }
+
+    async function forceCloseGoal(goalId) {
+      if (!confirm(`Force end goal #${goalId}? This kills every running runner in it and closes the whole tree.`)) return;
+      await run(async () => {
+        const data = await api(`/api/tasks/${goalId}/force-close`, { method: "POST" });
+        await loadGoals();
+        await loadTasks();
+        setStatus(`Goal #${goalId} force-ended: closed ${data.closed_tasks} tasks, killed ${data.killed_runners} runners`);
       });
     }
 

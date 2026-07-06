@@ -1195,6 +1195,40 @@ class UnlimitedConcurrencyTests(unittest.TestCase):
         self.assertIsNone(ranked.get("selected"))
 
 
+class ForceCloseTests(unittest.TestCase):
+    def test_force_close_closes_tree_and_orphans_runs(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            goal = h.create_task(title="goal")
+            sub = h.create_task(title="sub")
+            h.store._conn.execute("UPDATE tasks SET is_goal = 1 WHERE id = ?", (goal,))
+            h.store._conn.execute("UPDATE tasks SET parent_task_id = ? WHERE id = ?", (goal, sub))
+            h.store._conn.commit()
+            h.store.set_task_workflow_state(goal, task_status="in_progress")
+            h.store.set_task_workflow_state(sub, task_status="in_progress")
+            h.store.create_task_run(sub, worker="gemini", status="running")  # no pid
+
+            result = server.force_close_goal(h.store, tmp, goal)
+
+            self.assertEqual("closed", h.task(goal)["task_status"])
+            self.assertEqual("closed", h.task(sub)["task_status"])
+            self.assertEqual("orphaned", h.store.list_task_runs(sub)[0]["status"])
+            self.assertEqual(0, result["killed_runners"])  # no pid recorded -> nothing killed
+            self.assertGreaterEqual(result["closed_tasks"], 2)
+
+    def test_advance_on_terminal_task_is_noop(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            tid = h.create_task()
+            h.start(tid)
+            h.complete("hub-agent", tid, "intake", "done")  # at implement
+            h.store.set_task_workflow_state(tid, task_status="closed")
+            # a straggler runner finishing after force-close must not re-open it
+            res = server.advance_workflow_task(h.store, tmp, "codex", tid, "implement", "done")
+            self.assertEqual([], res["dispatched"])
+            self.assertEqual("closed", h.task(tid)["task_status"])
+
+
 class ActiveStepLedgerTests(unittest.TestCase):
     def _tx(self, h, tid, from_step, to_step, outcome, note=""):
         h.store.record_task_transition(tid, from_step, to_step, "codex", outcome, note)
