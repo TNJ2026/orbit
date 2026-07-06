@@ -1752,9 +1752,9 @@
                           title="Reassign or alert hub when the step sits with one assignee longer than this"
                           onchange="updateWorkflowStep('${escapeHtml(step.id)}', 'timeout_minutes', this.value)">
                       </label>
-                      <label class="workflow-required" ${step.required_locked ? 'title="Core step (hub/implementer/reviewer role) — always required"' : ""}>
+                      <label class="workflow-required" title="${step.required_locked ? "Core step (hub/implementer/reviewer role) — always mandatory. " : ""}Checked: the task blocks if no team member can fill this role. Unchecked: the step is auto-skipped when no one can run it.">
                         <input type="checkbox" ${step.required ? "checked" : ""} ${step.required_locked ? "disabled" : ""} onchange="updateWorkflowStep('${escapeHtml(step.id)}', 'required', this.checked)">
-                        <span class="meta">required${step.required_locked ? " 🔒" : ""}</span>
+                        <span class="meta">block if unstaffed${step.required_locked ? " 🔒" : ""}</span>
                       </label>
                       <div class="row" style="justify-content: space-between;">
                         <span class="meta">${escapeHtml(step.id || "")}</span>
