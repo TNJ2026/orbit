@@ -2326,23 +2326,6 @@
       renderTaskDetails(state.tasks.find(t => t.id === taskId) || null);
     }
 
-    async function createTaskRun(taskId) {
-      await run(async () => {
-        const data = await api(`/api/tasks/${taskId}/runs`, {
-          method: "POST",
-          body: JSON.stringify({ worker: "manual", status: "running" })
-        });
-        state.selectedRunId = data.run.id;
-        state.selectedRunFileKey = "events";
-        await loadTaskRuns(taskId);
-        // The run flips the task (and its goal) to in_progress; refresh the
-        // board/goals so the card leaves the Todo column.
-        await loadTasks();
-        await loadGoals();
-        setStatus("Run #" + data.run.id + " created");
-      });
-    }
-
     async function rerunTask(taskId) {
       const select = $("rerunAgentSelect");
       const agent = select ? select.value : "";
@@ -2560,21 +2543,18 @@
         <div class="task-runs">
           <div class="row" style="justify-content: space-between;">
             <strong>Runs</strong>
-            <button type="button" onclick="createTaskRun(${task.id})">New Run</button>
           </div>
-          ${task.task_status === "blocked" ? `
-            <div class="rerun-box">
-              <div class="meta">Blocked — re-run this step with a different agent (model):</div>
-              <div class="row" style="gap: 6px; margin-top: 4px;">
-                <select id="rerunAgentSelect">
-                  ${rerunAgents.length
-                    ? rerunAgents.map(name => `<option value="${escapeHtml(name)}"${name === defaultRerunAgent ? " selected" : ""}>${escapeHtml(name)}</option>`).join("")
-                    : `<option value="">No agents available</option>`}
-                </select>
-                <button type="button" class="primary" onclick="rerunTask(${task.id})">Re-run</button>
-              </div>
+          <div class="rerun-box">
+            <div class="meta">Re-run this step with a chosen agent (model):</div>
+            <div class="row" style="gap: 6px; margin-top: 4px;">
+              <select id="rerunAgentSelect">
+                ${rerunAgents.length
+                  ? rerunAgents.map(name => `<option value="${escapeHtml(name)}"${name === defaultRerunAgent ? " selected" : ""}>${escapeHtml(name)}</option>`).join("")
+                  : `<option value="">No agents available</option>`}
+              </select>
+              <button type="button" class="primary" onclick="rerunTask(${task.id})">Re-run</button>
             </div>
-          ` : ""}
+          </div>
           ${renderTaskRuns()}
         </div>
       `;
