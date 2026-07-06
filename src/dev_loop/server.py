@@ -1459,9 +1459,20 @@ def rerun_workflow_step(
             raise InvalidInputError(f"unknown task: {task_id}")
         transitions = store.list_task_transitions(task_id)
         if not transitions:
-            raise InvalidInputError(
-                f"task {task_id} has not entered the workflow yet; start it first"
-            )
+            # The board shows step cards, not the workflow task; a card has no
+            # transitions of its own. Redirect a re-run on a card to its parent
+            # workflow task, defaulting the step to the card's own step.
+            parent_id = task.get("parent_task_id")
+            parent = store.get_task(parent_id) if parent_id else None
+            if parent and store.list_task_transitions(parent_id):
+                if not (step or "").strip():
+                    step = task.get("workflow_step") or ""
+                task, task_id = parent, parent_id
+                transitions = store.list_task_transitions(parent_id)
+            else:
+                raise InvalidInputError(
+                    f"task {task_id} has not entered the workflow yet; start it first"
+                )
         cfg = read_workflow_config(project_root)
         steps = {s["id"]: s for s in cfg["steps"]}
         step_id = (step or "").strip()

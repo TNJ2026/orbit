@@ -987,6 +987,27 @@ class RerunTests(unittest.TestCase):
             self.assertIn("codex", redispatched)
             self.assertNotEqual("blocked", h.task(task_id)["task_status"])
 
+    def test_rerun_on_step_card_redirects_to_parent(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, team=self._team())
+            tid = h.create_task()
+            server.start_workflow_task(h.store, tmp, "hub-agent", tid)
+            server.advance_workflow_task(
+                h.store, tmp, "hub-agent", tid, "intake", "blocked", "stuck"
+            )
+            # a step card: child of the workflow task, its own step, no transitions
+            card = h.create_task(title="Intake · card")
+            h.store._conn.execute(
+                "UPDATE tasks SET parent_task_id = ?, workflow_step = 'intake' WHERE id = ?",
+                (tid, card),
+            )
+            h.store._conn.commit()
+
+            result = server.rerun_workflow_step(h.store, tmp, card, "codex")
+            self.assertEqual(tid, result["task_id"])  # redirected to parent
+            self.assertEqual("intake", result["step"])
+            self.assertEqual("codex", result["assignee"])
+
     def test_rerun_refuses_when_a_run_is_in_progress(self):
         with TemporaryDirectory() as tmp:
             h = EngineHarness(tmp, team=self._team())
