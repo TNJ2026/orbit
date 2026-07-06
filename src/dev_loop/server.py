@@ -586,6 +586,7 @@ def goals_summary(store: Store) -> list[dict[str, Any]]:
             "subtask_total": len(subs),
             "subtask_closed": sum(1 for s in subs if s["task_status"] == "closed"),
             "subtask_blocked": sum(1 for s in subs if s["task_status"] == "blocked"),
+            "tokens_total": store.sum_goal_tokens(task["id"]),
             "subtasks": [
                 {
                     "id": s["id"],
@@ -1740,6 +1741,31 @@ def _parse_runner_verdict(text: str) -> str | None:
     return matches[-1].lower() if matches else None
 
 
+# CLI-native token-usage formats, tried before the self-reported sentinel.
+# Accurate where a CLI prints its own usage (e.g. codex "tokens used\n<n>").
+_NATIVE_TOKEN_PATTERNS = [
+    re.compile(r"tokens used\s*[\r\n]+\s*([\d,]+)", re.IGNORECASE),  # codex
+]
+# Universal fallback: the prompt asks every runner to print this. Approximate
+# (the model estimates its own usage) — only used when no native count exists.
+_SELF_REPORT_TOKEN_RE = re.compile(r"TOKENS_USED\s*[:=]\s*([\d,]+)", re.IGNORECASE)
+
+
+def _parse_run_tokens(stdout: str, stderr: str) -> int | None:
+    """Token count for a run: prefer an accurate CLI-native number, fall back to
+    the runner's self-reported TOKENS_USED sentinel, else None. Last match wins
+    (usage lines are cumulative)."""
+    text = f"{stderr or ''}\n{stdout or ''}"
+    for pattern in _NATIVE_TOKEN_PATTERNS:
+        matches = pattern.findall(text)
+        if matches:
+            return int(matches[-1].replace(",", ""))
+    matches = _SELF_REPORT_TOKEN_RE.findall(text)
+    if matches:
+        return int(matches[-1].replace(",", ""))
+    return None
+
+
 def _build_step_prompt(
     project_root: str | None,
     task: dict[str, Any],
@@ -1778,6 +1804,10 @@ def _build_step_prompt(
                 "- `rework`：本步骤可打回返工（成果不达标），退回上一步重做。\n"
             )
         final_instruction += "不写该行则默认视为 done。"
+        final_instruction += (
+            "\n\n最后另起一行报告本次消耗的 token 数：`TOKENS_USED: <数字>`"
+            "（若你的运行环境提供了用量数字，用真实值；否则可省略该行）。"
+        )
     return (
         f"你是被工作流引擎派发的一次性 worker，以角色 {step['role_id']} 执行"
         f"步骤 '{step['name']}'。当前工作目录就是项目根目录，直接读写文件完成任务。\n"
@@ -1985,6 +2015,7 @@ def run_step_worker(
             outcome = "blocked"
             status = "failed"
             result = str(exc)
+    tokens = _parse_run_tokens(stdout, stderr)
     if run:
         try:
             _write_run_file(run, "stdout", stdout)
@@ -2002,9 +2033,10 @@ def run_step_worker(
                     "exit_code": exit_code,
                     "stdout_bytes": len(stdout.encode("utf-8")),
                     "stderr_bytes": len(stderr.encode("utf-8")),
+                    "tokens": tokens,
                 },
             )
-            store.finish_task_run(run["id"], status, exit_code)
+            store.finish_task_run(run["id"], status, exit_code, tokens)
         except (InvalidInputError, OSError):
             pass
     if outcome == "done" and goal_intake:

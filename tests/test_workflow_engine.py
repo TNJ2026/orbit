@@ -1215,5 +1215,52 @@ class TaskHealthCheckTests(unittest.TestCase):
             self.assertEqual([], server.check_task_health(h.store, tmp))
 
 
+class TokenStatsTests(unittest.TestCase):
+    def test_parse_run_tokens_native_and_sentinel(self):
+        self.assertEqual(114751, server._parse_run_tokens("", "tokens used\n114,751"))
+        self.assertEqual(3200, server._parse_run_tokens("TOKENS_USED: 3,200", ""))
+        # an accurate native count wins over the self-reported sentinel
+        self.assertEqual(
+            114751, server._parse_run_tokens("TOKENS_USED: 5", "tokens used\n114,751")
+        )
+        self.assertIsNone(server._parse_run_tokens("no usage here", "nothing"))
+
+    def test_step_prompt_asks_for_tokens(self):
+        with TemporaryDirectory() as tmp:
+            EngineHarness(tmp)
+            step = {"id": "implement", "name": "Implement",
+                    "role_id": "implementer", "task_status": "in_progress",
+                    "required": True}
+            prompt = server._build_step_prompt(
+                tmp, {"id": 1, "title": "t", "content": ""}, step, ""
+            )
+            self.assertIn("TOKENS_USED", prompt)
+
+    def test_finish_task_run_persists_tokens(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            tid = h.create_task()
+            run = h.store.create_task_run(tid, worker="codex", status="running")
+            h.store.finish_task_run(run["id"], "succeeded", 0, 4200)
+            self.assertEqual(4200, h.store.list_task_runs(tid)[0]["tokens"])
+
+    def test_goal_tokens_total_sums_subtree(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            g = h.create_task(title="goal")
+            s = h.create_task(title="sub")
+            c = h.create_task(title="card")
+            h.store._conn.execute("UPDATE tasks SET is_goal = 1 WHERE id = ?", (g,))
+            h.store._conn.execute("UPDATE tasks SET parent_task_id = ? WHERE id = ?", (g, s))
+            h.store._conn.execute("UPDATE tasks SET parent_task_id = ? WHERE id = ?", (s, c))
+            h.store._conn.commit()
+            r1 = h.store.create_task_run(s, worker="codex", status="running")
+            h.store.finish_task_run(r1["id"], "succeeded", 0, 1000)
+            r2 = h.store.create_task_run(c, worker="gemini", status="running")
+            h.store.finish_task_run(r2["id"], "succeeded", 0, 250)
+            goals = {x["id"]: x for x in server.goals_summary(h.store)}
+            self.assertEqual(1250, goals[g]["tokens_total"])
+
+
 if __name__ == "__main__":
     unittest.main()

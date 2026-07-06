@@ -2415,10 +2415,13 @@
     }
 
     function goalProgressHtml(goal) {
-      if (!goal.subtask_total) return `<span class="meta">no subtasks yet</span>`;
+      const tokens = goal.tokens_total
+        ? ` · <span class="meta" title="Tokens consumed across this goal's runs (only counts runners that report usage)">🔢 ${goal.tokens_total.toLocaleString()} tokens</span>`
+        : "";
+      if (!goal.subtask_total) return `<span class="meta">no subtasks yet${tokens}</span>`;
       const pct = Math.round(goal.subtask_closed / goal.subtask_total * 100);
       return `
-        <span class="meta">${goal.subtask_closed}/${goal.subtask_total} done${goal.subtask_blocked ? ` · <span style="color: var(--danger)">${goal.subtask_blocked} blocked</span>` : ""}</span>
+        <span class="meta">${goal.subtask_closed}/${goal.subtask_total} done${goal.subtask_blocked ? ` · <span style="color: var(--danger)">${goal.subtask_blocked} blocked</span>` : ""}${tokens}</span>
         <div class="goal-progress"><div class="goal-progress-fill" style="width: ${pct}%"></div></div>`;
     }
 

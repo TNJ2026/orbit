@@ -94,6 +94,7 @@ CREATE TABLE IF NOT EXISTS task_runs (
     exit_code   INTEGER,
     log_dir     TEXT NOT NULL,
     command     TEXT NOT NULL DEFAULT '',
+    tokens      INTEGER,
     started_at  TEXT NOT NULL,
     finished_at TEXT,
     FOREIGN KEY(task_id) REFERENCES tasks(id),
@@ -290,6 +291,8 @@ class Store:
             self._conn.execute(
                 "ALTER TABLE task_runs ADD COLUMN command TEXT NOT NULL DEFAULT ''"
             )
+        if run_columns and "tokens" not in run_columns:
+            self._conn.execute("ALTER TABLE task_runs ADD COLUMN tokens INTEGER")
         self._backfill_tasks_from_messages()
 
     def _backfill_tasks_from_messages(self) -> None:
@@ -935,7 +938,7 @@ class Store:
         with self._lock:
             rows = self._conn.execute(
                 """SELECT id, task_id, attempt, worker, status, exit_code,
-                          log_dir, command, started_at, finished_at
+                          log_dir, command, tokens, started_at, finished_at
                    FROM task_runs
                    WHERE task_id = ?
                    ORDER BY attempt DESC
@@ -948,7 +951,7 @@ class Store:
         with self._lock:
             row = self._conn.execute(
                 """SELECT id, task_id, attempt, worker, status, exit_code,
-                          log_dir, command, started_at, finished_at
+                          log_dir, command, tokens, started_at, finished_at
                    FROM task_runs
                    WHERE id = ?""",
                 (run_id,),
@@ -960,6 +963,7 @@ class Store:
         run_id: int,
         status: str,
         exit_code: int | None = None,
+        tokens: int | None = None,
     ) -> dict[str, Any] | None:
         status = (status or "").strip()
         if not status:
@@ -967,14 +971,33 @@ class Store:
         with self._lock:
             cur = self._conn.execute(
                 """UPDATE task_runs
-                   SET status = ?, exit_code = ?, finished_at = ?
+                   SET status = ?, exit_code = ?, finished_at = ?,
+                       tokens = COALESCE(?, tokens)
                    WHERE id = ?""",
-                (status, exit_code, _now(), run_id),
+                (status, exit_code, _now(), tokens, run_id),
             )
             self._conn.commit()
         if cur.rowcount == 0:
             return None
         return self.get_task_run(run_id)
+
+    def sum_goal_tokens(self, goal_id: int) -> int:
+        """Total tokens across a goal's whole task subtree — the goal, its
+        business subtasks, and every step card beneath them (runs are recorded
+        on subtasks and cards). Walks parent_task_id recursively."""
+        with self._lock:
+            row = self._conn.execute(
+                """WITH RECURSIVE tree(id) AS (
+                       SELECT ?
+                       UNION
+                       SELECT t.id FROM tasks t JOIN tree ON t.parent_task_id = tree.id
+                   )
+                   SELECT COALESCE(SUM(r.tokens), 0) AS total
+                   FROM task_runs r
+                   WHERE r.task_id IN (SELECT id FROM tree)""",
+                (goal_id,),
+            ).fetchone()
+        return int(row["total"]) if row else 0
 
     def list_messages(
         self,
