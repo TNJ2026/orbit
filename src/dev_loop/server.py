@@ -2140,6 +2140,115 @@ def _check_workflow_step_timeouts_locked(
     return actions
 
 
+# Runs left in these states mean a runner is gone, not working.
+_RUN_DEAD_STATUSES = ("orphaned", "failed")
+
+
+def _latest_run_status_for_step(
+    store: Store, task: dict[str, Any], step_id: str
+) -> str | None:
+    """Status of the newest run for a step, read from its run holder (the goal's
+    step card when materialized, else the task itself — same target
+    run_step_worker records on)."""
+    holder_id = task["id"]
+    if _materializes_step_cards(task):
+        card = store.find_open_step_card(task["id"], step_id)
+        if card:
+            holder_id = card["id"]
+    runs = store.list_task_runs(holder_id, limit=1)
+    return runs[0]["status"] if runs else None
+
+
+def _task_has_running_run(store: Store, task_id: int) -> bool:
+    holders = [task_id] + [c["id"] for c in store.list_tasks_by_parent(task_id)]
+    for holder in holders:
+        if any(r["status"] == "running" for r in store.list_task_runs(holder, limit=5)):
+            return True
+    return False
+
+
+def check_task_health(
+    store: Store, project_root: str | None = None, now: datetime | None = None
+) -> list[dict[str, Any]]:
+    with _WORKFLOW_ENGINE_LOCK:
+        return _check_task_health_locked(store, project_root, now)
+
+
+def _check_task_health_locked(
+    store: Store, project_root: str | None, now: datetime | None = None
+) -> list[dict[str, Any]]:
+    """Bottom-line watchdog for the otherwise purely event-driven engine: scan
+    non-terminal tasks and notify the hub about stuck states nothing else
+    recovers — (A) a step whose runner died (orphaned/failed run, none running)
+    and (B) a non-goal task reading in_progress with no active step and no run
+    in progress. Alerts are deduped via a `health_alert` transition so the hub
+    is not re-pinged every cycle for the same unchanged problem."""
+    members = read_team_config(project_root)["members"]
+    cfg = read_workflow_config(project_root)
+    steps = {s["id"]: s for s in cfg["steps"]}
+    alerts: list[dict[str, Any]] = []
+    for task in store.list_tasks(status="all", limit=-1):
+        if task.get("task_status") in ("closed", "accepted"):
+            continue
+        task_id = task["id"]
+        transitions = store.list_task_transitions(task_id)
+        active = _active_step_assignees(transitions)
+
+        # A. A step is active but its runner is dead and nothing is running.
+        for step_id, assignee in active.items():
+            if step_id not in steps:
+                continue
+            if _latest_run_status_for_step(store, task, step_id) not in _RUN_DEAD_STATUSES:
+                continue
+            last_dispatch_id = max(
+                (t["id"] for t in transitions
+                 if t["outcome"] == "dispatched" and t["to_step"] == step_id),
+                default=0,
+            )
+            if any(
+                t["outcome"] == "health_alert" and t["to_step"] == step_id
+                and t["id"] > last_dispatch_id
+                for t in transitions
+            ):
+                continue  # already alerted for this dispatch
+            store.record_task_transition(
+                task_id, step_id, step_id, WORKFLOW_ENGINE_AGENT, "health_alert",
+                f"step '{step_id}' stalled: {assignee} runner is dead, nothing running",
+            )
+            notice = _notify_hub(
+                store, members,
+                f"Task #{task_id} step '{step_id}' looks stuck: the {assignee} runner "
+                "died and nothing is running. Re-run it (pick an agent) or "
+                "complete_step as hub.",
+            )
+            alerts.append({"task_id": task_id, "step": step_id,
+                           "problem": "dead runner", "notice": notice})
+
+        # B. A non-goal task claims to be in progress but has no active step and
+        # no run in flight — orphaned (e.g. its runner was killed mid-flight).
+        if (
+            not task.get("is_goal")
+            and task.get("task_status") == "in_progress"
+            and transitions
+            and not active
+            and not _task_has_running_run(store, task_id)
+        ):
+            latest = max(transitions, key=lambda t: t["id"])
+            if latest["outcome"] != "health_alert":
+                store.record_task_transition(
+                    task_id, "", "", WORKFLOW_ENGINE_AGENT, "health_alert",
+                    "in_progress but no active step and no run in progress",
+                )
+                notice = _notify_hub(
+                    store, members,
+                    f"Task #{task_id} reads in_progress but has no active step and "
+                    "nothing running — likely orphaned. Re-run or close it.",
+                )
+                alerts.append({"task_id": task_id, "step": None,
+                               "problem": "orphaned in_progress", "notice": notice})
+    return alerts
+
+
 def workflow_task_state(
     store: Store, project_root: str | None, task_id: int
 ) -> dict[str, Any]:
@@ -2419,12 +2528,12 @@ def create_server(
     def _timeout_watcher() -> None:
         while True:
             time.sleep(WORKFLOW_TIMEOUT_POLL_SECONDS)
-            try:
-                check_workflow_step_timeouts(
-                    store, current_project.get("project_root")
-                )
-            except Exception:
-                pass
+            root = current_project.get("project_root")
+            for check in (check_workflow_step_timeouts, check_task_health):
+                try:
+                    check(store, root)
+                except Exception:
+                    pass
 
     current_project = project or {
         "id": "",

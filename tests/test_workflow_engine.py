@@ -1140,5 +1140,61 @@ class UnlimitedConcurrencyTests(unittest.TestCase):
         self.assertIsNone(ranked.get("selected"))
 
 
+class TaskHealthCheckTests(unittest.TestCase):
+    def test_dead_runner_step_alerts_and_dedupes(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            tid = h.create_task()
+            h.start(tid)  # intake active, dispatched to hub-agent
+            run = h.store.create_task_run(tid, worker="hub-agent", status="running")
+            h.store._conn.execute(
+                "UPDATE task_runs SET status = 'orphaned' WHERE id = ?", (run["id"],)
+            )
+            h.store._conn.commit()
+
+            alerts = server.check_task_health(h.store, tmp)
+            self.assertEqual(1, len(alerts))
+            self.assertEqual("dead runner", alerts[0]["problem"])
+            self.assertEqual("intake", alerts[0]["step"])
+            self.assertTrue(any(str(tid) in c for _, c in h.inbox_senders("hub-agent")))
+            # same unchanged problem is not re-alerted
+            self.assertEqual([], server.check_task_health(h.store, tmp))
+
+    def test_orphaned_in_progress_alerts_and_dedupes(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            tid = h.create_task()
+            # dispatched then finished -> no active step, but marked in_progress
+            h.store.record_task_transition(tid, "", "intake", "hub-agent", "dispatched", "hub-agent")
+            h.store.record_task_transition(tid, "intake", "", "hub-agent", "done", "")
+            h.store.set_task_workflow_state(tid, task_status="in_progress")
+
+            alerts = server.check_task_health(h.store, tmp)
+            self.assertEqual(1, len(alerts))
+            self.assertEqual("orphaned in_progress", alerts[0]["problem"])
+            self.assertEqual([], server.check_task_health(h.store, tmp))
+
+    def test_healthy_running_step_no_alert(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            tid = h.create_task()
+            h.start(tid)
+            h.store.create_task_run(tid, worker="hub-agent", status="running")
+            self.assertEqual([], server.check_task_health(h.store, tmp))
+
+    def test_closed_task_ignored(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            tid = h.create_task()
+            h.start(tid)
+            run = h.store.create_task_run(tid, worker="hub-agent", status="running")
+            h.store._conn.execute(
+                "UPDATE task_runs SET status = 'orphaned' WHERE id = ?", (run["id"],)
+            )
+            h.store.set_task_workflow_state(tid, task_status="closed")
+            h.store._conn.commit()
+            self.assertEqual([], server.check_task_health(h.store, tmp))
+
+
 if __name__ == "__main__":
     unittest.main()
