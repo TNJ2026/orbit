@@ -1801,8 +1801,10 @@ def run_step_worker(
             )
         except (InvalidInputError, OSError):
             pass
-    # A run has started: mark this task (and its ancestor goals) in_progress.
-    _mark_task_running(store, task_id)
+    # A run has started: mark the running card/task (and its ancestor subtask
+    # and goal, reached via parent_task_id) in_progress. Use run_task_id so the
+    # step card shown on the board — not just the underlying task — flips too.
+    _mark_task_running(store, run_task_id)
     if timeout_seconds is None:
         step_timeout = int(step.get("timeout_minutes") or 0) * 60
         timeout_seconds = step_timeout or RUNNER_DEFAULT_TIMEOUT_SECONDS

@@ -959,24 +959,31 @@ class MarkTaskRunningTests(unittest.TestCase):
     def _set_status(self, store, task_id, status):
         store.set_task_workflow_state(task_id, task_status=status)
 
-    def test_run_start_marks_task_and_parent_goal_in_progress(self):
+    def test_run_start_marks_card_subtask_and_goal_in_progress(self):
+        # A runner records its run on the step card, so marking must start from
+        # the card (run_task_id) and roll up card -> subtask -> goal.
         with TemporaryDirectory() as tmp:
             h = EngineHarness(tmp)
             goal_id = h.create_task(title="goal")
             sub_id = h.create_task(title="sub")
-            # Link sub -> goal and flag goal.
+            card_id = h.create_task(title="Intake · card")
             h.store._conn.execute(
                 "UPDATE tasks SET is_goal = 1 WHERE id = ?", (goal_id,)
             )
             h.store._conn.execute(
                 "UPDATE tasks SET parent_task_id = ? WHERE id = ?", (goal_id, sub_id)
             )
+            h.store._conn.execute(
+                "UPDATE tasks SET parent_task_id = ? WHERE id = ?", (sub_id, card_id)
+            )
             h.store._conn.commit()
             self._set_status(h.store, goal_id, "created")
             self._set_status(h.store, sub_id, "assigned")
+            self._set_status(h.store, card_id, "created")
 
-            server._mark_task_running(h.store, sub_id)
+            server._mark_task_running(h.store, card_id)
 
+            self.assertEqual("in_progress", h.task(card_id)["task_status"])
             self.assertEqual("in_progress", h.task(sub_id)["task_status"])
             self.assertEqual("in_progress", h.task(goal_id)["task_status"])
 
