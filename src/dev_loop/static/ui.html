@@ -200,19 +200,16 @@
       border-radius: 6px;
       padding: 9px;
       background: #fbfbf9;
-      cursor: pointer;
-      transition: background 0.15s, border-color 0.15s;
-    }
-    .task-run:hover {
-      background: #f5f5f2;
     }
     .task-run.active {
       border-color: #9fc7b9;
       background: #eef5f1;
-      cursor: default;
     }
-    .task-run.active:hover {
-      background: #eef5f1;
+    .run-files {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
     }
     .run-file-content {
       margin: 8px 0 0;
@@ -224,17 +221,6 @@
       white-space: pre-wrap;
       overflow-wrap: anywhere;
       font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    }
-    .run-file-section {
-      margin-top: 12px;
-    }
-    .run-file-title {
-      font-size: 11px;
-      font-weight: 700;
-      color: var(--muted);
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-      margin-bottom: 4px;
     }
     .kanban-column.goal-column {
       background: #eef7f4;
@@ -2319,25 +2305,11 @@
 
     }
 
-    async function loadAllRunFiles(runId) {
-      const keys = ["events", "stdout", "stderr", "result"];
-      const results = await Promise.all(
-        keys.map(fileKey =>
-          api(`/api/task-runs/${runId}/files/${fileKey}?tail=65536`)
-            .catch(() => ({ content: "" }))
-        )
-      );
-      state.selectedRunId = runId;
-      state.runFiles = {};
-      keys.forEach((fileKey, idx) => {
-        state.runFiles[fileKey] = results[idx];
-      });
-    }
-
     async function loadTaskRuns(taskId) {
       if (!state.apiBase || !taskId) {
         state.taskRuns = [];
         state.selectedRunId = null;
+        state.selectedRunFileKey = "events";
         state.runFiles = {};
         return;
       }
@@ -2347,7 +2319,7 @@
         state.selectedRunId = (state.taskRuns[0] || {}).id || null;
       }
       if (state.selectedRunId) {
-        await loadAllRunFiles(state.selectedRunId);
+        await loadRunFile(state.selectedRunId, state.selectedRunFileKey || "events");
       } else {
         state.runFiles = {};
       }
@@ -2361,6 +2333,7 @@
           body: JSON.stringify({ worker: "manual", status: "running" })
         });
         state.selectedRunId = data.run.id;
+        state.selectedRunFileKey = "events";
         await loadTaskRuns(taskId);
         // The run flips the task (and its goal) to in_progress; refresh the
         // board/goals so the card leaves the Todo column.
@@ -2388,10 +2361,16 @@
       });
     }
 
-    async function selectRun(runId) {
-      if (state.selectedRunId === runId) return;
+    async function loadRunFile(runId, fileKey) {
+      const data = await api(`/api/task-runs/${runId}/files/${fileKey}?tail=65536`);
+      state.selectedRunId = runId;
+      state.selectedRunFileKey = fileKey;
+      state.runFiles = { [fileKey]: data };
+    }
+
+    async function showRunFile(runId, fileKey) {
       await run(async () => {
-        await loadAllRunFiles(runId);
+        await loadRunFile(runId, fileKey);
         renderTaskDetails(state.tasks.find(t => t.id === state.selectedTaskId) || null);
       });
     }
@@ -2637,8 +2616,9 @@
       if (!state.taskRuns.length) {
         return `<div class="empty" style="padding: 0;">No runs recorded.</div>`;
       }
+      const visibleFile = Object.values(state.runFiles)[0] || null;
       return state.taskRuns.map(run => `
-        <div class="task-run ${run.id === state.selectedRunId ? "active" : ""}" onclick="selectRun(${run.id})">
+        <div class="task-run ${run.id === state.selectedRunId ? "active" : ""}">
           <div class="row" style="justify-content: space-between;">
             <strong>run-${String(run.attempt).padStart(3, "0")}</strong>
             <span class="badge">${escapeHtml(run.status)}</span>
@@ -2650,24 +2630,13 @@
           </div>
           ${run.command ? `<div class="meta run-command" title="${escapeHtml(run.command)}">$ ${escapeHtml(run.command)}</div>` : ""}
           <div class="meta">${escapeHtml(run.log_dir || "")}</div>
-          
-          ${run.id === state.selectedRunId ? `
-            <div class="run-file-section" onclick="event.stopPropagation()">
-              <div class="run-file-title">events</div>
-              <pre class="run-file-content">${escapeHtml(formatRunFileContent("events", (state.runFiles["events"] || {}).content || ""))}</pre>
-            </div>
-            <div class="run-file-section" onclick="event.stopPropagation()">
-              <div class="run-file-title">stdout</div>
-              <pre class="run-file-content">${escapeHtml((state.runFiles["stdout"] || {}).content || "")}</pre>
-            </div>
-            <div class="run-file-section" onclick="event.stopPropagation()">
-              <div class="run-file-title">stderr</div>
-              <pre class="run-file-content">${escapeHtml((state.runFiles["stderr"] || {}).content || "")}</pre>
-            </div>
-            <div class="run-file-section" onclick="event.stopPropagation()">
-              <div class="run-file-title">result</div>
-              <pre class="run-file-content">${escapeHtml((state.runFiles["result"] || {}).content || "")}</pre>
-            </div>
+          <div class="run-files">
+            ${["events", "stdout", "stderr", "result"].map(fileKey => `
+              <button type="button" ${run.id === state.selectedRunId && fileKey === state.selectedRunFileKey ? 'class="primary"' : ""} onclick="showRunFile(${run.id}, '${fileKey}')">${fileKey}</button>
+            `).join("")}
+          </div>
+          ${run.id === state.selectedRunId && visibleFile ? `
+            <pre class="run-file-content">${escapeHtml(formatRunFileContent(state.selectedRunFileKey, visibleFile.content || ""))}</pre>
           ` : ""}
         </div>
       `).join("");
