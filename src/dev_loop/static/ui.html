@@ -2649,7 +2649,6 @@
             ${run.exit_code === null || run.exit_code === undefined ? "" : ` - exit ${run.exit_code}`}
             ${run.started_at ? ` - ${fmtTime(run.started_at)}` : ""}
           </div>
-          ${run.command ? `<div class="meta run-command" title="${escapeHtml(run.command)}">$ ${escapeHtml(run.command)}</div>` : ""}
           <div class="meta">${escapeHtml(run.log_dir || "")}</div>
           <div class="run-files">
             ${["events", "prompt", "stdout", "stderr", "result"].map(fileKey => `
