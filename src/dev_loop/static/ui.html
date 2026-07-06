@@ -2630,7 +2630,7 @@
           ${run.command ? `<div class="meta run-command" title="${escapeHtml(run.command)}">$ ${escapeHtml(run.command)}</div>` : ""}
           <div class="meta">${escapeHtml(run.log_dir || "")}</div>
           <div class="run-files">
-            ${["events", "stdout", "stderr", "result"].map(fileKey => `
+            ${["events", "prompt", "stdout", "stderr", "result"].map(fileKey => `
               <button type="button" ${run.id === state.selectedRunId && fileKey === state.selectedRunFileKey ? 'class="primary"' : ""} onclick="showRunFile(${run.id}, '${fileKey}')">${fileKey}</button>
             `).join("")}
           </div>

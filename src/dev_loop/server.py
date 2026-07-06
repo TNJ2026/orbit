@@ -80,6 +80,7 @@ _AGENT_TOOL_CANDIDATES = [
 ]
 _TASK_RUN_FILES = {
     "events": "events.jsonl",
+    "prompt": "prompt.txt",
     "stdout": "stdout.log",
     "stderr": "stderr.log",
     "result": "result.md",
@@ -2012,6 +2013,16 @@ def run_step_worker(
             project_root, task, step, upstream_result, can_rework
         )
         if run:
+            # Persist the exact invocation (command + the prompt piped on stdin)
+            # so it's inspectable in the run's "prompt" tab, even if the runner
+            # is later killed.
+            try:
+                _write_run_file(
+                    run, "prompt",
+                    f"$ {command}\n\n--- prompt (piped on stdin) ---\n{prompt}\n",
+                )
+            except (InvalidInputError, OSError):
+                pass
             try:
                 _append_run_event(
                     run,
