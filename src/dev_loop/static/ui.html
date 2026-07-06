@@ -2320,6 +2320,10 @@
         state.selectedRunId = data.run.id;
         state.selectedRunFileKey = "events";
         await loadTaskRuns(taskId);
+        // The run flips the task (and its goal) to in_progress; refresh the
+        // board/goals so the card leaves the Todo column.
+        await loadTasks();
+        await loadGoals();
         setStatus("Run #" + data.run.id + " created");
       });
     }
