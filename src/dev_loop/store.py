@@ -92,6 +92,7 @@ CREATE TABLE IF NOT EXISTS task_runs (
     status      TEXT NOT NULL DEFAULT 'running',
     exit_code   INTEGER,
     log_dir     TEXT NOT NULL,
+    command     TEXT NOT NULL DEFAULT '',
     started_at  TEXT NOT NULL,
     finished_at TEXT,
     FOREIGN KEY(task_id) REFERENCES tasks(id),
@@ -110,6 +111,12 @@ CREATE INDEX IF NOT EXISTS idx_tasks_status
     ON tasks (status);
 CREATE INDEX IF NOT EXISTS idx_tasks_assignee
     ON tasks (assignee);
+CREATE INDEX IF NOT EXISTS idx_tasks_parent
+    ON tasks (parent_task_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_workflow_active
+    ON tasks (workflow_step, status);
+CREATE INDEX IF NOT EXISTS idx_tasks_goals
+    ON tasks (is_goal);
 CREATE INDEX IF NOT EXISTS idx_task_runs_task
     ON task_runs (task_id, attempt);
 CREATE INDEX IF NOT EXISTS idx_task_transitions_task
@@ -274,6 +281,14 @@ class Store:
         for column, definition in task_defaults.items():
             if column not in task_columns:
                 self._conn.execute(f"ALTER TABLE tasks ADD COLUMN {column} {definition}")
+        run_columns = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(task_runs)").fetchall()
+        }
+        if run_columns and "command" not in run_columns:
+            self._conn.execute(
+                "ALTER TABLE task_runs ADD COLUMN command TEXT NOT NULL DEFAULT ''"
+            )
         self._backfill_tasks_from_messages()
 
     def _backfill_tasks_from_messages(self) -> None:
@@ -524,7 +539,11 @@ class Store:
         limit: int = 200,
     ) -> list[dict[str, Any]]:
         """Return executable tasks for the Kanban UI."""
-        limit = max(1, min(int(limit), 500))
+        limit_val = int(limit)
+        if limit_val >= 0:
+            limit_val = max(1, min(limit_val, 500))
+        else:
+            limit_val = 999999999
         filters = []
         params: list[Any] = []
         if status != "all":
@@ -545,7 +564,7 @@ class Store:
                     ORDER BY id DESC
                     LIMIT ?"""
         with self._lock:
-            rows = self._conn.execute(query, [*params, limit]).fetchall()
+            rows = self._conn.execute(query, [*params, limit_val]).fetchall()
         return [self._task_row(row) for row in rows]
 
     def get_task(self, task_id: int) -> dict[str, Any] | None:
@@ -561,6 +580,67 @@ class Store:
                 (task_id,),
             ).fetchone()
         return self._task_row(row) if row else None
+
+    def get_task_by_source_message(self, message_id: int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT id, source_message_id, title, content, sender,
+                          assignee, assignee AS recipient, status AS task_status,
+                          created_at, updated_at, role_required, importance, size,
+                          risk, required_capabilities, exclusive_workspace,
+                          workflow_step, parent_task_id, is_goal
+                   FROM tasks
+                   WHERE source_message_id = ?""",
+                (message_id,),
+            ).fetchone()
+        return self._task_row(row) if row else None
+
+    def list_tasks_by_parent(self, parent_task_id: int) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT id, source_message_id, title, content, sender,
+                          assignee, assignee AS recipient, status AS task_status,
+                          created_at, updated_at, role_required, importance, size,
+                          risk, required_capabilities, exclusive_workspace,
+                          workflow_step, parent_task_id, is_goal
+                   FROM tasks
+                   WHERE parent_task_id = ?
+                   ORDER BY id DESC""",
+                (parent_task_id,),
+            ).fetchall()
+        return [self._task_row(row) for row in rows]
+
+    def list_goals_with_children(self) -> list[dict[str, Any]]:
+        """Return goals and their direct children for the Goals page."""
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT id, source_message_id, title, content, sender,
+                          assignee, assignee AS recipient, status AS task_status,
+                          created_at, updated_at, role_required, importance, size,
+                          risk, required_capabilities, exclusive_workspace,
+                          workflow_step, parent_task_id, is_goal
+                   FROM tasks
+                   WHERE is_goal = 1
+                      OR parent_task_id IN (SELECT id FROM tasks WHERE is_goal = 1)
+                   ORDER BY id DESC"""
+            ).fetchall()
+        return [self._task_row(row) for row in rows]
+
+    def list_active_workflow_tasks(self) -> list[dict[str, Any]]:
+        """Return workflow tasks that can affect team locks or timeouts."""
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT id, source_message_id, title, content, sender,
+                          assignee, assignee AS recipient, status AS task_status,
+                          created_at, updated_at, role_required, importance, size,
+                          risk, required_capabilities, exclusive_workspace,
+                          workflow_step, parent_task_id, is_goal
+                   FROM tasks
+                   WHERE workflow_step != ''
+                     AND status NOT IN ('blocked', 'closed')
+                   ORDER BY id DESC"""
+            ).fetchall()
+        return [self._task_row(row) for row in rows]
 
     def update_task_metadata(
         self,
@@ -791,11 +871,13 @@ class Store:
         log_dir: str = "",
         worker: str = "",
         status: str = "running",
+        command: str = "",
     ) -> dict[str, Any] | None:
         """Create a task execution attempt and return its run metadata."""
         now = _now()
         worker = (worker or "").strip()
         status = (status or "running").strip()
+        command = (command or "").strip()
         with self._lock:
             task = self._conn.execute(
                 "SELECT id FROM tasks WHERE id = ?", (task_id,)
@@ -809,10 +891,11 @@ class Store:
             attempt = int(row["next_attempt"])
             cur = self._conn.execute(
                 """INSERT INTO task_runs (
-                       task_id, attempt, worker, status, log_dir, started_at
+                       task_id, attempt, worker, status, log_dir, command,
+                       started_at
                    )
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (task_id, attempt, worker, status, log_dir, now),
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (task_id, attempt, worker, status, log_dir, command, now),
             )
             run_id = cur.lastrowid
             self._conn.commit()
@@ -835,7 +918,7 @@ class Store:
         with self._lock:
             rows = self._conn.execute(
                 """SELECT id, task_id, attempt, worker, status, exit_code,
-                          log_dir, started_at, finished_at
+                          log_dir, command, started_at, finished_at
                    FROM task_runs
                    WHERE task_id = ?
                    ORDER BY attempt DESC
@@ -848,7 +931,7 @@ class Store:
         with self._lock:
             row = self._conn.execute(
                 """SELECT id, task_id, attempt, worker, status, exit_code,
-                          log_dir, started_at, finished_at
+                          log_dir, command, started_at, finished_at
                    FROM task_runs
                    WHERE id = ?""",
                 (run_id,),

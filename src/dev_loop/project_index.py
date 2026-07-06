@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -45,7 +46,6 @@ def _read_index(index_path: Path) -> list[dict[str, Any]]:
 
 
 def _write_index(index_path: Path, projects: list[dict[str, Any]]) -> None:
-    index_path.parent.mkdir(parents=True, exist_ok=True)
     # Unique temp name: servers for different projects share this index, and
     # two starting at once must not race on the same temp file.
     tmp_path = index_path.with_suffix(f".{os.getpid()}.tmp")
@@ -54,6 +54,27 @@ def _write_index(index_path: Path, projects: list[dict[str, Any]]) -> None:
         encoding="utf-8",
     )
     tmp_path.replace(index_path)
+
+
+@contextmanager
+def _index_write_lock(index_path: Path):
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = index_path.with_suffix(index_path.suffix + ".lock")
+    lock_file = lock_path.open("a+", encoding="utf-8")
+    try:
+        try:
+            import fcntl
+
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        except ImportError:
+            fcntl = None
+        yield
+    finally:
+        try:
+            if "fcntl" in locals() and fcntl is not None:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        finally:
+            lock_file.close()
 
 
 def upsert_project(
@@ -77,10 +98,14 @@ def upsert_project(
         "last_seen": now,
     }
     path = Path(index_path or DEFAULT_PROJECT_INDEX_PATH).expanduser()
-    projects = [project for project in _read_index(path) if project.get("id") != pid]
-    projects.append(entry)
-    projects.sort(key=lambda project: project.get("last_seen", ""), reverse=True)
-    _write_index(path, projects)
+    with _index_write_lock(path):
+        projects = [
+            project for project in _read_index(path)
+            if project.get("id") != pid
+        ]
+        projects.append(entry)
+        projects.sort(key=lambda project: project.get("last_seen", ""), reverse=True)
+        _write_index(path, projects)
     return entry
 
 

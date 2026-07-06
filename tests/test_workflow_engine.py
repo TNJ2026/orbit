@@ -1,5 +1,9 @@
 """Workflow constraint engine: dispatch, join, rework, blocking, skipping."""
 
+import json
+import sys
+import threading
+import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -146,6 +150,9 @@ class WorkflowEngineTests(unittest.TestCase):
                 {"b", "c"}, {d["step"] for d in fanout["dispatched"]}
             )
             self.assertEqual({"b", "c"}, set(h.state(task_id)["active_steps"]))
+            # Multiple active steps derive the visible task status from the
+            # workflow configuration order instead of whichever dispatch ran last.
+            self.assertEqual("in_progress", h.task(task_id)["task_status"])
 
             first = h.complete("codex", task_id, "b", "done")
             self.assertEqual([], first["dispatched"])
@@ -680,6 +687,13 @@ class AutoRunnerTests(unittest.TestCase):
         members = server.read_team_config(h.root)["members"]
         return next(m for m in members if m["agent_name"] == name)
 
+    def _run_event_types(self, run):
+        path = Path(run["log_dir"]) / "events.jsonl"
+        return [
+            json.loads(line)["type"]
+            for line in path.read_text(encoding="utf-8").splitlines()
+        ]
+
     def test_worker_success_advances_step_with_stdout_result(self):
         with TemporaryDirectory() as tmp:
             h = EngineHarness(tmp, team=self._team_with_runner("echo done: docs/x.md"))
@@ -695,10 +709,77 @@ class AutoRunnerTests(unittest.TestCase):
             self.assertEqual([{"step": "review", "assignee": "rev"}], report["dispatched"])
             runs = h.store.list_task_runs(task_id)
             self.assertEqual("succeeded", runs[0]["status"])
+            self.assertEqual(
+                ["run_created", "runner_started", "runner_finished"],
+                self._run_event_types(runs[0]),
+            )
             # review dispatch message carries the runner's stdout as upstream result
             self.assertTrue(
                 any("done: docs/x.md" in c for _, c in h.inbox_senders("rev"))
             )
+
+    def test_worker_streams_stdout_while_running(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(
+                tmp,
+                team=self._team_with_runner("printf first; sleep 0.6; printf second"),
+            )
+            task_id = h.create_task()
+            h.start(task_id)
+            h.complete("hub-agent", task_id, "intake", "done")
+            report = {}
+
+            def target():
+                report.update(server.run_step_worker(
+                    h.store, tmp, task_id, self._implement_step(h),
+                    self._member(h, "codex"),
+                ))
+
+            thread = threading.Thread(target=target)
+            thread.start()
+            stdout_path = None
+            deadline = time.time() + 2
+            while time.time() < deadline:
+                runs = h.store.list_task_runs(task_id)
+                if runs:
+                    stdout_path = Path(runs[0]["log_dir"]) / "stdout.log"
+                    if stdout_path.exists() and "first" in stdout_path.read_text(encoding="utf-8"):
+                        break
+                time.sleep(0.05)
+            else:
+                self.fail("runner stdout was not written before process exit")
+
+            self.assertTrue(thread.is_alive())
+            thread.join(timeout=3)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual([{"step": "review", "assignee": "rev"}], report["dispatched"])
+            self.assertEqual("firstsecond", stdout_path.read_text(encoding="utf-8"))
+
+    def test_worker_timeout_is_not_blocked_by_unread_stdin(self):
+        with TemporaryDirectory() as tmp:
+            command = f'"{sys.executable}" -c "import time; time.sleep(5)"'
+            h = EngineHarness(tmp, team=self._team_with_runner(command))
+            task_id = h.create_task()
+            h.start(task_id)
+            h.complete("hub-agent", task_id, "intake", "done")
+
+            with mock.patch.object(
+                server, "_build_step_prompt", return_value="x" * 1_000_000
+            ):
+                started = time.time()
+                report = server.run_step_worker(
+                    h.store,
+                    tmp,
+                    task_id,
+                    self._implement_step(h),
+                    self._member(h, "codex"),
+                    timeout_seconds=0.2,
+                )
+
+            self.assertLess(time.time() - started, 2)
+            self.assertEqual("blocked", report["outcome"])
+            self.assertIn("timed out", report["runner_result"])
+            self.assertEqual("timeout", h.store.list_task_runs(task_id)[0]["status"])
 
     def test_worker_failure_blocks_and_notifies_hub(self):
         with TemporaryDirectory() as tmp:
@@ -731,7 +812,12 @@ class AutoRunnerTests(unittest.TestCase):
             )
 
             self.assertEqual("blocked", h.task(task_id)["task_status"])
-            self.assertEqual("timeout", h.store.list_task_runs(task_id)[0]["status"])
+            run = h.store.list_task_runs(task_id)[0]
+            self.assertEqual("timeout", run["status"])
+            self.assertEqual(
+                ["run_created", "runner_started", "runner_timeout", "runner_finished"],
+                self._run_event_types(run),
+            )
 
     def test_dispatch_spawns_worker_only_when_runner_command_exists(self):
         spawn = server._spawn_step_worker  # module-level mock

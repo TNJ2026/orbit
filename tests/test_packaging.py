@@ -132,7 +132,10 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("/api/team", html)
         self.assertIn("/api/workflow", html)
         self.assertIn("/api/tasks?limit=200", html)
-        self.assertIn("/api/tasks/${taskId}/status", html)
+        self.assertIn("/api/tasks/${goalId}/status", html)
+        self.assertNotIn("function moveTask", html)
+        self.assertNotIn("/api/tasks/${taskId}/workflow/start", html)
+        self.assertNotIn("/api/tasks/${taskId}/workflow/complete", html)
         self.assertIn("/api/tasks/${taskId}/runs?limit=10", html)
         self.assertIn("/api/task-runs/${runId}/files/${fileKey}?tail=65536", html)
         self.assertIn("function createTaskRun(taskId)", html)
@@ -145,11 +148,21 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("workflow-canvas", html)
         self.assertIn("workflow-node", html)
         self.assertIn("workflow-port", html)
-        self.assertIn("function recommendAgent(taskId)", html)
-        self.assertIn("function renderAssignmentCandidates()", html)
+        self.assertIn('id="wfArrow"', html)
+        self.assertIn('marker-end="url(#wfArrow)"', html)
+        self.assertIn("x: step.x, y: step.y + h / 2", html)
+        self.assertIn("x: step.x + w / 2, y: step.y", html)
+        self.assertIn("function startExistingEdgeDrag(", html)
+        self.assertIn("function updateWorkflowEdgeTarget(", html)
+        self.assertIn("Drag to reconnect; click to delete", html)
+        self.assertIn("<strong>Assignment</strong>", html)
+        self.assertIn("role: ${escapeHtml(task.role_required", html)
+        self.assertIn("agent: ${escapeHtml(task.assignee", html)
         self.assertIn('id="teamRequirements"', html)
         self.assertIn('const REQUIRED_TEAM_ROLES = ["hub", "implementer", "reviewer"]', html)
-        self.assertIn("/api/tasks/${taskId}/assignment-candidates", html)
+        self.assertNotIn("function recommendAgent(taskId)", html)
+        self.assertNotIn("function renderAssignmentCandidates()", html)
+        self.assertNotIn("/api/tasks/${taskId}/assignment-candidates", html)
         self.assertIn("Expertise", html)
         self.assertIn("capability subscriptions", html)
         self.assertNotIn("Weight", html)
@@ -159,10 +172,9 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("selectedProjectId", html)
         self.assertIn("async function refreshWorkspace()", html)
         self.assertIn("function wireRefresh(", html)
-        self.assertIn("function renderTaskWorkflow(", html)
-        self.assertIn("function startTaskWorkflow(", html)
-        self.assertIn("function completeTaskStep(", html)
-        self.assertIn("/workflow/complete", html)
+        self.assertNotIn("function renderTaskWorkflow(", html)
+        self.assertNotIn("function startTaskWorkflow(", html)
+        self.assertNotIn("function completeTaskStep(", html)
         for button_id in (
             "refreshTools",
             "refreshTeam",
@@ -317,6 +329,40 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual(5, member["expertise_level"])
         self.assertNotIn("priority", member)
         self.assertNotIn("weight", member)
+
+    def test_team_config_allows_unlimited_concurrency(self):
+        import dev_loop.server as server
+
+        member = server._normalize_team_member(
+            {
+                "agent_name": "codex",
+                "role_id": "implementer",
+                "max_concurrent_tasks": "0",
+            }
+        )
+
+        self.assertEqual(0, member["max_concurrent_tasks"])
+
+    def test_team_config_parses_string_enabled_explicitly(self):
+        import dev_loop.server as server
+
+        member = server._normalize_team_member(
+            {
+                "agent_name": "codex",
+                "role_id": "implementer",
+                "enabled": "false",
+            }
+        )
+
+        self.assertFalse(member["enabled"])
+        with self.assertRaisesRegex(ValueError, "enabled"):
+            server._normalize_team_member(
+                {
+                    "agent_name": "codex",
+                    "role_id": "implementer",
+                    "enabled": "nope",
+                }
+            )
 
     def test_workflow_config_defaults_and_round_trips_project_file(self):
         import dev_loop.server as server

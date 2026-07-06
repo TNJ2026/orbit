@@ -215,7 +215,40 @@ class StoreTests(unittest.TestCase):
 
         self.assertTrue(store.update_task_item_status(task["id"], "testing"))
         self.assertEqual("testing", store.list_tasks()[0]["task_status"])
-        self.assertEqual("testing", store.get_message(message_id)["task_status"])
+
+    def test_goal_queries_return_only_goals_and_direct_children(self):
+        store = self.make_store()
+        self.register_pair(store)
+        store.send_message("a", "b", "goal", kind="task", title="Goal")
+        goal = store.list_tasks()[0]
+        store.update_task_metadata(goal["id"], is_goal=True)
+        store.create_step_card(
+            goal["id"], "intake", "Intake", "do intake", "a", "b", "created"
+        )
+        store.send_message("a", "b", "unrelated", kind="task", title="Other")
+
+        tasks = store.list_goals_with_children()
+
+        self.assertEqual(
+            {"Goal", "Intake"},
+            {task["title"] for task in tasks},
+        )
+
+    def test_active_workflow_tasks_excludes_blocked_and_closed(self):
+        store = self.make_store()
+        self.register_pair(store)
+        ids = []
+        for status in ("in_progress", "blocked", "closed"):
+            store.send_message("a", "b", status, kind="task", title=status)
+            task = store.list_tasks()[0]
+            store.set_task_workflow_state(
+                task["id"], workflow_step="implement", task_status=status
+            )
+            ids.append(task["id"])
+
+        tasks = store.list_active_workflow_tasks()
+
+        self.assertEqual([ids[0]], [task["id"] for task in tasks])
 
     def test_message_task_status_syncs_to_task_engine(self):
         store = self.make_store()

@@ -5,6 +5,7 @@ from __future__ import annotations
 import atexit
 import ipaddress
 import json
+import os
 import re
 import shlex
 import shutil
@@ -493,12 +494,24 @@ def _normalize_team_member(member: Any) -> dict[str, Any]:
         raise InvalidInputError(
             "expertise_level and max_concurrent_tasks must be integers"
         ) from None
+    enabled = member.get("enabled", True)
+    if isinstance(enabled, bool):
+        enabled_value = enabled
+    elif isinstance(enabled, str):
+        lowered = enabled.strip().lower()
+        if lowered not in {"true", "false"}:
+            raise InvalidInputError("enabled must be a boolean")
+        enabled_value = lowered == "true"
+    else:
+        raise InvalidInputError("enabled must be a boolean")
     return {
         "agent_name": agent_name,
         "role_id": role_id,
-        "enabled": bool(member.get("enabled", True)),
+        "enabled": enabled_value,
         "expertise_level": max(1, min(expertise_level, 5)),
-        "max_concurrent_tasks": max(1, min(max_concurrent_tasks, 3)),
+        # 0 (or negative) means unlimited concurrency; a positive value is a
+        # hard cap with no upper ceiling.
+        "max_concurrent_tasks": max(0, max_concurrent_tasks),
         "capabilities": [capability.strip() for capability in capabilities if capability.strip()],
         "notes": str(member.get("notes", "")).strip(),
         # Members with a runner command/default auto-run dispatched steps.
@@ -554,7 +567,7 @@ def _reject_unknown_roles(role_ids: set[str], project_root: str | None) -> None:
 def goals_summary(store: Store) -> list[dict[str, Any]]:
     """Goals with aggregated subtask progress for the Goals page. Children
     are linked via parent_task_id (subtasks reply to the goal's message)."""
-    tasks = store.list_tasks(status="all", limit=500)
+    tasks = store.list_goals_with_children()
     children: dict[int, list[dict[str, Any]]] = {}
     for task in tasks:
         parent = task.get("parent_task_id")
@@ -603,7 +616,7 @@ def team_locked_reason(store: Store) -> str | None:
     do NOT lock — fixing the team is the documented way to unblock them."""
     busy = [
         task["id"]
-        for task in store.list_tasks(status="all", limit=500)
+        for task in store.list_active_workflow_tasks()
         if task.get("workflow_step")
         and task.get("task_status") not in ("blocked", "closed")
     ]
@@ -697,7 +710,9 @@ def rank_assignment_candidates(
         missing_capabilities = sorted(required_capabilities - member_capabilities)
         active_count = active_counts.get(member["agent_name"], 0)
         max_concurrent = int(member.get("max_concurrent_tasks", 1))
-        if active_count >= max_concurrent:
+        # max_concurrent <= 0 means unlimited: never hard-exclude on load
+        # (load_penalty below still soft-prefers idle members).
+        if max_concurrent > 0 and active_count >= max_concurrent:
             continue
         expertise_level = int(member.get("expertise_level", 3))
         capability_bonus = 15 * (
@@ -914,6 +929,16 @@ def _active_steps(transitions: list[dict[str, Any]]) -> list[str]:
         elif t["outcome"] in _STEP_FINISHING_OUTCOMES and t["from_step"]:
             finished[t["from_step"]] = finished.get(t["from_step"], 0) + 1
     return [s for s, n in dispatched.items() if n > finished.get(s, 0)]
+
+
+def _workflow_status_for_active_steps(
+    active_steps: list[str], cfg: dict[str, Any]
+) -> str | None:
+    active = set(active_steps)
+    for step in cfg["steps"]:
+        if step["id"] in active:
+            return step["task_status"]
+    return None
 
 
 def _active_step_assignees(transitions: list[dict[str, Any]]) -> dict[str, str]:
@@ -1134,21 +1159,16 @@ def _start_goal_business_subtasks(
             kind="task",
             title=subtask["title"],
         )
-        task = next(
-            t for t in store.list_tasks(status="all", limit=500)
-            if t["source_message_id"] == message_id
-        )
+        task = store.get_task_by_source_message(message_id)
+        if not task:
+            raise InvalidInputError(f"task not created for message: {message_id}")
         result = _start_workflow_task_locked(store, project_root, actor, task["id"])
         started.append({"task": store.get_task(task["id"]), **result})
     return started
 
 
 def _business_subtasks_for_goal(store: Store, goal_id: int) -> list[dict[str, Any]]:
-    return [
-        task for task in store.list_tasks(status="all", limit=500)
-        if task.get("parent_task_id") == goal_id
-        and task.get("source_message_id") is not None
-    ]
+    return store.list_tasks_by_parent(goal_id)
 
 
 def _maybe_accept_parent_goal(store: Store, task: dict[str, Any]) -> None:
@@ -1382,7 +1402,11 @@ def _dispatch_targets(
     transitions = store.list_task_transitions(task_id)
     active = _active_steps(transitions)
     if active:
-        store.set_task_workflow_state(task_id, workflow_step=",".join(active))
+        store.set_task_workflow_state(
+            task_id,
+            workflow_step=",".join(active),
+            task_status=_workflow_status_for_active_steps(active, cfg),
+        )
     return dispatched, notices
 
 
@@ -1391,6 +1415,85 @@ def start_workflow_task(
 ) -> dict[str, Any]:
     with _WORKFLOW_ENGINE_LOCK:
         return _start_workflow_task_locked(store, project_root, agent, task_id)
+
+
+def rerun_workflow_step(
+    store: Store,
+    project_root: str | None,
+    task_id: int,
+    agent: str,
+    step: str | None = None,
+) -> dict[str, Any]:
+    """Re-run a blocked (or active) workflow step with a chosen agent.
+
+    Used by the task panel to recover a step that blocked — e.g. the assigned
+    CLI hit a rate/session limit — by re-dispatching it to a different agent
+    (a different model) without editing the team. Records a fresh dispatch to
+    `agent` for the step and spawns its runner; on success the engine advances
+    as usual."""
+    agent = (agent or "").strip()
+    if not agent:
+        raise InvalidInputError("agent is required to re-run a step")
+    with _WORKFLOW_ENGINE_LOCK:
+        task = store.get_task(task_id)
+        if not task:
+            raise InvalidInputError(f"unknown task: {task_id}")
+        transitions = store.list_task_transitions(task_id)
+        if not transitions:
+            raise InvalidInputError(
+                f"task {task_id} has not entered the workflow yet; start it first"
+            )
+        cfg = read_workflow_config(project_root)
+        steps = {s["id"]: s for s in cfg["steps"]}
+        step_id = (step or "").strip()
+        if not step_id:
+            # Prefer the most recently blocked step; fall back to whatever step
+            # is currently active.
+            blocked = [t for t in transitions if t["outcome"] == "blocked"]
+            if blocked:
+                last = blocked[-1]
+                step_id = last["to_step"] or last["from_step"]
+            else:
+                active = _active_steps(transitions)
+                step_id = active[-1] if active else ""
+        if step_id not in steps:
+            raise InvalidInputError(
+                f"cannot determine a workflow step to re-run for task {task_id}"
+                + (f" (unknown step {step_id!r})" if step_id else "")
+            )
+        step_def = steps[step_id]
+        members = read_team_config(project_root)["members"]
+        base = _member_named(members, agent) or {}
+        member = {
+            "agent_name": agent,
+            "role_id": step_def["role_id"],
+            "enabled": True,
+            "expertise_level": int(base.get("expertise_level", 3)),
+            "max_concurrent_tasks": int(base.get("max_concurrent_tasks", 0)),
+            "capabilities": list(base.get("capabilities", [])),
+            "notes": base.get("notes", ""),
+            "runner_command": base.get("runner_command", ""),
+        }
+        if not _runner_command_for(member):
+            raise InvalidInputError(
+                f"agent {agent!r} has no runner command or built-in default, so it "
+                "cannot auto-run the step; pick a CLI-backed agent"
+            )
+        # Carry the upstream step's result forward so the re-run has the same
+        # context the original dispatch had (empty for entry steps).
+        upstream = [
+            t for t in transitions
+            if t["outcome"] == "done" and t["to_step"] == step_id
+        ]
+        upstream_result = upstream[-1].get("note", "") if upstream else ""
+        _dispatch_step(store, project_root, task, step_def, member, upstream_result)
+        return {
+            "task_id": task_id,
+            "step": step_id,
+            "assignee": agent,
+            "runner_command": _runner_command_for(member),
+            "reran": True,
+        }
 
 
 def _start_workflow_task_locked(
@@ -1620,6 +1723,27 @@ def _build_step_prompt(
     )
 
 
+_TASK_RUNNING_TERMINAL = ("closed", "accepted")
+
+
+def _mark_task_running(store: Store, task_id: int | None) -> None:
+    """When a runner starts, flip the task — and every ancestor goal/parent —
+    to in_progress so the board reflects that work is actually underway. A run
+    starting on any subtask surfaces its parent goal as in_progress too.
+    Terminal tasks (closed/accepted) are left untouched."""
+    seen: set[int] = set()
+    current = task_id
+    while current and current not in seen:
+        seen.add(current)
+        task = store.get_task(current)
+        if not task:
+            break
+        status = task.get("task_status")
+        if status not in _TASK_RUNNING_TERMINAL and status != "in_progress":
+            store.set_task_workflow_state(current, task_status="in_progress")
+        current = task.get("parent_task_id")
+
+
 def run_step_worker(
     store: Store,
     project_root: str | None,
@@ -1644,11 +1768,25 @@ def run_step_worker(
         card = store.find_open_step_card(task_id, step["id"])
         if card:
             run_task_id = card["id"]
-    run = store.create_task_run(run_task_id, worker=assignee)
+    command = _runner_command_for(member)
+    run = store.create_task_run(run_task_id, worker=assignee, command=command)
     if run:
         log_dir = _task_run_dir(project_root, run_task_id, int(run["attempt"]))
         run = store.update_task_run_log_dir(run["id"], str(log_dir)) or run
-    command = _runner_command_for(member)
+        try:
+            _append_run_event(
+                run,
+                {
+                    "type": "run_created",
+                    "workflow_task_id": task_id,
+                    "workflow_step": step["id"],
+                    "command": command,
+                },
+            )
+        except (InvalidInputError, OSError):
+            pass
+    # A run has started: mark this task (and its ancestor goals) in_progress.
+    _mark_task_running(store, task_id)
     if timeout_seconds is None:
         step_timeout = int(step.get("timeout_minutes") or 0) * 60
         timeout_seconds = step_timeout or RUNNER_DEFAULT_TIMEOUT_SECONDS
@@ -1662,30 +1800,99 @@ def run_step_worker(
         )
     else:
         prompt = _build_step_prompt(project_root, task, step, upstream_result)
+        if run:
+            try:
+                _append_run_event(
+                    run,
+                    {
+                        "type": "runner_started",
+                        "workflow_task_id": task_id,
+                        "workflow_step": step["id"],
+                        "timeout_seconds": timeout_seconds,
+                    },
+                )
+            except (InvalidInputError, OSError):
+                pass
         try:
-            proc = subprocess.run(
+            proc = subprocess.Popen(
                 command,
                 shell=True,
-                input=prompt,
-                capture_output=True,
-                text=True,
-                timeout=timeout_seconds,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 cwd=str(_project_root(project_root)),
             )
-            stdout, stderr, exit_code = proc.stdout, proc.stderr, proc.returncode
-            if exit_code == 0:
+            stdout_chunks: list[str] = []
+            stderr_chunks: list[str] = []
+            stdout_thread = threading.Thread(
+                target=_stream_process_output,
+                args=(run, proc, "stdout", stdout_chunks),
+                daemon=True,
+            )
+            stderr_thread = threading.Thread(
+                target=_stream_process_output,
+                args=(run, proc, "stderr", stderr_chunks),
+                daemon=True,
+            )
+            stdout_thread.start()
+            stderr_thread.start()
+            stdin_errors: list[str] = []
+            stdin_thread = threading.Thread(
+                target=_write_process_stdin,
+                args=(proc, prompt.encode("utf-8"), stdin_errors),
+                daemon=True,
+            )
+            stdin_thread.start()
+            try:
+                exit_code = proc.wait(timeout=timeout_seconds)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                status = "timeout"
+                result = f"runner timed out after {int(timeout_seconds)}s"
+                if run:
+                    try:
+                        _append_run_event(
+                            run,
+                            {
+                                "type": "runner_timeout",
+                                "workflow_task_id": task_id,
+                                "workflow_step": step["id"],
+                                "timeout_seconds": timeout_seconds,
+                            },
+                        )
+                    except (InvalidInputError, OSError):
+                        pass
+                proc.wait()
+            stdin_thread.join(timeout=1)
+            stdout_thread.join()
+            stderr_thread.join()
+            stdout = "".join(stdout_chunks)
+            stderr = "".join(stderr_chunks)
+            if status == "timeout":
+                pass
+            elif exit_code == 0:
                 outcome = "done"
                 status = "succeeded"
                 result = _tail(stdout, 4000) or "runner finished with no output"
+            elif stdin_errors:
+                result = f"runner stdin failed: {stdin_errors[-1]}"
             else:
                 result = f"runner exited {exit_code}: {_tail(stderr or stdout, 2000)}"
-        except subprocess.TimeoutExpired as exc:
-            stdout = str(exc.stdout or "")
-            stderr = str(exc.stderr or "")
-            status = "timeout"
-            result = f"runner timed out after {int(timeout_seconds)}s"
         except OSError as exc:
             result = f"runner failed to start: {exc}"
+            if run:
+                try:
+                    _append_run_event(
+                        run,
+                        {
+                            "type": "runner_failed_to_start",
+                            "workflow_task_id": task_id,
+                            "workflow_step": step["id"],
+                            "error": str(exc),
+                        },
+                    )
+                except (InvalidInputError, OSError):
+                    pass
     goal_intake = _is_root_goal_entry_step(project_root, task, step)
     if outcome == "done" and goal_intake:
         try:
@@ -1700,6 +1907,19 @@ def run_step_worker(
             _write_run_file(run, "stderr", stderr)
             if outcome == "done":
                 _write_run_file(run, "result", result)
+            _append_run_event(
+                run,
+                {
+                    "type": "runner_finished",
+                    "workflow_task_id": task_id,
+                    "workflow_step": step["id"],
+                    "status": status,
+                    "outcome": outcome,
+                    "exit_code": exit_code,
+                    "stdout_bytes": len(stdout.encode("utf-8")),
+                    "stderr_bytes": len(stderr.encode("utf-8")),
+                },
+            )
             store.finish_task_run(run["id"], status, exit_code)
         except (InvalidInputError, OSError):
             pass
@@ -1718,7 +1938,7 @@ def run_step_worker(
     except (InvalidInputError, UnknownAgentError) as exc:
         # e.g. the step was reassigned while the runner worked
         return {"task_id": task_id, "step": step["id"], "error": str(exc)}
-    return report
+    return {**report, "runner_status": status, "runner_result": result}
 
 
 def _spawn_step_worker(
@@ -1761,9 +1981,7 @@ def _check_workflow_step_timeouts_locked(
     steps = {s["id"]: s for s in cfg["steps"]}
     members = read_team_config(project_root)["members"]
     actions: list[dict[str, Any]] = []
-    for task in store.list_tasks(status="all", limit=500):
-        if not task.get("workflow_step") or task.get("task_status") == "closed":
-            continue
+    for task in store.list_active_workflow_tasks():
         task_id = task["id"]
         transitions = store.list_task_transitions(task_id)
         for step_id, assignee in _active_step_assignees(transitions).items():
@@ -1874,14 +2092,81 @@ def _task_run_file(run: dict[str, Any], file_key: str) -> Path:
     return file_path
 
 
+_FILE_APPEND_LOCK = threading.Lock()
+
+
 def _append_run_file(run: dict[str, Any], file_key: str, content: str) -> dict[str, Any]:
     if not isinstance(content, str):
         raise InvalidInputError("content must be a string")
     file_path = _task_run_file(run, file_key)
     file_path.parent.mkdir(parents=True, exist_ok=True)
-    with file_path.open("a", encoding="utf-8") as file:
-        file.write(content)
+    with _FILE_APPEND_LOCK:
+        with file_path.open("a", encoding="utf-8") as file:
+            file.write(content)
     return {"file": file_key, "path": str(file_path), "bytes": len(content.encode("utf-8"))}
+
+
+def _append_run_event(run: dict[str, Any], event: dict[str, Any]) -> None:
+    record = {
+        "run_id": run.get("id"),
+        "task_id": run.get("task_id"),
+        "attempt": run.get("attempt"),
+        "worker": run.get("worker", ""),
+        **event,
+    }
+    if "created_at" not in record:
+        record["created_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    _append_run_file(run, "events", json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def _write_process_stdin(
+    proc: subprocess.Popen[bytes],
+    payload: bytes,
+    errors: list[str],
+) -> None:
+    if proc.stdin is None:
+        return
+    try:
+        proc.stdin.write(payload)
+    except BrokenPipeError:
+        pass
+    except OSError as exc:
+        errors.append(str(exc))
+    finally:
+        try:
+            proc.stdin.close()
+        except OSError:
+            pass
+
+
+def _stream_process_output(
+    run: dict[str, Any] | None,
+    proc: subprocess.Popen[bytes],
+    stream_name: str,
+    chunks: list[str],
+) -> None:
+    stream = proc.stdout if stream_name == "stdout" else proc.stderr
+    if stream is None:
+        return
+    try:
+        while True:
+            raw_chunk = os.read(stream.fileno(), 4096)
+            if not raw_chunk:
+                break
+            chunk = raw_chunk.decode("utf-8", errors="replace")
+            if not chunk:
+                break
+            chunks.append(chunk)
+            if run:
+                try:
+                    _append_run_file(run, stream_name, chunk)
+                except (InvalidInputError, OSError):
+                    pass
+    finally:
+        try:
+            stream.close()
+        except OSError:
+            pass
 
 
 def _write_run_file(run: dict[str, Any], file_key: str, content: str) -> dict[str, Any]:
@@ -2057,10 +2342,6 @@ def create_server(
             except Exception:
                 pass
 
-    threading.Thread(
-        target=_timeout_watcher, name="workflow-timeout-watcher", daemon=True
-    ).start()
-
     current_project = project or {
         "id": "",
         "name": "",
@@ -2071,6 +2352,10 @@ def create_server(
         "port": port,
         "last_seen": "",
     }
+
+    threading.Thread(
+        target=_timeout_watcher, name="workflow-timeout-watcher", daemon=True
+    ).start()
 
     mcp = FastMCP(
         "dev-loop",
@@ -2302,6 +2587,11 @@ def create_server(
             store, current_project.get("project_root"), task_id
         )
 
+    def _engine_rerun(task_id: int, agent: str, step: str) -> dict:
+        return rerun_workflow_step(
+            store, current_project.get("project_root"), task_id, agent, step or None
+        )
+
     @mcp.tool()
     async def get_thread(message_id: int) -> list[dict]:
         """Return the full conversation thread containing the given message id:
@@ -2516,6 +2806,16 @@ def create_server(
         except InvalidInputError as exc:
             return _json_error(str(exc), request=request)
         return _json(request, {"tasks": tasks})
+
+    @mcp.custom_route("/api/tasks/{task_id:int}", methods=["GET"])
+    async def api_get_task(request: Request) -> JSONResponse:
+        if forbidden := _forbid_non_local(request):
+            return forbidden
+        task_id = int(request.path_params["task_id"])
+        task = await _to_thread(store.get_task, task_id)
+        if task is None:
+            return _json_error("task not found", 404, request)
+        return _json(request, {"task": task})
 
     @mcp.custom_route("/api/goals", methods=["GET"])
     async def api_list_goals(request: Request) -> JSONResponse:
@@ -2737,6 +3037,26 @@ def create_server(
             return _json_error(f"workflow step failed: {exc!r}", 500, request)
         return _json(request, result)
 
+    @mcp.custom_route("/api/tasks/{task_id:int}/rerun", methods=["POST"])
+    async def api_task_rerun(request: Request) -> JSONResponse:
+        if forbidden := _forbid_non_local(request):
+            return forbidden
+        task_id = int(request.path_params["task_id"])
+        data = await _read_json(request)
+        agent = str(data.get("agent") or "").strip()
+        if not agent:
+            return _json_error("agent is required", request=request)
+        try:
+            result = await _to_thread(
+                _engine_rerun, task_id, agent, str(data.get("step") or "")
+            )
+        except (InvalidInputError, UnknownAgentError) as exc:
+            return _json_error(str(exc), request=request)
+        except Exception as exc:
+            traceback.print_exc()
+            return _json_error(f"re-run failed: {exc!r}", 500, request)
+        return _json(request, result)
+
     @mcp.custom_route("/api/tasks/{task_id:int}/runs", methods=["GET"])
     async def api_list_task_runs(request: Request) -> JSONResponse:
         if forbidden := _forbid_non_local(request):
@@ -2760,6 +3080,8 @@ def create_server(
         run = await _to_thread(store.create_task_run, task_id, "", worker, status)
         if run is None:
             return _json_error("task not found", 404, request)
+        if status == "running":
+            await _to_thread(_mark_task_running, store, task_id)
         run_dir = _task_run_dir(
             current_project.get("project_root"), task_id, int(run["attempt"])
         )

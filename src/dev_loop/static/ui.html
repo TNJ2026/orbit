@@ -100,12 +100,12 @@
     .tools-page {
       height: 100%;
       overflow: auto;
-      background: var(--panel);
+      background: var(--bg);
     }
     .team-page {
       height: 100%;
-      overflow: auto;
-      background: var(--panel);
+      overflow: hidden;
+      background: var(--bg);
     }
     .workflow-page {
       height: 100%;
@@ -115,7 +115,7 @@
     .roles-page {
       height: 100%;
       overflow: auto;
-      background: var(--panel);
+      background: var(--bg);
     }
     .tasks-page {
       height: 100%;
@@ -178,6 +178,12 @@
       padding-top: 12px;
       display: grid;
       gap: 10px;
+    }
+    .rerun-box {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 8px;
+      background: #fdf6ec;
     }
     .task-run {
       border: 1px solid var(--line);
@@ -330,10 +336,26 @@
       margin-top: 6px;
     }
     .tools-grid {
-      display: block;
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 16px;
+      padding: 16px;
     }
     .tools-grid .tool {
-      border-right: 0;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+      cursor: default;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      transition: transform 0.15s, box-shadow 0.15s;
+    }
+    .tools-grid .tool:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
     }
     section {
       min-width: 0;
@@ -371,7 +393,7 @@
     }
     button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
     button.danger { color: var(--danger); }
-    button:disabled { opacity: .55; cursor: default; }
+    button:disabled, select:disabled, input:disabled { opacity: .55; cursor: default; }
     button:active:not(:disabled) { transform: translateY(1px); }
     .tasks-goal-subtitle {
       max-width: 100%;
@@ -412,6 +434,13 @@
       padding-left: 12px;
       border-left: 2px solid var(--line);
     }
+    .run-command {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
     .wf-active-badge {
       background: var(--accent);
       color: var(--accent-ink);
@@ -443,6 +472,53 @@
     .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
     .row > * { min-width: 0; }
     .row .grow { flex: 1; }
+    .switch {
+      position: relative;
+      display: inline-block;
+      width: 32px;
+      height: 18px;
+      flex-shrink: 0;
+    }
+    .switch input[type="checkbox"] {
+      opacity: 0 !important;
+      width: 0 !important;
+      height: 0 !important;
+      padding: 0 !important;
+      margin: 0 !important;
+      position: absolute !important;
+    }
+    .slider {
+      position: absolute;
+      cursor: pointer;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background-color: var(--line);
+      transition: .2s;
+      border-radius: 18px;
+    }
+    .slider:before {
+      position: absolute;
+      content: "";
+      height: 14px;
+      width: 14px;
+      left: 2px;
+      bottom: 2px;
+      background-color: #fff;
+      transition: .2s;
+      border-radius: 50%;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.15);
+    }
+    .switch input:checked + .slider {
+      background-color: var(--accent);
+    }
+    .switch input:focus-visible + .slider {
+      box-shadow: 0 0 0 2px rgba(37, 108, 90, 0.25);
+    }
+    .switch input:checked + .slider:before {
+      transform: translateX(14px);
+    }
     .agent, .tool, .message, .thread-item {
       border-bottom: 1px solid var(--line);
       padding: 11px 12px;
@@ -480,60 +556,132 @@
       font-weight: 600;
     }
     .role {
-      border-bottom: 1px solid var(--line);
-      padding: 14px 16px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      margin: 16px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+      overflow: hidden;
     }
     .role-title {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 8px;
-      font-weight: 650;
+      gap: 10px;
+      padding: 12px 16px;
+      background: #eef5f1;
+      border-bottom: 1px solid var(--line);
+      border-left: 4px solid var(--accent);
+      font-weight: 700;
+      font-size: 15px;
+      color: var(--accent);
     }
     .role-body {
-      margin: 10px 0 0;
+      margin: 0;
       max-width: 980px;
       white-space: pre-wrap;
       overflow-wrap: anywhere;
       color: #2f383c;
       font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     }
+    .role-action {
+      min-height: 28px;
+      padding: 3px 10px;
+      font-size: 12px;
+    }
     .team-layout {
       display: grid;
       grid-template-columns: minmax(0, 1fr) minmax(240px, 0.34fr);
-      min-height: calc(100vh - 102px);
+      height: calc(100vh - 102px);
+    }
+    #teamMembers {
+      overflow-y: auto;
+      height: 100%;
     }
     .team-builder {
-      border-left: 1px solid var(--line);
-      background: #fbfbf9;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 20px;
+      margin: 16px;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.06);
       align-content: start;
+      height: fit-content;
+    }
+    .team-group {
+      margin-bottom: 24px;
+      background: transparent;
     }
     .team-group-head {
       display: flex;
       align-items: center;
-      gap: 8px;
-      padding: 8px 12px;
-      background: #f2f5f3;
+      gap: 10px;
+      padding: 12px 16px;
+      background: #eef5f1;
       border-bottom: 1px solid var(--line);
-      font-weight: 600;
+      border-left: 4px solid var(--accent);
+      border-radius: 6px;
+      margin: 16px 16px 0;
+      font-weight: 700;
+      font-size: 14px;
+      color: var(--accent);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .team-group-members {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+      gap: 16px;
+      padding: 16px;
     }
     .team-member {
-      border-bottom: 1px solid var(--line);
-      padding: 12px;
-      display: grid;
-      gap: 8px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+      transition: transform 0.2s, box-shadow 0.2s;
+    }
+    .team-member:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 4px 10px rgba(0, 0, 0, 0.06);
     }
     .team-member.disabled {
       opacity: 0.62;
+      background: #fafafa;
     }
-    .team-member-grid {
+    .team-member-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 12px;
+      border-bottom: 1px dashed var(--line);
+      padding-bottom: 10px;
+      margin-bottom: 2px;
+    }
+    .team-member-controls {
       display: grid;
-      grid-template-columns: minmax(140px, 1fr) minmax(120px, 0.7fr) 92px 86px 86px auto;
-      gap: 8px;
-      align-items: center;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      align-items: end;
     }
-    .team-member-grid input[type="checkbox"] {
-      width: auto;
+    .team-member-inputs {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .input-with-label {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .input-with-label .label-text {
+      font-size: 11px;
+      color: var(--muted);
+      margin: 0;
     }
     .workflow-canvas {
       position: relative;
@@ -560,11 +708,13 @@
     .wf-edge {
       fill: none;
       stroke: #6fae98;
+      color: #6fae98;
       stroke-width: 2.5;
       pointer-events: stroke;
-      cursor: pointer;
+      cursor: grab;
     }
-    .wf-edge:hover { stroke: var(--danger); stroke-width: 3.5; }
+    .wf-edge:active { cursor: grabbing; }
+    .wf-edge:hover { stroke: var(--danger); color: var(--danger); stroke-width: 3.5; }
     .wf-edge.temp {
       stroke: var(--accent);
       stroke-dasharray: 5 4;
@@ -634,20 +784,26 @@
     }
     .workflow-port {
       position: absolute;
-      top: 36px;
-      width: 14px;
-      height: 14px;
+      width: 12px;
+      height: 12px;
       border-radius: 999px;
       border: 2px solid #6fae98;
       background: #fff;
-      z-index: 2;
+      z-index: 3;
       touch-action: none;
+      cursor: crosshair;
+      transition: background 0.15s, border-color 0.15s;
     }
-    .workflow-port.in { left: -7px; }
-    .workflow-port.out { right: -7px; cursor: crosshair; }
-    .workflow-port.out:hover { background: var(--accent); }
-    .workflow-node.drop-target .workflow-port.in {
+    .workflow-port:hover {
       background: var(--accent);
+      border-color: var(--accent);
+    }
+    .workflow-port.left { left: -6px; top: calc(50% - 6px); }
+    .workflow-port.right { right: -6px; top: calc(50% - 6px); }
+    .workflow-port.top { top: -6px; left: calc(50% - 6px); }
+    .workflow-port.bottom { bottom: -6px; left: calc(50% - 6px); }
+    .workflow-node.drop-target {
+      box-shadow: 0 0 0 3px rgba(37, 108, 90, 0.4);
       border-color: var(--accent);
     }
     .workflow-required {
@@ -741,7 +897,8 @@
       }
       .team-builder {
         border-left: 0;
-        border-top: 1px solid var(--line);
+        border-top: 0;
+        margin: 16px;
       }
       .team-member-grid {
         grid-template-columns: 1fr;
@@ -784,7 +941,16 @@
     <div id="goalsPage" class="page goals-page">
       <div class="pane-head">
         <h2>Goals</h2>
-        <button id="refreshGoals" type="button">Refresh</button>
+        <span class="row" style="gap: 10px; width: auto; flex-wrap: nowrap; align-items: center;">
+          <label class="meta" style="display: flex; align-items: center; gap: 6px; cursor: pointer; white-space: nowrap; user-select: none; margin-top: 0;">
+            <span class="switch">
+              <input type="checkbox" id="hideClosedGoals" checked>
+              <span class="slider"></span>
+            </span>
+            <span>Hide closed</span>
+          </label>
+          <button id="refreshGoals" type="button">Refresh</button>
+        </span>
       </div>
       <div class="goal-composer stack">
         <textarea id="goalInput" class="goal-textarea" placeholder="Describe the objective, key milestones, or sprint goal here..."></textarea>
@@ -889,9 +1055,8 @@
       selectedTaskId: null,
       taskRuns: [],
       selectedRunId: null,
+      selectedRunFileKey: "events",
       runFiles: {},
-      assignmentCandidates: null,
-      taskWorkflow: null,
       goals: [],
       taskDetailsCollapsed: localStorage.getItem("devloop-task-details-collapsed") !== "0"
     };
@@ -938,8 +1103,8 @@
       state.selectedTaskId = null;
       state.taskRuns = [];
       state.selectedRunId = null;
+      state.selectedRunFileKey = "events";
       state.runFiles = {};
-      state.assignmentCandidates = null;
       renderTools();
       renderRoles();
       renderTeam();
@@ -1130,9 +1295,11 @@
           <div class="team-group-head">
             <span>${escapeHtml(roleId)}</span>
             <span class="badge">${groups.get(roleId).length}</span>
-            ${REQUIRED_TEAM_ROLES.includes(roleId) ? `<span class="meta">required</span>` : ""}
+            ${REQUIRED_TEAM_ROLES.includes(roleId) ? `<span class="meta" style="color: var(--warn); border: 1px solid var(--warn); border-radius: 4px; padding: 1px 6px; font-size: 10px; text-transform: lowercase; font-weight: normal; margin-left: auto; background: #fff;">required</span>` : ""}
           </div>
-          ${groups.get(roleId).map(({ member, index }) => teamMemberHtml(member, index, groups.get(roleId).length > 1)).join("")}
+          <div class="team-group-members">
+            ${groups.get(roleId).map(({ member, index }) => teamMemberHtml(member, index, groups.get(roleId).length > 1)).join("")}
+          </div>
         </div>
       `).join("") : `<div class="empty">No team members configured.</div>`;
     }
@@ -1142,43 +1309,46 @@
     function teamMemberHtml(member, index, showExpertise) {
       return `
         <div class="team-member ${member.enabled ? "" : "disabled"}">
-          <div class="team-member-grid">
+          <div class="team-member-header">
             <div>
-              <strong>${escapeHtml(member.agent_name)}</strong>
-              <div class="meta">${escapeHtml(agentLabel(member.agent_name))}</div>
+              <strong style="font-size: 15px; color: var(--ink);">${escapeHtml(member.agent_name)}</strong>
+              <div class="meta" style="margin-top: 2px;">${escapeHtml(agentLabel(member.agent_name))}</div>
             </div>
-            <label>
-              <div class="meta">Role</div>
-              <select onchange="updateTeamMember(${index}, 'role_id', this.value)">
+            <button class="danger" type="button" onclick="removeTeamMember(${index})" style="min-height: 28px; padding: 2px 8px; font-size: 12px;">Remove</button>
+          </div>
+
+          <div class="team-member-controls">
+            <label style="display: block;">
+              <div class="meta" style="margin-bottom: 4px;">Role</div>
+              <select ${member.role_id ? 'disabled' : ''} onchange="updateTeamMember(${index}, 'role_id', this.value)" style="font-size: 13px; padding: 5px 8px;">
                 ${roleOptionsHtml(member.role_id)}
               </select>
             </label>
             ${showExpertise ? `
-            <label>
-              <div class="meta">Expertise</div>
-              <select onchange="updateTeamMember(${index}, 'expertise_level', this.value)">
+            <label style="display: block;">
+              <div class="meta" style="margin-bottom: 4px;">Expertise</div>
+              <select onchange="updateTeamMember(${index}, 'expertise_level', this.value)" style="font-size: 13px; padding: 5px 8px;">
                 ${[1, 2, 3, 4, 5].map(level => `
                   <option value="${level}" ${(member.expertise_level || 3) === level ? "selected" : ""}>L${level}</option>
                 `).join("")}
               </select>
-            </label>` : `<div></div>`}
-            <label>
-              <div class="meta">Max tasks</div>
-              <select onchange="updateTeamMember(${index}, 'max_concurrent_tasks', this.value)">
-                ${[1, 2, 3].map(n => `
-                  <option value="${n}" ${(member.max_concurrent_tasks || 1) === n ? "selected" : ""}>${n}</option>
-                `).join("")}
-              </select>
-            </label>
-            <label>
-              <div class="meta">Enabled</div>
-              <input type="checkbox" ${member.enabled ? "checked" : ""} onchange="updateTeamMember(${index}, 'enabled', this.checked)">
-            </label>
-            <button class="danger" type="button" onclick="removeTeamMember(${index})">Remove</button>
+            </label>` : `<div style="display: block;"></div>`}
           </div>
-          <input value="${escapeHtml((member.capabilities || []).join(', '))}" placeholder="capability subscriptions" onchange="updateTeamMember(${index}, 'capabilities', this.value)">
-          <input value="${escapeHtml(member.notes || "")}" placeholder="notes" onchange="updateTeamMember(${index}, 'notes', this.value)">
-          <input value="${escapeHtml(member.runner_command || "")}" placeholder="runner command (default per tool, e.g. claude -p …)" title="When set, dispatched steps spawn this CLI (prompt on stdin); empty uses a per-tool default if available" onchange="updateTeamMember(${index}, 'runner_command', this.value)">
+
+          <div class="team-member-inputs">
+            <div class="input-with-label">
+              <span class="meta label-text">Capabilities</span>
+              <input value="${escapeHtml((member.capabilities || []).join(', '))}" placeholder="capability subscriptions (comma separated)" onchange="updateTeamMember(${index}, 'capabilities', this.value)" style="font-size: 13px; padding: 5px 8px;">
+            </div>
+            <div class="input-with-label">
+              <span class="meta label-text">Notes</span>
+              <input value="${escapeHtml(member.notes || "")}" placeholder="notes" onchange="updateTeamMember(${index}, 'notes', this.value)" style="font-size: 13px; padding: 5px 8px;">
+            </div>
+            <div class="input-with-label">
+              <span class="meta label-text">Runner Command</span>
+              <input value="${escapeHtml(member.runner_command || "")}" placeholder="runner command" title="When set, dispatched steps spawn this CLI (prompt on stdin); empty uses a per-tool default if available" onchange="updateTeamMember(${index}, 'runner_command', this.value)" style="font-size: 13px; padding: 5px 8px;">
+            </div>
+          </div>
         </div>
       `;
     }
@@ -1233,7 +1403,7 @@
           role_id: roleId,
           enabled: true,
           expertise_level: 3,
-          max_concurrent_tasks: 1,
+          max_concurrent_tasks: 0,
           capabilities: [],
           notes: ""
         }
@@ -1363,61 +1533,88 @@
       return changed;
     }
 
-    // Assign each edge a port slot on both endpoints so a node with several
-    // connections spreads them across up to WF_MAX_PORTS points per side
-    // instead of stacking every line on one point. Edges are ordered by the
-    // opposite node's vertical position so lines don't cross.
+    // Assign each edge a port slot on the closest side on both endpoints.
+    // For each node and each of its 4 sides, we distribute multiple connections
+    // evenly to prevent them from stacking on top of each other.
     function wfComputeLayout() {
       const steps = state.workflow.steps || [];
       const edges = state.workflow.edges || [];
-      const byId = Object.fromEntries(steps.map(s => [s.id, s]));
-      const centerY = id => (byId[id] ? byId[id].y : 0);
-      const outGroups = {}, inGroups = {};
-      edges.forEach((e, i) => {
-        (outGroups[e.from] = outGroups[e.from] || []).push(i);
-        (inGroups[e.to] = inGroups[e.to] || []).push(i);
+      const rects = wfNodeRects();
+
+      const edgeSides = edges.map(e => {
+        const a = rects[e.from], b = rects[e.to];
+        if (!a || !b) return { fromSide: "right", toSide: "left" };
+        const dx = (b.x + b.w / 2) - (a.x + a.w / 2);
+        const dy = (b.y + b.h / 2) - (a.y + a.h / 2);
+
+        let fromSide = "right";
+        if (Math.abs(dy * a.w) < Math.abs(dx * a.h)) {
+          fromSide = dx > 0 ? "right" : "left";
+        } else {
+          fromSide = dy > 0 ? "bottom" : "top";
+        }
+
+        let toSide = "left";
+        if (Math.abs(dy * b.w) < Math.abs(dx * b.h)) {
+          toSide = dx > 0 ? "left" : "right";
+        } else {
+          toSide = dy > 0 ? "top" : "bottom";
+        }
+
+        return { fromSide, toSide };
       });
-      const edgeSlots = edges.map(() => ({ fromSlot: 0, toSlot: 0 }));
-      const outCount = {}, inCount = {};
-      for (const id in outGroups) {
-        const list = outGroups[id].sort((a, b) => centerY(edges[a].to) - centerY(edges[b].to));
-        const count = Math.min(list.length, WF_MAX_PORTS);
-        outCount[id] = count;
-        list.forEach((ei, idx) => { edgeSlots[ei].fromSlot = Math.min(idx, count - 1); });
-      }
-      for (const id in inGroups) {
-        const list = inGroups[id].sort((a, b) => centerY(edges[a].from) - centerY(edges[b].from));
-        const count = Math.min(list.length, WF_MAX_PORTS);
-        inCount[id] = count;
-        list.forEach((ei, idx) => { edgeSlots[ei].toSlot = Math.min(idx, count - 1); });
-      }
-      // Always show at least one port per side as a connection affordance.
+
+      const sideCounts = {};
       steps.forEach(s => {
-        outCount[s.id] = Math.max(1, outCount[s.id] || 0);
-        inCount[s.id] = Math.max(1, inCount[s.id] || 0);
+        sideCounts[s.id] = { left: 0, right: 0, top: 0, bottom: 0 };
       });
-      return { outCount, inCount, edgeSlots };
+
+      const edgeSlots = edges.map((e, idx) => {
+        const { fromSide, toSide } = edgeSides[idx];
+        const fromSlot = sideCounts[e.from][fromSide]++;
+        const toSlot = sideCounts[e.to][toSide]++;
+        return { fromSide, toSide, fromSlot, toSlot };
+      });
+
+      return { sideCounts, edgeSlots };
     }
 
-    function wfPortTop(slot) {
-      return WF_PORT_TOP + slot * WF_PORT_GAP;
-    }
-
-    function wfPortPoint(step, side, slot = 0) {
-      return {
-        x: step.x + (side === "out" ? WF_NODE_W : 0),
-        y: step.y + wfPortTop(slot) + WF_PORT_R,
-      };
-    }
-
-    function wfPortsHtml(id, side, count) {
-      const cls = side === "out" ? "out" : "in";
-      const hint = side === "out" ? "Drag to connect to another step" : "Drag a connection here";
-      let html = "";
-      for (let i = 0; i < count; i++) {
-        html += `<span class="workflow-port ${cls}" data-id="${id}" data-slot="${i}" style="top:${wfPortTop(i)}px" title="${hint}"></span>`;
+    // Connections must terminate at the visible circular ports; slot values
+    // are accepted for caller compatibility but do not move endpoints.
+    function wfPortPoint(step, rect, side, slot = 0, total = 1) {
+      const w = rect.w;
+      const h = rect.h;
+      if (side === "left") {
+        return { x: step.x, y: step.y + h / 2 };
+      } else if (side === "right") {
+        return { x: step.x + w, y: step.y + h / 2 };
+      } else if (side === "top") {
+        return { x: step.x + w / 2, y: step.y };
+      } else if (side === "bottom") {
+        return { x: step.x + w / 2, y: step.y + h };
       }
-      return html;
+      return { x: step.x + w, y: step.y + h / 2 };
+    }
+
+    function wfSinglePortPoint(step, rect, cx, cy) {
+      const dx = cx - (step.x + rect.w / 2);
+      const dy = cy - (step.y + rect.h / 2);
+      let side = "right";
+      if (Math.abs(dy * rect.w) < Math.abs(dx * rect.h)) {
+        side = dx > 0 ? "right" : "left";
+      } else {
+        side = dy > 0 ? "bottom" : "top";
+      }
+      return wfPortPoint(step, rect, side, 0, 1);
+    }
+
+    function wfPortsHtml(id) {
+      return `
+        <span class="workflow-port left" data-id="${id}" data-side="left" title="Drag to connect"></span>
+        <span class="workflow-port right" data-id="${id}" data-side="right" title="Drag to connect"></span>
+        <span class="workflow-port top" data-id="${id}" data-side="top" title="Drag to connect"></span>
+        <span class="workflow-port bottom" data-id="${id}" data-side="bottom" title="Drag to connect"></span>
+      `;
     }
 
     function wfNodeRects() {
@@ -1453,27 +1650,21 @@
     // the way, in which case the curve arcs over or under the blockers.
     // Backward edges wrap around every card in their horizontal span instead
     // of cutting straight through (and behind) them.
-    function wfEdgePath(fromId, toId, p1, p2, rects) {
-      const others = Object.values(rects).filter(r => r.id !== fromId && r.id !== toId);
-      if (p2.x > p1.x + 20) {
-        const dx = Math.max(40, (p2.x - p1.x) * 0.5);
-        const c1 = { x: p1.x + dx, y: p1.y }, c2 = { x: p2.x - dx, y: p2.y };
-        if (!wfCubicHits(p1, c1, c2, p2, others)) return wfCubic(p1, c1, c2, p2);
-        const blockers = others.filter(r => r.x + r.w > p1.x - 60 && r.x < p2.x + 60);
-        if (!blockers.length) return wfCubic(p1, c1, c2, p2);
-        const top = Math.min(...blockers.map(r => r.y)) - 30;
-        const bottom = Math.max(...blockers.map(r => r.y + r.h)) + 30;
-        const mid = (p1.y + p2.y) / 2;
-        const detour = (top >= 12 && mid - top <= bottom - mid) ? top : bottom;
-        const y = wfBulgeY(p1, p2, detour);
-        return wfCubic(p1, { x: p1.x + dx, y }, { x: p2.x - dx, y }, p2);
-      }
-      const inSpan = Object.values(rects).filter(r => r.x + r.w > p2.x - 60 && r.x < p1.x + 60);
-      const bottom = Math.max(p1.y, p2.y, ...inSpan.map(r => r.y + r.h)) + 40;
-      const top = Math.min(p1.y, p2.y, ...inSpan.map(r => r.y)) - 40;
-      const goUp = top >= 12 && (p1.y - top) + (p2.y - top) < (bottom - p1.y) + (bottom - p2.y);
-      const y = wfBulgeY(p1, p2, goUp ? top : bottom);
-      return wfCubic(p1, { x: p1.x + 90, y }, { x: p2.x - 90, y }, p2);
+    function wfEdgePath(fromId, toId, p1, p2, rects, fromSide, toSide) {
+      const dist = Math.min(100, Math.max(40, Math.abs(p2.x - p1.x) * 0.5, Math.abs(p2.y - p1.y) * 0.5));
+      let c1 = { x: p1.x, y: p1.y };
+      if (fromSide === "right") c1.x += dist;
+      else if (fromSide === "left") c1.x -= dist;
+      else if (fromSide === "top") c1.y -= dist;
+      else if (fromSide === "bottom") c1.y += dist;
+
+      let c2 = { x: p2.x, y: p2.y };
+      if (toSide === "right") c2.x += dist;
+      else if (toSide === "left") c2.x -= dist;
+      else if (toSide === "top") c2.y -= dist;
+      else if (toSide === "bottom") c2.y += dist;
+
+      return wfCubic(p1, c1, c2, p2);
     }
 
     function wfGraphPoint(event) {
@@ -1505,13 +1696,19 @@
       $("workflowSteps").innerHTML = steps.length ? `
         <div class="workflow-canvas" id="wfCanvas">
           <div class="workflow-graph" id="wfGraph">
-            <svg class="workflow-edges" id="wfEdges"></svg>
+            <svg class="workflow-edges" id="wfEdges">
+              <defs>
+                <marker id="wfArrow" viewBox="0 0 10 10" refX="8" refY="5"
+                  markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                  <path d="M 0 0 L 10 5 L 0 10 z" fill="context-stroke"></path>
+                </marker>
+              </defs>
+            </svg>
             <div class="workflow-nodes" id="wfNodes">
               ${steps.map((step, index) => `
                 <div class="workflow-node-wrap" data-id="${escapeHtml(step.id)}" style="left:${step.x}px; top:${step.y}px">
                   <div class="workflow-node ${step.required ? "required" : ""}" data-id="${escapeHtml(step.id)}">
-                    ${wfPortsHtml(escapeHtml(step.id), "in", layout.inCount[step.id] || 1)}
-                    ${wfPortsHtml(escapeHtml(step.id), "out", layout.outCount[step.id] || 1)}
+                    ${wfPortsHtml(escapeHtml(step.id))}
                     <div class="workflow-node-head" data-drag-id="${escapeHtml(step.id)}" title="Drag to move">
                       <strong><span class="grip">⠿</span> ${escapeHtml(step.name || "Step")}</strong>
                       <span class="row" style="gap: 4px;">
@@ -1520,12 +1717,6 @@
                       </span>
                     </div>
                     <div class="workflow-node-body">
-                      <label>
-                        <div class="meta">name</div>
-                        <input type="text" data-name-input value="${escapeHtml(step.name || "")}"
-                          onchange="updateWorkflowStep('${escapeHtml(step.id)}', 'name', this.value)"
-                          onkeydown="if (event.key === 'Enter') this.blur()">
-                      </label>
                       <label>
                         <div class="meta">role</div>
                         <select onchange="updateWorkflowStep('${escapeHtml(step.id)}', 'role_id', this.value)">
@@ -1570,6 +1761,7 @@
       const steps = state.workflow.steps || [];
       const edges = state.workflow.edges || [];
       const byId = wfById();
+
       let maxX = 600, maxY = 400;
       steps.forEach(s => {
         maxX = Math.max(maxX, s.x + WF_NODE_W + 140);
@@ -1579,20 +1771,40 @@
       if (graph) { graph.style.width = maxX + "px"; graph.style.height = maxY + "px"; }
       svg.setAttribute("width", maxX);
       svg.setAttribute("height", maxY);
-      const slots = (wfLayoutCache || wfComputeLayout()).edgeSlots;
+
+      const layout = wfLayoutCache || wfComputeLayout();
       const rects = wfNodeRects();
-      let paths = edges.map((edge, i) => {
+
+      let paths = `<defs>
+        <marker id="wfArrow" viewBox="0 0 10 10" refX="8" refY="5"
+          markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="context-stroke"></path>
+        </marker>
+      </defs>`;
+      paths += edges.map((edge, i) => {
         const a = byId[edge.from], b = byId[edge.to];
         if (!a || !b) return "";
-        const slot = slots[i] || { fromSlot: 0, toSlot: 0 };
-        const p1 = wfPortPoint(a, "out", slot.fromSlot), p2 = wfPortPoint(b, "in", slot.toSlot);
-        const d = wfEdgePath(edge.from, edge.to, p1, p2, rects);
-        return `<path class="wf-edge" data-edge="${i}" d="${d}"><title>Click to delete connection</title></path>`;
+        const slot = layout.edgeSlots[i];
+        if (!slot) return "";
+
+        const rectA = rects[edge.from];
+        const rectB = rects[edge.to];
+        if (!rectA || !rectB) return "";
+
+        const totalFrom = layout.sideCounts[edge.from][slot.fromSide];
+        const totalTo = layout.sideCounts[edge.to][slot.toSide];
+
+        const p1 = wfPortPoint(a, rectA, slot.fromSide, slot.fromSlot, totalFrom);
+        const p2 = wfPortPoint(b, rectB, slot.toSide, slot.toSlot, totalTo);
+
+        const d = wfEdgePath(edge.from, edge.to, p1, p2, rects, slot.fromSide, slot.toSide);
+        return `<path class="wf-edge" data-edge="${i}" d="${d}" marker-end="url(#wfArrow)"><title>Drag to reconnect; click to delete</title></path>`;
       }).join("");
+
       if (wfTempPath) paths += `<path class="wf-edge temp" d="${wfTempPath}"></path>`;
       svg.innerHTML = paths;
       svg.querySelectorAll(".wf-edge[data-edge]").forEach(path => {
-        path.addEventListener("click", () => removeWorkflowEdge(Number(path.dataset.edge)));
+        path.addEventListener("pointerdown", event => startExistingEdgeDrag(event, Number(path.dataset.edge)));
       });
     }
 
@@ -1600,8 +1812,8 @@
       document.querySelectorAll(".workflow-node-head[data-drag-id]").forEach(head => {
         head.addEventListener("pointerdown", event => startNodeDrag(event, head.dataset.dragId));
       });
-      document.querySelectorAll(".workflow-port.out[data-id]").forEach(port => {
-        port.addEventListener("pointerdown", event => startEdgeDrag(event, port.dataset.id, Number(port.dataset.slot) || 0));
+      document.querySelectorAll(".workflow-port[data-id]").forEach(port => {
+        port.addEventListener("pointerdown", event => startEdgeDrag(event, port.dataset.id, port.dataset.side));
       });
     }
 
@@ -1618,11 +1830,34 @@
       event.preventDefault();
     }
 
-    function startEdgeDrag(event, id, slot = 0) {
+    function startEdgeDrag(event, id, side) {
       if (event.button !== 0) return;
       event.stopPropagation();
       event.preventDefault();
-      wfDrag = { type: "edge", from: id, fromSlot: slot };
+      wfDrag = { type: "edge", from: id, fromSide: side };
+      document.addEventListener("pointermove", onWorkflowPointerMove);
+      document.addEventListener("pointerup", onWorkflowPointerUp);
+    }
+
+    function startExistingEdgeDrag(event, edgeIndex) {
+      if (event.button !== 0) return;
+      const edge = (state.workflow.edges || [])[edgeIndex];
+      if (!edge) return;
+      event.stopPropagation();
+      event.preventDefault();
+      const cursor = wfGraphPoint(event);
+      const layout = wfLayoutCache || wfComputeLayout();
+      const slot = (layout.edgeSlots || [])[edgeIndex] || { fromSide: "right" };
+      wfDrag = {
+        type: "edge",
+        from: edge.from,
+        fromSide: slot.fromSide,
+        replaceIndex: edgeIndex,
+        originalTo: edge.to,
+        startX: cursor.x,
+        startY: cursor.y,
+        moved: false
+      };
       document.addEventListener("pointermove", onWorkflowPointerMove);
       document.addEventListener("pointerup", onWorkflowPointerUp);
     }
@@ -1640,15 +1875,61 @@
         if (wrap) { wrap.style.left = step.x + "px"; wrap.style.top = step.y + "px"; }
         drawEdges();
       } else if (wfDrag.type === "edge") {
-        const from = wfById()[wfDrag.from];
+        if (wfDrag.startX !== undefined) {
+          const movedEnough = Math.abs(cursor.x - wfDrag.startX) > 4 || Math.abs(cursor.y - wfDrag.startY) > 4;
+          wfDrag.moved = wfDrag.moved || movedEnough;
+        }
+        const byId = wfById();
+        const from = byId[wfDrag.from];
         if (!from) return;
-        const p1 = wfPortPoint(from, "out", wfDrag.fromSlot || 0);
-        const dx = Math.max(40, Math.abs(cursor.x - p1.x) * 0.5);
-        wfTempPath = `M ${p1.x} ${p1.y} C ${p1.x + dx} ${p1.y}, ${cursor.x - dx} ${cursor.y}, ${cursor.x} ${cursor.y}`;
+        const rects = wfNodeRects();
+        const p1 = wfPortPoint(from, rects[wfDrag.from], wfDrag.fromSide, 0, 1);
+
         const target = document.elementFromPoint(event.clientX, event.clientY);
         const node = target && target.closest(".workflow-node");
+        const toId = node && node.dataset.id;
+
         document.querySelectorAll(".workflow-node.drop-target").forEach(el => el.classList.remove("drop-target"));
-        if (node && node.dataset.id !== wfDrag.from) node.classList.add("drop-target");
+
+        let p2 = { x: cursor.x, y: cursor.y };
+        let toSide = "left";
+
+        if (node && toId !== wfDrag.from) {
+          node.classList.add("drop-target");
+          const targetRect = rects[toId];
+          const toNode = byId[toId];
+          if (targetRect && toNode) {
+            const dx = (targetRect.x + targetRect.w / 2) - p1.x;
+            const dy = (targetRect.y + targetRect.h / 2) - p1.y;
+            if (Math.abs(dy * targetRect.w) < Math.abs(dx * targetRect.h)) {
+              toSide = dx > 0 ? "left" : "right";
+            } else {
+              toSide = dy > 0 ? "top" : "bottom";
+            }
+            p2 = wfPortPoint(toNode, targetRect, toSide, 0, 1);
+          }
+        }
+
+        const dx = Math.max(40, Math.abs(p2.x - p1.x) * 0.5);
+        const dy = Math.max(40, Math.abs(p2.y - p1.y) * 0.5);
+
+        let c1 = { x: p1.x, y: p1.y };
+        if (wfDrag.fromSide === "right") c1.x += dx;
+        else if (wfDrag.fromSide === "left") c1.x -= dx;
+        else if (wfDrag.fromSide === "top") c1.y -= dy;
+        else if (wfDrag.fromSide === "bottom") c1.y += dy;
+
+        let c2 = { x: p2.x, y: p2.y };
+        if (node && toId !== wfDrag.from) {
+          if (toSide === "right") c2.x += dx;
+          else if (toSide === "left") c2.x -= dx;
+          else if (toSide === "top") c2.y -= dy;
+          else if (toSide === "bottom") c2.y += dy;
+        } else {
+          c2.x -= dx;
+        }
+
+        wfTempPath = `M ${p1.x} ${p1.y} C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${p2.x} ${p2.y}`;
         drawEdges();
       }
     }
@@ -1673,11 +1954,19 @@
         }
         run(async () => { await saveWorkflow(); setStatus("Workflow layout saved"); });
       } else if (drag.type === "edge") {
+        if (drag.replaceIndex !== undefined && !drag.moved) {
+          removeWorkflowEdge(drag.replaceIndex);
+          return;
+        }
         const target = document.elementFromPoint(event.clientX, event.clientY);
         const node = target && target.closest(".workflow-node");
         const to = node && node.dataset.id;
         if (to && to !== drag.from) {
-          addWorkflowEdge(drag.from, to);
+          if (drag.replaceIndex !== undefined) {
+            updateWorkflowEdgeTarget(drag.replaceIndex, drag.from, to);
+          } else {
+            addWorkflowEdge(drag.from, to);
+          }
         } else {
           drawEdges();
         }
@@ -1689,6 +1978,19 @@
       if (edges.some(e => e.from === from && e.to === to)) { drawEdges(); return; }
       edges.push({ from, to });
       run(async () => { await saveWorkflow(); setStatus("Connection added"); });
+    }
+
+    function updateWorkflowEdgeTarget(index, from, to) {
+      const edges = state.workflow.edges || [];
+      if (index < 0 || index >= edges.length) { drawEdges(); return; }
+      if (edges[index].from === from && edges[index].to === to) { drawEdges(); return; }
+      if (edges.some((edge, i) => i !== index && edge.from === from && edge.to === to)) {
+        drawEdges();
+        setStatus("Connection already exists", true);
+        return;
+      }
+      edges[index] = { from, to };
+      run(async () => { await saveWorkflow(); setStatus("Connection updated"); });
     }
 
     function removeWorkflowEdge(index) {
@@ -1783,15 +2085,12 @@
         await saveWorkflow();
         setStatus("Workflow updated");
       });
-      // saveWorkflow re-rendered the canvas; put the new card's name into
-      // edit mode so it can be renamed immediately.
-      const input = document.querySelector(
-        `.workflow-node[data-id="${CSS.escape(newId)}"] input[data-name-input]`
+      // saveWorkflow re-rendered the canvas; scroll the new card into view.
+      const el = document.querySelector(
+        `.workflow-node-wrap[data-id="${CSS.escape(newId)}"]`
       );
-      if (input) {
-        input.scrollIntoView({ block: "center", inline: "center" });
-        input.focus();
-        input.select();
+      if (el) {
+        el.scrollIntoView({ block: "center", inline: "center" });
       }
     }
 
@@ -1824,15 +2123,17 @@
           <div class="role-title">
             <div style="display: flex; align-items: center; gap: 8px;">
               <span>${escapeHtml(role.name)}</span>
-              <span class="badge">${escapeHtml(role.id)}</span>
+              <span class="badge" style="background: #fff; border-color: #9fc7b9; color: var(--accent);">${escapeHtml(role.id)}</span>
             </div>
             <div class="role-actions" id="actions-${escapeHtml(role.id)}" style="display: flex; gap: 6px;">
               <button class="role-action" data-action="edit" data-role-id="${escapeHtml(role.id)}">Edit</button>
             </div>
           </div>
-          <div class="meta">${escapeHtml(role.path)}</div>
-          <div id="body-container-${escapeHtml(role.id)}">
-            <pre class="role-body">${escapeHtml(role.content)}</pre>
+          <div style="padding: 16px;">
+            <div class="meta" style="margin-bottom: 10px;">${escapeHtml(role.path)}</div>
+            <div id="body-container-${escapeHtml(role.id)}">
+              <pre class="role-body">${escapeHtml(role.content)}</pre>
+            </div>
           </div>
         </div>
       `).join("") : `<div class="empty">No workflow roles detected.</div>`;
@@ -1905,23 +2206,25 @@
       "accepted": "done",
       "closed": "done"
     };
-    // Single source of truth for task statuses, shared by the Tasks (kanban)
-    // board and the Workflow step cards so their dropdowns stay in sync.
+    // Single source of truth for task statuses used by Workflow step cards.
+    // The kanban board groups tasks by the workflow-written task_status.
     const TASK_STATUS_OPTIONS = [
-      { value: "created", label: "Created" },
-      { value: "assigned", label: "Assigned" },
+      { value: "created", label: "Todo" },
       { value: "in_progress", label: "In Progress" },
       { value: "bugfixing", label: "Bug Fixing" },
       { value: "testing", label: "In Testing" },
       { value: "blocked", label: "Blocked" },
-      { value: "replied", label: "Replied" },
-      { value: "needs_changes", label: "Needs Changes" },
-      { value: "accepted", label: "Accepted" },
-      { value: "closed", label: "Closed" }
+      { value: "replied", label: "Under Review" },
+      { value: "accepted", label: "Done" }
     ];
     function statusOptionsHtml(selected) {
+      let normalized = selected;
+      if (selected === "assigned") normalized = "created";
+      if (selected === "needs_changes") normalized = "replied";
+      if (selected === "closed") normalized = "accepted";
+
       return TASK_STATUS_OPTIONS.map(opt =>
-        `<option value="${opt.value}" ${selected === opt.value ? "selected" : ""}>${opt.label}</option>`
+        `<option value="${opt.value}" ${normalized === opt.value ? "selected" : ""}>${opt.label}</option>`
       ).join("");
     }
     const REQUIRED_TEAM_ROLES = ["hub", "implementer", "reviewer"];
@@ -1976,9 +2279,6 @@
                     </div>` : ""}
                     <div class="kanban-card-meta">
                       <span>${escapeHtml(task.sender)} ➜ ${escapeHtml(task.recipient)}</span>
-                      <select onclick="event.stopPropagation()" onchange="moveTask(${task.id}, this.value)" style="font-size: 11px; padding: 2px 4px; width: auto; min-height: 20px; height: 22px; line-height: 1;">
-                        ${statusOptionsHtml(task.task_status)}
-                      </select>
                     </div>
                   </div>
                 `).join("") : `<div class="empty" style="text-align: center; padding: 20px 0;">No tasks</div>`}
@@ -1994,6 +2294,7 @@
       if (!state.apiBase || !taskId) {
         state.taskRuns = [];
         state.selectedRunId = null;
+        state.selectedRunFileKey = "events";
         state.runFiles = {};
         return;
       }
@@ -2003,7 +2304,7 @@
         state.selectedRunId = (state.taskRuns[0] || {}).id || null;
       }
       if (state.selectedRunId) {
-        await loadRunFile(state.selectedRunId, "events");
+        await loadRunFile(state.selectedRunId, state.selectedRunFileKey || "events");
       } else {
         state.runFiles = {};
       }
@@ -2017,14 +2318,34 @@
           body: JSON.stringify({ worker: "manual", status: "running" })
         });
         state.selectedRunId = data.run.id;
+        state.selectedRunFileKey = "events";
         await loadTaskRuns(taskId);
         setStatus("Run #" + data.run.id + " created");
+      });
+    }
+
+    async function rerunTask(taskId) {
+      const select = $("rerunAgentSelect");
+      const agent = select ? select.value : "";
+      if (!agent) {
+        setStatus("Pick an agent to re-run with", true);
+        return;
+      }
+      await run(async () => {
+        const data = await api(`/api/tasks/${taskId}/rerun`, {
+          method: "POST",
+          body: JSON.stringify({ agent })
+        });
+        setStatus(`Re-running #${taskId} step "${data.step}" with ${data.assignee}`);
+        await loadTasks();
+        await loadTaskRuns(taskId);
       });
     }
 
     async function loadRunFile(runId, fileKey) {
       const data = await api(`/api/task-runs/${runId}/files/${fileKey}?tail=65536`);
       state.selectedRunId = runId;
+      state.selectedRunFileKey = fileKey;
       state.runFiles = { [fileKey]: data };
     }
 
@@ -2032,15 +2353,6 @@
       await run(async () => {
         await loadRunFile(runId, fileKey);
         renderTaskDetails(state.tasks.find(t => t.id === state.selectedTaskId) || null);
-      });
-    }
-
-    async function recommendAgent(taskId) {
-      await run(async () => {
-        const data = await api(`/api/tasks/${taskId}/assignment-candidates`);
-        state.assignmentCandidates = data;
-        renderTaskDetails(state.tasks.find(t => t.id === taskId) || data.task || null);
-        setStatus(data.selected ? `Recommended ${data.selected.agent_name}` : "No candidate available");
       });
     }
 
@@ -2090,8 +2402,14 @@
     }
 
     function renderGoals() {
-      const goals = state.goals || [];
-      $("goalsList").innerHTML = goals.length ? goals.map(goal => `
+      const allGoals = state.goals || [];
+      const hideClosed = $("hideClosedGoals") ? $("hideClosedGoals").checked : true;
+      const goals = hideClosed ? allGoals.filter(goal => goal.task_status !== "closed") : allGoals;
+      const hiddenCount = allGoals.length - goals.length;
+      const hiddenNote = hiddenCount
+        ? `<div class="meta" style="margin-top: 8px; padding-left: 12px;">${hiddenCount} closed goal${hiddenCount > 1 ? "s" : ""} hidden</div>`
+        : "";
+      $("goalsList").innerHTML = (goals.length ? goals.map(goal => `
         <div class="goal-card" onclick="openGoalTask(${goal.id})">
           <div class="row" style="justify-content: space-between;">
             <strong>🎯 #${goal.id} ${escapeHtml(goal.title || "Goal")}</strong>
@@ -2111,7 +2429,9 @@
               `).join("")}
             </div>` : ""}
         </div>
-      `).join("") : `<div class="empty">No goals yet — describe one above and press Start.</div>`;
+      `).join("") : `<div class="empty">${allGoals.length && hideClosed
+          ? `All ${allGoals.length} goal${allGoals.length > 1 ? "s are" : " is"} closed — untick "Hide closed" to view them.`
+          : "No goals yet — describe one above and press Start."}</div>`) + hiddenNote;
     }
 
     function openGoalTask(taskId) {
@@ -2153,29 +2473,23 @@
       bar.onclick = () => setPage("goals");
     }
 
-    async function moveTask(taskId, newStatus) {
-      await run(async () => {
-        await api(`/api/tasks/${taskId}/status`, {
-          method: "POST",
-          body: JSON.stringify({ task_status: newStatus })
-        });
-        await loadTasks();
-        renderTaskDetails(state.tasks.find(t => t.id === state.selectedTaskId) || null);
-        setStatus("Task #" + taskId + " moved to " + newStatus);
-      });
-    }
-
-    function showTaskDetails(taskId) {
-      const task = state.tasks.find(t => t.id === taskId);
+    async function showTaskDetails(taskId) {
+      let task = state.tasks.find(t => t.id === taskId);
+      if (!task) {
+        try {
+          const res = await api(`/api/tasks/${taskId}`);
+          task = res.task;
+        } catch (e) {
+          setStatus(`Failed to load task #${taskId}: ${e.message}`);
+          return;
+        }
+      }
       if (!task) return;
       state.selectedTaskId = taskId;
-      state.assignmentCandidates = null;
-      state.taskWorkflow = null;
       state.taskDetailsCollapsed = false;
       applyTaskDetailsCollapsed();
       renderTaskDetails(task);
       run(async () => {
-        await loadTaskWorkflow(taskId);
         await loadTaskRuns(taskId);
       });
     }
@@ -2187,6 +2501,10 @@
         return;
       }
       $("taskDetails").className = "task-details";
+      // For the blocked re-run picker: default to an agent other than the one
+      // that just failed, so a click actually switches models.
+      const rerunAgents = (state.tools || []).map(tool => tool.agent_name);
+      const defaultRerunAgent = rerunAgents.find(name => name !== task.assignee) || rerunAgents[0] || "";
       $("taskDetailContent").innerHTML = `
         <div class="task-detail-title">
           <span>${escapeHtml(task.title || "#" + task.id + " Task")}</span>
@@ -2212,139 +2530,31 @@
         <div class="task-detail-body">${escapeHtml(task.content)}</div>
         <div class="task-runs">
           <div class="row" style="justify-content: space-between;">
-            <strong>Workflow</strong>
-          </div>
-          ${renderTaskWorkflow(task)}
-        </div>
-        <div class="task-runs">
-          <div class="row" style="justify-content: space-between;">
             <strong>Assignment</strong>
-            <button type="button" onclick="recommendAgent(${task.id})">Recommend Agent</button>
           </div>
-          ${renderAssignmentCandidates()}
+          <div class="meta">role: ${escapeHtml(task.role_required || "implementer")}</div>
+          <div class="meta">agent: ${escapeHtml(task.assignee || "unassigned")}</div>
         </div>
         <div class="task-runs">
           <div class="row" style="justify-content: space-between;">
             <strong>Runs</strong>
             <button type="button" onclick="createTaskRun(${task.id})">New Run</button>
           </div>
+          ${task.task_status === "blocked" ? `
+            <div class="rerun-box">
+              <div class="meta">Blocked — re-run this step with a different agent (model):</div>
+              <div class="row" style="gap: 6px; margin-top: 4px;">
+                <select id="rerunAgentSelect">
+                  ${rerunAgents.length
+                    ? rerunAgents.map(name => `<option value="${escapeHtml(name)}"${name === defaultRerunAgent ? " selected" : ""}>${escapeHtml(name)}</option>`).join("")
+                    : `<option value="">No agents available</option>`}
+                </select>
+                <button type="button" class="primary" onclick="rerunTask(${task.id})">Re-run</button>
+              </div>
+            </div>
+          ` : ""}
           ${renderTaskRuns()}
         </div>
-      `;
-    }
-
-    function renderTaskWorkflow(task) {
-      const wf = state.taskWorkflow;
-      if (!wf || wf.task_id !== task.id) {
-        return `<div class="empty" style="padding: 0;">Loading workflow state…</div>`;
-      }
-      const active = wf.active_steps || [];
-      const transitions = wf.transitions || [];
-      if (!transitions.length) {
-        if (task.task_status === "closed") {
-          return `<div class="meta">Task closed; not routed through the workflow.</div>`;
-        }
-        return `<button class="primary" type="button" onclick="startTaskWorkflow(${task.id})">▶ Start Workflow</button>`;
-      }
-      let html = "";
-      if (active.length) {
-        html += `
-          <div class="meta">active steps: ${active.map(escapeHtml).join(", ")}</div>
-          <div class="row" style="flex-wrap: wrap; gap: 6px;">
-            <select id="wfStepSel" style="width: auto;">${active.map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join("")}</select>
-            <select id="wfOutcomeSel" style="width: auto;">
-              <option value="done">done</option>
-              <option value="rework">rework</option>
-              <option value="blocked">blocked</option>
-            </select>
-            <input id="wfResultInput" placeholder="result / reason" style="flex: 1; min-width: 140px;">
-            <button class="primary" type="button" onclick="completeTaskStep(${task.id})">Submit</button>
-          </div>`;
-      } else if (task.task_status === "closed") {
-        html += `<div class="meta">Workflow finished — task closed.</div>`;
-      } else if (task.task_status === "blocked") {
-        html += `<div class="meta" style="color: var(--danger);">Blocked — no step is running; check the transition log.</div>`;
-      }
-      html += `<div class="wf-transitions">${transitions.slice(-15).reverse().map(t => `
-        <div class="meta">
-          ${t.created_at ? fmtTime(t.created_at) + " · " : ""}${escapeHtml(t.outcome)}:
-          ${t.from_step ? escapeHtml(t.from_step) : "∅"}${t.to_step ? " → " + escapeHtml(t.to_step) : ""}
-          (${escapeHtml(t.actor)})${t.note ? " — " + escapeHtml(t.note) : ""}
-        </div>
-      `).join("")}</div>`;
-      return html;
-    }
-
-    async function loadTaskWorkflow(taskId) {
-      try {
-        state.taskWorkflow = await api(`/api/tasks/${taskId}/workflow`);
-      } catch (error) {
-        state.taskWorkflow = null;
-      }
-    }
-
-    async function startTaskWorkflow(taskId) {
-      await run(async () => {
-        const data = await api(`/api/tasks/${taskId}/workflow/start`, {
-          method: "POST",
-          body: JSON.stringify({})
-        });
-        await loadTasks();
-        await loadTaskWorkflow(taskId);
-        renderTaskDetails(state.tasks.find(t => t.id === taskId) || null);
-        const to = (data.dispatched || []).map(d => `${d.step} → ${d.assignee}`).join(", ");
-        setStatus(to ? `Workflow started: ${to}` : "Workflow started");
-      });
-    }
-
-    async function completeTaskStep(taskId) {
-      const step = $("wfStepSel").value;
-      const outcome = $("wfOutcomeSel").value;
-      const result = $("wfResultInput").value.trim();
-      await run(async () => {
-        const data = await api(`/api/tasks/${taskId}/workflow/complete`, {
-          method: "POST",
-          body: JSON.stringify({ step, outcome, result })
-        });
-        await loadTasks();
-        await loadTaskWorkflow(taskId);
-        renderTaskDetails(state.tasks.find(t => t.id === taskId) || null);
-        if (data.closed) setStatus(`Task #${taskId} closed`);
-        else {
-          const to = (data.dispatched || []).map(d => `${d.step} → ${d.assignee}`).join(", ");
-          setStatus(to ? `Dispatched: ${to}` : `Step ${step}: ${outcome}`);
-        }
-      });
-    }
-
-    function renderAssignmentCandidates() {
-      const data = state.assignmentCandidates;
-      if (!data || data.task.id !== state.selectedTaskId) {
-        return `<div class="empty" style="padding: 0;">No recommendation loaded.</div>`;
-      }
-      if (!data.candidates.length) {
-        return `<div class="empty" style="padding: 0;">No matching enabled team member.</div>`;
-      }
-      return `
-        <div class="meta">required expertise: L${escapeHtml(data.required_expertise_level || 3)}</div>
-        ${data.required_followups && data.required_followups.length ? `
-          <div class="meta">required follow-up roles: ${escapeHtml(data.required_followups.join(", "))}</div>
-        ` : ""}
-        ${data.candidates.slice(0, 5).map(candidate => `
-          <div class="team-member" style="padding: 8px;">
-            <div class="row" style="justify-content: space-between;">
-              <strong>${escapeHtml(candidate.agent_name)}</strong>
-              <span class="badge">score ${escapeHtml(candidate.score)}</span>
-            </div>
-            <div class="meta">
-              expertise L${escapeHtml(candidate.expertise_level || 3)}
-              - active ${escapeHtml(candidate.active_tasks)}
-              - slots ${escapeHtml(candidate.available_slots)}
-              ${candidate.expertise_gap ? ` - expertise gap ${escapeHtml(candidate.expertise_gap)}` : ""}
-              ${candidate.missing_capabilities && candidate.missing_capabilities.length ? ` - missing ${escapeHtml(candidate.missing_capabilities.join(", "))}` : ""}
-            </div>
-          </div>
-        `).join("")}
       `;
     }
 
@@ -2364,10 +2574,11 @@
             ${run.exit_code === null || run.exit_code === undefined ? "" : ` - exit ${run.exit_code}`}
             ${run.started_at ? ` - ${fmtTime(run.started_at)}` : ""}
           </div>
+          ${run.command ? `<div class="meta run-command" title="${escapeHtml(run.command)}">$ ${escapeHtml(run.command)}</div>` : ""}
           <div class="meta">${escapeHtml(run.log_dir || "")}</div>
           <div class="run-files">
             ${["events", "stdout", "stderr", "result", "diff"].map(fileKey => `
-              <button type="button" onclick="showRunFile(${run.id}, '${fileKey}')">${fileKey}</button>
+              <button type="button" ${run.id === state.selectedRunId && fileKey === state.selectedRunFileKey ? 'class="primary"' : ""} onclick="showRunFile(${run.id}, '${fileKey}')">${fileKey}</button>
             `).join("")}
           </div>
           ${run.id === state.selectedRunId && visibleFile ? `
@@ -2429,6 +2640,13 @@
       localStorage.setItem("devloop-goal", $("goalInput").value);
     });
     $("goalInput").value = localStorage.getItem("devloop-goal") || "";
+    // Default to hiding closed goals so finished/abandoned goals don't pile up;
+    // the choice persists across reloads.
+    $("hideClosedGoals").checked = localStorage.getItem("devloop-hide-closed-goals") !== "false";
+    $("hideClosedGoals").addEventListener("change", () => {
+      localStorage.setItem("devloop-hide-closed-goals", $("hideClosedGoals").checked);
+      renderGoals();
+    });
     $("tasksTab").addEventListener("click", () => setPage("tasks"));
 
     run(async () => {
@@ -2444,15 +2662,16 @@
     setInterval(async () => {
       if (livePolling || !state.apiBase || document.hidden) return;
       // Re-rendering the board would steal focus mid-keystroke (goal box,
-      // status selects); wait until the user leaves the tasks pane.
+      // status selects); wait until the user leaves the task board.
       const active = document.activeElement;
-      if (active && ($("tasksList").contains(active) || $("taskDetails").contains(active))) return;
+      if (active && $("tasksList").contains(active)) return;
       livePolling = true;
       try {
         await loadTasks();
         if (state.selectedTaskId) {
-          await loadTaskWorkflow(state.selectedTaskId);
-          renderTaskDetails(state.tasks.find(t => t.id === state.selectedTaskId) || null);
+          await loadTaskRuns(state.selectedTaskId);
+        } else {
+          renderTaskDetails(null);
         }
         if ($("workflowPage").classList.contains("active")) renderWorkflow();
         // Goals feed both the Goals page and the bar above the kanban.
