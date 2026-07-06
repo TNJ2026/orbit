@@ -2562,6 +2562,38 @@
       `;
     }
 
+    function formatRunFileContent(fileKey, content) {
+      if (!content) return "";
+      if (fileKey === "events") {
+        try {
+          const trimmed = content.trim();
+          if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+            const parsed = JSON.parse(trimmed);
+            return JSON.stringify(parsed, null, 2);
+          }
+        } catch (e) {
+          // Not a single JSON document, fallback to JSON lines
+        }
+        
+        const lines = content.split("\n");
+        const formattedLines = lines.map(line => {
+          const trimmedLine = line.trim();
+          if (!trimmedLine) return "";
+          try {
+            const parsed = JSON.parse(trimmedLine);
+            return JSON.stringify(parsed, null, 2);
+          } catch (e) {
+            return line;
+          }
+        }).filter(Boolean);
+        
+        if (formattedLines.length > 0) {
+          return formattedLines.join("\n\n");
+        }
+      }
+      return content;
+    }
+
     function renderTaskRuns() {
       if (!state.taskRuns.length) {
         return `<div class="empty" style="padding: 0;">No runs recorded.</div>`;
@@ -2586,7 +2618,7 @@
             `).join("")}
           </div>
           ${run.id === state.selectedRunId && visibleFile ? `
-            <pre class="run-file-content">${escapeHtml(visibleFile.content || "")}</pre>
+            <pre class="run-file-content">${escapeHtml(formatRunFileContent(state.selectedRunFileKey, visibleFile.content || ""))}</pre>
           ` : ""}
         </div>
       `).join("");
