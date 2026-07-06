@@ -1066,6 +1066,17 @@ class MarkTaskRunningTests(unittest.TestCase):
             self.assertEqual("in_progress", h.task(sub_id)["task_status"])
             self.assertEqual("in_progress", h.task(goal_id)["task_status"])
 
+    def test_phase_status_card_kept_in_its_column(self):
+        # A running review/test card must stay in "replied"/"testing" (Under
+        # Review / In Testing), not get flipped to generic in_progress.
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            for phase in ("replied", "testing", "needs_changes", "bugfixing"):
+                tid = h.create_task(title=phase)
+                self._set_status(h.store, tid, phase)
+                server._mark_task_running(h.store, tid)
+                self.assertEqual(phase, h.task(tid)["task_status"])
+
     def test_terminal_parent_is_not_reopened(self):
         with TemporaryDirectory() as tmp:
             h = EngineHarness(tmp)

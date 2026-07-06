@@ -1834,6 +1834,10 @@ def _build_step_prompt(
 
 
 _TASK_RUNNING_TERMINAL = ("closed", "accepted")
+# Statuses that already place a task in its own board column while its runner
+# works (Under Review / In Testing / Bug Fixing). Don't overwrite them with the
+# generic in_progress, or those columns would never show anything.
+_TASK_PHASE_STATUSES = ("testing", "replied", "needs_changes", "bugfixing")
 
 
 def _mark_task_running(store: Store, task_id: int | None) -> None:
@@ -1849,7 +1853,11 @@ def _mark_task_running(store: Store, task_id: int | None) -> None:
         if not task:
             break
         status = task.get("task_status")
-        if status not in _TASK_RUNNING_TERMINAL and status != "in_progress":
+        if (
+            status not in _TASK_RUNNING_TERMINAL
+            and status not in _TASK_PHASE_STATUSES
+            and status != "in_progress"
+        ):
             store.set_task_workflow_state(current, task_status="in_progress")
         current = task.get("parent_task_id")
 
