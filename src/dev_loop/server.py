@@ -324,7 +324,12 @@ def _normalize_workflow_edges(
         if key in seen:
             continue
         seen.add(key)
-        normalized.append({"from": src, "to": dst})
+        norm_edge = {"from": src, "to": dst}
+        if edge.get("rework"):
+            # Explicit loop-back marker: lets a rework target sit off the
+            # forward path (see _workflow_graph).
+            norm_edge["rework"] = True
+        normalized.append(norm_edge)
     return normalized
 
 
@@ -778,10 +783,16 @@ WORKFLOW_OUTCOMES = {"done", "rework", "blocked"}
 
 
 def _workflow_graph(cfg: dict[str, Any]) -> set[tuple[str, str]]:
-    """Classify loop-back edges via DFS (an edge into a node still on the
-    DFS stack closes a cycle). Every other edge is forward flow. Layer
-    numbers are not used: cycles make longest-path layering ambiguous, so
-    forward/backward is decided purely by this classification."""
+    """Return the set of loop-back (rework) edges. If any edge is explicitly
+    marked `"rework": true`, those are the loop-backs verbatim — this lets a
+    rework target sit off the forward path (e.g. a bugfix step only reached on
+    rework). Otherwise loop-backs are inferred via DFS (an edge into a node
+    still on the DFS stack closes a cycle); every other edge is forward flow."""
+    explicit = {
+        (edge["from"], edge["to"]) for edge in cfg["edges"] if edge.get("rework")
+    }
+    if explicit:
+        return explicit
     ids = [step["id"] for step in cfg["steps"]]
     adj: dict[str, list[str]] = {}
     for edge in cfg["edges"]:
@@ -820,10 +831,18 @@ def _forward_out(
 
 
 def _workflow_entry_steps(cfg: dict[str, Any], back: set[tuple[str, str]]) -> list[str]:
+    # An entry step has no forward incoming edge (a back edge into it, e.g. an
+    # accept -> intake reopen, still leaves it an entry). But an explicit rework
+    # target (e.g. an off-path bugfix step, only reached on rework) is never an
+    # entry, even though its only incoming edges are loop-backs.
     forward_in = {
         e["to"] for e in cfg["edges"] if (e["from"], e["to"]) not in back
     }
-    return [s["id"] for s in cfg["steps"] if s["id"] not in forward_in]
+    rework_targets = {e["to"] for e in cfg["edges"] if e.get("rework")}
+    return [
+        s["id"] for s in cfg["steps"]
+        if s["id"] not in forward_in and s["id"] not in rework_targets
+    ]
 
 
 def _workflow_terminal_steps(
@@ -847,10 +866,10 @@ def _workflow_execution_errors(
     entries = _workflow_entry_steps(cfg, back)
     terminals = _workflow_terminal_steps(cfg, back)
 
-    def _reach(seeds: list[str], reverse: bool = False) -> set[str]:
+    def _reach(seeds: list[str], reverse: bool = False, include_back: bool = False) -> set[str]:
         graph: dict[str, list[str]] = {}
         for edge in cfg["edges"]:
-            if (edge["from"], edge["to"]) in back:
+            if not include_back and (edge["from"], edge["to"]) in back:
                 continue
             src, dst = (
                 (edge["to"], edge["from"]) if reverse
@@ -873,7 +892,9 @@ def _workflow_execution_errors(
     if not terminals:
         errors.append("no terminal step")
     main_entry = entries[0] if entries else None
-    reachable = _reach([main_entry]) if main_entry else set()
+    # Reachability includes rework edges: a step only entered on rework (e.g. an
+    # off-path bugfix step) is still reachable, not dead.
+    reachable = _reach([main_entry], include_back=True) if main_entry else set()
     can_finish = _reach(terminals, reverse=True) if terminals else set()
     required_ids = [step_id for step_id in ids if steps[step_id]["required"]]
     unreachable_required = [step_id for step_id in required_ids if step_id not in reachable]
@@ -980,11 +1001,16 @@ def _join_ready(
     steps: dict[str, dict[str, Any]],
     transitions: list[dict[str, Any]],
 ) -> bool:
+    # A rework target (e.g. an off-path bugfix step) feeds back into a shared
+    # step but is not a parallel branch of it, so it must not gate the join —
+    # otherwise the normal path would wait forever for a step only run on rework.
+    rework_targets = {e["to"] for e in cfg["edges"] if e.get("rework")}
     required_preds = [
         e["from"] for e in cfg["edges"]
         if e["to"] == target
         and (e["from"], e["to"]) not in back
         and steps[e["from"]]["required"]
+        and e["from"] not in rework_targets
     ]
     arrived = {
         t["from_step"] for t in transitions

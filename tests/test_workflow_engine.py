@@ -1172,6 +1172,47 @@ class UnlimitedConcurrencyTests(unittest.TestCase):
         self.assertIsNone(ranked.get("selected"))
 
 
+class ExplicitReworkEdgeTests(unittest.TestCase):
+    STEPS = [
+        {"id": "intake", "name": "Intake", "role_id": "hub", "task_status": "created", "required": True},
+        {"id": "implement", "name": "Implement", "role_id": "implementer", "task_status": "in_progress", "required": True},
+        {"id": "bugfix", "name": "Bug Fixing", "role_id": "implementer", "task_status": "bugfixing", "required": False},
+        {"id": "review", "name": "Review", "role_id": "reviewer", "task_status": "replied", "required": True},
+        {"id": "accept", "name": "Accept", "role_id": "hub", "task_status": "accepted", "required": True},
+    ]
+    # bugfix sits off the forward path — only reached on rework from review.
+    EDGES = [
+        {"from": "intake", "to": "implement"},
+        {"from": "implement", "to": "review"},
+        {"from": "review", "to": "accept"},
+        {"from": "review", "to": "bugfix", "rework": True},
+        {"from": "bugfix", "to": "review"},
+    ]
+
+    def test_offpath_bugfix_only_runs_on_rework(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, steps=self.STEPS, edges=self.EDGES)
+            task_id = h.create_task()
+            # start dispatches only the real entry, not the off-path bugfix
+            started = h.start(task_id)
+            self.assertEqual([{"step": "intake", "assignee": "hub-agent"}], started["dispatched"])
+
+            h.complete("hub-agent", task_id, "intake", "done")
+            self.assertEqual("codex", h.task(task_id)["assignee"])  # implement
+            # normal path skips bugfix: implement -> review
+            fwd = h.complete("codex", task_id, "implement", "done")
+            self.assertEqual([{"step": "review", "assignee": "rev"}], fwd["dispatched"])
+
+            # review rework -> off-path bugfix
+            rework = h.complete("rev", task_id, "review", "rework", "fix the bug")
+            self.assertEqual([{"step": "bugfix", "assignee": "codex"}], rework["dispatched"])
+            self.assertEqual("bugfixing", h.task(task_id)["task_status"])
+
+            # bugfix done -> back to review
+            back = h.complete("codex", task_id, "bugfix", "done")
+            self.assertEqual([{"step": "review", "assignee": "rev"}], back["dispatched"])
+
+
 class TaskHealthCheckTests(unittest.TestCase):
     def test_dead_runner_step_alerts_and_dedupes(self):
         with TemporaryDirectory() as tmp:
