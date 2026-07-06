@@ -2144,19 +2144,30 @@ def _check_workflow_step_timeouts_locked(
 _RUN_DEAD_STATUSES = ("orphaned", "failed")
 
 
-def _latest_run_status_for_step(
+def _latest_run_for_step(
     store: Store, task: dict[str, Any], step_id: str
-) -> str | None:
-    """Status of the newest run for a step, read from its run holder (the goal's
-    step card when materialized, else the task itself — same target
-    run_step_worker records on)."""
+) -> dict[str, Any] | None:
+    """Newest run for a step, read from its run holder (the goal's step card
+    when materialized, else the task itself — same target run_step_worker
+    records on)."""
     holder_id = task["id"]
     if _materializes_step_cards(task):
         card = store.find_open_step_card(task["id"], step_id)
         if card:
             holder_id = card["id"]
     runs = store.list_task_runs(holder_id, limit=1)
-    return runs[0]["status"] if runs else None
+    return runs[0] if runs else None
+
+
+def _run_is_after(run: dict[str, Any], transition: dict[str, Any]) -> bool:
+    """Whether a run started at or after a transition — used to confirm a dead
+    run belongs to the current dispatch rather than a superseded one."""
+    try:
+        return datetime.fromisoformat(run["started_at"]) >= datetime.fromisoformat(
+            transition["created_at"]
+        )
+    except (ValueError, TypeError, KeyError):
+        return True
 
 
 def _task_has_running_run(store: Store, task_id: int) -> bool:
@@ -2187,9 +2198,7 @@ def _check_task_health_locked(
     cfg = read_workflow_config(project_root)
     steps = {s["id"]: s for s in cfg["steps"]}
     alerts: list[dict[str, Any]] = []
-    for task in store.list_tasks(status="all", limit=-1):
-        if task.get("task_status") in ("closed", "accepted"):
-            continue
+    for task in store.list_non_terminal_tasks():
         task_id = task["id"]
         transitions = store.list_task_transitions(task_id)
         active = _active_step_assignees(transitions)
@@ -2198,16 +2207,24 @@ def _check_task_health_locked(
         for step_id, assignee in active.items():
             if step_id not in steps:
                 continue
-            if _latest_run_status_for_step(store, task, step_id) not in _RUN_DEAD_STATUSES:
+            run = _latest_run_for_step(store, task, step_id)
+            if not run or run["status"] not in _RUN_DEAD_STATUSES:
                 continue
-            last_dispatch_id = max(
-                (t["id"] for t in transitions
+            last_dispatch = max(
+                (t for t in transitions
                  if t["outcome"] == "dispatched" and t["to_step"] == step_id),
-                default=0,
+                key=lambda t: t["id"], default=None,
             )
+            if last_dispatch is None:
+                continue
+            # The dead run must belong to the current dispatch. If it predates
+            # the latest (re)dispatch, a fresh runner is still spawning — a new
+            # run just has not been recorded yet — so hold off.
+            if not _run_is_after(run, last_dispatch):
+                continue
             if any(
                 t["outcome"] == "health_alert" and t["to_step"] == step_id
-                and t["id"] > last_dispatch_id
+                and t["id"] > last_dispatch["id"]
                 for t in transitions
             ):
                 continue  # already alerted for this dispatch

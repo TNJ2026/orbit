@@ -1174,6 +1174,25 @@ class TaskHealthCheckTests(unittest.TestCase):
             self.assertEqual("orphaned in_progress", alerts[0]["problem"])
             self.assertEqual([], server.check_task_health(h.store, tmp))
 
+    def test_no_alert_when_dead_run_predates_redispatch(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            tid = h.create_task()
+            h.start(tid)
+            run = h.store.create_task_run(tid, worker="hub-agent", status="running")
+            h.store._conn.execute(
+                "UPDATE task_runs SET status = 'orphaned', "
+                "started_at = '2000-01-01T00:00:00+00:00' WHERE id = ?",
+                (run["id"],),
+            )
+            h.store._conn.commit()
+            # a fresh dispatch supersedes the dead run; its runner has not
+            # recorded a run yet -> watchdog must hold off, not false-alert
+            h.store.record_task_transition(
+                tid, "", "intake", "hub-agent", "dispatched", "hub-agent"
+            )
+            self.assertEqual([], server.check_task_health(h.store, tmp))
+
     def test_healthy_running_step_no_alert(self):
         with TemporaryDirectory() as tmp:
             h = EngineHarness(tmp)

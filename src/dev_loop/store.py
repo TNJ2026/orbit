@@ -643,6 +643,22 @@ class Store:
             ).fetchall()
         return [self._task_row(row) for row in rows]
 
+    def list_non_terminal_tasks(self) -> list[dict[str, Any]]:
+        """Return tasks that are not finished (status not closed/accepted), for
+        the health watchdog — avoids scanning closed history every cycle."""
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT id, source_message_id, title, content, sender,
+                          assignee, assignee AS recipient, status AS task_status,
+                          created_at, updated_at, role_required, importance, size,
+                          risk, required_capabilities, exclusive_workspace,
+                          workflow_step, parent_task_id, is_goal
+                   FROM tasks
+                   WHERE status NOT IN ('closed', 'accepted')
+                   ORDER BY id DESC"""
+            ).fetchall()
+        return [self._task_row(row) for row in rows]
+
     def update_task_metadata(
         self,
         task_id: int,
