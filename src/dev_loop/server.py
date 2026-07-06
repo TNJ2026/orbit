@@ -1462,6 +1462,22 @@ def rerun_workflow_step(
                 + (f" (unknown step {step_id!r})" if step_id else "")
             )
         step_def = steps[step_id]
+        # Guard against double-running: if a runner is still in flight for this
+        # step, a second dispatch would race (two runners advancing the same
+        # step). Runs are recorded on the goal's step card when materialized.
+        run_holder_id = task_id
+        if _materializes_step_cards(task):
+            card = store.find_open_step_card(task_id, step_id)
+            if card:
+                run_holder_id = card["id"]
+        if any(
+            run.get("status") == "running"
+            for run in store.list_task_runs(run_holder_id, limit=10)
+        ):
+            raise InvalidInputError(
+                f"a run is already in progress for step {step_id!r}; wait for it "
+                "to finish before re-running"
+            )
         members = read_team_config(project_root)["members"]
         base = _member_named(members, agent) or {}
         member = {

@@ -46,6 +46,7 @@ def _read_index(index_path: Path) -> list[dict[str, Any]]:
 
 
 def _write_index(index_path: Path, projects: list[dict[str, Any]]) -> None:
+    index_path.parent.mkdir(parents=True, exist_ok=True)
     # Unique temp name: servers for different projects share this index, and
     # two starting at once must not race on the same temp file.
     tmp_path = index_path.with_suffix(f".{os.getpid()}.tmp")
@@ -61,18 +62,26 @@ def _index_write_lock(index_path: Path):
     index_path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = index_path.with_suffix(index_path.suffix + ".lock")
     lock_file = lock_path.open("a+", encoding="utf-8")
+    locked = False
     try:
         try:
             import fcntl
 
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        except ImportError:
-            fcntl = None
+            locked = True
+        except (ImportError, OSError):
+            # No fcntl (e.g. Windows) or locking unsupported on this filesystem:
+            # degrade to no cross-process lock rather than failing the write.
+            locked = False
         yield
     finally:
         try:
-            if "fcntl" in locals() and fcntl is not None:
+            if locked:
+                import fcntl
+
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        except (ImportError, OSError):
+            pass
         finally:
             lock_file.close()
 

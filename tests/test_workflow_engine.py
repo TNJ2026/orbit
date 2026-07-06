@@ -899,5 +899,132 @@ class AutoRunnerTests(unittest.TestCase):
             )
 
 
+class RerunTests(unittest.TestCase):
+    def _team(self):
+        team = [dict(m) for m in TEAM]
+        for m in team:
+            m["runner_command"] = "cat"
+        return team
+
+    def test_rerun_blocked_step_dispatches_to_chosen_agent(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, team=self._team())
+            task_id = h.create_task()
+            server.start_workflow_task(h.store, tmp, "hub-agent", task_id)
+            server.advance_workflow_task(
+                h.store, tmp, "hub-agent", task_id, "intake", "blocked", "stuck"
+            )
+            self.assertEqual("blocked", h.task(task_id)["task_status"])
+
+            result = server.rerun_workflow_step(h.store, tmp, task_id, "codex")
+
+            self.assertEqual("intake", result["step"])
+            self.assertEqual("codex", result["assignee"])
+            self.assertTrue(result["reran"])
+            transitions = h.store.list_task_transitions(task_id)
+            redispatched = [
+                t["note"] for t in transitions
+                if t["outcome"] == "dispatched" and t["to_step"] == "intake"
+            ]
+            self.assertIn("codex", redispatched)
+            self.assertNotEqual("blocked", h.task(task_id)["task_status"])
+
+    def test_rerun_refuses_when_a_run_is_in_progress(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, team=self._team())
+            task_id = h.create_task()
+            server.start_workflow_task(h.store, tmp, "hub-agent", task_id)
+            # A runner is still in flight for this task's step.
+            h.store.create_task_run(task_id, worker="hub-agent", status="running")
+
+            with self.assertRaises(InvalidInputError) as ctx:
+                server.rerun_workflow_step(h.store, tmp, task_id, "codex")
+            self.assertIn("already in progress", str(ctx.exception))
+
+    def test_rerun_unknown_agent_without_runner_is_rejected(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, team=self._team())
+            task_id = h.create_task()
+            server.start_workflow_task(h.store, tmp, "hub-agent", task_id)
+            server.advance_workflow_task(
+                h.store, tmp, "hub-agent", task_id, "intake", "blocked", "stuck"
+            )
+            with mock.patch.dict(server._DEFAULT_RUNNER_COMMANDS, {}, clear=True):
+                with self.assertRaises(InvalidInputError) as ctx:
+                    server.rerun_workflow_step(h.store, tmp, task_id, "nobody")
+            self.assertIn("no runner command", str(ctx.exception))
+
+
+class MarkTaskRunningTests(unittest.TestCase):
+    def _set_status(self, store, task_id, status):
+        store.set_task_workflow_state(task_id, task_status=status)
+
+    def test_run_start_marks_task_and_parent_goal_in_progress(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            goal_id = h.create_task(title="goal")
+            sub_id = h.create_task(title="sub")
+            # Link sub -> goal and flag goal.
+            h.store._conn.execute(
+                "UPDATE tasks SET is_goal = 1 WHERE id = ?", (goal_id,)
+            )
+            h.store._conn.execute(
+                "UPDATE tasks SET parent_task_id = ? WHERE id = ?", (goal_id, sub_id)
+            )
+            h.store._conn.commit()
+            self._set_status(h.store, goal_id, "created")
+            self._set_status(h.store, sub_id, "assigned")
+
+            server._mark_task_running(h.store, sub_id)
+
+            self.assertEqual("in_progress", h.task(sub_id)["task_status"])
+            self.assertEqual("in_progress", h.task(goal_id)["task_status"])
+
+    def test_terminal_parent_is_not_reopened(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            goal_id = h.create_task(title="goal")
+            sub_id = h.create_task(title="sub")
+            h.store._conn.execute(
+                "UPDATE tasks SET is_goal = 1 WHERE id = ?", (goal_id,)
+            )
+            h.store._conn.execute(
+                "UPDATE tasks SET parent_task_id = ? WHERE id = ?", (goal_id, sub_id)
+            )
+            h.store._conn.commit()
+            self._set_status(h.store, goal_id, "accepted")
+            self._set_status(h.store, sub_id, "blocked")
+
+            server._mark_task_running(h.store, sub_id)
+
+            self.assertEqual("in_progress", h.task(sub_id)["task_status"])
+            self.assertEqual("accepted", h.task(goal_id)["task_status"])
+
+
+class UnlimitedConcurrencyTests(unittest.TestCase):
+    def _member(self, max_concurrent):
+        return {
+            "agent_name": "solo",
+            "role_id": "hub",
+            "enabled": True,
+            "expertise_level": 3,
+            "max_concurrent_tasks": max_concurrent,
+            "capabilities": [],
+        }
+
+    def test_unlimited_member_never_excluded_on_load(self):
+        ranked = server.rank_assignment_candidates(
+            {"role_required": "hub"}, [self._member(0)], {"solo": 5}, role_id="hub"
+        )
+        self.assertIsNotNone(ranked.get("selected"))
+        self.assertEqual("solo", ranked["selected"]["agent_name"])
+
+    def test_positive_cap_still_excludes_when_full(self):
+        ranked = server.rank_assignment_candidates(
+            {"role_required": "hub"}, [self._member(1)], {"solo": 1}, role_id="hub"
+        )
+        self.assertIsNone(ranked.get("selected"))
+
+
 if __name__ == "__main__":
     unittest.main()
