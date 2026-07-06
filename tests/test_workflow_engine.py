@@ -718,6 +718,24 @@ class AutoRunnerTests(unittest.TestCase):
                 [{"step": "implement", "assignee": "codex"}], report["dispatched"]
             )
 
+    def test_runner_blocked_verdict_blocks_despite_exit0(self):
+        with TemporaryDirectory() as tmp:
+            team = [dict(m) for m in TEAM]
+            for m in team:
+                m["runner_command"] = "printf 'ran but broke\\nWORKFLOW_OUTCOME: blocked\\n'"
+            h = EngineHarness(tmp, team=team)
+            task_id = h.create_task()
+            h.start(task_id)
+            h.complete("hub-agent", task_id, "intake", "done")
+
+            # implement runner exits 0 but self-reports failure
+            report = server.run_step_worker(
+                h.store, tmp, task_id, self._implement_step(h), self._member(h, "codex")
+            )
+            self.assertEqual("blocked", h.task(task_id)["task_status"])
+            self.assertEqual([], report["dispatched"])
+            self.assertEqual("failed", h.store.list_task_runs(task_id)[0]["status"])
+
     def test_reviewer_runner_default_verdict_advances(self):
         with TemporaryDirectory() as tmp:
             team = [dict(m) for m in TEAM]

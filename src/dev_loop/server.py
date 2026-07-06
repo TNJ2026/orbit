@@ -1701,7 +1701,7 @@ def _tail(text: str, limit: int) -> str:
 
 
 _VERDICT_RE = re.compile(
-    r"WORKFLOW_OUTCOME\s*[:=]\s*(done|rework)", re.IGNORECASE
+    r"WORKFLOW_OUTCOME\s*[:=]\s*(done|rework|blocked)", re.IGNORECASE
 )
 
 
@@ -1747,13 +1747,18 @@ def _build_step_prompt(
         if goal_contract
         else "完成后在输出的最后打印一段简短总结：一行结论 + 产物文件路径。"
     )
-    if can_rework and not goal_contract:
+    if not goal_contract:
         final_instruction += (
-            "\n\n本步骤可以打回返工。请在输出的最后单独用一行给出裁决：\n"
-            "`WORKFLOW_OUTCOME: done`（通过，进入下一步）或\n"
-            "`WORKFLOW_OUTCOME: rework`（不通过，打回上一步返工），其后可附一行原因。\n"
-            "不写该行则默认视为 done。"
+            "\n\n请在输出的最后单独用一行给出裁决 `WORKFLOW_OUTCOME: <值>`，其后可附一行原因：\n"
+            "- `done`：本步骤成功完成，进入下一步。\n"
+            "- `blocked`：你无法完成本步骤（缺信息 / 环境损坏 / 依赖未满足 / 测试失败无法修复等），"
+            "主动上报失败，暂停并通知 hub。即使进程正常退出也要用它标记失败。\n"
         )
+        if can_rework:
+            final_instruction += (
+                "- `rework`：本步骤可打回返工（成果不达标），退回上一步重做。\n"
+            )
+        final_instruction += "不写该行则默认视为 done。"
     return (
         f"你是被工作流引擎派发的一次性 worker，以角色 {step['role_id']} 执行"
         f"步骤 '{step['name']}'。当前工作目录就是项目根目录，直接读写文件完成任务。\n"
@@ -1922,16 +1927,18 @@ def run_step_worker(
             if status == "timeout":
                 pass
             elif exit_code == 0:
-                status = "succeeded"
                 result = _tail(stdout, 4000) or "runner finished with no output"
-                # A runner on a rework-capable step (e.g. review) can send the
-                # task back by printing `WORKFLOW_OUTCOME: rework`; otherwise a
-                # clean exit means done.
-                outcome = (
-                    "rework"
-                    if can_rework and _parse_runner_verdict(stdout) == "rework"
-                    else "done"
-                )
+                # A clean exit defaults to done, but the runner can override via
+                # a `WORKFLOW_OUTCOME:` line: any step may self-report `blocked`
+                # (it ran but the work failed / is stuck); a rework-capable step
+                # (e.g. review) may send the task back with `rework`.
+                verdict = _parse_runner_verdict(stdout)
+                if verdict == "blocked":
+                    outcome, status = "blocked", "failed"
+                elif verdict == "rework" and can_rework:
+                    outcome, status = "rework", "succeeded"
+                else:
+                    outcome, status = "done", "succeeded"
             elif stdin_errors:
                 result = f"runner stdin failed: {stdin_errors[-1]}"
             else:
