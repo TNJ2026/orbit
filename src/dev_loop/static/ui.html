@@ -123,50 +123,63 @@
       background: var(--panel);
     }
     .tasks-layout {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) minmax(320px, 0.32fr);
+      display: block;
       height: calc(100vh - 102px);
       min-height: 460px;
       background: var(--bg);
     }
-    .tasks-layout.details-collapsed {
-      grid-template-columns: minmax(0, 1fr) 44px;
-    }
     .tasks-list {
       min-width: 0;
+      height: 100%;
       overflow: auto;
+    }
+    /* Task details as a right slide-over drawer (overlay). */
+    .drawer-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.35);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.18s ease;
+      z-index: 40;
+    }
+    .drawer-backdrop.open {
+      opacity: 1;
+      pointer-events: auto;
     }
     .task-details {
-      min-width: 0;
-      overflow: auto;
-      border-left: 1px solid var(--line);
+      position: fixed;
+      top: 0;
+      right: 0;
+      height: 100vh;
+      width: min(560px, 94vw);
       background: var(--panel);
-      padding: 14px 16px;
+      border-left: 1px solid var(--line);
+      box-shadow: -6px 0 24px rgba(0, 0, 0, 0.18);
+      padding: 14px 18px;
+      overflow: auto;
+      transform: translateX(100%);
+      transition: transform 0.2s ease;
+      z-index: 41;
     }
-    .tasks-layout.details-collapsed .task-details {
-      padding: 10px 6px;
-      overflow: hidden;
+    .task-details.open {
+      transform: translateX(0);
     }
     .task-details-toggle {
-      width: 28px;
-      height: 28px;
-      min-height: 28px;
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      width: 30px;
+      height: 30px;
+      min-height: 30px;
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      margin-bottom: 10px;
-      align-self: flex-start;
-      border-radius: 4px;
+      border-radius: 6px;
       padding: 0;
-      font-size: 16px;
+      font-size: 18px;
       cursor: pointer;
-    }
-    .tasks-layout.details-collapsed .task-detail-content {
-      display: none;
-    }
-    .tasks-layout.details-collapsed .task-details-toggle {
-      margin-bottom: 0;
-      align-self: center;
+      z-index: 1;
     }
     .task-detail-title {
       display: flex;
@@ -979,11 +992,12 @@
       </div>
       <div id="tasksLayout" class="tasks-layout">
         <div id="tasksList" class="tasks-list"></div>
-        <aside id="taskDetails" class="task-details empty">
-          <button id="toggleTaskDetails" class="task-details-toggle" type="button">›</button>
-          <div id="taskDetailContent" class="task-detail-content">No task selected.</div>
-        </aside>
       </div>
+      <div id="taskDetailsBackdrop" class="drawer-backdrop"></div>
+      <aside id="taskDetails" class="task-details empty">
+        <button id="toggleTaskDetails" class="task-details-toggle" type="button" title="Close">×</button>
+        <div id="taskDetailContent" class="task-detail-content">No task selected.</div>
+      </aside>
     </div>
     <div id="toolsPage" class="page tools-page">
       <div class="pane-head">
@@ -1128,19 +1142,15 @@
       renderTaskDetails(null);
     }
 
-    function applyTaskDetailsCollapsed() {
-      $("tasksLayout").classList.toggle("details-collapsed", state.taskDetailsCollapsed);
-      $("toggleTaskDetails").textContent = state.taskDetailsCollapsed ? "‹" : "›";
-      $("toggleTaskDetails").title = state.taskDetailsCollapsed ? "Expand details" : "Collapse details";
-      localStorage.setItem(
-        "devloop-task-details-collapsed",
-        state.taskDetailsCollapsed ? "1" : "0"
-      );
+    function openTaskDrawer() {
+      $("taskDetails").classList.add("open");
+      $("taskDetailsBackdrop").classList.add("open");
     }
 
-    function toggleTaskDetails() {
-      state.taskDetailsCollapsed = !state.taskDetailsCollapsed;
-      applyTaskDetailsCollapsed();
+    function closeTaskDrawer() {
+      $("taskDetails").classList.remove("open");
+      $("taskDetailsBackdrop").classList.remove("open");
+      state.selectedTaskId = null;  // stop the poll from reloading a hidden drawer
     }
 
     function setStatus(text, isError = false) {
@@ -2505,8 +2515,7 @@
       if (!task) return;
       if (state.selectedTaskId !== taskId) state.rerunAgent = null;  // reset picker per task
       state.selectedTaskId = taskId;
-      state.taskDetailsCollapsed = false;
-      applyTaskDetailsCollapsed();
+      openTaskDrawer();
       renderTaskDetails(task);
       run(async () => {
         await loadTaskRuns(taskId);
@@ -2515,11 +2524,15 @@
 
     function renderTaskDetails(task) {
       if (!task) {
-        $("taskDetails").className = "task-details empty";
+        $("taskDetails").classList.add("empty");  // keep .open so the drawer stays put
         $("taskDetailContent").textContent = "No task selected.";
         return;
       }
-      $("taskDetails").className = "task-details";
+      // Preserve the open run log's scroll position across the 5s poll re-render
+      // so a background refresh doesn't jump the drawer back to the top.
+      const prevScrolled = document.querySelector("#taskDetails .run-file-content");
+      const prevScrollTop = prevScrolled ? prevScrolled.scrollTop : 0;
+      $("taskDetails").classList.remove("empty");
       // Re-run agent picker. Default to an agent other than the one that just
       // failed; but keep the user's own choice across the 5s poll re-render
       // (state.rerunAgent), so a background refresh can't silently reset the
@@ -2584,6 +2597,8 @@
           ${renderTaskRuns()}
         </div>
       `;
+      const nowScrolled = document.querySelector("#taskDetails .run-file-content");
+      if (nowScrolled && prevScrollTop) nowScrolled.scrollTop = prevScrollTop;
     }
 
     function formatRunFileContent(fileKey, content) {
@@ -2689,7 +2704,11 @@
     $("addTeamMember").addEventListener("click", addTeamMember);
     $("addWorkflowStep").addEventListener("click", addWorkflowStep);
     $("autoArrangeWorkflow").addEventListener("click", autoArrangeWorkflow);
-    $("toggleTaskDetails").addEventListener("click", toggleTaskDetails);
+    $("toggleTaskDetails").addEventListener("click", closeTaskDrawer);
+    $("taskDetailsBackdrop").addEventListener("click", closeTaskDrawer);
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && $("taskDetails").classList.contains("open")) closeTaskDrawer();
+    });
     $("toolsTab").addEventListener("click", () => setPage("tools"));
     $("teamTab").addEventListener("click", () => setPage("team"));
     $("workflowTab").addEventListener("click", () => setPage("workflow"));
@@ -2710,7 +2729,6 @@
     $("tasksTab").addEventListener("click", () => setPage("tasks"));
 
     run(async () => {
-      applyTaskDetailsCollapsed();
       await refreshWorkspace();
       setStatus("Ready");
     });
