@@ -148,15 +148,25 @@
       overflow: hidden;
     }
     .task-details-toggle {
-      width: 100%;
+      width: 28px;
+      height: 28px;
       min-height: 28px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
       margin-bottom: 10px;
+      align-self: flex-start;
+      border-radius: 4px;
+      padding: 0;
+      font-size: 16px;
+      cursor: pointer;
     }
     .tasks-layout.details-collapsed .task-detail-content {
       display: none;
     }
     .tasks-layout.details-collapsed .task-details-toggle {
       margin-bottom: 0;
+      align-self: center;
     }
     .task-detail-title {
       display: flex;
