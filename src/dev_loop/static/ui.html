@@ -1080,6 +1080,13 @@
         $(`${name}Page`).classList.toggle("active", name === page);
         $(`${name}Tab`).classList.toggle("active", name === page);
       });
+      // Edges are measured from node heights (offsetHeight). When the workflow
+      // page is rendered while hidden those read 0, so the initial geometry is
+      // wrong until a later re-render. Redraw once the page is visible and laid
+      // out, on the next frame.
+      if (page === "workflow" && $("wfEdges")) {
+        requestAnimationFrame(() => drawEdges());
+      }
     }
 
     async function api(path, options = {}, base = state.apiBase) {
