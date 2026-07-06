@@ -1278,11 +1278,12 @@
         roleSelect.value = missingRoles[0];
       }
       const prevAgent = agentSelect.value;
-      const toolsSorted = [...state.tools].sort((a, b) => Number(b.installed) - Number(a.installed));
-      agentSelect.innerHTML = toolsSorted.length ? toolsSorted.map(tool => `
-        <option value="${escapeHtml(tool.agent_name)}">${escapeHtml(tool.agent_name)} - ${escapeHtml(tool.profile_name ? "Hermes" : tool.name)}${tool.installed ? "" : " (not installed)"}</option>
-      `).join("") : `<option value="">No agents</option>`;
-      if (prevAgent && state.tools.some(tool => tool.agent_name === prevAgent)) {
+      // Only installed agents can actually run, so don't offer the rest.
+      const installedTools = state.tools.filter(tool => tool.installed);
+      agentSelect.innerHTML = installedTools.length ? installedTools.map(tool => `
+        <option value="${escapeHtml(tool.agent_name)}">${escapeHtml(tool.agent_name)} - ${escapeHtml(tool.profile_name ? "Hermes" : tool.name)}</option>
+      `).join("") : `<option value="">No installed agents</option>`;
+      if (prevAgent && installedTools.some(tool => tool.agent_name === prevAgent)) {
         agentSelect.value = prevAgent;
       }
       $("teamRequirements").textContent = missingRoles.length
