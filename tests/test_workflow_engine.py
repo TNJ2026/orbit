@@ -1286,19 +1286,36 @@ class TaskHealthCheckTests(unittest.TestCase):
             # same unchanged problem is not re-alerted
             self.assertEqual([], server.check_task_health(h.store, tmp))
 
-    def test_orphaned_in_progress_alerts_and_dedupes(self):
+    def test_orphaned_with_undispatched_next_step_is_blocked(self):
+        # intake done -> implement should have been dispatched but was not
+        # (advance interrupted). Recover to blocked at implement, visible/rerunnable.
         with TemporaryDirectory() as tmp:
             h = EngineHarness(tmp)
             tid = h.create_task()
-            # dispatched then finished -> no active step, but marked in_progress
             h.store.record_task_transition(tid, "", "intake", "hub-agent", "dispatched", "hub-agent")
-            h.store.record_task_transition(tid, "intake", "", "hub-agent", "done", "")
+            h.store.record_task_transition(tid, "intake", "implement", "hub-agent", "done", "")
             h.store.set_task_workflow_state(tid, task_status="in_progress")
 
             alerts = server.check_task_health(h.store, tmp)
             self.assertEqual(1, len(alerts))
-            self.assertEqual("orphaned in_progress", alerts[0]["problem"])
+            self.assertEqual("orphaned -> blocked", alerts[0]["problem"])
+            self.assertEqual("implement", alerts[0]["step"])
+            self.assertEqual("blocked", h.task(tid)["task_status"])
+            self.assertEqual("implement", h.task(tid)["workflow_step"])
+            # now blocked -> no longer matches, not re-processed
             self.assertEqual([], server.check_task_health(h.store, tmp))
+
+    def test_orphaned_after_terminal_done_is_closed(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            tid = h.create_task()
+            h.store.record_task_transition(tid, "", "accept", "hub-agent", "dispatched", "hub-agent")
+            h.store.record_task_transition(tid, "accept", "", "hub-agent", "done", "")
+            h.store.set_task_workflow_state(tid, task_status="in_progress")
+
+            alerts = server.check_task_health(h.store, tmp)
+            self.assertEqual("orphaned -> closed", alerts[0]["problem"])
+            self.assertEqual("closed", h.task(tid)["task_status"])
 
     def test_undispatched_rework_alerts_and_dedupes(self):
         with TemporaryDirectory() as tmp:

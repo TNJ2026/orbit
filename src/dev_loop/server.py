@@ -2432,7 +2432,11 @@ def _check_task_health_locked(
                     })
 
         # C. A non-goal task claims to be in progress but has no active step and
-        # no run in flight — orphaned (e.g. its runner was killed mid-flight).
+        # no run in flight — orphaned (e.g. an advance recorded a step done but
+        # was killed before dispatching the next step). Recover it into a
+        # visible, re-runnable state instead of an invisible limbo: block it at
+        # the step the advance meant to reach (shows in the Blocked column and
+        # Re-run can target it), or close it if that step was terminal.
         if (
             not task.get("is_goal")
             and task.get("task_status") == "in_progress"
@@ -2440,19 +2444,34 @@ def _check_task_health_locked(
             and not active
             and not _task_has_running_run(store, task_id)
         ):
-            latest = max(transitions, key=lambda t: t["id"])
-            if latest["outcome"] != "health_alert":
+            last_settle = max(
+                (t for t in transitions if t["outcome"] in ("done", "rework")),
+                key=lambda t: t["id"], default=None,
+            )
+            stalled_step = (last_settle or {}).get("to_step", "")
+            if stalled_step and stalled_step in steps:
                 store.record_task_transition(
-                    task_id, "", "", WORKFLOW_ENGINE_AGENT, "health_alert",
-                    "in_progress but no active step and no run in progress",
+                    task_id, "", stalled_step, WORKFLOW_ENGINE_AGENT, "blocked",
+                    "orphaned: advance interrupted before dispatching this step",
+                )
+                store.set_task_workflow_state(
+                    task_id, workflow_step=stalled_step, task_status="blocked"
                 )
                 notice = _notify_hub(
                     store, members,
-                    f"Task #{task_id} reads in_progress but has no active step and "
-                    "nothing running — likely orphaned. Re-run or close it.",
+                    f"Task #{task_id} was orphaned (advance interrupted at "
+                    f"'{stalled_step}'); marked blocked. Re-run it or close it.",
                 )
+                alerts.append({"task_id": task_id, "step": stalled_step,
+                               "problem": "orphaned -> blocked", "notice": notice})
+            else:
+                # No forward target left — the task really finished; close it.
+                store.set_task_workflow_state(
+                    task_id, workflow_step="", task_status="closed"
+                )
+                _recompute_parent_goal_status(store, task)
                 alerts.append({"task_id": task_id, "step": None,
-                               "problem": "orphaned in_progress", "notice": notice})
+                               "problem": "orphaned -> closed", "notice": ""})
     return alerts
 
 
