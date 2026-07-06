@@ -942,15 +942,30 @@ def _team_role_of(members: list[dict[str, Any]], agent: str) -> str | None:
 _STEP_FINISHING_OUTCOMES = ("done", "rework", "reassigned")
 
 
-def _active_steps(transitions: list[dict[str, Any]]) -> list[str]:
-    dispatched: dict[str, int] = {}
-    finished: dict[str, int] = {}
+def _last_dispatch_and_finish(
+    transitions: list[dict[str, Any]],
+) -> tuple[dict[str, tuple[int, str]], dict[str, int]]:
+    """Per step: the most recent dispatch (id, assignee) and the id of the most
+    recent finishing transition. A step is active when its latest dispatch has
+    no finish after it. Using the LATEST dispatch rather than a dispatch/finish
+    count means a runner killed before it finished (a dispatch with no matching
+    finish) does not phantom-activate the step forever across restarts."""
+    last_dispatch: dict[str, tuple[int, str]] = {}
+    last_finish: dict[str, int] = {}
     for t in transitions:
         if t["outcome"] == "dispatched":
-            dispatched[t["to_step"]] = dispatched.get(t["to_step"], 0) + 1
+            last_dispatch[t["to_step"]] = (t["id"], t.get("note", ""))
         elif t["outcome"] in _STEP_FINISHING_OUTCOMES and t["from_step"]:
-            finished[t["from_step"]] = finished.get(t["from_step"], 0) + 1
-    return [s for s, n in dispatched.items() if n > finished.get(s, 0)]
+            last_finish[t["from_step"]] = t["id"]
+    return last_dispatch, last_finish
+
+
+def _active_steps(transitions: list[dict[str, Any]]) -> list[str]:
+    last_dispatch, last_finish = _last_dispatch_and_finish(transitions)
+    return [
+        step for step, (did, _) in last_dispatch.items()
+        if did > last_finish.get(step, 0)
+    ]
 
 
 def _workflow_status_for_active_steps(
@@ -964,19 +979,12 @@ def _workflow_status_for_active_steps(
 
 
 def _active_step_assignees(transitions: list[dict[str, Any]]) -> dict[str, str]:
-    dispatches: dict[str, list[str]] = {}
-    finished: dict[str, int] = {}
-    for t in transitions:
-        if t["outcome"] == "dispatched":
-            dispatches.setdefault(t["to_step"], []).append(t.get("note", ""))
-        elif t["outcome"] in _STEP_FINISHING_OUTCOMES and t["from_step"]:
-            finished[t["from_step"]] = finished.get(t["from_step"], 0) + 1
-    active: dict[str, str] = {}
-    for step, assignees in dispatches.items():
-        remaining = assignees[finished.get(step, 0):]
-        if remaining:
-            active[step] = remaining[-1]
-    return active
+    last_dispatch, last_finish = _last_dispatch_and_finish(transitions)
+    return {
+        step: assignee
+        for step, (did, assignee) in last_dispatch.items()
+        if did > last_finish.get(step, 0)
+    }
 
 
 def _latest_rework_transition_id(transitions: list[dict[str, Any]]) -> int:

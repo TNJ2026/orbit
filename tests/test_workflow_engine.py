@@ -1195,6 +1195,36 @@ class UnlimitedConcurrencyTests(unittest.TestCase):
         self.assertIsNone(ranked.get("selected"))
 
 
+class ActiveStepLedgerTests(unittest.TestCase):
+    def _tx(self, h, tid, from_step, to_step, outcome, note=""):
+        h.store.record_task_transition(tid, from_step, to_step, "codex", outcome, note)
+
+    def test_killed_runner_extra_dispatch_does_not_phantom_activate(self):
+        # A dispatch whose runner was killed (no finishing transition) followed
+        # by a re-dispatch that DID finish must not leave the step active.
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            tid = h.create_task()
+            self._tx(h, tid, "", "implement", "dispatched", "codex")  # killed run
+            self._tx(h, tid, "", "implement", "dispatched", "codex")  # re-dispatch
+            self._tx(h, tid, "implement", "review", "done")           # finished
+            trans = h.store.list_task_transitions(tid)
+            self.assertNotIn("implement", server._active_steps(trans))
+            self.assertNotIn("implement", server._active_step_assignees(trans))
+
+    def test_latest_dispatch_without_finish_stays_active(self):
+        # A genuinely in-flight (or killed-and-not-yet-recovered) step whose
+        # latest dispatch has no finish after it is still active.
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            tid = h.create_task()
+            self._tx(h, tid, "implement", "review", "done")   # earlier finish
+            self._tx(h, tid, "", "implement", "dispatched", "codex")  # re-dispatched, not finished
+            trans = h.store.list_task_transitions(tid)
+            self.assertIn("implement", server._active_steps(trans))
+            self.assertEqual("codex", server._active_step_assignees(trans)["implement"])
+
+
 class ExplicitReworkEdgeTests(unittest.TestCase):
     STEPS = [
         {"id": "intake", "name": "Intake", "role_id": "hub", "task_status": "created", "required": True},
