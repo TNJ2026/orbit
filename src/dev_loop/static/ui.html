@@ -2338,6 +2338,7 @@
           method: "POST",
           body: JSON.stringify({ agent })
         });
+        state.rerunAgent = null;  // consumed; next open defaults again
         setStatus(`Re-running #${taskId} step "${data.step}" with ${data.assignee}`);
         await loadTasks();
         await loadTaskRuns(taskId);
@@ -2490,6 +2491,7 @@
         }
       }
       if (!task) return;
+      if (state.selectedTaskId !== taskId) state.rerunAgent = null;  // reset picker per task
       state.selectedTaskId = taskId;
       state.taskDetailsCollapsed = false;
       applyTaskDetailsCollapsed();
@@ -2506,10 +2508,15 @@
         return;
       }
       $("taskDetails").className = "task-details";
-      // For the blocked re-run picker: default to an agent other than the one
-      // that just failed, so a click actually switches models.
+      // Re-run agent picker. Default to an agent other than the one that just
+      // failed; but keep the user's own choice across the 5s poll re-render
+      // (state.rerunAgent), so a background refresh can't silently reset the
+      // dropdown to the default before they click Re-run.
       const rerunAgents = (state.tools || []).map(tool => tool.agent_name);
-      const defaultRerunAgent = rerunAgents.find(name => name !== task.assignee) || rerunAgents[0] || "";
+      const defaultRerunAgent =
+        (state.rerunAgent && rerunAgents.includes(state.rerunAgent))
+          ? state.rerunAgent
+          : (rerunAgents.find(name => name !== task.assignee) || rerunAgents[0] || "");
       $("taskDetailContent").innerHTML = `
         <div class="task-detail-title">
           <span>${escapeHtml(task.title || "#" + task.id + " Task")}</span>
@@ -2547,7 +2554,7 @@
           <div class="rerun-box">
             <div class="meta">Re-run this step with a chosen agent (model):</div>
             <div class="row" style="gap: 6px; margin-top: 4px;">
-              <select id="rerunAgentSelect">
+              <select id="rerunAgentSelect" onchange="state.rerunAgent = this.value">
                 ${rerunAgents.length
                   ? rerunAgents.map(name => `<option value="${escapeHtml(name)}"${name === defaultRerunAgent ? " selected" : ""}>${escapeHtml(name)}</option>`).join("")
                   : `<option value="">No agents available</option>`}
