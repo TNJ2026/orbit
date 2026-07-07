@@ -45,6 +45,47 @@ uv run dev-loop serve --port 9000 --db /tmp/test.db
 
 每个 daemon 启动时会把当前项目写入 `~/.dev_loop/projects/index.json`。任意一个项目的 `/ui` 都能从这个索引里看到其它项目 daemon：在线项目可以直接在顶部 Project 下拉框切换；离线项目只显示元数据，需要先在该项目目录启动对应 daemon。跨项目 UI 只是聚合视图，写操作仍发到被选中项目自己的 daemon。
 
+## 工作流执行：serve + runner
+
+工作流引擎分成两个独立进程，**都要起**才能让任务真正跑起来：
+
+| 进程 | 命令 | 职责 |
+|---|---|---|
+| **serve**(UI / Scheduler) | `dev-loop serve` | 服务 Web UI + MCP + REST；把"要执行某 step"写入 `run_jobs` 队列；单点 Scheduler 消费执行完的 job 并推进工作流（dispatch / rework / accept）；跑 timeout / health 兜底。**不执行 runner command。** |
+| **runner**(Worker) | `dev-loop runner` | 从 `run_jobs` 领取任务（带租约 + 心跳）、执行各 agent 的 CLI、流式记录 stdout/stderr、解析 outcome，把结果写回 job。**可多实例。** |
+
+```bash
+# 终端 1：UI / 调度
+dev-loop serve
+
+# 终端 2:执行器（从当前项目目录启动，靠 cwd 解析项目库；或用 --project 指定）
+dev-loop runner --name runner-local
+```
+
+> ⚠️ **只起 serve 不起 runner，队列里的 job 会一直 pending、工作流不动。** UI 的 **Jobs** 标签页能看到队列状态(pending / running / finished / done)。
+
+**job 生命周期：** `pending → running`（runner 领取）`→ finished`（runner 执行完、报告 outcome）`→ done`（scheduler 推进下一步）。
+
+**serve 重启不杀在途任务**：run 活在 runner 进程里，serve 重启只是调度暂停，runner 照跑。
+
+### 多实例 runner
+
+runner 是无状态 worker，可以按 agent / 角色拆分、并行：
+
+```bash
+dev-loop runner --roles implementer --max-concurrency 2   # 2 个并行实现 worker
+dev-loop runner --roles reviewer --agent antigravity      # 只跑 antigravity 的评审
+dev-loop runner --project /path/to/repo --name box-a       # 显式指定项目
+```
+
+- `--agent NAME`（可重复）：只领分给该 agent 的 job。
+- `--roles a,b`：只领这些工作流角色的 job（按 workflow 配置把角色解析成 step）。
+- `--max-concurrency N`：并行跑 N 个 job（各 worker 独立租约名 `<name>-0/-1/…`）。
+- `--project PATH`：显式项目根，替代 cwd 解析。
+- `--once`：领到一个跑完就退出（适合脚本 / CI）。
+
+领取是 DB 层原子操作(`UPDATE ... WHERE status=... AND lease<=now`),多 runner 并存不会重复领同一个 job;某 runner 挂了,租约到期后 job 被别的 runner 重新领走。
+
 ## 客户端接入
 
 ### Claude Code
@@ -172,6 +213,8 @@ asyncio.run(main())
 - 用 Analyze / Implement / Review / Test 模板发送编程任务，或按 `reply_to` 回复
 - 标记任务状态
 - 对已 claim 的消息执行 ack
+- **Jobs** 标签页：查看 `run_jobs` 执行队列（status / outcome / 领取者 / 租约到期），确认 runner 在正常消费
+- **Goals** 标签页：查看 goal 进度、子树 token 消耗，可 **Force End** 强制结束(杀该 goal 全部在跑 runner + 关整树)
 
 UI 只通过 `/api/*` JSON route 访问本地 store。直接查看消息列表不会领取消息；只有点击 Claim inbox 才会创建租约。
 
