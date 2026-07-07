@@ -2303,10 +2303,13 @@
         done: { name: "Done", class: "done", tasks: [] }
       };
 
-      // Goals and business subtasks live on the Goals page; the board shows
-      // only workflow execution cards.
+      // The board shows the real tasks — standalone tasks and a goal's business
+      // subtasks — one card each, moving through columns as their workflow
+      // advances. Goals live on the Goals page; step cards (a task's per-step
+      // execution) are hidden here and listed inside the task's detail instead.
       (state.tasks || []).forEach(task => {
-        if (task.is_goal || !task.parent_task_id || task.source_message_id) return;
+        if (task.is_goal) return;
+        if (task.parent_task_id && !task.source_message_id) return;  // step card
         const colId = COLUMN_MAP[task.task_status] || "todo";
         columns[colId].tasks.push(task);
       });
@@ -2643,6 +2646,28 @@
           <div class="meta">role: ${escapeHtml(task.role_required || "implementer")}</div>
           <div class="meta">agent: ${escapeHtml(task.assignee || "unassigned")}</div>
         </div>
+        ${(() => {
+          const cards = (state.tasks || [])
+            .filter(t => t.parent_task_id === task.id && !t.source_message_id)
+            .sort((a, b) => a.id - b.id);
+          if (!cards.length) return "";
+          return `
+        <div class="task-runs">
+          <div class="row" style="justify-content: space-between;">
+            <strong>Steps</strong><span class="meta">${cards.length}</span>
+          </div>
+          <table class="jobs-table">
+            <tbody>
+              ${cards.map(c => `
+                <tr onclick="showTaskDetails(${c.id})" style="cursor: pointer;">
+                  <td>#${escapeHtml(c.display_id || String(c.id))}</td>
+                  <td>${escapeHtml(c.workflow_step || c.title || "")}</td>
+                  <td><span class="badge">${escapeHtml(c.task_status || "")}</span></td>
+                </tr>`).join("")}
+            </tbody>
+          </table>
+        </div>`;
+        })()}
         <div class="task-runs">
           <div class="row" style="justify-content: space-between;">
             <strong>Runs</strong>
