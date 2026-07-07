@@ -725,7 +725,9 @@ class AutoRunnerTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             team = [dict(m) for m in TEAM]
             for m in team:
-                m["runner_command"] = "printf 'looks off\\nWORKFLOW_OUTCOME: rework\\n'"
+                m["max_concurrent_tasks"] = 0
+                if m["agent_name"] == "rev":
+                    m["runner_command"] = "printf 'looks off\\nWORKFLOW_OUTCOME: rework\\n'"
             h = EngineHarness(tmp, team=team)
             task_id = h.create_task()
             h.start(task_id)
@@ -763,7 +765,9 @@ class AutoRunnerTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             team = [dict(m) for m in TEAM]
             for m in team:
-                m["runner_command"] = "echo lgtm"  # no verdict line -> done
+                m["max_concurrent_tasks"] = 0
+                if m["agent_name"] == "rev":
+                    m["runner_command"] = "echo lgtm"  # no verdict line -> done
             h = EngineHarness(tmp, team=team)
             task_id = h.create_task()
             h.start(task_id)
@@ -900,17 +904,35 @@ class AutoRunnerTests(unittest.TestCase):
                 self._run_event_types(run),
             )
 
-    def test_dispatch_spawns_worker_only_when_runner_command_exists(self):
-        spawn = server._spawn_step_worker  # module-level mock
+    def test_dispatch_queues_runner_job_only_when_runner_command_exists(self):
         with TemporaryDirectory() as tmp:
             h = EngineHarness(tmp, team=self._team_with_runner())
             task_id = h.create_task()
-            spawn.reset_mock()
             h.start(task_id)  # intake -> hub-agent, no default runner
-            self.assertEqual(0, spawn.call_count)
+            self.assertEqual([], h.store.list_run_jobs(status="all"))
             h.complete("hub-agent", task_id, "intake", "done")  # -> codex, explicit runner
-            self.assertEqual(1, spawn.call_count)
-            self.assertEqual("implement", spawn.call_args.args[3]["id"])
+            jobs = h.store.list_run_jobs(status="all")
+            self.assertEqual(1, len(jobs))
+            self.assertEqual("pending", jobs[0]["status"])
+            self.assertEqual("implement", jobs[0]["step"])
+            self.assertEqual("codex", jobs[0]["assignee"])
+
+    def test_runner_server_claims_job_and_advances_step(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, team=self._team_with_runner("echo done"))
+            task_id = h.create_task()
+            h.start(task_id)
+            h.complete("hub-agent", task_id, "intake", "done")
+
+            result = server.run_queued_job(h.store, tmp, runner_name="runner-1")
+
+            self.assertIsNotNone(result)
+            self.assertEqual("done", result["status"])
+            self.assertEqual([{"step": "review", "assignee": "rev"}], result["report"]["dispatched"])
+            jobs = h.store.list_run_jobs(status="all")
+            self.assertEqual("done", jobs[0]["status"])
+            runs = h.store.list_task_runs(task_id)
+            self.assertEqual("succeeded", runs[0]["status"])
 
     def test_goal_step_run_recorded_on_step_card(self):
         with TemporaryDirectory() as tmp:
@@ -1193,6 +1215,41 @@ class UnlimitedConcurrencyTests(unittest.TestCase):
             {"role_required": "hub"}, [self._member(1)], {"solo": 1}, role_id="hub"
         )
         self.assertIsNone(ranked.get("selected"))
+
+
+class RunJobLeaseTests(unittest.TestCase):
+    def _job(self, h):
+        tid = h.create_task()
+        return h.store.create_run_job(tid, "implement", "codex", "echo x", "")
+
+    def test_renew_keeps_lease_and_blocks_reclaim(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            job = self._job(h)
+            claimed = h.store.claim_next_run_job("runner-1", lease_seconds=300)
+            self.assertEqual(job["id"], claimed["id"])
+            # a fresh lease keeps another runner from claiming it
+            self.assertIsNone(h.store.claim_next_run_job("runner-2", lease_seconds=300))
+            # the heartbeat renews the lease (still owned by runner-1)
+            self.assertTrue(h.store.renew_run_job(job["id"], "runner-1", 300))
+            self.assertIsNone(h.store.claim_next_run_job("runner-2", lease_seconds=300))
+
+    def test_expired_lease_is_reclaimed_by_another_runner(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            job = self._job(h)
+            h.store.claim_next_run_job("runner-1", lease_seconds=300)
+            # no heartbeat -> the lease expires
+            h.store._conn.execute(
+                "UPDATE run_jobs SET leased_until = ? WHERE id = ?",
+                ("2000-01-01T00:00:00+00:00", job["id"]),
+            )
+            h.store._conn.commit()
+            stolen = h.store.claim_next_run_job("runner-2", lease_seconds=300)
+            self.assertEqual(job["id"], stolen["id"])
+            self.assertEqual("runner-2", stolen["claimed_by"])
+            # the old owner can no longer renew what it lost
+            self.assertFalse(h.store.renew_run_job(job["id"], "runner-1", 300))
 
 
 class ForceCloseTests(unittest.TestCase):

@@ -1271,6 +1271,11 @@ def _complete_goal_intake_locked(
     # Settle the goal's own intake card and record the intake before dispatching
     # the business subtasks — subtask dispatch can raise, and if it did after
     # this point the intake card would be left stuck in_progress forever.
+    store.cancel_pending_run_jobs(
+        goal["id"],
+        step["id"],
+        f"goal intake settled by {actor}",
+    )
     store.record_task_transition(goal["id"], step["id"], "", actor, "done", result)
     store.set_task_workflow_state(
         goal["id"], workflow_step="", task_status="in_progress"
@@ -1398,8 +1403,16 @@ def _dispatch_step(
     )
     if _materializes_step_cards(task):
         _upsert_step_card(store, project_root, task, step, assignee)
-    if _runner_command_for(member):
-        _spawn_step_worker(store, project_root, task_id, step, member, upstream_result)
+    command = _runner_command_for(member)
+    if command:
+        store.create_run_job(
+            task_id,
+            step["id"],
+            assignee,
+            command,
+            upstream_result,
+            note=f"queued runner for step {step['id']}",
+        )
 
 
 def _dispatch_targets(
@@ -1718,6 +1731,11 @@ def _advance_workflow_task_locked(
             f"agent {agent} is not assigned to active step {step} "
             f"(assigned to {assigned_agent})"
         )
+    store.cancel_pending_run_jobs(
+        task_id,
+        step,
+        f"step settled by {agent} with outcome {outcome}",
+    )
     back = _workflow_graph(cfg)
     forward = [
         e["to"] for e in cfg["edges"]
@@ -2199,6 +2217,113 @@ def _spawn_step_worker(
     threading.Thread(
         target=_worker, name=f"step-runner-{task_id}-{step['id']}", daemon=True
     ).start()
+
+
+def run_queued_job(
+    store: Store,
+    project_root: str | None,
+    runner_name: str,
+    agents: list[str] | None = None,
+    lease_seconds: int = DEFAULT_LEASE_SECONDS,
+    timeout_seconds: float | None = None,
+) -> dict[str, Any] | None:
+    """Runner-server entry point: claim one queued runner job and execute it.
+
+    The UI/API server and scheduler only create run_jobs. A separate runner
+    process calls this function, owns the subprocess lifetime, and records the
+    result through the same run_step_worker path used by the legacy in-process
+    runner.
+    """
+    job = store.claim_next_run_job(
+        runner_name=runner_name,
+        agents=agents,
+        lease_seconds=lease_seconds,
+    )
+    if not job:
+        return None
+    try:
+        task = store.get_task(int(job["task_id"]))
+        if not task:
+            store.finish_run_job(job["id"], "failed", "task no longer exists")
+            return {"job_id": job["id"], "status": "failed", "error": "task missing"}
+        cfg = read_workflow_config(project_root)
+        steps = {s["id"]: s for s in cfg["steps"]}
+        step = steps.get(job["step"])
+        if not step:
+            store.finish_run_job(job["id"], "failed", f"unknown step {job['step']}")
+            return {"job_id": job["id"], "status": "failed", "error": "step missing"}
+        members = read_team_config(project_root)["members"]
+        base = _member_named(members, job["assignee"]) or {}
+        member = {
+            **base,
+            "agent_name": job["assignee"],
+            "role_id": step["role_id"],
+            "enabled": True,
+            "runner_command": job["command"],
+        }
+        # Heartbeat: a long step can outrun the lease; renew it periodically so
+        # another runner does not reclaim this job mid-execution. Renew well
+        # before expiry (a third of the lease).
+        stop_heartbeat = threading.Event()
+
+        def _heartbeat() -> None:
+            interval = max(5.0, lease_seconds / 3)
+            while not stop_heartbeat.wait(interval):
+                try:
+                    store.renew_run_job(job["id"], runner_name, lease_seconds)
+                except Exception:
+                    pass
+
+        heartbeat = threading.Thread(
+            target=_heartbeat, name=f"job-heartbeat-{job['id']}", daemon=True
+        )
+        heartbeat.start()
+        try:
+            report = run_step_worker(
+                store,
+                project_root,
+                int(job["task_id"]),
+                step,
+                member,
+                job.get("upstream_result") or "",
+                timeout_seconds=timeout_seconds,
+            )
+        finally:
+            stop_heartbeat.set()
+            heartbeat.join(timeout=1)
+        status = "failed" if report.get("error") else "done"
+        store.finish_run_job(job["id"], status, str(report.get("error") or ""))
+        return {"job_id": job["id"], "status": status, "report": report}
+    except Exception as exc:
+        store.finish_run_job(job["id"], "failed", repr(exc))
+        raise
+
+
+def runner_loop(
+    store: Store,
+    project_root: str | None,
+    runner_name: str,
+    agents: list[str] | None = None,
+    poll_seconds: float = 2.0,
+    once: bool = False,
+) -> None:
+    """Poll and execute queued run_jobs until interrupted."""
+    while True:
+        result = run_queued_job(
+            store,
+            project_root,
+            runner_name=runner_name,
+            agents=agents,
+        )
+        if result:
+            print(
+                f"runner {runner_name}: job #{result['job_id']} {result['status']}",
+                flush=True,
+            )
+        elif once:
+            return
+        else:
+            time.sleep(max(0.1, float(poll_seconds)))
 
 
 def check_workflow_step_timeouts(
@@ -2797,9 +2922,6 @@ def create_server(
     # atexit hook is the reliable place to checkpoint the WAL and close the
     # connection cleanly.
     atexit.register(store.close)
-    reaped = store.reap_stale_runs()
-    if reaped:
-        print(f"note: marked {reaped} stale running task_run(s) as orphaned", flush=True)
 
     # Step-timeout watchdog: the engine is otherwise purely event-driven, so
     # a dead assignee would leave its step active forever. Daemon thread dies
@@ -3300,6 +3422,18 @@ def create_server(
             return forbidden
         goals = await _to_thread(goals_summary, store)
         return _json(request, {"goals": goals})
+
+    @mcp.custom_route("/api/run-jobs", methods=["GET"])
+    async def api_list_run_jobs(request: Request) -> JSONResponse:
+        if forbidden := _forbid_non_local(request):
+            return forbidden
+        status = request.query_params.get("status", "all")
+        try:
+            limit = _parse_int(request.query_params.get("limit", "100"), "limit")
+            jobs = await _to_thread(store.list_run_jobs, status, limit)
+        except InvalidInputError as exc:
+            return _json_error(str(exc), request=request)
+        return _json(request, {"jobs": jobs})
 
     @mcp.custom_route("/api/goals", methods=["POST"])
     async def api_create_goal(request: Request) -> JSONResponse:

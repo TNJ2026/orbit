@@ -852,6 +852,16 @@
     .badge.leased { color: var(--warn); border-color: #deb16f; }
     .badge.read { color: var(--muted); }
     .badge.installed { color: var(--accent); border-color: #9fc7b9; }
+    .badge.job-pending { color: var(--muted); }
+    .badge.job-running { color: var(--accent); border-color: #9fc7b9; }
+    .badge.job-done { color: var(--muted); border-color: #cdd6d1; }
+    .badge.job-failed { color: var(--danger); border-color: #e0a3a3; }
+    .badge.job-cancelled { color: var(--muted); }
+    .jobs-table-wrap { overflow-x: auto; padding: 0 16px 16px; }
+    .jobs-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .jobs-table th, .jobs-table td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+    .jobs-table th { color: var(--muted); font-weight: 600; }
+    .jobs-table tbody tr:hover { background: var(--bg); }
     .badge.missing { color: var(--muted); }
     .empty, .error {
       padding: 18px 12px;
@@ -953,6 +963,7 @@
     <aside class="side-menu" aria-label="View">
       <button id="goalsTab" class="menu-button" type="button">Goals</button>
       <button id="tasksTab" class="menu-button active" type="button">Tasks</button>
+      <button id="jobsTab" class="menu-button" type="button">Jobs</button>
       <button id="teamTab" class="menu-button" type="button">Team</button>
       <button id="workflowTab" class="menu-button" type="button">Workflow</button>
       <button id="rolesTab" class="menu-button" type="button">Roles</button>
@@ -998,6 +1009,14 @@
         <button id="toggleTaskDetails" class="task-details-toggle" type="button" title="Close">×</button>
         <div id="taskDetailContent" class="task-detail-content">No task selected.</div>
       </aside>
+    </div>
+    <div id="jobsPage" class="page jobs-page">
+      <div class="pane-head">
+        <h2>Run Jobs</h2>
+        <button id="refreshJobs" type="button">Refresh</button>
+      </div>
+      <div class="meta" style="padding: 0 16px 8px;">Queued runner jobs. A runner claims a job (leasing it), heartbeats to keep the lease, and finishes it. An expired lease lets another runner reclaim it.</div>
+      <div id="jobsList"></div>
     </div>
     <div id="toolsPage" class="page tools-page">
       <div class="pane-head">
@@ -1085,7 +1104,7 @@
 
     const $ = (id) => document.getElementById(id);
 
-    const PAGES = ["goals", "tasks", "tools", "team", "workflow", "roles"];
+    const PAGES = ["goals", "tasks", "jobs", "tools", "team", "workflow", "roles"];
     function setPage(page) {
       if (!PAGES.includes(page)) page = "tasks";
       PAGES.forEach(name => {
@@ -1151,6 +1170,11 @@
       $("taskDetails").classList.remove("open");
       $("taskDetailsBackdrop").classList.remove("open");
       state.selectedTaskId = null;  // stop the poll from reloading a hidden drawer
+    }
+
+    function toggleTaskDetails() {
+      if ($("taskDetails").classList.contains("open")) closeTaskDrawer();
+      else openTaskDrawer();
     }
 
     function setStatus(text, isError = false) {
@@ -2407,6 +2431,42 @@
       renderTasksGoalBar();
     }
 
+    async function loadRunJobs() {
+      if (!state.apiBase) {
+        state.runJobs = [];
+        renderRunJobs();
+        return;
+      }
+      const data = await api("/api/run-jobs?limit=100");
+      state.runJobs = data.jobs || [];
+      renderRunJobs();
+    }
+
+    function renderRunJobs() {
+      const jobs = state.runJobs || [];
+      const counts = jobs.reduce((acc, j) => { acc[j.status] = (acc[j.status] || 0) + 1; return acc; }, {});
+      const summary = ["pending", "running", "done", "failed", "cancelled"]
+        .filter(s => counts[s]).map(s => `${counts[s]} ${s}`).join(" · ");
+      $("jobsList").innerHTML = jobs.length ? `
+        <div class="meta" style="padding: 0 16px 8px;">${escapeHtml(summary)}</div>
+        <div class="jobs-table-wrap">
+          <table class="jobs-table">
+            <thead><tr><th>#</th><th>Task · Step</th><th>Assignee</th><th>Status</th><th>Claimed by</th><th>Lease until</th></tr></thead>
+            <tbody>
+              ${jobs.map(j => `
+                <tr onclick="showTaskDetails(${j.task_id})" style="cursor: pointer;">
+                  <td>${j.id}</td>
+                  <td>#${j.task_id} · ${escapeHtml(j.step || "")}</td>
+                  <td>${escapeHtml(j.assignee || "")}</td>
+                  <td><span class="badge job-${escapeHtml(j.status)}">${escapeHtml(j.status)}</span></td>
+                  <td>${escapeHtml(j.claimed_by || "—")}</td>
+                  <td class="meta">${j.leased_until ? fmtTime(j.leased_until) : "—"}</td>
+                </tr>`).join("")}
+            </tbody>
+          </table>
+        </div>` : `<div class="empty">No run jobs.</div>`;
+    }
+
     function goalProgressHtml(goal) {
       const tokens = goal.tokens_total
         ? ` · <span class="meta" title="Tokens consumed across this goal's runs (only counts runners that report usage)">🔢 ${goal.tokens_total.toLocaleString()} tokens</span>`
@@ -2700,6 +2760,7 @@
     wireRefresh("refreshRoles", loadRoles);
     wireRefresh("refreshTasks", loadTasks);
     wireRefresh("refreshGoals", loadGoals);
+    wireRefresh("refreshJobs", loadRunJobs);
     $("addTeamMember").addEventListener("click", addTeamMember);
     $("addWorkflowStep").addEventListener("click", addWorkflowStep);
     $("autoArrangeWorkflow").addEventListener("click", autoArrangeWorkflow);
@@ -2713,6 +2774,7 @@
     $("workflowTab").addEventListener("click", () => setPage("workflow"));
     $("rolesTab").addEventListener("click", () => setPage("roles"));
     $("goalsTab").addEventListener("click", () => setPage("goals"));
+    $("jobsTab").addEventListener("click", () => { setPage("jobs"); loadRunJobs(); });
     $("startGoal").addEventListener("click", createGoal);
     $("goalInput").addEventListener("input", () => {
       localStorage.setItem("devloop-goal", $("goalInput").value);
@@ -2753,6 +2815,7 @@
         if ($("workflowPage").classList.contains("active")) renderWorkflow();
         // Goals feed both the Goals page and the bar above the kanban.
         if ($("goalsPage").classList.contains("active") || $("tasksPage").classList.contains("active")) await loadGoals();
+        if ($("jobsPage").classList.contains("active")) await loadRunJobs();
       } catch (error) {
         // transient poll errors stay silent; manual actions still report
       } finally {
