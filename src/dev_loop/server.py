@@ -622,12 +622,7 @@ def team_locked_reason(store: Store) -> str | None:
     steps: reassignment math, role constraints, and running auto-runners all
     read the team live, so edits mid-flight corrupt routing. Blocked tasks
     do NOT lock — fixing the team is the documented way to unblock them."""
-    busy = [
-        task["id"]
-        for task in store.list_active_workflow_tasks()
-        if task.get("workflow_step")
-        and task.get("task_status") not in ("blocked", "closed")
-    ]
+    busy = _active_workflow_task_ids(store)
     if not busy:
         return None
     ids = ", ".join(f"#{task_id}" for task_id in busy[:10])
@@ -635,6 +630,26 @@ def team_locked_reason(store: Store) -> str | None:
         f"team config is locked while workflow tasks are running ({ids}); "
         "wait for them to finish, or block/close them first"
     )
+
+
+def workflow_locked_reason(store: Store) -> str | None:
+    busy = _active_workflow_task_ids(store)
+    if not busy:
+        return None
+    ids = ", ".join(f"#{task_id}" for task_id in busy[:10])
+    return (
+        f"workflow config is locked while workflow tasks are running ({ids}); "
+        "wait for them to finish, or block/close them first"
+    )
+
+
+def _active_workflow_task_ids(store: Store) -> list[int]:
+    return [
+        task["id"]
+        for task in store.list_active_workflow_tasks()
+        if task.get("workflow_step")
+        and task.get("task_status") not in ("blocked", "closed")
+    ]
 
 
 def _missing_team_roles(members: list[dict[str, Any]]) -> list[str]:
@@ -1798,6 +1813,12 @@ WORKFLOW_TIMEOUT_POLL_SECONDS = 60
 # The scheduler drains finished run jobs; keep latency low so a step's next
 # step dispatches promptly after the runner reports.
 SCHEDULER_POLL_SECONDS = 1.0
+# Per-process name so two UI/scheduler instances hold distinguishable applying
+# leases (the finish CAS guards on this exact name).
+SCHEDULER_RUNNER_NAME = f"workflow-scheduler-{os.getpid()}"
+# Applying a finished job is a few fast DB ops; keep the lease short so a
+# crashed scheduler's job is reclaimable quickly.
+SCHEDULER_APPLYING_LEASE_SECONDS = 60
 
 # --- Auto-runner -------------------------------------------------------------
 # Dispatched steps whose assignee has a runner command spawn a one-shot CLI
@@ -2287,13 +2308,19 @@ def run_queued_job(
     try:
         task = store.get_task(int(job["task_id"]))
         if not task:
-            store.finish_run_job(job["id"], "failed", "task no longer exists")
+            store.finish_run_job(
+                job["id"], "failed", "task no longer exists",
+                runner_name=runner_name, current_status="running",
+            )
             return {"job_id": job["id"], "status": "failed", "error": "task missing"}
         cfg = read_workflow_config(project_root)
         steps = {s["id"]: s for s in cfg["steps"]}
         step = steps.get(job["step"])
         if not step:
-            store.finish_run_job(job["id"], "failed", f"unknown step {job['step']}")
+            store.finish_run_job(
+                job["id"], "failed", f"unknown step {job['step']}",
+                runner_name=runner_name, current_status="running",
+            )
             return {"job_id": job["id"], "status": "failed", "error": "step missing"}
         members = read_team_config(project_root)["members"]
         base = _member_named(members, job["assignee"]) or {}
@@ -2338,15 +2365,26 @@ def run_queued_job(
         # Hand the parsed outcome/result to the scheduler via the job row. The
         # runner does not advance the workflow itself.
         outcome = report.get("outcome") or "blocked"
-        store.finish_run_job(
+        finished = store.finish_run_job(
             job["id"], "finished",
             note=str(report.get("error") or ""),
             outcome=outcome,
             result=report.get("result") or "",
+            runner_name=runner_name,
+            current_status="running",
         )
+        if finished is None:
+            return {
+                "job_id": job["id"],
+                "status": "lost_lease",
+                "outcome": outcome,
+            }
         return {"job_id": job["id"], "status": "finished", "outcome": outcome}
     except Exception as exc:
-        store.finish_run_job(job["id"], "failed", repr(exc))
+        store.finish_run_job(
+            job["id"], "failed", repr(exc),
+            runner_name=runner_name, current_status="running",
+        )
         raise
 
 
@@ -2425,11 +2463,21 @@ def scheduler_tick(
     cfg = read_workflow_config(project_root)
     steps = {s["id"]: s for s in cfg["steps"]}
     processed: list[dict[str, Any]] = []
-    jobs = store.list_run_jobs(status="finished", limit=200)
-    for job in sorted(jobs, key=lambda j: j["id"]):  # FIFO
+    # Bound total work per tick by iterations (not just successes) so a burst of
+    # failing jobs can't process unboundedly in one pass.
+    for _ in range(200):
+        job = store.claim_finished_run_job(
+            SCHEDULER_RUNNER_NAME, lease_seconds=SCHEDULER_APPLYING_LEASE_SECONDS
+        )
+        if not job:
+            break
         step = steps.get(job["step"])
         if not step:
-            store.finish_run_job(job["id"], "failed", f"unknown step {job['step']}")
+            store.finish_run_job(
+                job["id"], "failed", f"unknown step {job['step']}",
+                applied_by=SCHEDULER_RUNNER_NAME,
+                current_status="applying",
+            )
             continue
         try:
             report = apply_run_outcome(
@@ -2441,10 +2489,18 @@ def scheduler_tick(
                 job.get("outcome") or "blocked",
                 job.get("result") or "",
             )
-            store.finish_run_job(job["id"], "done", str(report.get("error") or ""))
+            store.finish_run_job(
+                job["id"], "done", str(report.get("error") or ""),
+                applied_by=SCHEDULER_RUNNER_NAME,
+                current_status="applying",
+            )
             processed.append({"job_id": job["id"], "task_id": job["task_id"], "report": report})
         except Exception as exc:
-            store.finish_run_job(job["id"], "failed", repr(exc))
+            store.finish_run_job(
+                job["id"], "failed", repr(exc),
+                applied_by=SCHEDULER_RUNNER_NAME,
+                current_status="applying",
+            )
     return processed
 
 
@@ -3518,6 +3574,9 @@ def create_server(
         if forbidden := _forbid_non_local(request):
             return forbidden
         data = await _read_json(request)
+        locked = await _to_thread(workflow_locked_reason, store)
+        if locked:
+            return _json_error(locked, 409, request)
         try:
             workflow = await _to_thread(
                 write_workflow_config,

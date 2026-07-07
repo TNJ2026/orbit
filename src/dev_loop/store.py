@@ -127,6 +127,7 @@ CREATE TABLE IF NOT EXISTS run_jobs (
     note            TEXT NOT NULL DEFAULT '',
     outcome         TEXT NOT NULL DEFAULT '',
     result          TEXT NOT NULL DEFAULT '',
+    applied_by      TEXT NOT NULL DEFAULT '',
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL,
     completed_at    TEXT,
@@ -370,6 +371,12 @@ class Store:
         if job_columns and "result" not in job_columns:
             self._conn.execute(
                 "ALTER TABLE run_jobs ADD COLUMN result TEXT NOT NULL DEFAULT ''"
+            )
+        # Scheduler-side applying-lease owner, kept separate from claimed_by so
+        # the runner that executed the job stays visible.
+        if job_columns and "applied_by" not in job_columns:
+            self._conn.execute(
+                "ALTER TABLE run_jobs ADD COLUMN applied_by TEXT NOT NULL DEFAULT ''"
             )
         self._backfill_tasks_from_messages()
 
@@ -1073,7 +1080,7 @@ class Store:
             row = self._conn.execute(
                 """SELECT id, task_id, step, assignee, command, upstream_result,
                           status, claimed_by, leased_until, note, outcome, result,
-                          created_at, updated_at, completed_at
+                          applied_by, created_at, updated_at, completed_at
                    FROM run_jobs
                    WHERE id = ?""",
                 (job_id,),
@@ -1153,6 +1160,9 @@ class Store:
         note: str = "",
         outcome: str | None = None,
         result: str | None = None,
+        runner_name: str | None = None,
+        current_status: str | None = None,
+        applied_by: str | None = None,
     ) -> dict[str, Any] | None:
         status = (status or "").strip()
         if not status:
@@ -1161,9 +1171,22 @@ class Store:
         # 'finished' means the runner executed and reported an outcome; the
         # scheduler still has to advance it, so it is not yet completed.
         completed_at = now if status in {"done", "failed", "cancelled"} else None
+        # Compare-and-set guards: a runner only finishes a job it still holds
+        # (claimed_by); a scheduler only finishes one it is applying (applied_by).
+        filters = ["id = ?"]
+        params_tail: list[Any] = [job_id]
+        if runner_name is not None:
+            filters.append("claimed_by = ?")
+            params_tail.append((runner_name or "").strip())
+        if applied_by is not None:
+            filters.append("applied_by = ?")
+            params_tail.append((applied_by or "").strip())
+        if current_status is not None:
+            filters.append("status = ?")
+            params_tail.append((current_status or "").strip())
         with self._lock:
             cur = self._conn.execute(
-                """UPDATE run_jobs
+                f"""UPDATE run_jobs
                    SET status = ?,
                        note = CASE WHEN ? = '' THEN note ELSE ? END,
                        outcome = CASE WHEN ? IS NULL THEN outcome ELSE ? END,
@@ -1171,18 +1194,59 @@ class Store:
                        leased_until = NULL,
                        updated_at = ?,
                        completed_at = ?
-                   WHERE id = ?""",
+                   WHERE {' AND '.join(filters)}""",
                 (
                     status,
                     note[:2000], note[:2000],
                     outcome, outcome,
                     result, (result or "")[:8000],
-                    now, completed_at, job_id,
+                    now, completed_at, *params_tail,
                 ),
             )
             self._conn.commit()
         if cur.rowcount == 0:
             return None
+        return self.get_run_job(job_id)
+
+    def claim_finished_run_job(
+        self,
+        scheduler_name: str,
+        lease_seconds: int = DEFAULT_LEASE_SECONDS,
+    ) -> dict[str, Any] | None:
+        """Atomically claim one finished job for scheduler-side advancement.
+
+        This keeps multiple UI/scheduler processes from applying the same
+        runner result concurrently. An expired applying lease can be reclaimed.
+        """
+        now = _now()
+        lease_until = _future(max(1, int(lease_seconds)))
+        scheduler_name = (scheduler_name or "").strip()
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT id FROM run_jobs
+                   WHERE status = 'finished'
+                      OR (status = 'applying' AND leased_until <= ?)
+                   ORDER BY id
+                   LIMIT 1""",
+                (now,),
+            ).fetchone()
+            if row is None:
+                return None
+            job_id = int(row["id"])
+            cur = self._conn.execute(
+                """UPDATE run_jobs
+                   SET status = 'applying',
+                       applied_by = ?,
+                       leased_until = ?,
+                       updated_at = ?
+                   WHERE id = ?
+                     AND (status = 'finished'
+                          OR (status = 'applying' AND leased_until <= ?))""",
+                (scheduler_name, lease_until, now, job_id, now),
+            )
+            self._conn.commit()
+            if cur.rowcount == 0:
+                return None
         return self.get_run_job(job_id)
 
     def cancel_pending_run_jobs(
@@ -1221,7 +1285,7 @@ class Store:
             rows = self._conn.execute(
                 f"""SELECT id, task_id, step, assignee, command, upstream_result,
                            status, claimed_by, leased_until, note, outcome, result,
-                           created_at, updated_at, completed_at
+                           applied_by, created_at, updated_at, completed_at
                     FROM run_jobs
                     {where}
                     ORDER BY id DESC

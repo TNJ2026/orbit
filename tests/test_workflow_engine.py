@@ -349,6 +349,19 @@ class WorkflowEngineTests(unittest.TestCase):
             with self.assertRaisesRegex(InvalidInputError, "no enabled hub member"):
                 server._workflow_api_actor("", tmp)
 
+    def test_workflow_config_locked_while_task_active(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            task_id = h.create_task()
+            h.start(task_id)
+
+            reason = server.workflow_locked_reason(h.store)
+            self.assertIsNotNone(reason)
+            self.assertIn(f"#{task_id}", reason)
+
+            h.complete("hub-agent", task_id, "intake", "blocked", "waiting")
+            self.assertIsNone(server.workflow_locked_reason(h.store))
+
     def test_reopen_loop_into_entry_is_executable(self):
         # accept -> intake is a legitimate reopen loop; entry/terminal checks
         # must classify it as a loop-back, not "no entry step".
@@ -1260,6 +1273,66 @@ class RunJobLeaseTests(unittest.TestCase):
             self.assertEqual("runner-2", stolen["claimed_by"])
             # the old owner can no longer renew what it lost
             self.assertFalse(h.store.renew_run_job(job["id"], "runner-1", 300))
+
+    def test_lost_lease_owner_cannot_finish_job(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            job = self._job(h)
+            h.store.claim_next_run_job("runner-1", lease_seconds=300)
+            h.store._conn.execute(
+                "UPDATE run_jobs SET leased_until = ? WHERE id = ?",
+                ("2000-01-01T00:00:00+00:00", job["id"]),
+            )
+            h.store._conn.commit()
+            h.store.claim_next_run_job("runner-2", lease_seconds=300)
+
+            stale = h.store.finish_run_job(
+                job["id"],
+                "finished",
+                outcome="done",
+                result="stale",
+                runner_name="runner-1",
+                current_status="running",
+            )
+            self.assertIsNone(stale)
+            current = h.store.get_run_job(job["id"])
+            self.assertEqual("running", current["status"])
+            self.assertEqual("runner-2", current["claimed_by"])
+
+    def test_finished_job_claim_is_single_owner(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            job = self._job(h)
+            h.store.claim_next_run_job("runner-1", lease_seconds=300)
+            h.store.finish_run_job(
+                job["id"],
+                "finished",
+                outcome="done",
+                result="ok",
+                runner_name="runner-1",
+                current_status="running",
+            )
+
+            claimed = h.store.claim_finished_run_job("scheduler-1")
+            self.assertEqual(job["id"], claimed["id"])
+            self.assertEqual("applying", claimed["status"])
+            self.assertEqual("scheduler-1", claimed["applied_by"])
+            # the runner that executed the job stays visible on claimed_by
+            self.assertEqual("runner-1", claimed["claimed_by"])
+            self.assertIsNone(h.store.claim_finished_run_job("scheduler-2"))
+            # a different scheduler cannot finish what scheduler-1 is applying
+            self.assertIsNone(h.store.finish_run_job(
+                job["id"], "done",
+                applied_by="scheduler-2", current_status="applying",
+            ))
+            done = h.store.finish_run_job(
+                job["id"],
+                "done",
+                applied_by="scheduler-1",
+                current_status="applying",
+            )
+            self.assertEqual("done", done["status"])
+            self.assertEqual("runner-1", done["claimed_by"])
 
 
 class RunnerScopeTests(unittest.TestCase):
