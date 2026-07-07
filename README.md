@@ -47,26 +47,36 @@ uv run dev-loop serve --port 9000 --db /tmp/test.db
 
 ## 工作流执行：serve + runner
 
-工作流引擎分成两个独立进程，**都要起**才能让任务真正跑起来：
+工作流引擎逻辑上是三层——**Scheduler**（决定下一步、推进）、**Runner/Worker**（执行 agent CLI）、以及它们之间的 `run_jobs` 队列。默认打包进一个进程，也可以拆开跑：
 
-| 进程 | 命令 | 职责 |
-|---|---|---|
-| **serve**(UI / Scheduler) | `dev-loop serve` | 服务 Web UI + MCP + REST；把"要执行某 step"写入 `run_jobs` 队列；单点 Scheduler 消费执行完的 job 并推进工作流（dispatch / rework / accept）；跑 timeout / health 兜底。**不执行 runner command。** |
-| **runner**(Worker) | `dev-loop runner` | 从 `run_jobs` 领取任务（带租约 + 心跳）、执行各 agent 的 CLI、流式记录 stdout/stderr、解析 outcome，把结果写回 job。**可多实例。** |
+| 层 | 职责 |
+|---|---|
+| **Scheduler**（serve 内线程） | 把"要执行某 step"写入 `run_jobs` 队列；单点消费执行完的 job 并推进工作流（dispatch / rework / accept）；跑 timeout / health 兜底 |
+| **Runner / Worker** | 从 `run_jobs` 领取任务（带租约 + 心跳）、执行各 agent 的 CLI、流式记录 stdout/stderr、解析 outcome，把结果写回 job |
+
+### 默认：一条命令跑通
 
 ```bash
-# 终端 1：UI / 调度
-dev-loop serve
-
-# 终端 2:执行器（从当前项目目录启动，靠 cwd 解析项目库；或用 --project 指定）
-dev-loop runner --name runner-local
+dev-loop serve        # UI + MCP + Scheduler + 内嵌 Runner，全在一个进程
 ```
 
-> ⚠️ **只起 serve 不起 runner，队列里的 job 会一直 pending、工作流不动。** UI 的 **Jobs** 标签页能看到队列状态(pending / running / finished / done)。
+`serve` 默认**内嵌一个 in-process runner**（名字 `serve-embedded`），所以启动一个 goal 后不需要再手动起 runner——建 job → 内嵌 runner 执行 → scheduler 推进，全自动。UI 的 **Jobs** 标签页能看到队列状态(pending / running / finished / done)。
+
+> ⚠️ 内嵌 runner 与 serve 同生命周期：**serve 重启会中断在途 step**（租约到期后该 step 自动重跑）。要重启安全 / 多机 / 水平扩展，用下面的解耦模式。
 
 **job 生命周期：** `pending → running`（runner 领取）`→ finished`（runner 执行完、报告 outcome）`→ done`（scheduler 推进下一步）。
 
-**serve 重启不杀在途任务**：run 活在 runner 进程里，serve 重启只是调度暂停，runner 照跑。
+### 解耦：serve 不带 runner + 独立 runner
+
+```bash
+# 终端 1：只跑 UI / 调度，不内嵌 worker
+dev-loop serve --no-runner
+
+# 终端 2+：独立 runner（重启 serve 不影响它们；可多实例）
+dev-loop runner --name runner-local
+```
+
+此模式下 run 活在独立 runner 进程里，**serve 重启不杀在途任务**——调度暂停一下，runner 照跑。
 
 ### 多实例 runner
 
