@@ -1416,26 +1416,53 @@ class HubInspectTests(unittest.TestCase):
                 m["runner_command"] = hub_command
         return team
 
-    def _inspect(self, tmp, store):
-        return server._hub_inspect_step(
-            store, tmp, {"id": 1, "title": "t"},
-            {"id": "implement", "name": "Implement"}, "codex", "", "", 300,
-        )
+    def _cands(self):
+        return [
+            {"run_id": 11, "task_id": 1, "title": "a", "step": "implement",
+             "assignee": "codex", "elapsed": 400, "output": ""},
+            {"run_id": 22, "task_id": 2, "title": "b", "step": "bugfix",
+             "assignee": "codex", "elapsed": 400, "output": ""},
+        ]
 
-    def test_hub_decision_kill(self):
+    def test_batch_parses_per_run_decisions(self):
         with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp, team=self._hub_team("echo 'DECISION: KILL'"))
-            self.assertEqual("kill", self._inspect(tmp, h.store))
+            h = EngineHarness(
+                tmp, team=self._hub_team("printf 'DECISION 1: KILL\\nDECISION 2: CONTINUE\\n'"))
+            d = server._hub_inspect_batch(h.store, tmp, self._cands())
+            self.assertEqual("kill", d[11])
+            self.assertEqual("continue", d[22])
 
-    def test_hub_decision_continue(self):
+    def test_batch_unclear_defaults_continue(self):
         with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp, team=self._hub_team("echo 'DECISION: CONTINUE'"))
-            self.assertEqual("continue", self._inspect(tmp, h.store))
+            h = EngineHarness(tmp, team=self._hub_team("echo idk"))
+            self.assertEqual({11: "continue", 22: "continue"},
+                             server._hub_inspect_batch(h.store, tmp, self._cands()))
 
-    def test_hub_unclear_answer_defaults_continue(self):
+    def test_batch_no_hub_command_defaults_continue(self):
         with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp, team=self._hub_team("echo 'not sure'"))
-            self.assertEqual("continue", self._inspect(tmp, h.store))
+            h = EngineHarness(tmp)  # default team's hub has no runner command
+            self.assertEqual({11: "continue", 22: "continue"},
+                             server._hub_inspect_batch(h.store, tmp, self._cands()))
+
+    def test_sweep_skips_run_that_is_producing_output(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, team=self._hub_team("echo 'DECISION 1: KILL'"))
+            run_dir = Path(tmp) / "run"
+            run_dir.mkdir()
+            (run_dir / "stdout.log").write_text("start", encoding="utf-8")
+            old = "2000-01-01T00:00:00+00:00"  # far past the soft timeout
+            server._HUB_SWEEP_STATE.clear()
+            # a fake running run with a pid that is not ours to kill
+            def fake_running():
+                return [{"id": 99, "task_id": 1, "worker": "codex",
+                         "pid": 999999999, "log_dir": str(run_dir), "started_at": old}]
+            h.store.list_running_task_runs = fake_running  # type: ignore
+            # first sweep just records the size (no delta yet)
+            self.assertEqual([], server.hub_inspect_sweep(h.store, tmp))
+            # output grew -> still producing -> skipped, not killed
+            (run_dir / "stdout.log").write_text("start more", encoding="utf-8")
+            self.assertEqual([], server.hub_inspect_sweep(h.store, tmp))
+            server._HUB_SWEEP_STATE.clear()
 
 
 class RunnerScopeTests(unittest.TestCase):

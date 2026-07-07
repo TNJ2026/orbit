@@ -1382,6 +1382,17 @@ class Store:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def list_running_task_runs(self) -> list[dict[str, Any]]:
+        """Every task_run still marked running, with the fields the hub-inspect
+        sweep needs (pid to kill, log_dir to gauge output, started_at for age)."""
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT id, task_id, worker, pid, log_dir, started_at
+                   FROM task_runs WHERE status = 'running'
+                   ORDER BY id"""
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def get_task_run(self, run_id: int) -> dict[str, Any] | None:
         with self._lock:
             row = self._conn.execute(
