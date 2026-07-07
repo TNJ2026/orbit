@@ -917,22 +917,32 @@ class AutoRunnerTests(unittest.TestCase):
             self.assertEqual("implement", jobs[0]["step"])
             self.assertEqual("codex", jobs[0]["assignee"])
 
-    def test_runner_server_claims_job_and_advances_step(self):
+    def test_runner_claims_and_reports_then_scheduler_advances(self):
         with TemporaryDirectory() as tmp:
             h = EngineHarness(tmp, team=self._team_with_runner("echo done"))
             task_id = h.create_task()
             h.start(task_id)
             h.complete("hub-agent", task_id, "intake", "done")
 
+            # Runner only executes + reports; it does not advance.
             result = server.run_queued_job(h.store, tmp, runner_name="runner-1")
-
             self.assertIsNotNone(result)
-            self.assertEqual("done", result["status"])
-            self.assertEqual([{"step": "review", "assignee": "rev"}], result["report"]["dispatched"])
-            jobs = h.store.list_run_jobs(status="all")
-            self.assertEqual("done", jobs[0]["status"])
+            self.assertEqual("finished", result["status"])
+            self.assertEqual("done", result["outcome"])
+            job = h.store.list_run_jobs(status="finished")[0]
+            self.assertEqual("done", job["outcome"])
             runs = h.store.list_task_runs(task_id)
             self.assertEqual("succeeded", runs[0]["status"])
+
+            # The scheduler applies the outcome and advances the workflow.
+            processed = server.scheduler_tick(h.store, tmp)
+            self.assertEqual(1, len(processed))
+            self.assertEqual(
+                [{"step": "review", "assignee": "rev"}],
+                processed[0]["report"]["dispatched"],
+            )
+            # The finished job is now marked done (advanced).
+            self.assertEqual("done", h.store.get_run_job(job["id"])["status"])
 
     def test_goal_step_run_recorded_on_step_card(self):
         with TemporaryDirectory() as tmp:

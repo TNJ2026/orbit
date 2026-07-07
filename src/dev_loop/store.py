@@ -114,6 +114,24 @@ CREATE TABLE IF NOT EXISTS workflow_actions (
     completed_at TEXT,
     FOREIGN KEY(task_id) REFERENCES tasks(id)
 );
+CREATE TABLE IF NOT EXISTS run_jobs (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id         INTEGER NOT NULL,
+    step            TEXT NOT NULL DEFAULT '',
+    assignee        TEXT NOT NULL DEFAULT '',
+    command         TEXT NOT NULL DEFAULT '',
+    upstream_result TEXT NOT NULL DEFAULT '',
+    status          TEXT NOT NULL DEFAULT 'pending',
+    claimed_by      TEXT NOT NULL DEFAULT '',
+    leased_until    TEXT,
+    note            TEXT NOT NULL DEFAULT '',
+    outcome         TEXT NOT NULL DEFAULT '',
+    result          TEXT NOT NULL DEFAULT '',
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    completed_at    TEXT,
+    FOREIGN KEY(task_id) REFERENCES tasks(id)
+);
 """
 
 _INDEX_SCHEMA = """
@@ -139,6 +157,10 @@ CREATE INDEX IF NOT EXISTS idx_task_transitions_task
     ON task_transitions (task_id, id);
 CREATE INDEX IF NOT EXISTS idx_workflow_actions_pending
     ON workflow_actions (status, task_id, id);
+CREATE INDEX IF NOT EXISTS idx_run_jobs_available
+    ON run_jobs (status, leased_until, id);
+CREATE INDEX IF NOT EXISTS idx_run_jobs_task
+    ON run_jobs (task_id, step, id);
 """
 
 
@@ -247,6 +269,10 @@ class Store:
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=WAL;")
             self._conn.execute("PRAGMA synchronous=NORMAL;")
+            # Multiple processes (UI/scheduler + N runners) write this DB; wait
+            # for a contended write lock instead of failing with "database is
+            # locked" immediately.
+            self._conn.execute("PRAGMA busy_timeout=5000;")
             self._conn.executescript(_TABLE_SCHEMA)
             self._migrate()
             self._conn.executescript(_INDEX_SCHEMA)
@@ -311,6 +337,40 @@ class Store:
             self._conn.execute("ALTER TABLE task_runs ADD COLUMN tokens INTEGER")
         if run_columns and "pid" not in run_columns:
             self._conn.execute("ALTER TABLE task_runs ADD COLUMN pid INTEGER")
+        # Older databases predate runner jobs. The main schema creates the
+        # table for fresh databases; this keeps existing project DBs compatible.
+        self._conn.execute(
+            """CREATE TABLE IF NOT EXISTS run_jobs (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id         INTEGER NOT NULL,
+                step            TEXT NOT NULL DEFAULT '',
+                assignee        TEXT NOT NULL DEFAULT '',
+                command         TEXT NOT NULL DEFAULT '',
+                upstream_result TEXT NOT NULL DEFAULT '',
+                status          TEXT NOT NULL DEFAULT 'pending',
+                claimed_by      TEXT NOT NULL DEFAULT '',
+                leased_until    TEXT,
+                note            TEXT NOT NULL DEFAULT '',
+                created_at      TEXT NOT NULL,
+                updated_at      TEXT NOT NULL,
+                completed_at    TEXT,
+                FOREIGN KEY(task_id) REFERENCES tasks(id)
+            )"""
+        )
+        job_columns = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(run_jobs)").fetchall()
+        }
+        # Runner reports the run's outcome/result onto the job; the scheduler
+        # reads them to advance the workflow (runner no longer advances itself).
+        if job_columns and "outcome" not in job_columns:
+            self._conn.execute(
+                "ALTER TABLE run_jobs ADD COLUMN outcome TEXT NOT NULL DEFAULT ''"
+            )
+        if job_columns and "result" not in job_columns:
+            self._conn.execute(
+                "ALTER TABLE run_jobs ADD COLUMN result TEXT NOT NULL DEFAULT ''"
+            )
         self._backfill_tasks_from_messages()
 
     def _backfill_tasks_from_messages(self) -> None:
@@ -965,6 +1025,198 @@ class Store:
                 f"""SELECT id, task_id, action_type, step, assignee, status, note,
                            created_at, updated_at, completed_at
                     FROM workflow_actions
+                    {where}
+                    ORDER BY id DESC
+                    LIMIT ?""",
+                (*params, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def create_run_job(
+        self,
+        task_id: int,
+        step: str,
+        assignee: str,
+        command: str,
+        upstream_result: str = "",
+        note: str = "",
+    ) -> dict[str, Any] | None:
+        now = _now()
+        with self._lock:
+            task = self._conn.execute(
+                "SELECT id FROM tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+            if task is None:
+                return None
+            cur = self._conn.execute(
+                """INSERT INTO run_jobs (
+                       task_id, step, assignee, command, upstream_result,
+                       status, note, created_at, updated_at
+                   )
+                   VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)""",
+                (
+                    task_id,
+                    (step or "").strip(),
+                    (assignee or "").strip(),
+                    (command or "").strip(),
+                    upstream_result or "",
+                    note[:2000],
+                    now,
+                    now,
+                ),
+            )
+            self._conn.commit()
+        return self.get_run_job(cur.lastrowid)
+
+    def get_run_job(self, job_id: int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT id, task_id, step, assignee, command, upstream_result,
+                          status, claimed_by, leased_until, note, outcome, result,
+                          created_at, updated_at, completed_at
+                   FROM run_jobs
+                   WHERE id = ?""",
+                (job_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def claim_next_run_job(
+        self,
+        runner_name: str,
+        agents: list[str] | None = None,
+        lease_seconds: int = DEFAULT_LEASE_SECONDS,
+    ) -> dict[str, Any] | None:
+        now = _now()
+        lease_until = _future(max(1, int(lease_seconds)))
+        runner_name = (runner_name or "").strip()
+        agents = [a.strip() for a in (agents or []) if a.strip()]
+        with self._lock:
+            filters = [
+                "(status = 'pending' OR (status = 'running' AND leased_until <= ?))"
+            ]
+            params: list[Any] = [now]
+            if agents:
+                placeholders = ",".join("?" for _ in agents)
+                filters.append(f"assignee IN ({placeholders})")
+                params.extend(agents)
+            row = self._conn.execute(
+                f"""SELECT id FROM run_jobs
+                    WHERE {' AND '.join(filters)}
+                    ORDER BY id
+                    LIMIT 1""",
+                params,
+            ).fetchone()
+            if row is None:
+                return None
+            job_id = int(row["id"])
+            cur = self._conn.execute(
+                """UPDATE run_jobs
+                   SET status = 'running',
+                       claimed_by = ?,
+                       leased_until = ?,
+                       updated_at = ?
+                   WHERE id = ?
+                     AND (status = 'pending'
+                          OR (status = 'running' AND leased_until <= ?))""",
+                (runner_name, lease_until, now, job_id, now),
+            )
+            self._conn.commit()
+            if cur.rowcount == 0:
+                return None
+        return self.get_run_job(job_id)
+
+    def renew_run_job(
+        self, job_id: int, runner_name: str, lease_seconds: int = DEFAULT_LEASE_SECONDS
+    ) -> bool:
+        now = _now()
+        lease_until = _future(max(1, int(lease_seconds)))
+        with self._lock:
+            cur = self._conn.execute(
+                """UPDATE run_jobs
+                   SET leased_until = ?, updated_at = ?
+                   WHERE id = ? AND status = 'running' AND claimed_by = ?""",
+                (lease_until, now, job_id, runner_name),
+            )
+            self._conn.commit()
+        return cur.rowcount > 0
+
+    def finish_run_job(
+        self,
+        job_id: int,
+        status: str = "done",
+        note: str = "",
+        outcome: str | None = None,
+        result: str | None = None,
+    ) -> dict[str, Any] | None:
+        status = (status or "").strip()
+        if not status:
+            raise InvalidInputError("status is required")
+        now = _now()
+        # 'finished' means the runner executed and reported an outcome; the
+        # scheduler still has to advance it, so it is not yet completed.
+        completed_at = now if status in {"done", "failed", "cancelled"} else None
+        with self._lock:
+            cur = self._conn.execute(
+                """UPDATE run_jobs
+                   SET status = ?,
+                       note = CASE WHEN ? = '' THEN note ELSE ? END,
+                       outcome = CASE WHEN ? IS NULL THEN outcome ELSE ? END,
+                       result = CASE WHEN ? IS NULL THEN result ELSE ? END,
+                       leased_until = NULL,
+                       updated_at = ?,
+                       completed_at = ?
+                   WHERE id = ?""",
+                (
+                    status,
+                    note[:2000], note[:2000],
+                    outcome, outcome,
+                    result, (result or "")[:8000],
+                    now, completed_at, job_id,
+                ),
+            )
+            self._conn.commit()
+        if cur.rowcount == 0:
+            return None
+        return self.get_run_job(job_id)
+
+    def cancel_pending_run_jobs(
+        self, task_id: int, step: str, note: str = ""
+    ) -> int:
+        """Cancel queued runner jobs for a step that was settled elsewhere.
+
+        Running jobs are left alone: their subprocess already owns a task_run
+        and should finish or time out normally.
+        """
+        now = _now()
+        with self._lock:
+            cur = self._conn.execute(
+                """UPDATE run_jobs
+                   SET status = 'cancelled',
+                       note = CASE WHEN ? = '' THEN note ELSE ? END,
+                       leased_until = NULL,
+                       updated_at = ?,
+                       completed_at = ?
+                   WHERE task_id = ? AND step = ? AND status = 'pending'""",
+                (note[:2000], note[:2000], now, now, task_id, step),
+            )
+            self._conn.commit()
+        return cur.rowcount
+
+    def list_run_jobs(
+        self, status: str = "all", limit: int = 100
+    ) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 500))
+        params: list[Any] = []
+        where = ""
+        if status != "all":
+            where = "WHERE status = ?"
+            params.append((status or "").strip())
+        with self._lock:
+            rows = self._conn.execute(
+                f"""SELECT id, task_id, step, assignee, command, upstream_result,
+                           status, claimed_by, leased_until, note, outcome, result,
+                           created_at, updated_at, completed_at
+                    FROM run_jobs
                     {where}
                     ORDER BY id DESC
                     LIMIT ?""",

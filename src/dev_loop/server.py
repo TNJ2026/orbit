@@ -1795,6 +1795,9 @@ def _advance_workflow_task_locked(
 
 # How often the background watcher scans for timed-out steps.
 WORKFLOW_TIMEOUT_POLL_SECONDS = 60
+# The scheduler drains finished run jobs; keep latency low so a step's next
+# step dispatches promptly after the runner reports.
+SCHEDULER_POLL_SECONDS = 1.0
 
 # --- Auto-runner -------------------------------------------------------------
 # Dispatched steps whose assignee has a runner command spawn a one-shot CLI
@@ -1976,10 +1979,14 @@ def run_step_worker(
     member: dict[str, Any],
     upstream_result: str = "",
     timeout_seconds: float | None = None,
+    advance: bool = True,
 ) -> dict[str, Any]:
-    """Execute one dispatched step via the member's CLI and submit the
-    outcome through the engine. Exit 0 -> done (stdout tail as result);
-    nonzero/timeout/missing command -> blocked, which alerts the hub."""
+    """Execute one dispatched step via the member's CLI and record the run.
+
+    Exit 0 -> done (stdout tail as result); nonzero/timeout/missing command ->
+    blocked. With advance=True the outcome is applied through the engine inline
+    (legacy path); with advance=False the run is only executed and recorded and
+    the parsed outcome/result is returned for the scheduler to apply."""
     assignee = member["agent_name"]
     task = store.get_task(task_id)
     if not task:
@@ -2180,6 +2187,40 @@ def run_step_worker(
             store.finish_task_run(run["id"], status, exit_code, tokens)
         except (InvalidInputError, OSError):
             pass
+    if not advance:
+        # Decoupled path: the runner recorded the run and now only reports the
+        # outcome; the scheduler (single advance owner) applies it later.
+        return {
+            "task_id": task_id,
+            "step": step["id"],
+            "outcome": outcome,
+            "result": result,
+            "runner_status": status,
+            "tokens": tokens,
+        }
+    return apply_run_outcome(
+        store, project_root, task_id, step, assignee, outcome, result, status
+    )
+
+
+def apply_run_outcome(
+    store: Store,
+    project_root: str | None,
+    task_id: int,
+    step: dict[str, Any],
+    assignee: str,
+    outcome: str,
+    result: str,
+    status: str = "succeeded",
+) -> dict[str, Any]:
+    """Engine-side reaction to a finished run: for a root goal's intake split
+    the goal into subtasks; otherwise advance the workflow (dispatch/rework/
+    accept). This is the single point that mutates workflow state — the runner
+    process no longer calls it, so advances stay serialized in the scheduler."""
+    task = store.get_task(task_id)
+    if not task:
+        return {"task_id": task_id, "step": step["id"], "error": f"unknown task: {task_id}"}
+    goal_intake = _is_root_goal_entry_step(project_root, task, step)
     if outcome == "done" and goal_intake:
         try:
             with _WORKFLOW_ENGINE_LOCK:
@@ -2287,13 +2328,21 @@ def run_queued_job(
                 member,
                 job.get("upstream_result") or "",
                 timeout_seconds=timeout_seconds,
+                advance=False,  # runner only executes; the scheduler advances
             )
         finally:
             stop_heartbeat.set()
             heartbeat.join(timeout=1)
-        status = "failed" if report.get("error") else "done"
-        store.finish_run_job(job["id"], status, str(report.get("error") or ""))
-        return {"job_id": job["id"], "status": status, "report": report}
+        # Hand the parsed outcome/result to the scheduler via the job row. The
+        # runner does not advance the workflow itself.
+        outcome = report.get("outcome") or "blocked"
+        store.finish_run_job(
+            job["id"], "finished",
+            note=str(report.get("error") or ""),
+            outcome=outcome,
+            result=report.get("result") or "",
+        )
+        return {"job_id": job["id"], "status": "finished", "outcome": outcome}
     except Exception as exc:
         store.finish_run_job(job["id"], "failed", repr(exc))
         raise
@@ -2324,6 +2373,56 @@ def runner_loop(
             return
         else:
             time.sleep(max(0.1, float(poll_seconds)))
+
+
+def scheduler_tick(
+    store: Store, project_root: str | None
+) -> list[dict[str, Any]]:
+    """Single-owner scheduler: apply the outcome of every finished run job
+    (advance the workflow, or split a goal on intake) and mark the job done.
+    Runs in one thread in the UI/scheduler process, so all advances are
+    serialized here instead of racing across runner processes."""
+    cfg = read_workflow_config(project_root)
+    steps = {s["id"]: s for s in cfg["steps"]}
+    processed: list[dict[str, Any]] = []
+    jobs = store.list_run_jobs(status="finished", limit=200)
+    for job in sorted(jobs, key=lambda j: j["id"]):  # FIFO
+        step = steps.get(job["step"])
+        if not step:
+            store.finish_run_job(job["id"], "failed", f"unknown step {job['step']}")
+            continue
+        try:
+            report = apply_run_outcome(
+                store,
+                project_root,
+                int(job["task_id"]),
+                step,
+                job["assignee"],
+                job.get("outcome") or "blocked",
+                job.get("result") or "",
+            )
+            store.finish_run_job(job["id"], "done", str(report.get("error") or ""))
+            processed.append({"job_id": job["id"], "task_id": job["task_id"], "report": report})
+        except Exception as exc:
+            store.finish_run_job(job["id"], "failed", repr(exc))
+    return processed
+
+
+def scheduler_loop(
+    store: Store,
+    project_root: str | None,
+    poll_seconds: float = SCHEDULER_POLL_SECONDS,
+    once: bool = False,
+) -> None:
+    """Poll finished run jobs and advance them until interrupted."""
+    while True:
+        try:
+            scheduler_tick(store, project_root)
+        except Exception:
+            traceback.print_exc()
+        if once:
+            return
+        time.sleep(max(0.1, float(poll_seconds)))
 
 
 def check_workflow_step_timeouts(
@@ -2947,8 +3046,20 @@ def create_server(
         "last_seen": "",
     }
 
+    def _scheduler() -> None:
+        while True:
+            time.sleep(SCHEDULER_POLL_SECONDS)
+            root = current_project.get("project_root")
+            try:
+                scheduler_tick(store, root)
+            except Exception:
+                pass
+
     threading.Thread(
         target=_timeout_watcher, name="workflow-timeout-watcher", daemon=True
+    ).start()
+    threading.Thread(
+        target=_scheduler, name="workflow-scheduler", daemon=True
     ).start()
 
     mcp = FastMCP(

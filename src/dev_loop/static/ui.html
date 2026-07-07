@@ -854,6 +854,7 @@
     .badge.installed { color: var(--accent); border-color: #9fc7b9; }
     .badge.job-pending { color: var(--muted); }
     .badge.job-running { color: var(--accent); border-color: #9fc7b9; }
+    .badge.job-finished { color: var(--warn); border-color: #deb16f; }
     .badge.job-done { color: var(--muted); border-color: #cdd6d1; }
     .badge.job-failed { color: var(--danger); border-color: #e0a3a3; }
     .badge.job-cancelled { color: var(--muted); }
@@ -2445,13 +2446,13 @@
     function renderRunJobs() {
       const jobs = state.runJobs || [];
       const counts = jobs.reduce((acc, j) => { acc[j.status] = (acc[j.status] || 0) + 1; return acc; }, {});
-      const summary = ["pending", "running", "done", "failed", "cancelled"]
+      const summary = ["pending", "running", "finished", "done", "failed", "cancelled"]
         .filter(s => counts[s]).map(s => `${counts[s]} ${s}`).join(" · ");
       $("jobsList").innerHTML = jobs.length ? `
         <div class="meta" style="padding: 0 16px 8px;">${escapeHtml(summary)}</div>
         <div class="jobs-table-wrap">
           <table class="jobs-table">
-            <thead><tr><th>#</th><th>Task · Step</th><th>Assignee</th><th>Status</th><th>Claimed by</th><th>Lease until</th></tr></thead>
+            <thead><tr><th>#</th><th>Task · Step</th><th>Assignee</th><th>Status</th><th>Outcome</th><th>Claimed by</th><th>Lease until</th></tr></thead>
             <tbody>
               ${jobs.map(j => `
                 <tr onclick="showTaskDetails(${j.task_id})" style="cursor: pointer;">
@@ -2459,6 +2460,7 @@
                   <td>#${j.task_id} · ${escapeHtml(j.step || "")}</td>
                   <td>${escapeHtml(j.assignee || "")}</td>
                   <td><span class="badge job-${escapeHtml(j.status)}">${escapeHtml(j.status)}</span></td>
+                  <td class="meta">${escapeHtml(j.outcome || "—")}</td>
                   <td>${escapeHtml(j.claimed_by || "—")}</td>
                   <td class="meta">${j.leased_until ? fmtTime(j.leased_until) : "—"}</td>
                 </tr>`).join("")}
