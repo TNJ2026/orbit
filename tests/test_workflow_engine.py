@@ -1212,7 +1212,7 @@ class MarkTaskRunningTests(unittest.TestCase):
         # Review / In Testing), not get flipped to generic in_progress.
         with TemporaryDirectory() as tmp:
             h = EngineHarness(tmp)
-            for phase in ("replied", "testing", "needs_changes", "bugfixing"):
+            for phase in ("replied", "testing", "needs_changes"):
                 tid = h.create_task(title=phase)
                 self._set_status(h.store, tid, phase)
                 server._mark_task_running(h.store, tid)
@@ -1420,7 +1420,7 @@ class HubInspectTests(unittest.TestCase):
         return [
             {"run_id": 11, "task_id": 1, "title": "a", "step": "implement",
              "assignee": "codex", "elapsed": 400, "output": ""},
-            {"run_id": 22, "task_id": 2, "title": "b", "step": "bugfix",
+            {"run_id": 22, "task_id": 2, "title": "b", "step": "review",
              "assignee": "codex", "elapsed": 400, "output": ""},
         ]
 
@@ -1578,47 +1578,6 @@ class ActiveStepLedgerTests(unittest.TestCase):
             trans = h.store.list_task_transitions(tid)
             self.assertIn("implement", server._active_steps(trans))
             self.assertEqual("codex", server._active_step_assignees(trans)["implement"])
-
-
-class ExplicitReworkEdgeTests(unittest.TestCase):
-    STEPS = [
-        {"id": "intake", "name": "Intake", "role_id": "hub", "task_status": "created", "required": True},
-        {"id": "implement", "name": "Implement", "role_id": "implementer", "task_status": "in_progress", "required": True},
-        {"id": "bugfix", "name": "Bug Fixing", "role_id": "implementer", "task_status": "bugfixing", "required": False},
-        {"id": "review", "name": "Review", "role_id": "reviewer", "task_status": "replied", "required": True},
-        {"id": "accept", "name": "Accept", "role_id": "hub", "task_status": "accepted", "required": True},
-    ]
-    # bugfix sits off the forward path — only reached on rework from review.
-    EDGES = [
-        {"from": "intake", "to": "implement"},
-        {"from": "implement", "to": "review"},
-        {"from": "review", "to": "accept"},
-        {"from": "review", "to": "bugfix", "rework": True},
-        {"from": "bugfix", "to": "review"},
-    ]
-
-    def test_offpath_bugfix_only_runs_on_rework(self):
-        with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp, steps=self.STEPS, edges=self.EDGES)
-            task_id = h.create_task()
-            # start dispatches only the real entry, not the off-path bugfix
-            started = h.start(task_id)
-            self.assertEqual([{"step": "intake", "assignee": "hub-agent"}], started["dispatched"])
-
-            h.complete("hub-agent", task_id, "intake", "done")
-            self.assertEqual("codex", h.task(task_id)["assignee"])  # implement
-            # normal path skips bugfix: implement -> review
-            fwd = h.complete("codex", task_id, "implement", "done")
-            self.assertEqual([{"step": "review", "assignee": "rev"}], fwd["dispatched"])
-
-            # review rework -> off-path bugfix
-            rework = h.complete("rev", task_id, "review", "rework", "fix the bug")
-            self.assertEqual([{"step": "bugfix", "assignee": "codex"}], rework["dispatched"])
-            self.assertEqual("bugfixing", h.task(task_id)["task_status"])
-
-            # bugfix done -> back to review
-            back = h.complete("codex", task_id, "bugfix", "done")
-            self.assertEqual([{"step": "review", "assignee": "rev"}], back["dispatched"])
 
 
 class TaskHealthCheckTests(unittest.TestCase):

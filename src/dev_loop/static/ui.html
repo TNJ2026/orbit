@@ -2250,7 +2250,6 @@
       "created": "todo",
       "assigned": "todo",
       "in_progress": "progress",
-      "bugfixing": "bugfixing",
       "testing": "testing",
       "blocked": "blocked",
       "replied": "review",
@@ -2263,7 +2262,6 @@
     const TASK_STATUS_OPTIONS = [
       { value: "created", label: "Todo" },
       { value: "in_progress", label: "In Progress" },
-      { value: "bugfixing", label: "Bug Fixing" },
       { value: "testing", label: "In Testing" },
       { value: "blocked", label: "Blocked" },
       { value: "replied", label: "Under Review" },
@@ -2296,7 +2294,6 @@
       const columns = {
         todo: { name: "Todo", class: "todo", tasks: [] },
         progress: { name: "In Progress", class: "progress", tasks: [] },
-        bugfixing: { name: "Bug Fixing", class: "bugfixing", tasks: [] },
         testing: { name: "In Testing", class: "testing", tasks: [] },
         blocked: { name: "Blocked", class: "blocked", tasks: [] },
         review: { name: "Under Review", class: "review", tasks: [] },

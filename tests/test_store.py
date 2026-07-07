@@ -255,10 +255,10 @@ class StoreTests(unittest.TestCase):
         self.register_pair(store)
         [message_id] = store.send_message("a", "b", "fix lint", kind="task")
 
-        self.assertTrue(store.update_task_status(message_id, "bugfixing"))
-        [task] = store.list_tasks(status="bugfixing", assignee="b")
+        self.assertTrue(store.update_task_status(message_id, "testing"))
+        [task] = store.list_tasks(status="testing", assignee="b")
         self.assertEqual(message_id, task["source_message_id"])
-        self.assertEqual("bugfixing", task["task_status"])
+        self.assertEqual("testing", task["task_status"])
 
     def test_task_runs_track_execution_attempts(self):
         store = self.make_store()

@@ -262,7 +262,6 @@ def _normalize_workflow_step(step: Any, index: int) -> dict[str, Any]:
         "assigned",
         "in_progress",
         "testing",
-        "bugfixing",
         "replied",
         "accepted",
         "needs_changes",
@@ -824,17 +823,16 @@ def rank_assignment_candidates(
 WORKFLOW_ENGINE_AGENT = "workflow"
 WORKFLOW_OUTCOMES = {"done", "rework", "blocked"}
 # How many times a loop-back (rework) target may be re-entered before the engine
-# stops looping and blocks the task for the hub. Prevents e.g. test<->bugfix from
-# spinning forever when a fixer keeps failing to resolve the findings.
+# stops looping and blocks the task for the hub. Prevents review/implement
+# rework from spinning forever when feedback is not being resolved.
 MAX_REWORK_ROUNDS = 2
 
 
 def _workflow_graph(cfg: dict[str, Any]) -> set[tuple[str, str]]:
     """Return the set of loop-back (rework) edges. If any edge is explicitly
-    marked `"rework": true`, those are the loop-backs verbatim — this lets a
-    rework target sit off the forward path (e.g. a bugfix step only reached on
-    rework). Otherwise loop-backs are inferred via DFS (an edge into a node
-    still on the DFS stack closes a cycle); every other edge is forward flow."""
+    marked `"rework": true`, those are the loop-backs verbatim. Otherwise
+    loop-backs are inferred via DFS (an edge into a node still on the DFS stack
+    closes a cycle); every other edge is forward flow."""
     explicit = {
         (edge["from"], edge["to"]) for edge in cfg["edges"] if edge.get("rework")
     }
@@ -880,8 +878,7 @@ def _forward_out(
 def _workflow_entry_steps(cfg: dict[str, Any], back: set[tuple[str, str]]) -> list[str]:
     # An entry step has no forward incoming edge (a back edge into it, e.g. an
     # accept -> intake reopen, still leaves it an entry). But an explicit rework
-    # target (e.g. an off-path bugfix step, only reached on rework) is never an
-    # entry, even though its only incoming edges are loop-backs.
+    # target is never an entry, even though its only incoming edges are loop-backs.
     forward_in = {
         e["to"] for e in cfg["edges"] if (e["from"], e["to"]) not in back
     }
@@ -939,8 +936,8 @@ def _workflow_execution_errors(
     if not terminals:
         errors.append("no terminal step")
     main_entry = entries[0] if entries else None
-    # Reachability includes rework edges: a step only entered on rework (e.g. an
-    # off-path bugfix step) is still reachable, not dead.
+    # Reachability includes rework edges, so an explicitly rework-only step is
+    # still reachable, not dead.
     reachable = _reach([main_entry], include_back=True) if main_entry else set()
     can_finish = _reach(terminals, reverse=True) if terminals else set()
     required_ids = [step_id for step_id in ids if steps[step_id]["required"]]
@@ -1056,9 +1053,8 @@ def _join_ready(
     steps: dict[str, dict[str, Any]],
     transitions: list[dict[str, Any]],
 ) -> bool:
-    # A rework target (e.g. an off-path bugfix step) feeds back into a shared
-    # step but is not a parallel branch of it, so it must not gate the join —
-    # otherwise the normal path would wait forever for a step only run on rework.
+    # A rework target feeds back into a shared step but is not a parallel branch
+    # of it, so it must not gate the join.
     rework_targets = {e["to"] for e in cfg["edges"] if e.get("rework")}
     required_preds = [
         e["from"] for e in cfg["edges"]
@@ -2041,9 +2037,9 @@ def _build_step_prompt(
 
 _TASK_RUNNING_TERMINAL = ("closed", "accepted")
 # Statuses that already place a task in its own board column while its runner
-# works (Under Review / In Testing / Bug Fixing). Don't overwrite them with the
+# works (Under Review / In Testing). Don't overwrite them with the
 # generic in_progress, or those columns would never show anything.
-_TASK_PHASE_STATUSES = ("testing", "replied", "needs_changes", "bugfixing")
+_TASK_PHASE_STATUSES = ("testing", "replied", "needs_changes")
 
 
 def _mark_task_running(store: Store, task_id: int | None) -> None:
