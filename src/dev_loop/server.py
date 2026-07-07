@@ -1892,6 +1892,13 @@ SCHEDULER_APPLYING_LEASE_SECONDS = 60
 # is submitted via the engine as the step result.
 # runner_command on the member overrides the per-tool default.
 RUNNER_DEFAULT_TIMEOUT_SECONDS = 1800
+# Soft/hard timeouts for a running step. At each soft interval the hub agent is
+# asked to inspect the still-running step and decide KILL (stuck/errored) or
+# CONTINUE; the hard cap force-kills regardless so nothing runs forever.
+RUNNER_SOFT_TIMEOUT_SECONDS = 300
+RUNNER_HARD_TIMEOUT_SECONDS = 1800
+# The hub inspection is itself a CLI call; keep it bounded.
+HUB_INSPECT_TIMEOUT_SECONDS = 180
 # Headless CLIs default to asking for permission on every file write / tool
 # call, which no one is there to answer — a runner without full permissions
 # can only produce inline text. These defaults grant maximum autonomy; set
@@ -2057,6 +2064,84 @@ def _mark_task_running(store: Store, task_id: int | None) -> None:
         current = task.get("parent_task_id")
 
 
+def _kill_process_group(proc: "subprocess.Popen[bytes]") -> None:
+    """SIGKILL the runner's whole process group (shell + CLI + helpers), falling
+    back to the single process if the group is unavailable."""
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
+def _hub_inspect_step(
+    store: Store,
+    project_root: str | None,
+    task: dict[str, Any],
+    step: dict[str, Any],
+    assignee: str,
+    stdout_so_far: str,
+    stderr_so_far: str,
+    elapsed_seconds: float,
+) -> str:
+    """Ask the hub agent whether a still-running step is progressing or stuck.
+    Runs the hub member's CLI with an inspection prompt and parses its verdict.
+    Returns "kill" or "continue"; defaults to "continue" whenever the hub cannot
+    be consulted (no hub, no command, error, timeout, unclear answer) so a
+    healthy step is never killed on doubt — the hard cap is the backstop."""
+    try:
+        members = read_team_config(project_root)["members"]
+    except Exception:
+        return "continue"
+    hub = next(
+        (m for m in members
+         if m.get("role_id") == "hub" and m.get("enabled", True)
+         and _runner_command_for(m)),
+        None,
+    )
+    if not hub:
+        return "continue"
+    command = _runner_command_for(hub)
+    minutes = int(elapsed_seconds // 60)
+    prompt = (
+        "你是编排 hub。下面这个工作流步骤已经运行了较长时间还没结束，判断它是"
+        "在正常执行、还是卡死/出错了。\n\n"
+        f"任务 #{task['id']}: {task.get('title') or ''}\n"
+        f"步骤: {step.get('name') or step['id']}（由 {assignee} 执行）\n"
+        f"已运行: 约 {minutes} 分钟（进程仍存活）\n"
+        "该步骤 CLI 到目前为止的输出（可能为空——有些 CLI 只在结束时才输出）：\n"
+        f"--- stdout ---\n{_tail(stdout_so_far, 2000) or '(空)'}\n"
+        f"--- stderr ---\n{_tail(stderr_so_far, 1000) or '(空)'}\n\n"
+        "判断参考：输出是否有进展或报错；长时间零输出可能是后端无响应（API 限流 / "
+        "额度耗尽 / 超时）。\n"
+        "只输出一行裁决，不要别的：\n"
+        "DECISION: CONTINUE  （还在正常执行，让它继续）\n"
+        "DECISION: KILL      （卡死或出错，杀掉并标记 blocked）\n"
+    )
+    try:
+        proc = subprocess.Popen(
+            command, shell=True,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            cwd=str(_project_root(project_root)), start_new_session=True,
+        )
+        try:
+            out, _ = proc.communicate(
+                prompt.encode("utf-8"), timeout=HUB_INSPECT_TIMEOUT_SECONDS
+            )
+        except subprocess.TimeoutExpired:
+            _kill_process_group(proc)
+            proc.wait()
+            return "continue"
+    except OSError:
+        return "continue"
+    m = re.search(
+        r"DECISION:\s*(KILL|CONTINUE)", out.decode("utf-8", "replace"), re.IGNORECASE
+    )
+    return "kill" if (m and m.group(1).upper() == "KILL") else "continue"
+
+
 def run_step_worker(
     store: Store,
     project_root: str | None,
@@ -2106,9 +2191,15 @@ def run_step_worker(
     # and goal, reached via parent_task_id) in_progress. Use run_task_id so the
     # step card shown on the board — not just the underlying task — flips too.
     _mark_task_running(store, run_task_id)
-    if timeout_seconds is None:
-        step_timeout = int(step.get("timeout_minutes") or 0) * 60
-        timeout_seconds = step_timeout or RUNNER_DEFAULT_TIMEOUT_SECONDS
+    # Production runs (timeout_seconds unset) get soft/hard timeouts with hub
+    # inspection at each soft interval. An explicit timeout_seconds (tests) is a
+    # single hard timeout with no hub loop, for deterministic behaviour.
+    hub_inspect = timeout_seconds is None
+    if hub_inspect:
+        soft_seconds = RUNNER_SOFT_TIMEOUT_SECONDS
+        hard_seconds = RUNNER_HARD_TIMEOUT_SECONDS
+    else:
+        soft_seconds = hard_seconds = float(timeout_seconds)
 
     outcome, result, status, exit_code = "blocked", "", "failed", None
     stdout, stderr = "", ""
@@ -2182,26 +2273,73 @@ def run_step_worker(
                 daemon=True,
             )
             stdin_thread.start()
-            try:
-                exit_code = proc.wait(timeout=timeout_seconds)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                status = "timeout"
-                result = f"runner timed out after {int(timeout_seconds)}s"
-                if run:
-                    try:
-                        _append_run_event(
-                            run,
-                            {
-                                "type": "runner_timeout",
-                                "workflow_task_id": task_id,
-                                "workflow_step": step["id"],
-                                "timeout_seconds": timeout_seconds,
-                            },
-                        )
-                    except (InvalidInputError, OSError):
-                        pass
-                proc.wait()
+            start_wait = time.monotonic()
+            while True:
+                elapsed = time.monotonic() - start_wait
+                remaining = hard_seconds - elapsed
+                # Hard cap reached: force-kill the whole group no matter what.
+                if remaining <= 0:
+                    _kill_process_group(proc)
+                    status = "timeout"
+                    result = f"runner hard-timed out after {int(hard_seconds)}s"
+                    if run:
+                        try:
+                            _append_run_event(run, {
+                                "type": "runner_timeout", "workflow_task_id": task_id,
+                                "workflow_step": step["id"], "hard_seconds": hard_seconds,
+                            })
+                        except (InvalidInputError, OSError):
+                            pass
+                    proc.wait()
+                    break
+                chunk = min(soft_seconds, remaining) if hub_inspect else remaining
+                try:
+                    exit_code = proc.wait(timeout=max(1.0, chunk))
+                    break  # finished on its own
+                except subprocess.TimeoutExpired:
+                    if not hub_inspect:
+                        _kill_process_group(proc)
+                        status = "timeout"
+                        result = f"runner timed out after {int(hard_seconds)}s"
+                        if run:
+                            try:
+                                _append_run_event(run, {
+                                    "type": "runner_timeout", "workflow_task_id": task_id,
+                                    "workflow_step": step["id"], "timeout_seconds": hard_seconds,
+                                })
+                            except (InvalidInputError, OSError):
+                                pass
+                        proc.wait()
+                        break
+                    # Soft checkpoint: let the hub inspect the still-running step
+                    # and decide to kill it (stuck/errored) or let it continue.
+                    if run:
+                        try:
+                            _append_run_event(run, {
+                                "type": "runner_soft_timeout", "workflow_task_id": task_id,
+                                "workflow_step": step["id"], "elapsed_seconds": int(elapsed),
+                            })
+                        except (InvalidInputError, OSError):
+                            pass
+                    decision = _hub_inspect_step(
+                        store, project_root, task, step, assignee,
+                        "".join(stdout_chunks), "".join(stderr_chunks), elapsed,
+                    )
+                    if decision == "kill":
+                        _kill_process_group(proc)
+                        status = "timeout"
+                        result = f"hub inspected and killed the step after {int(elapsed)}s (stuck/errored)"
+                        if run:
+                            try:
+                                _append_run_event(run, {
+                                    "type": "runner_hub_killed", "workflow_task_id": task_id,
+                                    "workflow_step": step["id"], "elapsed_seconds": int(elapsed),
+                                })
+                            except (InvalidInputError, OSError):
+                                pass
+                        proc.wait()
+                        break
+                    # continue: loop and wait another interval
             stdin_thread.join(timeout=1)
             stdout_thread.join()
             stderr_thread.join()

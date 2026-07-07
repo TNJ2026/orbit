@@ -1408,6 +1408,36 @@ class RunJobLeaseTests(unittest.TestCase):
             self.assertEqual("runner-1", done["claimed_by"])
 
 
+class HubInspectTests(unittest.TestCase):
+    def _hub_team(self, hub_command):
+        team = [dict(m) for m in TEAM]
+        for m in team:
+            if m["role_id"] == "hub":
+                m["runner_command"] = hub_command
+        return team
+
+    def _inspect(self, tmp, store):
+        return server._hub_inspect_step(
+            store, tmp, {"id": 1, "title": "t"},
+            {"id": "implement", "name": "Implement"}, "codex", "", "", 300,
+        )
+
+    def test_hub_decision_kill(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, team=self._hub_team("echo 'DECISION: KILL'"))
+            self.assertEqual("kill", self._inspect(tmp, h.store))
+
+    def test_hub_decision_continue(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, team=self._hub_team("echo 'DECISION: CONTINUE'"))
+            self.assertEqual("continue", self._inspect(tmp, h.store))
+
+    def test_hub_unclear_answer_defaults_continue(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, team=self._hub_team("echo 'not sure'"))
+            self.assertEqual("continue", self._inspect(tmp, h.store))
+
+
 class RunnerScopeTests(unittest.TestCase):
     def test_steps_for_roles_resolves(self):
         with TemporaryDirectory() as tmp:
