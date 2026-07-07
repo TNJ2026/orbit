@@ -995,6 +995,18 @@ class AutoRunnerTests(unittest.TestCase):
             # The finished job is now marked done (advanced).
             self.assertEqual("done", h.store.get_run_job(job["id"])["status"])
 
+    def test_empty_output_is_blocked_not_done(self):
+        with TemporaryDirectory() as tmp:
+            # `true` exits 0 with no output — a silent runner (like agy producing
+            # nothing) must not count as done.
+            h = EngineHarness(tmp, team=self._team_with_runner("true"))
+            task_id = h.create_task()
+            h.start(task_id)
+            h.complete("hub-agent", task_id, "intake", "done")  # queues implement
+            result = server.run_queued_job(h.store, tmp, runner_name="runner-1")
+            self.assertEqual("finished", result["status"])
+            self.assertEqual("blocked", result["outcome"])
+
     def test_goal_step_run_recorded_on_step_card(self):
         with TemporaryDirectory() as tmp:
             h = EngineHarness(tmp, team=self._team_with_runner("echo built"))

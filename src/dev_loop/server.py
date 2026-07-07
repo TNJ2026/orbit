@@ -2220,6 +2220,14 @@ def run_step_worker(
                     outcome, status = "blocked", "failed"
                 elif verdict == "rework" and can_rework:
                     outcome, status = "rework", "succeeded"
+                elif not stdout.strip():
+                    # Clean exit but zero output: the runner ignored the
+                    # "print a summary + WORKFLOW_OUTCOME" contract — a silent CLI
+                    # failure (e.g. an agent that errored out) lands here. Don't
+                    # advance on nothing; block so the hub/rework path handles it
+                    # instead of looping on an empty "fix".
+                    outcome, status = "blocked", "failed"
+                    result = "runner produced no output (silent failure); treating as blocked"
                 else:
                     outcome, status = "done", "succeeded"
             elif stdin_errors:
