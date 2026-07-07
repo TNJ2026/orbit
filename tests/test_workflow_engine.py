@@ -362,6 +362,44 @@ class WorkflowEngineTests(unittest.TestCase):
             h.complete("hub-agent", task_id, "intake", "blocked", "waiting")
             self.assertIsNone(server.workflow_locked_reason(h.store))
 
+    def test_only_one_goal_can_run_at_a_time(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            first = h.create_task(title="first goal")
+            second = h.create_task(title="second goal")
+            h.store.update_task_metadata(first, is_goal=True)
+            h.store.update_task_metadata(second, is_goal=True)
+
+            h.start(first)
+            with self.assertRaisesRegex(InvalidInputError, "already active"):
+                h.start(second)
+
+            server.force_close_goal(h.store, tmp, first)
+            started = h.start(second)
+            self.assertEqual(
+                [{"step": "intake", "assignee": "hub-agent"}],
+                started["dispatched"],
+            )
+
+    def test_rework_loop_caps_and_blocks(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            tid = h.create_task()
+            h.start(tid)
+            h.complete("hub-agent", tid, "intake", "done")
+            # two rework rounds are allowed
+            for _ in range(2):
+                h.complete("codex", tid, "implement", "done")
+                rw = h.complete("rev", tid, "review", "rework", "again")
+                self.assertEqual([{"step": "implement", "assignee": "codex"}], rw["dispatched"])
+            # the third rework is capped: block instead of looping
+            h.complete("codex", tid, "implement", "done")
+            capped = h.complete("rev", tid, "review", "rework", "still broken")
+            self.assertEqual("blocked", capped["outcome"])
+            self.assertTrue(capped.get("rework_limited"))
+            self.assertEqual([], capped["dispatched"])
+            self.assertEqual("blocked", h.task(tid)["task_status"])
+
     def test_reopen_loop_into_entry_is_executable(self):
         # accept -> intake is a legitimate reopen loop; entry/terminal checks
         # must classify it as a loop-back, not "no entry step".
@@ -1047,6 +1085,10 @@ class RerunTests(unittest.TestCase):
             self.assertEqual("intake", result["step"])
             self.assertEqual("codex", result["assignee"])
             self.assertTrue(result["reran"])
+            job = h.store.get_run_job(result["queued_job_id"])
+            self.assertEqual("pending", job["status"])
+            self.assertEqual("intake", job["step"])
+            self.assertEqual("codex", job["assignee"])
             transitions = h.store.list_task_transitions(task_id)
             redispatched = [
                 t["note"] for t in transitions
@@ -1087,6 +1129,25 @@ class RerunTests(unittest.TestCase):
             with self.assertRaises(InvalidInputError) as ctx:
                 server.rerun_workflow_step(h.store, tmp, task_id, "codex")
             self.assertIn("already in progress", str(ctx.exception))
+
+    def test_rerun_ignores_stale_running_attempt_when_latest_failed(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, team=self._team())
+            task_id = h.create_task()
+            server.start_workflow_task(h.store, tmp, "hub-agent", task_id)
+            server.advance_workflow_task(
+                h.store, tmp, "hub-agent", task_id, "intake", "blocked", "stuck"
+            )
+            stale = h.store.create_task_run(task_id, worker="hub-agent", status="running")
+            failed = h.store.create_task_run(task_id, worker="hub-agent", status="running")
+            h.store.finish_task_run(failed["id"], "failed", 1)
+
+            result = server.rerun_workflow_step(h.store, tmp, task_id, "codex")
+
+            self.assertEqual("intake", result["step"])
+            self.assertEqual("codex", result["assignee"])
+            self.assertEqual("running", h.store.get_task_run(stale["id"])["status"])
+            self.assertEqual("pending", h.store.get_run_job(result["queued_job_id"])["status"])
 
     def test_rerun_unknown_agent_without_runner_is_rejected(self):
         with TemporaryDirectory() as tmp:

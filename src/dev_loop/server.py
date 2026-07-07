@@ -617,6 +617,32 @@ def goals_summary(store: Store) -> list[dict[str, Any]]:
     return goals
 
 
+def active_goal_conflict_reason(
+    store: Store, exclude_task_id: int | None = None
+) -> str | None:
+    """Only one goal may be active at a time.
+
+    A blocked/stalled goal still counts as active because it has not been
+    accepted or explicitly force-closed yet; starting another goal would make
+    the board and runner queue mix two top-level objectives.
+    """
+    for task in store.list_goals_with_children():
+        if not task.get("is_goal"):
+            continue
+        if exclude_task_id is not None and task["id"] == exclude_task_id:
+            continue
+        if task.get("task_status") in {"closed", "accepted"}:
+            continue
+        if task.get("task_status") == "created" and not task.get("workflow_step"):
+            continue
+        title = (task.get("title") or "untitled").strip()
+        return (
+            f"goal #{task['id']} is already active ({task.get('task_status')}: "
+            f"{title}); finish or force-end it before starting another goal"
+        )
+    return None
+
+
 def team_locked_reason(store: Store) -> str | None:
     """Team config is frozen while any task is actively executing workflow
     steps: reassignment math, role constraints, and running auto-runners all
@@ -797,6 +823,10 @@ def rank_assignment_candidates(
 
 WORKFLOW_ENGINE_AGENT = "workflow"
 WORKFLOW_OUTCOMES = {"done", "rework", "blocked"}
+# How many times a loop-back (rework) target may be re-entered before the engine
+# stops looping and blocks the task for the hub. Prevents e.g. test<->bugfix from
+# spinning forever when a fixer keeps failing to resolve the findings.
+MAX_REWORK_ROUNDS = 2
 
 
 def _workflow_graph(cfg: dict[str, Any]) -> set[tuple[str, str]]:
@@ -1391,7 +1421,7 @@ def _dispatch_step(
     step: dict[str, Any],
     member: dict[str, Any],
     upstream_result: str,
-) -> None:
+) -> dict[str, Any] | None:
     assignee = member["agent_name"]
     task_id = task["id"]
     _ensure_engine_agent(store)
@@ -1420,7 +1450,7 @@ def _dispatch_step(
         _upsert_step_card(store, project_root, task, step, assignee)
     command = _runner_command_for(member)
     if command:
-        store.create_run_job(
+        return store.create_run_job(
             task_id,
             step["id"],
             assignee,
@@ -1428,6 +1458,7 @@ def _dispatch_step(
             upstream_result,
             note=f"queued runner for step {step['id']}",
         )
+    return None
 
 
 def _dispatch_targets(
@@ -1581,10 +1612,12 @@ def rerun_workflow_step(
             card = store.find_open_step_card(task_id, step_id)
             if card:
                 run_holder_id = card["id"]
-        if any(
-            run.get("status") == "running"
-            for run in store.list_task_runs(run_holder_id, limit=10)
-        ):
+        # Only the latest attempt can represent the current in-flight runner.
+        # Older attempts may be stale leftovers (for example a lease was
+        # reclaimed and a newer attempt already failed); those must not block
+        # manual recovery via Re-run.
+        runs = store.list_task_runs(run_holder_id, limit=1)
+        if runs and runs[0].get("status") == "running":
             raise InvalidInputError(
                 f"a run is already in progress for step {step_id!r}; wait for it "
                 "to finish before re-running"
@@ -1613,12 +1646,15 @@ def rerun_workflow_step(
             if t["outcome"] == "done" and t["to_step"] == step_id
         ]
         upstream_result = upstream[-1].get("note", "") if upstream else ""
-        _dispatch_step(store, project_root, task, step_def, member, upstream_result)
+        job = _dispatch_step(
+            store, project_root, task, step_def, member, upstream_result
+        )
         return {
             "task_id": task_id,
             "step": step_id,
             "assignee": agent,
             "runner_command": _runner_command_for(member),
+            "queued_job_id": job["id"] if job else None,
             "reran": True,
         }
 
@@ -1655,6 +1691,10 @@ def _start_workflow_task_locked(
     task = store.get_task(task_id)
     if not task:
         raise InvalidInputError(f"unknown task: {task_id}")
+    if task.get("is_goal"):
+        conflict = active_goal_conflict_reason(store, exclude_task_id=task_id)
+        if conflict:
+            raise InvalidInputError(conflict)
     transitions = store.list_task_transitions(task_id)
     if transitions:
         raise InvalidInputError(
@@ -1779,6 +1819,31 @@ def _advance_workflow_task_locked(
         targets = backward
         if not targets:
             raise InvalidInputError(f"step {step} has no rework (loop-back) path")
+        # Rework-loop cap: if this loop-back has already been taken the maximum
+        # number of times, stop looping and block for the hub instead of
+        # dispatching another round that would likely fail the same way.
+        prior_rework = sum(
+            1 for t in transitions
+            if t["outcome"] == "rework" and t["to_step"] in targets
+        )
+        if prior_rework >= MAX_REWORK_ROUNDS:
+            store.record_task_transition(
+                task_id, step, step, agent, "blocked",
+                f"rework limit reached ({MAX_REWORK_ROUNDS} rounds); {result}",
+            )
+            store.set_task_workflow_state(task_id, task_status="blocked")
+            _settle_step_card(store, task, step, "blocked")
+            _recompute_parent_goal_status(store, task)
+            notice = _notify_hub(
+                store, members,
+                f"Task #{task_id} hit the rework limit ({MAX_REWORK_ROUNDS} rounds) "
+                f"at step '{step}' -> {', '.join(targets)}; blocked instead of "
+                f"looping again. Last result: {result or 'no details'}",
+            )
+            return {
+                "task_id": task_id, "step": step, "outcome": "blocked",
+                "dispatched": [], "notices": [notice], "rework_limited": True,
+            }
     else:
         targets = forward
 
@@ -2409,7 +2474,7 @@ def runner_loop(
     poll_seconds: float = 2.0,
     once: bool = False,
     roles: list[str] | None = None,
-    max_concurrency: int = 1,
+    max_concurrency: int = 5,
 ) -> None:
     """Poll and execute queued run_jobs until interrupted. `agents`/`roles`
     scope which jobs are claimed; max_concurrency runs that many jobs in
@@ -3112,7 +3177,7 @@ def create_server(
     db_path: str | None = None,
     project: dict[str, Any] | None = None,
     run_worker: bool = True,
-    worker_concurrency: int = 1,
+    worker_concurrency: int = 5,
 ) -> FastMCP:
     store = Store(db_path)
     # mcp.run() blocks until the process dies (Ctrl-C included), so a plain
@@ -3678,6 +3743,9 @@ def create_server(
         title = str(data.get("title") or "").strip() or content.splitlines()[0][:80]
 
         def _create_and_start() -> dict:
+            conflict = active_goal_conflict_reason(store)
+            if conflict:
+                raise InvalidInputError(conflict)
             actor = _workflow_api_actor(
                 str(data.get("agent") or ""), current_project.get("project_root")
             )
