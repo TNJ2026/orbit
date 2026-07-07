@@ -1085,11 +1085,13 @@ class Store:
         runner_name: str,
         agents: list[str] | None = None,
         lease_seconds: int = DEFAULT_LEASE_SECONDS,
+        steps: list[str] | None = None,
     ) -> dict[str, Any] | None:
         now = _now()
         lease_until = _future(max(1, int(lease_seconds)))
         runner_name = (runner_name or "").strip()
         agents = [a.strip() for a in (agents or []) if a.strip()]
+        steps = [s.strip() for s in (steps or []) if s.strip()]
         with self._lock:
             filters = [
                 "(status = 'pending' OR (status = 'running' AND leased_until <= ?))"
@@ -1099,6 +1101,10 @@ class Store:
                 placeholders = ",".join("?" for _ in agents)
                 filters.append(f"assignee IN ({placeholders})")
                 params.extend(agents)
+            if steps:
+                placeholders = ",".join("?" for _ in steps)
+                filters.append(f"step IN ({placeholders})")
+                params.extend(steps)
             row = self._conn.execute(
                 f"""SELECT id FROM run_jobs
                     WHERE {' AND '.join(filters)}

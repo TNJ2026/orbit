@@ -1262,6 +1262,26 @@ class RunJobLeaseTests(unittest.TestCase):
             self.assertFalse(h.store.renew_run_job(job["id"], "runner-1", 300))
 
 
+class RunnerScopeTests(unittest.TestCase):
+    def test_steps_for_roles_resolves(self):
+        with TemporaryDirectory() as tmp:
+            EngineHarness(tmp)  # writes the default workflow
+            self.assertEqual(["implement"], server._steps_for_roles(tmp, ["implementer"]))
+            self.assertEqual({"intake", "accept"}, set(server._steps_for_roles(tmp, ["hub"])))
+            self.assertIsNone(server._steps_for_roles(tmp, []))
+
+    def test_claim_filters_by_step(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            t1 = h.create_task()
+            h.store.create_run_job(t1, "implement", "codex", "echo x", "")
+            review = h.store.create_run_job(t1, "review", "rev", "echo y", "")
+            # a runner scoped to the review step claims only that job
+            claimed = h.store.claim_next_run_job("r", steps=["review"])
+            self.assertEqual(review["id"], claimed["id"])
+            self.assertEqual("review", claimed["step"])
+
+
 class ForceCloseTests(unittest.TestCase):
     def test_force_close_closes_tree_and_orphans_runs(self):
         with TemporaryDirectory() as tmp:

@@ -2267,18 +2267,20 @@ def run_queued_job(
     agents: list[str] | None = None,
     lease_seconds: int = DEFAULT_LEASE_SECONDS,
     timeout_seconds: float | None = None,
+    steps: list[str] | None = None,
 ) -> dict[str, Any] | None:
     """Runner-server entry point: claim one queued runner job and execute it.
 
     The UI/API server and scheduler only create run_jobs. A separate runner
     process calls this function, owns the subprocess lifetime, and records the
     result through the same run_step_worker path used by the legacy in-process
-    runner.
+    runner. `agents`/`steps` narrow which jobs this runner will claim.
     """
     job = store.claim_next_run_job(
         runner_name=runner_name,
         agents=agents,
         lease_seconds=lease_seconds,
+        steps=steps,
     )
     if not job:
         return None
@@ -2348,6 +2350,19 @@ def run_queued_job(
         raise
 
 
+def _steps_for_roles(
+    project_root: str | None, roles: list[str] | None
+) -> list[str] | None:
+    """Resolve role names to the workflow step ids that use them, so a runner
+    scoped to --roles claims only those steps' jobs. None means no role filter."""
+    roles = [r.strip() for r in (roles or []) if r.strip()]
+    if not roles:
+        return None
+    wanted = set(roles)
+    cfg = read_workflow_config(project_root)
+    return [s["id"] for s in cfg["steps"] if s.get("role_id") in wanted]
+
+
 def runner_loop(
     store: Store,
     project_root: str | None,
@@ -2355,24 +2370,49 @@ def runner_loop(
     agents: list[str] | None = None,
     poll_seconds: float = 2.0,
     once: bool = False,
+    roles: list[str] | None = None,
+    max_concurrency: int = 1,
 ) -> None:
-    """Poll and execute queued run_jobs until interrupted."""
-    while True:
-        result = run_queued_job(
-            store,
-            project_root,
-            runner_name=runner_name,
-            agents=agents,
-        )
-        if result:
-            print(
-                f"runner {runner_name}: job #{result['job_id']} {result['status']}",
-                flush=True,
+    """Poll and execute queued run_jobs until interrupted. `agents`/`roles`
+    scope which jobs are claimed; max_concurrency runs that many jobs in
+    parallel (each parallel worker leases under a distinct name)."""
+    steps = _steps_for_roles(project_root, roles)
+    # A role filter that matches no step would silently claim nothing; treat an
+    # empty resolved set as a hard stop rather than "all steps".
+    if roles and not steps:
+        print(f"runner {runner_name}: no steps match roles {roles}; nothing to do", flush=True)
+        return
+
+    def _worker(name: str) -> None:
+        while True:
+            result = run_queued_job(
+                store,
+                project_root,
+                runner_name=name,
+                agents=agents,
+                steps=steps,
             )
-        elif once:
-            return
-        else:
-            time.sleep(max(0.1, float(poll_seconds)))
+            if result:
+                print(f"runner {name}: job #{result['job_id']} {result['status']}", flush=True)
+            elif once:
+                return
+            else:
+                time.sleep(max(0.1, float(poll_seconds)))
+
+    workers = max(1, int(max_concurrency))
+    if workers == 1:
+        _worker(runner_name)
+        return
+    threads = [
+        threading.Thread(
+            target=_worker, args=(f"{runner_name}-{i}",), name=f"runner-worker-{i}", daemon=True
+        )
+        for i in range(workers)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
 
 
 def scheduler_tick(

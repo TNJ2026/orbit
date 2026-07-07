@@ -1,4 +1,4 @@
-"""CLI entry point: dev-loop serve|init [--host HOST] [--port PORT] [--db PATH]"""
+"""CLI entry point: dev-loop serve|runner|init."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ from importlib import resources
 from pathlib import Path
 
 from .project_index import upsert_project
-from .store import project_db_path, resolve_project_root
-from .server import create_server
+from .store import Store, project_db_path, resolve_project_root
+from .server import create_server, runner_loop
 
 _CLAUDE_MD_SECTION = """
 ## 多 agent 角色
@@ -147,13 +147,65 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="dev-loop", description="Local MCP mailbox for LLM agents")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    serve = sub.add_parser("serve", help="Start the MCP server (Streamable HTTP)")
+    serve = sub.add_parser(
+        "serve",
+        help="Start the UI/API + Scheduler server (Streamable HTTP)",
+    )
     serve.add_argument("--host", default="127.0.0.1", help="Bind address (default: 127.0.0.1)")
     serve.add_argument("--port", type=int, default=8848, help="Port (default: 8848)")
     serve.add_argument(
         "--db",
         default=None,
         help="SQLite path (default: per-project database under ~/.dev_loop/projects/)",
+    )
+
+    runner = sub.add_parser(
+        "runner",
+        help="Start a Runner server that claims queued workflow run jobs",
+    )
+    runner.add_argument(
+        "--db",
+        default=None,
+        help="SQLite path (default: per-project database under ~/.dev_loop/projects/)",
+    )
+    runner.add_argument(
+        "--name",
+        default="runner-local",
+        help="Runner instance name for job leases (default: runner-local)",
+    )
+    runner.add_argument(
+        "--agent",
+        action="append",
+        default=[],
+        help="Only run jobs assigned to this agent; repeatable. Default: all agents.",
+    )
+    runner.add_argument(
+        "--roles",
+        default="",
+        help="Only run jobs for these workflow roles (comma-separated, e.g. "
+        "implementer,reviewer). Default: all roles.",
+    )
+    runner.add_argument(
+        "--project",
+        default=None,
+        help="Project root to serve (default: resolved from the current directory).",
+    )
+    runner.add_argument(
+        "--max-concurrency",
+        type=int,
+        default=1,
+        help="Run up to this many jobs in parallel (default: 1).",
+    )
+    runner.add_argument(
+        "--poll-seconds",
+        type=float,
+        default=2.0,
+        help="Polling interval when no jobs are available (default: 2.0)",
+    )
+    runner.add_argument(
+        "--once",
+        action="store_true",
+        help="Claim at most one job and exit when no job is available.",
     )
 
     init = sub.add_parser(
@@ -205,10 +257,39 @@ def main() -> None:
             project=project,
         )
         print(
-            f"dev-loop MCP server listening on http://{args.host}:{args.port}/mcp (db: {db_path})",
+            f"dev-loop UI/Scheduler listening on http://{args.host}:{args.port}/mcp (db: {db_path})",
             flush=True,
         )
         mcp.run(transport="streamable-http")
+        return
+
+    if args.command == "runner":
+        project_root = resolve_project_root(args.project)
+        db_path = args.db or str(project_db_path(project_root))
+        roles = [r.strip() for r in (args.roles or "").split(",") if r.strip()]
+        scope = []
+        if args.agent:
+            scope.append(f"agents={','.join(args.agent)}")
+        if roles:
+            scope.append(f"roles={','.join(roles)}")
+        if args.max_concurrency > 1:
+            scope.append(f"concurrency={args.max_concurrency}")
+        suffix = f" [{'; '.join(scope)}]" if scope else ""
+        print(
+            f"dev-loop Runner {args.name} watching {project_root} (db: {db_path}){suffix}",
+            flush=True,
+        )
+        runner_loop(
+            Store(db_path),
+            str(project_root),
+            runner_name=args.name,
+            agents=args.agent or None,
+            poll_seconds=args.poll_seconds,
+            once=args.once,
+            roles=roles or None,
+            max_concurrency=args.max_concurrency,
+        )
+        return
 
 
 if __name__ == "__main__":
