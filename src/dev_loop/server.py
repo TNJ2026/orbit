@@ -1901,6 +1901,8 @@ RUNNER_HARD_TIMEOUT_SECONDS = 1800
 HUB_INSPECT_TIMEOUT_SECONDS = 180
 # How often the central hub-inspection sweep scans for stuck runs.
 HUB_SWEEP_POLL_SECONDS = 60
+# How often a runner re-checks the hard cap and the hub's kill flag while waiting.
+RUNNER_CANCEL_POLL_SECONDS = 10
 # Headless CLIs default to asking for permission on every file write / tool
 # call, which no one is there to answer — a runner without full permissions
 # can only produce inline text. These defaults grant maximum autonomy; set
@@ -2095,16 +2097,24 @@ def _run_output_size(log_dir: str | None) -> int:
     return total
 
 
-def _read_run_output(log_dir: str | None) -> str:
+def _read_run_output_tail(log_dir: str | None, tail_bytes: int = 4000) -> str:
+    """Last tail_bytes of each log file — a long-running step's logs can be huge,
+    and the hub prompt only needs the recent tail. Seeks instead of reading all."""
     if not log_dir:
         return ""
     parts = []
     for name in ("stdout.log", "stderr.log"):
+        path = Path(log_dir) / name
         try:
-            parts.append((Path(log_dir) / name).read_text("utf-8", errors="replace"))
+            with path.open("rb") as fh:
+                size = fh.seek(0, os.SEEK_END)
+                fh.seek(max(0, size - tail_bytes))
+                chunk = fh.read().decode("utf-8", errors="replace")
+            if chunk.strip():
+                parts.append(chunk)
         except OSError:
             pass
-    return "\n".join(p for p in parts if p)
+    return "\n".join(parts)
 
 
 def _hub_inspect_batch(
@@ -2171,20 +2181,18 @@ def hub_inspect_sweep(
     """Central soft-timeout check (one hub call for all): find runs past the soft
     timeout that produced no new output since the last sweep (filter A — a run
     still streaming output is working and is skipped), ask the hub whether each
-    is stuck, and killpg the ones it condemns. The runner's proc.wait then
-    returns and settles the step as blocked. Returns the killed run ids."""
+    is stuck, and flag the condemned ones for their owning runner to kill (the
+    runner owns the process, so no reused/foreign pid is ever signalled).
+    Returns the flagged run ids."""
     now = now if now is not None else time.monotonic()
     candidates: list[dict[str, Any]] = []
     live_ids: set[int] = set()
     for run in store.list_running_task_runs():
         rid = int(run["id"])
         live_ids.add(rid)
-        pid = run.get("pid")
         size = _run_output_size(run.get("log_dir"))
         prev = _HUB_SWEEP_STATE.get(rid)
         _HUB_SWEEP_STATE[rid] = {"size": size, "inspected": (prev or {}).get("inspected", 0.0)}
-        if not pid:
-            continue
         try:
             elapsed = (
                 datetime.now(timezone.utc) - datetime.fromisoformat(run["started_at"])
@@ -2200,29 +2208,26 @@ def hub_inspect_sweep(
         if now - _HUB_SWEEP_STATE[rid]["inspected"] < RUNNER_SOFT_TIMEOUT_SECONDS:
             continue
         task = store.get_task(int(run["task_id"]))
-        if not task:
-            continue
         candidates.append({
-            "run_id": rid, "pid": int(pid), "task_id": run["task_id"],
-            "title": task.get("title"), "step": task.get("workflow_step"),
+            "run_id": rid, "task_id": run["task_id"],
+            "title": task.get("title") if task else "",
+            "step": run.get("workflow_step") or (task.get("workflow_step") if task else ""),
             "assignee": run.get("worker"), "elapsed": elapsed,
-            "output": _read_run_output(run.get("log_dir")),
+            "output": _read_run_output_tail(run.get("log_dir")),
         })
     for gone in [k for k in _HUB_SWEEP_STATE if k not in live_ids]:
         _HUB_SWEEP_STATE.pop(gone, None)
     if not candidates:
         return []
     decisions = _hub_inspect_batch(store, project_root, candidates)
-    killed: list[int] = []
+    flagged: list[int] = []
     for c in candidates:
         _HUB_SWEEP_STATE[c["run_id"]]["inspected"] = now
         if decisions.get(c["run_id"]) == "kill":
-            try:
-                os.killpg(os.getpgid(c["pid"]), signal.SIGKILL)
-                killed.append(c["run_id"])
-            except (ProcessLookupError, PermissionError, OSError):
-                pass
-    return killed
+            # Signal only — the runner that owns the process kills it.
+            if store.request_run_kill(c["run_id"], "hub inspection: stuck/errored"):
+                flagged.append(c["run_id"])
+    return flagged
 
 
 def run_step_worker(
@@ -2254,7 +2259,9 @@ def run_step_worker(
         if card:
             run_task_id = card["id"]
     command = _runner_command_for(member)
-    run = store.create_task_run(run_task_id, worker=assignee, command=command)
+    run = store.create_task_run(
+        run_task_id, worker=assignee, command=command, workflow_step=step["id"]
+    )
     if run:
         log_dir = _task_run_dir(project_root, run_task_id, int(run["attempt"]))
         run = store.update_task_run_log_dir(run["id"], str(log_dir)) or run
@@ -2353,26 +2360,38 @@ def run_step_worker(
                 daemon=True,
             )
             stdin_thread.start()
-            # The runner just waits to the hard cap and force-kills the whole
-            # group. Soft-timeout inspection (hub decides KILL/CONTINUE for a
-            # still-running silent step) is handled centrally by hub_inspect_sweep
-            # in the UI/scheduler process, which killpg's this run's pid if the
-            # hub decides to kill it — proc.wait then returns here as usual.
-            try:
-                exit_code = proc.wait(timeout=hard_seconds)
-            except subprocess.TimeoutExpired:
-                _kill_process_group(proc)
-                status = "timeout"
-                result = f"runner hard-timed out after {int(hard_seconds)}s"
-                if run:
-                    try:
-                        _append_run_event(run, {
-                            "type": "runner_timeout", "workflow_task_id": task_id,
-                            "workflow_step": step["id"], "timeout_seconds": hard_seconds,
-                        })
-                    except (InvalidInputError, OSError):
-                        pass
-                proc.wait()
+            # Wait in short chunks: enforce the hard cap, and honour a kill flag
+            # set by the central hub sweep. Only this runner — which owns the
+            # process — ever kills it, so a reused/foreign pid is never touched.
+            start_wait = time.monotonic()
+            while True:
+                elapsed = time.monotonic() - start_wait
+                remaining = hard_seconds - elapsed
+                kill_reason = None
+                if remaining <= 0:
+                    kill_reason = f"runner hard-timed out after {int(hard_seconds)}s"
+                elif run and store.run_cancel_requested(run["id"]):
+                    kill_reason = f"hub inspection killed the step after {int(elapsed)}s (stuck/errored)"
+                if kill_reason is not None:
+                    _kill_process_group(proc)
+                    status = "timeout"
+                    result = kill_reason
+                    if run:
+                        try:
+                            _append_run_event(run, {
+                                "type": "runner_timeout", "workflow_task_id": task_id,
+                                "workflow_step": step["id"], "elapsed_seconds": int(elapsed),
+                                "reason": kill_reason,
+                            })
+                        except (InvalidInputError, OSError):
+                            pass
+                    proc.wait()
+                    break
+                try:
+                    exit_code = proc.wait(timeout=min(RUNNER_CANCEL_POLL_SECONDS, remaining))
+                    break  # finished on its own
+                except subprocess.TimeoutExpired:
+                    continue
             stdin_thread.join(timeout=1)
             stdout_thread.join()
             stderr_thread.join()

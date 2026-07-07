@@ -1444,6 +1444,37 @@ class HubInspectTests(unittest.TestCase):
             self.assertEqual({11: "continue", 22: "continue"},
                              server._hub_inspect_batch(h.store, tmp, self._cands()))
 
+    def test_sweep_flags_stuck_run_instead_of_killing_pid(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, team=self._hub_team("echo 'DECISION 1: KILL'"))
+            tid = h.create_task()
+            run = h.store.create_task_run(
+                tid, worker="codex", command="x", workflow_step="implement")
+            run_dir = Path(tmp) / "rundir"
+            run_dir.mkdir()
+            (run_dir / "stdout.log").write_text("", encoding="utf-8")  # silent
+            h.store._conn.execute(
+                "UPDATE task_runs SET started_at=?, log_dir=?, pid=? WHERE id=?",
+                ("2000-01-01T00:00:00+00:00", str(run_dir), 999999999, run["id"]),
+            )
+            h.store._conn.commit()
+            server._HUB_SWEEP_STATE.clear()
+            server.hub_inspect_sweep(h.store, tmp)          # 1st: record size
+            flagged = server.hub_inspect_sweep(h.store, tmp)  # 2nd: silent -> hub KILL
+            server._HUB_SWEEP_STATE.clear()
+            self.assertIn(run["id"], flagged)
+            # the sweep only signals; it does not kill a pid itself
+            self.assertTrue(h.store.run_cancel_requested(run["id"]))
+
+    def test_run_cancel_flag_roundtrip(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            tid = h.create_task()
+            run = h.store.create_task_run(tid, worker="codex")
+            self.assertFalse(h.store.run_cancel_requested(run["id"]))
+            self.assertTrue(h.store.request_run_kill(run["id"]))
+            self.assertTrue(h.store.run_cancel_requested(run["id"]))
+
     def test_sweep_skips_run_that_is_producing_output(self):
         with TemporaryDirectory() as tmp:
             h = EngineHarness(tmp, team=self._hub_team("echo 'DECISION 1: KILL'"))

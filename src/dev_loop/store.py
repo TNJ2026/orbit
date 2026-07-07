@@ -96,6 +96,8 @@ CREATE TABLE IF NOT EXISTS task_runs (
     command     TEXT NOT NULL DEFAULT '',
     tokens      INTEGER,
     pid         INTEGER,
+    workflow_step TEXT NOT NULL DEFAULT '',
+    cancel_requested INTEGER NOT NULL DEFAULT 0,
     started_at  TEXT NOT NULL,
     finished_at TEXT,
     FOREIGN KEY(task_id) REFERENCES tasks(id),
@@ -338,6 +340,14 @@ class Store:
             self._conn.execute("ALTER TABLE task_runs ADD COLUMN tokens INTEGER")
         if run_columns and "pid" not in run_columns:
             self._conn.execute("ALTER TABLE task_runs ADD COLUMN pid INTEGER")
+        if run_columns and "workflow_step" not in run_columns:
+            self._conn.execute(
+                "ALTER TABLE task_runs ADD COLUMN workflow_step TEXT NOT NULL DEFAULT ''"
+            )
+        if run_columns and "cancel_requested" not in run_columns:
+            self._conn.execute(
+                "ALTER TABLE task_runs ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0"
+            )
         # Older databases predate runner jobs. The main schema creates the
         # table for fresh databases; this keeps existing project DBs compatible.
         self._conn.execute(
@@ -1327,12 +1337,14 @@ class Store:
         worker: str = "",
         status: str = "running",
         command: str = "",
+        workflow_step: str = "",
     ) -> dict[str, Any] | None:
         """Create a task execution attempt and return its run metadata."""
         now = _now()
         worker = (worker or "").strip()
         status = (status or "running").strip()
         command = (command or "").strip()
+        workflow_step = (workflow_step or "").strip()
         with self._lock:
             task = self._conn.execute(
                 "SELECT id FROM tasks WHERE id = ?", (task_id,)
@@ -1347,10 +1359,10 @@ class Store:
             cur = self._conn.execute(
                 """INSERT INTO task_runs (
                        task_id, attempt, worker, status, log_dir, command,
-                       started_at
+                       workflow_step, started_at
                    )
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (task_id, attempt, worker, status, log_dir, command, now),
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (task_id, attempt, worker, status, log_dir, command, workflow_step, now),
             )
             run_id = cur.lastrowid
             self._conn.commit()
@@ -1384,20 +1396,41 @@ class Store:
 
     def list_running_task_runs(self) -> list[dict[str, Any]]:
         """Every task_run still marked running, with the fields the hub-inspect
-        sweep needs (pid to kill, log_dir to gauge output, started_at for age)."""
+        sweep needs (log_dir to gauge output/age, workflow_step for context)."""
         with self._lock:
             rows = self._conn.execute(
-                """SELECT id, task_id, worker, pid, log_dir, started_at
+                """SELECT id, task_id, worker, pid, log_dir, workflow_step,
+                          cancel_requested, started_at
                    FROM task_runs WHERE status = 'running'
                    ORDER BY id"""
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def request_run_kill(self, run_id: int, note: str = "") -> bool:
+        """Flag a running run for its owning runner to kill. The sweep sets this
+        instead of killing a pid itself, so only the runner that owns the process
+        (and its host) ever signals it — avoiding killing a reused/foreign pid."""
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE task_runs SET cancel_requested = 1 WHERE id = ? AND status = 'running'",
+                (run_id,),
+            )
+            self._conn.commit()
+        return cur.rowcount > 0
+
+    def run_cancel_requested(self, run_id: int) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT cancel_requested FROM task_runs WHERE id = ?", (run_id,)
+            ).fetchone()
+        return bool(row and row["cancel_requested"])
+
     def get_task_run(self, run_id: int) -> dict[str, Any] | None:
         with self._lock:
             row = self._conn.execute(
                 """SELECT id, task_id, attempt, worker, status, exit_code,
-                          log_dir, command, tokens, started_at, finished_at
+                          log_dir, command, tokens, workflow_step,
+                          cancel_requested, started_at, finished_at
                    FROM task_runs
                    WHERE id = ?""",
                 (run_id,),
