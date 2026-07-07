@@ -298,6 +298,16 @@ class StoreTests(unittest.TestCase):
         self.assertEqual("hub says stuck", finished["cancel_reason"])
         self.assertFalse(store.run_cancel_requested(run["id"]))
 
+    def test_step_card_display_id_tied_to_parent(self):
+        store = self.make_store()
+        self.register_pair(store)
+        store.send_message("a", "b", "big task", kind="task")
+        [parent] = store.list_tasks()
+        c1 = store.create_step_card(parent["id"], "intake", "Intake", "x", "workflow", "b", "created")
+        c2 = store.create_step_card(parent["id"], "implement", "Impl", "x", "workflow", "b", "in_progress")
+        self.assertEqual(f"{parent['id']}.1", c1["display_id"])
+        self.assertEqual(f"{parent['id']}.2", c2["display_id"])
+
     def test_task_run_log_dir_can_be_set_after_attempt_is_reserved(self):
         store = self.make_store()
         self.register_pair(store)

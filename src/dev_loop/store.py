@@ -325,10 +325,26 @@ class Store:
             "workflow_step": "TEXT NOT NULL DEFAULT ''",
             "parent_task_id": "INTEGER",
             "is_goal": "INTEGER NOT NULL DEFAULT 0",
+            # Human-facing hierarchical label for step cards, e.g. "2474.3".
+            "display_id": "TEXT NOT NULL DEFAULT ''",
         }
         for column, definition in task_defaults.items():
             if column not in task_columns:
                 self._conn.execute(f"ALTER TABLE tasks ADD COLUMN {column} {definition}")
+        # Backfill hierarchical labels for existing step cards (one-time; only
+        # touches cards still missing a display_id).
+        if "display_id" not in task_columns:
+            self._conn.execute(
+                """UPDATE tasks SET display_id = parent_task_id || '.' || (
+                       SELECT COUNT(*) FROM tasks t2
+                       WHERE t2.parent_task_id = tasks.parent_task_id
+                         AND t2.source_message_id IS NULL
+                         AND t2.id <= tasks.id
+                   )
+                   WHERE parent_task_id IS NOT NULL
+                     AND source_message_id IS NULL
+                     AND display_id = ''"""
+            )
         run_columns = {
             row["name"]
             for row in self._conn.execute("PRAGMA table_info(task_runs)").fetchall()
@@ -662,7 +678,7 @@ class Store:
                            created_at, updated_at,
                            role_required, importance, size, risk,
                            required_capabilities, exclusive_workspace,
-                           workflow_step, parent_task_id, is_goal
+                           workflow_step, parent_task_id, is_goal, display_id
                     FROM tasks
                     {where}
                     ORDER BY id DESC
@@ -678,7 +694,7 @@ class Store:
                           assignee, assignee AS recipient, status AS task_status,
                           created_at, updated_at, role_required, importance, size,
                           risk, required_capabilities, exclusive_workspace,
-                          workflow_step, parent_task_id, is_goal
+                          workflow_step, parent_task_id, is_goal, display_id
                    FROM tasks
                    WHERE id = ?""",
                 (task_id,),
@@ -692,7 +708,7 @@ class Store:
                           assignee, assignee AS recipient, status AS task_status,
                           created_at, updated_at, role_required, importance, size,
                           risk, required_capabilities, exclusive_workspace,
-                          workflow_step, parent_task_id, is_goal
+                          workflow_step, parent_task_id, is_goal, display_id
                    FROM tasks
                    WHERE source_message_id = ?""",
                 (message_id,),
@@ -706,7 +722,7 @@ class Store:
                           assignee, assignee AS recipient, status AS task_status,
                           created_at, updated_at, role_required, importance, size,
                           risk, required_capabilities, exclusive_workspace,
-                          workflow_step, parent_task_id, is_goal
+                          workflow_step, parent_task_id, is_goal, display_id
                    FROM tasks
                    WHERE parent_task_id = ?
                    ORDER BY id DESC""",
@@ -722,7 +738,7 @@ class Store:
                           assignee, assignee AS recipient, status AS task_status,
                           created_at, updated_at, role_required, importance, size,
                           risk, required_capabilities, exclusive_workspace,
-                          workflow_step, parent_task_id, is_goal
+                          workflow_step, parent_task_id, is_goal, display_id
                    FROM tasks
                    WHERE is_goal = 1
                       OR parent_task_id IN (SELECT id FROM tasks WHERE is_goal = 1)
@@ -738,7 +754,7 @@ class Store:
                           assignee, assignee AS recipient, status AS task_status,
                           created_at, updated_at, role_required, importance, size,
                           risk, required_capabilities, exclusive_workspace,
-                          workflow_step, parent_task_id, is_goal
+                          workflow_step, parent_task_id, is_goal, display_id
                    FROM tasks
                    WHERE workflow_step != ''
                      AND status NOT IN ('blocked', 'closed')
@@ -755,7 +771,7 @@ class Store:
                           assignee, assignee AS recipient, status AS task_status,
                           created_at, updated_at, role_required, importance, size,
                           risk, required_capabilities, exclusive_workspace,
-                          workflow_step, parent_task_id, is_goal
+                          workflow_step, parent_task_id, is_goal, display_id
                    FROM tasks
                    WHERE status NOT IN ('closed', 'accepted')
                    ORDER BY id DESC"""
@@ -852,15 +868,23 @@ class Store:
         status = _validate_task_status(status) or "created"
         now = _now()
         with self._lock:
+            # Hierarchical label tied to the parent task, e.g. "2474.3" for the
+            # third step card of task 2474 — stable, assigned once in order.
+            row = self._conn.execute(
+                """SELECT COUNT(*) AS n FROM tasks
+                   WHERE parent_task_id = ? AND source_message_id IS NULL""",
+                (parent_task_id,),
+            ).fetchone()
+            display_id = f"{parent_task_id}.{int(row['n']) + 1}"
             cur = self._conn.execute(
                 """INSERT INTO tasks (
                        title, content, sender, assignee, status, role_required,
-                       parent_task_id, workflow_step, created_at, updated_at
+                       parent_task_id, workflow_step, display_id, created_at, updated_at
                    )
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     title, content, sender, assignee, status, role_required,
-                    parent_task_id, workflow_step, now, now,
+                    parent_task_id, workflow_step, display_id, now, now,
                 ),
             )
             self._conn.commit()

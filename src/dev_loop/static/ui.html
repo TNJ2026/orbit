@@ -2322,7 +2322,7 @@
               <div class="kanban-cards">
                 ${col.tasks.length ? col.tasks.map(task => `
                   <div class="kanban-card" onclick="showTaskDetails(${task.id})">
-                    <div class="kanban-card-title">#${task.id} ${escapeHtml(task.title || "Task")}</div>
+                    <div class="kanban-card-title">#${escapeHtml(task.display_id || String(task.id))} ${escapeHtml(task.title || "Task")}</div>
                     <div class="kanban-card-content">${escapeHtml(task.content)}</div>
                     ${task.workflow_step || task.parent_task_id || task.is_goal ? `<div class="meta" style="margin-bottom: 4px; display: flex; gap: 4px; flex-wrap: wrap;">
                       ${task.is_goal ? `<span class="badge wf-step-badge">🎯 goal</span>` : ""}
@@ -2619,7 +2619,7 @@
           <span class="badge">${escapeHtml(task.task_status || "")}</span>
         </div>
         <div class="meta">
-          #${task.id} ${escapeHtml(task.sender)} to ${escapeHtml(task.recipient)}
+          #${escapeHtml(task.display_id || String(task.id))}${task.display_id ? ` (id ${task.id})` : ""} ${escapeHtml(task.sender)} to ${escapeHtml(task.recipient)}
           ${task.created_at ? ` - ${fmtTime(task.created_at)}` : ""}
         </div>
         ${task.parent_task_id ? `
