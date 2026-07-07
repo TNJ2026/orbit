@@ -60,7 +60,7 @@ uv run dev-loop serve --port 9000 --db /tmp/test.db
 dev-loop serve        # UI + MCP + Scheduler + 内嵌 Runner，全在一个进程
 ```
 
-`serve` 默认**内嵌一个 in-process runner**（名字 `serve-embedded`），所以启动一个 goal 后不需要再手动起 runner——建 job → 内嵌 runner 执行 → scheduler 推进，全自动。UI 的 **Jobs** 标签页能看到队列状态(pending / running / finished / done)。
+`serve` 默认**内嵌一个 in-process runner**（名字 `serve-embedded`，并发 5），所以启动一个 goal 后不需要再手动起 runner——建 job → 内嵌 runner 执行 → scheduler 推进，全自动。UI 的 **Jobs** 标签页能看到队列状态(pending / running / finished / done)。
 
 > ⚠️ 内嵌 runner 与 serve 同生命周期：**serve 重启会中断在途 step**（租约到期后该 step 自动重跑）。要重启安全 / 多机 / 水平扩展，用下面的解耦模式。
 
@@ -90,7 +90,7 @@ dev-loop runner --project /path/to/repo --name box-a       # 显式指定项目
 
 - `--agent NAME`（可重复）：只领分给该 agent 的 job。
 - `--roles a,b`：只领这些工作流角色的 job（按 workflow 配置把角色解析成 step）。
-- `--max-concurrency N`：并行跑 N 个 job（各 worker 独立租约名 `<name>-0/-1/…`）。
+- `--max-concurrency N`：并行跑 N 个 job，默认 5（各 worker 独立租约名 `<name>-0/-1/…`）。
 - `--project PATH`：显式项目根，替代 cwd 解析。
 - `--once`：领到一个跑完就退出（适合脚本 / CI）。
 

@@ -280,6 +280,24 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(1, finished["exit_code"])
         self.assertIsNotNone(finished["finished_at"])
 
+    def test_run_cancel_reason_persists_and_finish_clears_flag(self):
+        store = self.make_store()
+        self.register_pair(store)
+        store.send_message("a", "b", "run test suite", kind="task")
+        [task] = store.list_tasks()
+        run = store.create_task_run(task["id"], worker="codex")
+
+        self.assertTrue(store.request_run_kill(run["id"], "hub says stuck"))
+        requested = store.get_task_run(run["id"])
+        self.assertEqual(1, requested["cancel_requested"])
+        self.assertEqual("hub says stuck", requested["cancel_reason"])
+        self.assertTrue(store.run_cancel_requested(run["id"]))
+
+        finished = store.finish_task_run(run["id"], "failed", 137)
+        self.assertEqual(0, finished["cancel_requested"])
+        self.assertEqual("hub says stuck", finished["cancel_reason"])
+        self.assertFalse(store.run_cancel_requested(run["id"]))
+
     def test_task_run_log_dir_can_be_set_after_attempt_is_reserved(self):
         store = self.make_store()
         self.register_pair(store)

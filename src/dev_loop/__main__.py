@@ -167,8 +167,8 @@ def main() -> None:
     serve.add_argument(
         "--runner-concurrency",
         type=int,
-        default=1,
-        help="How many jobs the in-process worker runs in parallel (default: 1).",
+        default=5,
+        help="How many jobs the in-process worker runs in parallel (default: 5).",
     )
 
     runner = sub.add_parser(
@@ -205,8 +205,8 @@ def main() -> None:
     runner.add_argument(
         "--max-concurrency",
         type=int,
-        default=1,
-        help="Run up to this many jobs in parallel (default: 1).",
+        default=5,
+        help="Run up to this many jobs in parallel (default: 5).",
     )
     runner.add_argument(
         "--poll-seconds",

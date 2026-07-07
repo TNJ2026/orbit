@@ -98,6 +98,7 @@ CREATE TABLE IF NOT EXISTS task_runs (
     pid         INTEGER,
     workflow_step TEXT NOT NULL DEFAULT '',
     cancel_requested INTEGER NOT NULL DEFAULT 0,
+    cancel_reason TEXT NOT NULL DEFAULT '',
     started_at  TEXT NOT NULL,
     finished_at TEXT,
     FOREIGN KEY(task_id) REFERENCES tasks(id),
@@ -347,6 +348,10 @@ class Store:
         if run_columns and "cancel_requested" not in run_columns:
             self._conn.execute(
                 "ALTER TABLE task_runs ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0"
+            )
+        if run_columns and "cancel_reason" not in run_columns:
+            self._conn.execute(
+                "ALTER TABLE task_runs ADD COLUMN cancel_reason TEXT NOT NULL DEFAULT ''"
             )
         # Older databases predate runner jobs. The main schema creates the
         # table for fresh databases; this keeps existing project DBs compatible.
@@ -1385,7 +1390,8 @@ class Store:
         with self._lock:
             rows = self._conn.execute(
                 """SELECT id, task_id, attempt, worker, status, exit_code,
-                          log_dir, command, tokens, started_at, finished_at
+                          log_dir, command, tokens, workflow_step,
+                          cancel_requested, cancel_reason, started_at, finished_at
                    FROM task_runs
                    WHERE task_id = ?
                    ORDER BY attempt DESC
@@ -1400,7 +1406,7 @@ class Store:
         with self._lock:
             rows = self._conn.execute(
                 """SELECT id, task_id, worker, pid, log_dir, workflow_step,
-                          cancel_requested, started_at
+                          cancel_requested, cancel_reason, started_at
                    FROM task_runs WHERE status = 'running'
                    ORDER BY id"""
             ).fetchall()
@@ -1412,8 +1418,10 @@ class Store:
         (and its host) ever signals it — avoiding killing a reused/foreign pid."""
         with self._lock:
             cur = self._conn.execute(
-                "UPDATE task_runs SET cancel_requested = 1 WHERE id = ? AND status = 'running'",
-                (run_id,),
+                """UPDATE task_runs
+                   SET cancel_requested = 1, cancel_reason = ?
+                   WHERE id = ? AND status = 'running'""",
+                ((note or "")[:2000], run_id),
             )
             self._conn.commit()
         return cur.rowcount > 0
@@ -1430,7 +1438,7 @@ class Store:
             row = self._conn.execute(
                 """SELECT id, task_id, attempt, worker, status, exit_code,
                           log_dir, command, tokens, workflow_step,
-                          cancel_requested, started_at, finished_at
+                          cancel_requested, cancel_reason, started_at, finished_at
                    FROM task_runs
                    WHERE id = ?""",
                 (run_id,),
@@ -1451,7 +1459,8 @@ class Store:
             cur = self._conn.execute(
                 """UPDATE task_runs
                    SET status = ?, exit_code = ?, finished_at = ?,
-                       tokens = COALESCE(?, tokens)
+                       tokens = COALESCE(?, tokens),
+                       cancel_requested = 0
                    WHERE id = ?""",
                 (status, exit_code, _now(), tokens, run_id),
             )

@@ -2376,8 +2376,9 @@
           body: JSON.stringify({ agent })
         });
         state.rerunAgent = null;  // consumed; next open defaults again
-        setStatus(`Re-running #${taskId} step "${data.step}" with ${data.assignee}`);
+        setStatus(`Re-running #${taskId} step "${data.step}" with ${data.assignee}${data.queued_job_id ? ` (job #${data.queued_job_id} queued)` : ""}`);
         await loadTasks();
+        await loadRunJobs();
         await loadTaskRuns(taskId);
       });
     }
