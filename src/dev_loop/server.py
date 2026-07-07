@@ -3112,6 +3112,7 @@ def create_server(
     db_path: str | None = None,
     project: dict[str, Any] | None = None,
     run_worker: bool = True,
+    worker_concurrency: int = 1,
 ) -> FastMCP:
     store = Store(db_path)
     # mcp.run() blocks until the process dies (Ctrl-C included), so a plain
@@ -3162,6 +3163,7 @@ def create_server(
             current_project.get("project_root"),
             runner_name="serve-embedded",
             poll_seconds=2.0,
+            max_concurrency=worker_concurrency,
         )
 
     threading.Thread(

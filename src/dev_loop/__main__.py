@@ -164,6 +164,12 @@ def main() -> None:
         help="Do not run an in-process worker; start standalone `dev-loop "
         "runner` process(es) instead (decoupled / multi-host / restart-safe).",
     )
+    serve.add_argument(
+        "--runner-concurrency",
+        type=int,
+        default=1,
+        help="How many jobs the in-process worker runs in parallel (default: 1).",
+    )
 
     runner = sub.add_parser(
         "runner",
@@ -262,9 +268,10 @@ def main() -> None:
             db_path=db_path,
             project=project,
             run_worker=not args.no_runner,
+            worker_concurrency=args.runner_concurrency,
         )
         worker = "no in-process runner (start `dev-loop runner` separately)" if args.no_runner \
-            else "with in-process runner"
+            else f"with in-process runner (concurrency={args.runner_concurrency})"
         print(
             f"dev-loop UI/Scheduler listening on http://{args.host}:{args.port}/mcp "
             f"({worker}) (db: {db_path})",
