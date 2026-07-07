@@ -158,6 +158,12 @@ def main() -> None:
         default=None,
         help="SQLite path (default: per-project database under ~/.dev_loop/projects/)",
     )
+    serve.add_argument(
+        "--no-runner",
+        action="store_true",
+        help="Do not run an in-process worker; start standalone `dev-loop "
+        "runner` process(es) instead (decoupled / multi-host / restart-safe).",
+    )
 
     runner = sub.add_parser(
         "runner",
@@ -255,9 +261,13 @@ def main() -> None:
             port=args.port,
             db_path=db_path,
             project=project,
+            run_worker=not args.no_runner,
         )
+        worker = "no in-process runner (start `dev-loop runner` separately)" if args.no_runner \
+            else "with in-process runner"
         print(
-            f"dev-loop UI/Scheduler listening on http://{args.host}:{args.port}/mcp (db: {db_path})",
+            f"dev-loop UI/Scheduler listening on http://{args.host}:{args.port}/mcp "
+            f"({worker}) (db: {db_path})",
             flush=True,
         )
         mcp.run(transport="streamable-http")

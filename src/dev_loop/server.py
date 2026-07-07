@@ -3055,6 +3055,7 @@ def create_server(
     port: int = 8848,
     db_path: str | None = None,
     project: dict[str, Any] | None = None,
+    run_worker: bool = True,
 ) -> FastMCP:
     store = Store(db_path)
     # mcp.run() blocks until the process dies (Ctrl-C included), so a plain
@@ -3095,12 +3096,28 @@ def create_server(
             except Exception:
                 pass
 
+    def _embedded_runner() -> None:
+        # Convenience: run a worker in-process so `dev-loop serve` executes goals
+        # end-to-end without a separate `dev-loop runner`. For a decoupled /
+        # multi-host / restart-safe setup, start serve with run_worker=False and
+        # run standalone runners instead.
+        runner_loop(
+            store,
+            current_project.get("project_root"),
+            runner_name="serve-embedded",
+            poll_seconds=2.0,
+        )
+
     threading.Thread(
         target=_timeout_watcher, name="workflow-timeout-watcher", daemon=True
     ).start()
     threading.Thread(
         target=_scheduler, name="workflow-scheduler", daemon=True
     ).start()
+    if run_worker:
+        threading.Thread(
+            target=_embedded_runner, name="embedded-runner", daemon=True
+        ).start()
 
     mcp = FastMCP(
         "dev-loop",
