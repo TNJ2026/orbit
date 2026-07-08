@@ -565,6 +565,8 @@ def write_workflow_config(
     project_root: str | None = None,
     edges: Any = None,
     statuses: Any = None,
+    goal_verify: str | None = None,
+    goal_token_budget: int | None = None,
 ) -> dict[str, Any]:
     if not isinstance(steps, list):
         raise InvalidInputError("steps must be a list")
@@ -603,25 +605,30 @@ def write_workflow_config(
         {k: v for k, v in step.items() if k != "required_locked"}
         for step in normalized
     ]
-    # goal_verify / goal_token_budget have no editor fields yet; preserve any
-    # hand-set values across UI saves (which only send steps/statuses/edges)
-    # instead of wiping them.
-    goal_verify = ""
-    goal_token_budget = 0
+    # goal_verify / goal_token_budget: callers that don't pass them (e.g. a UI
+    # save of only steps/statuses/edges) preserve the existing values instead
+    # of wiping them; an explicit value overrides.
+    preserved_verify = ""
+    preserved_budget = 0
     if path.exists():
         try:
             prev = json.loads(path.read_text(encoding="utf-8"))
             if isinstance(prev, dict):
-                goal_verify = str(prev.get("goal_verify") or "").strip()
-                goal_token_budget = _coerce_token_budget(prev.get("goal_token_budget"))
+                preserved_verify = str(prev.get("goal_verify") or "").strip()
+                preserved_budget = _coerce_token_budget(prev.get("goal_token_budget"))
         except (OSError, json.JSONDecodeError):
             pass
+    final_verify = preserved_verify if goal_verify is None else str(goal_verify or "").strip()
+    final_budget = (
+        preserved_budget if goal_token_budget is None
+        else _coerce_token_budget(goal_token_budget)
+    )
     data = {
         "statuses": normalized_statuses,
         "steps": persisted,
         "edges": normalized_edges,
-        "goal_verify": goal_verify,
-        "goal_token_budget": goal_token_budget,
+        "goal_verify": final_verify,
+        "goal_token_budget": final_budget,
     }
     path.write_text(
         json.dumps(data, ensure_ascii=False, indent=2) + "\n",
@@ -631,8 +638,8 @@ def write_workflow_config(
         "steps": normalized,
         "statuses": normalized_statuses,
         "edges": normalized_edges,
-        "goal_verify": goal_verify,
-        "goal_token_budget": goal_token_budget,
+        "goal_verify": final_verify,
+        "goal_token_budget": final_budget,
         "path": str(path),
         "warnings": _workflow_graph_warnings(normalized, normalized_edges),
     }
@@ -4654,6 +4661,8 @@ def create_server(
                 current_project.get("project_root"),
                 data.get("edges"),
                 data.get("statuses"),
+                data.get("goal_verify"),
+                data.get("goal_token_budget"),
             )
         except InvalidInputError as exc:
             return _json_error(str(exc), request=request)

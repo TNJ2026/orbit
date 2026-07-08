@@ -374,6 +374,25 @@ class TokenBudgetConfigTests(unittest.TestCase):
             )
             self.assertEqual(12345, server.read_workflow_config(tmp)["goal_token_budget"])
 
+    def test_write_sets_and_clears_gates_explicitly(self):
+        with TemporaryDirectory() as tmp:
+            saved = server.write_workflow_config(
+                server.default_workflow_steps(), tmp, server.default_workflow_edges(),
+                goal_verify="pytest -q", goal_token_budget=5_000_000,
+            )
+            self.assertEqual(("pytest -q", 5_000_000),
+                             (saved["goal_verify"], saved["goal_token_budget"]))
+            # None preserves; explicit values override/clear.
+            server.write_workflow_config(
+                server.default_workflow_steps(), tmp, server.default_workflow_edges()
+            )
+            self.assertEqual(5_000_000, server.read_workflow_config(tmp)["goal_token_budget"])
+            cleared = server.write_workflow_config(
+                server.default_workflow_steps(), tmp, server.default_workflow_edges(),
+                goal_verify="", goal_token_budget=0,
+            )
+            self.assertEqual(("", 0), (cleared["goal_verify"], cleared["goal_token_budget"]))
+
 
 class TokenBudgetGateTests(unittest.TestCase):
     def _goal_with_subtask_tokens(self, tmp, tokens):
