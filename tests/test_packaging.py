@@ -814,35 +814,44 @@ class PackagingTests(unittest.TestCase):
         with self.assertRaises(InvalidInputError):
             server._validate_role_content([])
 
-    def test_workflow_config_with_decision_node(self):
+    def test_workflow_steps_have_no_kind_field(self):
+        # Decision nodes were removed: every node is a role-bearing step, and the
+        # normalized config no longer carries a "kind" field. Branching is
+        # expressed with plain edges (parallel/merge) and rework loop-backs.
         import dev_loop.server as server
 
         steps = [
             {"id": "intake", "name": "Triage", "role_id": "hub", "task_status": "created", "required": True},
             {"id": "implement", "name": "Implement", "role_id": "implementer", "task_status": "in_progress", "required": True},
             {"id": "review", "name": "Review", "role_id": "reviewer", "task_status": "reviewing", "required": True},
-            {"id": "branch_decision", "name": "Branch Decision", "kind": "decision"},
         ]
         edges = [
             {"from": "intake", "to": "implement"},
             {"from": "implement", "to": "review"},
-            {"from": "review", "to": "branch_decision"},
-            {"from": "branch_decision", "to": "implement", "rework": True},
-            {"from": "branch_decision", "to": "intake"},
+            {"from": "review", "to": "implement", "rework": True},
         ]
         with TemporaryDirectory() as tmp:
-            # Decisions are normalized (empty role_id/task_status, required=False, required_locked=False, timeout_minutes=0)
             saved = server.write_workflow_config(steps, tmp, edges=edges)
             loaded = server.read_workflow_config(tmp)
 
         self.assertEqual(saved, loaded)
-        decision_step = next(s for s in loaded["steps"] if s["id"] == "branch_decision")
-        self.assertEqual("decision", decision_step["kind"])
-        self.assertEqual("", decision_step["role_id"])
-        self.assertEqual("", decision_step["task_status"])
-        self.assertFalse(decision_step["required"])
-        self.assertFalse(decision_step["required_locked"])
-        self.assertEqual(0, decision_step["timeout_minutes"])
+        for step in loaded["steps"]:
+            self.assertNotIn("kind", step)
+            self.assertTrue(step["role_id"])
+
+    def test_workflow_decision_node_is_rejected(self):
+        # A former decision node (kind set, no role) is no longer accepted: with
+        # decisions gone it normalizes as a plain step and fails role validation.
+        import dev_loop.server as server
+        from dev_loop.store import InvalidInputError
+
+        steps = [
+            {"id": "intake", "name": "Triage", "role_id": "hub", "task_status": "created", "required": True},
+            {"id": "branch_decision", "name": "Branch Decision", "kind": "decision"},
+        ]
+        with TemporaryDirectory() as tmp:
+            with self.assertRaises(InvalidInputError):
+                server.write_workflow_config(steps, tmp, edges=[{"from": "intake", "to": "branch_decision"}])
 
 
 if __name__ == "__main__":

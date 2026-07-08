@@ -359,42 +359,30 @@ def _normalize_workflow_step(
             raise InvalidInputError(f"workflow step {key} must be finite")
         return max(0.0, round(value, 2))
 
-    kind = str(step.get("kind", "step") or "step").strip().lower()
-    if kind not in ("step", "decision"):
-        kind = "step"
-
-    if kind == "decision":
-        role_id = ""
-        task_status = ""
-        required = False
-        required_locked = False
-        timeout_minutes = 0
-    else:
-        if not _is_valid_role_id(role_id):
-            raise InvalidInputError("workflow step role_id is invalid")
-        allowed_statuses = allowed_statuses or _workflow_status_values(
-            default_workflow_statuses()
-        )
-        if task_status and task_status not in allowed_statuses:
-            raise InvalidInputError("workflow step task_status is invalid")
-        try:
-            timeout_minutes = int(step.get("timeout_minutes", 0) or 0)
-        except (TypeError, ValueError):
-            raise InvalidInputError("workflow step timeout_minutes must be an integer") from None
-        if timeout_minutes < 0:
-            raise InvalidInputError("workflow step timeout_minutes must be >= 0")
-        required_locked = role_id in REQUIRED_TEAM_ROLES
-        required = True if required_locked else bool(step.get("required", False))
+    if not _is_valid_role_id(role_id):
+        raise InvalidInputError("workflow step role_id is invalid")
+    allowed_statuses = allowed_statuses or _workflow_status_values(
+        default_workflow_statuses()
+    )
+    if task_status and task_status not in allowed_statuses:
+        raise InvalidInputError("workflow step task_status is invalid")
+    try:
+        timeout_minutes = int(step.get("timeout_minutes", 0) or 0)
+    except (TypeError, ValueError):
+        raise InvalidInputError("workflow step timeout_minutes must be an integer") from None
+    if timeout_minutes < 0:
+        raise InvalidInputError("workflow step timeout_minutes must be >= 0")
+    required_locked = role_id in REQUIRED_TEAM_ROLES
+    required = True if required_locked else bool(step.get("required", False))
 
     return {
         "id": step_id,
         "name": name,
         "role_id": role_id,
-        "task_status": task_status or ("" if kind == "decision" else "created"),
+        "task_status": task_status or "created",
         "required": required,
         "required_locked": required_locked,
         "timeout_minutes": timeout_minutes,
-        "kind": kind,
         "x": _coord("x", 40 + index * 320),
         "y": _coord("y", _DEFAULT_STEP_MID_Y),
     }
@@ -1284,8 +1272,6 @@ def _validate_goal_auto_runners(
     }
     missing: list[str] = []
     for step in _main_workflow_reachable_steps(cfg, back):
-        if step.get("kind") == "decision":
-            continue
         assignee = _pick_assignee(store, probe_task, step, members)
         if assignee is None:
             if step["required"]:
@@ -1632,23 +1618,14 @@ def _dispatch_targets(
                     f"available team member for role {step['role_id']}.",
                 ))
                 continue
-            # Optional step or decision node with nobody to run it: pass through.
+            # Optional step with nobody to run it: pass through to successors.
             for nxt in _forward_out(cfg, back, target):
-                if step.get("kind") == "decision":
-                    store.record_task_transition(
-                        task_id, target, nxt, WORKFLOW_ENGINE_AGENT, "skipped",
-                        f"decision node {target} passed through",
-                    )
-                else:
-                    store.record_task_transition(
-                        task_id, target, nxt, WORKFLOW_ENGINE_AGENT, "skipped",
-                        f"no team member for optional step {target}",
-                    )
+                store.record_task_transition(
+                    task_id, target, nxt, WORKFLOW_ENGINE_AGENT, "skipped",
+                    f"no team member for optional step {target}",
+                )
                 queue.append(nxt)
-            if step.get("kind") == "decision":
-                notices.append(f"decision node {target} passed through")
-            else:
-                notices.append(f"optional step {target} skipped (no team member)")
+            notices.append(f"optional step {target} skipped (no team member)")
             continue
         action = store.create_workflow_action(
             task_id,

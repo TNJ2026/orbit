@@ -860,33 +860,6 @@
     .workflow-node.wf-end { border-color: #7a8a83; background: #f2f4f3; }
     .wf-terminal-tag { font-size: 11px; font-weight: 600; color: var(--accent); }
     .wf-end .wf-terminal-tag { color: #5a6a63; }
-    /* Decision node: a diamond (branch point). The SVG stretches to the node's
-       rect, so its vertices land on the side midpoints where ports/edges attach. */
-    .workflow-node.wf-decision {
-      border: none;
-      background: transparent;
-      box-shadow: none;
-      min-height: 104px;
-      padding: 8px 26px;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      isolation: isolate;
-    }
-    .workflow-node.wf-decision:hover { box-shadow: none; }
-    .wf-diamond-bg {
-      position: absolute;
-      inset: 0;
-      width: 100%;
-      height: 100%;
-      z-index: 0;
-      pointer-events: none;
-      overflow: visible;
-    }
-    .wf-diamond-bg polygon { fill: #fdf3e6; stroke: var(--warn); stroke-width: 1.5; }
-    .wf-decision .wf-box-name, .wf-decision .wf-box-meta { position: relative; z-index: 1; }
-    .wf-decision .wf-role-badge { background: #fbe7cd; color: var(--warn); }
     .workflow-node:hover { box-shadow: 0 7px 18px rgba(29, 35, 38, 0.16); }
     .workflow-node:active { cursor: grabbing; }
     .workflow-node.optional { border-style: dashed; border-color: var(--muted); }
@@ -1322,7 +1295,6 @@
         <h2>Workflow</h2>
         <div class="row">
           <button id="addWorkflowStep" type="button">Add Step</button>
-          <button id="addWorkflowDecision" type="button">Add Decision</button>
           <button id="refreshWorkflow" type="button">Refresh</button>
         </div>
       </div>
@@ -1351,10 +1323,6 @@
     <div class="modal" role="dialog" aria-modal="true" aria-labelledby="addStepModalTitle">
       <div id="addStepModalTitle" class="modal-title">Add workflow step</div>
       <label><div class="meta">Name</div><input id="addStepName" type="text" placeholder="Step name"></label>
-      <div id="addStepDecisionHint" class="modal-hint" style="display:none;">
-        Decisions are branch points — they hold no role or status. Use them to model
-        choices where the flow fans out (e.g. review → pass / rework).
-      </div>
       <label id="addStepRoleField"><div class="meta">Role</div><select id="addStepRole"></select></label>
       <label id="addStepStatusField"><div class="meta">Status</div><select id="addStepStatus"></select></label>
       <label id="addStepRequiredField" class="modal-check"><input id="addStepRequired" type="checkbox"><span class="meta">Required (a step the flow must include)</span></label>
@@ -1834,8 +1802,8 @@
     const WF_NODE_W = 200;  // must match .workflow-node width in CSS (edge geometry uses it)
     let wfTempPath = null;    // in-progress connection preview path (SVG d string)
     let wfLayoutCache = null; // per-node port counts + per-edge port slots
-    // Active toolbar tool: "select" (click a node to edit), "step"/"decision"
-    // (click canvas to place), "connect" (click two nodes to wire an edge).
+    // Active toolbar tool: "select" (click a node to edit), "step" (click canvas
+    // to place a step), "connect" (click two nodes to wire an edge).
     let wfTool = "select";
     let wfConnectFrom = null; // source node id when in connect mode
 
@@ -1846,8 +1814,8 @@
     // Compute node coordinates with dagre and write them into the step models
     // (top-left corners; dagre returns centers). No-op when the dagre bundle is
     // unavailable, so callers keep whatever positions they already had. Node
-    // heights are read from the live DOM, so decisions and multi-line steps are
-    // measured accurately. Rework/back-edges are kept — dagre's acyclicer breaks
+    // heights are read from the live DOM, so multi-line steps are measured
+    // accurately. Rework/back-edges are kept — dagre's acyclicer breaks
     // cycles for ranking and routes them back. saveWorkflow calls this before
     // every POST, which is what makes the graph self-arranging.
     function wfApplyDagreLayout() {
@@ -2030,12 +1998,6 @@
             </svg>
             <span class="wf-tool-name">Step</span>
           </div>
-          <div class="wf-tool${wfTool === "decision" ? " active" : ""}" data-tool="decision" title="Click canvas to place a decision">
-            <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
-              <polygon points="11,3 19,11 11,19 3,11" stroke="var(--warn)" stroke-width="1.4" fill="#fdf3e6"/>
-            </svg>
-            <span class="wf-tool-name">Decision</span>
-          </div>
           <div class="wf-tool${wfTool === "connect" ? " active" : ""}" data-tool="connect" title="Click two nodes to connect">
             <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
               <circle cx="4" cy="11" r="2.2" fill="var(--accent)"/>
@@ -2056,7 +2018,7 @@
             <span class="wf-tool-name">Auto-layout</span>
           </div>
         </div>`;
-      const canvasCls = "workflow-canvas" + (wfTool === "step" || wfTool === "decision" ? " tool-place" : "") + (wfTool === "connect" ? " tool-connect" : "");
+      const canvasCls = "workflow-canvas" + (wfTool === "step" ? " tool-place" : "") + (wfTool === "connect" ? " tool-connect" : "");
       $("workflowSteps").innerHTML = steps.length || wfTool !== "select" ? `
         <div class="workflow-canvas-wrap">
           ${toolbarHtml}
@@ -2073,30 +2035,23 @@
                 </svg>
                 <div class="workflow-nodes" id="wfNodes">
                   ${steps.map((step, index) => {
-                    const isDecision = step.kind === "decision";
-                    const isStart = !isDecision && !wfIncoming.has(step.id) && wfOutgoing.has(step.id);
-                    const isEnd = !isDecision && !wfOutgoing.has(step.id) && wfIncoming.has(step.id);
+                    const isStart = !wfIncoming.has(step.id) && wfOutgoing.has(step.id);
+                    const isEnd = !wfOutgoing.has(step.id) && wfIncoming.has(step.id);
                     const terminalCls = isStart ? " wf-terminal wf-start" : isEnd ? " wf-terminal wf-end" : "";
-                    const kindCls = isDecision ? " wf-decision" : "";
                     const tag = isStart
                       ? '<span class="wf-terminal-tag">▶ start</span>'
                       : isEnd
                       ? '<span class="wf-terminal-tag">⏹ end</span>'
-                      : isDecision
-                      ? ""
                       : `<span class="wf-box-flag">${step.required ? "required" : "optional"}${step.required_locked ? " 🔒" : ""}</span>`;
                     return `
                     <div class="workflow-node-wrap" data-id="${escapeHtml(step.id)}" style="left:${step.x}px; top:${step.y}px">
-                      <div class="workflow-node ${step.required ? "required" : "optional"}${terminalCls}${kindCls}" data-id="${escapeHtml(step.id)}" title="Click to edit">
-                        ${isDecision ? '<svg class="wf-diamond-bg" viewBox="0 0 100 100" preserveAspectRatio="none"><polygon points="50,1 99,50 50,99 1,50" vector-effect="non-scaling-stroke"></polygon></svg>' : ""}
-                        ${isDecision ? "" : `<div class="wf-box-index">#${index + 1}</div>`}
-                        <div class="wf-box-name">${escapeHtml(step.name || (isDecision ? "Decision" : "Step"))}</div>
-                        ${isDecision ? "" : `
+                      <div class="workflow-node ${step.required ? "required" : "optional"}${terminalCls}" data-id="${escapeHtml(step.id)}" title="Click to edit">
+                        <div class="wf-box-index">#${index + 1}</div>
+                        <div class="wf-box-name">${escapeHtml(step.name || "Step")}</div>
                         <div class="wf-box-meta">
                           <span class="wf-role-badge">${escapeHtml(step.role_id || "?")}</span>
                           ${tag}
                         </div>
-                        `}
                       </div>
                     </div>`;
                   }).join("")}
@@ -2175,9 +2130,9 @@
       if (graph) {
         graph.addEventListener("click", event => {
           if (event.target.closest(".workflow-node") || event.target.closest(".wf-edge")) return;
-          if (wfTool === "step" || wfTool === "decision") {
+          if (wfTool === "step") {
             const pt = wfGraphPoint(event);
-            placeNodeAt(wfTool, pt.x - WF_NODE_W / 2, pt.y - 20);
+            placeNodeAt(pt.x - WF_NODE_W / 2, pt.y - 20);
           } else if (wfTool === "connect" && wfConnectFrom) {
             // Clicking empty space abandons the pending connection source.
             wfConnectFrom = null;
@@ -2226,34 +2181,31 @@
       clearConnectPreview();
       renderWorkflow();
       const hint = tool === "step" ? "Click on the canvas to place a step"
-        : tool === "decision" ? "Click on the canvas to place a decision"
         : tool === "connect" ? "Click a node, then click another node to connect them"
         : "";
       if (hint) setStatus(hint);
     }
 
-    // Create a node of the given kind. The click point only seeds an initial
-    // x/y; saveWorkflow re-lays-out the whole graph with dagre, so the final
-    // position is chosen automatically. Reuses the modal's defaults so
-    // toolbar-placed nodes match Add Step / Decision.
-    async function placeNodeAt(kind, x, y) {
-      const isDecision = kind === "decision";
+    // Create a step. The click point only seeds an initial x/y; saveWorkflow
+    // re-lays-out the whole graph with dagre, so the final position is chosen
+    // automatically. Reuses the modal's defaults so toolbar-placed steps match
+    // Add Step.
+    async function placeNodeAt(x, y) {
       const steps = state.workflow.steps || [];
-      const name = isDecision ? "New Decision" : "New Step";
-      const roleId = isDecision ? "" : ((state.roles[0] || {}).id || "hub");
-      const taskStatus = isDecision ? "" : ((workflowStatusOptions()[0] || {}).value || "created");
-      const required = false;
+      const name = "New Step";
+      const roleId = (state.roles[0] || {}).id || "hub";
+      const taskStatus = (workflowStatusOptions()[0] || {}).value || "created";
       const newId = "step-" + Date.now().toString(36);
       const newStep = {
-        id: newId, name, kind, role_id: roleId, task_status: taskStatus, required,
+        id: newId, name, role_id: roleId, task_status: taskStatus, required: false,
         x: Math.max(0, Math.round(x)), y: Math.max(0, Math.round(y))
       };
       state.workflow.steps = [...steps, newStep];
       await run(async () => {
         await saveWorkflow();
-        setStatus(isDecision ? `Decision "${name}" placed — click to edit` : `Step "${name}" placed — click to edit`);
+        setStatus(`Step "${name}" placed — click to edit`);
       });
-      // Stay in the place tool so the user can drop several nodes quickly;
+      // Stay in the place tool so the user can drop several steps quickly;
       // Esc or clicking Select returns to the default mode.
     }
 
@@ -2367,38 +2319,19 @@
     // (clicking a node on the canvas opens it in edit mode).
     let wfStepModalMode = "add";
     let wfStepModalId = null;
-    // Kind is fixed at creation: a Step button opens the step modal, a Decision
-    // button opens the decision modal. There is no in-modal Type switch because
-    // decisions are not steps — they are branch points with no role/status.
-    let wfStepModalKind = "step";
 
-    function updateModalFieldVisibility() {
-      const isDecision = wfStepModalKind === "decision";
-      $("addStepRoleField").style.display = isDecision ? "none" : "";
-      $("addStepStatusField").style.display = isDecision ? "none" : "";
-      $("addStepRequiredField").style.display = isDecision ? "none" : "";
-      $("addStepDecisionHint").style.display = isDecision ? "" : "none";
-      if (wfStepModalMode === "add") {
-        $("addStepModalTitle").textContent = isDecision ? "Add workflow decision" : "Add workflow step";
-      } else {
-        $("addStepModalTitle").textContent = isDecision ? "Edit decision" : "Edit step";
-      }
-    }
-
-    function openAddStepModal(kind = "step") {
+    function openAddStepModal() {
       wfStepModalMode = "add";
       wfStepModalId = null;
-      wfStepModalKind = kind;
-      $("addStepModalTitle").textContent = kind === "decision" ? "Add workflow decision" : "Add workflow step";
+      $("addStepModalTitle").textContent = "Add workflow step";
       $("addStepConfirm").textContent = "Add";
       $("addStepDelete").style.display = "none";
       $("addStepName").value = "";
-      $("addStepName").placeholder = kind === "decision" ? "Decision question (e.g. Pass review?)" : "Step name";
+      $("addStepName").placeholder = "Step name";
       $("addStepRole").innerHTML = roleOptionsHtml((state.roles[0] || {}).id || "");
       $("addStepStatus").innerHTML = statusOptionsHtml((workflowStatusOptions()[0] || {}).value || "");
       $("addStepRequired").checked = false;
       $("addStepRequired").disabled = false;
-      updateModalFieldVisibility();
       $("addStepModalBackdrop").classList.add("open");
       $("addStepName").focus();
     }
@@ -2408,8 +2341,7 @@
       if (!step) return;
       wfStepModalMode = "edit";
       wfStepModalId = id;
-      wfStepModalKind = step.kind || "step";
-      $("addStepModalTitle").textContent = wfStepModalKind === "decision" ? "Edit decision" : "Edit step";
+      $("addStepModalTitle").textContent = "Edit step";
       $("addStepConfirm").textContent = "Save";
       $("addStepDelete").style.display = step.required_locked ? "none" : "";
       $("addStepName").value = step.name || "";
@@ -2417,7 +2349,6 @@
       $("addStepStatus").innerHTML = statusOptionsHtml(step.task_status || "");
       $("addStepRequired").checked = !!step.required;
       $("addStepRequired").disabled = !!step.required_locked;
-      updateModalFieldVisibility();
       $("addStepModalBackdrop").classList.add("open");
       $("addStepName").focus();
     }
@@ -2435,19 +2366,13 @@
       const step = (state.workflow.steps || []).find(s => s.id === wfStepModalId);
       if (!step) { closeAddStepModal(); return; }
       step.name = ($("addStepName").value || "").trim() || step.name || "Step";
-      // Kind is fixed once created; the modal no longer exposes a Type switch.
-      const isDecision = step.kind === "decision";
-      step.role_id = isDecision ? "" : ($("addStepRole").value || step.role_id);
-      step.task_status = isDecision ? "" : ($("addStepStatus").value || step.task_status);
-      if (isDecision) {
-        step.required = false;
-      } else {
-        if (!step.required_locked) step.required = $("addStepRequired").checked;
-      }
+      step.role_id = $("addStepRole").value || step.role_id;
+      step.task_status = $("addStepStatus").value || step.task_status;
+      if (!step.required_locked) step.required = $("addStepRequired").checked;
       closeAddStepModal();
       await run(async () => {
         await saveWorkflow();
-        setStatus(isDecision ? `Decision "${step.name}" saved` : `Step "${step.name}" saved`);
+        setStatus(`Step "${step.name}" saved`);
       });
     }
 
@@ -2458,21 +2383,19 @@
     }
 
     async function confirmAddStep() {
-      const kind = wfStepModalKind;
-      const isDecision = kind === "decision";
-      const name = ($("addStepName").value || "").trim() || (isDecision ? "New Decision" : "New Step");
-      const roleId = isDecision ? "" : ($("addStepRole").value || (state.roles[0] || {}).id || "hub");
-      const taskStatus = isDecision ? "" : ($("addStepStatus").value || (workflowStatusOptions()[0] || {}).value || "created");
-      const required = isDecision ? false : $("addStepRequired").checked;
+      const name = ($("addStepName").value || "").trim() || "New Step";
+      const roleId = $("addStepRole").value || (state.roles[0] || {}).id || "hub";
+      const taskStatus = $("addStepStatus").value || (workflowStatusOptions()[0] || {}).value || "created";
+      const required = $("addStepRequired").checked;
       const steps = state.workflow.steps || [];
       // Seed coordinates only; saveWorkflow re-lays-out the graph with dagre.
       const newId = "step-" + Date.now().toString(36);
-      const newStep = { id: newId, name, kind, role_id: roleId, task_status: taskStatus, required, x: 40, y: 60 };
+      const newStep = { id: newId, name, role_id: roleId, task_status: taskStatus, required, x: 40, y: 60 };
       state.workflow.steps = [...steps, newStep];
       closeAddStepModal();
       await run(async () => {
         await saveWorkflow();
-        setStatus(isDecision ? `Decision "${name}" added` : `Step "${name}" added`);
+        setStatus(`Step "${name}" added`);
       });
       const el = document.querySelector(`.workflow-node-wrap[data-id="${CSS.escape(newId)}"]`);
       if (el) el.scrollIntoView({ block: "center", inline: "center" });
@@ -3145,8 +3068,7 @@
     wireRefresh("refreshTasks", loadTasks);
     wireRefresh("refreshGoals", loadGoals);
     $("addTeamMember").addEventListener("click", addTeamMember);
-    $("addWorkflowStep").addEventListener("click", () => openAddStepModal("step"));
-    $("addWorkflowDecision").addEventListener("click", () => openAddStepModal("decision"));
+    $("addWorkflowStep").addEventListener("click", () => openAddStepModal());
     $("addStepCancel").addEventListener("click", closeAddStepModal);
     $("addStepConfirm").addEventListener("click", confirmStep);
     $("addStepDelete").addEventListener("click", deleteStepFromModal);
