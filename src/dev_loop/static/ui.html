@@ -1065,6 +1065,19 @@
       transition: background 0.12s ease, box-shadow 0.12s ease;
     }
     .step-item:hover { background: var(--bg); box-shadow: 0 1px 6px rgba(0, 0, 0, 0.08); }
+    /* Keyboard focus for all clickable cards/rows that opt in via
+       role="button" + tabindex="0" (kanban cards, goals, step cards,
+       workflow nodes, goal subtask rows). :focus-visible keeps the ring
+       off mouse clicks but visible for keyboard navigation. */
+    .kanban-card:focus-visible,
+    .goal-card:focus-visible,
+    .step-item:focus-visible,
+    .workflow-node:focus-visible,
+    .goal-subtask-row:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+      border-color: var(--accent);
+    }
     .step-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex: none; }
     .step-name { flex: 1; font-weight: 600; font-size: 13px; text-transform: capitalize; }
     .step-id { color: var(--muted); font-size: 12px; }
@@ -2394,7 +2407,7 @@
                       : `<span class="wf-box-flag">${step.required ? t("wf.required") : t("wf.optional")}${step.required_locked ? " 🔒" : ""}</span>`;
                     return `
                     <div class="workflow-node-wrap" data-id="${escapeHtml(step.id)}" style="left:${step.x}px; top:${step.y}px">
-                      <div class="workflow-node ${step.required ? "required" : "optional"}${terminalCls}" data-id="${escapeHtml(step.id)}" title="${escapeHtml(t("wf.dblClickEdit"))}">
+                      <div class="workflow-node ${step.required ? "required" : "optional"}${terminalCls}" data-id="${escapeHtml(step.id)}" title="${escapeHtml(t("wf.dblClickEdit"))}" tabindex="0" role="button" aria-label="${escapeHtml(step.name || t("wf.step"))}">
                         <div class="wf-box-index">#${index + 1}</div>
                         <div class="wf-box-name">${escapeHtml(step.name || t("wf.step"))}</div>
                         <div class="wf-box-meta">
@@ -2918,7 +2931,7 @@
               </div>
               <div class="kanban-cards">
                 ${col.tasks.length ? col.tasks.map(task => `
-                  <div class="kanban-card" onclick="showTaskDetails(${task.id})">
+                  <div class="kanban-card" onclick="showTaskDetails(${task.id})" tabindex="0" role="button" aria-label="${escapeHtml(t("tasks.title"))} #${escapeHtml(task.display_id || String(task.id))}">
                     <div class="kanban-card-title">#${escapeHtml(task.display_id || String(task.id))} ${escapeHtml(task.title || t("task.fallback"))}</div>
                     <div class="kanban-card-content">${escapeHtml(task.content)}</div>
                     ${task.workflow_step || task.parent_task_id || task.is_goal ? `<div class="meta" style="margin-bottom: 4px; display: flex; gap: 4px; flex-wrap: wrap;">
@@ -3077,7 +3090,7 @@
         ? `<div class="meta" style="margin-top: 8px; padding-left: 12px;">${t("goal.closedHidden", hiddenCount, hiddenCount > 1 ? "s" : "")}</div>`
         : "";
       $("goalsList").innerHTML = (goals.length ? goals.map(goal => `
-        <div class="goal-card" onclick="openGoalTask(${goal.id})">
+        <div class="goal-card" onclick="openGoalTask(${goal.id})" tabindex="0" role="button" aria-label="${escapeHtml(t("goal.fallback"))} #${goal.id}">
           <div class="row" style="justify-content: space-between;">
             <strong>🎯 #${goal.id} ${escapeHtml(goal.title || t("goal.fallback"))}</strong>
             <span class="row" style="gap: 6px; width: auto;">
@@ -3091,7 +3104,7 @@
           ${goal.subtasks.length ? `
             <div class="goal-subtasks">
               ${goal.subtasks.map(sub => `
-                <div class="meta" onclick="event.stopPropagation(); openGoalTask(${sub.id})" style="cursor: pointer;">
+                <div class="meta goal-subtask-row" onclick="event.stopPropagation(); openGoalTask(${sub.id})" style="cursor: pointer;" tabindex="0" role="button" aria-label="#${sub.id} ${escapeHtml(sub.title || "")}">
                   #${sub.id} ${escapeHtml(sub.title || "")} — ${escapeHtml(stLabel(sub.task_status))}${sub.workflow_step ? ` · ⚙ ${escapeHtml(sub.workflow_step)}` : ""}
                 </div>
               `).join("")}
@@ -3270,7 +3283,7 @@
                         : "active";
               const expanded = c.id === state.expandedStepId;
               return `
-              <div class="step-item step-${cls}${expanded ? " expanded" : ""}" onclick="toggleStep(${c.id})">
+              <div class="step-item step-${cls}${expanded ? " expanded" : ""}" onclick="toggleStep(${c.id})" tabindex="0" role="button" aria-expanded="${expanded ? "true" : "false"}" aria-label="${escapeHtml(c.workflow_step || c.title || t("wf.step"))}">
                 <span class="step-dot"></span>
                 <span class="step-name">${escapeHtml(c.workflow_step || c.title || "")}</span>
                 ${c.assignee ? `<span class="step-agent">${escapeHtml(c.assignee)}</span>` : ""}
@@ -3454,6 +3467,35 @@
       renderGoals();
     });
     $("tasksTab").addEventListener("click", () => setPage("tasks"));
+
+    // Keyboard activation for clickable cards/rows that opt in via
+    // role="button" + tabindex="0" (kanban/goal/step cards, workflow nodes,
+    // goal subtask rows). Enter or Space fires a click, matching native
+    // button semantics — so the existing onclick handlers run unchanged.
+    // Workflow nodes are special: Enter triggers the edit (double-click)
+    // behavior unless the Connect tool is active, in which case it picks
+    // the node like a single click (source → target).
+    document.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      // Let native interactive elements handle their own activation; only
+      // intercept for div-based role="button" cards/rows.
+      const tag = event.target.tagName;
+      if (tag === "BUTTON" || tag === "A" || tag === "SELECT" || tag === "INPUT" || tag === "TEXTAREA") return;
+      const el = event.target.closest('[role="button"]');
+      if (!el) return;
+      event.preventDefault();
+      if (event.key === " " && el.classList.contains("workflow-node")) return; // Space makes no sense on a node
+      if (el.classList.contains("workflow-node")) {
+        const id = el.dataset.id;
+        if (!id) return;
+        // In connect mode, Enter picks the node (same as handleNodeClick);
+        // otherwise it opens the edit modal (same as the dblclick handler).
+        if (wfTool === "connect") handleConnectPick(id);
+        else openEditStepModal(id);
+        return;
+      }
+      el.click();
+    });
 
     // Language switcher: persist + re-apply static labels + re-render dynamic
     // content so the whole UI swaps locale without a reload.
