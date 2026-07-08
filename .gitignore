@@ -6,3 +6,4 @@ dist/
 build/
 *.egg-info/
 .codegraph/
+.DS_Store
