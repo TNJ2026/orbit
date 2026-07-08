@@ -150,14 +150,22 @@ class PackagingTests(unittest.TestCase):
         self.assertIn('id="addStepModalBackdrop"', html)
         self.assertIn("workflow-canvas", html)
         self.assertIn("workflow-node", html)
-        self.assertIn("workflow-port", html)
         self.assertIn('id="wfArrow"', html)
         self.assertIn('marker-end="url(#wfArrow)"', html)
         self.assertIn("x: step.x, y: step.y + h / 2", html)
         self.assertIn("x: step.x + w / 2, y: step.y", html)
-        self.assertIn("function startExistingEdgeDrag(", html)
-        self.assertIn("function updateWorkflowEdgeTarget(", html)
-        self.assertIn("Drag to reconnect; click to delete", html)
+        # Auto-laid-out editor: dagre computes coordinates, the user only edits
+        # the graph. The manual-drag machinery (ports, node/edge dragging) is
+        # gone — clicks edit nodes and delete edges.
+        self.assertIn('src="/static/dagre.min.js"', html)
+        self.assertIn("function wfApplyDagreLayout(", html)
+        self.assertIn("function autoLayoutWorkflow(", html)
+        self.assertIn("function handleNodeClick(", html)
+        self.assertIn("<title>Click to delete</title>", html)
+        self.assertNotIn("workflow-port", html)
+        self.assertNotIn("function startNodeDrag(", html)
+        self.assertNotIn("function startExistingEdgeDrag(", html)
+        self.assertNotIn("function updateWorkflowEdgeTarget(", html)
         self.assertIn("role: ${escapeHtml(task.role_required", html)
         self.assertNotIn("<strong>Assignment</strong>", html)  # Assignment section removed
         self.assertIn("function toggleStep(", html)            # inline-expand step detail

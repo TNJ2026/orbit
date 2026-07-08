@@ -977,27 +977,6 @@
     .workflow-node .meta {
       color: var(--muted);
     }
-    .workflow-port {
-      position: absolute;
-      width: 12px;
-      height: 12px;
-      border-radius: 999px;
-      border: 2px solid #6fae98;
-      background: #fff;
-      z-index: 3;
-      touch-action: none;
-      pointer-events: auto;
-      cursor: crosshair;
-      transition: background 0.15s, border-color 0.15s;
-    }
-    .workflow-port:hover {
-      background: var(--accent);
-      border-color: var(--accent);
-    }
-    .workflow-port.left { left: -6px; top: calc(50% - 6px); }
-    .workflow-port.right { right: -6px; top: calc(50% - 6px); }
-    .workflow-port.top { top: -6px; left: calc(50% - 6px); }
-    .workflow-port.bottom { bottom: -6px; left: calc(50% - 6px); }
     .workflow-node.drop-target {
       box-shadow: 0 0 0 3px rgba(37, 108, 90, 0.4);
       border-color: var(--accent);
@@ -1594,13 +1573,11 @@
         path: data.path || "",
         warnings: data.warnings || []
       };
-      // Render first: overlap resolution needs real card heights from the
-      // DOM, and before the first render the fallback estimate undershoots.
+      // Render at the stored (last auto-laid-out) coordinates. Layout is only
+      // recomputed on an explicit edit (saveWorkflow) or the Auto-layout button,
+      // never on load — viewing must not write the config (and the server locks
+      // workflow saves while tasks are running).
       renderWorkflow();
-      const changed = resolveAllOverlaps();
-      if (changed) {
-        await saveWorkflow();
-      }
     }
 
     async function loadStatus() {
@@ -1848,20 +1825,17 @@
       });
     }
 
-    // --- Free-canvas workflow editor -------------------------------------
-    // Nodes are absolutely positioned at step.x/step.y and connected by
-    // SVG edges. Dragging a head moves a node; dragging from an out-port to
-    // another node creates a connection. Positions and edges both persist.
+    // --- Auto-laid-out workflow editor -----------------------------------
+    // The user edits the graph (add / connect / delete); node coordinates are
+    // never set by hand — dagre computes them on every save (see saveWorkflow),
+    // so the diagram is always tidy and can never be dragged into a mess. Nodes
+    // still render at step.x/step.y (the last computed layout), which keeps the
+    // view working even if the dagre bundle is unavailable.
     const WF_NODE_W = 200;  // must match .workflow-node width in CSS (edge geometry uses it)
-    const WF_PORT_TOP = 36;   // top offset of the first port
-    const WF_PORT_GAP = 26;   // vertical spacing between ports
-    const WF_PORT_R = 7;      // port radius (center offset)
-    const WF_MAX_PORTS = 3;   // max connection points per side
-    let wfDrag = null;        // active pointer interaction
-    let wfTempPath = null;    // in-progress connection path (SVG d string)
+    let wfTempPath = null;    // in-progress connection preview path (SVG d string)
     let wfLayoutCache = null; // per-node port counts + per-edge port slots
-    // Active toolbar tool: "select" (move/edit), "step"/"decision" (click canvas
-    // to place), "connect" (click two nodes to wire an edge).
+    // Active toolbar tool: "select" (click a node to edit), "step"/"decision"
+    // (click canvas to place), "connect" (click two nodes to wire an edge).
     let wfTool = "select";
     let wfConnectFrom = null; // source node id when in connect mode
 
@@ -1869,80 +1843,43 @@
       return Object.fromEntries((state.workflow.steps || []).map(s => [s.id, s]));
     }
 
-    function resolveOverlap(draggedId, targetX, targetY, rects, gap = 20) {
-      const A = rects[draggedId];
-      if (!A) return { x: targetX, y: targetY };
-      const w = A.w;
-      const h = A.h;
-      const others = Object.values(rects).filter(r => r.id !== draggedId);
-      function overlapsAny(cx, cy) {
-        for (const r of others) {
-          if (cx + w + gap > r.x && cx < r.x + r.w + gap &&
-              cy + h + gap > r.y && cy < r.y + r.h + gap) {
-            return r;
-          }
-        }
-        return null;
-      }
-      const queue = [{ x: targetX, y: targetY }];
-      const visited = new Set();
-      visited.add(`${targetX},${targetY}`);
-      let iterations = 0;
-      const maxIterations = 200;
-      while (queue.length > 0 && iterations < maxIterations) {
-        iterations++;
-        queue.sort((a, b) => {
-          const distA = Math.pow(a.x - targetX, 2) + Math.pow(a.y - targetY, 2);
-          const distB = Math.pow(b.x - targetX, 2) + Math.pow(b.y - targetY, 2);
-          return distA - distB;
-        });
-        const curr = queue.shift();
-        const cx = Math.max(0, curr.x);
-        const cy = Math.max(0, curr.y);
-        const blocker = overlapsAny(cx, cy);
-        if (!blocker) {
-          return { x: cx, y: cy };
-        }
-        const options = [
-          { x: blocker.x - w - gap, y: cy },
-          { x: blocker.x + blocker.w + gap, y: cy },
-          { x: cx, y: blocker.y - h - gap },
-          { x: cx, y: blocker.y + blocker.h + gap }
-        ];
-        for (const opt of options) {
-          opt.x = Math.max(0, Math.round(opt.x));
-          opt.y = Math.max(0, Math.round(opt.y));
-          const key = `${opt.x},${opt.y}`;
-          if (!visited.has(key)) {
-            visited.add(key);
-            queue.push(opt);
-          }
-        }
-      }
-      return { x: targetX, y: targetY };
-    }
-
-    function resolveAllOverlaps() {
+    // Compute node coordinates with dagre and write them into the step models
+    // (top-left corners; dagre returns centers). No-op when the dagre bundle is
+    // unavailable, so callers keep whatever positions they already had. Node
+    // heights are read from the live DOM, so decisions and multi-line steps are
+    // measured accurately. Rework/back-edges are kept — dagre's acyclicer breaks
+    // cycles for ranking and routes them back. saveWorkflow calls this before
+    // every POST, which is what makes the graph self-arranging.
+    function wfApplyDagreLayout() {
+      if (!wfDagreReady()) return false;
       const steps = state.workflow.steps || [];
+      const edges = state.workflow.edges || [];
       if (!steps.length) return false;
-      let changed = false;
-      for (let pass = 0; pass < 3; pass++) {
-        let passChanged = false;
-        const rects = wfNodeRects();
-        for (const step of steps) {
-          const resolved = resolveOverlap(step.id, step.x, step.y, rects);
-          if (resolved.x !== step.x || resolved.y !== step.y) {
-            step.x = resolved.x;
-            step.y = resolved.y;
-            rects[step.id].x = resolved.x;
-            rects[step.id].y = resolved.y;
-            passChanged = true;
-            changed = true;
-          }
-        }
-        if (!passChanged) break;
+      const rects = wfNodeRects();
+      const g = new window.dagre.graphlib.Graph({ directed: true });
+      // rankdir LR matches the intended left→right flow (intake … accept).
+      g.setGraph({ rankdir: "LR", nodesep: 40, ranksep: 90, marginx: 40, marginy: 40 });
+      g.setDefaultEdgeLabel(() => ({}));
+      steps.forEach(s => {
+        const r = rects[s.id];
+        g.setNode(s.id, { width: WF_NODE_W, height: (r && r.h) || 120 });
+      });
+      edges.forEach(e => {
+        if (g.hasNode(e.from) && g.hasNode(e.to)) g.setEdge(e.from, e.to);
+      });
+      try {
+        window.dagre.layout(g);
+      } catch (err) {
+        setStatus("Auto-layout failed: " + (err && err.message || err), true);
+        return false;
       }
-      return changed;
+      steps.forEach(s => {
+        const n = g.node(s.id);
+        if (!n) return;
+        s.x = Math.max(0, Math.round(n.x - WF_NODE_W / 2));
+        s.y = Math.max(0, Math.round(n.y - ((rects[s.id] && rects[s.id].h) || 120) / 2));
+      });
+      return true;
     }
 
     // Assign each edge a port slot on the closest side on both endpoints.
@@ -2018,15 +1955,6 @@
         side = dy > 0 ? "bottom" : "top";
       }
       return wfPortPoint(step, rect, side, 0, 1);
-    }
-
-    function wfPortsHtml(id) {
-      return `
-        <span class="workflow-port left" data-id="${id}" data-side="left" title="Drag to connect"></span>
-        <span class="workflow-port right" data-id="${id}" data-side="right" title="Drag to connect"></span>
-        <span class="workflow-port top" data-id="${id}" data-side="top" title="Drag to connect"></span>
-        <span class="workflow-port bottom" data-id="${id}" data-side="bottom" title="Drag to connect"></span>
-      `;
     }
 
     function wfNodeRects() {
@@ -2159,9 +2087,8 @@
                       : `<span class="wf-box-flag">${step.required ? "required" : "optional"}${step.required_locked ? " 🔒" : ""}</span>`;
                     return `
                     <div class="workflow-node-wrap" data-id="${escapeHtml(step.id)}" style="left:${step.x}px; top:${step.y}px">
-                      <div class="workflow-node ${step.required ? "required" : "optional"}${terminalCls}${kindCls}" data-id="${escapeHtml(step.id)}" data-drag-id="${escapeHtml(step.id)}" title="Drag to move · click to edit">
+                      <div class="workflow-node ${step.required ? "required" : "optional"}${terminalCls}${kindCls}" data-id="${escapeHtml(step.id)}" title="Click to edit">
                         ${isDecision ? '<svg class="wf-diamond-bg" viewBox="0 0 100 100" preserveAspectRatio="none"><polygon points="50,1 99,50 50,99 1,50" vector-effect="non-scaling-stroke"></polygon></svg>' : ""}
-                        ${wfPortsHtml(escapeHtml(step.id))}
                         ${isDecision ? "" : `<div class="wf-box-index">#${index + 1}</div>`}
                         <div class="wf-box-name">${escapeHtml(step.name || (isDecision ? "Decision" : "Step"))}</div>
                         ${isDecision ? "" : `
@@ -2227,30 +2154,27 @@
         const p2 = wfPortPoint(b, rectB, slot.toSide, slot.toSlot, totalTo);
 
         const d = wfEdgePath(edge.from, edge.to, p1, p2, rects, slot.fromSide, slot.toSide);
-        return `<path class="wf-edge" data-edge="${i}" d="${d}" marker-end="url(#wfArrow)"><title>Drag to reconnect; click to delete</title></path>`;
+        return `<path class="wf-edge" data-edge="${i}" d="${d}" marker-end="url(#wfArrow)"><title>Click to delete</title></path>`;
       }).join("");
 
       if (wfTempPath) paths += `<path class="wf-edge temp" d="${wfTempPath}"></path>`;
       svg.innerHTML = paths;
       svg.querySelectorAll(".wf-edge[data-edge]").forEach(path => {
-        path.addEventListener("pointerdown", event => startExistingEdgeDrag(event, Number(path.dataset.edge)));
+        path.addEventListener("click", () => removeWorkflowEdge(Number(path.dataset.edge)));
       });
     }
 
     function wireWorkflowInteractions() {
-      document.querySelectorAll(".workflow-node[data-drag-id]").forEach(node => {
-        node.addEventListener("pointerdown", event => startNodeDrag(event, node.dataset.dragId));
-      });
-      document.querySelectorAll(".workflow-port[data-id]").forEach(port => {
-        port.addEventListener("pointerdown", event => startEdgeDrag(event, port.dataset.id, port.dataset.side));
+      document.querySelectorAll(".workflow-node[data-id]").forEach(node => {
+        node.addEventListener("click", event => handleNodeClick(event, node.dataset.id));
       });
       // Click-to-place: when a place tool is active, a click on empty canvas
       // drops a node there. We listen on the graph (which holds the nodes) and
-      // ignore clicks that hit a node/port/edge.
+      // ignore clicks that hit a node/edge.
       const graph = $("wfGraph");
       if (graph) {
         graph.addEventListener("click", event => {
-          if (event.target.closest(".workflow-node") || event.target.closest(".workflow-port") || event.target.closest(".wf-edge")) return;
+          if (event.target.closest(".workflow-node") || event.target.closest(".wf-edge")) return;
           if (wfTool === "step" || wfTool === "decision") {
             const pt = wfGraphPoint(event);
             placeNodeAt(wfTool, pt.x - WF_NODE_W / 2, pt.y - 20);
@@ -2283,41 +2207,12 @@
       return !window.__dagreFailed && !!(window.dagre && window.dagre.graphlib);
     }
 
-    // Re-flow the whole graph into clean layered columns using dagre, then
-    // persist the computed x/y through the normal saveWorkflow() path. Node
-    // sizes come from the live DOM (offsetHeight), so decisions and multi-line
-    // steps are measured accurately. Rework/back-edges are kept in the graph —
-    // dagre's acyclicer breaks cycles for ranking and routes them back.
+    // Toolbar button: force a re-tidy. saveWorkflow already re-lays-out on every
+    // save, so this is only needed after a change that alters node height (e.g.
+    // a rename) without otherwise re-saving. Persists through the normal path.
     async function autoLayoutWorkflow() {
       if (!wfDagreReady()) { setStatus("Auto-layout unavailable: dagre not loaded", true); return; }
-      const steps = state.workflow.steps || [];
-      const edges = state.workflow.edges || [];
-      if (!steps.length) { setStatus("Nothing to lay out"); return; }
-      const rects = wfNodeRects();
-      const g = new window.dagre.graphlib.Graph({ directed: true });
-      // rankdir LR matches the existing left→right flow (intake … accept).
-      g.setGraph({ rankdir: "LR", nodesep: 40, ranksep: 90, marginx: 40, marginy: 40 });
-      g.setDefaultEdgeLabel(() => ({}));
-      steps.forEach(s => {
-        const r = rects[s.id];
-        g.setNode(s.id, { width: WF_NODE_W, height: (r && r.h) || 120 });
-      });
-      edges.forEach(e => {
-        if (g.hasNode(e.from) && g.hasNode(e.to)) g.setEdge(e.from, e.to);
-      });
-      try {
-        window.dagre.layout(g);
-      } catch (err) {
-        setStatus("Auto-layout failed: " + (err && err.message || err), true);
-        return;
-      }
-      // dagre returns node centers; our steps store top-left corners.
-      steps.forEach(s => {
-        const n = g.node(s.id);
-        if (!n) return;
-        s.x = Math.max(0, Math.round(n.x - WF_NODE_W / 2));
-        s.y = Math.max(0, Math.round(n.y - ((rects[s.id] && rects[s.id].h) || 120) / 2));
-      });
+      if (!(state.workflow.steps || []).length) { setStatus("Nothing to lay out"); return; }
       await run(async () => {
         await saveWorkflow();
         setStatus("Auto-layout applied");
@@ -2337,8 +2232,10 @@
       if (hint) setStatus(hint);
     }
 
-    // Create a node of the given kind at canvas coordinates. Reuses the modal's
-    // defaults so toolbar-placed nodes are consistent with Add Step / Decision.
+    // Create a node of the given kind. The click point only seeds an initial
+    // x/y; saveWorkflow re-lays-out the whole graph with dagre, so the final
+    // position is chosen automatically. Reuses the modal's defaults so
+    // toolbar-placed nodes match Add Step / Decision.
     async function placeNodeAt(kind, x, y) {
       const isDecision = kind === "decision";
       const steps = state.workflow.steps || [];
@@ -2347,15 +2244,11 @@
       const taskStatus = isDecision ? "" : ((workflowStatusOptions()[0] || {}).value || "created");
       const required = false;
       const newId = "step-" + Date.now().toString(36);
-      const newX = Math.max(0, Math.round(x));
-      const newY = Math.max(0, Math.round(y));
-      const newStep = { id: newId, name, kind, role_id: roleId, task_status: taskStatus, required, x: newX, y: newY };
+      const newStep = {
+        id: newId, name, kind, role_id: roleId, task_status: taskStatus, required,
+        x: Math.max(0, Math.round(x)), y: Math.max(0, Math.round(y))
+      };
       state.workflow.steps = [...steps, newStep];
-      const rects = wfNodeRects();
-      rects[newId] = { id: newId, x: newX, y: newY, w: WF_NODE_W, h: 240 };
-      const resolved = resolveOverlap(newId, newX, newY, rects);
-      newStep.x = resolved.x;
-      newStep.y = resolved.y;
       await run(async () => {
         await saveWorkflow();
         setStatus(isDecision ? `Decision "${name}" placed — click to edit` : `Step "${name}" placed — click to edit`);
@@ -2364,30 +2257,13 @@
       // Esc or clicking Select returns to the default mode.
     }
 
-    function startNodeDrag(event, id) {
-      if (event.button !== 0) return;
-      const step = wfById()[id];
-      if (!step) return;
-      // Connect tool: clicks select source then target, never drag.
-      if (wfTool === "connect") {
-        event.preventDefault();
-        handleConnectPick(id);
-        return;
-      }
-      // Place tools: a click on an existing node opens it for editing instead
-      // of dropping a new one on top.
-      if (wfTool === "step" || wfTool === "decision") {
-        event.preventDefault();
-        openEditStepModal(id);
-        return;
-      }
-      const cursor = wfGraphPoint(event);
-      wfDrag = { type: "node", id, offX: cursor.x - step.x, offY: cursor.y - step.y, moved: false };
-      const node = document.querySelector(`.workflow-node[data-id="${CSS.escape(id)}"]`);
-      if (node) node.classList.add("dragging");
-      document.addEventListener("pointermove", onWorkflowPointerMove);
-      document.addEventListener("pointerup", onWorkflowPointerUp);
+    // Nodes are not draggable — a click either wires a connection (connect tool)
+    // or opens the node for editing (every other tool). Layout is dagre's job.
+    function handleNodeClick(event, id) {
+      if (!wfById()[id]) return;
       event.preventDefault();
+      if (wfTool === "connect") { handleConnectPick(id); return; }
+      openEditStepModal(id);
     }
 
     function handleConnectPick(id) {
@@ -2450,164 +2326,11 @@
       return "right";
     }
 
-    function startEdgeDrag(event, id, side) {
-      if (event.button !== 0) return;
-      // Connect tool: handle the pick directly on the port instead of relying
-      // on pointerdown bubbling to the node. The right/left ports sit at
-      // right:-6px / left:-6px (half outside the node box); some browsers don't
-      // reliably bubble pointerdown from an out-of-box child to its parent.
-      if (wfTool === "connect") {
-        event.stopPropagation();
-        event.preventDefault();
-        handleConnectPick(id);
-        return;
-      }
-      // Place tools: let the pointerdown bubble to the node so it opens the
-      // edit modal (the user clicked an existing node, not empty canvas).
-      if (wfTool === "step" || wfTool === "decision") return;
-      event.stopPropagation();
-      event.preventDefault();
-      wfDrag = { type: "edge", from: id, fromSide: side };
-      document.addEventListener("pointermove", onWorkflowPointerMove);
-      document.addEventListener("pointerup", onWorkflowPointerUp);
-    }
-
-    function startExistingEdgeDrag(event, edgeIndex) {
-      if (event.button !== 0) return;
-      const edge = (state.workflow.edges || [])[edgeIndex];
-      if (!edge) return;
-      event.stopPropagation();
-      event.preventDefault();
-      const cursor = wfGraphPoint(event);
-      const layout = wfLayoutCache || wfComputeLayout();
-      const slot = (layout.edgeSlots || [])[edgeIndex] || { fromSide: "right" };
-      wfDrag = {
-        type: "edge",
-        from: edge.from,
-        fromSide: slot.fromSide,
-        replaceIndex: edgeIndex,
-        originalTo: edge.to,
-        startX: cursor.x,
-        startY: cursor.y,
-        moved: false
-      };
-      document.addEventListener("pointermove", onWorkflowPointerMove);
-      document.addEventListener("pointerup", onWorkflowPointerUp);
-    }
-
-    function onWorkflowPointerMove(event) {
-      if (!wfDrag) return;
-      const cursor = wfGraphPoint(event);
-      if (wfDrag.type === "node") {
-        const step = wfById()[wfDrag.id];
-        if (!step) return;
-        step.x = Math.max(0, Math.round(cursor.x - wfDrag.offX));
-        step.y = Math.max(0, Math.round(cursor.y - wfDrag.offY));
-        wfDrag.moved = true;
-        const wrap = document.querySelector(`.workflow-node-wrap[data-id="${CSS.escape(wfDrag.id)}"]`);
-        if (wrap) { wrap.style.left = step.x + "px"; wrap.style.top = step.y + "px"; }
-        drawEdges();
-      } else if (wfDrag.type === "edge") {
-        if (wfDrag.startX !== undefined) {
-          const movedEnough = Math.abs(cursor.x - wfDrag.startX) > 4 || Math.abs(cursor.y - wfDrag.startY) > 4;
-          wfDrag.moved = wfDrag.moved || movedEnough;
-        }
-        const byId = wfById();
-        const from = byId[wfDrag.from];
-        if (!from) return;
-        const rects = wfNodeRects();
-        const p1 = wfPortPoint(from, rects[wfDrag.from], wfDrag.fromSide, 0, 1);
-
-        const target = document.elementFromPoint(event.clientX, event.clientY);
-        const node = target && target.closest(".workflow-node");
-        const toId = node && node.dataset.id;
-
-        document.querySelectorAll(".workflow-node.drop-target").forEach(el => el.classList.remove("drop-target"));
-
-        let p2 = null;
-        let toSide = "left";
-
-        if (node && toId && toId !== wfDrag.from) {
-          node.classList.add("drop-target");
-          const targetRect = rects[toId];
-          const toNode = byId[toId];
-          if (targetRect && toNode) {
-            const dx = (targetRect.x + targetRect.w / 2) - p1.x;
-            const dy = (targetRect.y + targetRect.h / 2) - p1.y;
-            if (Math.abs(dy * targetRect.w) < Math.abs(dx * targetRect.h)) {
-              toSide = dx > 0 ? "left" : "right";
-            } else {
-              toSide = dy > 0 ? "top" : "bottom";
-            }
-            p2 = wfPortPoint(toNode, targetRect, toSide, 0, 1);
-            wfTempPath = wfEdgePath(wfDrag.from, toId, p1, p2, rects, wfDrag.fromSide, toSide);
-          } else {
-            wfTempPath = null;
-          }
-        } else {
-          wfTempPath = null;
-        }
-        drawEdges();
-      }
-    }
-
-    function onWorkflowPointerUp(event) {
-      document.removeEventListener("pointermove", onWorkflowPointerMove);
-      document.removeEventListener("pointerup", onWorkflowPointerUp);
-      const drag = wfDrag;
-      wfDrag = null;
-      wfTempPath = null;
-      document.querySelectorAll(".workflow-node.dragging").forEach(el => el.classList.remove("dragging"));
-      document.querySelectorAll(".workflow-node.drop-target").forEach(el => el.classList.remove("drop-target"));
-      if (!drag) return;
-      if (drag.type === "node") {
-        if (!drag.moved) { openEditStepModal(drag.id); drawEdges(); return; }  // tap = edit
-        const step = wfById()[drag.id];
-        if (step) {
-          const rects = wfNodeRects();
-          const resolved = resolveOverlap(drag.id, step.x, step.y, rects);
-          step.x = resolved.x;
-          step.y = resolved.y;
-        }
-        run(async () => { await saveWorkflow(); setStatus("Workflow layout saved"); });
-      } else if (drag.type === "edge") {
-        if (drag.replaceIndex !== undefined && !drag.moved) {
-          removeWorkflowEdge(drag.replaceIndex);
-          return;
-        }
-        const target = document.elementFromPoint(event.clientX, event.clientY);
-        const node = target && target.closest(".workflow-node");
-        const to = node && node.dataset.id;
-        if (to && to !== drag.from) {
-          if (drag.replaceIndex !== undefined) {
-            updateWorkflowEdgeTarget(drag.replaceIndex, drag.from, to);
-          } else {
-            addWorkflowEdge(drag.from, to);
-          }
-        } else {
-          drawEdges();
-        }
-      }
-    }
-
     function addWorkflowEdge(from, to) {
       const edges = state.workflow.edges || (state.workflow.edges = []);
       if (edges.some(e => e.from === from && e.to === to)) { drawEdges(); return; }
       edges.push({ from, to });
       run(async () => { await saveWorkflow(); setStatus("Connection added"); });
-    }
-
-    function updateWorkflowEdgeTarget(index, from, to) {
-      const edges = state.workflow.edges || [];
-      if (index < 0 || index >= edges.length) { drawEdges(); return; }
-      if (edges[index].from === from && edges[index].to === to) { drawEdges(); return; }
-      if (edges.some((edge, i) => i !== index && edge.from === from && edge.to === to)) {
-        drawEdges();
-        setStatus("Connection already exists", true);
-        return;
-      }
-      edges[index] = { from, to };
-      run(async () => { await saveWorkflow(); setStatus("Connection updated"); });
     }
 
     function removeWorkflowEdge(index) {
@@ -2618,6 +2341,10 @@
     }
 
     async function saveWorkflow() {
+      // Recompute node coordinates before persisting: the user never positions
+      // nodes by hand, so every structural change re-lays-out the whole graph.
+      // No-op if dagre is unavailable (keeps the current coordinates).
+      wfApplyDagreLayout();
       const data = await api("/api/workflow", {
         method: "POST",
         body: JSON.stringify({
@@ -2738,22 +2465,10 @@
       const taskStatus = isDecision ? "" : ($("addStepStatus").value || (workflowStatusOptions()[0] || {}).value || "created");
       const required = isDecision ? false : $("addStepRequired").checked;
       const steps = state.workflow.steps || [];
-      // Place the new node at the center of the visible canvas so it appears
-      // where the user is looking.
-      const canvas = $("wfCanvas");
-      let newX = 40, newY = 60;
-      if (canvas) {
-        newX = Math.max(0, Math.round(canvas.scrollLeft + canvas.clientWidth / 2 - WF_NODE_W / 2));
-        newY = Math.max(0, Math.round(canvas.scrollTop + canvas.clientHeight / 2 - 120));
-      }
+      // Seed coordinates only; saveWorkflow re-lays-out the graph with dagre.
       const newId = "step-" + Date.now().toString(36);
-      const newStep = { id: newId, name, kind, role_id: roleId, task_status: taskStatus, required, x: newX, y: newY };
+      const newStep = { id: newId, name, kind, role_id: roleId, task_status: taskStatus, required, x: 40, y: 60 };
       state.workflow.steps = [...steps, newStep];
-      const rects = wfNodeRects();
-      rects[newId] = { id: newId, x: newX, y: newY, w: WF_NODE_W, h: 240 };
-      const resolved = resolveOverlap(newId, newX, newY, rects);
-      newStep.x = resolved.x;
-      newStep.y = resolved.y;
       closeAddStepModal();
       await run(async () => {
         await saveWorkflow();
