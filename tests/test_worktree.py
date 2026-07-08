@@ -376,6 +376,94 @@ class GoalConvergenceGateTests(unittest.TestCase):
             store.close()
 
 
+class GoalVerifyDetectionTests(unittest.TestCase):
+    def test_detects_python_unittest(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+            (root / "tests").mkdir()
+            self.assertEqual(
+                "python -m unittest discover -s tests",
+                server._detect_goal_verify(root),
+            )
+
+    def test_python_marker_without_tests_dir_detects_nothing(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+            self.assertEqual("", server._detect_goal_verify(root))
+
+    def test_detects_npm_only_with_test_script(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "package.json").write_text(
+                '{"scripts": {"test": "jest"}}', encoding="utf-8"
+            )
+            self.assertEqual("npm test", server._detect_goal_verify(root))
+            (root / "package.json").write_text(
+                '{"scripts": {"build": "tsc"}}', encoding="utf-8"
+            )
+            self.assertEqual("", server._detect_goal_verify(root))
+
+    def test_detects_make_test_target(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "Makefile").write_text("build:\n\tcc x\ntest:\n\t./run\n", encoding="utf-8")
+            self.assertEqual("make test", server._detect_goal_verify(root))
+
+    def test_detects_cargo_and_go(self):
+        with TemporaryDirectory() as tmp:
+            (Path(tmp) / "Cargo.toml").write_text("[package]\n", encoding="utf-8")
+            self.assertEqual("cargo test", server._detect_goal_verify(Path(tmp)))
+        with TemporaryDirectory() as tmp:
+            (Path(tmp) / "go.mod").write_text("module x\n", encoding="utf-8")
+            self.assertEqual("go test ./...", server._detect_goal_verify(Path(tmp)))
+
+    def test_no_markers_detects_nothing(self):
+        with TemporaryDirectory() as tmp:
+            self.assertEqual("", server._detect_goal_verify(Path(tmp)))
+
+    def test_configured_overrides_detected(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+            (root / "tests").mkdir()
+            _set_goal_verify(tmp, "true")
+            self.assertEqual("true", server._effective_goal_verify(tmp))
+
+    def test_effective_falls_back_to_detected(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+            (root / "tests").mkdir()
+            self.assertEqual(
+                "python -m unittest discover -s tests",
+                server._effective_goal_verify(tmp),
+            )
+
+    def test_detected_verify_queues_and_holds_accept(self):
+        # No goal_verify configured, but project markers exist -> the detected
+        # command gates the goal instead of accepting on aggregation.
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+            (root / "tests").mkdir()
+            store = Store(root / ".orbit" / "messages.db")
+            store.register_agent("hub", "")
+            gmsgs = store.send_message("hub", "hub", "g", kind="task", title="G")
+            goal = store.get_task_by_source_message(gmsgs[0])
+            store.update_task_metadata(goal["id"], is_goal=True)
+            smsgs = store.send_message(
+                "hub", "hub", "s", reply_to=gmsgs[0], kind="task", title="S"
+            )
+            sub = store.get_task_by_source_message(smsgs[0])
+            store.update_task_item_status(sub["id"], "closed")
+            server._recompute_parent_goal_status(store, store.get_task(sub["id"]), tmp)
+            self.assertEqual("in_progress", store.get_task(goal["id"])["task_status"])
+            self.assertTrue(store.has_pending_workflow_action(goal["id"], "goal_verify"))
+            store.close()
+
+
 class ReapStaleRunsTests(unittest.TestCase):
     def test_reap_orphans_running_task_runs(self):
         with TemporaryDirectory() as tmp:

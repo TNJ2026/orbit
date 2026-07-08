@@ -1491,6 +1491,51 @@ def _enforce_goal_token_budget(
     return True
 
 
+def _detect_goal_verify(root: Path) -> str:
+    """Infer a default project test command from build markers in `root` (looked
+    at the project root only, never walked up). Empty string when nothing is
+    recognized. Used as the goal convergence check when no goal_verify is
+    configured, so a goal still gets an objective integration gate out of the
+    box. An explicit goal_verify always wins over this guess."""
+    pkg = root / "package.json"
+    if pkg.exists():
+        try:
+            data = json.loads(pkg.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            data = None
+        # Only when a `test` script exists — `npm test` errors without one.
+        if isinstance(data, dict) and isinstance(data.get("scripts"), dict) \
+                and str(data["scripts"].get("test") or "").strip():
+            return "npm test"
+    makefile = root / "Makefile"
+    if makefile.exists():
+        try:
+            if re.search(r"(?m)^test:", makefile.read_text(encoding="utf-8")):
+                return "make test"
+        except OSError:
+            pass
+    if (root / "Cargo.toml").exists():
+        return "cargo test"
+    if (root / "go.mod").exists():
+        return "go test ./..."
+    if (root / "pyproject.toml").exists() or (root / "setup.py").exists() \
+            or (root / "setup.cfg").exists():
+        for name in ("tests", "test"):
+            if (root / name).is_dir():
+                return f"python -m unittest discover -s {name}"
+    return ""
+
+
+def _effective_goal_verify(project_root: str | None) -> str:
+    """The goal convergence command to actually run: the configured goal_verify
+    if set, otherwise a best-effort default detected from project markers. Empty
+    when neither is available."""
+    configured = str(read_workflow_config(project_root).get("goal_verify") or "").strip()
+    if configured:
+        return configured
+    return _detect_goal_verify(_project_root(project_root))
+
+
 def _recompute_parent_goal_status(
     store: Store, task: dict[str, Any], project_root: str | None = None
 ) -> None:
@@ -1518,9 +1563,10 @@ def _recompute_parent_goal_status(
         # the integrated main can still fail. If a goal_verify command is set,
         # queue an objective check on main and let the async sweep accept or
         # stall the goal — don't accept on aggregation alone. Runs once per goal.
-        goal_verify = str(
+        configured = str(
             read_workflow_config(project_root).get("goal_verify") or ""
         ).strip()
+        goal_verify = configured or _detect_goal_verify(_project_root(project_root))
         if goal_verify:
             # Already verified and accepted: nothing to do.
             if parent.get("task_status") == "accepted":
@@ -1530,9 +1576,11 @@ def _recompute_parent_goal_status(
             # NOT block re-queue, so a goal reworked after a failed verification
             # (subtasks reopened then re-closed) gets verified again.
             if not store.has_pending_workflow_action(parent_id, "goal_verify"):
+                note = "all subtasks closed; goal verification queued"
+                if not configured:
+                    note += f" (auto-detected: {goal_verify})"
                 store.create_workflow_action(
-                    parent_id, "goal_verify",
-                    note="all subtasks closed; goal verification queued",
+                    parent_id, "goal_verify", note=note,
                 )
                 if parent.get("task_status") != "in_progress":
                     store.set_task_workflow_state(parent_id, task_status="in_progress")
@@ -2889,7 +2937,7 @@ def goal_verify_sweep(store: Store, project_root: str | None) -> list[dict[str, 
     claims pending goal_verify actions plus any left 'running' by a crashed
     process. Runs the suite synchronously on its own thread, so goals verify one
     at a time on main — no concurrent-suite thrash, no merge races."""
-    command = str(read_workflow_config(project_root).get("goal_verify") or "").strip()
+    command = _effective_goal_verify(project_root)
     if not command:
         return []
     pending = [
