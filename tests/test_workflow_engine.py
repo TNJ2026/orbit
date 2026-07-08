@@ -1442,7 +1442,7 @@ class GoalRollupTests(unittest.TestCase):
             goal = self._mk(h, "goal", "in_progress", is_goal=True)
             self._mk(h, "s1", "closed", parent=goal)
             s2 = self._mk(h, "s2", "closed", parent=goal)
-            server._recompute_parent_goal_status(h.store, h.task(s2))
+            server._recompute_parent_goal_status(h.store, h.task(s2), h.root)
             self.assertEqual("accepted", h.task(goal)["task_status"])
 
     def test_any_blocked_subtask_stalls_goal(self):
@@ -1451,7 +1451,7 @@ class GoalRollupTests(unittest.TestCase):
             goal = self._mk(h, "goal", "in_progress", is_goal=True)
             self._mk(h, "s1", "closed", parent=goal)
             s2 = self._mk(h, "s2", "blocked", parent=goal)
-            server._recompute_parent_goal_status(h.store, h.task(s2))
+            server._recompute_parent_goal_status(h.store, h.task(s2), h.root)
             self.assertEqual("stalled", h.task(goal)["task_status"])
 
     def test_mixed_subtasks_keep_goal_in_progress(self):
@@ -1460,7 +1460,7 @@ class GoalRollupTests(unittest.TestCase):
             goal = self._mk(h, "goal", "stalled", is_goal=True)
             self._mk(h, "s1", "closed", parent=goal)
             s2 = self._mk(h, "s2", "in_progress", parent=goal)
-            server._recompute_parent_goal_status(h.store, h.task(s2))
+            server._recompute_parent_goal_status(h.store, h.task(s2), h.root)
             self.assertEqual("in_progress", h.task(goal)["task_status"])
 
     def test_explicitly_closed_goal_is_left_alone(self):
@@ -1468,7 +1468,7 @@ class GoalRollupTests(unittest.TestCase):
             h = EngineHarness(tmp)
             goal = self._mk(h, "goal", "closed", is_goal=True)
             s1 = self._mk(h, "s1", "blocked", parent=goal)
-            server._recompute_parent_goal_status(h.store, h.task(s1))
+            server._recompute_parent_goal_status(h.store, h.task(s1), h.root)
             self.assertEqual("closed", h.task(goal)["task_status"])
 
 
