@@ -10,8 +10,8 @@ from tempfile import TemporaryDirectory
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import dev_loop.server as server
-from dev_loop.store import Store
+import orbit.server as server
+from orbit.store import Store
 
 
 def _init_repo(root: Path) -> None:
@@ -96,7 +96,7 @@ class StepPromptTests(unittest.TestCase):
                 {"id": "integrate", "name": "Integrate", "role_id": "hub", "integrate": True},
                 "", can_rework=True,
             )
-        self.assertIn("devloop/task-42", p)
+        self.assertIn("orbit/task-42", p)
         self.assertIn("git merge", p)
 
     def test_isolated_prompt_mentions_worktree_branch(self):
@@ -106,7 +106,7 @@ class StepPromptTests(unittest.TestCase):
                 {"id": "implement", "name": "Implement", "role_id": "implementer"},
                 "", can_rework=True, isolated=True,
             )
-        self.assertIn("devloop/task-42", p)
+        self.assertIn("orbit/task-42", p)
         self.assertIn("worktree", p)
 
     def test_non_isolated_prompt_uses_project_root(self):
@@ -136,7 +136,7 @@ class WorktreeLifecycleTests(unittest.TestCase):
                 ["git", "-C", str(wt1), "rev-parse", "--abbrev-ref", "HEAD"],
                 capture_output=True, text=True,
             ).stdout.strip()
-            self.assertEqual("devloop/task-5", branch)
+            self.assertEqual("orbit/task-5", branch)
             # Second call reattaches the same worktree, never a duplicate.
             wt2 = server._ensure_task_worktree(tmp, 5)
             self.assertEqual(wt1, wt2)
@@ -149,7 +149,7 @@ class WorktreeLifecycleTests(unittest.TestCase):
             wt = server._ensure_task_worktree(tmp, 7)
             server._remove_task_worktree(tmp, 7)
             self.assertFalse(wt.exists())
-            self.assertFalse(server._branch_exists(root, "devloop/task-7"))
+            self.assertFalse(server._branch_exists(root, "orbit/task-7"))
             wt2 = server._ensure_task_worktree(tmp, 7)
             self.assertIsNotNone(wt2)
             self.assertTrue(wt2.exists())
@@ -173,7 +173,7 @@ class WorktreeSweepTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             _init_repo(root)
-            store = Store(root / ".dev_loop" / "messages.db")
+            store = Store(root / ".orbit" / "messages.db")
 
             # Orphan: a worktree whose task row doesn't exist -> reaped.
             orphan = server._ensure_task_worktree(tmp, 999)
@@ -199,7 +199,7 @@ class VerifyGateTests(unittest.TestCase):
     def _setup(self, tmp):
         root = Path(tmp)
         _init_repo(root)
-        store = Store(root / ".dev_loop" / "messages.db")
+        store = Store(root / ".orbit" / "messages.db")
         store.register_agent("hub", "")
         store.register_agent("dev", "")
         ids = store.send_message("hub", "dev", "do it", kind="task", title="t")
@@ -271,7 +271,7 @@ def _set_goal_verify(tmp, command):
     server.write_workflow_config(
         server.default_workflow_steps(), tmp, server.default_workflow_edges()
     )
-    path = Path(tmp) / ".dev_loop" / "workflow.json"
+    path = Path(tmp) / ".orbit" / "workflow.json"
     data = json.loads(path.read_text(encoding="utf-8"))
     data["goal_verify"] = command
     path.write_text(json.dumps(data), encoding="utf-8")
@@ -279,7 +279,7 @@ def _set_goal_verify(tmp, command):
 
 class GoalConvergenceGateTests(unittest.TestCase):
     def _goal_with_closed_subtask(self, tmp):
-        store = Store(Path(tmp) / ".dev_loop" / "messages.db")
+        store = Store(Path(tmp) / ".orbit" / "messages.db")
         store.register_agent("hub", "")
         gid_msgs = store.send_message("hub", "hub", "the goal", kind="task", title="G")
         goal = store.get_task_by_source_message(gid_msgs[0])
@@ -379,7 +379,7 @@ class GoalConvergenceGateTests(unittest.TestCase):
 class ReapStaleRunsTests(unittest.TestCase):
     def test_reap_orphans_running_task_runs(self):
         with TemporaryDirectory() as tmp:
-            store = Store(Path(tmp) / ".dev_loop" / "m.db")
+            store = Store(Path(tmp) / ".orbit" / "m.db")
             store.register_agent("hub", "")
             tid = store.get_task_by_source_message(
                 store.send_message("hub", "hub", "x", kind="task", title="t")[0]
@@ -395,7 +395,7 @@ def _set_workflow_field(tmp, key, value):
     server.write_workflow_config(
         server.default_workflow_steps(), tmp, server.default_workflow_edges()
     )
-    path = Path(tmp) / ".dev_loop" / "workflow.json"
+    path = Path(tmp) / ".orbit" / "workflow.json"
     data = json.loads(path.read_text(encoding="utf-8"))
     data[key] = value
     path.write_text(json.dumps(data), encoding="utf-8")
@@ -438,7 +438,7 @@ class TokenBudgetConfigTests(unittest.TestCase):
 
 class TokenBudgetGateTests(unittest.TestCase):
     def _goal_with_subtask_tokens(self, tmp, tokens):
-        store = Store(Path(tmp) / ".dev_loop" / "messages.db")
+        store = Store(Path(tmp) / ".orbit" / "messages.db")
         store.register_agent("hub", "")
         gid = store.send_message("hub", "hub", "goal", kind="task", title="G")
         goal = store.get_task_by_source_message(gid[0])

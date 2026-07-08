@@ -4,7 +4,7 @@ from tempfile import TemporaryDirectory
 import time
 import unittest
 
-from dev_loop.store import (
+from orbit.store import (
     InvalidInputError,
     Store,
     UnknownAgentError,

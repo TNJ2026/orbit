@@ -1,4 +1,4 @@
-"""FastMCP server exposing the dev_loop mailbox tools."""
+"""FastMCP server exposing the orbit mailbox tools."""
 
 from __future__ import annotations
 
@@ -33,6 +33,7 @@ from .store import (
     Store,
     TASK_STATUSES,
     UnknownAgentError,
+    project_state_dir,
 )
 
 MAX_WAIT_SECONDS = 60
@@ -109,7 +110,7 @@ TASK_RISK_SCORES = {"low": 0, "medium": 10, "high": 25}
 _to_thread = anyio.to_thread.run_sync
 
 _UI_HTML = (
-    resources.files("dev_loop").joinpath("static/ui.html").read_text(encoding="utf-8")
+    resources.files("orbit").joinpath("static/ui.html").read_text(encoding="utf-8")
 )
 
 # Vendored, self-contained: the dagre layout engine (bundles graphlib, exposes a
@@ -118,7 +119,7 @@ _UI_HTML = (
 # vendor file only disables the Auto-layout button, never breaks the page.
 try:
     _DAGRE_JS = (
-        resources.files("dev_loop")
+        resources.files("orbit")
         .joinpath("static/vendor/dagre.min.js")
         .read_text(encoding="utf-8")
     )
@@ -212,11 +213,11 @@ def _project_root(project_root: str | None) -> Path:
 
 
 def _team_config_path(project_root: str | None) -> Path:
-    return _project_root(project_root) / ".dev_loop" / "team.json"
+    return project_state_dir(_project_root(project_root)) / "team.json"
 
 
 def _workflow_config_path(project_root: str | None) -> Path:
-    return _project_root(project_root) / ".dev_loop" / "workflow.json"
+    return project_state_dir(_project_root(project_root)) / "workflow.json"
 
 
 # Default canvas layout. Nodes carry explicit x/y because the flow is not a
@@ -2671,7 +2672,7 @@ def _task_blocked_reason(store: Store, task: dict[str, Any]) -> str | None:
 # --- per-task git worktree isolation ---------------------------------------
 # Concurrent implementers of different tasks must not share one working tree
 # (git checkout is global to a tree). Each isolated step runs in a per-task
-# worktree on branch devloop/task-<id>; a single-assignee `integrate` step
+# worktree on branch orbit/task-<id>; a single-assignee `integrate` step
 # merges that branch back into the main tree, serialized by the hub.
 
 WORKTREE_TERMINAL_STATUSES = {"closed", "accepted"}
@@ -2693,11 +2694,11 @@ def _is_git_repo(root: Path) -> bool:
 
 
 def _worktree_branch(task_id: int) -> str:
-    return f"devloop/task-{task_id}"
+    return f"orbit/task-{task_id}"
 
 
 def _task_worktree_dir(project_root: str | None, task_id: int) -> Path:
-    return _project_root(project_root) / ".dev_loop" / "worktrees" / f"task-{task_id}"
+    return project_state_dir(_project_root(project_root)) / "worktrees" / f"task-{task_id}"
 
 
 def _worktree_base_ref(root: Path) -> str | None:
@@ -2816,7 +2817,7 @@ def _sweep_task_worktrees(store: Store, project_root: str | None) -> None:
     Runs on the timeout watcher so SIGKILLed runs that never cleaned up (their
     trap can't fire on SIGKILL) don't leak worktrees and branches indefinitely."""
     root = _project_root(project_root)
-    wt_root = root / ".dev_loop" / "worktrees"
+    wt_root = project_state_dir(root) / "worktrees"
     if not wt_root.exists() or not _is_git_repo(root):
         return
     try:
@@ -3902,7 +3903,7 @@ def workflow_task_state(
 
 
 def _task_runs_root(project_root: str | None) -> Path:
-    return _project_root(project_root) / ".dev_loop" / "tasks"
+    return project_state_dir(_project_root(project_root)) / "tasks"
 
 
 def _task_run_dir(project_root: str | None, task_id: int, attempt: int) -> Path:
@@ -4089,13 +4090,13 @@ def detect_hermes_profiles(profile_root: Path | None = None) -> list[dict[str, s
 
 
 def _packaged_role_templates_dir() -> Path:
-    return Path(str(resources.files("dev_loop") / "role_templates"))
+    return Path(str(resources.files("orbit") / "role_templates"))
 
 
 def _agents_dir(project_root: str | None) -> Path:
     # Prefer the project's own roles, then the server cwd's agents/, and as
     # a last resort the templates bundled in the package — so a fresh project
-    # that never ran `dev-loop init` still gets the default role set.
+    # that never ran `orbit init` still gets the default role set.
     root = _project_root(project_root) / "agents"
     if root.is_dir():
         return root
@@ -4232,8 +4233,8 @@ def create_server(
                 pass
 
     def _embedded_runner() -> None:
-        # Convenience: run a worker in-process so `dev-loop serve` executes goals
-        # end-to-end without a separate `dev-loop runner`. For a decoupled /
+        # Convenience: run a worker in-process so `orbit serve` executes goals
+        # end-to-end without a separate `orbit runner`. For a decoupled /
         # multi-host / restart-safe setup, start serve with run_worker=False and
         # run standalone runners instead.
         runner_loop(
@@ -4262,9 +4263,9 @@ def create_server(
         ).start()
 
     mcp = FastMCP(
-        "dev-loop",
+        "orbit",
         instructions=(
-            "dev-loop is a local mailbox that lets LLM CLIs and agents pass prompts "
+            "Orbit is a local mailbox that lets LLM CLIs and agents pass prompts "
             "to each other. Protocol: 1) call register_agent once with a stable name "
             "(e.g. 'claude-code', 'codex', 'gemini'); 2) use send_message to hand a "
             "prompt to another agent; 3) call check_inbox periodically (use "
@@ -4315,7 +4316,7 @@ def create_server(
 
     @mcp.tool()
     async def register_agent(name: str, description: str = "") -> dict:
-        """Register yourself (or refresh your registration) in the dev-loop agent
+        """Register yourself (or refresh your registration) in the orbit agent
         registry. Call this once at the start of a session with a short stable name
         such as 'claude-code', 'codex', or 'gemini', and a one-line description of
         what you are working on. Returns the full list of registered agents so you

@@ -2,7 +2,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from dev_loop.project_index import (
+from orbit.project_index import (
     browser_host,
     list_projects,
     project_id,

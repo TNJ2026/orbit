@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>dev-loop</title>
+  <title>Orbit</title>
   <style>
     :root {
       color-scheme: light;
@@ -1273,7 +1273,7 @@
 <body>
   <header>
     <div class="brand">
-      <h1>dev-loop</h1>
+      <h1>Orbit</h1>
     </div>
     <div class="header-meta">
       <div id="status" class="meta"></div>
@@ -1434,7 +1434,7 @@
     // Leases survive page reloads via sessionStorage; losing a token would
     // leave a claimed message un-ackable until its lease expires.
     function leaseStorageKey(projectId) {
-      return `devloop-leases:${projectId || "default"}`;
+      return `orbit-leases:${projectId || "default"}`;
     }
 
     function loadLeases(projectId) {
@@ -1463,10 +1463,10 @@
       runFiles: {},
       goals: [],
       selectedGoalId: null,  // board goal filter: goal id, "all", or null (default to newest active)
-      taskDetailsCollapsed: localStorage.getItem("devloop-task-details-collapsed") !== "0"
+      taskDetailsCollapsed: localStorage.getItem("orbit-task-details-collapsed") !== "0"
     };
     {
-      const gf = localStorage.getItem("devloop-goal-filter");
+      const gf = localStorage.getItem("orbit-goal-filter");
       state.selectedGoalId = gf === "all" ? "all" : (gf ? Number(gf) : null);
     }
 
@@ -1694,7 +1694,7 @@
         "wf.help.layout": "布局由 dagre 自动排列，节点不可拖动"
       }
     };
-    let LANG = (localStorage.getItem("devloop-lang") || "en");
+    let LANG = (localStorage.getItem("orbit-lang") || "en");
     if (!I18N[LANG]) LANG = "en";
     function t(key, ...args) {
       const s = (I18N[LANG] && I18N[LANG][key]) || I18N.en[key] || key;
@@ -1718,7 +1718,7 @@
     }
     function setLang(lang) {
       LANG = I18N[lang] ? lang : "en";
-      localStorage.setItem("devloop-lang", LANG);
+      localStorage.setItem("orbit-lang", LANG);
       applyStaticI18n();
       // Re-render all dynamic content so the new locale takes effect everywhere.
       renderTools(); renderTeam(); renderRoles(); renderWorkflow(); renderTasks(); renderGoals();
@@ -3040,7 +3040,7 @@
         });
         $("goalInput").value = "";
         $("goalBudget").value = "";
-        localStorage.removeItem("devloop-goal");
+        localStorage.removeItem("orbit-goal");
         await loadGoals();
         await loadTasks();
         const dispatchedTo = (result.dispatched || [])
@@ -3157,7 +3157,7 @@
 
     function selectGoalFilter(id) {
       state.selectedGoalId = id;
-      try { localStorage.setItem("devloop-goal-filter", String(id)); } catch (e) {}
+      try { localStorage.setItem("orbit-goal-filter", String(id)); } catch (e) {}
       renderTasksGoalBar();
       renderTasks();
     }
@@ -3456,14 +3456,14 @@
     $("goalsTab").addEventListener("click", () => setPage("goals"));
     $("startGoal").addEventListener("click", createGoal);
     $("goalInput").addEventListener("input", () => {
-      localStorage.setItem("devloop-goal", $("goalInput").value);
+      localStorage.setItem("orbit-goal", $("goalInput").value);
     });
-    $("goalInput").value = localStorage.getItem("devloop-goal") || "";
+    $("goalInput").value = localStorage.getItem("orbit-goal") || "";
     // Default to hiding closed goals so finished/abandoned goals don't pile up;
     // the choice persists across reloads.
-    $("hideClosedGoals").checked = localStorage.getItem("devloop-hide-closed-goals") !== "false";
+    $("hideClosedGoals").checked = localStorage.getItem("orbit-hide-closed-goals") !== "false";
     $("hideClosedGoals").addEventListener("change", () => {
-      localStorage.setItem("devloop-hide-closed-goals", $("hideClosedGoals").checked);
+      localStorage.setItem("orbit-hide-closed-goals", $("hideClosedGoals").checked);
       renderGoals();
     });
     $("tasksTab").addEventListener("click", () => setPage("tasks"));

@@ -11,7 +11,28 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-DEFAULT_DB_ROOT = Path.home() / ".dev_loop" / "projects"
+def _resolve_state_dir(parent: Path) -> Path:
+    """Return the Orbit state directory under `parent`, preferring the new
+    `.orbit` name but falling back to a pre-rename `.dev_loop` if that is the
+    one that already exists — so existing data keeps working without migration.
+    A fresh location defaults to `.orbit`."""
+    new = parent / ".orbit"
+    if new.exists():
+        return new
+    legacy = parent / ".dev_loop"
+    if legacy.exists():
+        return legacy
+    return new
+
+
+def project_state_dir(project_root: Path | str) -> Path:
+    """Per-project state dir (workflow/team config, task logs, worktrees).
+    `.orbit`, or a legacy `.dev_loop` when that is what the project already has."""
+    return _resolve_state_dir(Path(project_root))
+
+
+# Home-level store root (per-project databases + the project index).
+DEFAULT_DB_ROOT = _resolve_state_dir(Path.home()) / "projects"
 DEFAULT_LEASE_SECONDS = 300
 MESSAGE_KINDS = {"message", "task"}
 TASK_STATUSES = {

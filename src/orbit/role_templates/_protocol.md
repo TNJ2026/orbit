@@ -1,6 +1,6 @@
-# devloop 通信协议（所有角色公共约定）
+# orbit 通信协议（所有角色公共约定）
 
-devloop 是本地 MCP 信箱（server 名 `devloop`），用于 agent 间传递提示词。
+orbit 是本地 MCP 信箱（server 名 `orbit`），用于 agent 间传递提示词。
 
 ## 基本流程
 

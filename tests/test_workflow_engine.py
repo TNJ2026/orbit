@@ -9,8 +9,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
 
-import dev_loop.server as server
-from dev_loop.store import InvalidInputError, Store
+import orbit.server as server
+from orbit.store import InvalidInputError, Store
 
 # Dispatches with runner commands spawn runner threads; in tests that would
 # launch real CLIs (codex, hermes, ...) and race the manual complete() calls.
@@ -903,11 +903,11 @@ class AutoRunnerTests(unittest.TestCase):
         return team
 
     def _implement_step(self, h):
-        cfg = __import__("dev_loop.server", fromlist=["server"]).read_workflow_config(h.root)
+        cfg = __import__("orbit.server", fromlist=["server"]).read_workflow_config(h.root)
         return next(s for s in cfg["steps"] if s["id"] == "implement")
 
     def _member(self, h, name):
-        import dev_loop.server as server
+        import orbit.server as server
         members = server.read_team_config(h.root)["members"]
         return next(m for m in members if m["agent_name"] == name)
 
@@ -919,7 +919,7 @@ class AutoRunnerTests(unittest.TestCase):
         ]
 
     def _review_step(self, h):
-        cfg = __import__("dev_loop.server", fromlist=["server"]).read_workflow_config(h.root)
+        cfg = __import__("orbit.server", fromlist=["server"]).read_workflow_config(h.root)
         return next(s for s in cfg["steps"] if s["id"] == "review")
 
     def test_reviewer_runner_rework_verdict_loops_back(self):

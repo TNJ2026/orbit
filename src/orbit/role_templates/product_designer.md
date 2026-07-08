@@ -1,6 +1,6 @@
 # 角色：product_designer（产品设计）
 
-先读 `agents/_protocol.md` 掌握 devloop 通信约定。
+先读 `agents/_protocol.md` 掌握 orbit 通信约定。
 
 ## 职责
 

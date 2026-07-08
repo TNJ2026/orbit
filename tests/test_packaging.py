@@ -10,7 +10,7 @@ from unittest import mock
 class PackagingTests(unittest.TestCase):
     def test_init_project_bootstraps_everything_and_is_idempotent(self):
         import json
-        from dev_loop.__main__ import init_project
+        from orbit.__main__ import init_project
 
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -18,13 +18,13 @@ class PackagingTests(unittest.TestCase):
 
             self.assertTrue((root / "agents" / "hub.md").exists())
             self.assertTrue((root / "agents" / "_protocol.md").exists())
-            self.assertTrue((root / ".dev_loop" / "workflow.json").exists())
-            self.assertTrue((root / ".dev_loop" / "team.json").exists())
+            self.assertTrue((root / ".orbit" / "workflow.json").exists())
+            self.assertTrue((root / ".orbit" / "team.json").exists())
             mcp = json.loads((root / ".mcp.json").read_text(encoding="utf-8"))
             self.assertEqual(
-                "http://127.0.0.1:9999/mcp", mcp["mcpServers"]["devloop"]["url"]
+                "http://127.0.0.1:9999/mcp", mcp["mcpServers"]["orbit"]["url"]
             )
-            self.assertIn(".dev_loop/tasks/", (root / ".gitignore").read_text(encoding="utf-8"))
+            self.assertIn(".orbit/tasks/", (root / ".gitignore").read_text(encoding="utf-8"))
             self.assertIn("多 agent 角色", (root / "CLAUDE.md").read_text(encoding="utf-8"))
             self.assertTrue(first["created"])
 
@@ -33,12 +33,12 @@ class PackagingTests(unittest.TestCase):
             self.assertEqual([], second["created"])
 
             # team covers the core roles
-            team = json.loads((root / ".dev_loop" / "team.json").read_text(encoding="utf-8"))
+            team = json.loads((root / ".orbit" / "team.json").read_text(encoding="utf-8"))
             roles = {m["role_id"] for m in team["members"]}
             self.assertEqual({"hub", "implementer", "reviewer"}, roles)
 
     def test_agents_dir_falls_back_to_packaged_templates(self):
-        import dev_loop.server as server
+        import orbit.server as server
 
         with TemporaryDirectory() as project, TemporaryDirectory() as cwd:
             with mock.patch.object(server.Path, "cwd", return_value=Path(cwd)):
@@ -48,7 +48,7 @@ class PackagingTests(unittest.TestCase):
             self.assertIn("hub", {role["id"] for role in roles})
 
     def test_materialize_role_templates_fills_project_agents(self):
-        import dev_loop.server as server
+        import orbit.server as server
 
         with TemporaryDirectory() as tmp:
             agents_dir = Path(tmp) / "agents"
@@ -67,7 +67,7 @@ class PackagingTests(unittest.TestCase):
         # _engine_start resolved the MCP tool instead of the engine function).
         import ast
         import inspect
-        import dev_loop.server as server
+        import orbit.server as server
 
         tree = ast.parse(inspect.getsource(server))
         module_funcs = {
@@ -86,14 +86,14 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual(set(), module_funcs & inner_funcs)
 
     def test_role_templates_are_packaged(self):
-        templates = resources.files("dev_loop") / "role_templates"
+        templates = resources.files("orbit") / "role_templates"
         names = {entry.name for entry in templates.iterdir()}
         for required in ("_protocol.md", "_template.md", "hub.md", "implementer.md", "reviewer.md"):
             self.assertIn(required, names)
 
     def test_ui_asset_is_present_and_loadable(self):
         html = (
-            resources.files("dev_loop")
+            resources.files("orbit")
             .joinpath("static/ui.html")
             .read_text(encoding="utf-8")
         )
@@ -120,7 +120,7 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("function toggleTaskDetails()", html)
         self.assertIn("function renderTaskDetails(task)", html)
         self.assertIn("task-detail-body", html)
-        self.assertIn('localStorage.getItem("devloop-task-details-collapsed") !== "0"', html)
+        self.assertIn('localStorage.getItem("orbit-task-details-collapsed") !== "0"', html)
         self.assertIn('class="side-menu"', html)
         self.assertIn("menu-button", html)
         self.assertIn("display: block;", html)
@@ -213,17 +213,17 @@ class PackagingTests(unittest.TestCase):
     def test_server_module_imports(self):
         # Importing the module reads the UI asset at module load time;
         # a missing resource would raise here.
-        import dev_loop.server as server
+        import orbit.server as server
 
         self.assertTrue(server._UI_HTML)
 
     def test_gitignore_keeps_team_config_trackable(self):
         gitignore = Path(".gitignore").read_text(encoding="utf-8")
-        self.assertIn(".dev_loop/tasks/", gitignore)
-        self.assertNotIn(".dev_loop/\n", gitignore)
+        self.assertIn(".orbit/tasks/", gitignore)
+        self.assertNotIn(".orbit/\n", gitignore)
 
     def test_agent_tool_detection_shape(self):
-        import dev_loop.server as server
+        import orbit.server as server
 
         tools = server.detect_agent_tools()
         self.assertTrue(tools)
@@ -239,12 +239,12 @@ class PackagingTests(unittest.TestCase):
         self.assertNotIn("profile_count", by_id["hermes"])
 
     def test_agent_tool_detection_marks_installed_paths(self):
-        import dev_loop.server as server
+        import orbit.server as server
 
         def fake_which(command):
             return f"/bin/{command}" if command == "codex" else None
 
-        with mock.patch("dev_loop.server.shutil.which", side_effect=fake_which):
+        with mock.patch("orbit.server.shutil.which", side_effect=fake_which):
             tools = {tool["id"]: tool for tool in server.detect_agent_tools()}
 
         self.assertTrue(tools["codex"]["installed"])
@@ -253,7 +253,7 @@ class PackagingTests(unittest.TestCase):
         self.assertIsNone(tools["claude"]["path"])
 
     def test_hermes_profile_detection_lists_profile_directories(self):
-        import dev_loop.server as server
+        import orbit.server as server
 
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -267,13 +267,13 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual(["manager", "researcher"], [p["name"] for p in profiles])
 
     def test_agent_tool_detection_splits_hermes_profiles_into_agents(self):
-        import dev_loop.server as server
+        import orbit.server as server
 
         fake_profiles = [
             {"name": "default", "path": "/tmp/default"},
             {"name": "manager", "path": "/tmp/manager"},
         ]
-        with mock.patch("dev_loop.server.detect_hermes_profiles", return_value=fake_profiles):
+        with mock.patch("orbit.server.detect_hermes_profiles", return_value=fake_profiles):
             tools = {tool["id"]: tool for tool in server.detect_agent_tools()}
 
         self.assertIn("hermes", tools)
@@ -287,13 +287,13 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual("hermes --profile manager", tools["hermes-manager"]["command"])
 
     def test_hermes_profile_agent_ids_are_slugged(self):
-        import dev_loop.server as server
+        import orbit.server as server
 
         fake_profiles = [
             {"name": "manager qa", "path": "/tmp/manager-qa"},
             {"name": "manager/qa", "path": "/tmp/manager-qa-2"},
         ]
-        with mock.patch("dev_loop.server.detect_hermes_profiles", return_value=fake_profiles):
+        with mock.patch("orbit.server.detect_hermes_profiles", return_value=fake_profiles):
             by_id = {tool["id"]: tool for tool in server.detect_agent_tools()}
 
         self.assertIn("hermes-manager-qa", by_id)
@@ -302,7 +302,7 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual("manager/qa", by_id["hermes-manager-qa-2"]["profile_name"])
 
     def test_team_config_round_trips_project_file(self):
-        import dev_loop.server as server
+        import orbit.server as server
 
         with TemporaryDirectory() as tmp:
             team = server.write_team_config(
@@ -337,10 +337,10 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual(4, implementer["expertise_level"])
         self.assertEqual(2, implementer["max_concurrent_tasks"])
         self.assertEqual(["python", "tests"], implementer["capabilities"])
-        self.assertTrue(loaded["path"].endswith(".dev_loop/team.json"))
+        self.assertTrue(loaded["path"].endswith(".orbit/team.json"))
 
     def test_team_config_migrates_legacy_priority_to_expertise(self):
-        import dev_loop.server as server
+        import orbit.server as server
 
         member = server._normalize_team_member(
             {"agent_name": "codex", "role_id": "implementer", "priority": 120}
@@ -351,7 +351,7 @@ class PackagingTests(unittest.TestCase):
         self.assertNotIn("weight", member)
 
     def test_team_config_allows_unlimited_concurrency(self):
-        import dev_loop.server as server
+        import orbit.server as server
 
         member = server._normalize_team_member(
             {
@@ -364,7 +364,7 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual(0, member["max_concurrent_tasks"])
 
     def test_team_config_parses_string_enabled_explicitly(self):
-        import dev_loop.server as server
+        import orbit.server as server
 
         member = server._normalize_team_member(
             {
@@ -385,7 +385,7 @@ class PackagingTests(unittest.TestCase):
             )
 
     def test_workflow_config_defaults_and_round_trips_project_file(self):
-        import dev_loop.server as server
+        import orbit.server as server
 
         with TemporaryDirectory() as tmp:
             default = server.read_workflow_config(tmp)
@@ -422,11 +422,11 @@ class PackagingTests(unittest.TestCase):
         )
         self.assertEqual(saved, loaded)
         self.assertEqual(["plan", "ship", "check"], [step["id"] for step in loaded["steps"]])
-        self.assertTrue(loaded["path"].endswith(".dev_loop/workflow.json"))
+        self.assertTrue(loaded["path"].endswith(".orbit/workflow.json"))
 
     def test_workflow_step_status_must_come_from_workflow_statuses(self):
-        import dev_loop.server as server
-        from dev_loop.store import InvalidInputError
+        import orbit.server as server
+        from orbit.store import InvalidInputError
 
         steps = [
             {"id": "a", "name": "A", "role_id": "hub", "task_status": "created"},
@@ -463,8 +463,8 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual(statuses, saved["statuses"])
 
     def test_workflow_rejects_payload_missing_core_role_steps(self):
-        import dev_loop.server as server
-        from dev_loop.store import InvalidInputError
+        import orbit.server as server
+        from orbit.store import InvalidInputError
 
         with TemporaryDirectory() as tmp:
             with self.assertRaisesRegex(
@@ -477,8 +477,8 @@ class PackagingTests(unittest.TestCase):
                 )
 
     def test_write_rejects_roles_without_role_file(self):
-        import dev_loop.server as server
-        from dev_loop.store import InvalidInputError
+        import orbit.server as server
+        from orbit.store import InvalidInputError
 
         with TemporaryDirectory() as tmp:
             with self.assertRaisesRegex(InvalidInputError, "unknown roles: ghost_role"):
@@ -497,7 +497,7 @@ class PackagingTests(unittest.TestCase):
                 )
 
     def test_workflow_reports_graph_warnings(self):
-        import dev_loop.server as server
+        import orbit.server as server
 
         steps = [
             {"id": "a", "name": "A", "role_id": "hub"},
@@ -519,7 +519,7 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual([], orphaned["warnings"])
 
     def test_workflow_warns_on_unreachable_steps(self):
-        import dev_loop.server as server
+        import orbit.server as server
 
         steps = [
             {"id": "a", "name": "A", "role_id": "hub"},
@@ -536,7 +536,7 @@ class PackagingTests(unittest.TestCase):
         self.assertTrue(any("no path to an end" in w for w in saved["warnings"]))
 
     def test_core_role_steps_are_always_required_and_locked(self):
-        import dev_loop.server as server
+        import orbit.server as server
 
         with TemporaryDirectory() as tmp:
             saved = server.write_workflow_config(
@@ -559,7 +559,7 @@ class PackagingTests(unittest.TestCase):
         self.assertFalse(by_id["qa"]["required_locked"])
 
     def test_default_workflow_has_parallel_merge_and_loopback(self):
-        import dev_loop.server as server
+        import orbit.server as server
 
         edges = server.default_workflow_edges()
         ids = {s["id"] for s in server.default_workflow_steps()}
@@ -582,7 +582,7 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual(edges, loaded["edges"])
 
     def test_workflow_persists_positions_and_edges(self):
-        import dev_loop.server as server
+        import orbit.server as server
 
         with TemporaryDirectory() as tmp:
             saved = server.write_workflow_config(
@@ -602,8 +602,8 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual([{"from": "a", "to": "b"}], loaded["edges"])
 
     def test_workflow_edges_drop_selfloops_and_dupes_and_reject_unknown(self):
-        import dev_loop.server as server
-        from dev_loop.store import InvalidInputError
+        import orbit.server as server
+        from orbit.store import InvalidInputError
 
         steps = [
             {"id": "a", "name": "A", "role_id": "hub"},
@@ -625,11 +625,11 @@ class PackagingTests(unittest.TestCase):
                 server.write_workflow_config(steps, tmp, [{"from": "a", "to": "z"}])
 
     def test_legacy_workflow_without_edges_gets_sequential_chain(self):
-        import dev_loop.server as server
+        import orbit.server as server
         import json as _json
 
         with TemporaryDirectory() as tmp:
-            cfg = Path(tmp) / ".dev_loop" / "workflow.json"
+            cfg = Path(tmp) / ".orbit" / "workflow.json"
             cfg.parent.mkdir(parents=True)
             cfg.write_text(_json.dumps({"steps": [
                 {"id": "a", "name": "A", "role_id": "hub"},
@@ -642,8 +642,8 @@ class PackagingTests(unittest.TestCase):
         )
 
     def test_workflow_config_rejects_invalid_step_role(self):
-        import dev_loop.server as server
-        from dev_loop.store import InvalidInputError
+        import orbit.server as server
+        from orbit.store import InvalidInputError
 
         with TemporaryDirectory() as tmp:
             with self.assertRaisesRegex(InvalidInputError, "role_id is invalid"):
@@ -653,7 +653,7 @@ class PackagingTests(unittest.TestCase):
                 )
 
     def test_assignment_candidates_rank_by_capabilities_expertise_and_load(self):
-        import dev_loop.server as server
+        import orbit.server as server
 
         task = {
             "id": 1,
@@ -703,7 +703,7 @@ class PackagingTests(unittest.TestCase):
         )
 
     def test_assignment_candidates_penalize_low_expertise_for_complex_tasks(self):
-        import dev_loop.server as server
+        import orbit.server as server
 
         task = {
             "id": 1,
@@ -742,7 +742,7 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual(3, junior["expertise_gap"])
 
     def test_team_config_reports_missing_core_roles_without_rejecting(self):
-        import dev_loop.server as server
+        import orbit.server as server
 
         with TemporaryDirectory() as tmp:
             saved = server.write_team_config(
@@ -763,7 +763,7 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual(3, len(loaded["members"]))
 
     def test_team_config_saves_single_member(self):
-        import dev_loop.server as server
+        import orbit.server as server
 
         with TemporaryDirectory() as tmp:
             saved = server.write_team_config(
@@ -774,8 +774,8 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual(["hub", "reviewer"], saved["missing_roles"])
 
     def test_team_config_rejects_invalid_role_id(self):
-        import dev_loop.server as server
-        from dev_loop.store import InvalidInputError
+        import orbit.server as server
+        from orbit.store import InvalidInputError
 
         with TemporaryDirectory() as tmp:
             with self.assertRaises(InvalidInputError):
@@ -785,7 +785,7 @@ class PackagingTests(unittest.TestCase):
                 )
 
     def test_agent_role_detection_lists_non_private_role_files(self):
-        import dev_loop.server as server
+        import orbit.server as server
 
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -803,7 +803,7 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("body", roles[0]["content"])
 
     def test_role_id_validation_rejects_private_and_non_identifiers(self):
-        import dev_loop.server as server
+        import orbit.server as server
 
         self.assertTrue(server._is_valid_role_id("tester"))
         self.assertTrue(server._is_valid_role_id("security_auditor"))
@@ -812,8 +812,8 @@ class PackagingTests(unittest.TestCase):
         self.assertFalse(server._is_valid_role_id("123bad"))
 
     def test_role_content_validation_requires_string(self):
-        import dev_loop.server as server
-        from dev_loop.store import InvalidInputError
+        import orbit.server as server
+        from orbit.store import InvalidInputError
 
         self.assertEqual("body", server._validate_role_content("body"))
         with self.assertRaises(InvalidInputError):
@@ -825,7 +825,7 @@ class PackagingTests(unittest.TestCase):
         # Decision nodes were removed: every node is a role-bearing step, and the
         # normalized config no longer carries a "kind" field. Branching is
         # expressed with plain edges (parallel/merge) and rework loop-backs.
-        import dev_loop.server as server
+        import orbit.server as server
 
         steps = [
             {"id": "intake", "name": "Triage", "role_id": "hub", "task_status": "created", "required": True},
@@ -849,8 +849,8 @@ class PackagingTests(unittest.TestCase):
     def test_workflow_decision_node_is_rejected(self):
         # A former decision node (kind set, no role) is no longer accepted: with
         # decisions gone it normalizes as a plain step and fails role validation.
-        import dev_loop.server as server
-        from dev_loop.store import InvalidInputError
+        import orbit.server as server
+        from orbit.store import InvalidInputError
 
         steps = [
             {"id": "intake", "name": "Triage", "role_id": "hub", "task_status": "created", "required": True},

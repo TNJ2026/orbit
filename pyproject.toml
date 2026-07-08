@@ -1,5 +1,5 @@
 [project]
-name = "dev-loop"
+name = "orbit"
 version = "0.1.0"
 description = "Local MCP server that lets LLM CLIs and agents exchange prompts with each other"
 readme = "README.md"
@@ -9,14 +9,14 @@ dependencies = [
 ]
 
 [project.scripts]
-dev-loop = "dev_loop.__main__:main"
+orbit = "orbit.__main__:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/dev_loop"]
+packages = ["src/orbit"]
 # Non-Python resources (the Web UI, the vendored dagre bundle, role templates)
 # are loaded via importlib.resources at runtime. hatchling already ships every
 # non-ignored file under the package tree, so they are included automatically —

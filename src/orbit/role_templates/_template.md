@@ -1,6 +1,6 @@
 # 角色：<角色名>（<一句话定位>）
 
-先读 `agents/_protocol.md` 掌握 devloop 通信约定。
+先读 `agents/_protocol.md` 掌握 orbit 通信约定。
 
 <!--
 使用方法：复制本文件为 agents/<角色名>.md，替换所有 <占位符>，删掉本注释。

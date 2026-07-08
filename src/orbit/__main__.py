@@ -1,4 +1,4 @@
-"""CLI entry point: dev-loop serve|runner|init."""
+"""CLI entry point: orbit serve|runner|init."""
 
 from __future__ import annotations
 
@@ -8,13 +8,13 @@ from importlib import resources
 from pathlib import Path
 
 from .project_index import upsert_project
-from .store import Store, project_db_path, resolve_project_root
+from .store import Store, project_db_path, project_state_dir, resolve_project_root
 from .server import create_server, runner_loop
 
 _CLAUDE_MD_SECTION = """
 ## 多 agent 角色
 
-本项目用 devloop 做多 agent 协作（MCP server 名 `devloop`）。如果启动时被指定了角色\
+本项目用 Orbit 做多 agent 协作（MCP server 名 `orbit`）。如果启动时被指定了角色\
 （如「按 agents/hub.md 工作」），读取 `agents/<role>.md` 并遵循；\
 通信协议见 `agents/_protocol.md`。未指定角色时忽略本节。
 """
@@ -23,7 +23,7 @@ _CLAUDE_MD_SECTION = """
 def init_project(
     project_root: Path, host: str = "127.0.0.1", port: int = 8848
 ) -> dict[str, list[str]]:
-    """Bootstrap a project for dev-loop in one shot: role prompts, default
+    """Bootstrap a project for orbit in one shot: role prompts, default
     workflow/team config, MCP registration, gitignore, CLAUDE.md section.
     Idempotent — existing files are left untouched."""
     from .server import (
@@ -43,7 +43,7 @@ def init_project(
     # 1. Role prompts from the packaged templates.
     agents_dir = project_root / "agents"
     agents_dir.mkdir(parents=True, exist_ok=True)
-    templates = resources.files("dev_loop") / "role_templates"
+    templates = resources.files("orbit") / "role_templates"
     for entry in sorted(templates.iterdir(), key=lambda e: e.name):
         if not entry.name.endswith(".md"):
             continue
@@ -54,8 +54,12 @@ def init_project(
         dest.write_text(entry.read_text(encoding="utf-8"), encoding="utf-8")
         _mark(dest, True)
 
+    # Per-project state dir: .orbit for fresh projects, or a legacy .dev_loop
+    # if that is what this project already uses.
+    state_dir = project_state_dir(project_root)
+
     # 2. Default workflow (after roles exist, so role validation passes).
-    workflow_path = project_root / ".dev_loop" / "workflow.json"
+    workflow_path = state_dir / "workflow.json"
     if workflow_path.exists():
         _mark(workflow_path, False)
     else:
@@ -66,7 +70,7 @@ def init_project(
 
     # 3. Default team: spread the core roles over the installed agent CLIs
     # (repeating when fewer than three are installed).
-    team_path = project_root / ".dev_loop" / "team.json"
+    team_path = state_dir / "team.json"
     if team_path.exists():
         _mark(team_path, False)
     else:
@@ -92,10 +96,10 @@ def init_project(
         if not isinstance(mcp_config, dict):
             mcp_config = {}
     servers = mcp_config.setdefault("mcpServers", {})
-    if "devloop" in servers:
+    if "orbit" in servers:
         _mark(mcp_path, False)
     else:
-        servers["devloop"] = {
+        servers["orbit"] = {
             "type": "http",
             "url": f"http://{host}:{port}/mcp",
         }
@@ -108,7 +112,7 @@ def init_project(
     # 5. Keep runtime task logs and per-task worktree checkouts out of git.
     gitignore = project_root / ".gitignore"
     existing = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
-    wanted = [".dev_loop/tasks/", ".dev_loop/worktrees/"]
+    wanted = [f"{state_dir.name}/tasks/", f"{state_dir.name}/worktrees/"]
     missing = [line for line in wanted if line not in existing]
     if not missing:
         _mark(gitignore, False)
@@ -131,25 +135,25 @@ def init_project(
 
     return {"created": created, "skipped": skipped}
 
-# Database location used by dev-loop before databases became per-project.
+# Database location used by orbit before databases became per-project.
 LEGACY_DB_PATH = Path.home() / ".dev_loop" / "messages.db"
 
 
 def _serve_hint(host: str, port: int) -> str:
     """A serve command that actually works in the caller's shell: plain
-    dev-loop when it is on PATH, otherwise route through the checkout's env."""
+    orbit when it is on PATH, otherwise route through the checkout's env."""
     import shutil
 
-    if shutil.which("dev-loop"):
-        return f"dev-loop serve --host {host} --port {port}"
+    if shutil.which("orbit"):
+        return f"orbit serve --host {host} --port {port}"
     repo = Path(__file__).resolve().parents[2]
     if (repo / "pyproject.toml").exists():
-        return f"uv run --project {repo} dev-loop serve --host {host} --port {port}"
-    return f"python -m dev_loop serve --host {host} --port {port}"
+        return f"uv run --project {repo} orbit serve --host {host} --port {port}"
+    return f"python -m orbit serve --host {host} --port {port}"
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(prog="dev-loop", description="Local MCP mailbox for LLM agents")
+    parser = argparse.ArgumentParser(prog="orbit", description="Local MCP mailbox for LLM agents")
     sub = parser.add_subparsers(dest="command", required=True)
 
     serve = sub.add_parser(
@@ -161,12 +165,12 @@ def main() -> None:
     serve.add_argument(
         "--db",
         default=None,
-        help="SQLite path (default: per-project database under ~/.dev_loop/projects/)",
+        help="SQLite path (default: per-project database under ~/.orbit/projects/)",
     )
     serve.add_argument(
         "--no-runner",
         action="store_true",
-        help="Do not run an in-process worker; start standalone `dev-loop "
+        help="Do not run an in-process worker; start standalone `orbit "
         "runner` process(es) instead (decoupled / multi-host / restart-safe).",
     )
     serve.add_argument(
@@ -183,7 +187,7 @@ def main() -> None:
     runner.add_argument(
         "--db",
         default=None,
-        help="SQLite path (default: per-project database under ~/.dev_loop/projects/)",
+        help="SQLite path (default: per-project database under ~/.orbit/projects/)",
     )
     runner.add_argument(
         "--name",
@@ -257,7 +261,7 @@ def main() -> None:
             print(
                 f"note: legacy shared database exists at {LEGACY_DB_PATH} and is NOT "
                 f"used anymore — agents and messages stored there will not appear.\n"
-                f"      To keep using it: dev-loop serve --db {LEGACY_DB_PATH}\n"
+                f"      To keep using it: orbit serve --db {LEGACY_DB_PATH}\n"
                 f"      To migrate it to this project: cp {LEGACY_DB_PATH} {db_path}",
                 flush=True,
             )
@@ -275,10 +279,10 @@ def main() -> None:
             run_worker=not args.no_runner,
             worker_concurrency=args.runner_concurrency,
         )
-        worker = "no in-process runner (start `dev-loop runner` separately)" if args.no_runner \
+        worker = "no in-process runner (start `orbit runner` separately)" if args.no_runner \
             else f"with in-process runner (concurrency={args.runner_concurrency})"
         print(
-            f"dev-loop UI/Scheduler listening on http://{args.host}:{args.port}/mcp "
+            f"orbit UI/Scheduler listening on http://{args.host}:{args.port}/mcp "
             f"({worker}) (db: {db_path})",
             flush=True,
         )
@@ -298,7 +302,7 @@ def main() -> None:
             scope.append(f"concurrency={args.max_concurrency}")
         suffix = f" [{'; '.join(scope)}]" if scope else ""
         print(
-            f"dev-loop Runner {args.name} watching {project_root} (db: {db_path}){suffix}",
+            f"orbit Runner {args.name} watching {project_root} (db: {db_path}){suffix}",
             flush=True,
         )
         runner_loop(
