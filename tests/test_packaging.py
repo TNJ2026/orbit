@@ -168,12 +168,12 @@ class PackagingTests(unittest.TestCase):
         # Layout is fully automatic (in saveWorkflow) — no manual re-tidy button.
         self.assertNotIn("function autoLayoutWorkflow(", html)
         self.assertNotIn('data-action="auto-layout"', html)
-        self.assertIn("<title>Click to delete</title>", html)
+        self.assertIn('t("wf.clickDelete")', html)
         self.assertNotIn("workflow-port", html)
         self.assertNotIn("function startNodeDrag(", html)
         self.assertNotIn("function startExistingEdgeDrag(", html)
         self.assertNotIn("function updateWorkflowEdgeTarget(", html)
-        self.assertIn("role: ${escapeHtml(task.role_required", html)
+        self.assertIn('t("task.role", escapeHtml(task.role_required', html)
         self.assertNotIn("<strong>Assignment</strong>", html)  # Assignment section removed
         self.assertIn("function toggleStep(", html)            # inline-expand step detail
         self.assertIn('class="step-item', html)
