@@ -34,6 +34,17 @@ uv run orbit serve --port 9000 --db /tmp/test.db
 
 默认数据库路径形如 `~/.orbit/projects/<项目目录名>-<路径hash>/messages.db`，项目目录按最近的 `.git` / `pyproject.toml` 向上探测——从子目录启动也会解析到同一个库。需要手动共享或指定旧库时，用 `--db` 覆盖。
 
+### 在别的仓库里零配置启动
+
+不想往别的仓库里复制角色/配置文件时，用 `orbit up`：它先把状态目录（`.orbit/`）写进该仓库的 `.gitignore`，再用**包内自带的角色和工作流默认值**直接 serve——不落任何需要提交的文件。`serve` 支持的参数（`--host` / `--port` / `--db` / `--no-runner` / `--runner-concurrency`）它都支持。
+
+```bash
+orbit up                                   # 已装 orbit
+uvx --from git+<repo-url> orbit up         # 没装也行，uvx 临时拉起
+```
+
+需要改角色提示词、自定义工作流并提交给团队共享时，才用 `orbit init`（它会把 `agents/*.md`、`.orbit/workflow.json`、`team.json`、`.mcp.json`、`CLAUDE.md` 段落写进仓库，这些是**故意不 gitignore** 的，供 commit 共享）。
+
 **运维模型：一个项目 = 一个 daemon = 一个端口。** db 由 daemon 的启动目录决定，与客户端从哪个项目连入无关——所有连到同一端口的客户端共享同一个信箱。要隔离多个项目，就为每个项目起独立 daemon 并用 `--port` 错开端口，各项目的 MCP 客户端配置指向各自的端口。
 
 从旧版本升级：旧的全局库在 `~/.dev_loop/messages.db`，不再被默认加载（启动时会打印提示）。想沿用它，`orbit serve --db ~/.dev_loop/messages.db`；想迁移进某个项目，把该文件 cp 到启动提示打印的新路径。

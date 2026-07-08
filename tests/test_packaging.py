@@ -37,6 +37,31 @@ class PackagingTests(unittest.TestCase):
             roles = {m["role_id"] for m in team["members"]}
             self.assertEqual({"hub", "implementer", "reviewer"}, roles)
 
+    def test_ensure_state_dir_gitignored_adds_entry_once(self):
+        from orbit.__main__ import ensure_state_dir_gitignored
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # Fresh repo: no .gitignore -> the state dir gets ignored.
+            self.assertTrue(ensure_state_dir_gitignored(root))
+            gitignore = (root / ".gitignore").read_text(encoding="utf-8")
+            self.assertIn(".orbit/", gitignore)
+            # Idempotent: a second call is a no-op, no duplicate line.
+            self.assertFalse(ensure_state_dir_gitignored(root))
+            self.assertEqual(
+                1, (root / ".gitignore").read_text(encoding="utf-8").count(".orbit/")
+            )
+
+    def test_ensure_state_dir_gitignored_respects_existing_content(self):
+        from orbit.__main__ import ensure_state_dir_gitignored
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".gitignore").write_text(".venv/\n", encoding="utf-8")
+            self.assertTrue(ensure_state_dir_gitignored(root))
+            text = (root / ".gitignore").read_text(encoding="utf-8")
+            self.assertEqual(".venv/\n.orbit/\n", text)
+
     def test_agents_dir_falls_back_to_packaged_templates(self):
         import orbit.server as server
 

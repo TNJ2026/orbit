@@ -152,32 +152,98 @@ def _serve_hint(host: str, port: int) -> str:
     return f"python -m orbit serve --host {host} --port {port}"
 
 
+def ensure_state_dir_gitignored(project_root: Path) -> bool:
+    """Add the per-project state dir (e.g. `.orbit/`) to the repo's .gitignore
+    so runtime task logs and worktrees never show up in `git status`. Returns
+    True if the file was modified. Already-tracked files are unaffected by
+    gitignore, so a project that committed its `.orbit/` config via `orbit
+    init` keeps those tracked."""
+    state_name = project_state_dir(project_root).name
+    entry = f"{state_name}/"
+    gitignore = project_root / ".gitignore"
+    existing = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
+    present = {line.strip() for line in existing.splitlines()}
+    if entry in present or state_name in present:
+        return False
+    joiner = "" if not existing or existing.endswith("\n") else "\n"
+    gitignore.write_text(existing + joiner + entry + "\n", encoding="utf-8")
+    return True
+
+
+def _serve(args) -> None:
+    """Start the UI/API + Scheduler server (shared by `serve` and `up`)."""
+    project_root = resolve_project_root()
+    db_path = args.db or str(project_db_path(project_root))
+    if args.db is None and LEGACY_DB_PATH.exists():
+        print(
+            f"note: legacy shared database exists at {LEGACY_DB_PATH} and is NOT "
+            f"used anymore — agents and messages stored there will not appear.\n"
+            f"      To keep using it: orbit serve --db {LEGACY_DB_PATH}\n"
+            f"      To migrate it to this project: cp {LEGACY_DB_PATH} {db_path}",
+            flush=True,
+        )
+    project = upsert_project(
+        project_root=project_root,
+        db_path=db_path,
+        host=args.host,
+        port=args.port,
+    )
+    mcp = create_server(
+        host=args.host,
+        port=args.port,
+        db_path=db_path,
+        project=project,
+        run_worker=not args.no_runner,
+        worker_concurrency=args.runner_concurrency,
+    )
+    worker = "no in-process runner (start `orbit runner` separately)" if args.no_runner \
+        else f"with in-process runner (concurrency={args.runner_concurrency})"
+    print(
+        f"orbit UI/Scheduler listening on http://{args.host}:{args.port}/mcp "
+        f"({worker}) (db: {db_path})",
+        flush=True,
+    )
+    mcp.run(transport="streamable-http")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="orbit", description="Local MCP mailbox for LLM agents")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    serve = sub.add_parser(
-        "serve",
-        help="Start the UI/API + Scheduler server (Streamable HTTP)",
-    )
-    serve.add_argument("--host", default="127.0.0.1", help="Bind address (default: 127.0.0.1)")
-    serve.add_argument("--port", type=int, default=8848, help="Port (default: 8848)")
-    serve.add_argument(
+    # Shared flags for the two ways to bring the server up (serve / up).
+    serve_common = argparse.ArgumentParser(add_help=False)
+    serve_common.add_argument("--host", default="127.0.0.1", help="Bind address (default: 127.0.0.1)")
+    serve_common.add_argument("--port", type=int, default=8848, help="Port (default: 8848)")
+    serve_common.add_argument(
         "--db",
         default=None,
         help="SQLite path (default: per-project database under ~/.orbit/projects/)",
     )
-    serve.add_argument(
+    serve_common.add_argument(
         "--no-runner",
         action="store_true",
         help="Do not run an in-process worker; start standalone `orbit "
         "runner` process(es) instead (decoupled / multi-host / restart-safe).",
     )
-    serve.add_argument(
+    serve_common.add_argument(
         "--runner-concurrency",
         type=int,
         default=5,
         help="How many jobs the in-process worker runs in parallel (default: 5).",
+    )
+
+    sub.add_parser(
+        "serve",
+        parents=[serve_common],
+        help="Start the UI/API + Scheduler server (Streamable HTTP)",
+    )
+
+    sub.add_parser(
+        "up",
+        parents=[serve_common],
+        help="Zero-setup start: gitignore the state dir, then serve with the "
+        "packaged role/workflow defaults — no files copied into the repo. "
+        "Run `orbit init` instead to customize and commit them.",
     )
 
     runner = sub.add_parser(
@@ -254,39 +320,23 @@ def main() -> None:
         )
         return
 
-    if args.command == "serve":
+    if args.command == "up":
         project_root = resolve_project_root()
-        db_path = args.db or str(project_db_path(project_root))
-        if args.db is None and LEGACY_DB_PATH.exists():
-            print(
-                f"note: legacy shared database exists at {LEGACY_DB_PATH} and is NOT "
-                f"used anymore — agents and messages stored there will not appear.\n"
-                f"      To keep using it: orbit serve --db {LEGACY_DB_PATH}\n"
-                f"      To migrate it to this project: cp {LEGACY_DB_PATH} {db_path}",
-                flush=True,
-            )
-        project = upsert_project(
-            project_root=project_root,
-            db_path=db_path,
-            host=args.host,
-            port=args.port,
-        )
-        mcp = create_server(
-            host=args.host,
-            port=args.port,
-            db_path=db_path,
-            project=project,
-            run_worker=not args.no_runner,
-            worker_concurrency=args.runner_concurrency,
-        )
-        worker = "no in-process runner (start `orbit runner` separately)" if args.no_runner \
-            else f"with in-process runner (concurrency={args.runner_concurrency})"
+        state_name = project_state_dir(project_root).name
+        if ensure_state_dir_gitignored(project_root):
+            print(f"gitignore: added {state_name}/", flush=True)
+        else:
+            print(f"gitignore: {state_name}/ already ignored", flush=True)
         print(
-            f"orbit UI/Scheduler listening on http://{args.host}:{args.port}/mcp "
-            f"({worker}) (db: {db_path})",
+            "orbit up: serving with packaged role/workflow defaults — no files "
+            "copied into the repo. Run `orbit init` to customize and commit them.",
             flush=True,
         )
-        mcp.run(transport="streamable-http")
+        _serve(args)
+        return
+
+    if args.command == "serve":
+        _serve(args)
         return
 
     if args.command == "runner":
