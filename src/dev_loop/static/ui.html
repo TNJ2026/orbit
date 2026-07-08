@@ -416,16 +416,33 @@
     button.danger { color: var(--danger); }
     button:disabled, select:disabled, input:disabled { opacity: .55; cursor: default; }
     button:active:not(:disabled) { transform: translateY(1px); }
-    .tasks-goal-subtitle {
+    .goal-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 6px;
       max-width: 100%;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
+    }
+    .goal-chip {
+      max-width: 280px;
+      padding: 3px 10px;
+      min-height: 0;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--panel);
       color: var(--muted);
       font-size: 12px;
       cursor: pointer;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
-    .tasks-goal-subtitle:hover { color: var(--ink); }
+    .goal-chip:hover { color: var(--ink); border-color: var(--muted); }
+    .goal-chip.active {
+      background: var(--accent);
+      color: var(--accent-ink);
+      border-color: var(--accent);
+    }
     .goal-composer {
       border-bottom: 1px solid var(--line);
       background: #fbfbf9;
@@ -438,6 +455,22 @@
       cursor: pointer;
     }
     .goal-card:hover { background: #f4f7f5; }
+    .goal-analyzing {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      color: var(--accent);
+      font-size: 13px;
+    }
+    .goal-analyzing .spinner {
+      display: inline-block;
+      width: 11px;
+      height: 11px;
+      border: 2px solid var(--line);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: refresh-spin 0.7s linear infinite;
+    }
     .goal-progress {
       height: 6px;
       border-radius: 3px;
@@ -461,11 +494,6 @@
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
-    }
-    .wf-active-badge {
-      background: var(--accent);
-      color: var(--accent-ink);
-      border-color: var(--accent);
     }
     .wf-step-badge {
       background: #eef5f1;
@@ -713,6 +741,69 @@
         radial-gradient(circle, rgba(29, 35, 38, 0.10) 1px, transparent 1px) 0 0 / 18px 18px,
         #eef1ef;
     }
+    .workflow-canvas-wrap {
+      display: flex;
+      align-items: stretch;
+    }
+    .wf-toolbar {
+      flex: none;
+      width: 60px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      padding: 10px 8px;
+      border-right: 1px solid var(--line);
+      background: var(--panel);
+      position: sticky;
+      left: 0;
+      z-index: 5;
+    }
+    .wf-tool {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+      padding: 8px 4px 6px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      color: var(--ink);
+      cursor: pointer;
+      font-size: 11px;
+      line-height: 1.2;
+      text-align: center;
+      user-select: none;
+      transition: border-color 0.12s, background 0.12s;
+    }
+    .wf-tool:hover { border-color: var(--accent); background: #f3faf7; }
+    .wf-tool.active {
+      border-color: var(--accent);
+      background: #eef7f2;
+      box-shadow: 0 0 0 2px rgba(37, 108, 90, 0.18);
+    }
+    .wf-tool svg { display: block; }
+    .wf-tool-name { font-weight: 600; }
+    .wf-tool.disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+    .wf-tool.disabled:hover { border-color: var(--line); background: var(--panel); }
+    .wf-tool-sep {
+      align-self: stretch;
+      width: 1px;
+      margin: 2px 2px;
+      background: var(--line);
+    }
+    .wf-canvas-inner {
+      flex: 1;
+      min-width: 0;
+      position: relative;
+    }
+    .workflow-canvas.tool-place { cursor: crosshair; }
+    .workflow-canvas.tool-connect { cursor: cell; }
+    .workflow-node.connect-source {
+      box-shadow: 0 0 0 3px rgba(37, 108, 90, 0.35);
+    }
     .workflow-graph {
       position: relative;
       min-width: 100%;
@@ -752,16 +843,53 @@
     }
     .workflow-node {
       position: relative;
-      width: 260px;
-      border: 1px solid var(--line);
-      border-radius: 7px;
+      width: 200px;
+      border: 1.5px solid var(--accent);
+      border-radius: 14px;
       background: var(--panel);
       color: var(--ink);
-      box-shadow: 0 6px 16px rgba(29, 35, 38, 0.08);
+      box-shadow: 0 4px 12px rgba(29, 35, 38, 0.08);
+      padding: 11px 14px;
+      text-align: center;
+      cursor: grab;
+      user-select: none;
     }
-    .workflow-node.required {
-      border-color: #9fc7b9;
+    /* Fixed start / end terminals: stadium (pill) shape, like a flowchart. */
+    .workflow-node.wf-terminal { border-radius: 999px; padding-left: 22px; padding-right: 22px; }
+    .workflow-node.wf-start { border-color: var(--accent); background: #eef7f2; }
+    .workflow-node.wf-end { border-color: #7a8a83; background: #f2f4f3; }
+    .wf-terminal-tag { font-size: 11px; font-weight: 600; color: var(--accent); }
+    .wf-end .wf-terminal-tag { color: #5a6a63; }
+    /* Decision node: a diamond (branch point). The SVG stretches to the node's
+       rect, so its vertices land on the side midpoints where ports/edges attach. */
+    .workflow-node.wf-decision {
+      border: none;
+      background: transparent;
+      box-shadow: none;
+      min-height: 104px;
+      padding: 8px 26px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      isolation: isolate;
     }
+    .workflow-node.wf-decision:hover { box-shadow: none; }
+    .wf-diamond-bg {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      z-index: 0;
+      pointer-events: none;
+      overflow: visible;
+    }
+    .wf-diamond-bg polygon { fill: #fdf3e6; stroke: var(--warn); stroke-width: 1.5; }
+    .wf-decision .wf-box-name, .wf-decision .wf-box-meta { position: relative; z-index: 1; }
+    .wf-decision .wf-role-badge { background: #fbe7cd; color: var(--warn); }
+    .workflow-node:hover { box-shadow: 0 7px 18px rgba(29, 35, 38, 0.16); }
+    .workflow-node:active { cursor: grabbing; }
+    .workflow-node.optional { border-style: dashed; border-color: var(--muted); }
     .workflow-node.dragging {
       opacity: 0.75;
       box-shadow: 0 12px 28px rgba(29, 35, 38, 0.22);
@@ -770,6 +898,19 @@
       border-color: var(--accent);
       box-shadow: 0 0 0 2px rgba(37, 108, 90, 0.28);
     }
+    .wf-box-index { position: absolute; top: 4px; right: 8px; font-size: 10px; color: var(--muted); }
+    .wf-box-name {
+      font-weight: 650; font-size: 14px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .wf-box-meta {
+      margin-top: 5px; display: flex; justify-content: center; align-items: center; gap: 7px;
+    }
+    .wf-role-badge {
+      padding: 1px 8px; border-radius: 999px;
+      background: #eef5f1; color: var(--accent); font-size: 11px;
+    }
+    .wf-box-flag { font-size: 11px; color: var(--muted); }
     .workflow-node-head {
       display: flex;
       justify-content: space-between;
@@ -789,6 +930,39 @@
       letter-spacing: 1px;
       user-select: none;
     }
+    .wf-node-name {
+      flex: 1;
+      min-width: 0;
+      font-weight: 650;
+      font-size: 13px;
+      padding: 2px 5px;
+      border: 1px solid transparent;
+      border-radius: 4px;
+      background: transparent;
+      cursor: text;
+    }
+    .wf-node-name:hover { border-color: var(--line); background: #fff; }
+    .wf-node-name:focus { border-color: var(--accent); background: #fff; outline: none; }
+    .wf-node-title {
+      flex: 1;
+      min-width: 0;
+      font-weight: 650;
+      font-size: 13px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .wf-name-btn {
+      flex: none;
+      padding: 2px 9px;
+      min-height: 0;
+      font-size: 12px;
+      line-height: 1.3;
+      border-radius: 4px;
+      cursor: pointer;
+      color: var(--muted);
+    }
+    .wf-name-btn:not(.primary):hover { color: var(--accent); border-color: var(--accent); }
     .workflow-node-body {
       display: grid;
       gap: 8px;
@@ -812,6 +986,7 @@
       background: #fff;
       z-index: 3;
       touch-action: none;
+      pointer-events: auto;
       cursor: crosshair;
       transition: background 0.15s, border-color 0.15s;
     }
@@ -852,24 +1027,147 @@
     .badge.leased { color: var(--warn); border-color: #deb16f; }
     .badge.read { color: var(--muted); }
     .badge.installed { color: var(--accent); border-color: #9fc7b9; }
-    .badge.job-pending { color: var(--muted); }
-    .badge.job-running { color: var(--accent); border-color: #9fc7b9; }
-    .badge.job-finished { color: var(--warn); border-color: #deb16f; }
-    .badge.job-applying { color: var(--accent); border-color: #9fc7b9; }
-    .badge.job-done { color: var(--muted); border-color: #cdd6d1; }
-    .badge.job-failed { color: var(--danger); border-color: #e0a3a3; }
-    .badge.job-cancelled { color: var(--muted); }
-    .jobs-table-wrap { overflow-x: auto; padding: 0 16px 16px; }
-    .jobs-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    .jobs-table th, .jobs-table td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
-    .jobs-table th { color: var(--muted); font-weight: 600; }
-    .jobs-table tbody tr:hover { background: var(--bg); }
     .badge.missing { color: var(--muted); }
     .empty, .error {
       padding: 18px 12px;
       color: var(--muted);
     }
     .error { color: var(--danger); }
+    .blocked-reason {
+      margin: 10px 0;
+      padding: 10px 12px;
+      border: 1px solid #e0a3a3;
+      border-left: 3px solid var(--danger);
+      border-radius: 6px;
+      background: rgba(163, 59, 59, 0.06);
+    }
+    .blocked-reason > strong { color: var(--danger); font-size: 12px; }
+    /* Step cards in the task detail: color-coded so state reads at a glance. */
+    .step-list { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+    .step-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 9px 12px;
+      border: 1px solid var(--line);
+      border-left: 4px solid var(--muted);
+      border-radius: 8px;
+      background: var(--panel);
+      cursor: pointer;
+      transition: background 0.12s ease, box-shadow 0.12s ease;
+    }
+    .step-item:hover { background: var(--bg); box-shadow: 0 1px 6px rgba(0, 0, 0, 0.08); }
+    .step-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex: none; }
+    .step-name { flex: 1; font-weight: 600; font-size: 13px; text-transform: capitalize; }
+    .step-id { color: var(--muted); font-size: 12px; }
+    .step-item .badge { font-size: 11px; }
+    .step-active { border-left-color: var(--accent); }
+    .step-active .step-dot { background: var(--accent); }
+    .step-blocked { border-left-color: var(--danger); background: rgba(163, 59, 59, 0.05); }
+    .step-blocked .step-dot { background: var(--danger); }
+    .step-blocked .step-name { color: var(--danger); }
+    .step-done { border-left-color: #9bbcae; }
+    .step-done .step-dot { background: #9bbcae; }
+    .step-done .step-name { color: var(--muted); font-weight: 500; }
+    .step-agent { color: var(--muted); font-size: 12px; }
+    .step-chevron { color: var(--muted); font-size: 12px; width: 12px; text-align: center; flex: none; }
+    .step-item.expanded { border-radius: 8px 8px 0 0; background: var(--bg); }
+    .step-detail {
+      border: 1px solid var(--line);
+      border-top: none;
+      border-radius: 0 0 8px 8px;
+      padding: 10px 12px;
+      margin-top: -6px;   /* tuck under the row it belongs to (step-list gap is 6px) */
+      margin-bottom: 2px;
+      background: var(--panel);
+    }
+    .step-open { font-size: 12px; color: var(--accent); text-decoration: none; }
+    .step-open:hover { text-decoration: underline; }
+    .blocked-reason-body {
+      margin-top: 6px;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-size: 13px;
+      max-height: 220px;
+      overflow: auto;
+    }
+    /* Error popup: sits above the task drawer so a failed action is unmissable. */
+    .error-modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.4);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 60;
+      padding: 20px;
+    }
+    .error-modal-backdrop.open { display: flex; }
+    .error-modal {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-top: 3px solid var(--danger);
+      border-radius: 8px;
+      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+      width: min(440px, 94vw);
+      max-height: 80vh;
+      overflow: auto;
+      padding: 18px 20px 16px;
+    }
+    .error-modal-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 700;
+      color: var(--danger);
+      margin-bottom: 10px;
+    }
+    .error-modal-body {
+      white-space: pre-wrap;
+      word-break: break-word;
+      color: var(--ink);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    .error-modal-actions {
+      margin-top: 16px;
+      display: flex;
+      justify-content: flex-end;
+    }
+    /* Generic modal (Add Step, etc.) */
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.4);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 60;
+      padding: 20px;
+    }
+    .modal-backdrop.open { display: flex; }
+    .modal {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+      width: min(420px, 94vw);
+      max-height: 85vh;
+      overflow: auto;
+      padding: 18px 20px 16px;
+      display: grid;
+      gap: 12px;
+    }
+    .modal-title { font-weight: 700; font-size: 15px; }
+    .modal-actions { margin-top: 6px; display: flex; justify-content: flex-end; gap: 8px; }
+    .modal-check { display: flex; align-items: center; gap: 8px; }
+    .modal-check input { width: auto; }
+    .modal-hint {
+      font-size: 12px; color: var(--muted);
+      padding: 8px 10px; border-radius: 6px;
+      background: #f6f5ef; border: 1px solid var(--line);
+      line-height: 1.4;
+    }
     .composer {
       border-top: 1px solid var(--line);
       background: #fbfbf9;
@@ -965,7 +1263,6 @@
     <aside class="side-menu" aria-label="View">
       <button id="goalsTab" class="menu-button" type="button">Goals</button>
       <button id="tasksTab" class="menu-button active" type="button">Tasks</button>
-      <button id="jobsTab" class="menu-button" type="button">Jobs</button>
       <button id="teamTab" class="menu-button" type="button">Team</button>
       <button id="workflowTab" class="menu-button" type="button">Workflow</button>
       <button id="rolesTab" class="menu-button" type="button">Roles</button>
@@ -999,7 +1296,7 @@
       <div class="pane-head">
         <div style="min-width: 0;">
           <h2>Development Tasks</h2>
-          <div id="tasksGoalBar" class="tasks-goal-subtitle"></div>
+          <div id="tasksGoalBar"></div>
         </div>
         <button id="refreshTasks">Refresh</button>
       </div>
@@ -1011,14 +1308,6 @@
         <button id="toggleTaskDetails" class="task-details-toggle" type="button" title="Close">×</button>
         <div id="taskDetailContent" class="task-detail-content">No task selected.</div>
       </aside>
-    </div>
-    <div id="jobsPage" class="page jobs-page">
-      <div class="pane-head">
-        <h2>Run Jobs</h2>
-        <button id="refreshJobs" type="button">Refresh</button>
-      </div>
-      <div class="meta" style="padding: 0 16px 8px;">Queued runner jobs. A runner claims a job (leasing it), heartbeats to keep the lease, and finishes it. An expired lease lets another runner reclaim it.</div>
-      <div id="jobsList"></div>
     </div>
     <div id="toolsPage" class="page tools-page">
       <div class="pane-head">
@@ -1054,7 +1343,7 @@
         <h2>Workflow</h2>
         <div class="row">
           <button id="addWorkflowStep" type="button">Add Step</button>
-          <button id="autoArrangeWorkflow" type="button" title="Re-layout steps left-to-right to untangle connections">Auto Arrange</button>
+          <button id="addWorkflowDecision" type="button">Add Decision</button>
           <button id="refreshWorkflow" type="button">Refresh</button>
         </div>
       </div>
@@ -1070,6 +1359,36 @@
     </div>
     </div>
   </main>
+  <div id="errorModalBackdrop" class="error-modal-backdrop">
+    <div class="error-modal" role="alertdialog" aria-modal="true" aria-labelledby="errorModalTitle">
+      <div id="errorModalTitle" class="error-modal-title">⚠ Error</div>
+      <div id="errorModalBody" class="error-modal-body"></div>
+      <div class="error-modal-actions">
+        <button id="errorModalClose" type="button">OK</button>
+      </div>
+    </div>
+  </div>
+  <div id="addStepModalBackdrop" class="modal-backdrop">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="addStepModalTitle">
+      <div id="addStepModalTitle" class="modal-title">Add workflow step</div>
+      <label><div class="meta">Name</div><input id="addStepName" type="text" placeholder="Step name"></label>
+      <div id="addStepDecisionHint" class="modal-hint" style="display:none;">
+        Decisions are branch points — they hold no role or status. Use them to model
+        choices where the flow fans out (e.g. review → pass / rework).
+      </div>
+      <label id="addStepRoleField"><div class="meta">Role</div><select id="addStepRole"></select></label>
+      <label id="addStepStatusField"><div class="meta">Status</div><select id="addStepStatus"></select></label>
+      <label id="addStepRequiredField" class="modal-check"><input id="addStepRequired" type="checkbox"><span class="meta">Required (a step the flow must include)</span></label>
+      <div class="modal-actions">
+        <button id="addStepDelete" type="button" class="danger" style="margin-right: auto; display: none;">Delete</button>
+        <button id="addStepCancel" type="button">Cancel</button>
+        <button id="addStepConfirm" type="button" class="primary">Add</button>
+      </div>
+    </div>
+  </div>
+  <!-- Vendored dagre (self-hosted, no CDN). Optional: if it fails to load the
+       app still works — the Auto-layout button feature-detects window.dagre. -->
+  <script src="/static/dagre.min.js" onerror="window.__dagreFailed=true"></script>
   <script>
     // Leases survive page reloads via sessionStorage; losing a token would
     // leave a claimed message un-ackable until its lease expires.
@@ -1093,20 +1412,26 @@
       tools: [],
       roles: [],
       team: { members: [], path: "" },
-      workflow: { steps: [], edges: [], path: "" },
+      workflow: { steps: [], statuses: [], edges: [], path: "" },
       tasks: [],
       selectedTaskId: null,
+      expandedStepId: null,
       taskRuns: [],
       selectedRunId: null,
       selectedRunFileKey: "events",
       runFiles: {},
       goals: [],
+      selectedGoalId: null,  // board goal filter: goal id, "all", or null (default to newest active)
       taskDetailsCollapsed: localStorage.getItem("devloop-task-details-collapsed") !== "0"
     };
+    {
+      const gf = localStorage.getItem("devloop-goal-filter");
+      state.selectedGoalId = gf === "all" ? "all" : (gf ? Number(gf) : null);
+    }
 
     const $ = (id) => document.getElementById(id);
 
-    const PAGES = ["goals", "tasks", "jobs", "tools", "team", "workflow", "roles"];
+    const PAGES = ["goals", "tasks", "tools", "team", "workflow", "roles"];
     function setPage(page) {
       if (!PAGES.includes(page)) page = "tasks";
       PAGES.forEach(name => {
@@ -1148,9 +1473,10 @@
       state.tools = [];
       state.roles = [];
       state.team = { members: [], path: "" };
-      state.workflow = { steps: [], edges: [], path: "" };
+      state.workflow = { steps: [], statuses: [], edges: [], path: "" };
       state.tasks = [];
       state.selectedTaskId = null;
+      state.expandedStepId = null;
       state.taskRuns = [];
       state.selectedRunId = null;
       state.selectedRunFileKey = "events";
@@ -1172,6 +1498,7 @@
       $("taskDetails").classList.remove("open");
       $("taskDetailsBackdrop").classList.remove("open");
       state.selectedTaskId = null;  // stop the poll from reloading a hidden drawer
+      state.expandedStepId = null;
     }
 
     function toggleTaskDetails() {
@@ -1179,10 +1506,33 @@
       else openTaskDrawer();
     }
 
+    function showError(message) {
+      $("errorModalBody").textContent = message || "Something went wrong.";
+      $("errorModalBackdrop").classList.add("open");
+      $("errorModalClose").focus();
+    }
+
+    function hideError() {
+      $("errorModalBackdrop").classList.remove("open");
+    }
+
     function setStatus(text, isError = false) {
       $("status").textContent = text;
       $("status").style.color = isError ? "var(--danger)" : "var(--muted)";
+      // Every error surface funnels through setStatus(..., true); route those to
+      // a popup so a failed action is unmissable instead of a quiet status line.
+      if (isError) showError(text);
     }
+
+    $("errorModalClose").addEventListener("click", hideError);
+    $("errorModalBackdrop").addEventListener("click", (event) => {
+      if (event.target === $("errorModalBackdrop")) hideError();
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && $("errorModalBackdrop").classList.contains("open")) {
+        hideError();
+      }
+    });
 
     function fmtTime(value) {
       if (!value) return "";
@@ -1232,12 +1582,18 @@
 
     async function loadWorkflow() {
       if (!state.apiBase) {
-        state.workflow = { steps: [], edges: [], path: "" };
+        state.workflow = { steps: [], statuses: [], edges: [], path: "" };
         renderWorkflow();
         return;
       }
       const data = await api("/api/workflow");
-      state.workflow = { steps: data.steps || [], edges: data.edges || [], path: data.path || "", warnings: data.warnings || [] };
+      state.workflow = {
+        steps: data.steps || [],
+        statuses: data.statuses || [],
+        edges: data.edges || [],
+        path: data.path || "",
+        warnings: data.warnings || []
+      };
       // Render first: overlap resolution needs real card heights from the
       // DOM, and before the first render the fallback estimate undershoots.
       renderWorkflow();
@@ -1496,7 +1852,7 @@
     // Nodes are absolutely positioned at step.x/step.y and connected by
     // SVG edges. Dragging a head moves a node; dragging from an out-port to
     // another node creates a connection. Positions and edges both persist.
-    const WF_NODE_W = 260;
+    const WF_NODE_W = 200;  // must match .workflow-node width in CSS (edge geometry uses it)
     const WF_PORT_TOP = 36;   // top offset of the first port
     const WF_PORT_GAP = 26;   // vertical spacing between ports
     const WF_PORT_R = 7;      // port radius (center offset)
@@ -1504,6 +1860,10 @@
     let wfDrag = null;        // active pointer interaction
     let wfTempPath = null;    // in-progress connection path (SVG d string)
     let wfLayoutCache = null; // per-node port counts + per-edge port slots
+    // Active toolbar tool: "select" (move/edit), "step"/"decision" (click canvas
+    // to place), "connect" (click two nodes to wire an edge).
+    let wfTool = "select";
+    let wfConnectFrom = null; // source node id when in connect mode
 
     function wfById() {
       return Object.fromEntries((state.workflow.steps || []).map(s => [s.id, s]));
@@ -1678,45 +2038,34 @@
       return rects;
     }
 
-    function wfCubic(p1, c1, c2, p2) {
-      return `M ${p1.x} ${p1.y} C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${p2.x} ${p2.y}`;
-    }
 
-    function wfCubicHits(p1, c1, c2, p2, obstacles) {
-      for (let i = 1; i < 24; i++) {
-        const t = i / 24, u = 1 - t;
-        const x = u * u * u * p1.x + 3 * u * u * t * c1.x + 3 * u * t * t * c2.x + t * t * t * p2.x;
-        const y = u * u * u * p1.y + 3 * u * u * t * c1.y + 3 * u * t * t * c2.y + t * t * t * p2.y;
-        if (obstacles.some(r => x > r.x - 6 && x < r.x + r.w + 6 && y > r.y - 6 && y < r.y + r.h + 6)) return true;
-      }
-      return false;
-    }
-
-    // Control-point y that makes a symmetric cubic actually pass through
-    // `target` at its midpoint (curve midpoint = (p1 + 3c1 + 3c2 + p2) / 8).
-    function wfBulgeY(p1, p2, target) {
-      return (target - (p1.y + p2.y) / 8) / 0.75;
-    }
-
-    // Route one edge. Forward edges get a plain bezier unless a card sits in
-    // the way, in which case the curve arcs over or under the blockers.
-    // Backward edges wrap around every card in their horizontal span instead
-    // of cutting straight through (and behind) them.
+    // Orthogonal (right-angle) connector: stub out of each node along its side,
+    // then join the stubs with axis-aligned segments — the classic flowchart look.
     function wfEdgePath(fromId, toId, p1, p2, rects, fromSide, toSide) {
-      const dist = Math.min(100, Math.max(40, Math.abs(p2.x - p1.x) * 0.5, Math.abs(p2.y - p1.y) * 0.5));
-      let c1 = { x: p1.x, y: p1.y };
-      if (fromSide === "right") c1.x += dist;
-      else if (fromSide === "left") c1.x -= dist;
-      else if (fromSide === "top") c1.y -= dist;
-      else if (fromSide === "bottom") c1.y += dist;
-
-      let c2 = { x: p2.x, y: p2.y };
-      if (toSide === "right") c2.x += dist;
-      else if (toSide === "left") c2.x -= dist;
-      else if (toSide === "top") c2.y -= dist;
-      else if (toSide === "bottom") c2.y += dist;
-
-      return wfCubic(p1, c1, c2, p2);
+      const stub = 22;
+      const out = (p, side) =>
+        side === "right" ? { x: p.x + stub, y: p.y }
+        : side === "left" ? { x: p.x - stub, y: p.y }
+        : side === "top" ? { x: p.x, y: p.y - stub }
+        : { x: p.x, y: p.y + stub };  // bottom
+      const s1 = out(p1, fromSide);
+      const s2 = out(p2, toSide);
+      const hFrom = fromSide === "left" || fromSide === "right";
+      const hTo = toSide === "left" || toSide === "right";
+      const pts = [p1, s1];
+      if (hFrom && hTo) {
+        const midX = (s1.x + s2.x) / 2;
+        pts.push({ x: midX, y: s1.y }, { x: midX, y: s2.y });
+      } else if (!hFrom && !hTo) {
+        const midY = (s1.y + s2.y) / 2;
+        pts.push({ x: s1.x, y: midY }, { x: s2.x, y: midY });
+      } else if (hFrom && !hTo) {
+        pts.push({ x: s2.x, y: s1.y });
+      } else {  // vertical from, horizontal to
+        pts.push({ x: s1.x, y: s2.y });
+      }
+      pts.push(s2, p2);
+      return "M " + pts.map(p => `${Math.round(p.x)} ${Math.round(p.y)}`).join(" L ");
     }
 
     function wfGraphPoint(event) {
@@ -1733,77 +2082,105 @@
         wfWarnings.length ? `<span style="color: var(--warn)">⚠ ${wfWarnings.map(escapeHtml).join(" · ")}</span>` : ""
       ].filter(Boolean).join(" — ");
       const steps = state.workflow.steps || [];
+      // Terminals: a start node has flow out but nothing pointing in; an end node
+      // has flow in but nothing out. Rendered as fixed start/end pill nodes.
+      const wfIncoming = new Set((state.workflow.edges || []).map(e => e.to));
+      const wfOutgoing = new Set((state.workflow.edges || []).map(e => e.from));
       wfLayoutCache = wfComputeLayout();
       const layout = wfLayoutCache;
-      // Tasks currently sitting on each step (workflow_step is comma-joined
-      // when branches run in parallel).
-      const stepTaskCounts = {};
-      (state.tasks || []).forEach(task => {
-        if (task.task_status === "closed") return;
-        String(task.workflow_step || "").split(",").forEach(part => {
-          const id = part.trim();
-          if (id) stepTaskCounts[id] = (stepTaskCounts[id] || 0) + 1;
-        });
-      });
-      $("workflowSteps").innerHTML = steps.length ? `
-        <div class="workflow-canvas" id="wfCanvas">
-          <div class="workflow-graph" id="wfGraph">
-            <svg class="workflow-edges" id="wfEdges">
-              <defs>
-                <marker id="wfArrow" viewBox="0 0 10 10" refX="8" refY="5"
-                  markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-                  <path d="M 0 0 L 10 5 L 0 10 z" fill="context-stroke"></path>
-                </marker>
-              </defs>
+      const toolbarHtml = `
+        <div class="wf-toolbar" id="wfToolbar">
+          <div class="wf-tool${wfTool === "select" ? " active" : ""}" data-tool="select" title="Select / move (Esc)">
+            <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
+              <path d="M4 3 L4 16 L8 12 L11 18 L13 17 L10 11 L16 11 Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" fill="none"/>
             </svg>
-            <div class="workflow-nodes" id="wfNodes">
-              ${steps.map((step, index) => `
-                <div class="workflow-node-wrap" data-id="${escapeHtml(step.id)}" style="left:${step.x}px; top:${step.y}px">
-                  <div class="workflow-node ${step.required ? "required" : ""}" data-id="${escapeHtml(step.id)}">
-                    ${wfPortsHtml(escapeHtml(step.id))}
-                    <div class="workflow-node-head" data-drag-id="${escapeHtml(step.id)}" title="Drag to move">
-                      <strong><span class="grip">⠿</span> ${escapeHtml(step.name || "Step")}</strong>
-                      <span class="row" style="gap: 4px;">
-                        ${stepTaskCounts[step.id] ? `<span class="badge wf-active-badge" title="tasks currently at this step">▶ ${stepTaskCounts[step.id]}</span>` : ""}
-                        <span class="badge">#${index + 1}</span>
-                      </span>
-                    </div>
-                    <div class="workflow-node-body">
-                      <label>
-                        <div class="meta">role</div>
-                        <select onchange="updateWorkflowStep('${escapeHtml(step.id)}', 'role_id', this.value)">
-                          ${roleOptionsHtml(step.role_id)}
-                        </select>
-                      </label>
-                      <label>
-                        <div class="meta">status</div>
-                        <select onchange="updateWorkflowStep('${escapeHtml(step.id)}', 'task_status', this.value)">
-                          ${statusOptionsHtml(step.task_status)}
-                        </select>
-                      </label>
-                      <label>
-                        <div class="meta">timeout min (0 = off)</div>
-                        <input type="number" min="0" step="5" value="${step.timeout_minutes || 0}"
-                          title="Reassign or alert hub when the step sits with one assignee longer than this"
-                          onchange="updateWorkflowStep('${escapeHtml(step.id)}', 'timeout_minutes', this.value)">
-                      </label>
-                      <label class="workflow-required" title="${step.required_locked ? "Core step (hub/implementer/reviewer role) — always mandatory. " : ""}Checked: the task blocks if no team member can fill this role. Unchecked: the step is auto-skipped when no one can run it.">
-                        <input type="checkbox" ${step.required ? "checked" : ""} ${step.required_locked ? "disabled" : ""} onchange="updateWorkflowStep('${escapeHtml(step.id)}', 'required', this.checked)">
-                        <span class="meta">block if unstaffed${step.required_locked ? " 🔒" : ""}</span>
-                      </label>
-                      <div class="row" style="justify-content: space-between;">
-                        <span class="meta">${escapeHtml(step.id || "")}</span>
-                        ${step.required_locked ? '<span class="meta" title="Core step (hub/implementer/reviewer role) cannot be removed">core</span>' : `<button class="danger" type="button" onclick="removeWorkflowStep('${escapeHtml(step.id)}')">Remove</button>`}
+            <span class="wf-tool-name">Select</span>
+          </div>
+          <div class="wf-tool${wfTool === "step" ? " active" : ""}" data-tool="step" title="Click canvas to place a step">
+            <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
+              <rect x="3" y="6" width="16" height="10" rx="3" stroke="var(--accent)" stroke-width="1.4" fill="#eef7f2"/>
+            </svg>
+            <span class="wf-tool-name">Step</span>
+          </div>
+          <div class="wf-tool${wfTool === "decision" ? " active" : ""}" data-tool="decision" title="Click canvas to place a decision">
+            <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
+              <polygon points="11,3 19,11 11,19 3,11" stroke="var(--warn)" stroke-width="1.4" fill="#fdf3e6"/>
+            </svg>
+            <span class="wf-tool-name">Decision</span>
+          </div>
+          <div class="wf-tool${wfTool === "connect" ? " active" : ""}" data-tool="connect" title="Click two nodes to connect">
+            <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
+              <circle cx="4" cy="11" r="2.2" fill="var(--accent)"/>
+              <path d="M6 11 L15 11" stroke="var(--accent)" stroke-width="1.4"/>
+              <path d="M12 7.5 L16 11 L12 14.5" stroke="var(--accent)" stroke-width="1.4" fill="none" stroke-linejoin="round" stroke-linecap="round"/>
+            </svg>
+            <span class="wf-tool-name">Connect</span>
+          </div>
+          <div class="wf-tool-sep"></div>
+          <div class="wf-tool${wfDagreReady() ? "" : " disabled"}" data-action="auto-layout"
+               title="${wfDagreReady() ? "Auto-arrange nodes left→right (dagre)" : "Auto-layout unavailable: dagre bundle not loaded"}">
+            <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
+              <rect x="2" y="8" width="6" height="6" rx="1.4" stroke="currentColor" stroke-width="1.4" fill="none"/>
+              <rect x="14" y="3" width="6" height="6" rx="1.4" stroke="currentColor" stroke-width="1.4" fill="none"/>
+              <rect x="14" y="13" width="6" height="6" rx="1.4" stroke="currentColor" stroke-width="1.4" fill="none"/>
+              <path d="M8 11 L11 11 L11 6 L14 6 M11 11 L11 16 L14 16" stroke="currentColor" stroke-width="1.4" fill="none"/>
+            </svg>
+            <span class="wf-tool-name">Auto-layout</span>
+          </div>
+        </div>`;
+      const canvasCls = "workflow-canvas" + (wfTool === "step" || wfTool === "decision" ? " tool-place" : "") + (wfTool === "connect" ? " tool-connect" : "");
+      $("workflowSteps").innerHTML = steps.length || wfTool !== "select" ? `
+        <div class="workflow-canvas-wrap">
+          ${toolbarHtml}
+          <div class="wf-canvas-inner">
+            <div class="${canvasCls}" id="wfCanvas">
+              <div class="workflow-graph" id="wfGraph">
+                <svg class="workflow-edges" id="wfEdges">
+                  <defs>
+                    <marker id="wfArrow" viewBox="0 0 10 10" refX="8" refY="5"
+                      markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                      <path d="M 0 0 L 10 5 L 0 10 z" fill="context-stroke"></path>
+                    </marker>
+                  </defs>
+                </svg>
+                <div class="workflow-nodes" id="wfNodes">
+                  ${steps.map((step, index) => {
+                    const isDecision = step.kind === "decision";
+                    const isStart = !isDecision && !wfIncoming.has(step.id) && wfOutgoing.has(step.id);
+                    const isEnd = !isDecision && !wfOutgoing.has(step.id) && wfIncoming.has(step.id);
+                    const terminalCls = isStart ? " wf-terminal wf-start" : isEnd ? " wf-terminal wf-end" : "";
+                    const kindCls = isDecision ? " wf-decision" : "";
+                    const tag = isStart
+                      ? '<span class="wf-terminal-tag">▶ start</span>'
+                      : isEnd
+                      ? '<span class="wf-terminal-tag">⏹ end</span>'
+                      : isDecision
+                      ? ""
+                      : `<span class="wf-box-flag">${step.required ? "required" : "optional"}${step.required_locked ? " 🔒" : ""}</span>`;
+                    return `
+                    <div class="workflow-node-wrap" data-id="${escapeHtml(step.id)}" style="left:${step.x}px; top:${step.y}px">
+                      <div class="workflow-node ${step.required ? "required" : "optional"}${terminalCls}${kindCls}" data-id="${escapeHtml(step.id)}" data-drag-id="${escapeHtml(step.id)}" title="Drag to move · click to edit">
+                        ${isDecision ? '<svg class="wf-diamond-bg" viewBox="0 0 100 100" preserveAspectRatio="none"><polygon points="50,1 99,50 50,99 1,50" vector-effect="non-scaling-stroke"></polygon></svg>' : ""}
+                        ${wfPortsHtml(escapeHtml(step.id))}
+                        ${isDecision ? "" : `<div class="wf-box-index">#${index + 1}</div>`}
+                        <div class="wf-box-name">${escapeHtml(step.name || (isDecision ? "Decision" : "Step"))}</div>
+                        ${isDecision ? "" : `
+                        <div class="wf-box-meta">
+                          <span class="wf-role-badge">${escapeHtml(step.role_id || "?")}</span>
+                          ${tag}
+                        </div>
+                        `}
                       </div>
-                    </div>
-                  </div>
+                    </div>`;
+                  }).join("")}
                 </div>
-              `).join("")}
+              </div>
             </div>
           </div>
         </div>
       ` : `<div class="empty">No workflow steps configured.</div>`;
       wireWorkflowInteractions();
+      wireToolbar();
       drawEdges();
     }
 
@@ -1861,18 +2238,149 @@
     }
 
     function wireWorkflowInteractions() {
-      document.querySelectorAll(".workflow-node-head[data-drag-id]").forEach(head => {
-        head.addEventListener("pointerdown", event => startNodeDrag(event, head.dataset.dragId));
+      document.querySelectorAll(".workflow-node[data-drag-id]").forEach(node => {
+        node.addEventListener("pointerdown", event => startNodeDrag(event, node.dataset.dragId));
       });
       document.querySelectorAll(".workflow-port[data-id]").forEach(port => {
         port.addEventListener("pointerdown", event => startEdgeDrag(event, port.dataset.id, port.dataset.side));
       });
+      // Click-to-place: when a place tool is active, a click on empty canvas
+      // drops a node there. We listen on the graph (which holds the nodes) and
+      // ignore clicks that hit a node/port/edge.
+      const graph = $("wfGraph");
+      if (graph) {
+        graph.addEventListener("click", event => {
+          if (event.target.closest(".workflow-node") || event.target.closest(".workflow-port") || event.target.closest(".wf-edge")) return;
+          if (wfTool === "step" || wfTool === "decision") {
+            const pt = wfGraphPoint(event);
+            placeNodeAt(wfTool, pt.x - WF_NODE_W / 2, pt.y - 20);
+          } else if (wfTool === "connect" && wfConnectFrom) {
+            // Clicking empty space abandons the pending connection source.
+            wfConnectFrom = null;
+            document.querySelectorAll(".workflow-node.connect-source").forEach(el => el.classList.remove("connect-source"));
+            clearConnectPreview();
+            setStatus("Connect cancelled");
+          }
+        });
+      }
+    }
+
+    function wireToolbar() {
+      document.querySelectorAll(".wf-tool[data-tool]").forEach(btn => {
+        btn.addEventListener("click", () => setWfTool(btn.dataset.tool));
+      });
+      document.querySelectorAll(".wf-tool[data-action]").forEach(btn => {
+        btn.addEventListener("click", () => {
+          if (btn.classList.contains("disabled")) return;
+          if (btn.dataset.action === "auto-layout") autoLayoutWorkflow();
+        });
+      });
+    }
+
+    // Auto-layout is optional: it depends on the vendored dagre bundle being
+    // reachable. Feature-detect so the button can disable itself gracefully.
+    function wfDagreReady() {
+      return !window.__dagreFailed && !!(window.dagre && window.dagre.graphlib);
+    }
+
+    // Re-flow the whole graph into clean layered columns using dagre, then
+    // persist the computed x/y through the normal saveWorkflow() path. Node
+    // sizes come from the live DOM (offsetHeight), so decisions and multi-line
+    // steps are measured accurately. Rework/back-edges are kept in the graph —
+    // dagre's acyclicer breaks cycles for ranking and routes them back.
+    async function autoLayoutWorkflow() {
+      if (!wfDagreReady()) { setStatus("Auto-layout unavailable: dagre not loaded", true); return; }
+      const steps = state.workflow.steps || [];
+      const edges = state.workflow.edges || [];
+      if (!steps.length) { setStatus("Nothing to lay out"); return; }
+      const rects = wfNodeRects();
+      const g = new window.dagre.graphlib.Graph({ directed: true });
+      // rankdir LR matches the existing left→right flow (intake … accept).
+      g.setGraph({ rankdir: "LR", nodesep: 40, ranksep: 90, marginx: 40, marginy: 40 });
+      g.setDefaultEdgeLabel(() => ({}));
+      steps.forEach(s => {
+        const r = rects[s.id];
+        g.setNode(s.id, { width: WF_NODE_W, height: (r && r.h) || 120 });
+      });
+      edges.forEach(e => {
+        if (g.hasNode(e.from) && g.hasNode(e.to)) g.setEdge(e.from, e.to);
+      });
+      try {
+        window.dagre.layout(g);
+      } catch (err) {
+        setStatus("Auto-layout failed: " + (err && err.message || err), true);
+        return;
+      }
+      // dagre returns node centers; our steps store top-left corners.
+      steps.forEach(s => {
+        const n = g.node(s.id);
+        if (!n) return;
+        s.x = Math.max(0, Math.round(n.x - WF_NODE_W / 2));
+        s.y = Math.max(0, Math.round(n.y - ((rects[s.id] && rects[s.id].h) || 120) / 2));
+      });
+      await run(async () => {
+        await saveWorkflow();
+        setStatus("Auto-layout applied");
+      });
+    }
+
+    function setWfTool(tool) {
+      wfTool = tool;
+      wfConnectFrom = null;
+      document.querySelectorAll(".workflow-node.connect-source").forEach(el => el.classList.remove("connect-source"));
+      clearConnectPreview();
+      renderWorkflow();
+      const hint = tool === "step" ? "Click on the canvas to place a step"
+        : tool === "decision" ? "Click on the canvas to place a decision"
+        : tool === "connect" ? "Click a node, then click another node to connect them"
+        : "";
+      if (hint) setStatus(hint);
+    }
+
+    // Create a node of the given kind at canvas coordinates. Reuses the modal's
+    // defaults so toolbar-placed nodes are consistent with Add Step / Decision.
+    async function placeNodeAt(kind, x, y) {
+      const isDecision = kind === "decision";
+      const steps = state.workflow.steps || [];
+      const name = isDecision ? "New Decision" : "New Step";
+      const roleId = isDecision ? "" : ((state.roles[0] || {}).id || "hub");
+      const taskStatus = isDecision ? "" : ((workflowStatusOptions()[0] || {}).value || "created");
+      const required = false;
+      const newId = "step-" + Date.now().toString(36);
+      const newX = Math.max(0, Math.round(x));
+      const newY = Math.max(0, Math.round(y));
+      const newStep = { id: newId, name, kind, role_id: roleId, task_status: taskStatus, required, x: newX, y: newY };
+      state.workflow.steps = [...steps, newStep];
+      const rects = wfNodeRects();
+      rects[newId] = { id: newId, x: newX, y: newY, w: WF_NODE_W, h: 240 };
+      const resolved = resolveOverlap(newId, newX, newY, rects);
+      newStep.x = resolved.x;
+      newStep.y = resolved.y;
+      await run(async () => {
+        await saveWorkflow();
+        setStatus(isDecision ? `Decision "${name}" placed — click to edit` : `Step "${name}" placed — click to edit`);
+      });
+      // Stay in the place tool so the user can drop several nodes quickly;
+      // Esc or clicking Select returns to the default mode.
     }
 
     function startNodeDrag(event, id) {
       if (event.button !== 0) return;
       const step = wfById()[id];
       if (!step) return;
+      // Connect tool: clicks select source then target, never drag.
+      if (wfTool === "connect") {
+        event.preventDefault();
+        handleConnectPick(id);
+        return;
+      }
+      // Place tools: a click on an existing node opens it for editing instead
+      // of dropping a new one on top.
+      if (wfTool === "step" || wfTool === "decision") {
+        event.preventDefault();
+        openEditStepModal(id);
+        return;
+      }
       const cursor = wfGraphPoint(event);
       wfDrag = { type: "node", id, offX: cursor.x - step.x, offY: cursor.y - step.y, moved: false };
       const node = document.querySelector(`.workflow-node[data-id="${CSS.escape(id)}"]`);
@@ -1882,8 +2390,81 @@
       event.preventDefault();
     }
 
+    function handleConnectPick(id) {
+      if (!wfConnectFrom) {
+        wfConnectFrom = id;
+        const el = document.querySelector(`.workflow-node[data-id="${CSS.escape(id)}"]`);
+        if (el) el.classList.add("connect-source");
+        setStatus(`Connect: source "${id}" — now click the target node`);
+        // Draw a rubber-band line from the source to the cursor as it moves,
+        // so the user sees the connection forming before the second click.
+        document.addEventListener("pointermove", onConnectPointerMove);
+        return;
+      }
+      if (wfConnectFrom === id) {
+        // Clicking the same node cancels the pending connection.
+        wfConnectFrom = null;
+        document.querySelectorAll(".workflow-node.connect-source").forEach(el => el.classList.remove("connect-source"));
+        setStatus("Connect cancelled");
+        clearConnectPreview();
+        return;
+      }
+      const from = wfConnectFrom;
+      wfConnectFrom = null;
+      document.querySelectorAll(".workflow-node.connect-source").forEach(el => el.classList.remove("connect-source"));
+      clearConnectPreview();
+      addWorkflowEdge(from, id);
+    }
+
+    function clearConnectPreview() {
+      document.removeEventListener("pointermove", onConnectPointerMove);
+      wfTempPath = null;
+      drawEdges();
+    }
+
+    // Rubber-band preview while a connect source is picked: a dashed line from
+    // the source node's nearest side to the current cursor position.
+    function onConnectPointerMove(event) {
+      if (!wfConnectFrom) { clearConnectPreview(); return; }
+      const byId = wfById();
+      const from = byId[wfConnectFrom];
+      if (!from) { clearConnectPreview(); return; }
+      const rects = wfNodeRects();
+      const rect = rects[wfConnectFrom];
+      if (!rect) return;
+      const cursor = wfGraphPoint(event);
+      // Snap the source endpoint to the side of the node facing the cursor.
+      const p1 = wfSinglePortPoint(from, rect, cursor.x, cursor.y);
+      const p2 = { x: cursor.x, y: cursor.y };
+      wfTempPath = wfEdgePath(wfConnectFrom, wfConnectFrom, p1, p2, rects,
+        wfSideOfPoint(from, rect, p1), "left");
+      drawEdges();
+    }
+
+    // Inverse of wfSinglePortPoint: recover the side name for a port point.
+    function wfSideOfPoint(step, rect, p) {
+      if (Math.abs(p.x - step.x) < 1) return "left";
+      if (Math.abs(p.x - (step.x + rect.w)) < 1) return "right";
+      if (Math.abs(p.y - step.y) < 1) return "top";
+      if (Math.abs(p.y - (step.y + rect.h)) < 1) return "bottom";
+      return "right";
+    }
+
     function startEdgeDrag(event, id, side) {
       if (event.button !== 0) return;
+      // Connect tool: handle the pick directly on the port instead of relying
+      // on pointerdown bubbling to the node. The right/left ports sit at
+      // right:-6px / left:-6px (half outside the node box); some browsers don't
+      // reliably bubble pointerdown from an out-of-box child to its parent.
+      if (wfTool === "connect") {
+        event.stopPropagation();
+        event.preventDefault();
+        handleConnectPick(id);
+        return;
+      }
+      // Place tools: let the pointerdown bubble to the node so it opens the
+      // edit modal (the user clicked an existing node, not empty canvas).
+      if (wfTool === "step" || wfTool === "decision") return;
       event.stopPropagation();
       event.preventDefault();
       wfDrag = { type: "edge", from: id, fromSide: side };
@@ -1943,10 +2524,10 @@
 
         document.querySelectorAll(".workflow-node.drop-target").forEach(el => el.classList.remove("drop-target"));
 
-        let p2 = { x: cursor.x, y: cursor.y };
+        let p2 = null;
         let toSide = "left";
 
-        if (node && toId !== wfDrag.from) {
+        if (node && toId && toId !== wfDrag.from) {
           node.classList.add("drop-target");
           const targetRect = rects[toId];
           const toNode = byId[toId];
@@ -1959,29 +2540,13 @@
               toSide = dy > 0 ? "top" : "bottom";
             }
             p2 = wfPortPoint(toNode, targetRect, toSide, 0, 1);
+            wfTempPath = wfEdgePath(wfDrag.from, toId, p1, p2, rects, wfDrag.fromSide, toSide);
+          } else {
+            wfTempPath = null;
           }
-        }
-
-        const dx = Math.max(40, Math.abs(p2.x - p1.x) * 0.5);
-        const dy = Math.max(40, Math.abs(p2.y - p1.y) * 0.5);
-
-        let c1 = { x: p1.x, y: p1.y };
-        if (wfDrag.fromSide === "right") c1.x += dx;
-        else if (wfDrag.fromSide === "left") c1.x -= dx;
-        else if (wfDrag.fromSide === "top") c1.y -= dy;
-        else if (wfDrag.fromSide === "bottom") c1.y += dy;
-
-        let c2 = { x: p2.x, y: p2.y };
-        if (node && toId !== wfDrag.from) {
-          if (toSide === "right") c2.x += dx;
-          else if (toSide === "left") c2.x -= dx;
-          else if (toSide === "top") c2.y -= dy;
-          else if (toSide === "bottom") c2.y += dy;
         } else {
-          c2.x -= dx;
+          wfTempPath = null;
         }
-
-        wfTempPath = `M ${p1.x} ${p1.y} C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${p2.x} ${p2.y}`;
         drawEdges();
       }
     }
@@ -1996,7 +2561,7 @@
       document.querySelectorAll(".workflow-node.drop-target").forEach(el => el.classList.remove("drop-target"));
       if (!drag) return;
       if (drag.type === "node") {
-        if (!drag.moved) { drawEdges(); return; }
+        if (!drag.moved) { openEditStepModal(drag.id); drawEdges(); return; }  // tap = edit
         const step = wfById()[drag.id];
         if (step) {
           const rects = wfNodeRects();
@@ -2057,60 +2622,124 @@
         method: "POST",
         body: JSON.stringify({
           steps: state.workflow.steps || [],
+          statuses: state.workflow.statuses || [],
           edges: state.workflow.edges || []
         })
       });
-      state.workflow = { steps: data.steps || [], edges: data.edges || [], path: data.path || "", warnings: data.warnings || [] };
+      state.workflow = {
+        steps: data.steps || [],
+        statuses: data.statuses || [],
+        edges: data.edges || [],
+        path: data.path || "",
+        warnings: data.warnings || []
+      };
       renderWorkflow();
     }
 
-    // Layered layout: longest-path layering left-to-right, then each column
-    // ordered by the average row of its predecessors so edges run roughly
-    // horizontal and don't cross or pass behind other cards.
-    function autoArrangeWorkflow() {
-      const steps = state.workflow.steps || [];
-      if (!steps.length) return;
-      const edges = (state.workflow.edges || []).filter(e => e.from !== e.to);
-      const layer = {};
-      steps.forEach(s => { layer[s.id] = 0; });
-      // Bounded relaxation so cycles can't loop forever.
-      for (let pass = 0; pass < steps.length; pass++) {
-        let changed = false;
-        edges.forEach(e => {
-          if (layer[e.from] === undefined || layer[e.to] === undefined) return;
-          const next = layer[e.from] + 1;
-          if (next > layer[e.to] && next < steps.length) { layer[e.to] = next; changed = true; }
-        });
-        if (!changed) break;
+    // The step modal serves both adding a new step and editing an existing one
+    // (clicking a node on the canvas opens it in edit mode).
+    let wfStepModalMode = "add";
+    let wfStepModalId = null;
+    // Kind is fixed at creation: a Step button opens the step modal, a Decision
+    // button opens the decision modal. There is no in-modal Type switch because
+    // decisions are not steps — they are branch points with no role/status.
+    let wfStepModalKind = "step";
+
+    function updateModalFieldVisibility() {
+      const isDecision = wfStepModalKind === "decision";
+      $("addStepRoleField").style.display = isDecision ? "none" : "";
+      $("addStepStatusField").style.display = isDecision ? "none" : "";
+      $("addStepRequiredField").style.display = isDecision ? "none" : "";
+      $("addStepDecisionHint").style.display = isDecision ? "" : "none";
+      if (wfStepModalMode === "add") {
+        $("addStepModalTitle").textContent = isDecision ? "Add workflow decision" : "Add workflow step";
+      } else {
+        $("addStepModalTitle").textContent = isDecision ? "Edit decision" : "Edit step";
       }
-      const columns = {};
-      steps.forEach(s => { (columns[layer[s.id]] = columns[layer[s.id]] || []).push(s); });
-      const layerKeys = Object.keys(columns).map(Number).sort((a, b) => a - b);
-      const row = {};
-      const bary = s => {
-        const prev = edges.filter(e => e.to === s.id && row[e.from] !== undefined).map(e => row[e.from]);
-        return prev.length ? prev.reduce((a, b) => a + b, 0) / prev.length : s.y;
-      };
-      const rects = wfNodeRects();
-      const rowH = Math.max(220, ...Object.values(rects).map(r => r.h)) + 60;
-      layerKeys.forEach((l, li) => {
-        const col = columns[l];
-        if (li > 0) col.sort((a, b) => bary(a) - bary(b) || a.y - b.y);
-        else col.sort((a, b) => a.y - b.y);
-        col.forEach((s, i) => {
-          row[s.id] = i;
-          s.x = 40 + li * (WF_NODE_W + 140);
-          s.y = 40 + i * rowH;
-        });
-      });
-      run(async () => { await saveWorkflow(); setStatus("Workflow auto-arranged"); });
     }
 
-    async function addWorkflowStep() {
-      const roleId = (state.roles[0] || {}).id || "hub";
+    function openAddStepModal(kind = "step") {
+      wfStepModalMode = "add";
+      wfStepModalId = null;
+      wfStepModalKind = kind;
+      $("addStepModalTitle").textContent = kind === "decision" ? "Add workflow decision" : "Add workflow step";
+      $("addStepConfirm").textContent = "Add";
+      $("addStepDelete").style.display = "none";
+      $("addStepName").value = "";
+      $("addStepName").placeholder = kind === "decision" ? "Decision question (e.g. Pass review?)" : "Step name";
+      $("addStepRole").innerHTML = roleOptionsHtml((state.roles[0] || {}).id || "");
+      $("addStepStatus").innerHTML = statusOptionsHtml((workflowStatusOptions()[0] || {}).value || "");
+      $("addStepRequired").checked = false;
+      $("addStepRequired").disabled = false;
+      updateModalFieldVisibility();
+      $("addStepModalBackdrop").classList.add("open");
+      $("addStepName").focus();
+    }
+
+    function openEditStepModal(id) {
+      const step = (state.workflow.steps || []).find(s => s.id === id);
+      if (!step) return;
+      wfStepModalMode = "edit";
+      wfStepModalId = id;
+      wfStepModalKind = step.kind || "step";
+      $("addStepModalTitle").textContent = wfStepModalKind === "decision" ? "Edit decision" : "Edit step";
+      $("addStepConfirm").textContent = "Save";
+      $("addStepDelete").style.display = step.required_locked ? "none" : "";
+      $("addStepName").value = step.name || "";
+      $("addStepRole").innerHTML = roleOptionsHtml(step.role_id || "");
+      $("addStepStatus").innerHTML = statusOptionsHtml(step.task_status || "");
+      $("addStepRequired").checked = !!step.required;
+      $("addStepRequired").disabled = !!step.required_locked;
+      updateModalFieldVisibility();
+      $("addStepModalBackdrop").classList.add("open");
+      $("addStepName").focus();
+    }
+
+    function closeAddStepModal() {
+      $("addStepModalBackdrop").classList.remove("open");
+    }
+
+    function confirmStep() {
+      if (wfStepModalMode === "edit") saveEditStep();
+      else confirmAddStep();
+    }
+
+    async function saveEditStep() {
+      const step = (state.workflow.steps || []).find(s => s.id === wfStepModalId);
+      if (!step) { closeAddStepModal(); return; }
+      step.name = ($("addStepName").value || "").trim() || step.name || "Step";
+      // Kind is fixed once created; the modal no longer exposes a Type switch.
+      const isDecision = step.kind === "decision";
+      step.role_id = isDecision ? "" : ($("addStepRole").value || step.role_id);
+      step.task_status = isDecision ? "" : ($("addStepStatus").value || step.task_status);
+      if (isDecision) {
+        step.required = false;
+      } else {
+        if (!step.required_locked) step.required = $("addStepRequired").checked;
+      }
+      closeAddStepModal();
+      await run(async () => {
+        await saveWorkflow();
+        setStatus(isDecision ? `Decision "${step.name}" saved` : `Step "${step.name}" saved`);
+      });
+    }
+
+    function deleteStepFromModal() {
+      const id = wfStepModalId;
+      closeAddStepModal();
+      if (id) removeWorkflowStep(id);  // guards required_locked + saves
+    }
+
+    async function confirmAddStep() {
+      const kind = wfStepModalKind;
+      const isDecision = kind === "decision";
+      const name = ($("addStepName").value || "").trim() || (isDecision ? "New Decision" : "New Step");
+      const roleId = isDecision ? "" : ($("addStepRole").value || (state.roles[0] || {}).id || "hub");
+      const taskStatus = isDecision ? "" : ($("addStepStatus").value || (workflowStatusOptions()[0] || {}).value || "created");
+      const required = isDecision ? false : $("addStepRequired").checked;
       const steps = state.workflow.steps || [];
-      // Place the new node at the center of the visible canvas area so it
-      // appears where the user is looking, then open its name for editing.
+      // Place the new node at the center of the visible canvas so it appears
+      // where the user is looking.
       const canvas = $("wfCanvas");
       let newX = 40, newY = 60;
       if (canvas) {
@@ -2118,32 +2747,20 @@
         newY = Math.max(0, Math.round(canvas.scrollTop + canvas.clientHeight / 2 - 120));
       }
       const newId = "step-" + Date.now().toString(36);
-      const newStep = {
-        id: newId,
-        name: "New Step",
-        role_id: roleId,
-        task_status: "created",
-        required: false,
-        x: newX,
-        y: newY
-      };
+      const newStep = { id: newId, name, kind, role_id: roleId, task_status: taskStatus, required, x: newX, y: newY };
       state.workflow.steps = [...steps, newStep];
       const rects = wfNodeRects();
       rects[newId] = { id: newId, x: newX, y: newY, w: WF_NODE_W, h: 240 };
       const resolved = resolveOverlap(newId, newX, newY, rects);
       newStep.x = resolved.x;
       newStep.y = resolved.y;
+      closeAddStepModal();
       await run(async () => {
         await saveWorkflow();
-        setStatus("Workflow updated");
+        setStatus(isDecision ? `Decision "${name}" added` : `Step "${name}" added`);
       });
-      // saveWorkflow re-rendered the canvas; scroll the new card into view.
-      const el = document.querySelector(
-        `.workflow-node-wrap[data-id="${CSS.escape(newId)}"]`
-      );
-      if (el) {
-        el.scrollIntoView({ block: "center", inline: "center" });
-      }
+      const el = document.querySelector(`.workflow-node-wrap[data-id="${CSS.escape(newId)}"]`);
+      if (el) el.scrollIntoView({ block: "center", inline: "center" });
     }
 
     async function removeWorkflowStep(id) {
@@ -2151,18 +2768,6 @@
       if (step && step.required_locked) { setStatus("Core steps cannot be removed"); return; }
       state.workflow.steps = (state.workflow.steps || []).filter(s => s.id !== id);
       state.workflow.edges = (state.workflow.edges || []).filter(e => e.from !== id && e.to !== id);
-      await run(async () => {
-        await saveWorkflow();
-        setStatus("Workflow updated");
-      });
-    }
-
-    async function updateWorkflowStep(id, field, value) {
-      const step = (state.workflow.steps || []).find(s => s.id === id);
-      if (!step) return;
-      if (field === "required") step[field] = Boolean(value);
-      else if (field === "timeout_minutes") step[field] = Math.max(0, Number(value) || 0);
-      else step[field] = value;
       await run(async () => {
         await saveWorkflow();
         setStatus("Workflow updated");
@@ -2252,29 +2857,36 @@
       "in_progress": "progress",
       "testing": "testing",
       "blocked": "blocked",
-      "replied": "review",
-      "needs_changes": "review",
+      "reviewing": "review",
       "accepted": "done",
       "closed": "done"
     };
-    // Single source of truth for task statuses used by Workflow step cards.
-    // The kanban board groups tasks by the workflow-written task_status.
-    const TASK_STATUS_OPTIONS = [
+    // Fallback only; the workflow config returned by the server is the source
+    // of truth for status choices in step cards.
+    const DEFAULT_WORKFLOW_STATUSES = [
       { value: "created", label: "Todo" },
+      { value: "assigned", label: "Assigned" },
       { value: "in_progress", label: "In Progress" },
       { value: "testing", label: "In Testing" },
+      { value: "reviewing", label: "Under Review" },
+      { value: "accepted", label: "Accepted" },
       { value: "blocked", label: "Blocked" },
-      { value: "replied", label: "Under Review" },
-      { value: "accepted", label: "Done" }
+      { value: "stalled", label: "Stalled" },
+      { value: "closed", label: "Closed" }
     ];
+    function workflowStatusOptions() {
+      const statuses = state.workflow && Array.isArray(state.workflow.statuses)
+        ? state.workflow.statuses
+        : [];
+      return statuses.length ? statuses : DEFAULT_WORKFLOW_STATUSES;
+    }
     function statusOptionsHtml(selected) {
-      let normalized = selected;
-      if (selected === "assigned") normalized = "created";
-      if (selected === "needs_changes") normalized = "replied";
-      if (selected === "closed") normalized = "accepted";
-
-      return TASK_STATUS_OPTIONS.map(opt =>
-        `<option value="${opt.value}" ${normalized === opt.value ? "selected" : ""}>${opt.label}</option>`
+      const options = workflowStatusOptions();
+      const selectedValue = options.some(opt => opt.value === selected)
+        ? selected
+        : (options[0] || {}).value || "";
+      return options.map(opt =>
+        `<option value="${escapeHtml(opt.value)}" ${selectedValue === opt.value ? "selected" : ""}>${escapeHtml(opt.label || opt.value)}</option>`
       ).join("");
     }
     const REQUIRED_TEAM_ROLES = ["hub", "implementer", "reviewer"];
@@ -2300,13 +2912,16 @@
         done: { name: "Done", class: "done", tasks: [] }
       };
 
-      // The board shows the real tasks — standalone tasks and a goal's business
-      // subtasks — one card each, moving through columns as their workflow
-      // advances. Goals live on the Goals page; step cards (a task's per-step
-      // execution) are hidden here and listed inside the task's detail instead.
+      // The board shows the real tasks — a goal's business subtasks (or all,
+      // incl. standalone tasks). Goals live on the Goals page; step cards (a
+      // task's per-step execution) are hidden here and listed in the task detail.
+      // The goal chips above the board filter to one goal so the board shows that
+      // goal's work rather than the whole history.
+      const filter = goalFilterId();
       (state.tasks || []).forEach(task => {
         if (task.is_goal) return;
         if (task.parent_task_id && !task.source_message_id) return;  // step card
+        if (filter !== "all" && task.parent_task_id !== filter) return;  // other goal / standalone
         const colId = COLUMN_MAP[task.task_status] || "todo";
         columns[colId].tasks.push(task);
       });
@@ -2342,6 +2957,21 @@
 
     }
 
+    // The run viewer is single-subject: its runs are for whichever task is the
+    // "runs subject" — the expanded step card if one is open, else the drawer's
+    // own task. (For a task with step cards its own runs are empty; the real
+    // runs live on the cards, so expanding a step retargets the viewer at it.)
+    function runsSubjectId() {
+      return state.expandedStepId || state.selectedTaskId;
+    }
+
+    async function toggleStep(cardId) {
+      state.expandedStepId = state.expandedStepId === cardId ? null : cardId;
+      await run(async () => {
+        await loadTaskRuns(runsSubjectId());
+      });
+    }
+
     async function loadTaskRuns(taskId) {
       if (!state.apiBase || !taskId) {
         state.taskRuns = [];
@@ -2360,7 +2990,9 @@
       } else {
         state.runFiles = {};
       }
-      renderTaskDetails(state.tasks.find(t => t.id === taskId) || null);
+      // Always re-render the drawer for its own task (parent), even when the
+      // runs loaded above belong to an expanded step card.
+      renderTaskDetails(state.tasks.find(t => t.id === state.selectedTaskId) || null);
     }
 
     async function rerunTask(taskId) {
@@ -2378,7 +3010,6 @@
         state.rerunAgent = null;  // consumed; next open defaults again
         setStatus(`Re-running #${taskId} step "${data.step}" with ${data.assignee}${data.queued_job_id ? ` (job #${data.queued_job_id} queued)` : ""}`);
         await loadTasks();
-        await loadRunJobs();
         await loadTaskRuns(taskId);
       });
     }
@@ -2432,50 +3063,19 @@
       state.goals = data.goals || [];
       renderGoals();
       renderTasksGoalBar();
-    }
-
-    async function loadRunJobs() {
-      if (!state.apiBase) {
-        state.runJobs = [];
-        renderRunJobs();
-        return;
-      }
-      const data = await api("/api/run-jobs?limit=100");
-      state.runJobs = data.jobs || [];
-      renderRunJobs();
-    }
-
-    function renderRunJobs() {
-      const jobs = state.runJobs || [];
-      const counts = jobs.reduce((acc, j) => { acc[j.status] = (acc[j.status] || 0) + 1; return acc; }, {});
-      const summary = ["pending", "running", "finished", "applying", "done", "failed", "cancelled"]
-        .filter(s => counts[s]).map(s => `${counts[s]} ${s}`).join(" · ");
-      $("jobsList").innerHTML = jobs.length ? `
-        <div class="meta" style="padding: 0 16px 8px;">${escapeHtml(summary)}</div>
-        <div class="jobs-table-wrap">
-          <table class="jobs-table">
-            <thead><tr><th>#</th><th>Task · Step</th><th>Assignee</th><th>Status</th><th>Outcome</th><th>Claimed by</th><th>Lease until</th><th>Note</th></tr></thead>
-            <tbody>
-              ${jobs.map(j => `
-                <tr onclick="showTaskDetails(${j.task_id})" style="cursor: pointer;">
-                  <td>${j.id}</td>
-                  <td>#${j.task_id} · ${escapeHtml(j.step || "")}</td>
-                  <td>${escapeHtml(j.assignee || "")}</td>
-                  <td><span class="badge job-${escapeHtml(j.status)}">${escapeHtml(j.status)}</span></td>
-                  <td class="meta">${escapeHtml(j.outcome || "—")}</td>
-                  <td>${escapeHtml(j.claimed_by || "—")}</td>
-                  <td class="meta">${j.leased_until ? fmtTime(j.leased_until) : "—"}</td>
-                  <td class="meta" title="${escapeHtml(j.note || "")}">${escapeHtml(j.note || "—")}</td>
-                </tr>`).join("")}
-            </tbody>
-          </table>
-        </div>` : `<div class="empty">No run jobs.</div>`;
+      renderTasks();  // goals drive the board's goal filter; re-render with it
     }
 
     function goalProgressHtml(goal) {
       const tokens = goal.tokens_total
         ? ` · <span class="meta" title="Tokens consumed across this goal's runs (only counts runners that report usage)">🔢 ${goal.tokens_total.toLocaleString()} tokens</span>`
         : "";
+      // Intake in flight: goal started, hub is splitting it, no subtask cards yet.
+      const analyzing = !goal.subtask_total && goal.workflow_step
+        && !["blocked", "closed", "accepted"].includes(goal.task_status);
+      if (analyzing) {
+        return `<span class="goal-analyzing"><span class="spinner"></span>正在分析 goal，拆解子任务…${tokens}</span>`;
+      }
       if (!goal.subtask_total) return `<span class="meta">no subtasks yet${tokens}</span>`;
       const pct = Math.round(goal.subtask_closed / goal.subtask_total * 100);
       return `
@@ -2546,24 +3146,42 @@
 
     // One-line subtitle under the Tasks heading summarizing active goals;
     // long text truncates with an ellipsis. Click opens the Goals page.
+    // The board filter: the selected goal if still active, "all" if chosen
+    // explicitly, otherwise default to the newest active goal (so the board
+    // shows one goal's work, not the whole history).
+    function goalFilterId() {
+      const active = (state.goals || []).filter(g => g.task_status !== "closed");
+      const sel = state.selectedGoalId;
+      if (sel === "all") return "all";
+      if (sel != null && active.some(g => g.id === sel)) return sel;
+      return active.length ? active[0].id : "all";
+    }
+
+    function selectGoalFilter(id) {
+      state.selectedGoalId = id;
+      try { localStorage.setItem("devloop-goal-filter", String(id)); } catch (e) {}
+      renderTasksGoalBar();
+      renderTasks();
+    }
+
     function renderTasksGoalBar() {
       const bar = $("tasksGoalBar");
       if (!bar) return;
       const active = (state.goals || []).filter(g => g.task_status !== "closed");
-      if (!active.length) {
-        bar.textContent = "";
-        bar.onclick = null;
-        return;
-      }
-      const text = active.map(goal => {
+      if (!active.length) { bar.innerHTML = ""; return; }
+      const sel = goalFilterId();
+      const chip = (id, label, title) =>
+        `<button class="goal-chip ${sel === id ? "active" : ""}" title="${escapeHtml(title || label)}"
+           onclick="selectGoalFilter(${id === "all" ? "'all'" : id})">${escapeHtml(label)}</button>`;
+      const goalChips = active.map(goal => {
+        const analyzing = !goal.subtask_total && goal.workflow_step
+          && !["blocked", "closed", "accepted"].includes(goal.task_status);
         const progress = goal.subtask_total
-          ? `${goal.subtask_closed}/${goal.subtask_total} done${goal.subtask_blocked ? `, ${goal.subtask_blocked} blocked` : ""}`
-          : goal.workflow_step ? `⚙ ${goal.workflow_step}` : goal.task_status;
-        return `🎯 #${goal.id} ${goal.title || "Goal"} — ${progress}`;
-      }).join("  ·  ");
-      bar.textContent = text;
-      bar.title = text + "  (open Goals page)";
-      bar.onclick = () => setPage("goals");
+          ? ` · ${goal.subtask_closed}/${goal.subtask_total}${goal.subtask_blocked ? ` ⛔${goal.subtask_blocked}` : ""}`
+          : analyzing ? " · ⏳" : "";
+        return chip(goal.id, `🎯 #${goal.id} ${goal.title || "Goal"}${progress}`, goal.title);
+      }).join("");
+      bar.innerHTML = `<div class="goal-chips">${chip("all", "All")}${goalChips}</div>`;
     }
 
     async function showTaskDetails(taskId) {
@@ -2573,17 +3191,20 @@
           const res = await api(`/api/tasks/${taskId}`);
           task = res.task;
         } catch (e) {
-          setStatus(`Failed to load task #${taskId}: ${e.message}`);
+          setStatus(`Failed to load task #${taskId}: ${e.message}`, true);
           return;
         }
       }
       if (!task) return;
-      if (state.selectedTaskId !== taskId) state.rerunAgent = null;  // reset picker per task
+      if (state.selectedTaskId !== taskId) {
+        state.rerunAgent = null;       // reset picker per task
+        state.expandedStepId = null;   // collapse any step expanded on the prior task
+      }
       state.selectedTaskId = taskId;
       openTaskDrawer();
       renderTaskDetails(task);
       run(async () => {
-        await loadTaskRuns(taskId);
+        await loadTaskRuns(runsSubjectId());
       });
     }
 
@@ -2613,11 +3234,21 @@
       const showRerun =
         task.task_status === "blocked" ||
         (latestRun && (latestRun.status === "failed" || latestRun.status === "orphaned"));
+      // Tasks that materialize step cards keep their runs on the cards, not the
+      // task itself — those are surfaced per step above, so the bottom Runs list
+      // (which would be empty or duplicate the expanded step) is suppressed.
+      const hasStepCards = (state.tasks || [])
+        .some(t => t.parent_task_id === task.id && !t.source_message_id);
       $("taskDetailContent").innerHTML = `
         <div class="task-detail-title">
           <span>${escapeHtml(task.title || "#" + task.id + " Task")}</span>
           <span class="badge">${escapeHtml(task.task_status || "")}</span>
         </div>
+        ${task.task_status === "blocked" ? `
+          <div class="blocked-reason">
+            <strong>⛔ Blocked reason</strong>
+            <div class="blocked-reason-body">${escapeHtml(task.blocked_reason || "no reason recorded")}</div>
+          </div>` : ""}
         <div class="meta">
           #${escapeHtml(task.display_id || String(task.id))}${task.display_id ? ` (id ${task.id})` : ""} ${escapeHtml(task.sender)} to ${escapeHtml(task.recipient)}
           ${task.created_at ? ` - ${fmtTime(task.created_at)}` : ""}
@@ -2636,13 +3267,6 @@
           ${task.exclusive_workspace ? " - exclusive workspace" : ""}
         </div>
         <div class="task-detail-body">${escapeHtml(task.content)}</div>
-        <div class="task-runs">
-          <div class="row" style="justify-content: space-between;">
-            <strong>Assignment</strong>
-          </div>
-          <div class="meta">role: ${escapeHtml(task.role_required || "implementer")}</div>
-          <div class="meta">agent: ${escapeHtml(task.assignee || "unassigned")}</div>
-        </div>
         ${(() => {
           const cards = (state.tasks || [])
             .filter(t => t.parent_task_id === task.id && !t.source_message_id)
@@ -2653,16 +3277,32 @@
           <div class="row" style="justify-content: space-between;">
             <strong>Steps</strong><span class="meta">${cards.length}</span>
           </div>
-          <table class="jobs-table">
-            <tbody>
-              ${cards.map(c => `
-                <tr onclick="showTaskDetails(${c.id})" style="cursor: pointer;">
-                  <td>#${escapeHtml(c.display_id || String(c.id))}</td>
-                  <td>${escapeHtml(c.workflow_step || c.title || "")}</td>
-                  <td><span class="badge">${escapeHtml(c.task_status || "")}</span></td>
-                </tr>`).join("")}
-            </tbody>
-          </table>
+          <div class="step-list">
+            ${cards.map(c => {
+              const st = c.task_status || "";
+              const cls = ["closed", "accepted"].includes(st) ? "done"
+                        : st === "blocked" ? "blocked"
+                        : "active";
+              const expanded = c.id === state.expandedStepId;
+              return `
+              <div class="step-item step-${cls}${expanded ? " expanded" : ""}" onclick="toggleStep(${c.id})">
+                <span class="step-dot"></span>
+                <span class="step-name">${escapeHtml(c.workflow_step || c.title || "")}</span>
+                ${c.assignee ? `<span class="step-agent">${escapeHtml(c.assignee)}</span>` : ""}
+                <span class="step-id">#${escapeHtml(c.display_id || String(c.id))}</span>
+                <span class="badge">${escapeHtml(st)}</span>
+                <span class="step-chevron">${expanded ? "⌃" : "⌄"}</span>
+              </div>
+              ${expanded ? `
+              <div class="step-detail" onclick="event.stopPropagation()">
+                <div class="row" style="justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                  <span class="meta">runs for ${escapeHtml(c.workflow_step || c.title || "step")}</span>
+                  <a href="#" class="step-open" onclick="event.preventDefault(); event.stopPropagation(); showTaskDetails(${c.id})">open ↗</a>
+                </div>
+                ${renderTaskRuns()}
+              </div>` : ""}`;
+            }).join("")}
+          </div>
         </div>`;
         })()}
         <div class="task-runs">
@@ -2681,7 +3321,9 @@
               <button type="button" class="primary" onclick="rerunTask(${task.id})">Re-run</button>
             </div>
           </div>` : ""}
-          ${renderTaskRuns()}
+          ${hasStepCards
+            ? `<div class="meta">Runs are shown per step above — expand a step to see them.</div>`
+            : renderTaskRuns()}
         </div>
       `;
       const nowScrolled = document.querySelector("#taskDetails .run-file-content");
@@ -2787,21 +3429,34 @@
     wireRefresh("refreshRoles", loadRoles);
     wireRefresh("refreshTasks", loadTasks);
     wireRefresh("refreshGoals", loadGoals);
-    wireRefresh("refreshJobs", loadRunJobs);
     $("addTeamMember").addEventListener("click", addTeamMember);
-    $("addWorkflowStep").addEventListener("click", addWorkflowStep);
-    $("autoArrangeWorkflow").addEventListener("click", autoArrangeWorkflow);
+    $("addWorkflowStep").addEventListener("click", () => openAddStepModal("step"));
+    $("addWorkflowDecision").addEventListener("click", () => openAddStepModal("decision"));
+    $("addStepCancel").addEventListener("click", closeAddStepModal);
+    $("addStepConfirm").addEventListener("click", confirmStep);
+    $("addStepDelete").addEventListener("click", deleteStepFromModal);
+    $("addStepName").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") confirmStep();
+      else if (e.key === "Escape") closeAddStepModal();
+    });
+    $("addStepModalBackdrop").addEventListener("click", (event) => {
+      if (event.target === $("addStepModalBackdrop")) closeAddStepModal();
+    });
     $("toggleTaskDetails").addEventListener("click", closeTaskDrawer);
     $("taskDetailsBackdrop").addEventListener("click", closeTaskDrawer);
     document.addEventListener("keydown", (e) => {
       if (e.key === "Escape" && $("taskDetails").classList.contains("open")) closeTaskDrawer();
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && wfTool !== "select" && !$("addStepModalBackdrop").classList.contains("open")) {
+        setWfTool("select");
+      }
     });
     $("toolsTab").addEventListener("click", () => setPage("tools"));
     $("teamTab").addEventListener("click", () => setPage("team"));
     $("workflowTab").addEventListener("click", () => setPage("workflow"));
     $("rolesTab").addEventListener("click", () => setPage("roles"));
     $("goalsTab").addEventListener("click", () => setPage("goals"));
-    $("jobsTab").addEventListener("click", () => { setPage("jobs"); loadRunJobs(); });
     $("startGoal").addEventListener("click", createGoal);
     $("goalInput").addEventListener("input", () => {
       localStorage.setItem("devloop-goal", $("goalInput").value);
@@ -2835,14 +3490,13 @@
       try {
         await loadTasks();
         if (state.selectedTaskId) {
-          await loadTaskRuns(state.selectedTaskId);
+          await loadTaskRuns(runsSubjectId());
         } else {
           renderTaskDetails(null);
         }
         if ($("workflowPage").classList.contains("active")) renderWorkflow();
         // Goals feed both the Goals page and the bar above the kanban.
         if ($("goalsPage").classList.contains("active") || $("tasksPage").classList.contains("active")) await loadGoals();
-        if ($("jobsPage").classList.contains("active")) await loadRunJobs();
       } catch (error) {
         // transient poll errors stay silent; manual actions still report
       } finally {

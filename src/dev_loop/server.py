@@ -27,7 +27,13 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from .project_index import list_projects
-from .store import DEFAULT_LEASE_SECONDS, InvalidInputError, Store, UnknownAgentError
+from .store import (
+    DEFAULT_LEASE_SECONDS,
+    InvalidInputError,
+    Store,
+    TASK_STATUSES,
+    UnknownAgentError,
+)
 
 MAX_WAIT_SECONDS = 60
 MAX_LEASE_SECONDS = 3600
@@ -77,6 +83,13 @@ _AGENT_TOOL_CANDIDATES = [
         "agent_name": "hermes",
         "description": "Hermes agent CLI",
     },
+    {
+        "id": "opencode",
+        "name": "OpenCode",
+        "command": "opencode",
+        "agent_name": "opencode",
+        "description": "OpenCode CLI (opencode.ai)",
+    },
 ]
 _TASK_RUN_FILES = {
     "events": "events.jsonl",
@@ -98,6 +111,19 @@ _to_thread = anyio.to_thread.run_sync
 _UI_HTML = (
     resources.files("dev_loop").joinpath("static/ui.html").read_text(encoding="utf-8")
 )
+
+# Vendored, self-contained: the dagre layout engine (bundles graphlib, exposes a
+# global `dagre`). Served from our own origin so auto-layout works offline and
+# the app keeps its "no CDN, no build step" contract. Loaded lazily so a missing
+# vendor file only disables the Auto-layout button, never breaks the page.
+try:
+    _DAGRE_JS = (
+        resources.files("dev_loop")
+        .joinpath("static/vendor/dagre.min.js")
+        .read_text(encoding="utf-8")
+    )
+except (FileNotFoundError, ModuleNotFoundError, OSError):
+    _DAGRE_JS = ""
 
 
 async def _read_json(request: Request) -> dict:
@@ -198,12 +224,40 @@ def _workflow_config_path(project_root: str | None) -> Path:
 # architecture) that merge back into implementation, and review loops back to
 # implementation on rework.
 _DEFAULT_STEP_MID_Y = 160
+_WORKFLOW_STATUS_LABELS = {
+    "created": "Todo",
+    "assigned": "Assigned",
+    "in_progress": "In Progress",
+    "testing": "In Testing",
+    "reviewing": "Under Review",
+    "accepted": "Accepted",
+    "blocked": "Blocked",
+    "stalled": "Stalled",
+    "closed": "Closed",
+}
+
+
+def default_workflow_statuses() -> list[dict[str, str]]:
+    return [
+        {"value": value, "label": _WORKFLOW_STATUS_LABELS[value]}
+        for value in (
+            "created",
+            "assigned",
+            "in_progress",
+            "testing",
+            "reviewing",
+            "accepted",
+            "blocked",
+            "stalled",
+            "closed",
+        )
+    ]
 
 
 def default_workflow_steps() -> list[dict[str, Any]]:
     # (id, name, role_id, task_status, required, x, y)
     specs = [
-        ("intake", "Intake", "hub", "created", True, 40, _DEFAULT_STEP_MID_Y),
+        ("intake", "Triage", "hub", "created", True, 40, _DEFAULT_STEP_MID_Y),
         ("product_design", "Product Design", "product_designer", "assigned", True, 360, _DEFAULT_STEP_MID_Y),
         # Parallel branch cards stack vertically at x=700; keep enough gap
         # for a full card (~400px tall with the name/timeout fields).
@@ -211,7 +265,7 @@ def default_workflow_steps() -> list[dict[str, Any]]:
         ("architecture", "Architecture", "architect", "assigned", True, 700, 500),
         ("implement", "Implement", "implementer", "in_progress", True, 1060, _DEFAULT_STEP_MID_Y),
         ("test", "Test", "tester", "testing", False, 1400, _DEFAULT_STEP_MID_Y),
-        ("review", "Review", "reviewer", "replied", True, 1740, _DEFAULT_STEP_MID_Y),
+        ("review", "Review", "reviewer", "reviewing", True, 1740, _DEFAULT_STEP_MID_Y),
         ("accept", "Accept", "hub", "accepted", True, 2080, _DEFAULT_STEP_MID_Y),
     ]
     return [
@@ -246,7 +300,46 @@ def default_workflow_edges() -> list[dict[str, str]]:
     ]
 
 
-def _normalize_workflow_step(step: Any, index: int) -> dict[str, Any]:
+def _normalize_workflow_statuses(statuses: Any = None) -> list[dict[str, str]]:
+    if statuses is None:
+        return default_workflow_statuses()
+    if not isinstance(statuses, list):
+        raise InvalidInputError("workflow statuses must be a list")
+    normalized: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in statuses:
+        if isinstance(item, str):
+            value = item.strip()
+            label = _WORKFLOW_STATUS_LABELS.get(value, value.replace("_", " ").title())
+        elif isinstance(item, dict):
+            value = str(item.get("value", "")).strip()
+            label = str(
+                item.get("label", "") or _WORKFLOW_STATUS_LABELS.get(value, "")
+            ).strip()
+        else:
+            raise InvalidInputError("workflow status must be a string or object")
+        if not value:
+            raise InvalidInputError("workflow status value is required")
+        if value not in TASK_STATUSES or value == "":
+            raise InvalidInputError("workflow status value is invalid")
+        if value in seen:
+            continue
+        seen.add(value)
+        normalized.append({"value": value, "label": label or value})
+    if not normalized:
+        raise InvalidInputError("workflow statuses must include at least one status")
+    return normalized
+
+
+def _workflow_status_values(statuses: list[dict[str, str]]) -> set[str]:
+    return {status["value"] for status in statuses}
+
+
+def _normalize_workflow_step(
+    step: Any,
+    index: int,
+    allowed_statuses: set[str] | None = None,
+) -> dict[str, Any]:
     if not isinstance(step, dict):
         raise InvalidInputError("workflow step must be an object")
     step_id = _agent_slug(str(step.get("id", "") or f"step-{index + 1}"))
@@ -255,20 +348,7 @@ def _normalize_workflow_step(step: Any, index: int) -> dict[str, Any]:
     task_status = str(step.get("task_status", "")).strip()
     if not name:
         raise InvalidInputError("workflow step name is required")
-    if not _is_valid_role_id(role_id):
-        raise InvalidInputError("workflow step role_id is invalid")
-    if task_status and task_status not in {
-        "created",
-        "assigned",
-        "in_progress",
-        "testing",
-        "replied",
-        "accepted",
-        "needs_changes",
-        "blocked",
-        "closed",
-    }:
-        raise InvalidInputError("workflow step task_status is invalid")
+
     def _coord(key: str, default: float) -> float:
         raw = step.get(key, default)
         try:
@@ -279,25 +359,42 @@ def _normalize_workflow_step(step: Any, index: int) -> dict[str, Any]:
             raise InvalidInputError(f"workflow step {key} must be finite")
         return max(0.0, round(value, 2))
 
-    try:
-        timeout_minutes = int(step.get("timeout_minutes", 0) or 0)
-    except (TypeError, ValueError):
-        raise InvalidInputError("workflow step timeout_minutes must be an integer") from None
-    if timeout_minutes < 0:
-        raise InvalidInputError("workflow step timeout_minutes must be >= 0")
+    kind = str(step.get("kind", "step") or "step").strip().lower()
+    if kind not in ("step", "decision"):
+        kind = "step"
 
-    # Steps run by the mandatory team roles (hub/implementer/reviewer) are the
-    # indispensable core of the dev loop; they are always required and the
-    # flag cannot be toggled off.
-    required_locked = role_id in REQUIRED_TEAM_ROLES
+    if kind == "decision":
+        role_id = ""
+        task_status = ""
+        required = False
+        required_locked = False
+        timeout_minutes = 0
+    else:
+        if not _is_valid_role_id(role_id):
+            raise InvalidInputError("workflow step role_id is invalid")
+        allowed_statuses = allowed_statuses or _workflow_status_values(
+            default_workflow_statuses()
+        )
+        if task_status and task_status not in allowed_statuses:
+            raise InvalidInputError("workflow step task_status is invalid")
+        try:
+            timeout_minutes = int(step.get("timeout_minutes", 0) or 0)
+        except (TypeError, ValueError):
+            raise InvalidInputError("workflow step timeout_minutes must be an integer") from None
+        if timeout_minutes < 0:
+            raise InvalidInputError("workflow step timeout_minutes must be >= 0")
+        required_locked = role_id in REQUIRED_TEAM_ROLES
+        required = True if required_locked else bool(step.get("required", False))
+
     return {
         "id": step_id,
         "name": name,
         "role_id": role_id,
-        "task_status": task_status or "created",
-        "required": True if required_locked else bool(step.get("required", False)),
+        "task_status": task_status or ("" if kind == "decision" else "created"),
+        "required": required,
         "required_locked": required_locked,
         "timeout_minutes": timeout_minutes,
+        "kind": kind,
         "x": _coord("x", 40 + index * 320),
         "y": _coord("y", _DEFAULT_STEP_MID_Y),
     }
@@ -382,11 +479,14 @@ def read_workflow_config(project_root: str | None = None) -> dict[str, Any]:
     if not path.exists():
         # Normalize the defaults too so unsaved workflows carry the same
         # derived fields (required_locked, timeout_minutes) as saved ones.
+        statuses = default_workflow_statuses()
+        allowed_statuses = _workflow_status_values(statuses)
         return {
             "steps": [
-                _normalize_workflow_step(step, index)
+                _normalize_workflow_step(step, index, allowed_statuses)
                 for index, step in enumerate(default_workflow_steps())
             ],
+            "statuses": statuses,
             "edges": default_workflow_edges(),
             "path": str(path),
             "warnings": [],
@@ -398,8 +498,13 @@ def read_workflow_config(project_root: str | None = None) -> dict[str, Any]:
     steps = data.get("steps", []) if isinstance(data, dict) else []
     if not isinstance(steps, list):
         raise InvalidInputError("workflow steps must be a list")
+    statuses = _normalize_workflow_statuses(
+        data.get("statuses") if isinstance(data, dict) else None
+    )
+    allowed_statuses = _workflow_status_values(statuses)
     normalized = [
-        _normalize_workflow_step(step, index) for index, step in enumerate(steps)
+        _normalize_workflow_step(step, index, allowed_statuses)
+        for index, step in enumerate(steps)
     ]
     valid_ids = {step["id"] for step in normalized}
     raw_edges = data.get("edges") if isinstance(data, dict) else None
@@ -414,6 +519,7 @@ def read_workflow_config(project_root: str | None = None) -> dict[str, Any]:
         edges = _normalize_workflow_edges(raw_edges, valid_ids)
     return {
         "steps": normalized,
+        "statuses": statuses,
         "edges": edges,
         "path": str(path),
         "warnings": _workflow_graph_warnings(normalized, edges),
@@ -424,10 +530,16 @@ def write_workflow_config(
     steps: list[Any],
     project_root: str | None = None,
     edges: Any = None,
+    statuses: Any = None,
 ) -> dict[str, Any]:
     if not isinstance(steps, list):
         raise InvalidInputError("steps must be a list")
-    normalized = [_normalize_workflow_step(step, index) for index, step in enumerate(steps)]
+    normalized_statuses = _normalize_workflow_statuses(statuses)
+    allowed_statuses = _workflow_status_values(normalized_statuses)
+    normalized = [
+        _normalize_workflow_step(step, index, allowed_statuses)
+        for index, step in enumerate(steps)
+    ]
     if not normalized:
         raise InvalidInputError("workflow must include at least one step")
     valid_ids = {step["id"] for step in normalized}
@@ -443,7 +555,7 @@ def write_workflow_config(
         raise InvalidInputError(
             "workflow must keep steps for core roles: " + ", ".join(missing_core)
         )
-    _reject_unknown_roles({step["role_id"] for step in normalized}, project_root)
+    _reject_unknown_roles({step["role_id"] for step in normalized if step["role_id"]}, project_root)
     normalized_edges = _normalize_workflow_edges(edges, valid_ids)
     path = _workflow_config_path(project_root)
     project_root_path = _project_root(project_root)
@@ -457,13 +569,18 @@ def write_workflow_config(
         {k: v for k, v in step.items() if k != "required_locked"}
         for step in normalized
     ]
-    data = {"steps": persisted, "edges": normalized_edges}
+    data = {
+        "statuses": normalized_statuses,
+        "steps": persisted,
+        "edges": normalized_edges,
+    }
     path.write_text(
         json.dumps(data, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
     return {
         "steps": normalized,
+        "statuses": normalized_statuses,
         "edges": normalized_edges,
         "path": str(path),
         "warnings": _workflow_graph_warnings(normalized, normalized_edges),
@@ -825,7 +942,7 @@ WORKFLOW_OUTCOMES = {"done", "rework", "blocked"}
 # How many times a loop-back (rework) target may be re-entered before the engine
 # stops looping and blocks the task for the hub. Prevents review/implement
 # rework from spinning forever when feedback is not being resolved.
-MAX_REWORK_ROUNDS = 2
+MAX_REWORK_ROUNDS = 3
 
 
 def _workflow_graph(cfg: dict[str, Any]) -> set[tuple[str, str]]:
@@ -1146,7 +1263,15 @@ def _validate_goal_auto_runners(
             + "; ".join(errors)
             + ". Check the Workflow page warnings."
         )
-    members = read_team_config(project_root)["members"]
+    team = read_team_config(project_root)
+    missing_roles = team["missing_roles"]
+    if missing_roles:
+        raise InvalidInputError(
+            "team is missing required roles: "
+            + ", ".join(missing_roles)
+            + ". Enable a member for each on the Team page."
+        )
+    members = team["members"]
     probe_task = {
         "id": 0,
         "title": title,
@@ -1159,6 +1284,8 @@ def _validate_goal_auto_runners(
     }
     missing: list[str] = []
     for step in _main_workflow_reachable_steps(cfg, back):
+        if step.get("kind") == "decision":
+            continue
         assignee = _pick_assignee(store, probe_task, step, members)
         if assignee is None:
             if step["required"]:
@@ -1309,6 +1436,14 @@ def _complete_goal_intake_locked(
     result: str,
 ) -> dict[str, Any]:
     subtasks = _parse_goal_subtasks(result)
+    # Re-validate workflow/team/state before dispatching the business subtasks.
+    # The goal passed this gate at creation, but team/workflow config can change
+    # while intake is being worked; refuse to dispatch a batch that would only
+    # strand subtasks as blocked, and surface the reason to hub. Runs before the
+    # settle below so a failed precondition leaves intake open for retry.
+    _validate_goal_auto_runners(
+        store, project_root, goal.get("title", ""), goal.get("content", "")
+    )
     # Settle the goal's own intake card and record the intake before dispatching
     # the business subtasks — subtask dispatch can raise, and if it did after
     # this point the intake card would be left stuck in_progress forever.
@@ -1497,14 +1632,23 @@ def _dispatch_targets(
                     f"available team member for role {step['role_id']}.",
                 ))
                 continue
-            # Optional step with nobody to run it: pass through.
+            # Optional step or decision node with nobody to run it: pass through.
             for nxt in _forward_out(cfg, back, target):
-                store.record_task_transition(
-                    task_id, target, nxt, WORKFLOW_ENGINE_AGENT, "skipped",
-                    f"no team member for optional step {target}",
-                )
+                if step.get("kind") == "decision":
+                    store.record_task_transition(
+                        task_id, target, nxt, WORKFLOW_ENGINE_AGENT, "skipped",
+                        f"decision node {target} passed through",
+                    )
+                else:
+                    store.record_task_transition(
+                        task_id, target, nxt, WORKFLOW_ENGINE_AGENT, "skipped",
+                        f"no team member for optional step {target}",
+                    )
                 queue.append(nxt)
-            notices.append(f"optional step {target} skipped (no team member)")
+            if step.get("kind") == "decision":
+                notices.append(f"decision node {target} passed through")
+            else:
+                notices.append(f"optional step {target} skipped (no team member)")
             continue
         action = store.create_workflow_action(
             task_id,
@@ -1815,12 +1959,17 @@ def _advance_workflow_task_locked(
         targets = backward
         if not targets:
             raise InvalidInputError(f"step {step} has no rework (loop-back) path")
-        # Rework-loop cap: if this loop-back has already been taken the maximum
-        # number of times, stop looping and block for the hub instead of
-        # dispatching another round that would likely fail the same way.
+        # Rework-loop cap: if this step's own loop-back has already been taken
+        # the maximum number of times, stop looping and block for the hub instead
+        # of dispatching another round that would likely fail the same way.
+        # Counted per originating step (from_step == step): a rework from another
+        # step into the same target (e.g. test -> implement) has its own budget
+        # and must not drain this step's (e.g. review -> implement).
         prior_rework = sum(
             1 for t in transitions
-            if t["outcome"] == "rework" and t["to_step"] in targets
+            if t["outcome"] == "rework"
+            and t["from_step"] == step
+            and t["to_step"] in targets
         )
         if prior_rework >= MAX_REWORK_ROUNDS:
             store.record_task_transition(
@@ -1899,6 +2048,10 @@ HUB_INSPECT_TIMEOUT_SECONDS = 180
 HUB_SWEEP_POLL_SECONDS = 60
 # How often a runner re-checks the hard cap and the hub's kill flag while waiting.
 RUNNER_CANCEL_POLL_SECONDS = 10
+# After a process exits/is killed, how long to wait for the stdout/stderr readers
+# to drain before force-closing the pipes — bounds the wedge when an escaped child
+# keeps a pipe open so EOF never arrives.
+RUNNER_STREAM_DRAIN_SECONDS = 5
 # Headless CLIs default to asking for permission on every file write / tool
 # call, which no one is there to answer — a runner without full permissions
 # can only produce inline text. These defaults grant maximum autonomy; set
@@ -1909,6 +2062,10 @@ _DEFAULT_RUNNER_COMMANDS = {
     "codex": "codex exec --dangerously-bypass-approvals-and-sandbox -",
     # gemini additionally refuses to start headless in an untrusted dir.
     "gemini": "GEMINI_CLI_TRUST_WORKSPACE=true gemini --yolo",
+    # opencode's `run` takes the prompt as a positional arg (not stdin), so
+    # $(cat) bridges the piped prompt; --auto auto-approves permissions not
+    # explicitly denied (its headless-autonomy flag).
+    "opencode": 'opencode run --auto "$(cat)"',
 }
 
 
@@ -2039,7 +2196,7 @@ _TASK_RUNNING_TERMINAL = ("closed", "accepted")
 # Statuses that already place a task in its own board column while its runner
 # works (Under Review / In Testing). Don't overwrite them with the
 # generic in_progress, or those columns would never show anything.
-_TASK_PHASE_STATUSES = ("testing", "replied", "needs_changes")
+_TASK_PHASE_STATUSES = ("testing", "reviewing")
 
 
 def _mark_task_running(store: Store, task_id: int | None) -> None:
@@ -2064,15 +2221,58 @@ def _mark_task_running(store: Store, task_id: int | None) -> None:
         current = task.get("parent_task_id")
 
 
+def _descendant_pids(root_pid: int) -> list[int]:
+    """Every live descendant pid of root_pid, via a one-shot ppid snapshot.
+    A child that called setsid() escapes the process group (new pgid) but keeps
+    its parent link until the parent dies, so a ppid-tree walk catches escapees
+    that killpg misses. Works on macOS and Linux (`ps -Ao pid=,ppid=`)."""
+    try:
+        out = subprocess.run(
+            ["ps", "-Ao", "pid=,ppid="],
+            capture_output=True, text=True, timeout=5,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    children: dict[int, list[int]] = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) != 2:
+            continue
+        try:
+            pid, ppid = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        children.setdefault(ppid, []).append(pid)
+    seen: list[int] = []
+    stack = list(children.get(root_pid, []))
+    while stack:
+        pid = stack.pop()
+        if pid == root_pid or pid in seen:
+            continue
+        seen.append(pid)
+        stack.extend(children.get(pid, []))
+    return seen
+
+
 def _kill_process_group(proc: "subprocess.Popen[bytes]") -> None:
-    """SIGKILL the runner's whole process group (shell + CLI + helpers), falling
-    back to the single process if the group is unavailable."""
+    """SIGKILL the runner's whole process tree (shell + CLI + helpers), falling
+    back to the single process if the group is unavailable. Descendants are
+    snapshotted before the group kill and signalled individually so a setsid'd
+    child that escaped the process group is still reaped."""
+    # Snapshot before killing: once the parent dies its children reparent to
+    # init and the tree link is lost, so capture escapees while it still holds.
+    descendants = _descendant_pids(proc.pid) if proc.pid else []
     try:
         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
     except (ProcessLookupError, PermissionError, OSError):
         try:
             proc.kill()
         except OSError:
+            pass
+    for pid in descendants:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
             pass
 
 
@@ -2186,6 +2386,10 @@ def hub_inspect_sweep(
     for run in store.list_running_task_runs():
         rid = int(run["id"])
         live_ids.add(rid)
+        if run.get("cancel_requested"):
+            # Already condemned by a prior sweep (kill requested + step blocked).
+            # Don't burn another hub inspection re-judging it.
+            continue
         size = _run_output_size(run.get("log_dir"))
         prev = _HUB_SWEEP_STATE.get(rid)
         _HUB_SWEEP_STATE[rid] = {"size": size, "inspected": (prev or {}).get("inspected", 0.0)}
@@ -2216,14 +2420,75 @@ def hub_inspect_sweep(
     if not candidates:
         return []
     decisions = _hub_inspect_batch(store, project_root, candidates)
+    cfg = read_workflow_config(project_root)
+    steps = {s["id"]: s for s in cfg["steps"]}
     flagged: list[int] = []
     for c in candidates:
         _HUB_SWEEP_STATE[c["run_id"]]["inspected"] = now
-        if decisions.get(c["run_id"]) == "kill":
-            # Signal only — the runner that owns the process kills it.
-            if store.request_run_kill(c["run_id"], "hub inspection: stuck/errored"):
-                flagged.append(c["run_id"])
+        if decisions.get(c["run_id"]) != "kill":
+            continue
+        reason = "hub inspection: stuck/errored"
+        # Flag the run so the runner that owns the process kills the actual OS
+        # process (only the owner signals it — never a reused/foreign pid).
+        if store.request_run_kill(c["run_id"], reason):
+            flagged.append(c["run_id"])
+        # Immediately drive the workflow step to blocked instead of waiting for
+        # the runner to report back: a runner can itself be wedged (e.g. stuck
+        # reading a pipe an escaped child holds open), which would otherwise
+        # leave the task hung in_progress forever. Blocking is idempotent — a
+        # late runner report finds the step inactive and no-ops.
+        step = steps.get(c["step"])
+        if step is None:
+            continue
+        wf_task_id = _workflow_task_id_for_run(store, int(c["task_id"]))
+        try:
+            apply_run_outcome(
+                store, project_root, wf_task_id, step, c["assignee"],
+                "blocked", reason, status="failed",
+            )
+        except Exception:
+            # One task's block failure must never abort the whole sweep.
+            pass
     return flagged
+
+
+def _workflow_task_id_for_run(store: Store, run_task_id: int) -> int:
+    """The workflow task the engine advances for a run. Goal step runs are
+    recorded on the step card, whose parent is the business subtask the engine
+    actually routes; non-card runs are already on their workflow task."""
+    task = store.get_task(run_task_id)
+    if (
+        task
+        and task.get("source_message_id") is None
+        and task.get("parent_task_id")
+        and task.get("workflow_step")
+    ):
+        return int(task["parent_task_id"])
+    return run_task_id
+
+
+def _task_blocked_reason(store: Store, task: dict[str, Any]) -> str | None:
+    """Why a blocked task is blocked: the note of its most recent 'blocked'
+    transition, for the detail view. Step cards carry no transitions of their
+    own — the block is recorded on the parent workflow task — so fall back to
+    the parent. Returns None for tasks that are not blocked."""
+    if task.get("task_status") != "blocked":
+        return None
+
+    def _latest(tid: int) -> str | None:
+        for t in reversed(store.list_task_transitions(tid)):
+            if t["outcome"] == "blocked" and (t.get("note") or "").strip():
+                return t["note"]
+        return None
+
+    reason = _latest(int(task["id"]))
+    if (
+        reason is None
+        and task.get("source_message_id") is None
+        and task.get("parent_task_id")
+    ):
+        reason = _latest(int(task["parent_task_id"]))
+    return reason
 
 
 def run_step_worker(
@@ -2389,8 +2654,21 @@ def run_step_worker(
                 except subprocess.TimeoutExpired:
                     continue
             stdin_thread.join(timeout=1)
-            stdout_thread.join()
-            stderr_thread.join()
+            # Drain the readers, but never block forever: a child that escaped the
+            # process-group kill can inherit these pipes and hold them open, so EOF
+            # never arrives. Give the readers a bounded window, then close our read
+            # ends to unblock os.read so the join can't wedge the runner thread.
+            stdout_thread.join(timeout=RUNNER_STREAM_DRAIN_SECONDS)
+            stderr_thread.join(timeout=RUNNER_STREAM_DRAIN_SECONDS)
+            if stdout_thread.is_alive() or stderr_thread.is_alive():
+                for pipe in (proc.stdout, proc.stderr):
+                    try:
+                        if pipe is not None:
+                            pipe.close()
+                    except OSError:
+                        pass
+                stdout_thread.join(timeout=1)
+                stderr_thread.join(timeout=1)
             stdout = "".join(stdout_chunks)
             stderr = "".join(stderr_chunks)
             if status == "timeout":
@@ -3201,7 +3479,12 @@ def _stream_process_output(
         return
     try:
         while True:
-            raw_chunk = os.read(stream.fileno(), 4096)
+            try:
+                raw_chunk = os.read(stream.fileno(), 4096)
+            except (OSError, ValueError):
+                # Our read end was closed under us (kill path unblocking a reader
+                # wedged on a pipe an escaped child still holds open). Stop.
+                break
             if not raw_chunk:
                 break
             chunk = raw_chunk.decode("utf-8", errors="replace")
@@ -3707,6 +3990,18 @@ def create_server(
             return forbidden
         return HTMLResponse(_UI_HTML)
 
+    @mcp.custom_route("/static/dagre.min.js", methods=["GET"])
+    async def static_dagre(request: Request) -> Response:
+        if forbidden := _forbid_non_local(request):
+            return forbidden
+        if not _DAGRE_JS:
+            return Response("// dagre vendor bundle not installed", status_code=404)
+        return Response(
+            _DAGRE_JS,
+            media_type="application/javascript",
+            headers={"cache-control": "max-age=86400"},
+        )
+
     @mcp.custom_route("/api/{path:path}", methods=["OPTIONS"])
     async def api_options(request: Request) -> Response:
         if forbidden := _forbid_non_local(request):
@@ -3857,6 +4152,7 @@ def create_server(
                 data.get("steps", []),
                 current_project.get("project_root"),
                 data.get("edges"),
+                data.get("statuses"),
             )
         except InvalidInputError as exc:
             return _json_error(str(exc), request=request)
@@ -3902,7 +4198,17 @@ def create_server(
         assignee = params.get("assignee") or None
         try:
             limit = _parse_int(params.get("limit", "200"), "limit")
-            tasks = await _to_thread(store.list_tasks, status, assignee, limit)
+
+            def _load() -> list[dict[str, Any]]:
+                rows = store.list_tasks(status, assignee, limit)
+                # Attach the block reason so every render path (the drawer
+                # re-renders from this list) can show why a task is blocked.
+                for row in rows:
+                    if row.get("task_status") == "blocked":
+                        row["blocked_reason"] = _task_blocked_reason(store, row)
+                return rows
+
+            tasks = await _to_thread(_load)
         except InvalidInputError as exc:
             return _json_error(str(exc), request=request)
         return _json(request, {"tasks": tasks})
@@ -3912,7 +4218,14 @@ def create_server(
         if forbidden := _forbid_non_local(request):
             return forbidden
         task_id = int(request.path_params["task_id"])
-        task = await _to_thread(store.get_task, task_id)
+
+        def _load() -> dict[str, Any] | None:
+            t = store.get_task(task_id)
+            if t is not None:
+                t["blocked_reason"] = _task_blocked_reason(store, t)
+            return t
+
+        task = await _to_thread(_load)
         if task is None:
             return _json_error("task not found", 404, request)
         return _json(request, {"task": task})

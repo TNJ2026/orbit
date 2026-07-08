@@ -31,7 +31,7 @@ def tearDownModule():
 LINEAR_STEPS = [
     {"id": "intake", "name": "Intake", "role_id": "hub", "task_status": "created", "required": True},
     {"id": "implement", "name": "Implement", "role_id": "implementer", "task_status": "in_progress", "required": True},
-    {"id": "review", "name": "Review", "role_id": "reviewer", "task_status": "replied", "required": True},
+    {"id": "review", "name": "Review", "role_id": "reviewer", "task_status": "reviewing", "required": True},
     {"id": "accept", "name": "Accept", "role_id": "hub", "task_status": "accepted", "required": True},
 ]
 LINEAR_EDGES = [
@@ -131,7 +131,7 @@ class WorkflowEngineTests(unittest.TestCase):
         steps = [
             {"id": "a", "name": "A", "role_id": "hub", "task_status": "created", "required": True},
             {"id": "b", "name": "B", "role_id": "implementer", "task_status": "in_progress", "required": True},
-            {"id": "c", "name": "C", "role_id": "reviewer", "task_status": "replied", "required": True},
+            {"id": "c", "name": "C", "role_id": "reviewer", "task_status": "reviewing", "required": True},
             {"id": "d", "name": "D", "role_id": "hub", "task_status": "accepted", "required": True},
         ]
         edges = [
@@ -166,7 +166,7 @@ class WorkflowEngineTests(unittest.TestCase):
             {"id": "a", "name": "A", "role_id": "hub", "task_status": "created", "required": True},
             {"id": "b", "name": "B", "role_id": "implementer", "task_status": "in_progress", "required": True},
             {"id": "c", "name": "C", "role_id": "tester", "task_status": "testing", "required": False},
-            {"id": "d", "name": "D", "role_id": "reviewer", "task_status": "replied", "required": True},
+            {"id": "d", "name": "D", "role_id": "reviewer", "task_status": "reviewing", "required": True},
         ]
         edges = [
             {"from": "a", "to": "b"},
@@ -292,7 +292,7 @@ class WorkflowEngineTests(unittest.TestCase):
         steps = [
             {"id": "intake", "name": "Intake", "role_id": "hub", "task_status": "created", "required": True},
             {"id": "implement", "name": "Implement", "role_id": "implementer", "task_status": "in_progress", "required": True},
-            {"id": "review", "name": "Review", "role_id": "reviewer", "task_status": "replied", "required": True},
+            {"id": "review", "name": "Review", "role_id": "reviewer", "task_status": "reviewing", "required": True},
             {"id": "optional_check", "name": "Optional Check", "role_id": "tester", "task_status": "testing", "required": False},
         ]
         edges = [
@@ -311,7 +311,7 @@ class WorkflowEngineTests(unittest.TestCase):
         steps = [
             {"id": "intake", "name": "Intake", "role_id": "hub", "task_status": "created", "required": True},
             {"id": "implement", "name": "Implement", "role_id": "implementer", "task_status": "in_progress", "required": True},
-            {"id": "review", "name": "Review", "role_id": "reviewer", "task_status": "replied", "required": True},
+            {"id": "review", "name": "Review", "role_id": "reviewer", "task_status": "reviewing", "required": True},
             {"id": "optional_a", "name": "Optional A", "role_id": "tester", "task_status": "testing", "required": False},
             {"id": "optional_b", "name": "Optional B", "role_id": "tester", "task_status": "testing", "required": False},
         ]
@@ -387,18 +387,95 @@ class WorkflowEngineTests(unittest.TestCase):
             tid = h.create_task()
             h.start(tid)
             h.complete("hub-agent", tid, "intake", "done")
-            # two rework rounds are allowed
-            for _ in range(2):
+            # MAX_REWORK_ROUNDS rework rounds are allowed
+            for _ in range(server.MAX_REWORK_ROUNDS):
                 h.complete("codex", tid, "implement", "done")
                 rw = h.complete("rev", tid, "review", "rework", "again")
                 self.assertEqual([{"step": "implement", "assignee": "codex"}], rw["dispatched"])
-            # the third rework is capped: block instead of looping
+            # the next rework is capped: block instead of looping
             h.complete("codex", tid, "implement", "done")
             capped = h.complete("rev", tid, "review", "rework", "still broken")
             self.assertEqual("blocked", capped["outcome"])
             self.assertTrue(capped.get("rework_limited"))
             self.assertEqual([], capped["dispatched"])
             self.assertEqual("blocked", h.task(tid)["task_status"])
+
+    def test_rework_budget_is_per_originating_step(self):
+        # review->implement and test->implement both loop back to implement, but
+        # each step keeps its own rework budget: a tester rework must not drain
+        # the reviewer's, so the reviewer can still loop back afterwards.
+        steps = [
+            {"id": "intake", "name": "Intake", "role_id": "hub", "task_status": "created", "required": True},
+            {"id": "implement", "name": "Implement", "role_id": "implementer", "task_status": "in_progress", "required": True},
+            {"id": "review", "name": "Review", "role_id": "reviewer", "task_status": "reviewing", "required": True},
+            {"id": "test", "name": "Test", "role_id": "tester", "task_status": "testing", "required": True},
+            {"id": "accept", "name": "Accept", "role_id": "hub", "task_status": "accepted", "required": True},
+        ]
+        edges = [
+            {"from": "intake", "to": "implement"},
+            {"from": "implement", "to": "review"},
+            {"from": "review", "to": "test"},
+            {"from": "test", "to": "accept"},
+            {"from": "review", "to": "implement"},  # rework loop-back
+            {"from": "test", "to": "implement"},     # rework loop-back
+        ]
+        team = [
+            {"agent_name": "hub-agent", "role_id": "hub"},
+            {"agent_name": "codex", "role_id": "implementer"},
+            {"agent_name": "rev", "role_id": "reviewer"},
+            {"agent_name": "qa", "role_id": "tester"},
+        ]
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, steps=steps, edges=edges, team=team)
+            tid = h.create_task()
+            h.start(tid)
+            h.complete("hub-agent", tid, "intake", "done")
+            # reviewer loop-back #1 (review's budget: 1/2)
+            h.complete("codex", tid, "implement", "done")
+            rw1 = h.complete("rev", tid, "review", "rework", "r1")
+            self.assertEqual([{"step": "implement", "assignee": "codex"}], rw1["dispatched"])
+            # pass review, advance to test; tester loop-back (a different step's budget)
+            h.complete("codex", tid, "implement", "done")
+            h.complete("rev", tid, "review", "done")
+            tw = h.complete("qa", tid, "test", "rework", "t1")
+            self.assertEqual([{"step": "implement", "assignee": "codex"}], tw["dispatched"])
+            # reviewer loop-back #2: still within review's own budget, so it loops
+            # back instead of blocking (old shared counter would block here).
+            h.complete("codex", tid, "implement", "done")
+            rw2 = h.complete("rev", tid, "review", "rework", "r2")
+            self.assertEqual("rework", rw2["outcome"])
+            self.assertEqual([{"step": "implement", "assignee": "codex"}], rw2["dispatched"])
+            # review has now spent 2 of its own budget (unaffected by the tester
+            # rework); use up the rest, each still loops back.
+            for _ in range(server.MAX_REWORK_ROUNDS - 2):
+                h.complete("codex", tid, "implement", "done")
+                more = h.complete("rev", tid, "review", "rework", "again")
+                self.assertEqual("rework", more["outcome"])
+            # one past review's own cap -> block
+            h.complete("codex", tid, "implement", "done")
+            capped = h.complete("rev", tid, "review", "rework", "final")
+            self.assertEqual("blocked", capped["outcome"])
+            self.assertTrue(capped.get("rework_limited"))
+
+    def test_blocked_reason_from_latest_transition(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            tid = h.create_task()
+            h.start(tid)
+            h.complete("hub-agent", tid, "intake", "done")
+            h.complete("codex", tid, "implement", "blocked", "disk full, cannot build")
+            task = h.task(tid)
+            self.assertEqual("blocked", task["task_status"])
+            self.assertEqual(
+                "disk full, cannot build",
+                server._task_blocked_reason(h.store, task),
+            )
+
+    def test_blocked_reason_none_when_not_blocked(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            tid = h.create_task()
+            self.assertIsNone(server._task_blocked_reason(h.store, h.task(tid)))
 
     def test_reopen_loop_into_entry_is_executable(self):
         # accept -> intake is a legitimate reopen loop; entry/terminal checks
@@ -504,7 +581,13 @@ class StepTimeoutTests(unittest.TestCase):
 class GoalTests(unittest.TestCase):
     def test_goal_intake_card_settled_even_if_subtask_dispatch_fails(self):
         with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp)
+            # A runner-ready team clears the pre-dispatch validation gate, so the
+            # mocked dispatch crash below exercises the settle-before-dispatch path.
+            h = EngineHarness(tmp, team=[
+                {"agent_name": "hub-agent", "role_id": "hub", "runner_command": "cat"},
+                {"agent_name": "codex", "role_id": "implementer", "runner_command": "cat"},
+                {"agent_name": "rev", "role_id": "reviewer", "runner_command": "cat"},
+            ])
             goal_id = h.create_task(title="goal")
             h.store.update_task_metadata(goal_id, is_goal=True)
             h.start(goal_id)  # dispatch intake -> materialize the goal's card
@@ -524,6 +607,41 @@ class GoalTests(unittest.TestCase):
             # the intake card is settled before subtasks dispatch, so it is not
             # left stuck in_progress when dispatch blows up
             self.assertEqual("closed", h.task(card["id"])["task_status"])
+
+    def test_goal_intake_revalidates_team_before_dispatch(self):
+        with TemporaryDirectory() as tmp:
+            runners = [
+                {"agent_name": "hub-agent", "role_id": "hub", "runner_command": "cat"},
+                {"agent_name": "codex", "role_id": "implementer", "runner_command": "cat"},
+                {"agent_name": "rev", "role_id": "reviewer", "runner_command": "cat"},
+            ]
+            h = EngineHarness(tmp, team=runners)
+            goal_id = h.create_task(title="goal")
+            h.store.update_task_metadata(goal_id, is_goal=True)
+            h.start(goal_id)
+            step = next(
+                s for s in server.read_workflow_config(tmp)["steps"] if s["id"] == "intake"
+            )
+            # Team loses its implementer after the goal started but before intake
+            # finished: dispatching the business subtasks now would only strand
+            # them blocked, so completing intake must refuse instead.
+            server.write_team_config(
+                [m for m in runners if m["role_id"] != "implementer"], tmp
+            )
+            result = '{"tasks":[{"title":"t","content":"c"}]}'
+            with self.assertRaisesRegex(InvalidInputError, "implementer"):
+                server._complete_goal_intake_locked(
+                    h.store, tmp, h.task(goal_id), step, "hub-agent", result
+                )
+            # intake stays open (not settled) so hub can retry after fixing team,
+            # and no business subtask was dispatched
+            self.assertIsNotNone(h.store.find_open_step_card(goal_id, "intake"))
+            business = [
+                t for t in h.store.list_tasks(status="all")
+                if t.get("parent_task_id") == goal_id
+                and t.get("source_message_id") is not None
+            ]
+            self.assertEqual([], business)
 
     def test_subtask_links_to_goal_and_summary_aggregates(self):
         with TemporaryDirectory() as tmp:
@@ -638,6 +756,14 @@ class StepCardTests(unittest.TestCase):
             with self.assertRaisesRegex(InvalidInputError, "runner commands"):
                 server._validate_goal_auto_runners(h.store, tmp, "Goal", "Build it")
 
+    def test_goal_preflight_rejects_missing_required_role(self):
+        with TemporaryDirectory() as tmp:
+            # reviewer role has no enabled member -> team is not sound
+            team = [m for m in self._team_with_runners() if m["role_id"] != "reviewer"]
+            h = EngineHarness(tmp, team=team)
+            with self.assertRaisesRegex(InvalidInputError, "missing required roles"):
+                server._validate_goal_auto_runners(h.store, tmp, "Goal", "Build it")
+
     def test_goal_intake_invalid_json_blocks_goal(self):
         with TemporaryDirectory() as tmp:
             h = EngineHarness(tmp, team=self._team_with_runners())
@@ -687,7 +813,7 @@ class StepCardTests(unittest.TestCase):
             h.complete("hub-agent", subtask["id"], "implement", "done")
             cards = self._cards(h, subtask["id"])
             self.assertEqual("closed", cards["implement"]["task_status"])
-            self.assertEqual("replied", cards["review"]["task_status"])
+            self.assertEqual("reviewing", cards["review"]["task_status"])
 
             # rework closes the review card and opens a fresh implement card
             h.complete("rev", subtask["id"], "review", "rework", "tests missing")
@@ -708,6 +834,30 @@ class StepCardTests(unittest.TestCase):
             ]
             self.assertEqual([], leftovers)
             self.assertEqual("accepted", h.task(goal_id)["task_status"])
+
+    def test_blocked_reason_for_step_card_uses_parent_transition(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, team=self._team_with_runners())
+            goal = h.task(self._goal(h))
+            [mid] = h.store.send_message(
+                "hub-agent", "hub-agent", "Build API",
+                reply_to=goal["source_message_id"], kind="task", title="API",
+            )
+            subtask = next(
+                t for t in h.store.list_tasks(status="all")
+                if t["source_message_id"] == mid
+            )
+            h.start(subtask["id"])
+            h.complete("hub-agent", subtask["id"], "intake", "done")
+            h.complete("codex", subtask["id"], "implement", "blocked", "API spec missing")
+            card = self._cards(h, subtask["id"])["implement"]
+            self.assertEqual("blocked", card["task_status"])
+            # the card carries no transitions of its own — the reason is on the parent
+            self.assertIsNone(h.store.get_task(card["id"]).get("source_message_id"))
+            self.assertEqual(
+                "API spec missing",
+                server._task_blocked_reason(h.store, card),
+            )
 
     def test_non_goal_tasks_get_no_step_cards(self):
         with TemporaryDirectory() as tmp:
@@ -811,6 +961,38 @@ class AutoRunnerTests(unittest.TestCase):
             self.assertEqual("blocked", h.task(task_id)["task_status"])
             self.assertEqual([], report["dispatched"])
             self.assertEqual("failed", h.store.list_task_runs(task_id)[0]["status"])
+
+    def test_runner_not_wedged_by_child_holding_pipe(self):
+        # A backgrounded child inherits the runner's stdout/stderr and holds them
+        # open after the command exits, so the reader's os.read never sees EOF.
+        # The runner must still finish promptly (bounded join), not hang forever.
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, team=self._team_with_runner("sleep 5 & printf ok"))
+            task_id = h.create_task()
+            h.start(task_id)
+            h.complete("hub-agent", task_id, "intake", "done")
+            start = time.monotonic()
+            with mock.patch.object(server, "RUNNER_STREAM_DRAIN_SECONDS", 0.2):
+                report = server.run_step_worker(
+                    h.store, tmp, task_id, self._implement_step(h),
+                    self._member(h, "codex"),
+                )
+            elapsed = time.monotonic() - start
+            self.assertLess(elapsed, 3.0)  # did not wait out the 5s child
+            # exit 0 with output -> done -> advanced to review
+            self.assertEqual([{"step": "review", "assignee": "rev"}], report["dispatched"])
+
+    def test_descendant_pids_walks_process_tree_and_kill_reaps_it(self):
+        import subprocess as sp
+        # sh backgrounds one sleep and foregrounds another: both are descendants.
+        proc = sp.Popen(["sh", "-c", "sleep 30 & sleep 30"], start_new_session=True)
+        try:
+            time.sleep(0.4)
+            pids = server._descendant_pids(proc.pid)
+            self.assertTrue(pids, "descendant walk found no children")
+        finally:
+            server._kill_process_group(proc)
+            proc.wait(timeout=5)
 
     def test_reviewer_runner_default_verdict_advances(self):
         with TemporaryDirectory() as tmp:
@@ -1046,6 +1228,8 @@ class AutoRunnerTests(unittest.TestCase):
 
         cmd = server._runner_command_for({"agent_name": "hermes"})
         self.assertEqual('hermes --yolo -z "$(cat)"', cmd)
+        cmd = server._runner_command_for({"agent_name": "opencode"})
+        self.assertEqual('opencode run --auto "$(cat)"', cmd)
         cmd = server._runner_command_for({"agent_name": "hermes-manager"})
         self.assertEqual('hermes --profile manager --yolo -z "$(cat)"', cmd)
         # explicit runner_command still wins
@@ -1208,11 +1392,11 @@ class MarkTaskRunningTests(unittest.TestCase):
             self.assertEqual("in_progress", h.task(goal_id)["task_status"])
 
     def test_phase_status_card_kept_in_its_column(self):
-        # A running review/test card must stay in "replied"/"testing" (Under
+        # A running review/test card must stay in "reviewing"/"testing" (Under
         # Review / In Testing), not get flipped to generic in_progress.
         with TemporaryDirectory() as tmp:
             h = EngineHarness(tmp)
-            for phase in ("replied", "testing", "needs_changes"):
+            for phase in ("reviewing", "testing"):
                 tid = h.create_task(title=phase)
                 self._set_status(h.store, tid, phase)
                 server._mark_task_running(h.store, tid)
@@ -1465,6 +1649,53 @@ class HubInspectTests(unittest.TestCase):
             self.assertIn(run["id"], flagged)
             # the sweep only signals; it does not kill a pid itself
             self.assertTrue(h.store.run_cancel_requested(run["id"]))
+
+    def test_sweep_kill_blocks_the_workflow_task(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, team=self._hub_team("echo 'DECISION 1: KILL'"))
+            tid = h.create_task()
+            h.start(tid)
+            h.complete("hub-agent", tid, "intake", "done")  # implement now active (codex)
+            self.assertNotEqual("blocked", h.task(tid)["task_status"])
+            run = h.store.create_task_run(
+                tid, worker="codex", command="x", workflow_step="implement")
+            run_dir = Path(tmp) / "rundir"
+            run_dir.mkdir()
+            (run_dir / "stdout.log").write_text("", encoding="utf-8")  # silent
+            h.store._conn.execute(
+                "UPDATE task_runs SET started_at=?, log_dir=?, pid=? WHERE id=?",
+                ("2000-01-01T00:00:00+00:00", str(run_dir), 999999999, run["id"]),
+            )
+            h.store._conn.commit()
+            server._HUB_SWEEP_STATE.clear()
+            server.hub_inspect_sweep(h.store, tmp)            # 1st: record size
+            flagged = server.hub_inspect_sweep(h.store, tmp)  # 2nd: silent -> hub KILL
+            server._HUB_SWEEP_STATE.clear()
+            self.assertIn(run["id"], flagged)
+            self.assertTrue(h.store.run_cancel_requested(run["id"]))
+            # the change: hub's KILL blocks the workflow task immediately instead
+            # of leaving it in_progress waiting on a possibly-wedged runner.
+            self.assertEqual("blocked", h.task(tid)["task_status"])
+
+    def test_sweep_skips_already_condemned_run(self):
+        # A run already flagged for kill isn't re-inspected: no second hub call,
+        # and it is not returned as freshly flagged.
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, team=self._hub_team("echo 'DECISION 1: KILL'"))
+            tid = h.create_task()
+            run = h.store.create_task_run(
+                tid, worker="codex", command="x", workflow_step="implement")
+            h.store.request_run_kill(run["id"], "prior sweep")
+            h.store._conn.execute(
+                "UPDATE task_runs SET started_at=? WHERE id=?",
+                ("2000-01-01T00:00:00+00:00", run["id"]),
+            )
+            h.store._conn.commit()
+            server._HUB_SWEEP_STATE.clear()
+            server.hub_inspect_sweep(h.store, tmp)
+            flagged = server.hub_inspect_sweep(h.store, tmp)
+            server._HUB_SWEEP_STATE.clear()
+            self.assertEqual([], flagged)
 
     def test_run_cancel_flag_roundtrip(self):
         with TemporaryDirectory() as tmp:

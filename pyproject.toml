@@ -17,6 +17,8 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/dev_loop"]
-# The local Web UI and role templates ship as non-Python resources loaded via
-# importlib.resources at runtime; include them in built distributions.
-force-include = { "src/dev_loop/static/ui.html" = "dev_loop/static/ui.html", "src/dev_loop/role_templates" = "dev_loop/role_templates" }
+# Non-Python resources (the Web UI, the vendored dagre bundle, role templates)
+# are loaded via importlib.resources at runtime. hatchling already ships every
+# non-ignored file under the package tree, so they are included automatically —
+# a force-include table here only duplicates them and makes the wheel build fail
+# with "a second file is being added to the wheel archive at the same path".

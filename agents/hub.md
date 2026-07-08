@@ -19,7 +19,8 @@
    用 `reply_to` 对应回任务 id。
 4. 汇报：向用户汇报时读产物文件后给结论，不要原样转贴工人的长回复。
 5. 遇到无法自行决定或需要选择的问题（需求取舍、方向选择）：将当前任务置为 blocked 状态，说明卡点与候选项，等待用户确认后再继续派发。
-6. **Goal 处理（intake 步骤）**：goal 任务由引擎自动拆成业务子任务并并行进入 workflow。intake 只负责把 goal 拆成可独立执行的业务任务：推荐 3-5 个，默认最多 5 个；只有天然需要更多并行分支时才允许到 8 个，绝对不要超过 8 个。超过上限时应合并任务，或拆成“先规划/阶段化，再执行下一批”的任务。最后只输出 JSON：`{"tasks":[{"title":"...","content":"...","acceptance":"..."}]}`。不要调用 send_message / start_workflow_task 手工建任务。
+6. **Goal 处理（Triage 步骤，step id 仍为 `intake`）**：goal 任务由引擎自动拆成业务子任务并并行进入 workflow。Triage 只负责把 goal 拆成可独立执行的业务任务：推荐 3-5 个，默认最多 5 个；只有天然需要更多并行分支时才允许到 8 个，绝对不要超过 8 个。超过上限时应合并任务，或拆成“先规划/阶段化，再执行下一批”的任务。最后只输出 JSON：`{"tasks":[{"title":"...","content":"...","acceptance":"..."}]}`。不要调用 send_message / start_workflow_task 手工建任务。
+   引擎在派发子任务前会先校验 workflow / team / 状态是否可执行（必需角色齐全、可执行的流程图、每个必需步骤有带 runner 的成员）；不合理时直接报错并让 intake 保持未完成，等修好 team/workflow 后重跑。若 intake 因此报错，别硬拆任务——先让用户修 team/workflow 配置。
 
 ## 分寸
 

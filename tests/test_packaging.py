@@ -146,7 +146,8 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("function renderTeam()", html)
         self.assertIn("function addTeamMember()", html)
         self.assertIn("function renderWorkflow()", html)
-        self.assertIn("function addWorkflowStep()", html)
+        self.assertIn("function confirmAddStep()", html)
+        self.assertIn('id="addStepModalBackdrop"', html)
         self.assertIn("workflow-canvas", html)
         self.assertIn("workflow-node", html)
         self.assertIn("workflow-port", html)
@@ -157,9 +158,11 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("function startExistingEdgeDrag(", html)
         self.assertIn("function updateWorkflowEdgeTarget(", html)
         self.assertIn("Drag to reconnect; click to delete", html)
-        self.assertIn("<strong>Assignment</strong>", html)
         self.assertIn("role: ${escapeHtml(task.role_required", html)
-        self.assertIn("agent: ${escapeHtml(task.assignee", html)
+        self.assertNotIn("<strong>Assignment</strong>", html)  # Assignment section removed
+        self.assertIn("function toggleStep(", html)            # inline-expand step detail
+        self.assertIn('class="step-item', html)
+        self.assertNotIn('id="jobsTab"', html)                 # jobs page removed
         self.assertIn('id="teamRequirements"', html)
         self.assertIn('const REQUIRED_TEAM_ROLES = ["hub", "implementer", "reviewer"]', html)
         self.assertNotIn("function recommendAgent(taskId)", html)
@@ -390,7 +393,7 @@ class PackagingTests(unittest.TestCase):
                         "id": "check",
                         "name": "Check",
                         "role_id": "reviewer",
-                        "task_status": "replied",
+                        "task_status": "reviewing",
                     },
                 ],
                 tmp,
@@ -398,9 +401,51 @@ class PackagingTests(unittest.TestCase):
             loaded = server.read_workflow_config(tmp)
 
         self.assertEqual("intake", default["steps"][0]["id"])
+        self.assertIn(
+            {"value": "assigned", "label": "Assigned"},
+            default["statuses"],
+        )
         self.assertEqual(saved, loaded)
         self.assertEqual(["plan", "ship", "check"], [step["id"] for step in loaded["steps"]])
         self.assertTrue(loaded["path"].endswith(".dev_loop/workflow.json"))
+
+    def test_workflow_step_status_must_come_from_workflow_statuses(self):
+        import dev_loop.server as server
+        from dev_loop.store import InvalidInputError
+
+        steps = [
+            {"id": "a", "name": "A", "role_id": "hub", "task_status": "created"},
+            {
+                "id": "b",
+                "name": "B",
+                "role_id": "implementer",
+                "task_status": "in_progress",
+            },
+            {"id": "c", "name": "C", "role_id": "reviewer", "task_status": "testing"},
+        ]
+        statuses = [
+            {"value": "created", "label": "Todo"},
+            {"value": "in_progress", "label": "In Progress"},
+        ]
+        with TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(InvalidInputError, "task_status is invalid"):
+                server.write_workflow_config(steps, tmp, statuses=statuses)
+
+            saved = server.write_workflow_config(
+                steps[:2]
+                + [
+                    {
+                        "id": "c",
+                        "name": "C",
+                        "role_id": "reviewer",
+                        "task_status": "created",
+                    },
+                ],
+                tmp,
+                statuses=statuses,
+            )
+
+        self.assertEqual(statuses, saved["statuses"])
 
     def test_workflow_rejects_payload_missing_core_role_steps(self):
         import dev_loop.server as server
@@ -760,6 +805,36 @@ class PackagingTests(unittest.TestCase):
             server._validate_role_content(None)
         with self.assertRaises(InvalidInputError):
             server._validate_role_content([])
+
+    def test_workflow_config_with_decision_node(self):
+        import dev_loop.server as server
+
+        steps = [
+            {"id": "intake", "name": "Triage", "role_id": "hub", "task_status": "created", "required": True},
+            {"id": "implement", "name": "Implement", "role_id": "implementer", "task_status": "in_progress", "required": True},
+            {"id": "review", "name": "Review", "role_id": "reviewer", "task_status": "reviewing", "required": True},
+            {"id": "branch_decision", "name": "Branch Decision", "kind": "decision"},
+        ]
+        edges = [
+            {"from": "intake", "to": "implement"},
+            {"from": "implement", "to": "review"},
+            {"from": "review", "to": "branch_decision"},
+            {"from": "branch_decision", "to": "implement", "rework": True},
+            {"from": "branch_decision", "to": "intake"},
+        ]
+        with TemporaryDirectory() as tmp:
+            # Decisions are normalized (empty role_id/task_status, required=False, required_locked=False, timeout_minutes=0)
+            saved = server.write_workflow_config(steps, tmp, edges=edges)
+            loaded = server.read_workflow_config(tmp)
+
+        self.assertEqual(saved, loaded)
+        decision_step = next(s for s in loaded["steps"] if s["id"] == "branch_decision")
+        self.assertEqual("decision", decision_step["kind"])
+        self.assertEqual("", decision_step["role_id"])
+        self.assertEqual("", decision_step["task_status"])
+        self.assertFalse(decision_step["required"])
+        self.assertFalse(decision_step["required_locked"])
+        self.assertEqual(0, decision_step["timeout_minutes"])
 
 
 if __name__ == "__main__":
