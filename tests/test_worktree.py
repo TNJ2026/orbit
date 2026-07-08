@@ -457,6 +457,34 @@ class TokenBudgetGateTests(unittest.TestCase):
             self.assertFalse(store.has_unread("hub"))  # not re-notified
             store.close()
 
+    def test_goal_override_beats_config_default(self):
+        with TemporaryDirectory() as tmp:
+            _set_workflow_field(tmp, "goal_token_budget", 0)  # no global default
+            store, goal_id, sub_id = self._goal_with_subtask_tokens(tmp, 1200)
+            store.update_task_metadata(goal_id, token_budget=500)  # per-goal ceiling
+            self.assertTrue(
+                server._enforce_goal_token_budget(store, tmp, store.get_task(sub_id))
+            )
+            self.assertEqual("blocked", store.get_task(goal_id)["task_status"])
+            store.close()
+
+    def test_goal_override_raises_ceiling_above_default(self):
+        with TemporaryDirectory() as tmp:
+            _set_workflow_field(tmp, "goal_token_budget", 500)  # low global default
+            store, goal_id, sub_id = self._goal_with_subtask_tokens(tmp, 1200)
+            store.update_task_metadata(goal_id, token_budget=5000)  # this goal gets more
+            self.assertFalse(
+                server._enforce_goal_token_budget(store, tmp, store.get_task(sub_id))
+            )
+            self.assertNotEqual("blocked", store.get_task(goal_id)["task_status"])
+            store.close()
+
+    def test_new_task_budget_defaults_to_zero(self):
+        with TemporaryDirectory() as tmp:
+            store, goal_id, sub_id = self._goal_with_subtask_tokens(tmp, 10)
+            self.assertEqual(0, store.get_task(goal_id)["token_budget"])
+            store.close()
+
     def test_dispatch_step_is_frozen_over_budget(self):
         with TemporaryDirectory() as tmp:
             _set_workflow_field(tmp, "goal_token_budget", 500)

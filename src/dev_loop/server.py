@@ -1458,13 +1458,19 @@ def _enforce_goal_token_budget(
     """Hard token ceiling: if the task's goal has spent more than its configured
     budget, freeze the goal (block + notify hub, once) and return True so the
     caller skips dispatch. Returns False when no budget is set or still within
-    it. Tokens are self-reported by agents, so this bounds — not perfectly
-    meters — runaway cost; unreported tokens count as zero."""
-    budget = _goal_token_budget(project_root)
-    if budget <= 0:
-        return False
+    it. The goal's own token_budget overrides the workflow-level default (0 on
+    the goal falls back to that default). Tokens are self-reported by agents, so
+    this bounds — not perfectly meters — runaway cost; unreported tokens count
+    as zero."""
     goal_id = _root_goal_id(store, task)
     if goal_id is None:
+        return False
+    goal = store.get_task(goal_id)
+    if not goal:
+        return False
+    override = _coerce_token_budget(goal.get("token_budget"))
+    budget = override if override > 0 else _goal_token_budget(project_root)
+    if budget <= 0:
         return False
     total = store.sum_goal_tokens(goal_id)
     if total <= budget:
@@ -4790,7 +4796,10 @@ def create_server(
                 t for t in store.list_tasks(limit=10)
                 if t["source_message_id"] == message_id
             )
-            store.update_task_metadata(task["id"], is_goal=True)
+            store.update_task_metadata(
+                task["id"], is_goal=True,
+                token_budget=_coerce_token_budget(data.get("token_budget")),
+            )
             try:
                 started = start_workflow_task(
                     store, current_project.get("project_root"), actor, task["id"]

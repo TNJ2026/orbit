@@ -1300,9 +1300,15 @@
       </div>
       <div class="goal-composer stack">
         <textarea id="goalInput" class="goal-textarea" data-i18n-ph="goals.placeholder" placeholder="Describe the objective, key milestones, or sprint goal here..."></textarea>
-        <div class="row" style="justify-content: space-between;">
+        <div class="row" style="justify-content: space-between; align-items: flex-end;">
           <div class="meta" data-i18n="goals.hint">Start creates a goal, auto-splits it into tasks, and runs each task through the workflow.</div>
-          <button id="startGoal" class="primary" type="button" data-i18n="goals.start">▶ Start Goal</button>
+          <div class="row" style="gap: 10px; align-items: center;">
+            <label style="display:flex; flex-direction:column; gap:3px; font-size:11px; color:var(--muted);">
+              <span data-i18n="goal.budgetLabel">Token budget (M)</span>
+              <input id="goalBudget" type="number" min="0" step="1" placeholder="0" data-i18n-title="goal.budgetTitle" style="width:90px;">
+            </label>
+            <button id="startGoal" class="primary" type="button" data-i18n="goals.start">▶ Start Goal</button>
+          </div>
         </div>
       </div>
       <div id="goalsList"></div>
@@ -1465,6 +1471,8 @@
         "goals.title": "Goals", "goals.hideClosed": "Hide closed", "goals.refresh": "Refresh",
         "goals.placeholder": "Describe the objective, key milestones, or sprint goal here...",
         "goals.hint": "Start creates a goal, auto-splits it into tasks, and runs each task through the workflow.",
+        "goal.budgetLabel": "Token budget (M)",
+        "goal.budgetTitle": "Hard token ceiling for this goal (millions). 0 = use the workflow default.",
         "goals.start": "▶ Start Goal",
         "tasks.title": "Development Tasks", "tasks.refresh": "Refresh", "tasks.noSelected": "No task selected.",
         "tasks.close": "×",
@@ -1571,6 +1579,8 @@
         "goals.title": "目标", "goals.hideClosed": "隐藏已关闭", "goals.refresh": "刷新",
         "goals.placeholder": "在此描述目标、关键里程碑或冲刺目标…",
         "goals.hint": "点击开始会创建目标、自动拆分为任务，并逐个通过工作流执行。",
+        "goal.budgetLabel": "Token 预算 (M)",
+        "goal.budgetTitle": "本目标的 token 硬上限（百万）。0 = 用工作流默认值。",
         "goals.start": "▶ 开始目标",
         "tasks.title": "开发任务", "tasks.refresh": "刷新", "tasks.noSelected": "未选择任务。",
         "tasks.close": "×",
@@ -3008,12 +3018,15 @@
         setStatus(t("goal.enterFirst"), true);
         return;
       }
+      const m = parseFloat($("goalBudget").value);
+      const tokenBudget = (isFinite(m) && m > 0) ? Math.round(m * 1e6) : 0;
       await run(async () => {
         const result = await api("/api/goals", {
           method: "POST",
-          body: JSON.stringify({ content: goalVal })
+          body: JSON.stringify({ content: goalVal, token_budget: tokenBudget })
         });
         $("goalInput").value = "";
+        $("goalBudget").value = "";
         localStorage.removeItem("devloop-goal");
         await loadGoals();
         await loadTasks();
