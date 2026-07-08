@@ -159,8 +159,10 @@ class PackagingTests(unittest.TestCase):
         # gone — clicks edit nodes and delete edges.
         self.assertIn('src="/static/dagre.min.js"', html)
         self.assertIn("function wfApplyDagreLayout(", html)
-        self.assertIn("function autoLayoutWorkflow(", html)
         self.assertIn("function handleNodeClick(", html)
+        # Layout is fully automatic (in saveWorkflow) — no manual re-tidy button.
+        self.assertNotIn("function autoLayoutWorkflow(", html)
+        self.assertNotIn('data-action="auto-layout"', html)
         self.assertIn("<title>Click to delete</title>", html)
         self.assertNotIn("workflow-port", html)
         self.assertNotIn("function startNodeDrag(", html)

@@ -783,17 +783,6 @@
     }
     .wf-tool svg { display: block; }
     .wf-tool-name { font-weight: 600; }
-    .wf-tool.disabled {
-      opacity: 0.4;
-      cursor: not-allowed;
-    }
-    .wf-tool.disabled:hover { border-color: var(--line); background: var(--panel); }
-    .wf-tool-sep {
-      align-self: stretch;
-      width: 1px;
-      margin: 2px 2px;
-      background: var(--line);
-    }
     .wf-canvas-inner {
       flex: 1;
       min-width: 0;
@@ -1334,7 +1323,8 @@
     </div>
   </div>
   <!-- Vendored dagre (self-hosted, no CDN). Optional: if it fails to load the
-       app still works — the Auto-layout button feature-detects window.dagre. -->
+       app still works — saveWorkflow feature-detects window.dagre and keeps the
+       current node coordinates instead of re-laying-out. -->
   <script src="/static/dagre.min.js" onerror="window.__dagreFailed=true"></script>
   <script>
     // Leases survive page reloads via sessionStorage; losing a token would
@@ -1542,9 +1532,9 @@
         warnings: data.warnings || []
       };
       // Render at the stored (last auto-laid-out) coordinates. Layout is only
-      // recomputed on an explicit edit (saveWorkflow) or the Auto-layout button,
-      // never on load — viewing must not write the config (and the server locks
-      // workflow saves while tasks are running).
+      // recomputed on an explicit edit (saveWorkflow), never on load — viewing
+      // must not write the config (and the server locks workflow saves while
+      // tasks are running).
       renderWorkflow();
     }
 
@@ -2006,17 +1996,6 @@
             </svg>
             <span class="wf-tool-name">Connect</span>
           </div>
-          <div class="wf-tool-sep"></div>
-          <div class="wf-tool${wfDagreReady() ? "" : " disabled"}" data-action="auto-layout"
-               title="${wfDagreReady() ? "Auto-arrange nodes left→right (dagre)" : "Auto-layout unavailable: dagre bundle not loaded"}">
-            <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
-              <rect x="2" y="8" width="6" height="6" rx="1.4" stroke="currentColor" stroke-width="1.4" fill="none"/>
-              <rect x="14" y="3" width="6" height="6" rx="1.4" stroke="currentColor" stroke-width="1.4" fill="none"/>
-              <rect x="14" y="13" width="6" height="6" rx="1.4" stroke="currentColor" stroke-width="1.4" fill="none"/>
-              <path d="M8 11 L11 11 L11 6 L14 6 M11 11 L11 16 L14 16" stroke="currentColor" stroke-width="1.4" fill="none"/>
-            </svg>
-            <span class="wf-tool-name">Auto-layout</span>
-          </div>
         </div>`;
       const canvasCls = "workflow-canvas" + (wfTool === "step" ? " tool-place" : "") + (wfTool === "connect" ? " tool-connect" : "");
       $("workflowSteps").innerHTML = steps.length || wfTool !== "select" ? `
@@ -2148,30 +2127,12 @@
       document.querySelectorAll(".wf-tool[data-tool]").forEach(btn => {
         btn.addEventListener("click", () => setWfTool(btn.dataset.tool));
       });
-      document.querySelectorAll(".wf-tool[data-action]").forEach(btn => {
-        btn.addEventListener("click", () => {
-          if (btn.classList.contains("disabled")) return;
-          if (btn.dataset.action === "auto-layout") autoLayoutWorkflow();
-        });
-      });
     }
 
-    // Auto-layout is optional: it depends on the vendored dagre bundle being
-    // reachable. Feature-detect so the button can disable itself gracefully.
+    // Layout depends on the vendored dagre bundle being reachable. Feature-detect
+    // so saveWorkflow can skip re-layout gracefully when it is unavailable.
     function wfDagreReady() {
       return !window.__dagreFailed && !!(window.dagre && window.dagre.graphlib);
-    }
-
-    // Toolbar button: force a re-tidy. saveWorkflow already re-lays-out on every
-    // save, so this is only needed after a change that alters node height (e.g.
-    // a rename) without otherwise re-saving. Persists through the normal path.
-    async function autoLayoutWorkflow() {
-      if (!wfDagreReady()) { setStatus("Auto-layout unavailable: dagre not loaded", true); return; }
-      if (!(state.workflow.steps || []).length) { setStatus("Nothing to lay out"); return; }
-      await run(async () => {
-        await saveWorkflow();
-        setStatus("Auto-layout applied");
-      });
     }
 
     function setWfTool(tool) {
@@ -2293,10 +2254,21 @@
     }
 
     async function saveWorkflow() {
-      // Recompute node coordinates before persisting: the user never positions
-      // nodes by hand, so every structural change re-lays-out the whole graph.
-      // No-op if dagre is unavailable (keeps the current coordinates).
-      wfApplyDagreLayout();
+      // Two-pass layout so dagre measures real node heights. The caller has
+      // already mutated state.workflow, so render it first: that puts the new
+      // content (a renamed step, an added node) into the DOM at its true height.
+      // Then dagre computes coordinates from those measurements and we reposition
+      // the existing nodes in place — all synchronously, before the await, so the
+      // browser never paints the pre-layout positions (no flash). No-op if dagre
+      // is unavailable (keeps the current coordinates).
+      renderWorkflow();
+      if (wfApplyDagreLayout()) {
+        (state.workflow.steps || []).forEach(s => {
+          const wrap = document.querySelector(`.workflow-node-wrap[data-id="${CSS.escape(s.id)}"]`);
+          if (wrap) { wrap.style.left = s.x + "px"; wrap.style.top = s.y + "px"; }
+        });
+        drawEdges();
+      }
       const data = await api("/api/workflow", {
         method: "POST",
         body: JSON.stringify({
