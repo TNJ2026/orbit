@@ -1055,6 +1055,17 @@ class Store:
             return None
         return self.get_workflow_action(action_id)
 
+    def has_workflow_action(self, task_id: int, action_type: str) -> bool:
+        """Whether any workflow_action of this type exists for the task (any
+        status). Used to make one-shot actions (e.g. goal verification)
+        idempotent across the many callers that recompute goal status."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM workflow_actions WHERE task_id = ? AND action_type = ? LIMIT 1",
+                (task_id, (action_type or "").strip()),
+            ).fetchone()
+        return row is not None
+
     def list_workflow_actions(
         self, status: str = "pending", limit: int = 100
     ) -> list[dict[str, Any]]:

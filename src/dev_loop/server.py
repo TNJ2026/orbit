@@ -255,18 +255,26 @@ def default_workflow_statuses() -> list[dict[str, str]]:
 
 
 def default_workflow_steps() -> list[dict[str, Any]]:
-    # (id, name, role_id, task_status, required, x, y)
+    # (id, name, role_id, task_status, required, isolate, integrate, x, y)
+    # isolate: run in a per-task git worktree (implement/test/review all share
+    # one worktree per task, so review reads exactly what implement produced).
+    # integrate: single-assignee (hub) step that merges the task's worktree
+    # branch back into the main tree; runs in project_root, serialized by hub.
     specs = [
-        ("intake", "Triage", "hub", "created", True, 40, _DEFAULT_STEP_MID_Y),
-        ("product_design", "Product Design", "product_designer", "assigned", True, 360, _DEFAULT_STEP_MID_Y),
+        ("intake", "Triage", "hub", "created", True, False, False, 40, _DEFAULT_STEP_MID_Y),
+        ("product_design", "Product Design", "product_designer", "assigned", True, False, False, 360, _DEFAULT_STEP_MID_Y),
         # Parallel branch cards stack vertically at x=700; keep enough gap
         # for a full card (~400px tall with the name/timeout fields).
-        ("ui_design", "UI Design", "ui_designer", "assigned", False, 700, 40),
-        ("architecture", "Architecture", "architect", "assigned", True, 700, 500),
-        ("implement", "Implement", "implementer", "in_progress", True, 1060, _DEFAULT_STEP_MID_Y),
-        ("test", "Test", "tester", "testing", False, 1400, _DEFAULT_STEP_MID_Y),
-        ("review", "Review", "reviewer", "reviewing", True, 1740, _DEFAULT_STEP_MID_Y),
-        ("accept", "Accept", "hub", "accepted", True, 2080, _DEFAULT_STEP_MID_Y),
+        ("ui_design", "UI Design", "ui_designer", "assigned", False, False, False, 700, 40),
+        ("architecture", "Architecture", "architect", "assigned", True, False, False, 700, 500),
+        ("implement", "Implement", "implementer", "in_progress", True, True, False, 1060, _DEFAULT_STEP_MID_Y),
+        # test is the mandatory machine-verification gate: set its `verify`
+        # command (e.g. the project's test suite) so a failing run objectively
+        # sends the task back to implement instead of trusting a self-report.
+        ("test", "Test", "tester", "testing", True, True, False, 1400, _DEFAULT_STEP_MID_Y),
+        ("review", "Review", "reviewer", "reviewing", True, True, False, 1740, _DEFAULT_STEP_MID_Y),
+        ("integrate", "Integrate", "hub", "in_progress", True, False, True, 2080, _DEFAULT_STEP_MID_Y),
+        ("accept", "Accept", "hub", "accepted", True, False, False, 2420, _DEFAULT_STEP_MID_Y),
     ]
     return [
         {
@@ -275,10 +283,12 @@ def default_workflow_steps() -> list[dict[str, Any]]:
             "role_id": role_id,
             "task_status": task_status,
             "required": required,
+            "isolate": isolate,
+            "integrate": integrate,
             "x": x,
             "y": y,
         }
-        for step_id, name, role_id, task_status, required, x, y in specs
+        for step_id, name, role_id, task_status, required, isolate, integrate, x, y in specs
     ]
 
 
@@ -295,7 +305,10 @@ def default_workflow_edges() -> list[dict[str, str]]:
         {"from": "architecture", "to": "implement"},        # merge
         {"from": "implement", "to": "test"},
         {"from": "test", "to": "review"},
-        {"from": "review", "to": "accept"},
+        {"from": "test", "to": "implement"},                # verify failed -> rework
+        {"from": "review", "to": "integrate"},              # merge worktree branch to main
+        {"from": "integrate", "to": "accept"},
+        {"from": "integrate", "to": "implement"},           # loop-back (merge conflict -> rework)
         {"from": "review", "to": "implement"},              # loop-back (rework)
     ]
 
@@ -383,6 +396,16 @@ def _normalize_workflow_step(
         "required": required,
         "required_locked": required_locked,
         "timeout_minutes": timeout_minutes,
+        # isolate: run this step in a per-task git worktree so concurrent
+        # implementers of different tasks never share a working tree.
+        # integrate: this step merges the task's worktree branch back into the
+        # main tree, so it runs in project_root (never isolated).
+        "isolate": bool(step.get("isolate", False)) and not bool(step.get("integrate", False)),
+        "integrate": bool(step.get("integrate", False)),
+        # verify: an objective shell command the engine runs itself after the
+        # agent, in the same working tree. Its real exit code overrides the
+        # agent's self-reported `done` (a failing gate the agent can't fake).
+        "verify": str(step.get("verify", "") or "").strip(),
         "x": _coord("x", 40 + index * 320),
         "y": _coord("y", _DEFAULT_STEP_MID_Y),
     }
@@ -476,6 +499,8 @@ def read_workflow_config(project_root: str | None = None) -> dict[str, Any]:
             ],
             "statuses": statuses,
             "edges": default_workflow_edges(),
+            "goal_verify": "",
+            "goal_token_budget": 0,
             "path": str(path),
             "warnings": [],
         }
@@ -505,13 +530,34 @@ def read_workflow_config(project_root: str | None = None) -> dict[str, Any]:
         ]
     else:
         edges = _normalize_workflow_edges(raw_edges, valid_ids)
+    goal_verify = ""
+    goal_token_budget = 0
+    if isinstance(data, dict):
+        goal_verify = str(data.get("goal_verify") or "").strip()
+        goal_token_budget = _coerce_token_budget(data.get("goal_token_budget"))
     return {
         "steps": normalized,
         "statuses": statuses,
         "edges": edges,
+        # goal_verify: an objective command run on the integrated main tree once
+        # all of a goal's subtasks close, before the goal is accepted. Catches
+        # integration failures that per-subtask (isolated) tests can't see.
+        "goal_verify": goal_verify,
+        # goal_token_budget: hard ceiling on total tokens across a goal's whole
+        # subtree. Exceeding it freezes further dispatch and escalates to hub.
+        # 0 = unlimited.
+        "goal_token_budget": goal_token_budget,
         "path": str(path),
         "warnings": _workflow_graph_warnings(normalized, edges),
     }
+
+
+def _coerce_token_budget(value: Any) -> int:
+    try:
+        budget = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return budget if budget > 0 else 0
 
 
 def write_workflow_config(
@@ -557,10 +603,25 @@ def write_workflow_config(
         {k: v for k, v in step.items() if k != "required_locked"}
         for step in normalized
     ]
+    # goal_verify / goal_token_budget have no editor fields yet; preserve any
+    # hand-set values across UI saves (which only send steps/statuses/edges)
+    # instead of wiping them.
+    goal_verify = ""
+    goal_token_budget = 0
+    if path.exists():
+        try:
+            prev = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(prev, dict):
+                goal_verify = str(prev.get("goal_verify") or "").strip()
+                goal_token_budget = _coerce_token_budget(prev.get("goal_token_budget"))
+        except (OSError, json.JSONDecodeError):
+            pass
     data = {
         "statuses": normalized_statuses,
         "steps": persisted,
         "edges": normalized_edges,
+        "goal_verify": goal_verify,
+        "goal_token_budget": goal_token_budget,
     }
     path.write_text(
         json.dumps(data, ensure_ascii=False, indent=2) + "\n",
@@ -570,6 +631,8 @@ def write_workflow_config(
         "steps": normalized,
         "statuses": normalized_statuses,
         "edges": normalized_edges,
+        "goal_verify": goal_verify,
+        "goal_token_budget": goal_token_budget,
         "path": str(path),
         "warnings": _workflow_graph_warnings(normalized, normalized_edges),
     }
@@ -1362,7 +1425,61 @@ def _business_subtasks_for_goal(store: Store, goal_id: int) -> list[dict[str, An
     return store.list_tasks_by_parent(goal_id)
 
 
-def _recompute_parent_goal_status(store: Store, task: dict[str, Any]) -> None:
+def _goal_token_budget(project_root: str | None) -> int:
+    return _coerce_token_budget(read_workflow_config(project_root).get("goal_token_budget"))
+
+
+def _root_goal_id(store: Store, task: dict[str, Any]) -> int | None:
+    """Walk parent_task_id up to the owning goal (subtasks are children of the
+    goal). Returns the goal's id, or None if the task isn't under a goal."""
+    cur: dict[str, Any] | None = task
+    seen: set[int] = set()
+    while cur:
+        if cur.get("is_goal"):
+            return int(cur["id"])
+        parent_id = cur.get("parent_task_id")
+        if not parent_id or int(parent_id) in seen:
+            return None
+        seen.add(int(parent_id))
+        cur = store.get_task(int(parent_id))
+    return None
+
+
+def _enforce_goal_token_budget(
+    store: Store, project_root: str | None, task: dict[str, Any]
+) -> bool:
+    """Hard token ceiling: if the task's goal has spent more than its configured
+    budget, freeze the goal (block + notify hub, once) and return True so the
+    caller skips dispatch. Returns False when no budget is set or still within
+    it. Tokens are self-reported by agents, so this bounds — not perfectly
+    meters — runaway cost; unreported tokens count as zero."""
+    budget = _goal_token_budget(project_root)
+    if budget <= 0:
+        return False
+    goal_id = _root_goal_id(store, task)
+    if goal_id is None:
+        return False
+    total = store.sum_goal_tokens(goal_id)
+    if total <= budget:
+        return False
+    if not store.has_workflow_action(goal_id, "budget_exceeded"):
+        store.create_workflow_action(
+            goal_id, "budget_exceeded",
+            note=f"goal tokens {total} exceed budget {budget}",
+        )
+        store.set_task_workflow_state(goal_id, task_status="blocked")
+        members = read_team_config(project_root)["members"]
+        _notify_hub(
+            store, members,
+            f"目标 #{goal_id} 触及 token 硬预算：已用 {total} > 预算 {budget}。"
+            "已冻结后续派发，需人工介入（提高预算 / 重新拆分 / 终止目标）。",
+        )
+    return True
+
+
+def _recompute_parent_goal_status(
+    store: Store, task: dict[str, Any], project_root: str | None = None
+) -> None:
     """Roll a subtask status change up to its parent goal:
     all business subtasks closed -> accepted; any blocked -> stalled;
     otherwise in_progress. A goal that was explicitly closed is left as-is."""
@@ -1383,6 +1500,24 @@ def _recompute_parent_goal_status(store: Store, task: dict[str, Any]) -> None:
         return
     statuses = [subtask["task_status"] for subtask in subtasks]
     if all(status == "closed" for status in statuses):
+        # Goal convergence gate: subtasks passed their own (isolated) tests, but
+        # the integrated main can still fail. If a goal_verify command is set,
+        # queue an objective check on main and let the async sweep accept or
+        # stall the goal — don't accept on aggregation alone. Runs once per goal.
+        goal_verify = str(
+            read_workflow_config(project_root).get("goal_verify") or ""
+        ).strip()
+        if goal_verify:
+            if not store.has_workflow_action(parent_id, "goal_verify"):
+                store.create_workflow_action(
+                    parent_id, "goal_verify",
+                    note="all subtasks closed; goal verification queued",
+                )
+                if parent.get("task_status") != "in_progress":
+                    store.set_task_workflow_state(parent_id, task_status="in_progress")
+            # A goal_verify action already exists: the sweep owns the final
+            # accepted/stalled decision — leave the goal status alone.
+            return
         new_status = "accepted"
     elif any(status == "blocked" for status in statuses):
         new_status = "stalled"
@@ -1541,6 +1676,16 @@ def _dispatch_step(
 ) -> dict[str, Any] | None:
     assignee = member["agent_name"]
     task_id = task["id"]
+    # Hard token ceiling: never dispatch new work for a goal that has blown its
+    # budget. Covers every dispatch path (initial, rework, timeout-reassign,
+    # manual rerun) since all funnel through here.
+    if _enforce_goal_token_budget(store, project_root, task):
+        store.record_task_transition(
+            task_id, "", step["id"], WORKFLOW_ENGINE_AGENT, "blocked",
+            "goal token budget exceeded; dispatch frozen",
+        )
+        store.set_task_workflow_state(task_id, task_status="blocked")
+        return None
     _ensure_engine_agent(store)
     if not store.agent_exists(assignee):
         # Pre-register so the dispatch waits in their inbox until they poll.
@@ -1594,6 +1739,12 @@ def _dispatch_targets(
     notices: list[str] = []
     queue = list(targets)
     while queue:
+        # Budget ceiling before any dispatch bookkeeping, so an over-budget goal
+        # halts cleanly without leaving a dangling pending dispatch action.
+        if _enforce_goal_token_budget(store, project_root, task):
+            store.set_task_workflow_state(task_id, task_status="blocked")
+            notices.append("goal token budget exceeded; dispatch frozen")
+            break
         target = queue.pop(0)
         transitions = store.list_task_transitions(task_id)
         if target in _active_steps(transitions):
@@ -1922,7 +2073,7 @@ def _advance_workflow_task_locked(
         store.record_task_transition(task_id, step, step, agent, "blocked", result)
         store.set_task_workflow_state(task_id, task_status="blocked")
         _settle_step_card(store, task, step, "blocked")
-        _recompute_parent_goal_status(store, task)
+        _recompute_parent_goal_status(store, task, project_root)
         notice = _notify_hub(
             store, members,
             f"Task #{task_id} blocked at step '{step}' by {agent}: {result or 'no details'}",
@@ -1955,7 +2106,7 @@ def _advance_workflow_task_locked(
             )
             store.set_task_workflow_state(task_id, task_status="blocked")
             _settle_step_card(store, task, step, "blocked")
-            _recompute_parent_goal_status(store, task)
+            _recompute_parent_goal_status(store, task, project_root)
             notice = _notify_hub(
                 store, members,
                 f"Task #{task_id} hit the rework limit ({MAX_REWORK_ROUNDS} rounds) "
@@ -1979,7 +2130,7 @@ def _advance_workflow_task_locked(
             task_id, workflow_step="", task_status="closed"
         )
         _settle_step_card(store, task, step, "done")
-        _recompute_parent_goal_status(store, task)
+        _recompute_parent_goal_status(store, task, project_root)
         return {
             "task_id": task_id, "step": step, "outcome": "done",
             "closed": True, "dispatched": [], "notices": [],
@@ -2119,12 +2270,41 @@ def _build_step_prompt(
     step: dict[str, Any],
     upstream_result: str,
     can_rework: bool = False,
+    isolated: bool = False,
 ) -> str:
     roles = {
         role["id"]: role["content"]
         for role in list_agent_roles(_agents_dir(project_root))
     }
     role_text = roles.get(step["role_id"], "")
+    branch = _worktree_branch(task["id"])
+    if step.get("integrate"):
+        cwd_line = (
+            "当前工作目录是项目主工作树（main）。本任务的实现成果在独立 git 分支 "
+            f"`{branch}` 上，你的职责是把它集成回主干。\n"
+        )
+    elif isolated:
+        cwd_line = (
+            f"当前工作目录是本任务专属的 git worktree，位于分支 `{branch}`，"
+            "与其它任务的工作树完全隔离。直接读写文件完成任务；改动只影响该分支，"
+            "不会污染主干，也看不到其它任务的在途改动。完成后请把成果 "
+            "`git add -A && git commit` 到当前分支（后续 integrate 步骤据此合并回主干）。\n"
+        )
+    else:
+        cwd_line = "当前工作目录就是项目根目录，直接读写文件完成任务。\n"
+    integrate_block = ""
+    if step.get("integrate"):
+        integrate_block = (
+            "\n## 集成合并（integrate 步骤）\n"
+            f"把分支 `{branch}` 合并回主干，步骤：\n"
+            "1. `git status` 确认主工作树干净、当前在集成目标分支；\n"
+            f"2. `git merge --no-ff {branch}`；\n"
+            "3. 有冲突：能安全解决就解决后 `git commit`；无法安全解决则 "
+            "`git merge --abort` 并裁决 `rework`，在原因里列出冲突文件；\n"
+            "4. 合并后跑测试；测试失败且本步无法修复则 `rework`；\n"
+            "5. 全部通过则 `done`。\n"
+            "不要手动删除该 worktree 或分支——集成完成后引擎会自动回收。\n"
+        )
     goal_contract = ""
     if _is_root_goal_entry_step(project_root, task, step):
         goal_contract = (
@@ -2157,13 +2337,15 @@ def _build_step_prompt(
         )
     return (
         f"你是被工作流引擎派发的一次性 worker，以角色 {step['role_id']} 执行"
-        f"步骤 '{step['name']}'。当前工作目录就是项目根目录，直接读写文件完成任务。\n"
-        "忽略角色说明里 register_agent / check_inbox / ack 等信箱循环要求——"
+        f"步骤 '{step['name']}'。"
+        + cwd_line
+        + "忽略角色说明里 register_agent / check_inbox / ack 等信箱循环要求——"
         "本次为一次性执行，也不要调用 complete_step，派发器会代为提交结果。\n\n"
         f"## 角色说明\n{role_text}\n\n"
         f"## 任务 #{task['id']}: {task.get('title') or 'untitled'}\n"
         f"{task.get('content', '')}\n\n"
         + goal_contract
+        + integrate_block
         + (f"## 上游产出\n{upstream_result}\n\n" if upstream_result else "")
         + final_instruction
     )
@@ -2468,6 +2650,282 @@ def _task_blocked_reason(store: Store, task: dict[str, Any]) -> str | None:
     return reason
 
 
+# --- per-task git worktree isolation ---------------------------------------
+# Concurrent implementers of different tasks must not share one working tree
+# (git checkout is global to a tree). Each isolated step runs in a per-task
+# worktree on branch devloop/task-<id>; a single-assignee `integrate` step
+# merges that branch back into the main tree, serialized by the hub.
+
+WORKTREE_TERMINAL_STATUSES = {"closed", "accepted"}
+WORKTREE_LOCK_RETRIES = 5
+
+
+def _git(root: Path, *args: str, timeout: float = 30.0) -> "subprocess.CompletedProcess[str]":
+    return subprocess.run(
+        ["git", "-C", str(root), *args],
+        capture_output=True, text=True, timeout=timeout,
+    )
+
+
+def _is_git_repo(root: Path) -> bool:
+    try:
+        return _git(root, "rev-parse", "--git-dir", timeout=10).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _worktree_branch(task_id: int) -> str:
+    return f"devloop/task-{task_id}"
+
+
+def _task_worktree_dir(project_root: str | None, task_id: int) -> Path:
+    return _project_root(project_root) / ".dev_loop" / "worktrees" / f"task-{task_id}"
+
+
+def _worktree_base_ref(root: Path) -> str | None:
+    # New worktrees branch off the main tree's current commit. An unborn HEAD
+    # (repo with no commits) can't seed a worktree -> caller skips isolation.
+    try:
+        if _git(root, "rev-parse", "--verify", "-q", "HEAD", timeout=10).returncode == 0:
+            return "HEAD"
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return None
+
+
+def _branch_exists(root: Path, branch: str) -> bool:
+    try:
+        return _git(
+            root, "rev-parse", "--verify", "-q", f"refs/heads/{branch}", timeout=10
+        ).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _worktree_registered(root: Path, wt_dir: Path) -> bool:
+    try:
+        out = _git(root, "worktree", "list", "--porcelain", timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+    target = str(wt_dir.resolve())
+    for line in out.splitlines():
+        if line.startswith("worktree "):
+            path = line[len("worktree "):].strip()
+            try:
+                if str(Path(path).resolve()) == target:
+                    return True
+            except OSError:
+                continue
+    return False
+
+
+def _ensure_task_worktree(project_root: str | None, task_id: int) -> Path | None:
+    """Idempotently return a per-task git worktree, creating it if needed.
+
+    Returns None (and logs) when the project isn't a git repo or has no commits,
+    so the caller falls back to running in project_root. Idempotent because the
+    engine re-runs a step after its lease expires: an already-present worktree /
+    branch is reattached instead of recreated, a stale registration left by a
+    SIGKILLed run is pruned first, and concurrent adds for different tasks that
+    briefly contend on the repo lock are retried."""
+    import shutil
+
+    root = _project_root(project_root)
+    if not _is_git_repo(root):
+        print(
+            f"worktree: {root} is not a git repo; step runs in project root "
+            "without isolation", flush=True,
+        )
+        return None
+    base = _worktree_base_ref(root)
+    if base is None:
+        print(
+            f"worktree: {root} has no commits yet; step runs without isolation",
+            flush=True,
+        )
+        return None
+    wt_dir = _task_worktree_dir(project_root, task_id)
+    branch = _worktree_branch(task_id)
+    if wt_dir.exists() and _worktree_registered(root, wt_dir):
+        return wt_dir
+    try:
+        _git(root, "worktree", "prune")  # drop stale registrations from killed runs
+    except (OSError, subprocess.SubprocessError):
+        pass
+    # A leftover unregistered directory (e.g. a failed force-remove) would make
+    # `worktree add` fail with "already exists"; clear it before adding.
+    if wt_dir.exists() and not _worktree_registered(root, wt_dir):
+        shutil.rmtree(wt_dir, ignore_errors=True)
+    wt_dir.parent.mkdir(parents=True, exist_ok=True)
+    last_err = ""
+    for attempt in range(WORKTREE_LOCK_RETRIES):
+        try:
+            if _branch_exists(root, branch):
+                cp = _git(root, "worktree", "add", str(wt_dir), branch)
+            else:
+                cp = _git(root, "worktree", "add", "-b", branch, str(wt_dir), base)
+        except (OSError, subprocess.SubprocessError) as exc:
+            last_err = repr(exc)
+            cp = None
+        if cp is not None and cp.returncode == 0:
+            return wt_dir
+        if cp is not None:
+            last_err = (cp.stderr or cp.stdout).strip()
+        # A racing worker for the same task may have won the add; accept it.
+        if _worktree_registered(root, wt_dir):
+            return wt_dir
+        time.sleep(0.2 * (attempt + 1))
+    print(f"worktree: failed to create {wt_dir}: {last_err}", flush=True)
+    return None
+
+
+def _remove_task_worktree(project_root: str | None, task_id: int) -> None:
+    root = _project_root(project_root)
+    wt_dir = _task_worktree_dir(project_root, task_id)
+    for args in (
+        ("worktree", "remove", "--force", str(wt_dir)),
+        ("worktree", "prune"),
+        ("branch", "-D", _worktree_branch(task_id)),
+    ):
+        try:
+            _git(root, *args)
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+
+def _sweep_task_worktrees(store: Store, project_root: str | None) -> None:
+    """Reap per-task worktrees whose task is finished (accepted/closed) or gone.
+    Runs on the timeout watcher so SIGKILLed runs that never cleaned up (their
+    trap can't fire on SIGKILL) don't leak worktrees and branches indefinitely."""
+    root = _project_root(project_root)
+    wt_root = root / ".dev_loop" / "worktrees"
+    if not wt_root.exists() or not _is_git_repo(root):
+        return
+    try:
+        _git(root, "worktree", "prune")
+    except (OSError, subprocess.SubprocessError):
+        pass
+    for child in sorted(wt_root.iterdir()):
+        if not child.is_dir() or not child.name.startswith("task-"):
+            continue
+        try:
+            task_id = int(child.name[len("task-"):])
+        except ValueError:
+            continue
+        task = store.get_task(task_id)
+        if task and task.get("task_status") not in WORKTREE_TERMINAL_STATUSES:
+            continue
+        _remove_task_worktree(project_root, task_id)
+
+
+# --- machine verification gate ---------------------------------------------
+# The agent self-reports its outcome; a step's `verify` command lets the engine
+# objectively check the work (tests/build) and override an over-optimistic
+# `done`. Runs in the step's working tree so it sees exactly what the agent
+# produced (the per-task worktree for isolated steps).
+
+VERIFY_HARD_TIMEOUT_SECONDS = 900.0
+
+
+def _run_step_verify(command: str, cwd: Path) -> tuple[int, str]:
+    """Run a step's verify command in cwd; return (exit_code, combined_output).
+    A timeout or spawn failure counts as a failing gate (nonzero)."""
+    try:
+        cp = subprocess.run(
+            command, shell=True, cwd=str(cwd),
+            capture_output=True, text=True,
+            timeout=VERIFY_HARD_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return 124, f"verify timed out after {int(VERIFY_HARD_TIMEOUT_SECONDS)}s"
+    except (OSError, subprocess.SubprocessError) as exc:
+        return 1, f"verify failed to run: {exc!r}"
+    return cp.returncode, (cp.stdout or "") + (cp.stderr or "")
+
+
+# --- goal convergence gate --------------------------------------------------
+# Subtasks pass their own isolated tests, but the integrated main can still
+# fail. When all of a goal's subtasks close, a queued goal_verify action runs
+# the acceptance suite on main; this sweep applies the real exit code.
+
+GOAL_VERIFY_POLL_SECONDS = 30
+# Reclaim a goal_verify action stuck in 'running' by a crashed daemon.
+GOAL_VERIFY_STALE_SECONDS = VERIFY_HARD_TIMEOUT_SECONDS + 300.0
+
+
+def _iso_age_seconds(ts: str) -> float:
+    """Seconds since an ISO-8601 timestamp; inf if unparseable."""
+    try:
+        parsed = datetime.fromisoformat((ts or "").strip())
+    except (ValueError, TypeError):
+        return float("inf")
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - parsed).total_seconds()
+
+
+def goal_verify_sweep(store: Store, project_root: str | None) -> list[dict[str, Any]]:
+    """Run queued goal-convergence verifications on the integrated main tree and
+    accept or stall each goal by the real exit code. Single-owner (one daemon):
+    claims pending goal_verify actions plus any left 'running' by a crashed
+    process. Runs the suite synchronously on its own thread, so goals verify one
+    at a time on main — no concurrent-suite thrash, no merge races."""
+    command = str(read_workflow_config(project_root).get("goal_verify") or "").strip()
+    if not command:
+        return []
+    pending = [
+        a for a in store.list_workflow_actions("pending", limit=100)
+        if a["action_type"] == "goal_verify"
+    ]
+    stale = [
+        a for a in store.list_workflow_actions("running", limit=100)
+        if a["action_type"] == "goal_verify"
+        and _iso_age_seconds(a.get("updated_at", "")) > GOAL_VERIFY_STALE_SECONDS
+    ]
+    members = read_team_config(project_root)["members"]
+    processed: list[dict[str, Any]] = []
+    for action in pending + stale:
+        goal_id = int(action["task_id"])
+        goal = store.get_task(goal_id)
+        if not goal or not goal.get("is_goal") or goal.get("task_status") == "closed":
+            store.finish_workflow_action(action["id"], "done", "goal gone/closed")
+            continue
+        # Mark running so a restart mid-verify can tell in-flight from queued.
+        store.finish_workflow_action(action["id"], "running", "verifying integrated main")
+        run = store.create_task_run(
+            goal_id, worker="goal-verify", command=command, workflow_step="goal_verify"
+        )
+        if run:
+            log_dir = _task_run_dir(project_root, goal_id, int(run["attempt"]))
+            run = store.update_task_run_log_dir(run["id"], str(log_dir)) or run
+        code, out = _run_step_verify(command, _project_root(project_root))
+        if run:
+            try:
+                _write_run_file(run, "verify", f"$ {command}  (exit {code})\n\n{out}")
+                store.finish_task_run(
+                    run["id"], "succeeded" if code == 0 else "failed", code
+                )
+            except (InvalidInputError, OSError):
+                pass
+        if code == 0:
+            store.set_task_workflow_state(goal_id, task_status="accepted")
+            store.finish_workflow_action(action["id"], "done", "goal verified on main")
+        else:
+            store.set_task_workflow_state(goal_id, task_status="stalled")
+            store.finish_workflow_action(
+                action["id"], "failed", f"goal verify failed (exit {code})"
+            )
+            _notify_hub(
+                store, members,
+                f"目标 #{goal_id} 收敛验证失败：`{command}` 退出码 {code}"
+                "（引擎在集成后的 main 上判定，非 agent 自报）。"
+                "各子任务在各自 worktree 里通过，但合并后失败——需人工介入或补修子任务。\n"
+                f"{_tail(out, 2000)}",
+            )
+        processed.append({"goal_id": goal_id, "exit_code": code})
+    return processed
+
+
 def run_step_worker(
     store: Store,
     project_root: str | None,
@@ -2528,6 +2986,11 @@ def run_step_worker(
 
     outcome, result, status, exit_code = "blocked", "", "failed", None
     stdout, stderr = "", ""
+    # Defaults so the post-run verify gate can reference these even on the
+    # no-command path (where they are never assigned in the else branch).
+    exec_dir = _project_root(project_root)
+    isolated = False
+    can_rework = False
     if not command:
         result = (
             f"no runner command for agent {assignee}; set runner_command on "
@@ -2536,8 +2999,17 @@ def run_step_worker(
     else:
         _cfg = read_workflow_config(project_root)
         can_rework = _step_can_rework(_cfg, _workflow_graph(_cfg), step["id"])
+        # Isolated steps run in a per-task git worktree so concurrent
+        # implementers of different tasks never share a working tree. Falls back
+        # to project_root (no isolation) on non-git projects.
+        if step.get("isolate"):
+            wt = _ensure_task_worktree(project_root, task_id)
+            if wt is not None:
+                exec_dir = wt
+                isolated = True
         prompt = _build_step_prompt(
-            project_root, task, step, upstream_result, can_rework
+            project_root, task, step, upstream_result, can_rework,
+            isolated=isolated,
         )
         if run:
             # Persist the exact invocation (command + the prompt piped on stdin)
@@ -2569,7 +3041,7 @@ def run_step_worker(
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                cwd=str(_project_root(project_root)),
+                cwd=str(exec_dir),
                 start_new_session=True,  # own process group, so force-end can kill the whole CLI tree
             )
             if run:
@@ -2698,6 +3170,40 @@ def run_step_worker(
             outcome = "blocked"
             status = "failed"
             result = str(exc)
+    # Machine verification gate: the agent self-reports its outcome and can
+    # declare `done` without the work actually passing. If the step defines a
+    # `verify` command, run it ourselves in the same working tree (the per-task
+    # worktree for isolated steps) — a failing exit code the agent can't fake
+    # overrides `done`, sending a rework-capable step back instead of advancing.
+    verify_cmd = str(step.get("verify") or "").strip()
+    if outcome == "done" and not goal_intake and verify_cmd:
+        v_code, v_out = _run_step_verify(verify_cmd, exec_dir)
+        if run:
+            try:
+                _write_run_file(
+                    run, "verify", f"$ {verify_cmd}  (exit {v_code})\n\n{v_out}"
+                )
+                _append_run_event(
+                    run,
+                    {
+                        "type": "verify",
+                        "workflow_task_id": task_id,
+                        "workflow_step": step["id"],
+                        "command": verify_cmd,
+                        "exit_code": v_code,
+                    },
+                )
+            except (InvalidInputError, OSError):
+                pass
+        if v_code != 0:
+            outcome = "rework" if can_rework else "blocked"
+            status = "succeeded" if outcome == "rework" else "failed"
+            result = (
+                f"机器验证失败：`{verify_cmd}` 退出码 {v_code}（引擎判定，非 agent 自报）。"
+                "修复后重试。\n"
+                f"--- verify 输出（末尾） ---\n{_tail(v_out, 3000)}\n\n"
+                f"--- agent 自报产出 ---\n{result}"
+            )
     tokens = _parse_run_tokens(stdout, stderr)
     if run:
         try:
@@ -3356,7 +3862,7 @@ def _check_task_health_locked(
                 store.set_task_workflow_state(
                     task_id, workflow_step="", task_status="closed"
                 )
-                _recompute_parent_goal_status(store, task)
+                _recompute_parent_goal_status(store, task, project_root)
                 alerts.append({"task_id": task_id, "step": None,
                                "problem": "orphaned -> closed", "notice": ""})
     return alerts
@@ -3646,7 +4152,11 @@ def create_server(
         while True:
             time.sleep(WORKFLOW_TIMEOUT_POLL_SECONDS)
             root = current_project.get("project_root")
-            for check in (check_workflow_step_timeouts, check_task_health):
+            for check in (
+                check_workflow_step_timeouts,
+                check_task_health,
+                _sweep_task_worktrees,
+            ):
                 try:
                     check(store, root)
                 except Exception:
@@ -3682,6 +4192,17 @@ def create_server(
             except Exception:
                 pass
 
+    def _goal_verify_sweep() -> None:
+        # Separate thread: a goal-verify suite can run for minutes, so it must
+        # not block the scheduler, health watcher, or hub sweep. Goals verify
+        # one at a time here (serialized on main), which is what we want.
+        while True:
+            time.sleep(GOAL_VERIFY_POLL_SECONDS)
+            try:
+                goal_verify_sweep(store, current_project.get("project_root"))
+            except Exception:
+                pass
+
     def _embedded_runner() -> None:
         # Convenience: run a worker in-process so `dev-loop serve` executes goals
         # end-to-end without a separate `dev-loop runner`. For a decoupled /
@@ -3703,6 +4224,9 @@ def create_server(
     ).start()
     threading.Thread(
         target=_hub_sweep, name="hub-inspect-sweep", daemon=True
+    ).start()
+    threading.Thread(
+        target=_goal_verify_sweep, name="goal-verify-sweep", daemon=True
     ).start()
     if run_worker:
         threading.Thread(
@@ -4338,7 +4862,10 @@ def create_server(
         if updated:
             task = await _to_thread(store.get_task, task_id)
             if task:
-                await _to_thread(_recompute_parent_goal_status, store, task)
+                await _to_thread(
+                    _recompute_parent_goal_status, store, task,
+                    current_project.get("project_root"),
+                )
         return _json(
             request,
             {"updated": updated, "task_id": task_id, "task_status": task_status},

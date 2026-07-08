@@ -105,14 +105,19 @@ def init_project(
         )
         _mark(mcp_path, True)
 
-    # 5. Keep runtime task logs out of git.
+    # 5. Keep runtime task logs and per-task worktree checkouts out of git.
     gitignore = project_root / ".gitignore"
     existing = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
-    if ".dev_loop/tasks/" in existing:
+    wanted = [".dev_loop/tasks/", ".dev_loop/worktrees/"]
+    missing = [line for line in wanted if line not in existing]
+    if not missing:
         _mark(gitignore, False)
     else:
         joiner = "" if not existing or existing.endswith("\n") else "\n"
-        gitignore.write_text(existing + joiner + ".dev_loop/tasks/\n", encoding="utf-8")
+        gitignore.write_text(
+            existing + joiner + "".join(f"{line}\n" for line in missing),
+            encoding="utf-8",
+        )
         _mark(gitignore, True)
 
     # 6. CLAUDE.md pointer so role-assigned sessions know where to look.
