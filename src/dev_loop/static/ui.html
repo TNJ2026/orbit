@@ -737,41 +737,47 @@
       min-height: calc(100vh - 150px);
       overflow: auto;
       padding: 0;
+      /* Center the flow vertically. `safe center` keeps a taller-than-viewport
+         graph aligned to the top so it stays scrollable. */
+      display: flex;
+      align-items: safe center;
       background:
         radial-gradient(circle, rgba(29, 35, 38, 0.10) 1px, transparent 1px) 0 0 / 18px 18px,
         #eef1ef;
     }
     .workflow-canvas-wrap {
-      display: flex;
-      align-items: stretch;
+      position: relative;
     }
+    /* Floating toolbar overlaid on the top-left of the canvas (it does not take
+       layout width; the canvas uses the full pane and scrolls under it). */
     .wf-toolbar {
-      flex: none;
-      width: 60px;
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      z-index: 6;
       display: flex;
-      flex-direction: column;
+      flex-direction: row;
       gap: 6px;
-      padding: 10px 8px;
-      border-right: 1px solid var(--line);
+      padding: 6px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
       background: var(--panel);
-      position: sticky;
-      left: 0;
-      z-index: 5;
+      box-shadow: 0 4px 16px rgba(29, 35, 38, 0.14);
     }
     .wf-tool {
       display: flex;
-      flex-direction: column;
+      flex-direction: row;
       align-items: center;
-      gap: 4px;
-      padding: 8px 4px 6px;
+      gap: 7px;
+      padding: 7px 11px;
       border: 1px solid var(--line);
       border-radius: 8px;
       background: var(--panel);
       color: var(--ink);
       cursor: pointer;
-      font-size: 11px;
+      font-size: 12px;
       line-height: 1.2;
-      text-align: center;
+      white-space: nowrap;
       user-select: none;
       transition: border-color 0.12s, background 0.12s;
     }
@@ -781,14 +787,23 @@
       background: #eef7f2;
       box-shadow: 0 0 0 2px rgba(37, 108, 90, 0.18);
     }
-    .wf-tool svg { display: block; }
+    .wf-tool svg { display: block; flex: none; }
     .wf-tool-name { font-weight: 600; }
+    .wf-empty-hint {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      color: var(--muted);
+      font-size: 13px;
+      text-align: center;
+      pointer-events: none;
+    }
     .wf-canvas-inner {
       flex: 1;
       min-width: 0;
       position: relative;
     }
-    .workflow-canvas.tool-place { cursor: crosshair; }
     .workflow-canvas.tool-connect { cursor: cell; }
     .workflow-node.connect-source {
       box-shadow: 0 0 0 3px rgba(37, 108, 90, 0.35);
@@ -796,7 +811,7 @@
     .workflow-graph {
       position: relative;
       min-width: 100%;
-      min-height: calc(100vh - 150px);
+      flex: none;
     }
     .workflow-edges {
       position: absolute;
@@ -1283,7 +1298,6 @@
       <div class="pane-head">
         <h2>Workflow</h2>
         <div class="row">
-          <button id="addWorkflowStep" type="button">Add Step</button>
           <button id="refreshWorkflow" type="button">Refresh</button>
         </div>
       </div>
@@ -1792,9 +1806,10 @@
     const WF_NODE_W = 200;  // must match .workflow-node width in CSS (edge geometry uses it)
     let wfTempPath = null;    // in-progress connection preview path (SVG d string)
     let wfLayoutCache = null; // per-node port counts + per-edge port slots
-    // Active toolbar tool: "select" (click a node to edit), "step" (click canvas
-    // to place a step), "connect" (click two nodes to wire an edge).
-    let wfTool = "select";
+    // Active toolbar tool: "" (idle — double-click a node to edit it), "step"
+    // (click canvas to place a step), "connect" (click two nodes to wire an
+    // edge). Clicking the active tool again, or pressing Esc, returns to idle.
+    let wfTool = "";
     let wfConnectFrom = null; // source node id when in connect mode
 
     function wfById() {
@@ -1976,19 +1991,14 @@
       const layout = wfLayoutCache;
       const toolbarHtml = `
         <div class="wf-toolbar" id="wfToolbar">
-          <div class="wf-tool${wfTool === "select" ? " active" : ""}" data-tool="select" title="Select / move (Esc)">
-            <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
-              <path d="M4 3 L4 16 L8 12 L11 18 L13 17 L10 11 L16 11 Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" fill="none"/>
-            </svg>
-            <span class="wf-tool-name">Select</span>
-          </div>
-          <div class="wf-tool${wfTool === "step" ? " active" : ""}" data-tool="step" title="Click canvas to place a step">
+          <div class="wf-tool" data-action="add-step" title="Add step: opens a form to set the name, role and status of a new step">
             <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
               <rect x="3" y="6" width="16" height="10" rx="3" stroke="var(--accent)" stroke-width="1.4" fill="#eef7f2"/>
+              <path d="M11 8.5 L11 13.5 M8.5 11 L13.5 11" stroke="var(--accent)" stroke-width="1.4" stroke-linecap="round"/>
             </svg>
-            <span class="wf-tool-name">Step</span>
+            <span class="wf-tool-name">Add step</span>
           </div>
-          <div class="wf-tool${wfTool === "connect" ? " active" : ""}" data-tool="connect" title="Click two nodes to connect">
+          <div class="wf-tool${wfTool === "connect" ? " active" : ""}" data-tool="connect" title="Connect: click the source node, then the target node, to draw an edge">
             <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
               <circle cx="4" cy="11" r="2.2" fill="var(--accent)"/>
               <path d="M6 11 L15 11" stroke="var(--accent)" stroke-width="1.4"/>
@@ -1997,11 +2007,12 @@
             <span class="wf-tool-name">Connect</span>
           </div>
         </div>`;
-      const canvasCls = "workflow-canvas" + (wfTool === "step" ? " tool-place" : "") + (wfTool === "connect" ? " tool-connect" : "");
-      $("workflowSteps").innerHTML = steps.length || wfTool !== "select" ? `
+      const canvasCls = "workflow-canvas" + (wfTool === "connect" ? " tool-connect" : "");
+      $("workflowSteps").innerHTML = `
         <div class="workflow-canvas-wrap">
           ${toolbarHtml}
           <div class="wf-canvas-inner">
+            ${steps.length ? "" : `<div class="wf-empty-hint">No steps yet — click <strong>Add step</strong> to create one.</div>`}
             <div class="${canvasCls}" id="wfCanvas">
               <div class="workflow-graph" id="wfGraph">
                 <svg class="workflow-edges" id="wfEdges">
@@ -2024,7 +2035,7 @@
                       : `<span class="wf-box-flag">${step.required ? "required" : "optional"}${step.required_locked ? " 🔒" : ""}</span>`;
                     return `
                     <div class="workflow-node-wrap" data-id="${escapeHtml(step.id)}" style="left:${step.x}px; top:${step.y}px">
-                      <div class="workflow-node ${step.required ? "required" : "optional"}${terminalCls}" data-id="${escapeHtml(step.id)}" title="Click to edit">
+                      <div class="workflow-node ${step.required ? "required" : "optional"}${terminalCls}" data-id="${escapeHtml(step.id)}" title="Double-click to edit">
                         <div class="wf-box-index">#${index + 1}</div>
                         <div class="wf-box-name">${escapeHtml(step.name || "Step")}</div>
                         <div class="wf-box-meta">
@@ -2039,7 +2050,7 @@
             </div>
           </div>
         </div>
-      ` : `<div class="empty">No workflow steps configured.</div>`;
+      `;
       wireWorkflowInteractions();
       wireToolbar();
       drawEdges();
@@ -2052,18 +2063,22 @@
       const edges = state.workflow.edges || [];
       const byId = wfById();
 
-      let maxX = 600, maxY = 400;
+      const layout = wfLayoutCache || wfComputeLayout();
+      const rects = wfNodeRects();
+
+      // Size the graph box tight to its content (plus a small margin) using each
+      // node's real height, so a short flow can be centered in the canvas rather
+      // than pinned to the top of an over-tall box.
+      let maxX = 400, maxY = 200;
       steps.forEach(s => {
-        maxX = Math.max(maxX, s.x + WF_NODE_W + 140);
-        maxY = Math.max(maxY, s.y + 380);
+        const h = (rects[s.id] && rects[s.id].h) || 120;
+        maxX = Math.max(maxX, s.x + WF_NODE_W + 40);
+        maxY = Math.max(maxY, s.y + h + 40);
       });
       const graph = $("wfGraph");
       if (graph) { graph.style.width = maxX + "px"; graph.style.height = maxY + "px"; }
       svg.setAttribute("width", maxX);
       svg.setAttribute("height", maxY);
-
-      const layout = wfLayoutCache || wfComputeLayout();
-      const rects = wfNodeRects();
 
       let paths = `<defs>
         <marker id="wfArrow" viewBox="0 0 10 10" refX="8" refY="5"
@@ -2100,20 +2115,20 @@
 
     function wireWorkflowInteractions() {
       document.querySelectorAll(".workflow-node[data-id]").forEach(node => {
+        // Single click only matters while wiring an edge (connect tool); a
+        // double click always opens the node for editing.
         node.addEventListener("click", event => handleNodeClick(event, node.dataset.id));
+        node.addEventListener("dblclick", event => {
+          event.preventDefault();
+          openEditStepModal(node.dataset.id);
+        });
       });
-      // Click-to-place: when a place tool is active, a click on empty canvas
-      // drops a node there. We listen on the graph (which holds the nodes) and
-      // ignore clicks that hit a node/edge.
+      // Clicking empty canvas while a connection is pending abandons it.
       const graph = $("wfGraph");
       if (graph) {
         graph.addEventListener("click", event => {
           if (event.target.closest(".workflow-node") || event.target.closest(".wf-edge")) return;
-          if (wfTool === "step") {
-            const pt = wfGraphPoint(event);
-            placeNodeAt(pt.x - WF_NODE_W / 2, pt.y - 20);
-          } else if (wfTool === "connect" && wfConnectFrom) {
-            // Clicking empty space abandons the pending connection source.
+          if (wfTool === "connect" && wfConnectFrom) {
             wfConnectFrom = null;
             document.querySelectorAll(".workflow-node.connect-source").forEach(el => el.classList.remove("connect-source"));
             clearConnectPreview();
@@ -2127,6 +2142,11 @@
       document.querySelectorAll(".wf-tool[data-tool]").forEach(btn => {
         btn.addEventListener("click", () => setWfTool(btn.dataset.tool));
       });
+      document.querySelectorAll(".wf-tool[data-action]").forEach(btn => {
+        btn.addEventListener("click", () => {
+          if (btn.dataset.action === "add-step") openAddStepModal();
+        });
+      });
     }
 
     // Layout depends on the vendored dagre bundle being reachable. Feature-detect
@@ -2136,47 +2156,24 @@
     }
 
     function setWfTool(tool) {
-      wfTool = tool;
+      // Clicking the active tool again toggles it off, back to idle.
+      wfTool = wfTool === tool ? "" : tool;
       wfConnectFrom = null;
       document.querySelectorAll(".workflow-node.connect-source").forEach(el => el.classList.remove("connect-source"));
       clearConnectPreview();
       renderWorkflow();
-      const hint = tool === "step" ? "Click on the canvas to place a step"
-        : tool === "connect" ? "Click a node, then click another node to connect them"
-        : "";
-      if (hint) setStatus(hint);
+      const hint = wfTool === "connect"
+        ? "Click a node, then click another node to connect them"
+        : "Double-click a node to edit it";
+      setStatus(hint);
     }
 
-    // Create a step. The click point only seeds an initial x/y; saveWorkflow
-    // re-lays-out the whole graph with dagre, so the final position is chosen
-    // automatically. Reuses the modal's defaults so toolbar-placed steps match
-    // Add Step.
-    async function placeNodeAt(x, y) {
-      const steps = state.workflow.steps || [];
-      const name = "New Step";
-      const roleId = (state.roles[0] || {}).id || "hub";
-      const taskStatus = (workflowStatusOptions()[0] || {}).value || "created";
-      const newId = "step-" + Date.now().toString(36);
-      const newStep = {
-        id: newId, name, role_id: roleId, task_status: taskStatus, required: false,
-        x: Math.max(0, Math.round(x)), y: Math.max(0, Math.round(y))
-      };
-      state.workflow.steps = [...steps, newStep];
-      await run(async () => {
-        await saveWorkflow();
-        setStatus(`Step "${name}" placed — click to edit`);
-      });
-      // Stay in the place tool so the user can drop several steps quickly;
-      // Esc or clicking Select returns to the default mode.
-    }
-
-    // Nodes are not draggable — a click either wires a connection (connect tool)
-    // or opens the node for editing (every other tool). Layout is dagre's job.
+    // Nodes are not draggable. A single click only matters in connect mode (it
+    // picks the source then target); a double click opens the editor (wired
+    // separately). Layout is dagre's job.
     function handleNodeClick(event, id) {
       if (!wfById()[id]) return;
-      event.preventDefault();
-      if (wfTool === "connect") { handleConnectPick(id); return; }
-      openEditStepModal(id);
+      if (wfTool === "connect") { event.preventDefault(); handleConnectPick(id); }
     }
 
     function handleConnectPick(id) {
@@ -2287,8 +2284,8 @@
       renderWorkflow();
     }
 
-    // The step modal serves both adding a new step and editing an existing one
-    // (clicking a node on the canvas opens it in edit mode).
+    // The step modal serves both adding a new step (the Add-step toolbar tool)
+    // and editing an existing one (double-clicking a card).
     let wfStepModalMode = "add";
     let wfStepModalId = null;
 
@@ -2334,6 +2331,25 @@
       else confirmAddStep();
     }
 
+    async function confirmAddStep() {
+      const name = ($("addStepName").value || "").trim() || "New Step";
+      const roleId = $("addStepRole").value || (state.roles[0] || {}).id || "hub";
+      const taskStatus = $("addStepStatus").value || (workflowStatusOptions()[0] || {}).value || "created";
+      const required = $("addStepRequired").checked;
+      const steps = state.workflow.steps || [];
+      // Seed coordinates only; saveWorkflow re-lays-out the graph with dagre.
+      const newId = "step-" + Date.now().toString(36);
+      const newStep = { id: newId, name, role_id: roleId, task_status: taskStatus, required, x: 40, y: 60 };
+      state.workflow.steps = [...steps, newStep];
+      closeAddStepModal();
+      await run(async () => {
+        await saveWorkflow();
+        setStatus(`Step "${name}" added`);
+      });
+      const el = document.querySelector(`.workflow-node-wrap[data-id="${CSS.escape(newId)}"]`);
+      if (el) el.scrollIntoView({ block: "center", inline: "center" });
+    }
+
     async function saveEditStep() {
       const step = (state.workflow.steps || []).find(s => s.id === wfStepModalId);
       if (!step) { closeAddStepModal(); return; }
@@ -2352,25 +2368,6 @@
       const id = wfStepModalId;
       closeAddStepModal();
       if (id) removeWorkflowStep(id);  // guards required_locked + saves
-    }
-
-    async function confirmAddStep() {
-      const name = ($("addStepName").value || "").trim() || "New Step";
-      const roleId = $("addStepRole").value || (state.roles[0] || {}).id || "hub";
-      const taskStatus = $("addStepStatus").value || (workflowStatusOptions()[0] || {}).value || "created";
-      const required = $("addStepRequired").checked;
-      const steps = state.workflow.steps || [];
-      // Seed coordinates only; saveWorkflow re-lays-out the graph with dagre.
-      const newId = "step-" + Date.now().toString(36);
-      const newStep = { id: newId, name, role_id: roleId, task_status: taskStatus, required, x: 40, y: 60 };
-      state.workflow.steps = [...steps, newStep];
-      closeAddStepModal();
-      await run(async () => {
-        await saveWorkflow();
-        setStatus(`Step "${name}" added`);
-      });
-      const el = document.querySelector(`.workflow-node-wrap[data-id="${CSS.escape(newId)}"]`);
-      if (el) el.scrollIntoView({ block: "center", inline: "center" });
     }
 
     async function removeWorkflowStep(id) {
@@ -3040,7 +3037,6 @@
     wireRefresh("refreshTasks", loadTasks);
     wireRefresh("refreshGoals", loadGoals);
     $("addTeamMember").addEventListener("click", addTeamMember);
-    $("addWorkflowStep").addEventListener("click", () => openAddStepModal());
     $("addStepCancel").addEventListener("click", closeAddStepModal);
     $("addStepConfirm").addEventListener("click", confirmStep);
     $("addStepDelete").addEventListener("click", deleteStepFromModal);
@@ -3057,8 +3053,8 @@
       if (e.key === "Escape" && $("taskDetails").classList.contains("open")) closeTaskDrawer();
     });
     document.addEventListener("keydown", (e) => {
-      if (e.key === "Escape" && wfTool !== "select" && !$("addStepModalBackdrop").classList.contains("open")) {
-        setWfTool("select");
+      if (e.key === "Escape" && wfTool && !$("addStepModalBackdrop").classList.contains("open")) {
+        setWfTool("");
       }
     });
     $("toolsTab").addEventListener("click", () => setPage("tools"));

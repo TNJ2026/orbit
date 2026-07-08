@@ -146,7 +146,12 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("function renderTeam()", html)
         self.assertIn("function addTeamMember()", html)
         self.assertIn("function renderWorkflow()", html)
+        # The Add-step toolbar tool opens the modal (add); double-click opens it
+        # (edit). No standalone Add-step button in the pane header.
+        self.assertIn("function saveEditStep()", html)
         self.assertIn("function confirmAddStep()", html)
+        self.assertIn('data-action="add-step"', html)
+        self.assertNotIn('id="addWorkflowStep"', html)
         self.assertIn('id="addStepModalBackdrop"', html)
         self.assertIn("workflow-canvas", html)
         self.assertIn("workflow-node", html)
