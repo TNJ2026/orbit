@@ -1064,11 +1064,25 @@ class Store:
 
     def has_workflow_action(self, task_id: int, action_type: str) -> bool:
         """Whether any workflow_action of this type exists for the task (any
-        status). Used to make one-shot actions (e.g. goal verification)
-        idempotent across the many callers that recompute goal status."""
+        status). Used to make one-shot actions (e.g. budget-exceeded) idempotent
+        across the many callers that recompute goal status."""
         with self._lock:
             row = self._conn.execute(
                 "SELECT 1 FROM workflow_actions WHERE task_id = ? AND action_type = ? LIMIT 1",
+                (task_id, (action_type or "").strip()),
+            ).fetchone()
+        return row is not None
+
+    def has_pending_workflow_action(self, task_id: int, action_type: str) -> bool:
+        """Whether an in-flight (pending/running) workflow_action of this type
+        exists. Unlike has_workflow_action, a done/failed action does NOT count —
+        so a retryable action (e.g. goal verification) can be re-queued after a
+        prior attempt finished, without duplicating one that is still queued."""
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT 1 FROM workflow_actions
+                   WHERE task_id = ? AND action_type = ?
+                     AND status IN ('pending', 'running') LIMIT 1""",
                 (task_id, (action_type or "").strip()),
             ).fetchone()
         return row is not None

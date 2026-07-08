@@ -348,6 +348,48 @@ class GoalConvergenceGateTests(unittest.TestCase):
             self.assertTrue(any(r["workflow_step"] == "goal_verify" for r in runs))
             store.close()
 
+    def test_failed_verify_requeues_on_next_close(self):
+        # A failed verification must not permanently block re-verification: after
+        # the hub reworks and subtasks re-close, recompute queues a fresh check.
+        with TemporaryDirectory() as tmp:
+            _set_goal_verify(tmp, "false")
+            store, goal_id, sub_id = self._goal_with_closed_subtask(tmp)
+            server._recompute_parent_goal_status(store, store.get_task(sub_id), tmp)
+            server.goal_verify_sweep(store, tmp)  # fails -> stalled, action failed
+            self.assertEqual("stalled", store.get_task(goal_id)["task_status"])
+            self.assertFalse(store.has_pending_workflow_action(goal_id, "goal_verify"))
+            # rework re-close -> recompute fires again -> re-queue
+            server._recompute_parent_goal_status(store, store.get_task(sub_id), tmp)
+            self.assertTrue(store.has_pending_workflow_action(goal_id, "goal_verify"))
+            self.assertEqual("in_progress", store.get_task(goal_id)["task_status"])
+            store.close()
+
+    def test_accepted_goal_not_requeued(self):
+        with TemporaryDirectory() as tmp:
+            _set_goal_verify(tmp, "true")
+            store, goal_id, sub_id = self._goal_with_closed_subtask(tmp)
+            server._recompute_parent_goal_status(store, store.get_task(sub_id), tmp)
+            server.goal_verify_sweep(store, tmp)  # passes -> accepted
+            self.assertEqual("accepted", store.get_task(goal_id)["task_status"])
+            server._recompute_parent_goal_status(store, store.get_task(sub_id), tmp)
+            self.assertFalse(store.has_pending_workflow_action(goal_id, "goal_verify"))
+            store.close()
+
+
+class ReapStaleRunsTests(unittest.TestCase):
+    def test_reap_orphans_running_task_runs(self):
+        with TemporaryDirectory() as tmp:
+            store = Store(Path(tmp) / ".dev_loop" / "m.db")
+            store.register_agent("hub", "")
+            tid = store.get_task_by_source_message(
+                store.send_message("hub", "hub", "x", kind="task", title="t")[0]
+            )["id"]
+            run = store.create_task_run(tid, worker="dev", command="x", workflow_step="implement")
+            self.assertEqual("running", store.get_task_run(run["id"])["status"])
+            self.assertEqual(1, store.reap_stale_runs())
+            self.assertEqual("orphaned", store.get_task_run(run["id"])["status"])
+            store.close()
+
 
 def _set_workflow_field(tmp, key, value):
     server.write_workflow_config(

@@ -3475,10 +3475,12 @@
     let livePolling = false;
     setInterval(async () => {
       if (livePolling || !state.apiBase || document.hidden) return;
-      // Re-rendering the board would steal focus mid-keystroke (goal box,
-      // status selects); wait until the user leaves the task board.
+      // Re-rendering the board or the drawer would steal focus mid-keystroke
+      // (goal box, status selects, the drawer's Re-run dropdown); wait until the
+      // user leaves both. #taskDetails is a sibling of #tasksList, so it needs
+      // its own guard.
       const active = document.activeElement;
-      if (active && $("tasksList").contains(active)) return;
+      if (active && ($("tasksList").contains(active) || $("taskDetails").contains(active))) return;
       livePolling = true;
       try {
         await loadTasks();

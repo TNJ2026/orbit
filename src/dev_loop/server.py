@@ -1521,15 +1521,20 @@ def _recompute_parent_goal_status(
             read_workflow_config(project_root).get("goal_verify") or ""
         ).strip()
         if goal_verify:
-            if not store.has_workflow_action(parent_id, "goal_verify"):
+            # Already verified and accepted: nothing to do.
+            if parent.get("task_status") == "accepted":
+                return
+            # A verify is in flight (pending/running): the sweep owns the final
+            # decision — don't queue a duplicate. But a prior *failed* verify does
+            # NOT block re-queue, so a goal reworked after a failed verification
+            # (subtasks reopened then re-closed) gets verified again.
+            if not store.has_pending_workflow_action(parent_id, "goal_verify"):
                 store.create_workflow_action(
                     parent_id, "goal_verify",
                     note="all subtasks closed; goal verification queued",
                 )
                 if parent.get("task_status") != "in_progress":
                     store.set_task_workflow_state(parent_id, task_status="in_progress")
-            # A goal_verify action already exists: the sweep owns the final
-            # accepted/stalled decision — leave the goal status alone.
             return
         new_status = "accepted"
     elif any(status == "blocked" for status in statuses):
@@ -4058,7 +4063,7 @@ def detect_agent_tools() -> list[dict[str, Any]]:
                     {
                         "id": profile_id,
                         "name": f"Hermes {profile_name}",
-                        "command": f"hermes --profile {profile_name}",
+                        "command": f"hermes --profile {shlex.quote(profile_name)}",
                         "agent_name": profile_id,
                         "description": f"Hermes agent CLI profile: {profile_name}",
                         "installed": path is not None,
@@ -4157,6 +4162,16 @@ def create_server(
     # atexit hook is the reliable place to checkpoint the WAL and close the
     # connection cleanly.
     atexit.register(store.close)
+
+    # Embedded-runner mode: this process is the only runner, so any task_run
+    # still 'running' at startup is a leftover from a crashed prior daemon.
+    # Orphan them, else they count against their worker's max_concurrent_tasks
+    # forever and starve assignment. Skip in decoupled mode (run_worker=False):
+    # standalone runners may legitimately be mid-run when the daemon restarts.
+    if run_worker:
+        reaped = store.reap_stale_runs()
+        if reaped:
+            print(f"reaped {reaped} stale running task_runs at startup", flush=True)
 
     # Step-timeout watchdog: the engine is otherwise purely event-driven, so
     # a dead assignee would leave its step active forever. Daemon thread dies
