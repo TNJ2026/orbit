@@ -195,7 +195,8 @@ class PackagingTests(unittest.TestCase):
         self.assertIn('marker-end="url(#wfArrow)"', html)
         self.assertIn("function wfEdgeAnchor(", html)
         self.assertIn("function wfEdgePath(", html)
-        self.assertIn('"C", Math.round(p1.x + dx)', html)
+        self.assertIn("function wfPickSides(", html)
+        self.assertIn('marker-start="url(#wfArrow)"', html)
         # Auto-laid-out editor: dagre computes coordinates, the user only edits
         # the graph. The manual-drag machinery (ports, node/edge dragging) is
         # gone — clicks edit nodes and delete edges.

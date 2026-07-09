@@ -2212,11 +2212,24 @@
     }
 
 
+    // Every card exposes four connection points — top / bottom / left / right,
+    // each at its side's midpoint — carrying the side's outward normal so an
+    // edge can leave and arrive perpendicular to the card.
     function wfEdgeAnchor(step, rect, side) {
-      return {
-        x: step.x + (side === "right" ? rect.w : 0),
-        y: step.y + rect.h / 2
-      };
+      const w = rect.w, h = rect.h;
+      if (side === "top")    return { x: step.x + w / 2, y: step.y,         nx: 0,  ny: -1 };
+      if (side === "bottom") return { x: step.x + w / 2, y: step.y + h,     nx: 0,  ny: 1 };
+      if (side === "left")   return { x: step.x,         y: step.y + h / 2, nx: -1, ny: 0 };
+      return { x: step.x + w, y: step.y + h / 2, nx: 1, ny: 0 };  // right
+    }
+
+    // Pick the facing side on each card by the dominant axis between them, so a
+    // node above/below connects top/bottom and one left/right connects sideways.
+    function wfPickSides(a, rectA, b, rectB) {
+      const dx = (b.x + rectB.w / 2) - (a.x + rectA.w / 2);
+      const dy = (b.y + rectB.h / 2) - (a.y + rectA.h / 2);
+      if (Math.abs(dx) >= Math.abs(dy)) return dx >= 0 ? ["right", "left"] : ["left", "right"];
+      return dy >= 0 ? ["bottom", "top"] : ["top", "bottom"];
     }
 
     function wfEdgePath(p1, p2, isReturn = false, channel = 0) {
@@ -2230,11 +2243,15 @@
           Math.round(p2.x), Math.round(p2.y)
         ].join(" ");
       }
-      const dx = Math.max(60, Math.abs(p2.x - p1.x) * 0.45);
+      // Extend each control point along its port's outward normal so the curve
+      // exits perpendicular to the card side it connects to.
+      const handle = Math.max(60, Math.hypot(p2.x - p1.x, p2.y - p1.y) * 0.4);
+      const c1x = p1.x + (p1.nx || 0) * handle, c1y = p1.y + (p1.ny || 0) * handle;
+      const c2x = p2.x + (p2.nx || 0) * handle, c2y = p2.y + (p2.ny || 0) * handle;
       return [
         "M", Math.round(p1.x), Math.round(p1.y),
-        "C", Math.round(p1.x + dx), Math.round(p1.y),
-        Math.round(p2.x - dx), Math.round(p2.y),
+        "C", Math.round(c1x), Math.round(c1y),
+        Math.round(c2x), Math.round(c2y),
         Math.round(p2.x), Math.round(p2.y)
       ].join(" ");
     }
@@ -2417,23 +2434,29 @@
             && edgeSet.has(edge.to + " " + edge.from)
             && !between(a, b, rectA)) {
           if (a.x >= b.x) return "";  // reverse half — the forward half draws the pair
-          const p1 = wfEdgeAnchor(a, rectA, "right");
-          const p2 = wfEdgeAnchor(b, rectB, "left");
+          const [fs, ts] = wfPickSides(a, rectA, b, rectB);
+          const p1 = wfEdgeAnchor(a, rectA, fs);
+          const p2 = wfEdgeAnchor(b, rectB, ts);
           const d = wfEdgePath(p1, p2, false);
           return `<path class="wf-edge" data-edge="${i}" d="${d}" marker-start="url(#wfArrow)" marker-end="url(#wfArrow)"><title>${escapeHtml(t("wf.clickDelete"))}</title></path>`;
         }
 
         const isReturn = (b.x + rectB.w / 2) < (a.x + rectA.w / 2);
-        let channel = 0;
+        let channel = 0, p1, p2;
         if (isReturn) {
+          // Loop-back to a non-adjacent step: arc under the row (left→right),
+          // fanning the depth and arrowhead height so parallel returns stay apart.
           channel = (returnCh[edge.to] = (returnCh[edge.to] || 0));
           returnCh[edge.to] = channel + 1;
+          p1 = wfEdgeAnchor(a, rectA, "left");
+          p2 = wfEdgeAnchor(b, rectB, "right");
+          p2.y = Math.min(p2.y + channel * 9, b.y + rectB.h - 6);
+        } else {
+          // Forward edge: connect the facing sides (one of the four card ports each).
+          const [fs, ts] = wfPickSides(a, rectA, b, rectB);
+          p1 = wfEdgeAnchor(a, rectA, fs);
+          p2 = wfEdgeAnchor(b, rectB, ts);
         }
-        const p1 = wfEdgeAnchor(a, rectA, isReturn ? "left" : "right");
-        const p2 = wfEdgeAnchor(b, rectB, isReturn ? "right" : "left");
-        // Fan the loop-back arrowheads down the target's side so they don't all
-        // land on one point (kept within the card height).
-        if (isReturn) p2.y = Math.min(p2.y + channel * 9, b.y + rectB.h - 6);
         const d = wfEdgePath(p1, p2, isReturn, channel);
         return `<path class="wf-edge" data-edge="${i}" d="${d}" marker-end="url(#wfArrow)"><title>${escapeHtml(t("wf.clickDelete"))}</title></path>`;
       }).join("");
