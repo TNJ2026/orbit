@@ -2211,11 +2211,29 @@
       const edges = state.workflow.edges || [];
       const rects = wfNodeRects();
 
+      // Loop-back (rework) edges run right-to-left in the left→right flow. Route
+      // them through a top/bottom channel — alternating per target so several
+      // returns into one step (e.g. review→implement, test→implement) enter from
+      // different sides — instead of piling onto the horizontal side and cutting
+      // straight across the cards in between. `channel` deepens each successive
+      // return so parallel channels don't overlap.
+      const returnCount = {};
       const edgeSides = edges.map(e => {
         const a = rects[e.from], b = rects[e.to];
-        if (!a || !b) return { fromSide: "right", toSide: "left" };
+        if (!a || !b) return { fromSide: "right", toSide: "left", channel: 0 };
         const dx = (b.x + b.w / 2) - (a.x + a.w / 2);
         const dy = (b.y + b.h / 2) - (a.y + a.h / 2);
+
+        const isReturn = (b.x + b.w) < a.x + 4;  // target fully left of source
+        if (isReturn) {
+          const seen = (returnCount[e.to] = (returnCount[e.to] || 0));
+          returnCount[e.to] = seen + 1;
+          const side = seen % 2 === 0 ? "top" : "bottom";
+          const chKey = e.to + "|" + side;
+          const channel = (returnCount[chKey] = (returnCount[chKey] || 0));
+          returnCount[chKey] = channel + 1;
+          return { fromSide: side, toSide: side, channel };
+        }
 
         let fromSide = "right";
         if (Math.abs(dy * a.w) < Math.abs(dx * a.h)) {
@@ -2231,7 +2249,7 @@
           toSide = dy > 0 ? "top" : "bottom";
         }
 
-        return { fromSide, toSide };
+        return { fromSide, toSide, channel: 0 };
       });
 
       const sideCounts = {};
@@ -2240,30 +2258,32 @@
       });
 
       const edgeSlots = edges.map((e, idx) => {
-        const { fromSide, toSide } = edgeSides[idx];
+        const { fromSide, toSide, channel } = edgeSides[idx];
         const fromSlot = sideCounts[e.from][fromSide]++;
         const toSlot = sideCounts[e.to][toSide]++;
-        return { fromSide, toSide, fromSlot, toSlot };
+        return { fromSide, toSide, fromSlot, toSlot, channel };
       });
 
       return { sideCounts, edgeSlots };
     }
 
-    // Connections must terminate at the visible circular ports; slot values
-    // are accepted for caller compatibility but do not move endpoints.
+    // Distribute the `total` connections on a side evenly along it (leaving a
+    // margin at each end) so multiple edges terminate at distinct points instead
+    // of stacking on the side's midpoint. A lone edge stays centered.
     function wfPortPoint(step, rect, side, slot = 0, total = 1) {
       const w = rect.w;
       const h = rect.h;
+      const frac = total > 1 ? (slot + 1) / (total + 1) : 0.5;
       if (side === "left") {
-        return { x: step.x, y: step.y + h / 2 };
+        return { x: step.x, y: step.y + h * frac };
       } else if (side === "right") {
-        return { x: step.x + w, y: step.y + h / 2 };
+        return { x: step.x + w, y: step.y + h * frac };
       } else if (side === "top") {
-        return { x: step.x + w / 2, y: step.y };
+        return { x: step.x + w * frac, y: step.y };
       } else if (side === "bottom") {
-        return { x: step.x + w / 2, y: step.y + h };
+        return { x: step.x + w * frac, y: step.y + h };
       }
-      return { x: step.x + w, y: step.y + h / 2 };
+      return { x: step.x + w, y: step.y + h * frac };
     }
 
     function wfSinglePortPoint(step, rect, cx, cy) {
@@ -2290,8 +2310,10 @@
 
     // Orthogonal (right-angle) connector: stub out of each node along its side,
     // then join the stubs with axis-aligned segments — the classic flowchart look.
-    function wfEdgePath(fromId, toId, p1, p2, rects, fromSide, toSide) {
-      const stub = 22;
+    // `channel` deepens the stub so a routed loop-back runs in its own lane,
+    // clear of the cards and of the other loop-backs sharing the same side.
+    function wfEdgePath(fromId, toId, p1, p2, rects, fromSide, toSide, channel = 0) {
+      const stub = 22 + channel * 18;
       const out = (p, side) =>
         side === "right" ? { x: p.x + stub, y: p.y }
         : side === "left" ? { x: p.x - stub, y: p.y }
@@ -2474,7 +2496,7 @@
         const p1 = wfPortPoint(a, rectA, slot.fromSide, slot.fromSlot, totalFrom);
         const p2 = wfPortPoint(b, rectB, slot.toSide, slot.toSlot, totalTo);
 
-        const d = wfEdgePath(edge.from, edge.to, p1, p2, rects, slot.fromSide, slot.toSide);
+        const d = wfEdgePath(edge.from, edge.to, p1, p2, rects, slot.fromSide, slot.toSide, slot.channel);
         return `<path class="wf-edge" data-edge="${i}" d="${d}" marker-end="url(#wfArrow)"><title>${escapeHtml(t("wf.clickDelete"))}</title></path>`;
       }).join("");
 
