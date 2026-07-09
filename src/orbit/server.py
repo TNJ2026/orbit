@@ -393,7 +393,12 @@ def _normalize_workflow_step(
     # isolated step's commits on their branch. Lock it by the integrate flag
     # itself, not just its (currently hub) role, so re-assigning the role can't
     # silently make it optional.
-    required_locked = role_id in REQUIRED_TEAM_ROLES or bool(step.get("integrate", False))
+    decompose = bool(step.get("decompose", False))
+    required_locked = (
+        role_id in REQUIRED_TEAM_ROLES
+        or bool(step.get("integrate", False))
+        or decompose
+    )
     required = True if required_locked else bool(step.get("required", False))
 
     return {
@@ -408,8 +413,15 @@ def _normalize_workflow_step(
         # implementers of different tasks never share a working tree.
         # integrate: this step merges the task's worktree branch back into the
         # main tree, so it runs in project_root (never isolated).
-        "isolate": bool(step.get("isolate", False)) and not bool(step.get("integrate", False)),
+        # decompose: at this step a root goal splits into business subtasks; it
+        # runs at goal level in project_root (never isolated), and the subtasks
+        # begin at its forward successors — so goal-level design steps before it
+        # happen once, not per subtask.
+        "isolate": bool(step.get("isolate", False))
+        and not bool(step.get("integrate", False))
+        and not decompose,
         "integrate": bool(step.get("integrate", False)),
+        "decompose": decompose,
         # verify: an objective shell command the engine runs itself after the
         # agent, in the same working tree. Its real exit code overrides the
         # agent's self-reported `done` (a failing gate the agent can't fake).
@@ -464,6 +476,20 @@ def _workflow_graph_warnings(
         warnings.append(
             "git is not installed: isolate steps will run without a per-task "
             "worktree and the integrate step will be skipped"
+        )
+    # A decompose step is where a goal splits into subtasks; the subtasks begin at
+    # its forward successors, so it must have an outgoing step, and only one such
+    # step is used.
+    decompose_ids = [s["id"] for s in steps if s.get("decompose")]
+    if len(decompose_ids) > 1:
+        warnings.append(
+            "multiple decompose steps: only the first (" + decompose_ids[0]
+            + ") splits the goal"
+        )
+    if decompose_ids and not any(e["from"] == decompose_ids[0] for e in edges):
+        warnings.append(
+            f"decompose step '{decompose_ids[0]}' has no outgoing step: its "
+            "subtasks would have nowhere to start"
         )
     ids = [step["id"] for step in steps]
     if len(ids) <= 1:
@@ -1463,7 +1489,16 @@ def _start_goal_business_subtasks(
     goal: dict[str, Any],
     actor: str,
     subtasks: list[dict[str, str]],
+    from_step: str | None = None,
+    target_steps: list[str] | None = None,
+    upstream_result: str = "",
 ) -> list[dict[str, Any]]:
+    """Create each business subtask and start it in the workflow. By default a
+    subtask starts at the entry step (splits at intake). When `target_steps` is
+    given (a later decompose step's successors, `from_step` being that decompose
+    step), the subtask instead begins there with `upstream_result` — the goal's
+    shared design/architecture output — as its upstream context, so those steps
+    run once on the goal, not per subtask."""
     source_message_id = goal.get("source_message_id")
     if source_message_id is None:
         raise InvalidInputError("goal is missing source_message_id")
@@ -1480,7 +1515,13 @@ def _start_goal_business_subtasks(
         task = store.get_task_by_source_message(message_id)
         if not task:
             raise InvalidInputError(f"task not created for message: {message_id}")
-        result = _start_workflow_task_locked(store, project_root, actor, task["id"])
+        if target_steps is None:
+            result = _start_workflow_task_locked(store, project_root, actor, task["id"])
+        else:
+            result = _start_workflow_task_at_locked(
+                store, project_root, actor, task["id"],
+                from_step or "", target_steps, upstream_result,
+            )
         started.append({"task": store.get_task(task["id"]), **result})
     return started
 
@@ -1660,15 +1701,28 @@ def _materializes_step_cards(task: dict[str, Any]) -> bool:
     )
 
 
-def _is_root_goal_entry_step(
+def _root_goal_decompose_step_id(
+    cfg: dict[str, Any], back: set[tuple[str, str]]
+) -> str | None:
+    """The step at which a root goal splits into business subtasks. Explicit when
+    a step is flagged `decompose: true` (the first such, in step order); otherwise
+    the workflow entry step — so a workflow with no flag splits at intake exactly
+    as before. None only for an empty workflow."""
+    flagged = [s["id"] for s in cfg["steps"] if s.get("decompose")]
+    if flagged:
+        return flagged[0]
+    entries = _workflow_entry_steps(cfg, back)
+    return entries[0] if entries else None
+
+
+def _is_root_goal_decompose_step(
     project_root: str | None, task: dict[str, Any], step: dict[str, Any]
 ) -> bool:
     if not task.get("is_goal") or task.get("parent_task_id"):
         return False
     cfg = read_workflow_config(project_root)
     back = _workflow_graph(cfg)
-    entries = _workflow_entry_steps(cfg, back)
-    return bool(entries and step["id"] == entries[0])
+    return step["id"] == _root_goal_decompose_step_id(cfg, back)
 
 
 def _complete_goal_intake_locked(
@@ -1701,7 +1755,23 @@ def _complete_goal_intake_locked(
         goal["id"], workflow_step="", task_status="in_progress"
     )
     _settle_step_card(store, goal, step["id"], "done")
-    started = _start_goal_business_subtasks(store, project_root, goal, actor, subtasks)
+    # Where the subtasks begin depends on where the split happens:
+    #  - decompose at the entry step (default / no flag): subtasks run the whole
+    #    workflow from the entry, exactly as before.
+    #  - decompose at a later step (after goal-level design/architecture): subtasks
+    #    begin at that step's forward successors, carrying the goal's decompose
+    #    output forward, so the design steps run once on the goal, not per subtask.
+    cfg = read_workflow_config(project_root)
+    back = _workflow_graph(cfg)
+    if step["id"] in set(_workflow_entry_steps(cfg, back)):
+        started = _start_goal_business_subtasks(store, project_root, goal, actor, subtasks)
+    else:
+        started = _start_goal_business_subtasks(
+            store, project_root, goal, actor, subtasks,
+            from_step=step["id"],
+            target_steps=_forward_out(cfg, back, step["id"]),
+            upstream_result=result,
+        )
     return {
         "task_id": goal["id"],
         "step": step["id"],
@@ -2117,6 +2187,45 @@ def _start_workflow_task_locked(
     }
 
 
+def _start_workflow_task_at_locked(
+    store: Store,
+    project_root: str | None,
+    agent: str,
+    task_id: int,
+    from_step: str,
+    target_steps: list[str],
+    upstream_result: str = "",
+) -> dict[str, Any]:
+    """Start a fresh task partway through the workflow — at `target_steps` (the
+    decompose step's successors) instead of the entry. Used for decompose subtasks
+    that begin after the goal's shared design steps, inheriting the goal's
+    decompose output as their upstream."""
+    task = store.get_task(task_id)
+    if not task:
+        raise InvalidInputError(f"unknown task: {task_id}")
+    cfg = read_workflow_config(project_root)
+    back = _workflow_graph(cfg)
+    valid = {s["id"] for s in cfg["steps"]}
+    targets = [s for s in target_steps if s in valid]
+    # Seed the pre-split boundary exactly as a normal advance does before it
+    # dispatches: record `from_step -> target (done)` so the join gate sees the
+    # decompose step as a satisfied predecessor and lets each target dispatch on
+    # this otherwise-transitionless subtask. (The goal already ran everything up
+    # to and including the decompose step.)
+    for target in targets:
+        store.record_task_transition(task_id, from_step, target, agent, "done", upstream_result)
+    members = read_team_config(project_root)["members"]
+    dispatched, notices = _dispatch_targets(
+        store, project_root, task, targets, cfg, back, members, upstream_result
+    )
+    return {
+        "task_id": task_id,
+        "started": True,
+        "dispatched": dispatched,
+        "notices": notices,
+    }
+
+
 def advance_workflow_task(
     store: Store,
     project_root: str | None,
@@ -2428,9 +2537,11 @@ def _build_step_prompt(
             "不要手动删除该 worktree 或分支——集成完成后引擎会自动回收。\n"
         )
     goal_contract = ""
-    if _is_root_goal_entry_step(project_root, task, step):
+    if _is_root_goal_decompose_step(project_root, task, step):
         goal_contract = (
             "\n## Goal 拆分输出格式\n"
+            "把目标拆成业务子任务。若上游已有产品/UI/架构设计产出，"
+            "**据其模块与接口边界划分**，每个子任务对应一块不重叠的实现区域。\n"
             "你必须只输出一个 JSON 对象，不要 Markdown，不要代码块：\n"
             '{"tasks":[{"title":"子任务标题","content":"要做什么",'
             '"acceptance":"验收标准"}]}\n'
@@ -3618,7 +3729,7 @@ def run_step_worker(
                     )
                 except (InvalidInputError, OSError):
                     pass
-    goal_intake = _is_root_goal_entry_step(project_root, task, step)
+    goal_intake = _is_root_goal_decompose_step(project_root, task, step)
     if outcome == "done" and goal_intake:
         try:
             _parse_goal_subtasks(result)
@@ -3717,7 +3828,7 @@ def apply_run_outcome(
     task = store.get_task(task_id)
     if not task:
         return {"task_id": task_id, "step": step["id"], "error": f"unknown task: {task_id}"}
-    goal_intake = _is_root_goal_entry_step(project_root, task, step)
+    goal_intake = _is_root_goal_decompose_step(project_root, task, step)
     if outcome == "done" and goal_intake:
         try:
             with _WORKFLOW_ENGINE_LOCK:

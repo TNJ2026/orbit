@@ -2014,5 +2014,87 @@ class TokenStatsTests(unittest.TestCase):
             self.assertEqual(1250, goals[g]["tokens_total"])
 
 
+class DecomposeStepTests(unittest.TestCase):
+    """A `decompose`-flagged step splits a goal after goal-level design steps;
+    subtasks then begin at that step's successors, not the workflow entry."""
+
+    STEPS = [
+        {"id": "intake", "name": "Intake", "role_id": "hub", "required": True},
+        {"id": "design", "name": "Design", "role_id": "architect", "required": True},
+        {"id": "plan", "name": "Plan", "role_id": "hub", "decompose": True},
+        {"id": "implement", "name": "Implement", "role_id": "implementer", "required": True},
+        {"id": "review", "name": "Review", "role_id": "reviewer", "required": True},
+        {"id": "accept", "name": "Accept", "role_id": "hub", "required": True},
+    ]
+    EDGES = [
+        {"from": "intake", "to": "design"},
+        {"from": "design", "to": "plan"},
+        {"from": "plan", "to": "implement"},
+        {"from": "implement", "to": "review"},
+        {"from": "review", "to": "accept"},
+    ]
+    TEAM = [
+        {"agent_name": "hub-agent", "role_id": "hub", "runner_command": "cat"},
+        {"agent_name": "arch", "role_id": "architect", "runner_command": "cat"},
+        {"agent_name": "codex", "role_id": "implementer", "runner_command": "cat"},
+        {"agent_name": "rev", "role_id": "reviewer", "runner_command": "cat"},
+    ]
+
+    def test_flag_normalizes_locks_required_and_forces_isolate_off(self):
+        norm = server._normalize_workflow_step(
+            {"id": "plan", "name": "Plan", "role_id": "hub",
+             "decompose": True, "required": False, "isolate": True}, 0
+        )
+        self.assertTrue(norm["decompose"])
+        self.assertTrue(norm["required"])          # locked by the decompose flag
+        self.assertTrue(norm["required_locked"])
+        self.assertFalse(norm["isolate"])          # runs at goal level, never isolated
+
+    def test_decompose_step_id_prefers_flag_else_entry(self):
+        with TemporaryDirectory() as tmp:
+            server.write_workflow_config(self.STEPS, tmp, self.EDGES)
+            cfg = server.read_workflow_config(tmp)
+            back = server._workflow_graph(cfg)
+            self.assertEqual("plan", server._root_goal_decompose_step_id(cfg, back))
+        with TemporaryDirectory() as tmp:  # no flag -> entry step (back-compat)
+            server.write_workflow_config(LINEAR_STEPS, tmp, LINEAR_EDGES)
+            cfg = server.read_workflow_config(tmp)
+            back = server._workflow_graph(cfg)
+            self.assertEqual("intake", server._root_goal_decompose_step_id(cfg, back))
+
+    def test_subtasks_start_at_decompose_successor(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, steps=self.STEPS, edges=self.EDGES, team=self.TEAM)
+            goal_id = h.create_task(title="Big goal")
+            h.store.update_task_metadata(goal_id, is_goal=True)
+            h.start(goal_id)  # dispatches the goal's own intake
+            plan_step = next(
+                s for s in server.read_workflow_config(tmp)["steps"] if s["id"] == "plan"
+            )
+            report = server._complete_goal_intake_locked(
+                h.store, tmp, h.store.get_task(goal_id), plan_step, "hub-agent",
+                '{"tasks":[{"title":"A","content":"do A"},{"title":"B","content":"do B"}]}',
+            )
+            self.assertEqual(2, len(report["created_subtasks"]))
+            # Each subtask begins at implement (plan's successor) — not intake/design.
+            for item in report["started"]:
+                self.assertEqual(
+                    [{"step": "implement", "assignee": "codex"}], item["dispatched"]
+                )
+            # The goal itself has left the step flow.
+            self.assertEqual("", h.task(goal_id)["workflow_step"])
+
+    def test_decompose_warnings(self):
+        two = [dict(s, decompose=True) for s in self.STEPS if s["id"] in ("plan", "design")]
+        rest = [s for s in self.STEPS if s["id"] not in ("plan", "design")]
+        warns = server._workflow_graph_warnings(two + rest, self.EDGES)
+        self.assertTrue(any("multiple decompose steps" in w for w in warns), warns)
+        # decompose step with no outgoing edge
+        warns2 = server._workflow_graph_warnings(
+            self.STEPS, [e for e in self.EDGES if e["from"] != "plan"]
+        )
+        self.assertTrue(any("no outgoing step" in w for w in warns2), warns2)
+
+
 if __name__ == "__main__":
     unittest.main()

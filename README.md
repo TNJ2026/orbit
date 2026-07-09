@@ -141,6 +141,12 @@ orbit serve        # UI + Scheduler + embedded Runner, all in one process
 
 **Job lifecycle:** `pending → running` (runner claims) `→ finished` (runner done, reports outcome) `→ done` (scheduler advances to the next step).
 
+### Design-first: split after architecture (the `decompose` step)
+
+By default a goal splits into subtasks at the entry step (`intake`), and each subtask then runs the whole workflow — including its own product/UI/architecture design. For design-led work that's backwards: you want to design once at the goal level, then partition the implementation by the architecture's module boundaries.
+
+Flag a later step with `decompose: true` in `.orbit/workflow.json` to move the split there. The goal itself runs every step up to and including the decompose step (e.g. `intake → product_design → [ui_design ∥ architecture] → plan`), then that step (hub) emits the subtask JSON using the design output as context. Each subtask begins at the decompose step's successors (`implement` onward), inheriting that output — so the design steps run **once** on the goal, not per subtask, and subtasks partition cleanly by module. With no `decompose` flag, splitting stays at the entry step (unchanged). The flag is config-only (edit the JSON); a decompose step is auto-required and never isolated.
+
 ### Goal convergence check (goal_verify)
 
 Once all of a goal's business subtasks self-test and close, orbit runs the `goal_verify` command on the integrated main tree to accept the whole result objectively.
