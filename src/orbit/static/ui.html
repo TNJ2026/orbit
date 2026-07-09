@@ -2233,10 +2233,13 @@
         const cy = (p1.ny || 0) < 0
           ? Math.min(p1.y, p2.y) - lift
           : Math.max(p1.y, p2.y) + lift;
+        // Offset each control point horizontally by the vertical lift so the arc
+        // leaves the source and meets the target at ~45° (the loop-back arrowhead
+        // then follows the curve diagonally instead of pointing straight in).
         return [
           "M", Math.round(p1.x), Math.round(p1.y),
-          "C", Math.round(p1.x), Math.round(cy),
-          Math.round(p2.x), Math.round(cy),
+          "C", Math.round(p1.x - lift), Math.round(cy),
+          Math.round(p2.x + lift), Math.round(cy),
           Math.round(p2.x), Math.round(p2.y)
         ].join(" ");
       }
