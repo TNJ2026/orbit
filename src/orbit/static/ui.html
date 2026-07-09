@@ -2389,6 +2389,18 @@
       // a distinct dip depth (channel) and a distinct arrowhead height, so they
       // spread apart instead of overlapping — unlike a global index, this never
       // collides for returns sharing a target and holds beyond three of them.
+      const edgeSet = new Set(edges.map(e => e.from + " " + e.to));
+      // No other node sits horizontally between a and b (in the same row band).
+      const between = (a, b, rectA) => {
+        const lo = Math.min(a.x, b.x), hi = Math.max(a.x, b.x);
+        const yMid = a.y + rectA.h / 2;
+        return steps.some(s => {
+          if (s.id === a.id || s.id === b.id) return false;
+          const r = rects[s.id]; if (!r) return false;
+          const cx = s.x + r.w / 2, cy = s.y + r.h / 2;
+          return cx > lo + 4 && cx < hi - 4 && Math.abs(cy - yMid) < 80;
+        });
+      };
       const returnCh = {};
       paths += edges.map((edge, i) => {
         const a = byId[edge.from], b = byId[edge.to];
@@ -2397,6 +2409,19 @@
         const rectA = rects[edge.from];
         const rectB = rects[edge.to];
         if (!rectA || !rectB) return "";
+
+        // Two adjacent same-row steps that point at each other collapse into one
+        // double-headed arrow: draw it on the left→right half, skip the reverse.
+        const sameRow = Math.abs((a.y + rectA.h / 2) - (b.y + rectB.h / 2)) < 80;
+        if (sameRow
+            && edgeSet.has(edge.to + " " + edge.from)
+            && !between(a, b, rectA)) {
+          if (a.x >= b.x) return "";  // reverse half — the forward half draws the pair
+          const p1 = wfEdgeAnchor(a, rectA, "right");
+          const p2 = wfEdgeAnchor(b, rectB, "left");
+          const d = wfEdgePath(p1, p2, false);
+          return `<path class="wf-edge" data-edge="${i}" d="${d}" marker-start="url(#wfArrow)" marker-end="url(#wfArrow)"><title>${escapeHtml(t("wf.clickDelete"))}</title></path>`;
+        }
 
         const isReturn = (b.x + rectB.w / 2) < (a.x + rectA.w / 2);
         let channel = 0;
