@@ -627,6 +627,43 @@ class GoalVerifyDetectionTests(unittest.TestCase):
             store.close()
 
 
+class ProcessControlPortabilityTests(unittest.TestCase):
+    """Cross-platform process spawning/killing (POSIX process groups vs Windows
+    taskkill). Most assertions are platform-dispatch checks so they run anywhere."""
+
+    def test_detached_kwargs_match_platform(self):
+        kw = server._detached_process_kwargs()
+        if os.name == "nt":
+            self.assertIn("creationflags", kw)
+        else:
+            self.assertEqual({"start_new_session": True}, kw)
+
+    def test_windows_ppid_backend_is_noop_off_windows(self):
+        if os.name != "nt":
+            self.assertIsNone(server._snapshot_ppids_windows())
+
+    def test_terminate_missing_pid_is_false(self):
+        self.assertFalse(server._terminate_pid_tree(0))
+
+    def test_terminate_pid_tree_kills_a_detached_process(self):
+        if os.name == "nt":
+            self.skipTest("uses a POSIX `sleep`; the kill path is taskkill on Windows")
+        import time
+
+        proc = subprocess.Popen(["sleep", "30"], **server._detached_process_kwargs())
+        try:
+            self.assertTrue(server._terminate_pid_tree(proc.pid))
+            for _ in range(50):  # up to ~2.5s for SIGTERM to land
+                if proc.poll() is not None:
+                    break
+                time.sleep(0.05)
+            self.assertIsNotNone(proc.poll(), "process survived terminate")
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+
+
 class DescendantPidSnapshotTests(unittest.TestCase):
     def test_snapshot_maps_self_to_parent(self):
         import os

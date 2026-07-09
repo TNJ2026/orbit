@@ -29,7 +29,8 @@
 
 需要 Python ≥ 3.10 和 [uv](https://docs.astral.sh/uv/)。`git` 用于每任务
 worktree 隔离（项目还不是 git 仓库时 orbit 会自动创建）；runner 调用各 agent
-CLI（Claude Code、Codex 等），按需自行安装。
+CLI（Claude Code、Codex 等），按需自行安装。原生支持 macOS、Linux、Windows
+（进程控制按系统区分 —— POSIX 进程组、Windows `taskkill`）。
 
 **全局命令（推荐）** —— 装一次，任何电脑、任何项目里直接 `orbit`：
 

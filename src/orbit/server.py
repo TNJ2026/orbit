@@ -2061,13 +2061,7 @@ def force_close_goal(
         raise InvalidInputError(f"unknown task: {task_id}")
     with _WORKFLOW_ENGINE_LOCK:
         pids = store.running_run_pids_in_tree(task_id)
-        killed = 0
-        for pid in pids:
-            try:
-                os.killpg(os.getpgid(pid), signal.SIGTERM)
-                killed += 1
-            except (ProcessLookupError, PermissionError, OSError):
-                pass  # already gone / not our group
+        killed = sum(1 for pid in pids if _terminate_pid_tree(pid))
         closed = store.close_task_tree(task_id)
     return {
         "task_id": task_id,
@@ -2508,7 +2502,102 @@ def _mark_task_running(store: Store, task_id: int | None) -> None:
         current = task.get("parent_task_id")
 
 
+# --- cross-platform process control ----------------------------------------
+# Runner CLIs are spawned in their own process group (POSIX session / Windows
+# process group) so the engine can terminate the whole tree — shell + CLI + any
+# helpers — on timeout or force-end, without signalling orbit itself. The kill
+# path differs per OS: POSIX signals the process group (plus escaped setsid'd
+# children caught via a ppid snapshot); Windows shells out to `taskkill /T`,
+# which walks and ends the tree natively.
+_IS_WINDOWS = os.name == "nt"
+
+
+def _detached_process_kwargs() -> dict[str, Any]:
+    """Popen kwargs that isolate the child in its own process group."""
+    if _IS_WINDOWS:
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    return {"start_new_session": True}
+
+
+def _taskkill_tree(pid: int, force: bool) -> bool:
+    """Windows: end a process and its whole child tree via taskkill. Returns True
+    when the command was dispatched (not whether every process was already gone)."""
+    if not pid:
+        return False
+    args = ["taskkill", "/T", "/PID", str(pid)]
+    if force:
+        args.insert(1, "/F")
+    try:
+        subprocess.run(args, capture_output=True, timeout=10, check=False)
+        return True
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+        return False
+
+
+def _terminate_pid_tree(pid: int) -> bool:
+    """Best-effort terminate a process and its tree, cross-platform. POSIX sends
+    SIGTERM to the process group; Windows uses `taskkill /T` (force, since a
+    detached CLI has no graceful group signal). Returns True if dispatched."""
+    if not pid:
+        return False
+    if _IS_WINDOWS:
+        return _taskkill_tree(pid, force=True)
+    try:
+        os.killpg(os.getpgid(pid), signal.SIGTERM)
+        return True
+    except (ProcessLookupError, PermissionError, OSError):
+        return False
+
+
+def _snapshot_ppids_windows() -> dict[int, int] | None:
+    if not _IS_WINDOWS:
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except (ImportError, ValueError):
+        return None
+
+    TH32CS_SNAPPROCESS = 0x00000002
+    INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+    class PROCESSENTRY32(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+            ("th32ModuleID", wintypes.DWORD),
+            ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD),
+            ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", wintypes.DWORD),
+            ("szExeFile", ctypes.c_char * 260),
+        ]
+
+    try:
+        kernel32 = ctypes.windll.kernel32
+    except (AttributeError, OSError):
+        return None
+    snap = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    if not snap or snap == INVALID_HANDLE_VALUE:
+        return None
+    mapping: dict[int, int] = {}
+    try:
+        entry = PROCESSENTRY32()
+        entry.dwSize = ctypes.sizeof(PROCESSENTRY32)
+        ok = kernel32.Process32First(snap, ctypes.byref(entry))
+        while ok:
+            mapping[int(entry.th32ProcessID)] = int(entry.th32ParentProcessID)
+            ok = kernel32.Process32Next(snap, ctypes.byref(entry))
+    finally:
+        kernel32.CloseHandle(snap)
+    return mapping
+
+
 def _snapshot_ppids_ps() -> dict[int, int] | None:
+    if _IS_WINDOWS:
+        return None
     try:
         result = subprocess.run(
             ["ps", "-Ao", "pid=,ppid="],
@@ -2627,7 +2716,12 @@ def _snapshot_ppids_procfs() -> dict[int, int] | None:
 
 
 def _snapshot_ppids() -> dict[int, int]:
-    for getter in (_snapshot_ppids_ps, _snapshot_ppids_libproc, _snapshot_ppids_procfs):
+    for getter in (
+        _snapshot_ppids_windows,
+        _snapshot_ppids_ps,
+        _snapshot_ppids_libproc,
+        _snapshot_ppids_procfs,
+    ):
         mapping = getter()
         if mapping is None:
             continue
@@ -2655,13 +2749,21 @@ def _descendant_pids(root_pid: int) -> list[int]:
 
 
 def _kill_process_group(proc: "subprocess.Popen[bytes]") -> None:
-    """SIGKILL the runner's whole process tree (shell + CLI + helpers), falling
-    back to the single process if the group is unavailable. Descendants are
-    snapshotted before the group kill and signalled individually so a setsid'd
-    child that escaped the process group is still reaped."""
-    # Snapshot before killing: once the parent dies its children reparent to
-    # init and the tree link is lost, so capture escapees while it still holds.
-    descendants = _descendant_pids(proc.pid) if proc.pid else []
+    """Force-kill the runner's whole process tree (shell + CLI + helpers). On
+    Windows, `taskkill /F /T` walks and ends the tree natively. On POSIX, SIGKILL
+    the process group, then reap any setsid'd child that escaped it — snapshotted
+    before the kill, since once the parent dies its children reparent to init and
+    the tree link is lost."""
+    if not proc.pid:
+        return
+    if _IS_WINDOWS:
+        _taskkill_tree(proc.pid, force=True)
+        try:
+            proc.kill()  # backstop if taskkill is unavailable
+        except OSError:
+            pass
+        return
+    descendants = _descendant_pids(proc.pid)
     try:
         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
     except (ProcessLookupError, PermissionError, OSError):
@@ -2753,7 +2855,7 @@ def _hub_inspect_batch(
         proc = subprocess.Popen(
             command, shell=True,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            cwd=str(_project_root(project_root)), start_new_session=True,
+            cwd=str(_project_root(project_root)), **_detached_process_kwargs(),
         )
         try:
             out, _ = proc.communicate(prompt.encode("utf-8"), timeout=HUB_INSPECT_TIMEOUT_SECONDS)
@@ -3393,7 +3495,8 @@ def run_step_worker(
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 cwd=str(exec_dir),
-                start_new_session=True,  # own process group, so force-end can kill the whole CLI tree
+                # own process group, so force-end can kill the whole CLI tree
+                **_detached_process_kwargs(),
             )
             if run:
                 try:

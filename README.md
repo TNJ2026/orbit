@@ -30,7 +30,8 @@ goal/task ──▶ orbit (workflow engine + scheduler) ──▶ runner ──�
 Requires Python ≥ 3.10 and [uv](https://docs.astral.sh/uv/). `git` is used for
 per-task worktree isolation (orbit auto-creates a repo if the project isn't one
 yet); the runners invoke agent CLIs (Claude Code, Codex, …), so install those you
-plan to use.
+plan to use. Runs natively on macOS, Linux, and Windows (process control is
+handled per-OS — POSIX process groups, Windows `taskkill`).
 
 **Global CLI (recommended)** — install once, then run `orbit` in any project on
 any machine:
