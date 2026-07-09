@@ -4531,7 +4531,7 @@ def _packaged_role_templates_dir() -> Path:
 def _agents_dir(project_root: str | None) -> Path:
     # Prefer the project's own roles, then the server cwd's agents/, and as
     # a last resort the templates bundled in the package — so a fresh project
-    # that never ran `orbit init` still gets the default role set.
+    # that never ran `orbit config` still gets the default role set.
     root = _project_root(project_root) / "agents"
     if root.is_dir():
         return root

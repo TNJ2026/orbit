@@ -1,4 +1,4 @@
-"""CLI entry point: orbit serve|runner|init."""
+"""CLI entry point: orbit serve|up|runner|config."""
 
 from __future__ import annotations
 
@@ -218,7 +218,7 @@ def main() -> None:
         parents=[serve_common],
         help="Zero-setup start: gitignore the state dir, then serve with the "
         "packaged role/workflow defaults — no files copied into the repo. "
-        "Run `orbit init` instead to customize and commit them.",
+        "Run `orbit config` instead to customize and commit them.",
     )
 
     runner = sub.add_parser(
@@ -270,17 +270,19 @@ def main() -> None:
         help="Claim at most one job and exit when no job is available.",
     )
 
-    init = sub.add_parser(
-        "init",
-        help="Bootstrap the current project: role prompts, default workflow/team, "
-        "gitignore, CLAUDE.md section",
+    config_cmd = sub.add_parser(
+        "config",
+        aliases=["init"],  # back-compat: `orbit init` still works
+        help="Generate editable, committable project config (role prompts, "
+        "workflow/team, CLAUDE.md section). Optional — up/serve work without it; "
+        "run this only to customize and share config with the team.",
     )
-    init.add_argument("--host", default="127.0.0.1", help="Host for the printed serve hint (default: 127.0.0.1)")
-    init.add_argument("--port", type=int, default=8848, help="Port for the printed serve hint (default: 8848)")
+    config_cmd.add_argument("--host", default="127.0.0.1", help="Host for the printed serve hint (default: 127.0.0.1)")
+    config_cmd.add_argument("--port", type=int, default=8848, help="Port for the printed serve hint (default: 8848)")
 
     args = parser.parse_args()
 
-    if args.command == "init":
+    if args.command in ("config", "init"):
         project_root = resolve_project_root()
         summary = init_project(project_root)
         for path in summary["created"]:
@@ -304,7 +306,7 @@ def main() -> None:
             print(f"gitignore: {state_name}/ already ignored", flush=True)
         print(
             "orbit up: serving with packaged role/workflow defaults — no files "
-            "copied into the repo. Run `orbit init` to customize and commit them.",
+            "copied into the repo. Run `orbit config` to customize and commit them.",
             flush=True,
         )
         _serve(args)

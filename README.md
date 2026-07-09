@@ -67,9 +67,9 @@ Three ways to bring it up — pick by need:
 
 | Command | Writes files into the repo? | Use when |
 |---|---|---|
-| `orbit up` | Only appends to `.gitignore` (ignores `.orbit/`) | Zero-config use from another repo; ships with packaged role/workflow defaults |
-| `orbit serve` | No | Already `init`-ed, or happy with the defaults |
-| `orbit init` + `orbit serve` | Writes role / workflow / config files | Customize role prompts & workflow and commit them for the team |
+| `orbit up` | Only appends to `.gitignore` (ignores `.orbit/`) | **Default** — zero-config start from any repo; prepares + serves with packaged role/workflow defaults |
+| `orbit serve` | No | Already prepared, or happy with the defaults — just run it |
+| `orbit config` (then `orbit serve`) | Writes role / workflow / config files | Optional — only to customize role prompts & workflow and commit them for the team |
 
 ### Zero-config start in another repo
 
@@ -82,7 +82,7 @@ uvx --from git+https://github.com/TNJ2026/orbit.git orbit up    # not installed?
 
 ### Customize inside a repo
 
-When you need to edit role prompts, customize the workflow, and commit them for the team, use `orbit init`: it writes `agents/*.md`, `.orbit/workflow.json`, `team.json`, and a `CLAUDE.md` section into the repo. These are **intentionally not gitignored** so they can be committed and shared.
+`orbit up` / `orbit serve` need no setup. Only when you want to edit role prompts, customize the workflow, and commit them for the team, run `orbit config` (formerly `orbit init`, still accepted as an alias): it writes `agents/*.md`, `.orbit/workflow.json`, `team.json`, and a `CLAUDE.md` section into the repo. These are **intentionally not gitignored** so they can be committed and shared.
 
 ### Database & operational model
 
