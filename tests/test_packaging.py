@@ -238,10 +238,13 @@ class PackagingTests(unittest.TestCase):
 
         self.assertTrue(server._UI_HTML)
 
-    def test_gitignore_keeps_team_config_trackable(self):
-        gitignore = Path(".gitignore").read_text(encoding="utf-8")
-        self.assertIn(".orbit/tasks/", gitignore)
-        self.assertNotIn(".orbit/\n", gitignore)
+    def test_gitignore_excludes_orbit_state_dirs(self):
+        # Orbit does not commit its own state dir: the whole .orbit/ and legacy
+        # .dev_loop/ are ignored so a clone falls back to code defaults instead
+        # of inheriting a checked-in (and potentially stale) config snapshot.
+        lines = Path(".gitignore").read_text(encoding="utf-8").splitlines()
+        self.assertIn(".orbit/", lines)
+        self.assertIn(".dev_loop/", lines)
 
     def test_agent_tool_detection_shape(self):
         import orbit.server as server
