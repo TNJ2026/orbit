@@ -1,4 +1,42 @@
 {
+  "statuses": [
+    {
+      "value": "created",
+      "label": "Todo"
+    },
+    {
+      "value": "assigned",
+      "label": "Assigned"
+    },
+    {
+      "value": "in_progress",
+      "label": "In Progress"
+    },
+    {
+      "value": "testing",
+      "label": "In Testing"
+    },
+    {
+      "value": "reviewing",
+      "label": "Under Review"
+    },
+    {
+      "value": "accepted",
+      "label": "Accepted"
+    },
+    {
+      "value": "blocked",
+      "label": "Blocked"
+    },
+    {
+      "value": "stalled",
+      "label": "Stalled"
+    },
+    {
+      "value": "closed",
+      "label": "Closed"
+    }
+  ],
   "steps": [
     {
       "id": "intake",
@@ -6,8 +44,12 @@
       "role_id": "hub",
       "task_status": "created",
       "required": true,
+      "timeout_minutes": 0,
+      "isolate": false,
+      "integrate": false,
+      "verify": "",
       "x": 40.0,
-      "y": 40.0
+      "y": 160.0
     },
     {
       "id": "product_design",
@@ -15,17 +57,25 @@
       "role_id": "product_designer",
       "task_status": "assigned",
       "required": true,
-      "x": 404.0,
-      "y": 19.0
+      "timeout_minutes": 0,
+      "isolate": false,
+      "integrate": false,
+      "verify": "",
+      "x": 360.0,
+      "y": 160.0
     },
     {
       "id": "ui_design",
       "name": "UI Design",
       "role_id": "ui_designer",
       "task_status": "assigned",
-      "required": true,
-      "x": 744.0,
-      "y": 50.0
+      "required": false,
+      "timeout_minutes": 0,
+      "isolate": false,
+      "integrate": false,
+      "verify": "",
+      "x": 700.0,
+      "y": 40.0
     },
     {
       "id": "architecture",
@@ -33,8 +83,12 @@
       "role_id": "architect",
       "task_status": "assigned",
       "required": true,
-      "x": 840.0,
-      "y": 416.0
+      "timeout_minutes": 0,
+      "isolate": false,
+      "integrate": false,
+      "verify": "",
+      "x": 700.0,
+      "y": 500.0
     },
     {
       "id": "implement",
@@ -42,26 +96,12 @@
       "role_id": "implementer",
       "task_status": "in_progress",
       "required": true,
-      "x": 1173.0,
-      "y": 291.0
-    },
-    {
-      "id": "review",
-      "name": "Review",
-      "role_id": "reviewer",
-      "task_status": "reviewing",
-      "required": true,
-      "x": 1502.0,
-      "y": 46.0
-    },
-    {
-      "id": "accept",
-      "name": "Accept",
-      "role_id": "hub",
-      "task_status": "accepted",
-      "required": true,
-      "x": 2119.0,
-      "y": 355.0
+      "timeout_minutes": 0,
+      "isolate": true,
+      "integrate": false,
+      "verify": "",
+      "x": 1060.0,
+      "y": 160.0
     },
     {
       "id": "test",
@@ -69,8 +109,51 @@
       "role_id": "tester",
       "task_status": "testing",
       "required": true,
-      "x": 1808.0,
-      "y": 126.0
+      "timeout_minutes": 0,
+      "isolate": true,
+      "integrate": false,
+      "verify": "",
+      "x": 1400.0,
+      "y": 160.0
+    },
+    {
+      "id": "review",
+      "name": "Review",
+      "role_id": "reviewer",
+      "task_status": "reviewing",
+      "required": true,
+      "timeout_minutes": 0,
+      "isolate": true,
+      "integrate": false,
+      "verify": "",
+      "x": 1740.0,
+      "y": 160.0
+    },
+    {
+      "id": "integrate",
+      "name": "Integrate",
+      "role_id": "hub",
+      "task_status": "in_progress",
+      "required": true,
+      "timeout_minutes": 0,
+      "isolate": false,
+      "integrate": true,
+      "verify": "",
+      "x": 2080.0,
+      "y": 160.0
+    },
+    {
+      "id": "accept",
+      "name": "Accept",
+      "role_id": "hub",
+      "task_status": "accepted",
+      "required": true,
+      "timeout_minutes": 0,
+      "isolate": false,
+      "integrate": false,
+      "verify": "",
+      "x": 2420.0,
+      "y": 160.0
     }
   ],
   "edges": [
@@ -95,21 +178,34 @@
       "to": "implement"
     },
     {
-      "from": "review",
+      "from": "implement",
       "to": "test"
     },
     {
-      "from": "implement",
+      "from": "test",
       "to": "review"
     },
     {
       "from": "test",
+      "to": "implement"
+    },
+    {
+      "from": "review",
+      "to": "integrate"
+    },
+    {
+      "from": "integrate",
       "to": "accept"
+    },
+    {
+      "from": "integrate",
+      "to": "implement"
     },
     {
       "from": "review",
       "to": "implement"
     }
   ],
-  "goal_verify": ".venv/bin/python -m unittest discover -s tests"
+  "goal_verify": ".venv/bin/python -m unittest discover -s tests",
+  "goal_token_budget": 0
 }
