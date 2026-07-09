@@ -19,7 +19,8 @@
 ## 目录
 
 - [安装](#安装)
-- [启动](#启动)
+- [快速开始](#快速开始)
+- [高级用法](#高级用法)
 - [工作流引擎](#工作流引擎)
 - [本地 Web UI](#本地-web-ui)
 - [任务协作模型](#任务协作模型)
@@ -51,36 +52,55 @@ uv tool install --editable ./orbit   # 全局 `orbit`，改代码即时生效
 `uv run orbit …` 和 `uv tool` 首次使用时会自动建环境，**无需单独 `uv sync`**。
 不用 uv 的话：`pip install -e .`。
 
-## 启动
+## 快速开始
+
+任何仓库，零配置：
 
 ```bash
-cd <你的项目>                       # orbit 编排当前目录所在的项目
-orbit serve                        # 默认 127.0.0.1:8848，db 按当前项目目录分开存储
-orbit serve --port 9000 --db /tmp/test.db
+cd <你的项目>          # orbit 编排当前目录所在的项目
+orbit up               # gitignore .orbit/ + agents/，再用包内默认值直接 serve
 ```
 
-（从本地 checkout 且未全局安装时，命令前加 `uv run`。）
+然后打开 `http://127.0.0.1:8848/ui`：
 
-三种起法，按需求选：
+1. **Team** 页 —— 给每个核心角色(hub / implementer / reviewer)指派一个 agent CLI(Claude Code、Codex 等)。`up` 自带默认角色提示词和默认工作流，但 **team 是空的**,所以起 goal 前需先做这一步(一次性)。
+2. 给 **hub** 一个 goal —— 引擎把它拆成子任务并驱动它们走完工作流。
 
-| 命令 | 会往仓库写文件吗 | 适用 |
-|---|---|---|
-| `orbit up` | 只补 `.gitignore`（忽略 `.orbit/` 和 `agents/`） | **默认** —— 任何仓库零配置起，准备+serve 一体，用包内角色/工作流默认值 |
-| `orbit serve` | 否 | 已准备好、或直接用默认值，单独启动 |
-| `orbit config`（再 `orbit serve`） | 写角色/工作流/配置文件 | 可选 —— 仅当要改角色提示词、自定义工作流并 commit 给团队共享 |
+`up` 不落任何需要提交的文件(只往 `.gitignore` 补 `.orbit/` 和 `agents/`;UI 里改 role 仍会按需 materialize 出 `agents/`,但在 `up` 下不进 git),且支持全部 `serve` 参数(`--host` / `--port` / `--db` / `--no-runner` / `--runner-concurrency`)。没全局装? `uvx --from git+https://github.com/TNJ2026/orbit.git orbit up` 临时拉起。已准备好、或直接用默认值? 直接 `orbit serve`。(从本地 checkout 且未全局安装时,命令前加 `uv run`。)
 
-### 在别的仓库里零配置起
+## 高级用法
 
-不想往别的仓库里复制角色/配置文件时，用 `orbit up`：它先把状态目录（`.orbit/`）和 `agents/` 写进该仓库的 `.gitignore`，再用**包内自带的角色和工作流默认值**直接 serve——不落任何需要提交的文件。（在 UI 里改 role 提示词仍会按需 materialize 出 `agents/`，但在 `up` 下它不进 git。）`serve` 支持的参数（`--host` / `--port` / `--db` / `--no-runner` / `--runner-concurrency`）它都支持。
+### 定制并提交配置 —— `orbit config`
+
+`orbit up` / `orbit serve` 无需任何准备。只有当你要改角色提示词、自定义工作流并提交给团队共享时,才用 `orbit config`(原 `orbit init`,别名仍可用):它会把 `agents/*.md`、`.orbit/workflow.json`、`team.json`、`CLAUDE.md` 段落写进仓库 —— 这些**故意不 gitignore**,供 commit 共享。它还会把核心角色铺到你已装的 agent CLI 上生成一个默认 team,所以之后往往能直接起 goal。
+
+### 多进程：解耦 serve + 独立 runner
+
+`serve` 默认内嵌一个 runner,所以 **serve 重启会中断在途 step**(租约到期后自动重跑)。要重启安全 / 多机 / 水平扩展,把调度和执行拆开:
 
 ```bash
-orbit up                                   # 已装 orbit
-uvx --from git+https://github.com/TNJ2026/orbit.git orbit up    # 没装也行，uvx 临时拉起
+# 终端 1：只跑 UI / 调度，不内嵌 worker
+orbit serve --no-runner
+
+# 终端 2+：独立 runner（重启 serve 不影响它们）
+orbit runner --name runner-local
 ```
 
-### 在仓库内定制
+此模式下 run 活在独立进程里,serve 重启不杀在途任务 —— 调度暂停一下,runner 照跑。runner 是无状态 worker,可按 agent / 角色拆分并扩:
 
-`orbit up` / `orbit serve` 无需任何准备。只有当你要改角色提示词、自定义工作流并提交给团队共享时，才用 `orbit config`（原 `orbit init`，别名仍可用）：它会把 `agents/*.md`、`.orbit/workflow.json`、`team.json`、`CLAUDE.md` 段落写进仓库，这些是**故意不 gitignore** 的，供 commit 共享。
+```bash
+orbit runner --roles implementer --max-concurrency 2   # 2 个并行实现 worker
+orbit runner --roles reviewer --agent antigravity      # 只跑 antigravity 的评审
+orbit runner --project /path/to/repo --name box-a      # 显式指定项目
+```
+
+- `--agent NAME`（可重复）：只领分给该 agent 的 job。
+- `--roles a,b`：只领这些工作流角色的 job（按 workflow 配置把角色解析成 step）。
+- `--max-concurrency N`：并行跑 N 个 job，默认 5（各 worker 独立租约名 `<name>-0/-1/…`）。
+- `--project PATH`：显式项目根，替代 cwd 解析。
+- `--once`：领到一个跑完就退出（适合脚本 / CI）。
+
+领取是 DB 层原子操作(`UPDATE ... WHERE status=... AND lease<=now`),多 runner 并存不会重复领同一个 job;某 runner 挂了,租约到期后 job 被别的 runner 重新领走。
 
 ### 数据库与运维模型
 
@@ -115,39 +135,9 @@ orbit serve        # UI + 调度 + 内嵌 Runner，全在一个进程
 
 `serve` 默认**内嵌一个 in-process runner**（名字 `serve-embedded`，并发 5），所以启动一个 goal 后不需要再手动起 runner——建 job → 内嵌 runner 执行 → scheduler 推进，全自动。UI 的 **Jobs** 标签页能看到队列状态(pending / running / finished / done)。
 
-> ⚠️ 内嵌 runner 与 serve 同生命周期：**serve 重启会中断在途 step**（租约到期后该 step 自动重跑）。要重启安全 / 多机 / 水平扩展，用下面的解耦模式。
+> ⚠️ 内嵌 runner 与 serve 同生命周期：**serve 重启会中断在途 step**（租约到期后该 step 自动重跑）。要重启安全 / 多机 / 水平扩展，把它们拆开 —— 见[高级用法 → 多进程](#多进程解耦-serve--独立-runner)。
 
 **job 生命周期：** `pending → running`（runner 领取）`→ finished`（runner 执行完、报告 outcome）`→ done`（scheduler 推进下一步）。
-
-### 解耦：serve 不带 runner + 独立 runner
-
-```bash
-# 终端 1：只跑 UI / 调度，不内嵌 worker
-orbit serve --no-runner
-
-# 终端 2+：独立 runner（重启 serve 不影响它们；可多实例）
-orbit runner --name runner-local
-```
-
-此模式下 run 活在独立 runner 进程里，**serve 重启不杀在途任务**——调度暂停一下，runner 照跑。
-
-### 多实例 runner
-
-runner 是无状态 worker，可以按 agent / 角色拆分、并行：
-
-```bash
-orbit runner --roles implementer --max-concurrency 2   # 2 个并行实现 worker
-orbit runner --roles reviewer --agent antigravity      # 只跑 antigravity 的评审
-orbit runner --project /path/to/repo --name box-a       # 显式指定项目
-```
-
-- `--agent NAME`（可重复）：只领分给该 agent 的 job。
-- `--roles a,b`：只领这些工作流角色的 job（按 workflow 配置把角色解析成 step）。
-- `--max-concurrency N`：并行跑 N 个 job，默认 5（各 worker 独立租约名 `<name>-0/-1/…`）。
-- `--project PATH`：显式项目根，替代 cwd 解析。
-- `--once`：领到一个跑完就退出（适合脚本 / CI）。
-
-领取是 DB 层原子操作(`UPDATE ... WHERE status=... AND lease<=now`),多 runner 并存不会重复领同一个 job;某 runner 挂了,租约到期后 job 被别的 runner 重新领走。
 
 ### 目标收敛验证（goal_verify）最佳实践
 

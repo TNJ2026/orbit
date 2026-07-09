@@ -19,7 +19,8 @@ goal/task ──▶ orbit (workflow engine + scheduler) ──▶ runner ──�
 ## Table of Contents
 
 - [Install](#install)
-- [Start](#start)
+- [Quick Start](#quick-start)
+- [Advanced Usage](#advanced-usage)
 - [Workflow Engine](#workflow-engine)
 - [Local Web UI](#local-web-ui)
 - [Task Collaboration Model](#task-collaboration-model)
@@ -53,36 +54,55 @@ uv tool install --editable ./orbit   # global `orbit` that reflects your edits l
 `uv run orbit …` and `uv tool` create the environment on first use, so a separate
 `uv sync` is not required. Without uv: `pip install -e .`.
 
-## Start
+## Quick Start
+
+Zero config, from any repo:
 
 ```bash
-cd <your-project>                  # orbit orchestrates the project in the current directory
-orbit serve                        # default 127.0.0.1:8848; db split per current project directory
-orbit serve --port 9000 --db /tmp/test.db
+cd <your-project>          # orbit orchestrates the project in the current directory
+orbit up                   # gitignore .orbit/ + agents/, then serve with packaged defaults
 ```
 
-(From a local checkout without a global install, prefix any command with `uv run`.)
+Then open `http://127.0.0.1:8848/ui` and:
 
-Three ways to bring it up — pick by need:
+1. **Team** page — assign an agent CLI (Claude Code, Codex, …) to each core role (hub / implementer / reviewer). `up` ships default role prompts and a default workflow but an **empty team**, so this one-time step is required before a goal can run.
+2. Give **hub** a goal — the engine splits it into subtasks and drives them through the workflow.
 
-| Command | Writes files into the repo? | Use when |
-|---|---|---|
-| `orbit up` | Only appends to `.gitignore` (ignores `.orbit/` and `agents/`) | **Default** — zero-config start from any repo; prepares + serves with packaged role/workflow defaults |
-| `orbit serve` | No | Already prepared, or happy with the defaults — just run it |
-| `orbit config` (then `orbit serve`) | Writes role / workflow / config files | Optional — only to customize role prompts & workflow and commit them for the team |
+`up` copies nothing you need to commit (it only appends `.orbit/` and `agents/` to `.gitignore`; a UI role edit still materializes `agents/` on demand but stays out of git) and accepts every `serve` flag (`--host` / `--port` / `--db` / `--no-runner` / `--runner-concurrency`). Not installed globally? `uvx --from git+https://github.com/TNJ2026/orbit.git orbit up` pulls it in on the fly. Already prepared, or happy with the defaults? Just `orbit serve`. (From a local checkout without a global install, prefix any command with `uv run`.)
 
-### Zero-config start in another repo
+## Advanced Usage
 
-When you don't want to copy role/config files into another repo, use `orbit up`: it first appends the state dir (`.orbit/`) and `agents/` to that repo's `.gitignore`, then serves using the **packaged role and workflow defaults** — nothing that needs to be committed lands in the repo. (Editing a role prompt in the UI still materializes `agents/` on demand, but it stays out of git under `up`.) It accepts every `serve` flag (`--host` / `--port` / `--db` / `--no-runner` / `--runner-concurrency`).
+### Customize & commit config — `orbit config`
+
+`orbit up` / `orbit serve` need no setup. Run `orbit config` (formerly `orbit init`, still accepted as an alias) only when you want to edit role prompts, customize the workflow, and commit them for the team: it writes `agents/*.md`, `.orbit/workflow.json`, `team.json`, and a `CLAUDE.md` section into the repo — **intentionally not gitignored** so they can be committed and shared. It also seeds a default team by spreading the core roles over your installed agent CLIs, so a goal can often run right after.
+
+### Multi-process: decoupled serve + standalone runners
+
+By default `serve` embeds one runner, so **restarting serve interrupts in-flight steps** (they auto-rerun once the lease expires). For restart safety / multi-host / horizontal scaling, split scheduling from execution:
 
 ```bash
-orbit up                                                        # orbit already installed
-uvx --from git+https://github.com/TNJ2026/orbit.git orbit up    # not installed? uvx pulls it in on the fly
+# Terminal 1: UI / scheduling only, no embedded worker
+orbit serve --no-runner
+
+# Terminal 2+: standalone runners (restarting serve doesn't touch them)
+orbit runner --name runner-local
 ```
 
-### Customize inside a repo
+Runs then live in separate processes, so restarting serve doesn't kill in-flight tasks — scheduling pauses briefly, runners keep going. A runner is a stateless worker; split it by agent / role and scale it:
 
-`orbit up` / `orbit serve` need no setup. Only when you want to edit role prompts, customize the workflow, and commit them for the team, run `orbit config` (formerly `orbit init`, still accepted as an alias): it writes `agents/*.md`, `.orbit/workflow.json`, `team.json`, and a `CLAUDE.md` section into the repo. These are **intentionally not gitignored** so they can be committed and shared.
+```bash
+orbit runner --roles implementer --max-concurrency 2   # 2 parallel implementation workers
+orbit runner --roles reviewer --agent antigravity      # only antigravity's reviews
+orbit runner --project /path/to/repo --name box-a      # explicit project
+```
+
+- `--agent NAME` (repeatable): only claim jobs assigned to this agent.
+- `--roles a,b`: only claim jobs for these workflow roles (roles resolve to steps per the workflow config).
+- `--max-concurrency N`: run N jobs in parallel, default 5 (each worker leases as `<name>-0/-1/…`).
+- `--project PATH`: explicit project root instead of cwd resolution.
+- `--once`: claim one job, run it, and exit (good for scripts / CI).
+
+Claiming is an atomic DB-level operation (`UPDATE ... WHERE status=... AND lease<=now`), so concurrent runners never claim the same job twice; if a runner dies, its job is re-claimed once the lease expires.
 
 ### Database & operational model
 
@@ -117,39 +137,9 @@ orbit serve        # UI + Scheduler + embedded Runner, all in one process
 
 `serve` **embeds one in-process runner** by default (name `serve-embedded`, concurrency 5), so after kicking off a goal you don't need to start a runner manually — enqueue job → embedded runner executes → scheduler advances, fully automatic. The **Jobs** tab in the UI shows queue state (pending / running / finished / done).
 
-> ⚠️ The embedded runner shares serve's lifecycle: **restarting serve interrupts in-flight steps** (the step auto-reruns once its lease expires). For restart safety / multi-host / horizontal scaling, use the decoupled mode below.
+> ⚠️ The embedded runner shares serve's lifecycle: **restarting serve interrupts in-flight steps** (the step auto-reruns once its lease expires). For restart safety / multi-host / horizontal scaling, split them apart — see [Advanced Usage → Multi-process](#multi-process-decoupled-serve--standalone-runners).
 
 **Job lifecycle:** `pending → running` (runner claims) `→ finished` (runner done, reports outcome) `→ done` (scheduler advances to the next step).
-
-### Decoupled: serve without runner + standalone runners
-
-```bash
-# Terminal 1: UI / scheduling only, no embedded worker
-orbit serve --no-runner
-
-# Terminal 2+: standalone runners (restarting serve doesn't affect them; multi-instance)
-orbit runner --name runner-local
-```
-
-In this mode runs live in separate runner processes, so **restarting serve does not kill in-flight tasks** — scheduling pauses briefly, runners keep going.
-
-### Multi-instance runners
-
-A runner is a stateless worker; it can be split by agent / role and run in parallel:
-
-```bash
-orbit runner --roles implementer --max-concurrency 2   # 2 parallel implementation workers
-orbit runner --roles reviewer --agent antigravity      # only antigravity's reviews
-orbit runner --project /path/to/repo --name box-a       # explicit project
-```
-
-- `--agent NAME` (repeatable): only claim jobs assigned to this agent.
-- `--roles a,b`: only claim jobs for these workflow roles (roles resolve to steps per the workflow config).
-- `--max-concurrency N`: run N jobs in parallel, default 5 (each worker has its own lease name `<name>-0/-1/…`).
-- `--project PATH`: explicit project root instead of cwd resolution.
-- `--once`: claim one job, run it, and exit (good for scripts / CI).
-
-Claiming is an atomic DB-level operation (`UPDATE ... WHERE status=... AND lease<=now`), so concurrent runners never claim the same job twice; if a runner dies, its job is re-claimed by another once the lease expires.
 
 ### Goal convergence check (goal_verify)
 
