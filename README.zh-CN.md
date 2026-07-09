@@ -171,6 +171,15 @@ orbit serve        # UI + 调度 + 内嵌 Runner，全在一个进程
 - 每次运行都会在 UI 的 Runs 面板显示，并在状态目录写入日志：`<项目根>/.orbit/tasks/<goal_id>/run-XXX/verify`。
 - 成功时目标状态自动置为 `accepted`；失败则为 `stalled`，并向 hub 发送通知提醒人工介入。所有子任务重新关闭即会自动再触发 `goal_verify`。
 
+### Token 统计与预算
+
+每次运行都记录 token 用量，按目标聚合，可查看也可设上限。
+
+- **每次运行**：orbit 解析每个 run 的用量 —— 优先用 agent CLI 自己的用量行（准确），否则回落到每个 runner 被要求打印的 `TOKENS_USED: <n>` 哨兵行（近似，模型自估；见 `agents/_protocol.md`）。计数存在 run 上、显示在该 run 的日志里；CLI 用量行是累计的，故取最后一条。
+- **每个目标**：用量按目标整棵子树（目标 + 子任务 + step 卡）求和。**Goals** 标签页显示累计。
+- **预算上限**：在工作流配置里设 `goal_token_budget` 作为目标整棵子树 token 的硬上限（每目标可单独覆盖工作流默认值；`0` = 不限）。目标超预算时冻结后续派发并通知 hub（目标转 `blocked`）。
+- `goal_verify` 与 step 的 `verify` 命令不跑 LLM，所以**不耗 token**，也不计入预算。
+
 ## 本地 Web UI
 
 `/ui` 是本地控制台，用来观察和操作工作流：
