@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 from importlib import resources
 from pathlib import Path
 
@@ -20,12 +19,10 @@ _CLAUDE_MD_SECTION = """
 """
 
 
-def init_project(
-    project_root: Path, host: str = "127.0.0.1", port: int = 8848
-) -> dict[str, list[str]]:
+def init_project(project_root: Path) -> dict[str, list[str]]:
     """Bootstrap a project for orbit in one shot: role prompts, default
-    workflow/team config, MCP registration, gitignore, CLAUDE.md section.
-    Idempotent — existing files are left untouched."""
+    workflow/team config, gitignore, CLAUDE.md section. Idempotent — existing
+    files are left untouched."""
     from .server import (
         default_workflow_edges,
         default_workflow_steps,
@@ -85,31 +82,7 @@ def init_project(
         write_team_config(members, str(project_root))
         _mark(team_path, True)
 
-    # 4. Register the MCP server for Claude Code and friends.
-    mcp_path = project_root / ".mcp.json"
-    mcp_config: dict = {}
-    if mcp_path.exists():
-        try:
-            mcp_config = json.loads(mcp_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            mcp_config = {}
-        if not isinstance(mcp_config, dict):
-            mcp_config = {}
-    servers = mcp_config.setdefault("mcpServers", {})
-    if "orbit" in servers:
-        _mark(mcp_path, False)
-    else:
-        servers["orbit"] = {
-            "type": "http",
-            "url": f"http://{host}:{port}/mcp",
-        }
-        mcp_path.write_text(
-            json.dumps(mcp_config, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        _mark(mcp_path, True)
-
-    # 5. Keep runtime task logs and per-task worktree checkouts out of git.
+    # 4. Keep runtime task logs and per-task worktree checkouts out of git.
     gitignore = project_root / ".gitignore"
     existing = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
     wanted = [f"{state_dir.name}/tasks/", f"{state_dir.name}/worktrees/"]
@@ -124,7 +97,7 @@ def init_project(
         )
         _mark(gitignore, True)
 
-    # 6. CLAUDE.md pointer so role-assigned sessions know where to look.
+    # 5. CLAUDE.md pointer so role-assigned sessions know where to look.
     claude_md = project_root / "CLAUDE.md"
     existing = claude_md.read_text(encoding="utf-8") if claude_md.exists() else ""
     if "多 agent 角色" in existing:
@@ -298,16 +271,16 @@ def main() -> None:
     init = sub.add_parser(
         "init",
         help="Bootstrap the current project: role prompts, default workflow/team, "
-        ".mcp.json, gitignore, CLAUDE.md section",
+        "gitignore, CLAUDE.md section",
     )
-    init.add_argument("--host", default="127.0.0.1", help="Server host for .mcp.json (default: 127.0.0.1)")
-    init.add_argument("--port", type=int, default=8848, help="Server port for .mcp.json (default: 8848)")
+    init.add_argument("--host", default="127.0.0.1", help="Host for the printed serve hint (default: 127.0.0.1)")
+    init.add_argument("--port", type=int, default=8848, help="Port for the printed serve hint (default: 8848)")
 
     args = parser.parse_args()
 
     if args.command == "init":
         project_root = resolve_project_root()
-        summary = init_project(project_root, host=args.host, port=args.port)
+        summary = init_project(project_root)
         for path in summary["created"]:
             print(f"created  {path}")
         for path in summary["skipped"]:

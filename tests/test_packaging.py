@@ -14,22 +14,18 @@ class PackagingTests(unittest.TestCase):
 
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
-            first = init_project(root, port=9999)
+            first = init_project(root)
 
             self.assertTrue((root / "agents" / "hub.md").exists())
             self.assertTrue((root / "agents" / "_protocol.md").exists())
             self.assertTrue((root / ".orbit" / "workflow.json").exists())
             self.assertTrue((root / ".orbit" / "team.json").exists())
-            mcp = json.loads((root / ".mcp.json").read_text(encoding="utf-8"))
-            self.assertEqual(
-                "http://127.0.0.1:9999/mcp", mcp["mcpServers"]["orbit"]["url"]
-            )
             self.assertIn(".orbit/tasks/", (root / ".gitignore").read_text(encoding="utf-8"))
             self.assertIn("多 agent 角色", (root / "CLAUDE.md").read_text(encoding="utf-8"))
             self.assertTrue(first["created"])
 
             # second run touches nothing
-            second = init_project(root, port=9999)
+            second = init_project(root)
             self.assertEqual([], second["created"])
 
             # team covers the core roles
