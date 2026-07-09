@@ -2838,8 +2838,20 @@ def _task_blocked_reason(store: Store, task: dict[str, Any]) -> str | None:
 # worktree on branch orbit/task-<id>; a single-assignee `integrate` step
 # merges that branch back into the main tree, serialized by the hub.
 
-WORKTREE_TERMINAL_STATUSES = {"closed", "accepted"}
 WORKTREE_LOCK_RETRIES = 5
+
+
+def _task_workflow_finished(task: dict[str, Any] | None) -> bool:
+    """True when a task has left the workflow for good: it is gone, 'closed', or
+    — for a goal — 'accepted' (goals rest at accepted). A regular task at
+    'accepted' is only passing through the accept step, which may be non-terminal
+    with steps after it, so it is NOT finished and its worktree must be kept."""
+    if task is None:
+        return True
+    status = task.get("task_status")
+    if status == "closed":
+        return True
+    return status == "accepted" and bool(task.get("is_goal"))
 
 
 def _git(root: Path, *args: str, timeout: float = 30.0) -> "subprocess.CompletedProcess[str]":
@@ -2976,9 +2988,10 @@ def _remove_task_worktree(project_root: str | None, task_id: int) -> None:
 
 
 def _sweep_task_worktrees(store: Store, project_root: str | None) -> None:
-    """Reap per-task worktrees whose task is finished (accepted/closed) or gone.
-    Runs on the timeout watcher so SIGKILLed runs that never cleaned up (their
-    trap can't fire on SIGKILL) don't leak worktrees and branches indefinitely."""
+    """Reap per-task worktrees whose task has finished the workflow (see
+    _task_workflow_finished) or is gone. Runs on the timeout watcher so
+    SIGKILLed runs that never cleaned up (their trap can't fire on SIGKILL)
+    don't leak worktrees and branches indefinitely."""
     root = _project_root(project_root)
     wt_root = project_state_dir(root) / "worktrees"
     if not wt_root.exists() or not _is_git_repo(root):
@@ -2995,7 +3008,7 @@ def _sweep_task_worktrees(store: Store, project_root: str | None) -> None:
         except ValueError:
             continue
         task = store.get_task(task_id)
-        if task and task.get("task_status") not in WORKTREE_TERMINAL_STATUSES:
+        if not _task_workflow_finished(task):
             continue
         _remove_task_worktree(project_root, task_id)
 

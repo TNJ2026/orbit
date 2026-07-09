@@ -189,9 +189,14 @@ class WorktreeSweepTests(unittest.TestCase):
             self.assertFalse(orphan.exists())   # no task row
             self.assertTrue(active.exists())    # status 'created' -> kept
 
+            # A regular task at 'accepted' is only passing through the accept
+            # step (which may be non-terminal), so its worktree is kept.
             store.update_task_item_status(task_id, "accepted")
             server._sweep_task_worktrees(store, tmp)
-            self.assertFalse(active.exists())   # terminal -> reaped
+            self.assertTrue(active.exists())    # accepted (non-goal) -> kept
+            store.update_task_item_status(task_id, "closed")
+            server._sweep_task_worktrees(store, tmp)
+            self.assertFalse(active.exists())   # closed -> reaped
             store.close()
 
 
@@ -490,6 +495,64 @@ class DescendantPidSnapshotTests(unittest.TestCase):
         finally:
             child.terminate()
             child.wait()
+
+
+class AcceptNonTerminalTests(unittest.TestCase):
+    """`accepted` marks a task finished only for goals. A regular task passing
+    through a non-terminal accept step stays live (watched, worktree kept)."""
+
+    def test_task_workflow_finished_predicate(self):
+        f = server._task_workflow_finished
+        self.assertTrue(f(None))
+        self.assertTrue(f({"task_status": "closed"}))
+        self.assertTrue(f({"task_status": "accepted", "is_goal": True}))
+        self.assertFalse(f({"task_status": "accepted", "is_goal": False}))
+        self.assertFalse(f({"task_status": "accepted"}))
+        self.assertFalse(f({"task_status": "in_progress"}))
+
+    def test_regular_accepted_task_stays_non_terminal(self):
+        with TemporaryDirectory() as tmp:
+            store = Store(Path(tmp) / ".orbit" / "messages.db")
+            store.register_agent("hub", "")
+            msgs = store.send_message("hub", "hub", "t", kind="task", title="T")
+            tid = store.get_task_by_source_message(msgs[0])["id"]
+            store.set_task_workflow_state(tid, task_status="accepted")
+            ids = {t["id"] for t in store.list_non_terminal_tasks()}
+            self.assertIn(tid, ids)
+            store.close()
+
+    def test_accepted_goal_is_terminal(self):
+        with TemporaryDirectory() as tmp:
+            store = Store(Path(tmp) / ".orbit" / "messages.db")
+            store.register_agent("hub", "")
+            msgs = store.send_message("hub", "hub", "g", kind="task", title="G")
+            gid = store.get_task_by_source_message(msgs[0])["id"]
+            store.update_task_metadata(gid, is_goal=True)
+            store.set_task_workflow_state(gid, task_status="accepted")
+            ids = {t["id"] for t in store.list_non_terminal_tasks()}
+            self.assertNotIn(gid, ids)
+            store.close()
+
+    def test_sweep_keeps_worktree_for_regular_accepted_task(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _init_repo(root)
+            store = Store(root / ".orbit" / "messages.db")
+            store.register_agent("hub", "")
+            msgs = store.send_message("hub", "hub", "t", kind="task", title="T")
+            tid = store.get_task_by_source_message(msgs[0])["id"]
+            wt = server._ensure_task_worktree(tmp, tid)
+            self.assertIsNotNone(wt)
+            self.assertTrue(wt.exists())
+            # Passing through a non-terminal accept step: worktree must survive.
+            store.set_task_workflow_state(tid, task_status="accepted")
+            server._sweep_task_worktrees(store, tmp)
+            self.assertTrue(wt.exists(), "regular accepted task's worktree was reaped")
+            # Truly done: worktree is reaped.
+            store.set_task_workflow_state(tid, task_status="closed")
+            server._sweep_task_worktrees(store, tmp)
+            self.assertFalse(wt.exists())
+            store.close()
 
 
 class ReapStaleRunsTests(unittest.TestCase):

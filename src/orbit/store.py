@@ -785,8 +785,11 @@ class Store:
         return [self._task_row(row) for row in rows]
 
     def list_non_terminal_tasks(self) -> list[dict[str, Any]]:
-        """Return tasks that are not finished (status not closed/accepted), for
-        the health watchdog — avoids scanning closed history every cycle."""
+        """Return tasks that are not finished, for the health watchdog — avoids
+        scanning closed history every cycle. A task is finished when it is
+        'closed', or — for a goal — 'accepted' (goals rest there). A regular
+        task at 'accepted' is only passing through the accept step (which may be
+        non-terminal, with steps after it), so it is still watched."""
         with self._lock:
             rows = self._conn.execute(
                 """SELECT id, source_message_id, title, content, sender,
@@ -795,7 +798,8 @@ class Store:
                           risk, required_capabilities, exclusive_workspace,
                           workflow_step, parent_task_id, is_goal, display_id, token_budget
                    FROM tasks
-                   WHERE status NOT IN ('closed', 'accepted')
+                   WHERE status != 'closed'
+                     AND NOT (status = 'accepted' AND is_goal = 1)
                    ORDER BY id DESC"""
             ).fetchall()
         return [self._task_row(row) for row in rows]
