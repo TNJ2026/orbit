@@ -12,7 +12,7 @@
 
 - 一条命令起：Web UI + 调度 + 内嵌 runner 全在一个进程
 - 任务在可配置工作流图上流转：并行分支、汇合、返工回环、机器验证门
-- 每个任务在独立 git worktree 隔离执行，`integrate` 步骤把分支合并回主干
+- 每个任务在独立 git worktree 隔离执行，`integrate` 步骤把分支合并回主干；项目还不是 git 仓库时 orbit 自动初始化（带一个基线提交），未装 git 则降级为不隔离运行
 - runner 无头调用 agent CLI，可按角色 / agent 拆分、水平扩展
 - 状态持久化到 SQLite：进程重启不丢，超时 / 卡死有兜底
 
@@ -27,22 +27,38 @@
 
 ## 安装
 
-需要 Python ≥ 3.10 和 [uv](https://docs.astral.sh/uv/)：
+需要 Python ≥ 3.10 和 [uv](https://docs.astral.sh/uv/)。`git` 用于每任务
+worktree 隔离（项目还不是 git 仓库时 orbit 会自动创建）；runner 调用各 agent
+CLI（Claude Code、Codex 等），按需自行安装。
+
+**全局命令（推荐）** —— 装一次，任何电脑、任何项目里直接 `orbit`：
 
 ```bash
-git clone <repo-url> orbit
-cd orbit
-uv sync        # 创建 .venv 并安装依赖（starlette + uvicorn）
+uv tool install git+https://github.com/TNJ2026/orbit.git
+uv tool update-shell            # 确保 ~/.local/bin 在 PATH（仅首次）
+# 之后更新：  uv tool upgrade orbit
 ```
 
-不用 uv 的话：`pip install -e .`
+**从本地 checkout**（开发 orbit 本身时）：
+
+```bash
+git clone https://github.com/TNJ2026/orbit.git
+uv tool install --editable ./orbit   # 全局 `orbit`，改代码即时生效
+# 或不安装、就地跑：  cd orbit && uv run orbit serve
+```
+
+`uv run orbit …` 和 `uv tool` 首次使用时会自动建环境，**无需单独 `uv sync`**。
+不用 uv 的话：`pip install -e .`。
 
 ## 启动
 
 ```bash
-uv run orbit serve                 # 默认 127.0.0.1:8848，db 按当前项目目录分开存储
-uv run orbit serve --port 9000 --db /tmp/test.db
+cd <你的项目>                       # orbit 编排当前目录所在的项目
+orbit serve                        # 默认 127.0.0.1:8848，db 按当前项目目录分开存储
+orbit serve --port 9000 --db /tmp/test.db
 ```
+
+（从本地 checkout 且未全局安装时，命令前加 `uv run`。）
 
 三种起法，按需求选：
 
@@ -58,7 +74,7 @@ uv run orbit serve --port 9000 --db /tmp/test.db
 
 ```bash
 orbit up                                   # 已装 orbit
-uvx --from git+<repo-url> orbit up         # 没装也行，uvx 临时拉起
+uvx --from git+https://github.com/TNJ2026/orbit.git orbit up    # 没装也行，uvx 临时拉起
 ```
 
 ### 在仓库内定制

@@ -12,7 +12,7 @@ goal/task ──▶ orbit (workflow engine + scheduler) ──▶ runner ──�
 
 - One command to start: Web UI + scheduler + embedded runner, all in one process.
 - Tasks flow through a configurable graph: parallel branches, merges, rework loop-backs, machine-verification gates.
-- Each task runs isolated in its own git worktree; the `integrate` step merges the branch back to main.
+- Each task runs isolated in its own git worktree; the `integrate` step merges the branch back to main. Orbit auto-initializes a git repo (with a base commit) when a project isn't one yet, and degrades to running unisolated when git isn't installed.
 - Runners invoke agent CLIs headlessly and can be split by role / agent and scaled horizontally.
 - State persists to SQLite: nothing lost across restarts, with timeout / stuck-run backstops.
 
@@ -27,22 +27,40 @@ goal/task ──▶ orbit (workflow engine + scheduler) ──▶ runner ──�
 
 ## Install
 
-Requires Python ≥ 3.10 and [uv](https://docs.astral.sh/uv/):
+Requires Python ≥ 3.10 and [uv](https://docs.astral.sh/uv/). `git` is used for
+per-task worktree isolation (orbit auto-creates a repo if the project isn't one
+yet); the runners invoke agent CLIs (Claude Code, Codex, …), so install those you
+plan to use.
+
+**Global CLI (recommended)** — install once, then run `orbit` in any project on
+any machine:
 
 ```bash
-git clone <repo-url> orbit
-cd orbit
-uv sync        # creates .venv and installs deps (starlette + uvicorn)
+uv tool install git+https://github.com/TNJ2026/orbit.git
+uv tool update-shell            # ensure ~/.local/bin is on PATH (first time only)
+# update later:  uv tool upgrade orbit
 ```
 
-Without uv: `pip install -e .`
+**From a local checkout** (to hack on orbit itself):
+
+```bash
+git clone https://github.com/TNJ2026/orbit.git
+uv tool install --editable ./orbit   # global `orbit` that reflects your edits live
+# or run in-place without installing:  cd orbit && uv run orbit serve
+```
+
+`uv run orbit …` and `uv tool` create the environment on first use, so a separate
+`uv sync` is not required. Without uv: `pip install -e .`.
 
 ## Start
 
 ```bash
-uv run orbit serve                 # default 127.0.0.1:8848; db split per current project directory
-uv run orbit serve --port 9000 --db /tmp/test.db
+cd <your-project>                  # orbit orchestrates the project in the current directory
+orbit serve                        # default 127.0.0.1:8848; db split per current project directory
+orbit serve --port 9000 --db /tmp/test.db
 ```
+
+(From a local checkout without a global install, prefix any command with `uv run`.)
 
 Three ways to bring it up — pick by need:
 
@@ -57,8 +75,8 @@ Three ways to bring it up — pick by need:
 When you don't want to copy role/config files into another repo, use `orbit up`: it first appends the state dir (`.orbit/`) to that repo's `.gitignore`, then serves using the **packaged role and workflow defaults** — nothing that needs to be committed lands in the repo. It accepts every `serve` flag (`--host` / `--port` / `--db` / `--no-runner` / `--runner-concurrency`).
 
 ```bash
-orbit up                                   # orbit already installed
-uvx --from git+<repo-url> orbit up         # not installed? uvx pulls it in on the fly
+orbit up                                                        # orbit already installed
+uvx --from git+https://github.com/TNJ2026/orbit.git orbit up    # not installed? uvx pulls it in on the fly
 ```
 
 ### Customize inside a repo
