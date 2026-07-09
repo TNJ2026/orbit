@@ -136,6 +136,57 @@ orbit runner --project /path/to/repo --name box-a       # 显式指定项目
 
 领取是 DB 层原子操作(`UPDATE ... WHERE status=... AND lease<=now`),多 runner 并存不会重复领同一个 job;某 runner 挂了,租约到期后 job 被别的 runner 重新领走。
 
+### 目标收敛验证（goal_verify）最佳实践
+
+当一个目标（Goal）下的业务子任务全部自测通过并关闭后，orbit 会在主分支执行 `goal_verify` 命令，对整体成果进行客观验收。以下指南帮助终端用户正确配置、运行并排查这一流程。
+
+#### 何时显式配置
+
+- **默认自动检测**：如果未设置 `goal_verify`，orbit 会基于项目根的文件自动推测常见验证命令（如 `npm test`、`cargo test`、`python -m unittest discover -s tests` 等）。适合快速试用，但请在 Web UI 的 Workflow 面板确认检测结果是否符合预期。
+- **生产环境推荐显式声明**：将命令写入 `.orbit/workflow.json`（或通过 UI / CLI 保存），并在团队文档中记录来源与依赖，避免默认检测随项目结构变化而漂移。
+- **多模块/单体拆分**：若目标需要串连多个子项目，建议将 `goal_verify` 指向自定义脚本（例如 `./scripts/goal-verify.sh`），脚本内部再按需调用各模块验证命令。
+
+#### 命令设计原则
+
+1. **幂等**：重复执行不会修改仓库状态，也不依赖交互输入。避免长驻服务或写入操作。
+2. **离线可执行**：依赖应在 runner 主机预装好（包缓存、Docker 镜像、测试数据），避免访问外网导致波动或阻塞。
+3. **覆盖面充分**：至少包含单元/集成测试，必要时追加 Lint、类型检查等；如命令过长，可封装脚本输出阶段日志。
+4. **推荐模板**：
+   - Python：`uv run pytest` 或 `poetry run pytest`
+   - Node.js：`npm test -- --runInBand` / `pnpm test`
+   - Go：`go test ./...`
+   - Rust：`cargo test --all`
+   - Monorepo：`./scripts/goal-verify.sh`
+
+#### 运行环境与结构
+
+- `goal_verify` 在项目根目录执行，isolated step 的改动已合并回主工作树；若实际代码位于子目录，请在命令中先 `cd` 或使用脚本包装。
+- runner 主机需具备与开发环境一致的运行时，并提前安装依赖（例如在部署脚本中执行 `uv sync`、`npm ci`、`cargo fetch`）。
+- 可通过设置缓存相关环境变量（如 `UV_CACHE_DIR=/var/cache/uv`）来缩短验证时长，并保证缓存目录可写。
+
+#### 超时与成本控制
+
+- 验证命令受 `VERIFY_HARD_TIMEOUT_SECONDS`（默认 900 秒）限制；预估执行时间过长时，需优化命令或拆分目标，否则将被视为失败。
+- `goal_verify` 是普通 shell / 测试命令，不经过 LLM，**本身不消耗 token、也不计入 `goal_token_budget`**（预算只统计各 agent step 的 token 用量）。需要注意的是相反方向：预算冻结发生在派发阶段，若目标在收敛前就耗尽预算，子任务会先被冻结，`goal_verify` 可能没有机会运行。
+
+#### 结果与观测
+
+- 每次运行都会在 UI 的 Runs 面板显示，并在状态目录写入日志：`<项目根>/.orbit/tasks/<goal_id>/run-XXX/verify`。
+- 日志记录了完整命令、退出码以及 stdout/stderr 尾部（最多 2000 字符），便于快速定位问题。
+- 成功时目标状态自动置为 `accepted`；失败则为 `stalled`，并向 hub 发送通知提醒人工介入。
+
+#### 失败恢复流程
+
+1. 查看 hub 通知或日志文件，定位失败原因（测试未通过、依赖缺失、超时等）。
+2. 修复代码或补齐依赖；如需重新验收，可重新打开受影响的子任务或再次触发闭环，这会让引擎重新排队 `goal_verify`。
+3. 验证命令修复后，所有子任务重新关闭即会自动再触发 `goal_verify`，无需手动干预。
+
+#### 团队协作建议
+
+- 在项目 README/团队手册中写明 `goal_verify` 命令、依赖版本和必要环境变量，帮助新成员快速对齐。
+- 对复杂命令使用脚本封装，并在脚本内输出清晰的阶段性日志（建议 `set -euo pipefail`）。
+- 定期回顾验证时长和日志，必要时优化缓存策略或拆分目标规模，确保验证链路可持续。
+
 ## 客户端接入
 
 ### Claude Code
