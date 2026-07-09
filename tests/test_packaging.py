@@ -193,8 +193,9 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("workflow-node", html)
         self.assertIn('id="wfArrow"', html)
         self.assertIn('marker-end="url(#wfArrow)"', html)
-        self.assertIn("x: step.x, y: step.y + h * frac", html)
-        self.assertIn("x: step.x + w * frac, y: step.y", html)
+        self.assertIn("function wfEdgeAnchor(", html)
+        self.assertIn("function wfEdgePath(", html)
+        self.assertIn('"C", Math.round(p1.x + dx)', html)
         # Auto-laid-out editor: dagre computes coordinates, the user only edits
         # the graph. The manual-drag machinery (ports, node/edge dragging) is
         # gone — clicks edit nodes and delete edges.

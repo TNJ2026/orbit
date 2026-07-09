@@ -2153,7 +2153,6 @@
     // view working even if the dagre bundle is unavailable.
     const WF_NODE_W = 200;  // must match .workflow-node width in CSS (edge geometry uses it)
     let wfTempPath = null;    // in-progress connection preview path (SVG d string)
-    let wfLayoutCache = null; // per-node port counts + per-edge port slots
     // Active toolbar tool: "" (idle — double-click a node to edit it), "step"
     // (click canvas to place a step), "connect" (click two nodes to wire an
     // edge). Clicking the active tool again, or pressing Esc, returns to idle.
@@ -2203,101 +2202,6 @@
       return true;
     }
 
-    // Assign each edge a port slot on the closest side on both endpoints.
-    // For each node and each of its 4 sides, we distribute multiple connections
-    // evenly to prevent them from stacking on top of each other.
-    function wfComputeLayout() {
-      const steps = state.workflow.steps || [];
-      const edges = state.workflow.edges || [];
-      const rects = wfNodeRects();
-
-      // Loop-back (rework) edges run right-to-left in the left→right flow. Route
-      // them through a top/bottom channel — alternating per target so several
-      // returns into one step (e.g. review→implement, test→implement) enter from
-      // different sides — instead of piling onto the horizontal side and cutting
-      // straight across the cards in between. `channel` deepens each successive
-      // return so parallel channels don't overlap.
-      const returnCount = {};
-      const edgeSides = edges.map(e => {
-        const a = rects[e.from], b = rects[e.to];
-        if (!a || !b) return { fromSide: "right", toSide: "left", channel: 0 };
-        const dx = (b.x + b.w / 2) - (a.x + a.w / 2);
-        const dy = (b.y + b.h / 2) - (a.y + a.h / 2);
-
-        const isReturn = (b.x + b.w) < a.x + 4;  // target fully left of source
-        if (isReturn) {
-          const seen = (returnCount[e.to] = (returnCount[e.to] || 0));
-          returnCount[e.to] = seen + 1;
-          const side = seen % 2 === 0 ? "top" : "bottom";
-          const chKey = e.to + "|" + side;
-          const channel = (returnCount[chKey] = (returnCount[chKey] || 0));
-          returnCount[chKey] = channel + 1;
-          return { fromSide: side, toSide: side, channel };
-        }
-
-        let fromSide = "right";
-        if (Math.abs(dy * a.w) < Math.abs(dx * a.h)) {
-          fromSide = dx > 0 ? "right" : "left";
-        } else {
-          fromSide = dy > 0 ? "bottom" : "top";
-        }
-
-        let toSide = "left";
-        if (Math.abs(dy * b.w) < Math.abs(dx * b.h)) {
-          toSide = dx > 0 ? "left" : "right";
-        } else {
-          toSide = dy > 0 ? "top" : "bottom";
-        }
-
-        return { fromSide, toSide, channel: 0 };
-      });
-
-      const sideCounts = {};
-      steps.forEach(s => {
-        sideCounts[s.id] = { left: 0, right: 0, top: 0, bottom: 0 };
-      });
-
-      const edgeSlots = edges.map((e, idx) => {
-        const { fromSide, toSide, channel } = edgeSides[idx];
-        const fromSlot = sideCounts[e.from][fromSide]++;
-        const toSlot = sideCounts[e.to][toSide]++;
-        return { fromSide, toSide, fromSlot, toSlot, channel };
-      });
-
-      return { sideCounts, edgeSlots };
-    }
-
-    // Distribute the `total` connections on a side evenly along it (leaving a
-    // margin at each end) so multiple edges terminate at distinct points instead
-    // of stacking on the side's midpoint. A lone edge stays centered.
-    function wfPortPoint(step, rect, side, slot = 0, total = 1) {
-      const w = rect.w;
-      const h = rect.h;
-      const frac = total > 1 ? (slot + 1) / (total + 1) : 0.5;
-      if (side === "left") {
-        return { x: step.x, y: step.y + h * frac };
-      } else if (side === "right") {
-        return { x: step.x + w, y: step.y + h * frac };
-      } else if (side === "top") {
-        return { x: step.x + w * frac, y: step.y };
-      } else if (side === "bottom") {
-        return { x: step.x + w * frac, y: step.y + h };
-      }
-      return { x: step.x + w, y: step.y + h * frac };
-    }
-
-    function wfSinglePortPoint(step, rect, cx, cy) {
-      const dx = cx - (step.x + rect.w / 2);
-      const dy = cy - (step.y + rect.h / 2);
-      let side = "right";
-      if (Math.abs(dy * rect.w) < Math.abs(dx * rect.h)) {
-        side = dx > 0 ? "right" : "left";
-      } else {
-        side = dy > 0 ? "bottom" : "top";
-      }
-      return wfPortPoint(step, rect, side, 0, 1);
-    }
-
     function wfNodeRects() {
       const rects = {};
       (state.workflow.steps || []).forEach(s => {
@@ -2308,35 +2212,31 @@
     }
 
 
-    // Orthogonal (right-angle) connector: stub out of each node along its side,
-    // then join the stubs with axis-aligned segments — the classic flowchart look.
-    // `channel` deepens the stub so a routed loop-back runs in its own lane,
-    // clear of the cards and of the other loop-backs sharing the same side.
-    function wfEdgePath(fromId, toId, p1, p2, rects, fromSide, toSide, channel = 0) {
-      const stub = 22 + channel * 18;
-      const out = (p, side) =>
-        side === "right" ? { x: p.x + stub, y: p.y }
-        : side === "left" ? { x: p.x - stub, y: p.y }
-        : side === "top" ? { x: p.x, y: p.y - stub }
-        : { x: p.x, y: p.y + stub };  // bottom
-      const s1 = out(p1, fromSide);
-      const s2 = out(p2, toSide);
-      const hFrom = fromSide === "left" || fromSide === "right";
-      const hTo = toSide === "left" || toSide === "right";
-      const pts = [p1, s1];
-      if (hFrom && hTo) {
-        const midX = (s1.x + s2.x) / 2;
-        pts.push({ x: midX, y: s1.y }, { x: midX, y: s2.y });
-      } else if (!hFrom && !hTo) {
-        const midY = (s1.y + s2.y) / 2;
-        pts.push({ x: s1.x, y: midY }, { x: s2.x, y: midY });
-      } else if (hFrom && !hTo) {
-        pts.push({ x: s2.x, y: s1.y });
-      } else {  // vertical from, horizontal to
-        pts.push({ x: s1.x, y: s2.y });
+    function wfEdgeAnchor(step, rect, side) {
+      return {
+        x: step.x + (side === "right" ? rect.w : 0),
+        y: step.y + rect.h / 2
+      };
+    }
+
+    function wfEdgePath(p1, p2, isReturn = false, channel = 0) {
+      if (isReturn) {
+        const lift = 88 + channel * 28;
+        const cy = Math.max(p1.y, p2.y) + lift;
+        return [
+          "M", Math.round(p1.x), Math.round(p1.y),
+          "C", Math.round(p1.x - 70), Math.round(cy),
+          Math.round(p2.x + 70), Math.round(cy),
+          Math.round(p2.x), Math.round(p2.y)
+        ].join(" ");
       }
-      pts.push(s2, p2);
-      return "M " + pts.map(p => `${Math.round(p.x)} ${Math.round(p.y)}`).join(" L ");
+      const dx = Math.max(60, Math.abs(p2.x - p1.x) * 0.45);
+      return [
+        "M", Math.round(p1.x), Math.round(p1.y),
+        "C", Math.round(p1.x + dx), Math.round(p1.y),
+        Math.round(p2.x - dx), Math.round(p2.y),
+        Math.round(p2.x), Math.round(p2.y)
+      ].join(" ");
     }
 
     function wfGraphPoint(event) {
@@ -2373,8 +2273,6 @@
       // has flow in but nothing out. Rendered as fixed start/end pill nodes.
       const wfIncoming = new Set((state.workflow.edges || []).map(e => e.to));
       const wfOutgoing = new Set((state.workflow.edges || []).map(e => e.from));
-      wfLayoutCache = wfComputeLayout();
-      const layout = wfLayoutCache;
       const toolbarHtml = `
         <div class="wf-toolbar" id="wfToolbar">
           <div class="wf-tool" data-action="add-step" title="${escapeHtml(t("wf.addStepTitle"))}">
@@ -2457,18 +2355,25 @@
       const edges = state.workflow.edges || [];
       const byId = wfById();
 
-      const layout = wfLayoutCache || wfComputeLayout();
       const rects = wfNodeRects();
 
       // Size the graph box tight to its content (plus a small margin) using each
       // node's real height, so a short flow can be centered in the canvas rather
       // than pinned to the top of an over-tall box.
       let maxX = 400, maxY = 200;
+      let hasReturnEdge = false;
       steps.forEach(s => {
         const h = (rects[s.id] && rects[s.id].h) || 120;
         maxX = Math.max(maxX, s.x + WF_NODE_W + 40);
         maxY = Math.max(maxY, s.y + h + 40);
       });
+      edges.forEach(edge => {
+        const a = byId[edge.from], b = byId[edge.to];
+        const rectA = rects[edge.from], rectB = rects[edge.to];
+        if (!a || !b || !rectA || !rectB) return;
+        hasReturnEdge = hasReturnEdge || (b.x + rectB.w / 2) < (a.x + rectA.w / 2);
+      });
+      if (hasReturnEdge) maxY += 150;
       const graph = $("wfGraph");
       if (graph) { graph.style.width = maxX + "px"; graph.style.height = maxY + "px"; }
       svg.setAttribute("width", maxX);
@@ -2483,20 +2388,15 @@
       paths += edges.map((edge, i) => {
         const a = byId[edge.from], b = byId[edge.to];
         if (!a || !b) return "";
-        const slot = layout.edgeSlots[i];
-        if (!slot) return "";
 
         const rectA = rects[edge.from];
         const rectB = rects[edge.to];
         if (!rectA || !rectB) return "";
 
-        const totalFrom = layout.sideCounts[edge.from][slot.fromSide];
-        const totalTo = layout.sideCounts[edge.to][slot.toSide];
-
-        const p1 = wfPortPoint(a, rectA, slot.fromSide, slot.fromSlot, totalFrom);
-        const p2 = wfPortPoint(b, rectB, slot.toSide, slot.toSlot, totalTo);
-
-        const d = wfEdgePath(edge.from, edge.to, p1, p2, rects, slot.fromSide, slot.toSide, slot.channel);
+        const isReturn = (b.x + rectB.w / 2) < (a.x + rectA.w / 2);
+        const p1 = wfEdgeAnchor(a, rectA, isReturn ? "left" : "right");
+        const p2 = wfEdgeAnchor(b, rectB, isReturn ? "right" : "left");
+        const d = wfEdgePath(p1, p2, isReturn, i % 3);
         return `<path class="wf-edge" data-edge="${i}" d="${d}" marker-end="url(#wfArrow)"><title>${escapeHtml(t("wf.clickDelete"))}</title></path>`;
       }).join("");
 
@@ -2614,20 +2514,11 @@
       if (!rect) return;
       const cursor = wfGraphPoint(event);
       // Snap the source endpoint to the side of the node facing the cursor.
-      const p1 = wfSinglePortPoint(from, rect, cursor.x, cursor.y);
+      const side = cursor.x < from.x + rect.w / 2 ? "left" : "right";
+      const p1 = wfEdgeAnchor(from, rect, side);
       const p2 = { x: cursor.x, y: cursor.y };
-      wfTempPath = wfEdgePath(wfConnectFrom, wfConnectFrom, p1, p2, rects,
-        wfSideOfPoint(from, rect, p1), "left");
+      wfTempPath = wfEdgePath(p1, p2, false);
       drawEdges();
-    }
-
-    // Inverse of wfSinglePortPoint: recover the side name for a port point.
-    function wfSideOfPoint(step, rect, p) {
-      if (Math.abs(p.x - step.x) < 1) return "left";
-      if (Math.abs(p.x - (step.x + rect.w)) < 1) return "right";
-      if (Math.abs(p.y - step.y) < 1) return "top";
-      if (Math.abs(p.y - (step.y + rect.h)) < 1) return "bottom";
-      return "right";
     }
 
     function addWorkflowEdge(from, to) {
