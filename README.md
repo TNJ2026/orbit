@@ -21,7 +21,6 @@ goal/task ──▶ orbit (workflow engine + scheduler) ──▶ runner ──�
 - [Install](#install)
 - [Start](#start)
 - [Workflow Engine](#workflow-engine)
-- [MCP Tools](#mcp-tools)
 - [Local Web UI](#local-web-ui)
 - [Task Collaboration Model](#task-collaboration-model)
 - [Role Files](#role-files)
@@ -33,7 +32,7 @@ Requires Python ≥ 3.10 and [uv](https://docs.astral.sh/uv/):
 ```bash
 git clone <repo-url> orbit
 cd orbit
-uv sync        # creates .venv and installs the sole dependency, mcp
+uv sync        # creates .venv and installs deps (starlette + uvicorn)
 ```
 
 Without uv: `pip install -e .`
@@ -76,8 +75,7 @@ Upgrading from an older version: the old global database at `~/.dev_loop/message
 
 ### Access points
 
-- Local Web UI: `http://127.0.0.1:8848/ui` — the main entry for observing and operating tasks / workflows / queues.
-- Workflow MCP endpoint: `http://127.0.0.1:8848/mcp` — exposes only the workflow tools (`start_workflow_task` / `complete_step` / `get_workflow_task_state`) for an already-connected session to advance a task; not needed day to day.
+After startup, open the local Web UI: `http://127.0.0.1:8848/ui` — the main entry for observing and operating tasks / workflows / queues. Everything goes through `/api/*` JSON routes (local-only), which scripts can also call directly.
 
 Each daemon writes the current project into `~/.orbit/projects/index.json` on startup. Any project's `/ui` can see other project daemons from this index: online projects switch directly via the Project dropdown; offline ones show metadata only and need their daemon started in that project's directory. The cross-project UI is an aggregated view only — writes still go to the selected project's own daemon.
 
@@ -142,18 +140,6 @@ Once all of a goal's business subtasks self-test and close, orbit runs the `goal
 - **Declare it explicitly for real use**: save the command into `.orbit/workflow.json` (via UI/CLI). It should be idempotent, runnable offline, and cover unit/integration tests. Point it at a script (`./scripts/goal-verify.sh`) for monorepos.
 - It runs in the project root under a hard timeout (`VERIFY_HARD_TIMEOUT_SECONDS`, default 900s). Pass → goal `accepted`; fail → `stalled` + hub is notified.
 - `goal_verify` is a plain shell/test command — it uses no LLM, so it **consumes no tokens and does not count against `goal_token_budget`**.
-
-## MCP Tools
-
-The mailbox is no longer exposed as MCP tools; `/mcp` keeps only the three tools that advance the workflow, for an already-connected session (day to day, just use the Web UI — no manual setup needed):
-
-| Tool | Description |
-|---|---|
-| `start_workflow_task(agent, task_id)` | Enter an existing task into the configured workflow and dispatch its entry step(s) |
-| `complete_step(agent, task_id, step, outcome, result)` | Report a dispatched step's outcome (`done` / `rework` / `blocked`) |
-| `get_workflow_task_state(task_id)` | Show where a task is in the workflow: status, active steps, transition history |
-
-> Runner-executed agents do **not** call these — they finish the prompt, print `WORKFLOW_OUTCOME`, and the dispatcher submits on their behalf.
 
 ## Local Web UI
 

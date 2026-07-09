@@ -21,7 +21,6 @@
 - [安装](#安装)
 - [启动](#启动)
 - [工作流引擎](#工作流引擎)
-- [MCP 工具](#mcp-工具)
 - [本地 Web UI](#本地-web-ui)
 - [任务协作模型](#任务协作模型)
 - [角色文件](#角色文件)
@@ -33,7 +32,7 @@
 ```bash
 git clone <repo-url> orbit
 cd orbit
-uv sync        # 创建 .venv 并安装唯一依赖 mcp
+uv sync        # 创建 .venv 并安装依赖（starlette + uvicorn）
 ```
 
 不用 uv 的话：`pip install -e .`
@@ -76,8 +75,7 @@ uvx --from git+<repo-url> orbit up         # 没装也行，uvx 临时拉起
 
 ### 访问入口
 
-- 本地 Web UI：`http://127.0.0.1:8848/ui`（观察和操作任务 / 工作流 / 队列的主入口）
-- 工作流 MCP endpoint：`http://127.0.0.1:8848/mcp`（仅暴露工作流工具 `start_workflow_task` / `complete_step` / `get_workflow_task_state`，供已连入的会话推进任务；日常用不到）
+启动后访问本地 Web UI：`http://127.0.0.1:8848/ui`——观察和操作任务 / 工作流 / 队列的主入口。所有操作走 `/api/*` JSON route（仅本机可访问），也可脚本直连。
 
 每个 daemon 启动时会把当前项目写入 `~/.orbit/projects/index.json`。任意一个项目的 `/ui` 都能从这个索引里看到其它项目 daemon：在线项目可以直接在顶部 Project 下拉框切换；离线项目只显示元数据，需要先在该项目目录启动对应 daemon。跨项目 UI 只是聚合视图，写操作仍发到被选中项目自己的 daemon。
 
@@ -165,18 +163,6 @@ orbit runner --project /path/to/repo --name box-a       # 显式指定项目
 
 - 每次运行都会在 UI 的 Runs 面板显示，并在状态目录写入日志：`<项目根>/.orbit/tasks/<goal_id>/run-XXX/verify`。
 - 成功时目标状态自动置为 `accepted`；失败则为 `stalled`，并向 hub 发送通知提醒人工介入。所有子任务重新关闭即会自动再触发 `goal_verify`。
-
-## MCP 工具
-
-信箱已不再对外暴露为 MCP 工具；`/mcp` 只保留推进工作流的三个工具，供已连入的会话使用（日常用 Web UI 即可，无需手动接入）：
-
-| 工具 | 说明 |
-|---|---|
-| `start_workflow_task(agent, task_id)` | 把一个已存在的任务放进配置的工作流，派发入口步骤 |
-| `complete_step(agent, task_id, step, outcome, result)` | 汇报被派发步骤的结果（`done` / `rework` / `blocked`） |
-| `get_workflow_task_state(task_id)` | 查看任务当前在工作流的位置、活动步骤与流转历史 |
-
-> runner 执行的 agent **不需要**调这些工具——它把 prompt 干完、打印 `WORKFLOW_OUTCOME`，派发器代为提交。
 
 ## 本地 Web UI
 

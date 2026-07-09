@@ -1,11 +1,12 @@
 [project]
 name = "orbit"
 version = "0.1.0"
-description = "Local MCP server that lets LLM CLIs and agents exchange prompts with each other"
+description = "Local multi-agent workflow orchestrator that runs coding tasks across agent CLIs"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "mcp>=1.9.0",
+    "starlette>=0.37",
+    "uvicorn>=0.29",
 ]
 
 [project.scripts]

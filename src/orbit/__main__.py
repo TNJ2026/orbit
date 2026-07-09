@@ -6,6 +6,8 @@ import argparse
 from importlib import resources
 from pathlib import Path
 
+import uvicorn
+
 from .project_index import upsert_project
 from .store import Store, project_db_path, project_state_dir, resolve_project_root
 from .server import create_server, runner_loop
@@ -161,7 +163,7 @@ def _serve(args) -> None:
         host=args.host,
         port=args.port,
     )
-    mcp = create_server(
+    app = create_server(
         host=args.host,
         port=args.port,
         db_path=db_path,
@@ -172,15 +174,15 @@ def _serve(args) -> None:
     worker = "no in-process runner (start `orbit runner` separately)" if args.no_runner \
         else f"with in-process runner (concurrency={args.runner_concurrency})"
     print(
-        f"orbit UI/Scheduler listening on http://{args.host}:{args.port}/mcp "
+        f"orbit UI/Scheduler listening on http://{args.host}:{args.port}/ui "
         f"({worker}) (db: {db_path})",
         flush=True,
     )
-    mcp.run(transport="streamable-http")
+    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(prog="orbit", description="Local MCP mailbox for LLM agents")
+    parser = argparse.ArgumentParser(prog="orbit", description="Local multi-agent workflow orchestrator")
     sub = parser.add_subparsers(dest="command", required=True)
 
     # Shared flags for the two ways to bring the server up (serve / up).

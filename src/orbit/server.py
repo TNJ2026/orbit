@@ -1,4 +1,4 @@
-"""FastMCP server hosting the orbit Web UI, HTTP API, and workflow tools."""
+"""Starlette server hosting the orbit Web UI, HTTP API, and workflow engine."""
 
 from __future__ import annotations
 
@@ -24,9 +24,11 @@ from urllib.parse import urlparse
 
 import anyio
 
-from mcp.server.fastmcp import FastMCP
+import uvicorn
+from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from starlette.routing import Route
 
 from .project_index import list_projects
 from .store import (
@@ -4331,9 +4333,9 @@ def create_server(
     project: dict[str, Any] | None = None,
     run_worker: bool = True,
     worker_concurrency: int = 5,
-) -> FastMCP:
+) -> Starlette:
     store = Store(db_path)
-    # mcp.run() blocks until the process dies (Ctrl-C included), so a plain
+    # uvicorn.run() blocks until the process dies (Ctrl-C included), so a plain
     # atexit hook is the reliable place to checkpoint the WAL and close the
     # connection cleanly.
     atexit.register(store.close)
@@ -4436,21 +4438,16 @@ def create_server(
             target=_embedded_runner, name="embedded-runner", daemon=True
         ).start()
 
-    mcp = FastMCP(
-        "orbit",
-        instructions=(
-            "Orbit is a local multi-agent workflow orchestrator. Tasks move "
-            "through a configured workflow of role-bound steps; runners execute "
-            "each step by invoking an agent CLI. MCP tools: start_workflow_task "
-            "enters an existing task into the workflow, complete_step reports a "
-            "dispatched step's outcome (done/rework/blocked), and "
-            "get_workflow_task_state shows where a task is. Tasks, teams, and "
-            "workflows are managed from the local Web UI at /ui."
-        ),
-        host=host,
-        port=port,
-        stateless_http=True,
-    )
+    # Plain Starlette app: collect route definitions as they are declared, then
+    # build the app at the end. `route` mirrors the old @mcp.custom_route API so
+    # the endpoint bodies are unchanged.
+    routes: list[Route] = []
+
+    def route(path: str, methods: list[str]):
+        def decorator(fn):
+            routes.append(Route(path, fn, methods=methods))
+            return fn
+        return decorator
 
     async def _deliver(
         sender: str,
@@ -4484,66 +4481,6 @@ def create_server(
             }
         return {"delivered": len(ids), "message_ids": ids}
 
-    # NOTE: the local function must not reuse the module-level engine
-    # function's name — it would shadow it inside this closure and break
-    # _engine_start with a TypeError on argument count. The MCP tool name
-    # stays "start_workflow_task" via the decorator.
-    @mcp.tool(name="start_workflow_task")
-    async def start_workflow_task_tool(agent: str, task_id: int) -> dict:
-        """Enter an existing task (created via send_message kind="task") into
-        the configured workflow. The engine dispatches the entry step(s) to the
-        best-ranked team member for each step's role; from then on the task
-        moves only through complete_step. Fails if the task is already in the
-        workflow."""
-        await _to_thread(store.touch_agent, agent)
-        try:
-            return await _to_thread(
-                _engine_start, agent, task_id
-            )
-        except (InvalidInputError, UnknownAgentError) as exc:
-            return {"task_id": task_id, "started": False, "error": str(exc)}
-
-    @mcp.tool()
-    async def complete_step(
-        agent: str,
-        task_id: int,
-        step: str,
-        outcome: str = "done",
-        result: str = "",
-    ) -> dict:
-        """Report the outcome of a workflow step you were dispatched.
-
-        - agent: your registered agent name. It must be the assignee that was
-          dispatched the active step; hub may complete active steps for
-          recovery.
-        - task_id / step: from the dispatch message you received.
-        - outcome: "done" advances along forward connections (merge steps wait
-          for all required branches); "rework" sends the task back along the
-          loop-back connection (e.g. review -> implement); "blocked" pauses the
-          task and notifies the hub — use it when you cannot decide and need
-          confirmation, putting your question in result.
-        - result: summary of what you produced (file paths, conclusions). It is
-          forwarded to the next step's assignee.
-
-        Completing a terminal step closes the task."""
-        await _to_thread(store.touch_agent, agent)
-        try:
-            return await _to_thread(
-                _engine_advance, agent, task_id, step, outcome, result
-            )
-        except (InvalidInputError, UnknownAgentError) as exc:
-            return {"task_id": task_id, "step": step, "error": str(exc)}
-
-    @mcp.tool()
-    async def get_workflow_task_state(task_id: int) -> dict:
-        """Show where a task currently is in the workflow: its status, the
-        steps being worked on right now, and the full transition history
-        (dispatch/done/rework/skipped/blocked records)."""
-        try:
-            return await _to_thread(_engine_state, task_id)
-        except InvalidInputError as exc:
-            return {"task_id": task_id, "error": str(exc)}
-
     def _engine_start(agent: str, task_id: int) -> dict:
         return start_workflow_task(
             store, current_project.get("project_root"), agent, task_id
@@ -4572,17 +4509,17 @@ def create_server(
             store, current_project.get("project_root"), task_id
         )
 
-    @mcp.custom_route("/", methods=["GET"])
+    @route("/", methods=["GET"])
     async def index(_: Request) -> RedirectResponse:
         return RedirectResponse("/ui")
 
-    @mcp.custom_route("/ui", methods=["GET"])
+    @route("/ui", methods=["GET"])
     async def ui(request: Request) -> HTMLResponse | JSONResponse:
         if forbidden := _forbid_non_local(request):
             return forbidden
         return HTMLResponse(_UI_HTML)
 
-    @mcp.custom_route("/static/dagre.min.js", methods=["GET"])
+    @route("/static/dagre.min.js", methods=["GET"])
     async def static_dagre(request: Request) -> Response:
         if forbidden := _forbid_non_local(request):
             return forbidden
@@ -4594,20 +4531,20 @@ def create_server(
             headers={"cache-control": "max-age=86400"},
         )
 
-    @mcp.custom_route("/api/{path:path}", methods=["OPTIONS"])
+    @route("/api/{path:path}", methods=["OPTIONS"])
     async def api_options(request: Request) -> Response:
         if forbidden := _forbid_non_local(request):
             return forbidden
         return Response(status_code=204, headers=_cors_headers(request))
 
-    @mcp.custom_route("/api/agents", methods=["GET"])
+    @route("/api/agents", methods=["GET"])
     async def api_list_agents(request: Request) -> JSONResponse:
         if forbidden := _forbid_non_local(request):
             return forbidden
         agents = await _to_thread(store.list_agents)
         return _json(request, {"agents": agents})
 
-    @mcp.custom_route("/api/status", methods=["GET"])
+    @route("/api/status", methods=["GET"])
     async def api_status(request: Request) -> JSONResponse:
         if forbidden := _forbid_non_local(request):
             return forbidden
@@ -4619,7 +4556,7 @@ def create_server(
             },
         )
 
-    @mcp.custom_route("/api/projects", methods=["GET"])
+    @route("/api/projects", methods=["GET"])
     async def api_projects(request: Request) -> JSONResponse:
         if forbidden := _forbid_non_local(request):
             return forbidden
@@ -4636,7 +4573,7 @@ def create_server(
             },
         )
 
-    @mcp.custom_route("/api/agent-tools", methods=["GET"])
+    @route("/api/agent-tools", methods=["GET"])
     async def api_agent_tools(request: Request) -> JSONResponse:
         if forbidden := _forbid_non_local(request):
             return forbidden
@@ -4649,7 +4586,7 @@ def create_server(
             tool["last_seen"] = agent["last_seen"] if agent else None
         return _json(request, {"tools": tools})
 
-    @mcp.custom_route("/api/agent-roles", methods=["GET"])
+    @route("/api/agent-roles", methods=["GET"])
     async def api_agent_roles(request: Request) -> JSONResponse:
         if forbidden := _forbid_non_local(request):
             return forbidden
@@ -4657,7 +4594,7 @@ def create_server(
         roles = await _to_thread(list_agent_roles, agents_dir)
         return _json(request, {"roles": roles})
 
-    @mcp.custom_route("/api/agent-roles/{role_id}", methods=["POST"])
+    @route("/api/agent-roles/{role_id}", methods=["POST"])
     async def api_save_agent_role(request: Request) -> JSONResponse:
         if forbidden := _forbid_non_local(request):
             return forbidden
@@ -4688,7 +4625,7 @@ def create_server(
         roles = await _to_thread(list_agent_roles, agents_dir)
         return _json(request, {"success": True, "roles": roles})
 
-    @mcp.custom_route("/api/team", methods=["GET"])
+    @route("/api/team", methods=["GET"])
     async def api_get_team(request: Request) -> JSONResponse:
         if forbidden := _forbid_non_local(request):
             return forbidden
@@ -4700,7 +4637,7 @@ def create_server(
             return _json_error(str(exc), request=request)
         return _json(request, team)
 
-    @mcp.custom_route("/api/team", methods=["POST"])
+    @route("/api/team", methods=["POST"])
     async def api_save_team(request: Request) -> JSONResponse:
         if forbidden := _forbid_non_local(request):
             return forbidden
@@ -4718,7 +4655,7 @@ def create_server(
             return _json_error(str(exc), request=request)
         return _json(request, {"success": True, **team})
 
-    @mcp.custom_route("/api/workflow", methods=["GET"])
+    @route("/api/workflow", methods=["GET"])
     async def api_get_workflow(request: Request) -> JSONResponse:
         if forbidden := _forbid_non_local(request):
             return forbidden
@@ -4730,7 +4667,7 @@ def create_server(
             return _json_error(str(exc), request=request)
         return _json(request, workflow)
 
-    @mcp.custom_route("/api/workflow", methods=["POST"])
+    @route("/api/workflow", methods=["POST"])
     async def api_save_workflow(request: Request) -> JSONResponse:
         if forbidden := _forbid_non_local(request):
             return forbidden
@@ -4752,7 +4689,7 @@ def create_server(
             return _json_error(str(exc), request=request)
         return _json(request, {"success": True, **workflow})
 
-    @mcp.custom_route("/api/agents", methods=["POST"])
+    @route("/api/agents", methods=["POST"])
     async def api_register_agent(request: Request) -> JSONResponse:
         if forbidden := _forbid_non_local(request):
             return forbidden
@@ -4765,7 +4702,7 @@ def create_server(
             return _json_error(str(exc), request=request)
         return _json(request, {"registered": name, "agents": agents})
 
-    @mcp.custom_route("/api/messages", methods=["GET"])
+    @route("/api/messages", methods=["GET"])
     async def api_list_messages(request: Request) -> JSONResponse:
         if forbidden := _forbid_non_local(request):
             return forbidden
@@ -4783,7 +4720,7 @@ def create_server(
             return _json_error(str(exc), request=request)
         return _json(request, {"messages": messages})
 
-    @mcp.custom_route("/api/tasks", methods=["GET"])
+    @route("/api/tasks", methods=["GET"])
     async def api_list_tasks(request: Request) -> JSONResponse:
         if forbidden := _forbid_non_local(request):
             return forbidden
@@ -4807,7 +4744,7 @@ def create_server(
             return _json_error(str(exc), request=request)
         return _json(request, {"tasks": tasks})
 
-    @mcp.custom_route("/api/tasks/{task_id:int}", methods=["GET"])
+    @route("/api/tasks/{task_id:int}", methods=["GET"])
     async def api_get_task(request: Request) -> JSONResponse:
         if forbidden := _forbid_non_local(request):
             return forbidden
@@ -4824,14 +4761,14 @@ def create_server(
             return _json_error("task not found", 404, request)
         return _json(request, {"task": task})
 
-    @mcp.custom_route("/api/goals", methods=["GET"])
+    @route("/api/goals", methods=["GET"])
     async def api_list_goals(request: Request) -> JSONResponse:
         if forbidden := _forbid_non_local(request):
             return forbidden
         goals = await _to_thread(goals_summary, store)
         return _json(request, {"goals": goals})
 
-    @mcp.custom_route("/api/run-jobs", methods=["GET"])
+    @route("/api/run-jobs", methods=["GET"])
     async def api_list_run_jobs(request: Request) -> JSONResponse:
         if forbidden := _forbid_non_local(request):
             return forbidden
@@ -4843,7 +4780,7 @@ def create_server(
             return _json_error(str(exc), request=request)
         return _json(request, {"jobs": jobs})
 
-    @mcp.custom_route("/api/goals", methods=["POST"])
+    @route("/api/goals", methods=["POST"])
     async def api_create_goal(request: Request) -> JSONResponse:
         """Create a goal and enter it into the workflow in one shot, so a
         failed follow-up request can't leave a goal stranded outside the
@@ -4898,7 +4835,7 @@ def create_server(
             return _json_error(f"goal creation failed: {exc!r}", 500, request)
         return _json(request, result)
 
-    @mcp.custom_route("/api/messages", methods=["POST"])
+    @route("/api/messages", methods=["POST"])
     async def api_send_message(request: Request) -> JSONResponse:
         if forbidden := _forbid_non_local(request):
             return forbidden
@@ -4921,7 +4858,7 @@ def create_server(
             return _json_error(result["error"], request=request)
         return _json(request, result)
 
-    @mcp.custom_route("/api/messages/{message_id:int}/task-status", methods=["POST"])
+    @route("/api/messages/{message_id:int}/task-status", methods=["POST"])
     async def api_update_task_status(request: Request) -> JSONResponse:
         if forbidden := _forbid_non_local(request):
             return forbidden
@@ -4939,7 +4876,7 @@ def create_server(
             {"updated": updated, "message_id": message_id, "task_status": task_status}
         )
 
-    @mcp.custom_route("/api/tasks/{task_id:int}/status", methods=["POST"])
+    @route("/api/tasks/{task_id:int}/status", methods=["POST"])
     async def api_update_task_item_status(request: Request) -> JSONResponse:
         if forbidden := _forbid_non_local(request):
             return forbidden
@@ -4967,7 +4904,7 @@ def create_server(
             {"updated": updated, "task_id": task_id, "task_status": task_status},
         )
 
-    @mcp.custom_route("/api/tasks/{task_id:int}/metadata", methods=["POST"])
+    @route("/api/tasks/{task_id:int}/metadata", methods=["POST"])
     async def api_update_task_metadata(request: Request) -> JSONResponse:
         if forbidden := _forbid_non_local(request):
             return forbidden
@@ -4991,7 +4928,7 @@ def create_server(
             return _json_error("task not found", 404, request)
         return _json(request, {"task": task})
 
-    @mcp.custom_route("/api/tasks/{task_id:int}/assignment-candidates", methods=["GET"])
+    @route("/api/tasks/{task_id:int}/assignment-candidates", methods=["GET"])
     async def api_task_assignment_candidates(request: Request) -> JSONResponse:
         if forbidden := _forbid_non_local(request):
             return forbidden
@@ -5012,7 +4949,7 @@ def create_server(
         )
         return _json(request, {"task": task, **ranked})
 
-    @mcp.custom_route("/api/tasks/{task_id:int}/workflow", methods=["GET"])
+    @route("/api/tasks/{task_id:int}/workflow", methods=["GET"])
     async def api_task_workflow_state(request: Request) -> JSONResponse:
         if forbidden := _forbid_non_local(request):
             return forbidden
@@ -5023,7 +4960,7 @@ def create_server(
             return _json_error(str(exc), request=request)
         return _json(request, state)
 
-    @mcp.custom_route("/api/tasks/{task_id:int}/workflow/start", methods=["POST"])
+    @route("/api/tasks/{task_id:int}/workflow/start", methods=["POST"])
     async def api_task_workflow_start(request: Request) -> JSONResponse:
         if forbidden := _forbid_non_local(request):
             return forbidden
@@ -5043,7 +4980,7 @@ def create_server(
             return _json_error(f"workflow start failed: {exc!r}", 500, request)
         return _json(request, result)
 
-    @mcp.custom_route("/api/tasks/{task_id:int}/workflow/complete", methods=["POST"])
+    @route("/api/tasks/{task_id:int}/workflow/complete", methods=["POST"])
     async def api_task_workflow_complete(request: Request) -> JSONResponse:
         if forbidden := _forbid_non_local(request):
             return forbidden
@@ -5070,7 +5007,7 @@ def create_server(
             return _json_error(f"workflow step failed: {exc!r}", 500, request)
         return _json(request, result)
 
-    @mcp.custom_route("/api/tasks/{task_id:int}/rerun", methods=["POST"])
+    @route("/api/tasks/{task_id:int}/rerun", methods=["POST"])
     async def api_task_rerun(request: Request) -> JSONResponse:
         if forbidden := _forbid_non_local(request):
             return forbidden
@@ -5090,7 +5027,7 @@ def create_server(
             return _json_error(f"re-run failed: {exc!r}", 500, request)
         return _json(request, result)
 
-    @mcp.custom_route("/api/tasks/{task_id:int}/force-close", methods=["POST"])
+    @route("/api/tasks/{task_id:int}/force-close", methods=["POST"])
     async def api_task_force_close(request: Request) -> JSONResponse:
         if forbidden := _forbid_non_local(request):
             return forbidden
@@ -5104,7 +5041,7 @@ def create_server(
             return _json_error(f"force-close failed: {exc!r}", 500, request)
         return _json(request, result)
 
-    @mcp.custom_route("/api/tasks/{task_id:int}/runs", methods=["GET"])
+    @route("/api/tasks/{task_id:int}/runs", methods=["GET"])
     async def api_list_task_runs(request: Request) -> JSONResponse:
         if forbidden := _forbid_non_local(request):
             return forbidden
@@ -5116,7 +5053,7 @@ def create_server(
             return _json_error(str(exc), request=request)
         return _json(request, {"runs": runs})
 
-    @mcp.custom_route("/api/tasks/{task_id:int}/runs", methods=["POST"])
+    @route("/api/tasks/{task_id:int}/runs", methods=["POST"])
     async def api_create_task_run(request: Request) -> JSONResponse:
         if forbidden := _forbid_non_local(request):
             return forbidden
@@ -5154,7 +5091,7 @@ def create_server(
         updated = await _to_thread(store.update_task_run_log_dir, run["id"], str(run_dir))
         return _json(request, {"run": updated or run})
 
-    @mcp.custom_route("/api/task-runs/{run_id:int}/events", methods=["POST"])
+    @route("/api/task-runs/{run_id:int}/events", methods=["POST"])
     async def api_append_task_run_event(request: Request) -> JSONResponse:
         if forbidden := _forbid_non_local(request):
             return forbidden
@@ -5176,7 +5113,7 @@ def create_server(
             return _json_error(str(exc), request=request)
         return _json(request, result)
 
-    @mcp.custom_route("/api/task-runs/{run_id:int}/logs", methods=["POST"])
+    @route("/api/task-runs/{run_id:int}/logs", methods=["POST"])
     async def api_append_task_run_log(request: Request) -> JSONResponse:
         if forbidden := _forbid_non_local(request):
             return forbidden
@@ -5195,7 +5132,7 @@ def create_server(
             return _json_error(str(exc), request=request)
         return _json(request, result)
 
-    @mcp.custom_route("/api/task-runs/{run_id:int}/result", methods=["POST"])
+    @route("/api/task-runs/{run_id:int}/result", methods=["POST"])
     async def api_write_task_run_result(request: Request) -> JSONResponse:
         if forbidden := _forbid_non_local(request):
             return forbidden
@@ -5222,7 +5159,7 @@ def create_server(
             return _json_error(str(exc), request=request)
         return _json(request, {"run": updated, "result": write_result})
 
-    @mcp.custom_route("/api/task-runs/{run_id:int}/files/{file_key}", methods=["GET"])
+    @route("/api/task-runs/{run_id:int}/files/{file_key}", methods=["GET"])
     async def api_read_task_run_file(request: Request) -> JSONResponse:
         if forbidden := _forbid_non_local(request):
             return forbidden
@@ -5238,7 +5175,7 @@ def create_server(
             return _json_error(str(exc), request=request)
         return _json(request, result)
 
-    @mcp.custom_route("/api/inbox/check", methods=["POST"])
+    @route("/api/inbox/check", methods=["POST"])
     async def api_check_inbox(request: Request) -> JSONResponse:
         if forbidden := _forbid_non_local(request):
             return forbidden
@@ -5260,7 +5197,7 @@ def create_server(
             return _json_error(str(exc), request=request)
         return _json(request, {"agent": agent, "count": len(messages), "messages": messages})
 
-    @mcp.custom_route("/api/messages/{message_id:int}/ack", methods=["POST"])
+    @route("/api/messages/{message_id:int}/ack", methods=["POST"])
     async def api_ack_message(request: Request) -> JSONResponse:
         if forbidden := _forbid_non_local(request):
             return forbidden
@@ -5277,7 +5214,7 @@ def create_server(
             return _json_error(str(exc), request=request)
         return _json(request, {"acked": acked, "message_id": message_id})
 
-    @mcp.custom_route("/api/thread/{message_id:int}", methods=["GET"])
+    @route("/api/thread/{message_id:int}", methods=["GET"])
     async def api_get_thread(request: Request) -> JSONResponse:
         if forbidden := _forbid_non_local(request):
             return forbidden
@@ -5285,4 +5222,4 @@ def create_server(
         thread = await _to_thread(store.get_thread, message_id)
         return _json(request, {"messages": thread})
 
-    return mcp
+    return Starlette(routes=routes)
