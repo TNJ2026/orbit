@@ -2853,7 +2853,10 @@
       "testing": "testing",
       "blocked": "blocked",
       "reviewing": "review",
-      "accepted": "done",
+      // 'accepted' is the accept step *in flight*, not a finished task — a
+      // regular task is done only at 'closed' (accept may be non-terminal, with
+      // steps after it). Goals, which rest at 'accepted', are off this board.
+      "accepted": "progress",
       "closed": "done"
     };
     // Fallback only; the workflow config returned by the server is the source
@@ -3278,7 +3281,9 @@
           <div class="step-list">
             ${cards.map(c => {
               const st = c.task_status || "";
-              const cls = ["closed", "accepted"].includes(st) ? "done"
+              // A settled step card is 'closed'; 'accepted' means the accept
+              // step is still in flight, so it renders active, not done.
+              const cls = st === "closed" ? "done"
                         : st === "blocked" ? "blocked"
                         : "active";
               const expanded = c.id === state.expandedStepId;
