@@ -388,7 +388,12 @@ def _normalize_workflow_step(
         raise InvalidInputError("workflow step timeout_minutes must be an integer") from None
     if timeout_minutes < 0:
         raise InvalidInputError("workflow step timeout_minutes must be >= 0")
-    required_locked = role_id in REQUIRED_TEAM_ROLES
+    # Core-role steps are always required; so is any integrate step — it merges
+    # the worktree branch back to main, so skipping it would strand every
+    # isolated step's commits on their branch. Lock it by the integrate flag
+    # itself, not just its (currently hub) role, so re-assigning the role can't
+    # silently make it optional.
+    required_locked = role_id in REQUIRED_TEAM_ROLES or bool(step.get("integrate", False))
     required = True if required_locked else bool(step.get("required", False))
 
     return {
@@ -450,9 +455,19 @@ def _normalize_workflow_edges(
 def _workflow_graph_warnings(
     steps: list[dict[str, Any]], edges: list[dict[str, str]]
 ) -> list[str]:
+    warnings: list[str] = []
+    # git prerequisite for isolation/integration. The engine auto-inits a repo at
+    # flow start when git is installed (see _ensure_git_repo), so a non-git dir is
+    # NOT worth warning about — only a missing git binary is unrecoverable: those
+    # steps then run without a worktree and integrate is skipped.
+    if any(s.get("isolate") or s.get("integrate") for s in steps) and not _git_available():
+        warnings.append(
+            "git is not installed: isolate steps will run without a per-task "
+            "worktree and the integrate step will be skipped"
+        )
     ids = [step["id"] for step in steps]
     if len(ids) <= 1:
-        return []
+        return warnings
     adj: dict[str, list[str]] = {}
     radj: dict[str, list[str]] = {}
     for edge in edges:
@@ -472,7 +487,6 @@ def _workflow_graph_warnings(
             stack.extend(graph.get(node, []))
         return seen
 
-    warnings = []
     if not entries:
         warnings.append("no entry step: every step has an incoming connection")
     else:
@@ -563,6 +577,42 @@ def _coerce_token_budget(value: Any) -> int:
     return budget if budget > 0 else 0
 
 
+# Node box the UI paints (matches WF_NODE_W in static/ui.html). Steps closer
+# than one box + a gap on the same visual row overlap on the canvas.
+_WF_NODE_WIDTH = 200.0
+_WF_MIN_STEP_DX = _WF_NODE_WIDTH + 40.0  # min horizontal center gap in a row
+_WF_ROW_TOLERANCE = 80.0                 # nodes within this dy count as one row
+
+
+def _separate_overlapping_steps(steps: list[dict[str, Any]]) -> None:
+    """Nudge steps apart in place so no two boxes overlap on the same canvas row.
+
+    The UI's dagre layout already spaces nodes, but a config written another way
+    (a hand-edited file, an API POST, a programmatic edit) can place two nodes on
+    top of each other — the node then hides the short edge to its neighbour and
+    looks disconnected. Only same-row (close dy) nodes that are too close in x are
+    pushed right, so intentional parallel stacks (branches at different y) and
+    already-spaced layouts are left untouched. Deterministic: nodes are settled
+    left-to-right, each shifted just past any earlier node it would overlap."""
+    ordered = sorted(
+        steps, key=lambda s: (float(s.get("x", 0.0)), float(s.get("y", 0.0)), s["id"])
+    )
+    placed: list[dict[str, Any]] = []
+    for s in ordered:
+        # Re-check after each shift: moving right can bring a further node in range.
+        for _ in range(len(placed) + 1):
+            moved = False
+            for p in placed:
+                same_row = abs(float(s["y"]) - float(p["y"])) < _WF_ROW_TOLERANCE
+                dx = float(s["x"]) - float(p["x"])
+                if same_row and 0.0 <= dx < _WF_MIN_STEP_DX:
+                    s["x"] = round(float(p["x"]) + _WF_MIN_STEP_DX, 2)
+                    moved = True
+            if not moved:
+                break
+        placed.append(s)
+
+
 def write_workflow_config(
     steps: list[Any],
     project_root: str | None = None,
@@ -595,6 +645,10 @@ def write_workflow_config(
             "workflow must keep steps for core roles: " + ", ".join(missing_core)
         )
     _reject_unknown_roles({step["role_id"] for step in normalized if step["role_id"]}, project_root)
+    # Fallback for configs written outside the UI (hand edit / API / script): keep
+    # nodes from stacking on the canvas, where a covered edge reads as "not
+    # connected". A UI save has already dagre-spaced them, so this is a no-op there.
+    _separate_overlapping_steps(normalized)
     normalized_edges = _normalize_workflow_edges(edges, valid_ids)
     path = _workflow_config_path(project_root)
     project_root_path = _project_root(project_root)
@@ -2047,6 +2101,11 @@ def _start_workflow_task_locked(
             + "; ".join(execution_errors)
             + ". Check the Workflow page warnings."
         )
+    # Isolate/integrate steps need a git repo with a base commit. Provision one
+    # now (init + first commit) rather than letting steps silently degrade; if
+    # git isn't installed the workflow still runs unisolated (integrate no-ops).
+    if _workflow_needs_git(cfg):
+        _ensure_git_repo(project_root)
     steps = {s["id"]: s for s in cfg["steps"]}
     entries = [
         step_id for step_id in _workflow_entry_steps(cfg, back)
@@ -2887,6 +2946,93 @@ def _worktree_base_ref(root: Path) -> str | None:
     return None
 
 
+def _git_available() -> bool:
+    """Whether the git binary can be invoked at all. When git is absent the
+    engine cannot isolate or integrate, and silently degrades to project_root."""
+    import shutil
+
+    return shutil.which("git") is not None
+
+
+def _workflow_needs_git(cfg: dict[str, Any]) -> bool:
+    """A workflow needs a git repo only if some step runs isolated (per-task
+    worktree) or integrates (merge the task branch back to main)."""
+    return any(s.get("isolate") or s.get("integrate") for s in cfg["steps"])
+
+
+def _ensure_state_dir_gitignored(root: Path) -> None:
+    """Keep orbit's runtime dirs (per-task worktrees, task logs) out of the repo
+    so `git status` stays clean for the integrate step and the worktrees are
+    never committed into the tree they branch from."""
+    state = project_state_dir(root)
+    gitignore = root / ".gitignore"
+    existing = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
+    present = set(existing.splitlines())
+    wanted = [f"{state.name}/tasks/", f"{state.name}/worktrees/"]
+    missing = [line for line in wanted if line not in present]
+    if not missing:
+        return
+    joiner = "" if not existing or existing.endswith("\n") else "\n"
+    gitignore.write_text(
+        existing + joiner + "".join(f"{line}\n" for line in missing),
+        encoding="utf-8",
+    )
+
+
+def _ensure_git_repo(project_root: str | None) -> bool:
+    """Guarantee a git repo with at least one commit before the workflow starts,
+    so isolate/integrate steps have a base ref to branch from and merge into.
+
+    - git binary missing -> return False; steps degrade to project_root without
+      isolation and integrate no-ops (see run_step_worker).
+    - not a repo         -> `git init`, gitignore the runtime dirs, and make one
+                            initial commit of the working tree as the base.
+    - repo, unborn HEAD  -> same initial commit.
+    - repo with commits  -> left untouched (never auto-commit in-progress work).
+
+    Returns True when a usable repo with a base ref exists afterwards."""
+    if not _git_available():
+        print(
+            "git: not installed; workflow steps run in project root without "
+            "worktree isolation (integrate is skipped)", flush=True,
+        )
+        return False
+    root = _project_root(project_root)
+    if not _is_git_repo(root):
+        try:
+            cp = _git(root, "init")
+        except (OSError, subprocess.SubprocessError) as exc:
+            print(f"git: init failed in {root}: {exc!r}", flush=True)
+            return False
+        if cp.returncode != 0:
+            print(f"git: init failed in {root}: {(cp.stderr or cp.stdout).strip()}", flush=True)
+            return False
+        print(f"git: initialized empty repository in {root}", flush=True)
+    if _worktree_base_ref(root) is not None:
+        return True  # already has a commit to branch from
+    # Unborn HEAD: create the isolation base. Ignore orbit's runtime dirs first
+    # so the worktrees/logs are never committed into the base tree. Pass an inline
+    # identity so the commit never fails on a machine with no global git identity.
+    _ensure_state_dir_gitignored(root)
+    ident = ("-c", "user.name=orbit", "-c", "user.email=orbit@localhost")
+    msg = "orbit: initialize repository for worktree isolation"
+    try:
+        _git(root, "add", "-A")
+        cp = _git(root, *ident, "commit", "-m", msg)
+        if cp.returncode != 0:
+            # Empty project (nothing staged): seed an empty root commit so a base
+            # ref still exists for worktrees to branch off.
+            _git(root, *ident, "commit", "--allow-empty", "-m", msg)
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"git: initial commit failed in {root}: {exc!r}", flush=True)
+        return False
+    if _worktree_base_ref(root) is None:
+        print(f"git: could not create an initial commit in {root}", flush=True)
+        return False
+    print(f"git: created initial commit as the worktree base in {root}", flush=True)
+    return True
+
+
 def _branch_exists(root: Path, branch: str) -> bool:
     try:
         return _git(
@@ -3186,7 +3332,17 @@ def run_step_worker(
     exec_dir = _project_root(project_root)
     isolated = False
     can_rework = False
-    if not command:
+    # Non-git degrade: an integrate step has no task branch to merge when the
+    # project isn't a git repo (git absent, or the isolate steps also ran
+    # unisolated in project_root). Pass it instead of spawning the hub CLI to run
+    # `git merge` that would only fail — so a non-git workflow completes cleanly.
+    integrate_noop = bool(step.get("integrate")) and not _is_git_repo(exec_dir)
+    if integrate_noop:
+        outcome, result, status = "done", (
+            "integrate skipped: not a git repository, so there is no task branch "
+            "to merge (isolation degraded to project root)"
+        ), "succeeded"
+    elif not command:
         result = (
             f"no runner command for agent {assignee}; set runner_command on "
             "the team member"

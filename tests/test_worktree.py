@@ -86,6 +86,61 @@ class WorkflowSchemaTests(unittest.TestCase):
         self.assertIn(("test", "implement"), pairs)  # verify failed -> rework
 
 
+class StepSeparationTests(unittest.TestCase):
+    """write_workflow_config nudges overlapping nodes apart so a config written
+    outside the UI (hand edit / script) never stacks nodes on the canvas."""
+
+    def test_cramped_same_row_is_separated(self):
+        steps = [
+            {"id": "test", "name": "T", "role_id": "tester", "y": 94.0, "x": 1490.0},
+            {"id": "integrate", "name": "I", "role_id": "hub", "y": 94.0, "x": 1635.0},
+            {"id": "accept", "name": "A", "role_id": "hub", "y": 94.0, "x": 1780.0},
+        ]
+        server._separate_overlapping_steps(steps)
+        xs = sorted(s["x"] for s in steps)
+        gaps = [b - a for a, b in zip(xs, xs[1:])]
+        self.assertTrue(all(g >= server._WF_MIN_STEP_DX for g in gaps), xs)
+
+    def test_default_layout_is_left_untouched(self):
+        steps = server.default_workflow_steps()
+        before = {s["id"]: (s["x"], s["y"]) for s in steps}
+        server._separate_overlapping_steps(steps)
+        after = {s["id"]: (s["x"], s["y"]) for s in steps}
+        self.assertEqual(before, after)
+
+    def test_parallel_stack_same_x_different_row_kept(self):
+        # Branches stacked vertically (dy beyond the row tolerance) must not be
+        # treated as an overlap and pushed apart.
+        steps = [
+            {"id": "arch", "name": "A", "role_id": "architect", "x": 620.0, "y": 40.0},
+            {"id": "ui", "name": "U", "role_id": "ui_designer", "x": 620.0, "y": 148.0},
+        ]
+        server._separate_overlapping_steps(steps)
+        self.assertEqual([620.0, 620.0], [s["x"] for s in steps])
+
+    def test_duplicate_position_is_split(self):
+        steps = [
+            {"id": "a", "name": "A", "role_id": "hub", "x": 500.0, "y": 94.0},
+            {"id": "b", "name": "B", "role_id": "hub", "x": 500.0, "y": 94.0},
+        ]
+        server._separate_overlapping_steps(steps)
+        self.assertNotEqual(steps[0]["x"], steps[1]["x"])
+
+    def test_write_config_persists_separated_coords(self):
+        with TemporaryDirectory() as tmp:
+            steps = server.default_workflow_steps()
+            by = {s["id"]: s for s in steps}
+            # Jam integrate on top of test (both isolate/role fine for a write).
+            by["integrate"]["x"], by["integrate"]["y"] = by["test"]["x"] + 20, by["test"]["y"]
+            saved = server.write_workflow_config(
+                steps, tmp, server.default_workflow_edges()
+            )
+            xs = {s["id"]: s["x"] for s in saved["steps"]}
+            self.assertGreaterEqual(
+                abs(xs["integrate"] - xs["test"]), server._WF_MIN_STEP_DX
+            )
+
+
 class StepPromptTests(unittest.TestCase):
     TASK = {"id": 42, "title": "t", "content": "c", "is_goal": 0, "parent_task_id": None}
 
@@ -166,6 +221,109 @@ class WorktreeLifecycleTests(unittest.TestCase):
             wt = server._ensure_task_worktree(tmp, 3)
             self.assertIsNotNone(wt)
             self.assertTrue(server._worktree_registered(root, wt))
+
+
+class GitProvisioningTests(unittest.TestCase):
+    """Before a workflow with isolate/integrate steps starts, the engine makes
+    sure a git repo with a base commit exists (or degrades if git is absent)."""
+
+    def test_needs_git_predicate(self):
+        self.assertTrue(
+            server._workflow_needs_git({"steps": server.default_workflow_steps()})
+        )
+        self.assertFalse(
+            server._workflow_needs_git(
+                {"steps": [{"id": "a", "isolate": False, "integrate": False}]}
+            )
+        )
+
+    def test_ensure_inits_non_git_dir_with_base_commit(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "src.py").write_text("x = 1\n", encoding="utf-8")
+            self.assertTrue(server._ensure_git_repo(tmp))
+            self.assertTrue(server._is_git_repo(root))
+            self.assertEqual("HEAD", server._worktree_base_ref(root))
+            # runtime dirs are gitignored so integrate's `git status` stays clean
+            ignored = (root / ".gitignore").read_text(encoding="utf-8").splitlines()
+            self.assertIn(".orbit/worktrees/", ignored)
+            self.assertIn(".orbit/tasks/", ignored)
+            # the base commit is enough to seed a real per-task worktree
+            self.assertIsNotNone(server._ensure_task_worktree(tmp, 1))
+
+    def test_ensure_seeds_base_in_empty_dir(self):
+        with TemporaryDirectory() as tmp:
+            self.assertTrue(server._ensure_git_repo(tmp))
+            self.assertEqual("HEAD", server._worktree_base_ref(Path(tmp)))
+
+    def test_ensure_leaves_existing_commits_untouched(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _init_repo(root)
+            head = subprocess.run(
+                ["git", "-C", tmp, "rev-parse", "HEAD"], capture_output=True, text=True
+            ).stdout.strip()
+            # A dirty tree must NOT be auto-committed when a base already exists.
+            (root / "wip.txt").write_text("in progress", encoding="utf-8")
+            self.assertTrue(server._ensure_git_repo(tmp))
+            head2 = subprocess.run(
+                ["git", "-C", tmp, "rev-parse", "HEAD"], capture_output=True, text=True
+            ).stdout.strip()
+            self.assertEqual(head, head2)
+            self.assertTrue((root / "wip.txt").exists())  # left uncommitted
+
+    def test_warns_when_git_missing_for_isolating_workflow(self):
+        from unittest import mock
+
+        steps = server.default_workflow_steps()  # has isolate/integrate steps
+        with mock.patch.object(server, "_git_available", return_value=False):
+            w = server._workflow_graph_warnings(steps, server.default_workflow_edges())
+        self.assertTrue(any("git is not installed" in x for x in w), w)
+
+    def test_no_git_warning_when_git_available(self):
+        from unittest import mock
+
+        steps = server.default_workflow_steps()
+        with mock.patch.object(server, "_git_available", return_value=True):
+            w = server._workflow_graph_warnings(steps, server.default_workflow_edges())
+        self.assertFalse(any("git is not installed" in x for x in w), w)
+
+    def test_no_git_warning_for_workflow_without_isolation(self):
+        from unittest import mock
+
+        # No isolate/integrate step -> git is irrelevant, so no warning even
+        # when git is unavailable.
+        steps = [
+            {"id": "intake", "name": "T", "role_id": "hub", "isolate": False, "integrate": False},
+            {"id": "accept", "name": "A", "role_id": "hub", "isolate": False, "integrate": False},
+        ]
+        edges = [{"from": "intake", "to": "accept"}]
+        with mock.patch.object(server, "_git_available", return_value=False):
+            w = server._workflow_graph_warnings(steps, edges)
+        self.assertFalse(any("git is not installed" in x for x in w), w)
+
+    def test_integrate_noops_in_non_git_project(self):
+        # A non-git project can't have a task branch; integrate must pass the step
+        # (done) instead of dispatching the hub CLI to run `git merge` and fail.
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / ".orbit" / "messages.db")
+            store.register_agent("hub", "")
+            ids = store.send_message("hub", "hub", "do it", kind="task", title="t")
+            task_id = store.get_task_by_source_message(ids[0])["id"]
+            step = {
+                "id": "integrate", "name": "Integrate", "role_id": "hub",
+                "isolate": False, "integrate": True, "task_status": "in_progress",
+            }
+            # runner_command would fail if ever spawned; the no-op must skip it.
+            member = {"agent_name": "hub", "runner_command": "false"}
+            res = server.run_step_worker(
+                store, str(root), task_id, step, member,
+                upstream_result="", advance=False,
+            )
+            self.assertEqual("done", res["outcome"])
+            self.assertIn("not a git repository", res["result"])
+            store.close()
 
 
 class WorktreeSweepTests(unittest.TestCase):
