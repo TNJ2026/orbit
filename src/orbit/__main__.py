@@ -127,22 +127,32 @@ def _serve_hint(host: str, port: int) -> str:
     return f"python -m orbit serve --host {host} --port {port}"
 
 
-def ensure_state_dir_gitignored(project_root: Path) -> bool:
-    """Add the per-project state dir (e.g. `.orbit/`) to the repo's .gitignore
-    so runtime task logs and worktrees never show up in `git status`. Returns
-    True if the file was modified. Already-tracked files are unaffected by
-    gitignore, so a project that committed its `.orbit/` config via `orbit
-    init` keeps those tracked."""
-    state_name = project_state_dir(project_root).name
-    entry = f"{state_name}/"
+def append_missing_gitignore(project_root: Path, entries: list[str]) -> list[str]:
+    """Append any of `entries` not already in the repo's .gitignore, returning
+    the ones actually added. An entry counts as present with or without its
+    trailing slash. Already-tracked files are unaffected by gitignore, so a
+    project that committed a path keeps it tracked regardless."""
     gitignore = project_root / ".gitignore"
     existing = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
     present = {line.strip() for line in existing.splitlines()}
-    if entry in present or state_name in present:
-        return False
+    missing = [
+        e for e in entries if e not in present and e.rstrip("/") not in present
+    ]
+    if not missing:
+        return []
     joiner = "" if not existing or existing.endswith("\n") else "\n"
-    gitignore.write_text(existing + joiner + entry + "\n", encoding="utf-8")
-    return True
+    gitignore.write_text(
+        existing + joiner + "".join(f"{e}\n" for e in missing), encoding="utf-8"
+    )
+    return missing
+
+
+def ensure_state_dir_gitignored(project_root: Path) -> bool:
+    """Add the per-project state dir (e.g. `.orbit/`) to the repo's .gitignore
+    so runtime task logs and worktrees never show up in `git status`. Returns
+    True if the file was modified."""
+    state_name = project_state_dir(project_root).name
+    return bool(append_missing_gitignore(project_root, [f"{state_name}/"]))
 
 
 def _serve(args) -> None:
@@ -300,10 +310,14 @@ def main() -> None:
     if args.command == "up":
         project_root = resolve_project_root()
         state_name = project_state_dir(project_root).name
-        if ensure_state_dir_gitignored(project_root):
-            print(f"gitignore: added {state_name}/", flush=True)
+        # Ignore the state dir and agents/: under `up` a UI role edit materializes
+        # agents/ into the repo on demand, so keep it out of git too — `up` copies
+        # nothing you need to commit. (A committed agents/ stays tracked regardless.)
+        added = append_missing_gitignore(project_root, [f"{state_name}/", "agents/"])
+        if added:
+            print(f"gitignore: added {', '.join(added)}", flush=True)
         else:
-            print(f"gitignore: {state_name}/ already ignored", flush=True)
+            print(f"gitignore: {state_name}/ and agents/ already ignored", flush=True)
         print(
             "orbit up: serving with packaged role/workflow defaults — no files "
             "copied into the repo. Run `orbit config` to customize and commit them.",

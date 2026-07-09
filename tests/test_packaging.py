@@ -58,6 +58,21 @@ class PackagingTests(unittest.TestCase):
             text = (root / ".gitignore").read_text(encoding="utf-8")
             self.assertEqual(".venv/\n.orbit/\n", text)
 
+    def test_append_missing_gitignore_adds_only_absent_entries(self):
+        from orbit.__main__ import append_missing_gitignore
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".gitignore").write_text(".orbit/\n", encoding="utf-8")
+            # .orbit/ already present (agents/ isn't) -> only agents/ is added.
+            added = append_missing_gitignore(root, [".orbit/", "agents/"])
+            self.assertEqual(["agents/"], added)
+            text = (root / ".gitignore").read_text(encoding="utf-8")
+            self.assertEqual(".orbit/\nagents/\n", text)
+            # Trailing-slash-insensitive: `agents` without a slash counts as present.
+            (root / ".gitignore").write_text("agents\n", encoding="utf-8")
+            self.assertEqual([], append_missing_gitignore(root, ["agents/"]))
+
     def test_agents_dir_falls_back_to_packaged_templates(self):
         import orbit.server as server
 

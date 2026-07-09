@@ -65,13 +65,13 @@ orbit serve --port 9000 --db /tmp/test.db
 
 | 命令 | 会往仓库写文件吗 | 适用 |
 |---|---|---|
-| `orbit up` | 只补 `.gitignore`（忽略 `.orbit/`） | **默认** —— 任何仓库零配置起，准备+serve 一体，用包内角色/工作流默认值 |
+| `orbit up` | 只补 `.gitignore`（忽略 `.orbit/` 和 `agents/`） | **默认** —— 任何仓库零配置起，准备+serve 一体，用包内角色/工作流默认值 |
 | `orbit serve` | 否 | 已准备好、或直接用默认值，单独启动 |
 | `orbit config`（再 `orbit serve`） | 写角色/工作流/配置文件 | 可选 —— 仅当要改角色提示词、自定义工作流并 commit 给团队共享 |
 
 ### 在别的仓库里零配置起
 
-不想往别的仓库里复制角色/配置文件时，用 `orbit up`：它先把状态目录（`.orbit/`）写进该仓库的 `.gitignore`，再用**包内自带的角色和工作流默认值**直接 serve——不落任何需要提交的文件。`serve` 支持的参数（`--host` / `--port` / `--db` / `--no-runner` / `--runner-concurrency`）它都支持。
+不想往别的仓库里复制角色/配置文件时，用 `orbit up`：它先把状态目录（`.orbit/`）和 `agents/` 写进该仓库的 `.gitignore`，再用**包内自带的角色和工作流默认值**直接 serve——不落任何需要提交的文件。（在 UI 里改 role 提示词仍会按需 materialize 出 `agents/`，但在 `up` 下它不进 git。）`serve` 支持的参数（`--host` / `--port` / `--db` / `--no-runner` / `--runner-concurrency`）它都支持。
 
 ```bash
 orbit up                                   # 已装 orbit

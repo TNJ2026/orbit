@@ -67,13 +67,13 @@ Three ways to bring it up — pick by need:
 
 | Command | Writes files into the repo? | Use when |
 |---|---|---|
-| `orbit up` | Only appends to `.gitignore` (ignores `.orbit/`) | **Default** — zero-config start from any repo; prepares + serves with packaged role/workflow defaults |
+| `orbit up` | Only appends to `.gitignore` (ignores `.orbit/` and `agents/`) | **Default** — zero-config start from any repo; prepares + serves with packaged role/workflow defaults |
 | `orbit serve` | No | Already prepared, or happy with the defaults — just run it |
 | `orbit config` (then `orbit serve`) | Writes role / workflow / config files | Optional — only to customize role prompts & workflow and commit them for the team |
 
 ### Zero-config start in another repo
 
-When you don't want to copy role/config files into another repo, use `orbit up`: it first appends the state dir (`.orbit/`) to that repo's `.gitignore`, then serves using the **packaged role and workflow defaults** — nothing that needs to be committed lands in the repo. It accepts every `serve` flag (`--host` / `--port` / `--db` / `--no-runner` / `--runner-concurrency`).
+When you don't want to copy role/config files into another repo, use `orbit up`: it first appends the state dir (`.orbit/`) and `agents/` to that repo's `.gitignore`, then serves using the **packaged role and workflow defaults** — nothing that needs to be committed lands in the repo. (Editing a role prompt in the UI still materializes `agents/` on demand, but it stays out of git under `up`.) It accepts every `serve` flag (`--host` / `--port` / `--db` / `--no-runner` / `--runner-concurrency`).
 
 ```bash
 orbit up                                                        # orbit already installed
