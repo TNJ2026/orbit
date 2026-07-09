@@ -780,58 +780,41 @@ class ReapStaleRunsTests(unittest.TestCase):
             store.close()
 
 
-def _set_workflow_field(tmp, key, value):
-    server.write_workflow_config(
-        server.default_workflow_steps(), tmp, server.default_workflow_edges()
-    )
-    path = Path(tmp) / ".orbit" / "workflow.json"
-    data = json.loads(path.read_text(encoding="utf-8"))
-    data[key] = value
-    path.write_text(json.dumps(data), encoding="utf-8")
-
-
 class TokenBudgetConfigTests(unittest.TestCase):
-    def test_budget_roundtrips_and_coerces(self):
+    def test_coerce_token_budget(self):
         self.assertEqual(0, server._coerce_token_budget(None))
         self.assertEqual(0, server._coerce_token_budget("nope"))
         self.assertEqual(0, server._coerce_token_budget(-5))
         self.assertEqual(1000, server._coerce_token_budget("1000"))
-        with TemporaryDirectory() as tmp:
-            _set_workflow_field(tmp, "goal_token_budget", 12345)
-            self.assertEqual(12345, server.read_workflow_config(tmp)["goal_token_budget"])
-            # A plain UI save (no budget field) must preserve it.
-            server.write_workflow_config(
-                server.default_workflow_steps(), tmp, server.default_workflow_edges()
-            )
-            self.assertEqual(12345, server.read_workflow_config(tmp)["goal_token_budget"])
 
-    def test_write_sets_and_clears_gates_explicitly(self):
+    def test_goal_verify_roundtrips_and_no_workflow_budget(self):
         with TemporaryDirectory() as tmp:
-            saved = server.write_workflow_config(
+            server.write_workflow_config(
                 server.default_workflow_steps(), tmp, server.default_workflow_edges(),
-                goal_verify="pytest -q", goal_token_budget=5_000_000,
+                goal_verify="pytest -q",
             )
-            self.assertEqual(("pytest -q", 5_000_000),
-                             (saved["goal_verify"], saved["goal_token_budget"]))
-            # None preserves; explicit values override/clear.
+            self.assertEqual("pytest -q", server.read_workflow_config(tmp)["goal_verify"])
+            # A plain save (no goal_verify) preserves it; an explicit "" clears it.
             server.write_workflow_config(
                 server.default_workflow_steps(), tmp, server.default_workflow_edges()
             )
-            self.assertEqual(5_000_000, server.read_workflow_config(tmp)["goal_token_budget"])
+            self.assertEqual("pytest -q", server.read_workflow_config(tmp)["goal_verify"])
             cleared = server.write_workflow_config(
                 server.default_workflow_steps(), tmp, server.default_workflow_edges(),
-                goal_verify="", goal_token_budget=0,
+                goal_verify="",
             )
-            self.assertEqual(("", 0), (cleared["goal_verify"], cleared["goal_token_budget"]))
+            self.assertEqual("", cleared["goal_verify"])
+            # Token budget is per goal only — no workflow-level field.
+            self.assertNotIn("goal_token_budget", server.read_workflow_config(tmp))
 
 
 class TokenBudgetGateTests(unittest.TestCase):
-    def _goal_with_subtask_tokens(self, tmp, tokens):
+    def _goal_with_subtask_tokens(self, tmp, tokens, budget=0):
         store = Store(Path(tmp) / ".orbit" / "messages.db")
         store.register_agent("hub", "")
         gid = store.send_message("hub", "hub", "goal", kind="task", title="G")
         goal = store.get_task_by_source_message(gid[0])
-        store.update_task_metadata(goal["id"], is_goal=True)
+        store.update_task_metadata(goal["id"], is_goal=True, token_budget=budget)
         sub = store.get_task_by_source_message(
             store.send_message("hub", "hub", "sub", reply_to=gid[0], kind="task", title="S")[0]
         )
@@ -848,8 +831,7 @@ class TokenBudgetGateTests(unittest.TestCase):
 
     def test_no_budget_never_blocks(self):
         with TemporaryDirectory() as tmp:
-            _set_workflow_field(tmp, "goal_token_budget", 0)
-            store, goal_id, sub_id = self._goal_with_subtask_tokens(tmp, 10_000)
+            store, goal_id, sub_id = self._goal_with_subtask_tokens(tmp, 10_000, budget=0)
             self.assertFalse(
                 server._enforce_goal_token_budget(store, tmp, store.get_task(sub_id))
             )
@@ -857,8 +839,7 @@ class TokenBudgetGateTests(unittest.TestCase):
 
     def test_under_budget_passes(self):
         with TemporaryDirectory() as tmp:
-            _set_workflow_field(tmp, "goal_token_budget", 5000)
-            store, goal_id, sub_id = self._goal_with_subtask_tokens(tmp, 1000)
+            store, goal_id, sub_id = self._goal_with_subtask_tokens(tmp, 1000, budget=5000)
             self.assertFalse(
                 server._enforce_goal_token_budget(store, tmp, store.get_task(sub_id))
             )
@@ -867,8 +848,7 @@ class TokenBudgetGateTests(unittest.TestCase):
 
     def test_over_budget_blocks_goal_notifies_once(self):
         with TemporaryDirectory() as tmp:
-            _set_workflow_field(tmp, "goal_token_budget", 500)
-            store, goal_id, sub_id = self._goal_with_subtask_tokens(tmp, 1200)
+            store, goal_id, sub_id = self._goal_with_subtask_tokens(tmp, 1200, budget=500)
             self.assertTrue(
                 server._enforce_goal_token_budget(store, tmp, store.get_task(sub_id))
             )
@@ -888,28 +868,6 @@ class TokenBudgetGateTests(unittest.TestCase):
             self.assertFalse(store.has_unread("hub"))  # not re-notified
             store.close()
 
-    def test_goal_override_beats_config_default(self):
-        with TemporaryDirectory() as tmp:
-            _set_workflow_field(tmp, "goal_token_budget", 0)  # no global default
-            store, goal_id, sub_id = self._goal_with_subtask_tokens(tmp, 1200)
-            store.update_task_metadata(goal_id, token_budget=500)  # per-goal ceiling
-            self.assertTrue(
-                server._enforce_goal_token_budget(store, tmp, store.get_task(sub_id))
-            )
-            self.assertEqual("blocked", store.get_task(goal_id)["task_status"])
-            store.close()
-
-    def test_goal_override_raises_ceiling_above_default(self):
-        with TemporaryDirectory() as tmp:
-            _set_workflow_field(tmp, "goal_token_budget", 500)  # low global default
-            store, goal_id, sub_id = self._goal_with_subtask_tokens(tmp, 1200)
-            store.update_task_metadata(goal_id, token_budget=5000)  # this goal gets more
-            self.assertFalse(
-                server._enforce_goal_token_budget(store, tmp, store.get_task(sub_id))
-            )
-            self.assertNotEqual("blocked", store.get_task(goal_id)["task_status"])
-            store.close()
-
     def test_new_task_budget_defaults_to_zero(self):
         with TemporaryDirectory() as tmp:
             store, goal_id, sub_id = self._goal_with_subtask_tokens(tmp, 10)
@@ -918,8 +876,7 @@ class TokenBudgetGateTests(unittest.TestCase):
 
     def test_dispatch_step_is_frozen_over_budget(self):
         with TemporaryDirectory() as tmp:
-            _set_workflow_field(tmp, "goal_token_budget", 500)
-            store, goal_id, sub_id = self._goal_with_subtask_tokens(tmp, 1200)
+            store, goal_id, sub_id = self._goal_with_subtask_tokens(tmp, 1200, budget=500)
             sub = store.get_task(sub_id)
             step = {"id": "implement", "name": "Implement", "role_id": "implementer",
                     "task_status": "in_progress"}

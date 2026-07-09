@@ -154,7 +154,7 @@ Once all of a goal's business subtasks self-test and close, orbit runs the `goal
 - **Auto-detected by default**: with no `goal_verify` set, orbit infers a common test command from project markers (`npm test`, `cargo test`, `python -m unittest discover -s tests`, …). Good for a quick try — confirm the guess in the Workflow panel.
 - **Declare it explicitly for real use**: save the command into `.orbit/workflow.json` (via UI/CLI). It should be idempotent, runnable offline, and cover unit/integration tests. Point it at a script (`./scripts/goal-verify.sh`) for monorepos.
 - It runs in the project root under a hard timeout (`VERIFY_HARD_TIMEOUT_SECONDS`, default 900s). Pass → goal `accepted`; fail → `stalled` + hub is notified.
-- `goal_verify` is a plain shell/test command — it uses no LLM, so it **consumes no tokens and does not count against `goal_token_budget`**.
+- `goal_verify` is a plain shell/test command — it uses no LLM, so it **consumes no tokens and does not count against a goal's token budget**.
 
 ### Token accounting & budget
 
@@ -162,7 +162,7 @@ Every run records a token count, aggregated per goal so you can watch and cap sp
 
 - **Per run**: orbit parses each run's usage — preferring the agent CLI's own usage line (accurate), falling back to the `TOKENS_USED: <n>` sentinel every runner is asked to print (approximate, model-estimated; see `agents/_protocol.md`). The count is stored on the run and shown in its run log; the last usage line wins, since CLI usage lines are cumulative.
 - **Per goal**: usage is summed across the goal's whole subtree (goal + subtasks + step cards). The **Goals** tab shows the running total.
-- **Budget cap**: set `goal_token_budget` in the workflow config as a hard ceiling on a goal's total subtree tokens (a per-goal override beats the workflow default; `0` = unlimited). When a goal crosses its budget, further dispatch is frozen and hub is notified (the goal goes `blocked`).
+- **Budget cap**: set a token budget **per goal** when you start it (in the goal dialog) as a hard ceiling on that goal's total subtree tokens; `0` = unlimited. When a goal crosses its budget, further dispatch is frozen and hub is notified (the goal goes `blocked`).
 - `goal_verify` and step `verify` commands run no LLM, so they cost **no tokens** and never count against the budget.
 
 ## Local Web UI
@@ -172,7 +172,7 @@ Every run records a token count, aggregated per goal so you can watch and cap sp
 - Switch between running project daemons via the Project dropdown at the top
 - View installed common agent CLIs and the team config
 - **Board**: tasks by status column (todo / in progress / testing / review / blocked / done)
-- **Workflow**: visually edit the workflow graph (steps, roles, edges, `verify` command, goal budget)
+- **Workflow**: visually edit the workflow graph (steps, roles, edges, `verify` command, goal_verify)
 - **Jobs**: the `run_jobs` execution queue (status / outcome / claimant / lease expiry) to confirm the runner is consuming
 - **Goals**: goal progress and subtree token spend; **Force End** to hard-stop (kill running runners + close the whole tree)
 - Per-step run logs (command, exit code, stdout/stderr tail)

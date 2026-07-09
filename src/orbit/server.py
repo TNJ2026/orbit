@@ -553,7 +553,6 @@ def read_workflow_config(project_root: str | None = None) -> dict[str, Any]:
             "statuses": statuses,
             "edges": default_workflow_edges(),
             "goal_verify": "",
-            "goal_token_budget": 0,
             "path": str(path),
             "warnings": [],
         }
@@ -584,10 +583,8 @@ def read_workflow_config(project_root: str | None = None) -> dict[str, Any]:
     else:
         edges = _normalize_workflow_edges(raw_edges, valid_ids)
     goal_verify = ""
-    goal_token_budget = 0
     if isinstance(data, dict):
         goal_verify = str(data.get("goal_verify") or "").strip()
-        goal_token_budget = _coerce_token_budget(data.get("goal_token_budget"))
     return {
         "steps": normalized,
         "statuses": statuses,
@@ -596,10 +593,6 @@ def read_workflow_config(project_root: str | None = None) -> dict[str, Any]:
         # all of a goal's subtasks close, before the goal is accepted. Catches
         # integration failures that per-subtask (isolated) tests can't see.
         "goal_verify": goal_verify,
-        # goal_token_budget: hard ceiling on total tokens across a goal's whole
-        # subtree. Exceeding it freezes further dispatch and escalates to hub.
-        # 0 = unlimited.
-        "goal_token_budget": goal_token_budget,
         "path": str(path),
         "warnings": _workflow_graph_warnings(normalized, edges),
     }
@@ -655,7 +648,6 @@ def write_workflow_config(
     edges: Any = None,
     statuses: Any = None,
     goal_verify: str | None = None,
-    goal_token_budget: int | None = None,
 ) -> dict[str, Any]:
     if not isinstance(steps, list):
         raise InvalidInputError("steps must be a list")
@@ -698,30 +690,23 @@ def write_workflow_config(
         {k: v for k, v in step.items() if k != "required_locked"}
         for step in normalized
     ]
-    # goal_verify / goal_token_budget: callers that don't pass them (e.g. a UI
-    # save of only steps/statuses/edges) preserve the existing values instead
-    # of wiping them; an explicit value overrides.
+    # goal_verify: a caller that doesn't pass it (e.g. a UI save of only
+    # steps/statuses/edges) preserves the existing value instead of wiping it;
+    # an explicit value overrides.
     preserved_verify = ""
-    preserved_budget = 0
     if path.exists():
         try:
             prev = json.loads(path.read_text(encoding="utf-8"))
             if isinstance(prev, dict):
                 preserved_verify = str(prev.get("goal_verify") or "").strip()
-                preserved_budget = _coerce_token_budget(prev.get("goal_token_budget"))
         except (OSError, json.JSONDecodeError):
             pass
     final_verify = preserved_verify if goal_verify is None else str(goal_verify or "").strip()
-    final_budget = (
-        preserved_budget if goal_token_budget is None
-        else _coerce_token_budget(goal_token_budget)
-    )
     data = {
         "statuses": normalized_statuses,
         "steps": persisted,
         "edges": normalized_edges,
         "goal_verify": final_verify,
-        "goal_token_budget": final_budget,
     }
     path.write_text(
         json.dumps(data, ensure_ascii=False, indent=2) + "\n",
@@ -732,7 +717,6 @@ def write_workflow_config(
         "statuses": normalized_statuses,
         "edges": normalized_edges,
         "goal_verify": final_verify,
-        "goal_token_budget": final_budget,
         "path": str(path),
         "warnings": _workflow_graph_warnings(normalized, normalized_edges),
     }
@@ -1543,10 +1527,6 @@ def _business_subtasks_for_goal(store: Store, goal_id: int) -> list[dict[str, An
     return store.list_tasks_by_parent(goal_id)
 
 
-def _goal_token_budget(project_root: str | None) -> int:
-    return _coerce_token_budget(read_workflow_config(project_root).get("goal_token_budget"))
-
-
 def _root_goal_id(store: Store, task: dict[str, Any]) -> int | None:
     """Walk parent_task_id up to the owning goal (subtasks are children of the
     goal). Returns the goal's id, or None if the task isn't under a goal."""
@@ -1566,21 +1546,19 @@ def _root_goal_id(store: Store, task: dict[str, Any]) -> int | None:
 def _enforce_goal_token_budget(
     store: Store, project_root: str | None, task: dict[str, Any]
 ) -> bool:
-    """Hard token ceiling: if the task's goal has spent more than its configured
-    budget, freeze the goal (block + notify hub, once) and return True so the
-    caller skips dispatch. Returns False when no budget is set or still within
-    it. The goal's own token_budget overrides the workflow-level default (0 on
-    the goal falls back to that default). Tokens are self-reported by agents, so
-    this bounds — not perfectly meters — runaway cost; unreported tokens count
-    as zero."""
+    """Hard token ceiling: if the task's goal has spent more than its own
+    token_budget, freeze the goal (block + notify hub, once) and return True so
+    the caller skips dispatch. Returns False when the goal set no budget (0 =
+    unlimited) or is still within it. Budget is per goal, set when the goal is
+    started. Tokens are self-reported by agents, so this bounds — not perfectly
+    meters — runaway cost; unreported tokens count as zero."""
     goal_id = _root_goal_id(store, task)
     if goal_id is None:
         return False
     goal = store.get_task(goal_id)
     if not goal:
         return False
-    override = _coerce_token_budget(goal.get("token_budget"))
-    budget = override if override > 0 else _goal_token_budget(project_root)
+    budget = _coerce_token_budget(goal.get("token_budget"))
     if budget <= 0:
         return False
     total = store.sum_goal_tokens(goal_id)
@@ -5077,7 +5055,6 @@ def create_server(
                 data.get("edges"),
                 data.get("statuses"),
                 data.get("goal_verify"),
-                data.get("goal_token_budget"),
             )
         except InvalidInputError as exc:
             return _json_error(str(exc), request=request)

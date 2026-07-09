@@ -1381,16 +1381,11 @@
       </div>
       <div id="workflowPath" class="meta" style="padding: 10px 12px;"></div>
       <div id="workflowGates" style="display:flex; flex-wrap:wrap; gap:14px; align-items:flex-end; padding: 0 12px 10px;">
-        <label style="display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--muted);">
-          <span data-i18n="wf.budgetLabel">Token budget (M)</span>
-          <input id="wfTokenBudget" type="number" min="0" step="1" placeholder="0" style="width:100px;">
-        </label>
         <label style="display:flex; flex-direction:column; gap:4px; flex:1; min-width:240px; font-size:12px; color:var(--muted);">
           <span data-i18n="wf.goalVerifyLabel">Goal verify command</span>
           <input id="wfGoalVerify" type="text" data-i18n-ph="wf.goalVerifyPh" style="width:100%;">
         </label>
         <button id="wfSaveGates" type="button" data-i18n="wf.saveGates">Save</button>
-        <span class="meta" data-i18n="wf.gatesHint" style="font-size:11px;">0 = unlimited</span>
       </div>
       <div id="workflowSteps"></div>
     </div>
@@ -1521,11 +1516,9 @@
         "wf.addStepTitle": "Add step: opens a form to set the name, role and status of a new step",
         "wf.connectTitle": "Connect: click the source node, then the target node, to draw an edge",
         "wf.noSteps": "No steps yet — click <strong>Add step</strong> to create one.",
-        "wf.budgetLabel": "Token budget (M)",
         "wf.goalVerifyLabel": "Goal verify command",
         "wf.goalVerifyPh": "e.g. python -m pytest",
         "wf.saveGates": "Save",
-        "wf.gatesHint": "0 = unlimited",
         "wf.gatesSaved": "Gate settings saved",
         "wf.start": "▶ start", "wf.end": "⏹ end", "wf.required": "required", "wf.optional": "optional",
         "wf.step": "Step", "wf.dblClickEdit": "Double-click to edit", "wf.clickDelete": "Click to delete",
@@ -1629,11 +1622,9 @@
         "wf.addStepTitle": "添加步骤：打开表单设置新步骤的名称、角色和状态",
         "wf.connectTitle": "连接：先点击源节点，再点击目标节点，绘制连线",
         "wf.noSteps": "暂无步骤 — 点击 <strong>添加步骤</strong> 创建一个。",
-        "wf.budgetLabel": "Token 预算 (M)",
         "wf.goalVerifyLabel": "目标验收命令",
         "wf.goalVerifyPh": "如 python -m pytest",
         "wf.saveGates": "保存",
-        "wf.gatesHint": "0 = 不限",
         "wf.gatesSaved": "门槛设置已保存",
         "wf.start": "▶ 开始", "wf.end": "⏹ 结束", "wf.required": "必选", "wf.optional": "可选",
         "wf.step": "步骤", "wf.dblClickEdit": "双击编辑", "wf.clickDelete": "点击删除",
@@ -1890,8 +1881,7 @@
         edges: data.edges || [],
         path: data.path || "",
         warnings: data.warnings || [],
-        goal_verify: data.goal_verify || "",
-        goal_token_budget: data.goal_token_budget || 0
+        goal_verify: data.goal_verify || ""
       };
       // Render at the stored (last auto-laid-out) coordinates. Layout is only
       // recomputed on an explicit edit (saveWorkflow), never on load — viewing
@@ -2263,16 +2253,10 @@
       return { x: event.clientX - rect.left, y: event.clientY - rect.top };
     }
 
-    // Reflect the stored gate values into the inputs. Skip a focused field so a
-    // background re-render never clobbers what the user is typing. Budget is
-    // stored as raw tokens; the input is in millions (M).
+    // Reflect the stored goal_verify into its input. Skip a focused field so a
+    // background re-render never clobbers what the user is typing.
     function syncWorkflowGates() {
-      const budgetEl = $("wfTokenBudget");
       const verifyEl = $("wfGoalVerify");
-      if (budgetEl && document.activeElement !== budgetEl) {
-        const raw = Number(state.workflow.goal_token_budget) || 0;
-        budgetEl.value = raw > 0 ? String(raw / 1e6) : "";
-      }
       if (verifyEl && document.activeElement !== verifyEl) {
         verifyEl.value = state.workflow.goal_verify || "";
       }
@@ -2620,8 +2604,7 @@
           steps: state.workflow.steps || [],
           statuses: state.workflow.statuses || [],
           edges: state.workflow.edges || [],
-          goal_verify: state.workflow.goal_verify || "",
-          goal_token_budget: Number(state.workflow.goal_token_budget) || 0
+          goal_verify: state.workflow.goal_verify || ""
         })
       });
       state.workflow = {
@@ -2630,17 +2613,13 @@
         edges: data.edges || [],
         path: data.path || "",
         warnings: data.warnings || [],
-        goal_verify: data.goal_verify || "",
-        goal_token_budget: data.goal_token_budget || 0
+        goal_verify: data.goal_verify || ""
       };
       renderWorkflow();
     }
 
-    // Persist the goal gate settings (token budget in M -> raw tokens, and the
-    // goal_verify command) through the same workflow save path.
+    // Persist the goal_verify command through the workflow save path.
     async function saveWorkflowGates() {
-      const m = parseFloat($("wfTokenBudget").value);
-      state.workflow.goal_token_budget = (isFinite(m) && m > 0) ? Math.round(m * 1e6) : 0;
       state.workflow.goal_verify = ($("wfGoalVerify").value || "").trim();
       await run(async () => {
         await saveWorkflow();
