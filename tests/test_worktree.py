@@ -58,6 +58,21 @@ class WorkflowSchemaTests(unittest.TestCase):
         self.assertIn(("integrate", "accept"), pairs)
         self.assertIn(("integrate", "implement"), pairs)  # merge-conflict rework
 
+    def test_default_workflow_is_design_first(self):
+        steps = {s["id"]: s for s in server.default_workflow_steps()}
+        # design-first: the goal splits at `plan` (after the design steps), not intake
+        self.assertTrue(steps["plan"]["decompose"])
+        self.assertEqual("hub", steps["plan"]["role_id"])
+        self.assertFalse(steps["plan"]["isolate"])
+        with TemporaryDirectory() as tmp:
+            cfg = server.read_workflow_config(tmp)
+            back = server._workflow_graph(cfg)
+            self.assertEqual("plan", server._root_goal_decompose_step_id(cfg, back))
+        # only `plan` is a decompose step
+        self.assertEqual(
+            ["plan"], [sid for sid, s in steps.items() if s["decompose"]]
+        )
+
     def test_default_workflow_roundtrips_flags(self):
         with TemporaryDirectory() as tmp:
             server.write_workflow_config(

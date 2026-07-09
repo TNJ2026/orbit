@@ -125,7 +125,7 @@ orbit runner --project /path/to/repo --name box-a      # 显式指定项目
 | **Scheduler**（serve 内线程） | 把"要执行某 step"写入 `run_jobs` 队列；单点消费执行完的 job 并推进工作流（dispatch / rework / accept）；跑 timeout / health 兜底 |
 | **Runner / Worker** | 从 `run_jobs` 领取任务（带租约 + 心跳）、执行各 agent 的 CLI、流式记录 stdout/stderr、解析 outcome，把结果写回 job |
 
-默认工作流：`intake(hub) → product_design → [ui_design ∥ architecture] → implement → test → review → integrate(hub) → accept(hub)`，其中 `review` 有一条回到 `implement` 的返工回环，`test` 可配 `verify` 命令作为机器验证门。runner 把步骤 prompt 交给 agent CLI 无头执行，agent 在末尾打印 `WORKFLOW_OUTCOME: done|rework|blocked` 汇报（详见 `agents/_protocol.md`）。
+默认工作流（设计优先）：`intake(hub) → product_design → [ui_design ∥ architecture] → plan(hub) → implement → test → review → integrate(hub) → accept(hub)`。goal 先跑一次设计步，再由 `plan` 拆成实现子任务（每模块一个），子任务各自从 `implement` 起；`review` 有一条回到 `implement` 的返工回环，`test` 可配 `verify` 命令作为机器验证门。runner 把步骤 prompt 交给 agent CLI 无头执行，agent 在末尾打印 `WORKFLOW_OUTCOME: done|rework|blocked` 汇报（详见 `agents/_protocol.md`）。
 
 ### 默认：一体进程
 
@@ -139,11 +139,11 @@ orbit serve        # UI + 调度 + 内嵌 Runner，全在一个进程
 
 **job 生命周期：** `pending → running`（runner 领取）`→ finished`（runner 执行完、报告 outcome）`→ done`（scheduler 推进下一步）。
 
-### 设计优先：架构之后再拆（`decompose` 步）
+### 设计优先与 `decompose` 步
 
-默认情况下 goal 在入口步（`intake`）就拆成子任务，每个子任务再各自跑完整工作流——包括各自的产品/UI/架构设计。对设计驱动的工作这是反的：你想在 goal 层**设计一次**，再按架构的模块边界切分实现。
+goal 在哪一步拆成子任务，由打了 `decompose: true` 的那步决定。默认工作流把 `plan` 标为 decompose，所以 goal **自己**先跑一次设计步（`intake → product_design → [ui_design ∥ architecture] → plan`），再由 `plan`（hub）**结合设计产出**输出子任务 JSON。每个子任务从拆解步的**后继步**（`implement` 起）开始并继承该产出——于是设计步在 goal 层**只跑一次**（而非每个子任务一遍），子任务按架构模块干净切分。
 
-在 `.orbit/workflow.json` 里给靠后的某一步打 `decompose: true`，把拆解点移过去。goal **自己**跑完拆解步及之前的所有步（如 `intake → product_design → [ui_design ∥ architecture] → plan`），然后由该步（hub）**结合设计产出**输出子任务 JSON。每个子任务从拆解步的**后继步**（`implement` 起）开始，继承该产出——于是设计步在 goal 层**只跑一次**（而非每个子任务一遍），子任务按模块干净切分。不打 `decompose` 标记则拆解仍在入口步（行为不变）。该标记只能改 JSON 配置；decompose 步自动 required、且从不隔离。
+想换拆解点，就在 `.orbit/workflow.json` 里给别的步打标记；**不打** `decompose` 标记时，goal 会退回在入口步（`intake`）拆，每个子任务重跑整条工作流——更简单，但设计变成按子任务重复。该标记只能改 JSON 配置（同 `isolate`/`integrate`）；decompose 步自动 required、从不隔离、且必须有后继步供子任务起跑。
 
 ### 目标收敛验证（goal_verify）最佳实践
 

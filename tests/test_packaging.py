@@ -610,8 +610,10 @@ class PackagingTests(unittest.TestCase):
         into = lambda n: [e["from"] for e in edges if e["to"] == n]
         # parallel: product_design fans out to two branches
         self.assertEqual({"ui_design", "architecture"}, set(out_of("product_design")))
-        # merge: implement is fed by both branches
-        self.assertLessEqual({"ui_design", "architecture"}, set(into("implement")))
+        # merge: both design branches feed the decompose step (plan)
+        self.assertLessEqual({"ui_design", "architecture"}, set(into("plan")))
+        # split: subtasks begin at implement, one per module
+        self.assertIn("implement", out_of("plan"))
         # loop-back: review returns to implement
         self.assertIn("implement", out_of("review"))
         # config round-trips through write/read with the branching edges intact

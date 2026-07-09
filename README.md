@@ -127,7 +127,7 @@ The workflow engine is logically three layers — **Scheduler** (decides the nex
 | **Scheduler** (thread inside serve) | Enqueues "run this step" into `run_jobs`; single-point-consumes finished jobs and advances the workflow (dispatch / rework / accept); runs timeout / health backstops |
 | **Runner / Worker** | Claims jobs from `run_jobs` (with lease + heartbeat), executes each agent's CLI, streams stdout/stderr, parses the outcome, and writes the result back to the job |
 
-Default workflow: `intake(hub) → product_design → [ui_design ∥ architecture] → implement → test → review → integrate(hub) → accept(hub)`, where `review` has a loop-back edge to `implement` and `test` can carry a `verify` command as a machine gate. The runner hands the step prompt to an agent CLI headlessly; the agent reports by printing `WORKFLOW_OUTCOME: done|rework|blocked` at the end (see `agents/_protocol.md`).
+Default workflow (design-first): `intake(hub) → product_design → [ui_design ∥ architecture] → plan(hub) → implement → test → review → integrate(hub) → accept(hub)`. The goal runs the design steps once, then `plan` splits it into implementation subtasks (one per module) that each begin at `implement`; `review` has a loop-back edge to `implement`, and `test` can carry a `verify` command as a machine gate. The runner hands the step prompt to an agent CLI headlessly; the agent reports by printing `WORKFLOW_OUTCOME: done|rework|blocked` at the end (see `agents/_protocol.md`).
 
 ### Default: single process
 
@@ -141,11 +141,11 @@ orbit serve        # UI + Scheduler + embedded Runner, all in one process
 
 **Job lifecycle:** `pending → running` (runner claims) `→ finished` (runner done, reports outcome) `→ done` (scheduler advances to the next step).
 
-### Design-first: split after architecture (the `decompose` step)
+### Design-first & the `decompose` step
 
-By default a goal splits into subtasks at the entry step (`intake`), and each subtask then runs the whole workflow — including its own product/UI/architecture design. For design-led work that's backwards: you want to design once at the goal level, then partition the implementation by the architecture's module boundaries.
+Where a goal splits into subtasks is set by the step flagged `decompose: true`. The default workflow flags `plan`, so the goal itself runs the design steps once (`intake → product_design → [ui_design ∥ architecture] → plan`), then `plan` (hub) emits the subtask JSON using the design output as context. Each subtask begins at the decompose step's successors (`implement` onward), inheriting that output — so the design steps run **once** on the goal, not per subtask, and subtasks partition cleanly by the architecture's modules.
 
-Flag a later step with `decompose: true` in `.orbit/workflow.json` to move the split there. The goal itself runs every step up to and including the decompose step (e.g. `intake → product_design → [ui_design ∥ architecture] → plan`), then that step (hub) emits the subtask JSON using the design output as context. Each subtask begins at the decompose step's successors (`implement` onward), inheriting that output — so the design steps run **once** on the goal, not per subtask, and subtasks partition cleanly by module. With no `decompose` flag, splitting stays at the entry step (unchanged). The flag is config-only (edit the JSON); a decompose step is auto-required and never isolated.
+Move the split by flagging a different step in `.orbit/workflow.json`; with **no** `decompose` flag, a goal splits at the entry step instead (`intake`), and every subtask re-runs the whole workflow — simpler, but design then happens per subtask. The flag is config-only (edit the JSON, same as `isolate`/`integrate`); a decompose step is auto-required, never isolated, and must have a forward successor for its subtasks to start at.
 
 ### Goal convergence check (goal_verify)
 

@@ -258,26 +258,33 @@ def default_workflow_statuses() -> list[dict[str, str]]:
 
 
 def default_workflow_steps() -> list[dict[str, Any]]:
-    # (id, name, role_id, task_status, required, isolate, integrate, x, y)
+    # (id, name, role_id, task_status, required, isolate, integrate, decompose, x, y)
     # isolate: run in a per-task git worktree (implement/test/review all share
     # one worktree per task, so review reads exactly what implement produced).
     # integrate: single-assignee (hub) step that merges the task's worktree
     # branch back into the main tree; runs in project_root, serialized by hub.
+    # decompose: design-first — the goal itself runs intake + the product/UI/
+    # architecture design once, then `plan` (hub) splits it into implementation
+    # subtasks partitioned by the architecture's modules. Each subtask starts at
+    # `implement`, so the design steps run per goal, not per subtask.
     specs = [
-        ("intake", "Triage", "hub", "created", True, False, False, 40, _DEFAULT_STEP_MID_Y),
-        ("product_design", "Product Design", "product_designer", "assigned", True, False, False, 360, _DEFAULT_STEP_MID_Y),
+        ("intake", "Triage", "hub", "created", True, False, False, False, 40, _DEFAULT_STEP_MID_Y),
+        ("product_design", "Product Design", "product_designer", "assigned", True, False, False, False, 360, _DEFAULT_STEP_MID_Y),
         # Parallel branch cards stack vertically at x=700; keep enough gap
         # for a full card (~400px tall with the name/timeout fields).
-        ("ui_design", "UI Design", "ui_designer", "assigned", False, False, False, 700, 40),
-        ("architecture", "Architecture", "architect", "assigned", True, False, False, 700, 500),
-        ("implement", "Implement", "implementer", "in_progress", True, True, False, 1060, _DEFAULT_STEP_MID_Y),
+        ("ui_design", "UI Design", "ui_designer", "assigned", False, False, False, False, 700, 40),
+        ("architecture", "Architecture", "architect", "assigned", True, False, False, False, 700, 500),
+        # plan: the decomposition gate. ui_design + architecture merge here, and
+        # hub splits the goal into subtasks that begin at implement.
+        ("plan", "Plan", "hub", "in_progress", True, False, False, True, 1060, _DEFAULT_STEP_MID_Y),
+        ("implement", "Implement", "implementer", "in_progress", True, True, False, False, 1400, _DEFAULT_STEP_MID_Y),
         # test is the mandatory machine-verification gate: set its `verify`
         # command (e.g. the project's test suite) so a failing run objectively
         # sends the task back to implement instead of trusting a self-report.
-        ("test", "Test", "tester", "testing", True, True, False, 1400, _DEFAULT_STEP_MID_Y),
-        ("review", "Review", "reviewer", "reviewing", True, True, False, 1740, _DEFAULT_STEP_MID_Y),
-        ("integrate", "Integrate", "hub", "in_progress", True, False, True, 2080, _DEFAULT_STEP_MID_Y),
-        ("accept", "Accept", "hub", "accepted", True, False, False, 2420, _DEFAULT_STEP_MID_Y),
+        ("test", "Test", "tester", "testing", True, True, False, False, 1740, _DEFAULT_STEP_MID_Y),
+        ("review", "Review", "reviewer", "reviewing", True, True, False, False, 2080, _DEFAULT_STEP_MID_Y),
+        ("integrate", "Integrate", "hub", "in_progress", True, False, True, False, 2420, _DEFAULT_STEP_MID_Y),
+        ("accept", "Accept", "hub", "accepted", True, False, False, False, 2760, _DEFAULT_STEP_MID_Y),
     ]
     return [
         {
@@ -288,24 +295,27 @@ def default_workflow_steps() -> list[dict[str, Any]]:
             "required": required,
             "isolate": isolate,
             "integrate": integrate,
+            "decompose": decompose,
             "x": x,
             "y": y,
         }
-        for step_id, name, role_id, task_status, required, isolate, integrate, x, y in specs
+        for step_id, name, role_id, task_status, required, isolate, integrate, decompose, x, y in specs
     ]
 
 
 def default_workflow_edges() -> list[dict[str, str]]:
-    # Demonstrates the three branching patterns:
+    # Design-first flow: the goal runs intake + design, then splits at `plan`.
     #   parallel : product_design fans out to ui_design + architecture
-    #   merge    : ui_design + architecture both feed implement
-    #   loop-back: review returns to implement on rework
+    #   merge    : ui_design + architecture both feed plan (the decompose step)
+    #   split    : plan -> implement — subtasks begin here, one per module
+    #   loop-back: review / test / integrate return to implement on rework
     return [
         {"from": "intake", "to": "product_design"},
         {"from": "product_design", "to": "ui_design"},      # parallel
         {"from": "product_design", "to": "architecture"},   # parallel
-        {"from": "ui_design", "to": "implement"},           # merge
-        {"from": "architecture", "to": "implement"},        # merge
+        {"from": "ui_design", "to": "plan"},                # merge into decompose
+        {"from": "architecture", "to": "plan"},             # merge into decompose
+        {"from": "plan", "to": "implement"},                # split: subtasks start here
         {"from": "implement", "to": "test"},
         {"from": "test", "to": "review"},
         {"from": "test", "to": "implement"},                # verify failed -> rework
