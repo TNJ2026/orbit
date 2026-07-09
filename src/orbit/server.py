@@ -10,7 +10,9 @@ import re
 import shlex
 import shutil
 import signal
+import struct
 import subprocess
+import sys
 import threading
 import time
 import traceback
@@ -2447,20 +2449,21 @@ def _mark_task_running(store: Store, task_id: int | None) -> None:
         current = task.get("parent_task_id")
 
 
-def _descendant_pids(root_pid: int) -> list[int]:
-    """Every live descendant pid of root_pid, via a one-shot ppid snapshot.
-    A child that called setsid() escapes the process group (new pgid) but keeps
-    its parent link until the parent dies, so a ppid-tree walk catches escapees
-    that killpg misses. Works on macOS and Linux (`ps -Ao pid=,ppid=`)."""
+def _snapshot_ppids_ps() -> dict[int, int] | None:
     try:
-        out = subprocess.run(
+        result = subprocess.run(
             ["ps", "-Ao", "pid=,ppid="],
-            capture_output=True, text=True, timeout=5,
-        ).stdout
-    except (OSError, subprocess.SubprocessError):
-        return []
-    children: dict[int, list[int]] = {}
-    for line in out.splitlines():
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (FileNotFoundError, PermissionError, OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0 and not result.stdout:
+        return None
+    mapping: dict[int, int] = {}
+    for line in result.stdout.splitlines():
         parts = line.split()
         if len(parts) != 2:
             continue
@@ -2468,6 +2471,118 @@ def _descendant_pids(root_pid: int) -> list[int]:
             pid, ppid = int(parts[0]), int(parts[1])
         except ValueError:
             continue
+        mapping[pid] = ppid
+    return mapping
+
+
+def _snapshot_ppids_libproc() -> dict[int, int] | None:
+    if sys.platform != "darwin":
+        return None
+    try:
+        import ctypes
+        import ctypes.util
+    except ImportError:
+        return None
+    lib_path = ctypes.util.find_library("proc")
+    if not lib_path:
+        return None
+    libproc = ctypes.CDLL(lib_path, use_errno=True)
+    PROC_ALL_PIDS = ctypes.c_uint32(1)
+    PROC_PIDTBSDINFO = ctypes.c_int(3)
+    libproc.proc_listpids.argtypes = [ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_int]
+    libproc.proc_listpids.restype = ctypes.c_int
+    libproc.proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
+    libproc.proc_pidinfo.restype = ctypes.c_int
+    item_size = ctypes.sizeof(ctypes.c_int)
+    capacity = 4096
+    while True:
+        buf_type = ctypes.c_int * (capacity // item_size)
+        buf = buf_type()
+        bytes_used = libproc.proc_listpids(PROC_ALL_PIDS, ctypes.c_uint32(0), buf, ctypes.sizeof(buf))
+        if bytes_used <= 0:
+            if ctypes.get_errno():
+                return None
+            return {}
+        if bytes_used < ctypes.sizeof(buf):
+            count = bytes_used // item_size
+            pids = buf[:count]
+            break
+        capacity *= 2
+    info_buf = (ctypes.c_ubyte * 1024)()
+    mapping: dict[int, int] = {}
+    # proc_pidinfo returns 0 for processes this uid can't introspect; those are
+    # skipped, so this snapshot can under-count system-wide pids. Fine here: it
+    # is a fallback behind `ps`, and a runner's own descendants (the only ones
+    # we kill) are always readable. Don't promote it to primary expecting full
+    # coverage.
+    for pid in pids:
+        if pid <= 0:
+            continue
+        written = libproc.proc_pidinfo(pid, PROC_PIDTBSDINFO, ctypes.c_uint64(0), info_buf, ctypes.sizeof(info_buf))
+        if written < 20:
+            continue
+        data = bytes(info_buf[:written])
+        fields = struct.unpack_from("=5I", data)
+        real_pid = int(fields[3])
+        ppid = int(fields[4])
+        if real_pid:
+            mapping[real_pid] = ppid
+    return mapping
+
+
+def _snapshot_ppids_procfs() -> dict[int, int] | None:
+    if not sys.platform.startswith("linux"):
+        return None
+    root = Path("/proc")
+    try:
+        entries = list(root.iterdir())
+    except (FileNotFoundError, PermissionError, OSError):
+        return None
+    mapping: dict[int, int] = {}
+    for entry in entries:
+        name = entry.name
+        if not name.isdigit():
+            continue
+        status_path = entry / "status"
+        try:
+            with status_path.open("r", encoding="utf-8", errors="replace") as handle:
+                pid_val: int | None = None
+                ppid_val: int | None = None
+                for line in handle:
+                    if line.startswith("Pid:"):
+                        try:
+                            pid_val = int(line.split()[1])
+                        except (IndexError, ValueError):
+                            pid_val = None
+                    elif line.startswith("PPid:"):
+                        try:
+                            ppid_val = int(line.split()[1])
+                        except (IndexError, ValueError):
+                            ppid_val = None
+                        if pid_val is not None and ppid_val is not None:
+                            mapping[pid_val] = ppid_val
+                        break
+        except (FileNotFoundError, PermissionError, OSError):
+            continue
+    return mapping
+
+
+def _snapshot_ppids() -> dict[int, int]:
+    for getter in (_snapshot_ppids_ps, _snapshot_ppids_libproc, _snapshot_ppids_procfs):
+        mapping = getter()
+        if mapping is None:
+            continue
+        if mapping:
+            return mapping
+    return {}
+
+
+def _descendant_pids(root_pid: int) -> list[int]:
+    mapping = _snapshot_ppids()
+    if not mapping:
+        return []
+    children: dict[int, list[int]] = {}
+    for pid, ppid in mapping.items():
         children.setdefault(ppid, []).append(pid)
     seen: list[int] = []
     stack = list(children.get(root_pid, []))

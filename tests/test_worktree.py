@@ -464,6 +464,34 @@ class GoalVerifyDetectionTests(unittest.TestCase):
             store.close()
 
 
+class DescendantPidSnapshotTests(unittest.TestCase):
+    def test_snapshot_maps_self_to_parent(self):
+        import os
+
+        mapping = server._snapshot_ppids()
+        self.assertIsInstance(mapping, dict)
+        self.assertTrue(mapping, "no ppid backend worked on this platform")
+        self.assertEqual(os.getppid(), mapping.get(os.getpid()))
+
+    def test_descendant_pids_includes_a_spawned_child(self):
+        import os
+        import subprocess
+        import time
+
+        child = subprocess.Popen(["sleep", "5"])
+        try:
+            found = False
+            for _ in range(40):  # up to ~2s for the child to enter the table
+                if child.pid in server._descendant_pids(os.getpid()):
+                    found = True
+                    break
+                time.sleep(0.05)
+            self.assertTrue(found, "spawned child not found among descendants")
+        finally:
+            child.terminate()
+            child.wait()
+
+
 class ReapStaleRunsTests(unittest.TestCase):
     def test_reap_orphans_running_task_runs(self):
         with TemporaryDirectory() as tmp:
