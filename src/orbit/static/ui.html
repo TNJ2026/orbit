@@ -2223,23 +2223,20 @@
       return { x: step.x + w, y: step.y + h / 2, nx: 1, ny: 0 };  // right
     }
 
-    // Pick the facing side on each card by the dominant axis between them, so a
-    // node above/below connects top/bottom and one left/right connects sideways.
-    function wfPickSides(a, rectA, b, rectB) {
-      const dx = (b.x + rectB.w / 2) - (a.x + rectA.w / 2);
-      const dy = (b.y + rectB.h / 2) - (a.y + rectA.h / 2);
-      if (Math.abs(dx) >= Math.abs(dy)) return dx >= 0 ? ["right", "left"] : ["left", "right"];
-      return dy >= 0 ? ["bottom", "top"] : ["top", "bottom"];
-    }
-
     function wfEdgePath(p1, p2, isReturn = false, channel = 0) {
       if (isReturn) {
-        const lift = 88 + channel * 28;
-        const cy = Math.max(p1.y, p2.y) + lift;
+        // Loop-backs use the top and bottom ports: even channels arc over the
+        // top, odd ones under the bottom (top-first order); each further pair
+        // sits one lane deeper. The port normal (p1.ny) says which way to bow.
+        const depth = Math.floor(channel / 2);
+        const lift = 56 + depth * 34;
+        const cy = (p1.ny || 0) < 0
+          ? Math.min(p1.y, p2.y) - lift
+          : Math.max(p1.y, p2.y) + lift;
         return [
           "M", Math.round(p1.x), Math.round(p1.y),
-          "C", Math.round(p1.x - 70), Math.round(cy),
-          Math.round(p2.x + 70), Math.round(cy),
+          "C", Math.round(p1.x), Math.round(cy),
+          Math.round(p2.x), Math.round(cy),
           Math.round(p2.x), Math.round(p2.y)
         ].join(" ");
       }
@@ -2434,9 +2431,8 @@
             && edgeSet.has(edge.to + " " + edge.from)
             && !between(a, b, rectA)) {
           if (a.x >= b.x) return "";  // reverse half — the forward half draws the pair
-          const [fs, ts] = wfPickSides(a, rectA, b, rectB);
-          const p1 = wfEdgeAnchor(a, rectA, fs);
-          const p2 = wfEdgeAnchor(b, rectB, ts);
+          const p1 = wfEdgeAnchor(a, rectA, "right");
+          const p2 = wfEdgeAnchor(b, rectB, "left");
           const d = wfEdgePath(p1, p2, false);
           return `<path class="wf-edge" data-edge="${i}" d="${d}" marker-start="url(#wfArrow)" marker-end="url(#wfArrow)"><title>${escapeHtml(t("wf.clickDelete"))}</title></path>`;
         }
@@ -2444,18 +2440,21 @@
         const isReturn = (b.x + rectB.w / 2) < (a.x + rectA.w / 2);
         let channel = 0, p1, p2;
         if (isReturn) {
-          // Loop-back to a non-adjacent step: arc under the row (left→right),
-          // fanning the depth and arrowhead height so parallel returns stay apart.
+          // Loop-back: use top/bottom ports, top first then bottom, deepening in
+          // pairs (top, bottom, top, bottom, …) so returns into one step never
+          // overlap. Forward flow always keeps the left/right ports free for it.
           channel = (returnCh[edge.to] = (returnCh[edge.to] || 0));
           returnCh[edge.to] = channel + 1;
-          p1 = wfEdgeAnchor(a, rectA, "left");
-          p2 = wfEdgeAnchor(b, rectB, "right");
-          p2.y = Math.min(p2.y + channel * 9, b.y + rectB.h - 6);
+          const side = channel % 2 === 0 ? "top" : "bottom";
+          const off = Math.floor(channel / 2) * 14;  // shift deeper same-side lanes along the edge
+          p1 = wfEdgeAnchor(a, rectA, side);
+          p2 = wfEdgeAnchor(b, rectB, side);
+          p1.x = Math.min(p1.x + off, a.x + rectA.w - 8);
+          p2.x = Math.min(p2.x + off, b.x + rectB.w - 8);
         } else {
-          // Forward edge: connect the facing sides (one of the four card ports each).
-          const [fs, ts] = wfPickSides(a, rectA, b, rectB);
-          p1 = wfEdgeAnchor(a, rectA, fs);
-          p2 = wfEdgeAnchor(b, rectB, ts);
+          // Forward flow always connects the source's right port to the target's left.
+          p1 = wfEdgeAnchor(a, rectA, "right");
+          p2 = wfEdgeAnchor(b, rectB, "left");
         }
         const d = wfEdgePath(p1, p2, isReturn, channel);
         return `<path class="wf-edge" data-edge="${i}" d="${d}" marker-end="url(#wfArrow)"><title>${escapeHtml(t("wf.clickDelete"))}</title></path>`;
