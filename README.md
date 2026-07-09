@@ -60,21 +60,21 @@ Zero config, from any repo:
 
 ```bash
 cd <your-project>          # orbit orchestrates the project in the current directory
-orbit up                   # gitignore .orbit/ + agents/, then serve with packaged defaults
+orbit start                # gitignore .orbit/ + agents/, then serve with packaged defaults
 ```
 
 Then open `http://127.0.0.1:8848/ui` and:
 
-1. **Team** page — assign an agent CLI (Claude Code, Codex, …) to each core role (hub / implementer / reviewer). `up` ships default role prompts and a default workflow but an **empty team**, so this one-time step is required before a goal can run.
+1. **Team** page — assign an agent CLI (Claude Code, Codex, …) to each core role (hub / implementer / reviewer). `start` ships default role prompts and a default workflow but an **empty team**, so this one-time step is required before a goal can run.
 2. Give **hub** a goal — the engine splits it into subtasks and drives them through the workflow.
 
-`up` copies nothing you need to commit (it only appends `.orbit/` and `agents/` to `.gitignore`; a UI role edit still materializes `agents/` on demand but stays out of git) and accepts every `serve` flag (`--host` / `--port` / `--db` / `--no-runner` / `--runner-concurrency`). Not installed globally? `uvx --from git+https://github.com/TNJ2026/orbit.git orbit up` pulls it in on the fly. Already prepared, or happy with the defaults? Just `orbit serve`. (From a local checkout without a global install, prefix any command with `uv run`.)
+`start` copies nothing you need to commit (it only appends `.orbit/` and `agents/` to `.gitignore`; a UI role edit still materializes `agents/` on demand but stays out of git) and accepts every `serve` flag (`--host` / `--port` / `--db` / `--no-runner` / `--runner-concurrency`). (`orbit up` is a back-compat alias for `orbit start`.) Not installed globally? `uvx --from git+https://github.com/TNJ2026/orbit.git orbit start` pulls it in on the fly. Already prepared, or happy with the defaults? Just `orbit serve`. (From a local checkout without a global install, prefix any command with `uv run`.)
 
 ## Advanced Usage
 
 ### Customize & commit config — `orbit config`
 
-`orbit up` / `orbit serve` need no setup. Run `orbit config` (formerly `orbit init`, still accepted as an alias) only when you want to edit role prompts, customize the workflow, and commit them for the team: it writes `agents/*.md`, `.orbit/workflow.json`, `team.json`, and a `CLAUDE.md` section into the repo — **intentionally not gitignored** so they can be committed and shared. It also seeds a default team by spreading the core roles over your installed agent CLIs, so a goal can often run right after.
+`orbit start` / `orbit serve` need no setup. Run `orbit config` (formerly `orbit init`, still accepted as an alias) only when you want to edit role prompts, customize the workflow, and commit them for the team: it writes `agents/*.md`, `.orbit/workflow.json`, `team.json`, and a `CLAUDE.md` section into the repo — **intentionally not gitignored** so they can be committed and shared. It also seeds a default team by spreading the core roles over your installed agent CLIs, so a goal can often run right after.
 
 ### Multi-process: decoupled serve + standalone runners
 

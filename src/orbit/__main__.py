@@ -1,4 +1,4 @@
-"""CLI entry point: orbit serve|up|runner|config."""
+"""CLI entry point: orbit serve|start|runner|config."""
 
 from __future__ import annotations
 
@@ -224,7 +224,8 @@ def main() -> None:
     )
 
     sub.add_parser(
-        "up",
+        "start",
+        aliases=["up"],  # back-compat: `orbit up` still works
         parents=[serve_common],
         help="Zero-setup start: gitignore the state dir, then serve with the "
         "packaged role/workflow defaults — no files copied into the repo. "
@@ -307,11 +308,11 @@ def main() -> None:
         )
         return
 
-    if args.command == "up":
+    if args.command in ("start", "up"):
         project_root = resolve_project_root()
         state_name = project_state_dir(project_root).name
-        # Ignore the state dir and agents/: under `up` a UI role edit materializes
-        # agents/ into the repo on demand, so keep it out of git too — `up` copies
+        # Ignore the state dir and agents/: under `start` a UI role edit materializes
+        # agents/ into the repo on demand, so keep it out of git too — `start` copies
         # nothing you need to commit. (A committed agents/ stays tracked regardless.)
         added = append_missing_gitignore(project_root, [f"{state_name}/", "agents/"])
         if added:
@@ -319,7 +320,7 @@ def main() -> None:
         else:
             print(f"gitignore: {state_name}/ and agents/ already ignored", flush=True)
         print(
-            "orbit up: serving with packaged role/workflow defaults — no files "
+            "orbit start: serving with packaged role/workflow defaults — no files "
             "copied into the repo. Run `orbit config` to customize and commit them.",
             flush=True,
         )

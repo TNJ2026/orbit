@@ -58,21 +58,21 @@ uv tool install --editable ./orbit   # 全局 `orbit`，改代码即时生效
 
 ```bash
 cd <你的项目>          # orbit 编排当前目录所在的项目
-orbit up               # gitignore .orbit/ + agents/，再用包内默认值直接 serve
+orbit start            # gitignore .orbit/ + agents/，再用包内默认值直接 serve
 ```
 
 然后打开 `http://127.0.0.1:8848/ui`：
 
-1. **Team** 页 —— 给每个核心角色(hub / implementer / reviewer)指派一个 agent CLI(Claude Code、Codex 等)。`up` 自带默认角色提示词和默认工作流，但 **team 是空的**,所以起 goal 前需先做这一步(一次性)。
+1. **Team** 页 —— 给每个核心角色(hub / implementer / reviewer)指派一个 agent CLI(Claude Code、Codex 等)。`start` 自带默认角色提示词和默认工作流，但 **team 是空的**,所以起 goal 前需先做这一步(一次性)。
 2. 给 **hub** 一个 goal —— 引擎把它拆成子任务并驱动它们走完工作流。
 
-`up` 不落任何需要提交的文件(只往 `.gitignore` 补 `.orbit/` 和 `agents/`;UI 里改 role 仍会按需 materialize 出 `agents/`,但在 `up` 下不进 git),且支持全部 `serve` 参数(`--host` / `--port` / `--db` / `--no-runner` / `--runner-concurrency`)。没全局装? `uvx --from git+https://github.com/TNJ2026/orbit.git orbit up` 临时拉起。已准备好、或直接用默认值? 直接 `orbit serve`。(从本地 checkout 且未全局安装时,命令前加 `uv run`。)
+`start` 不落任何需要提交的文件(只往 `.gitignore` 补 `.orbit/` 和 `agents/`;UI 里改 role 仍会按需 materialize 出 `agents/`,但在 `start` 下不进 git),且支持全部 `serve` 参数(`--host` / `--port` / `--db` / `--no-runner` / `--runner-concurrency`)。(`orbit up` 是 `orbit start` 的向后兼容别名。)没全局装? `uvx --from git+https://github.com/TNJ2026/orbit.git orbit start` 临时拉起。已准备好、或直接用默认值? 直接 `orbit serve`。(从本地 checkout 且未全局安装时,命令前加 `uv run`。)
 
 ## 高级用法
 
 ### 定制并提交配置 —— `orbit config`
 
-`orbit up` / `orbit serve` 无需任何准备。只有当你要改角色提示词、自定义工作流并提交给团队共享时,才用 `orbit config`(原 `orbit init`,别名仍可用):它会把 `agents/*.md`、`.orbit/workflow.json`、`team.json`、`CLAUDE.md` 段落写进仓库 —— 这些**故意不 gitignore**,供 commit 共享。它还会把核心角色铺到你已装的 agent CLI 上生成一个默认 team,所以之后往往能直接起 goal。
+`orbit start` / `orbit serve` 无需任何准备。只有当你要改角色提示词、自定义工作流并提交给团队共享时,才用 `orbit config`(原 `orbit init`,别名仍可用):它会把 `agents/*.md`、`.orbit/workflow.json`、`team.json`、`CLAUDE.md` 段落写进仓库 —— 这些**故意不 gitignore**,供 commit 共享。它还会把核心角色铺到你已装的 agent CLI 上生成一个默认 team,所以之后往往能直接起 goal。
 
 ### 多进程：解耦 serve + 独立 runner
 
