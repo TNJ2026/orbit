@@ -2406,8 +2406,8 @@ def _build_step_prompt(
         f"你是被工作流引擎派发的一次性 worker，以角色 {step['role_id']} 执行"
         f"步骤 '{step['name']}'。"
         + cwd_line
-        + "忽略角色说明里 register_agent / check_inbox / ack 等信箱循环要求——"
-        "本次为一次性执行，也不要调用 complete_step，派发器会代为提交结果。\n\n"
+        + "本次为工作流引擎的一次性派发执行：直接在当前工作目录完成任务，"
+        "不要调用 complete_step，派发器会代为提交结果。\n\n"
         f"## 角色说明\n{role_text}\n\n"
         f"## 任务 #{task['id']}: {task.get('title') or 'untitled'}\n"
         f"{task.get('content', '')}\n\n"

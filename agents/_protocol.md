@@ -1,36 +1,24 @@
-# orbit 通信协议（所有角色公共约定）
+# orbit 角色执行协议（所有角色公共约定）
 
-orbit 是本地 MCP 信箱（server 名 `orbit`），用于 agent 间传递提示词。
+orbit 是本地多 agent 工作流编排器。任务在一张工作流图上流转，每个步骤绑定一个角色；runner 把该步骤的 prompt 交给对应的 agent CLI 执行。**你是被引擎派发的一次性 worker**——收到一个步骤 prompt，干完即退出。没有信箱：不注册、不轮询、不收发消息。
 
-## 基本流程
+## 执行流程
 
-1. **注册**：会话开始时调 `register_agent(name=<你的角色名>, description=<一行能力广告>)`。
-   name 用稳定 agent/session 名（如 hub-agent / codex / reviewer-1），职责角色由 team 配置里的 `role_id` 绑定。
-2. **收信**：`check_inbox(agent=<角色名>, wait_seconds=30)` 长轮询。
-   返回的消息是租约领取——不 ack 会在租约过期后重投递（`delivery_count` 递增）。
-3. **处理**：按 `id` 升序逐条处理。收到 `delivery_count > 1` 的消息说明上次处理中断，先检查是否已做过一半。
-4. **回复**：`send_message(sender=<角色名>, to=<对方>, content=..., reply_to=<收到的消息id>)`。
-5. **确认**：每处理完一条立即 `ack_message(agent=<角色名>, message_id=<id>, lease_token=<该消息的 lease_token>)`。
+1. **接收**：启动时你已拿到本步骤的完整 prompt（角色说明 + 任务描述 + 上游产出）。不需要 `register_agent` / `check_inbox`。
+2. **工作目录**：
+   - 普通步骤：当前目录就是项目根，直接读写文件。
+   - 隔离步骤（implement / test / review 等）：当前目录是本任务专属 git worktree（分支 `orbit/task-<id>`），与其它任务隔离。完成后 `git add -A && git commit` 到该分支。
+   - 集成步骤（integrate）：在主工作树把任务分支合并回主干（prompt 里有具体步骤）。
+3. **产物写文件**：报告、代码、长文本写进仓库文件；输出里只留「一行结论 + 文件路径」。
+4. **汇报结果**：在输出**最后**单独一行打印裁决，其后可附一行原因：
+   - `WORKFLOW_OUTCOME: done` —— 本步成功，引擎派发下一步（汇合步骤会等齐所有必需分支）。
+   - `WORKFLOW_OUTCOME: rework` —— 成果不达标，打回上游重做（如 review 打回 implement），原因写清。仅在本步有返工回环时可用。
+   - `WORKFLOW_OUTCOME: blocked` —— 无法完成或需要决策（缺信息 / 环境损坏 / 依赖未满足 / 测试失败无法修复），暂停并通知 hub。即使进程正常退出也要用它标记失败。
+   - 不打印该行默认视为 `done`。
+5. **token 用量（可选）**：再另起一行 `TOKENS_USED: <数字>`，有真实用量就填。
 
-## 消息内容约定
+## 不要做
 
-- **产物写文件，消息发指针**：报告、代码、长文本写到仓库文件，消息只发「一行结论 + 文件路径」。消息正文超过 ~20 行就该落盘。
-- **里程碑汇报**：只在状态变化时主动发消息——完成 / 阻塞 / 需要决策。不发进度流水。
-- **任务对号**：回复必须带 `reply_to`。派发方以 `send_message` 返回的 message id 作为任务 id。
-
-## 工作流任务（workflow 引擎派发）
-
-收到 sender 为 `workflow`、正文以 `[workflow step: <step>]` 开头的消息时，任务由流程引擎自动路由：
-
-1. 按消息里的角色与步骤要求干活，产物照常写文件。
-2. 完成后**不用 send_message 回复**，改调 `complete_step(agent=<你>, task_id=<id>, step=<step>, outcome=..., result=<一行结论+产物路径>)`：
-   - `outcome="done"`：通过，引擎沿流程派发下一步（汇合步骤会等齐所有必需分支）。
-   - `outcome="rework"`：打回上游（如 review 打回 implement），`result` 写明原因。
-   - `outcome="blocked"`：无法决定/需要选择时用，`result` 写卡点与候选项；任务挂起并通知 hub。
-3. 然后照常 `ack_message`。只有收到该步骤派发的 agent 能完成当前 active 步骤；hub 可代为完成 active 步骤用于恢复。
-
-## 禁止
-
-- 同一角色名开多个并发 `check_inbox` 循环。
-- 跳过 ack（除非确实没处理完，留给重投递）。
-- 把整批消息不加区分地一次性总结——逐条处理。
+- 不要调用 `register_agent` / `check_inbox` / `send_message` / `ack_message` / `complete_step`——这些不需要你调，派发器会代为提交结果。
+- 不要手动删除 worktree 或分支，引擎会自动回收。
+- 不要越界：只做本步骤指定的事；范围外发现的问题，在结论里提一句即可。

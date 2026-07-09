@@ -2,31 +2,29 @@
 
 [简体中文](./README.zh-CN.md) | **English**
 
-> A local MCP server that lets multiple LLM CLIs / agents (Claude Code, Codex CLI, Gemini CLI, your own agent) exchange prompts through a shared mailbox and run multi-role task workflows.
+> A local multi-agent workflow orchestrator: it splits a coding goal into tasks that move through a configurable workflow graph, and runners headlessly invoke agent CLIs (Claude Code, Codex CLI, Gemini CLI, your own agent) to run implement → test → review → integrate. Each task runs isolated in its own git worktree, and failures loop back for rework.
 
 ```
-Claude Code ──┐
-Codex CLI  ───┼── HTTP (Streamable) ──▶ orbit daemon :8848/mcp ──▶ SQLite ~/.orbit/projects/<project>/messages.db
-Gemini CLI ───┘
+goal/task ──▶ orbit (workflow engine + scheduler) ──▶ runner ──▶ agent CLI (Claude Code / Codex / Gemini …)
+                   │                                        │
+                   └──────── SQLite ~/.orbit/projects/<project>/ ◀── results (WORKFLOW_OUTCOME)
 ```
 
-- A single long-running HTTP daemon; all clients connect to the same port, so state is shared for free.
-- Per-project storage keyed by launch directory: agents / messages from different projects never mix in one database.
-- Messages persist to SQLite: no message is lost across daemon restarts, and a recipient can pick them up after coming online later.
-- Async mailbox model: `send_message` delivers, `check_inbox` claims under a lease, `ack_message` confirms completion (long-poll up to 60s).
+- One command to start: Web UI + scheduler + embedded runner, all in one process.
+- Tasks flow through a configurable graph: parallel branches, merges, rework loop-backs, machine-verification gates.
+- Each task runs isolated in its own git worktree; the `integrate` step merges the branch back to main.
+- Runners invoke agent CLIs headlessly and can be split by role / agent and scaled horizontally.
+- State persists to SQLite: nothing lost across restarts, with timeout / stuck-run backstops.
 
 ## Table of Contents
 
 - [Install](#install)
 - [Start](#start)
 - [Workflow Engine](#workflow-engine)
-- [Connecting Clients](#connecting-clients)
 - [MCP Tools](#mcp-tools)
 - [Local Web UI](#local-web-ui)
 - [Task Collaboration Model](#task-collaboration-model)
-- [Orchestrator Mode](#orchestrator-mode)
 - [Role Files](#role-files)
-- [Appendix: Tool Return Formats](#appendix-tool-return-formats)
 
 ## Install
 
@@ -66,24 +64,22 @@ uvx --from git+<repo-url> orbit up         # not installed? uvx pulls it in on t
 
 ### Customize inside a repo
 
-When you need to edit role prompts, customize the workflow, and commit them for the team, use `orbit init`: it writes `agents/*.md`, `.orbit/workflow.json`, `team.json`, `.mcp.json`, and a `CLAUDE.md` section into the repo. These are **intentionally not gitignored** so they can be committed and shared.
+When you need to edit role prompts, customize the workflow, and commit them for the team, use `orbit init`: it writes `agents/*.md`, `.orbit/workflow.json`, `team.json`, and a `CLAUDE.md` section into the repo. These are **intentionally not gitignored** so they can be committed and shared.
 
 ### Database & operational model
 
 The default database path looks like `~/.orbit/projects/<project-dir-name>-<path-hash>/messages.db`. The project root is probed upward via the nearest `.git` / `pyproject.toml` — starting from a subdirectory still resolves to the same database. To share manually or point at an old database, override with `--db`.
 
-**One project = one daemon = one port.** The db is decided by the daemon's launch directory, independent of which project a client connects from — all clients on the same port share one mailbox. To isolate multiple projects, start a separate daemon per project on distinct `--port`s, and point each project's MCP client config at its own port.
+**One project = one daemon = one port.** The db is decided by the daemon's launch directory. To run several projects at once, start a separate daemon per project on distinct `--port`s.
 
 Upgrading from an older version: the old global database at `~/.dev_loop/messages.db` is no longer loaded by default (a notice is printed on startup). To keep using it: `orbit serve --db ~/.dev_loop/messages.db`; to migrate it into a project, `cp` the file to the new path printed at startup.
 
 ### Access points
 
-After startup there are two entry points:
+- Local Web UI: `http://127.0.0.1:8848/ui` — the main entry for observing and operating tasks / workflows / queues.
+- Workflow MCP endpoint: `http://127.0.0.1:8848/mcp` — exposes only the workflow tools (`start_workflow_task` / `complete_step` / `get_workflow_task_state`) for an already-connected session to advance a task; not needed day to day.
 
-- MCP endpoint: `http://127.0.0.1:8848/mcp`
-- Local Web UI: `http://127.0.0.1:8848/ui`
-
-Each daemon writes the current project into `~/.orbit/projects/index.json` on startup. Any project's `/ui` can see other project daemons from this index: online projects can be switched directly via the Project dropdown at the top; offline projects show metadata only and require starting the corresponding daemon in that project's directory first. The cross-project UI is an aggregated view only — writes still go to the selected project's own daemon.
+Each daemon writes the current project into `~/.orbit/projects/index.json` on startup. Any project's `/ui` can see other project daemons from this index: online projects switch directly via the Project dropdown; offline ones show metadata only and need their daemon started in that project's directory. The cross-project UI is an aggregated view only — writes still go to the selected project's own daemon.
 
 ## Workflow Engine
 
@@ -94,10 +90,12 @@ The workflow engine is logically three layers — **Scheduler** (decides the nex
 | **Scheduler** (thread inside serve) | Enqueues "run this step" into `run_jobs`; single-point-consumes finished jobs and advances the workflow (dispatch / rework / accept); runs timeout / health backstops |
 | **Runner / Worker** | Claims jobs from `run_jobs` (with lease + heartbeat), executes each agent's CLI, streams stdout/stderr, parses the outcome, and writes the result back to the job |
 
+Default workflow: `intake(hub) → product_design → [ui_design ∥ architecture] → implement → test → review → integrate(hub) → accept(hub)`, where `review` has a loop-back edge to `implement` and `test` can carry a `verify` command as a machine gate. The runner hands the step prompt to an agent CLI headlessly; the agent reports by printing `WORKFLOW_OUTCOME: done|rework|blocked` at the end (see `agents/_protocol.md`).
+
 ### Default: single process
 
 ```bash
-orbit serve        # UI + MCP + Scheduler + embedded Runner, all in one process
+orbit serve        # UI + Scheduler + embedded Runner, all in one process
 ```
 
 `serve` **embeds one in-process runner** by default (name `serve-embedded`, concurrency 5), so after kicking off a goal you don't need to start a runner manually — enqueue job → embedded runner executes → scheduler advances, fully automatic. The **Jobs** tab in the UI shows queue state (pending / running / finished / done).
@@ -136,270 +134,101 @@ orbit runner --project /path/to/repo --name box-a       # explicit project
 
 Claiming is an atomic DB-level operation (`UPDATE ... WHERE status=... AND lease<=now`), so concurrent runners never claim the same job twice; if a runner dies, its job is re-claimed by another once the lease expires.
 
-## Connecting Clients
+### Goal convergence check (goal_verify)
 
-### Claude Code
+Once all of a goal's business subtasks self-test and close, orbit runs the `goal_verify` command on the integrated main tree to accept the whole result objectively.
 
-```bash
-claude mcp add --transport http orbit http://127.0.0.1:8848/mcp
-```
-
-### Gemini CLI
-
-Add to `~/.gemini/settings.json`:
-
-```json
-{
-  "mcpServers": {
-    "orbit": {
-      "httpUrl": "http://127.0.0.1:8848/mcp"
-    }
-  }
-}
-```
-
-### Codex CLI
-
-Add to `~/.codex/config.toml` (recent versions support HTTP transport):
-
-```toml
-[mcp_servers.orbit]
-url = "http://127.0.0.1:8848/mcp"
-```
-
-If your Codex version only supports stdio MCP, bridge with `mcp-remote`:
-
-```toml
-[mcp_servers.orbit]
-command = "npx"
-args = ["-y", "mcp-remote", "http://127.0.0.1:8848/mcp"]
-```
-
-### Google Antigravity CLI (agy)
-
-agy loads MCP servers via its plugin mechanism (the `mcpServers` key in `settings.json` is not the config entry). Create a minimal plugin:
-
-```bash
-mkdir -p /tmp/orbit-plugin && cd /tmp/orbit-plugin
-cat > plugin.json <<'EOF'
-{ "name": "orbit", "version": "0.1.0", "description": "orbit mailbox MCP server" }
-EOF
-cat > mcp_config.json <<'EOF'
-{ "mcpServers": { "orbit": { "serverUrl": "http://127.0.0.1:8848/mcp" } } }
-EOF
-agy plugin install /tmp/orbit-plugin
-```
-
-It lands in `~/.gemini/config/plugins/orbit/`. Optional: add entries like `mcp(orbit/register_agent)` to `permissions.allow` in `~/.gemini/antigravity-cli/settings.json` to skip confirmation prompts.
-
-### Other standard MCP clients
-
-Any MCP client that supports the Streamable HTTP transport just points at `http://127.0.0.1:8848/mcp`.
-
-### Custom Python agent (direct SDK)
-
-Connect directly with the official `mcp` package's `streamablehttp_client`: register → long-poll for messages → reply:
-
-```python
-import asyncio, json
-from mcp import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
-
-URL = "http://127.0.0.1:8848/mcp"
-
-def parse(result):
-    """Tool results arrive as JSON text content blocks."""
-    if result.structuredContent is not None:
-        return result.structuredContent
-    return json.loads("".join(c.text for c in result.content if c.type == "text"))
-
-async def main():
-    async with streamablehttp_client(URL) as (read, write, _):
-        async with ClientSession(read, write) as s:
-            await s.initialize()
-            await s.call_tool("register_agent", {
-                "name": "my-agent", "description": "custom python agent",
-            })
-            while True:
-                inbox = parse(await s.call_tool("check_inbox", {
-                    "agent": "my-agent", "wait_seconds": 30,   # long poll
-                }))
-                for msg in inbox["messages"]:
-                    print(f"from {msg['sender']}: {msg['content']}")
-                    await s.call_tool("send_message", {
-                        "sender": "my-agent", "to": msg["sender"],
-                        "content": "got it, done", "reply_to": msg["id"],
-                    })
-                    await s.call_tool("ack_message", {
-                        "agent": "my-agent",
-                        "message_id": msg["id"],
-                        "lease_token": msg["lease_token"],
-                    })
-
-asyncio.run(main())
-```
+- **Auto-detected by default**: with no `goal_verify` set, orbit infers a common test command from project markers (`npm test`, `cargo test`, `python -m unittest discover -s tests`, …). Good for a quick try — confirm the guess in the Workflow panel.
+- **Declare it explicitly for real use**: save the command into `.orbit/workflow.json` (via UI/CLI). It should be idempotent, runnable offline, and cover unit/integration tests. Point it at a script (`./scripts/goal-verify.sh`) for monorepos.
+- It runs in the project root under a hard timeout (`VERIFY_HARD_TIMEOUT_SECONDS`, default 900s). Pass → goal `accepted`; fail → `stalled` + hub is notified.
+- `goal_verify` is a plain shell/test command — it uses no LLM, so it **consumes no tokens and does not count against `goal_token_budget`**.
 
 ## MCP Tools
 
+The mailbox is no longer exposed as MCP tools; `/mcp` keeps only the three tools that advance the workflow, for an already-connected session (day to day, just use the Web UI — no manual setup needed):
+
 | Tool | Description |
 |---|---|
-| `register_agent(name, description)` | Register yourself; returns all currently registered agents |
-| `list_agents()` | See which agents can receive messages |
-| `send_message(sender, to, content, reply_to?, kind?, title?, task_status?)` | Send a prompt or task; `to="*"` broadcasts to all other agents |
-| `check_inbox(agent, wait_seconds=0, lease_seconds=300)` | Claim unread messages under a lease; `wait_seconds=30` long-polls near real-time; un-acked messages are re-delivered after the lease expires |
-| `ack_message(agent, message_id, lease_token)` | Confirm a message is handled so it won't be delivered again; `lease_token` comes from the message returned by `check_inbox` |
-| `get_thread(message_id)` | Walk the `reply_to` chain to retrieve the whole conversation thread |
+| `start_workflow_task(agent, task_id)` | Enter an existing task into the configured workflow and dispatch its entry step(s) |
+| `complete_step(agent, task_id, step, outcome, result)` | Report a dispatched step's outcome (`done` / `rework` / `blocked`) |
+| `get_workflow_task_state(task_id)` | Show where a task is in the workflow: status, active steps, transition history |
+
+> Runner-executed agents do **not** call these — they finish the prompt, print `WORKFLOW_OUTCOME`, and the dispatcher submits on their behalf.
 
 ## Local Web UI
 
-`/ui` is a minimal local console to observe and operate the same SQLite mailbox:
+`/ui` is a local console for observing and operating the workflow:
 
 - Switch between running project daemons via the Project dropdown at the top
-- View installed common agent CLIs and currently registered sessions
-- View recent messages, filtered by `available` / `leased` / `read`
-- View task messages, filtered by `created` / `assigned` / `in_progress` / `reviewing` / `accepted` / `blocked` / `stalled` / `closed`
-- Pick an agent, claim its inbox, and get the lease + ack token
-- View a message thread
-- Send programming tasks via the Analyze / Implement / Review / Test templates, or reply via `reply_to`
-- Mark task status
-- Ack a claimed message
-- **Jobs** tab: view the `run_jobs` execution queue (status / outcome / claimant / lease expiry) to confirm the runner is consuming normally
-- **Goals** tab: view goal progress and subtree token spend; **Force End** to hard-stop (kill all running runners for that goal + close the whole tree)
+- View installed common agent CLIs and the team config
+- **Board**: tasks by status column (todo / in progress / testing / review / blocked / done)
+- **Workflow**: visually edit the workflow graph (steps, roles, edges, `verify` command, goal budget)
+- **Jobs**: the `run_jobs` execution queue (status / outcome / claimant / lease expiry) to confirm the runner is consuming
+- **Goals**: goal progress and subtree token spend; **Force End** to hard-stop (kill running runners + close the whole tree)
+- Per-step run logs (command, exit code, stdout/stderr tail)
 
-The UI only reaches the local store through `/api/*` JSON routes. Merely viewing the message list does not claim messages; only clicking Claim inbox creates a lease.
+The UI reaches the local store only through `/api/*` JSON routes, and only serves local clients.
 
 ## Task Collaboration Model
 
-Treat orbit as a lightweight task dispatcher, not a group chat.
+Give `hub` a goal; the engine splits it into business subtasks that run through the workflow in parallel, each step executed headlessly by the matching role's agent.
 
 ### Roles & constraints
 
-Recommended agent split:
+Roles in the default workflow (see `agents/`):
 
-- `hub`: the main orchestrator agent. Splits tasks, merges conclusions, edits the main worktree, does final acceptance.
-- `impl-*`: implementation agents. Do local implementation or patch proposals.
-- `review-*`: review agents. Hunt for bugs, test gaps, and design risks.
-- `test-*`: verification agents. Own test plans, failure reproduction, and command output.
+- `hub`: orchestrator. Splits the goal, integrates/merges, does final acceptance; no big implementation or review work.
+- `implementer`: makes the code change and self-tests.
+- `reviewer`: hunts bugs, test gaps, design risk; reviews only, doesn't edit code.
+- `tester`: designs and runs tests, reproduces failures, reports coverage risk.
+- `architect` / `product_designer` / `ui_designer` / `security_auditor` / `refactorer`: design / audit / refactor roles wired in as needed.
 
-Recommended constraints:
+Constraints:
 
-1. By default only `hub` writes the main worktree.
+1. By default only `hub` (in the `integrate` step) writes the main worktree; other roles work in their own worktrees.
 2. A worker handles exactly one clearly-bounded small task at a time.
-3. A worker's reply must include file references, a conclusion, and how to verify.
+3. A worker writes artifacts to files, ends output with a one-line conclusion + artifact paths, and prints `WORKFLOW_OUTCOME`.
 
-### Task message format
+### Task content format
 
-Task messages should use `kind="task"`, with:
+A task's `content` should be structured so an agent can execute it unambiguously:
 
-```json
-{
-  "title": "Review auth flow",
-  "task_status": "assigned",
-  "content": "Task Type: review\n\nContext:\n- Repo path: ...\n- Change under review: ...\n\nDeliverable:\n- Findings ordered by severity\n- Missing tests\n- Residual risk"
-}
+```
+Task Type: review
+
+Context:
+- Repo path: ...
+- Change under review: ...
+
+Deliverable:
+- Findings ordered by severity
+- Missing tests
+- Residual risk
 ```
 
 ### Task statuses
 
 | Status | Meaning |
 |---|---|
-| `created` | Created, not yet formally dispatched |
-| `assigned` | Dispatched to the target agent |
-| `in_progress` | Worker has claimed it and started |
-| `reviewing` | Reviewer is reviewing |
-| `accepted` | Hub accepted the result |
-| `blocked` | Worker is blocked, needs input or an environment change |
+| `created` | Created, not yet in the workflow |
+| `assigned` | Dispatched to the target role |
+| `in_progress` | A step's runner is executing |
+| `reviewing` | At a review step |
+| `accepted` | Hub accepted the result (a terminal state) |
+| `blocked` | Blocked, needs input or an environment change |
 | `stalled` | Parent goal stalled because a subtask is blocked |
-| `closed` | Task archived |
-
-## Orchestrator Mode
-
-When one main agent dispatches tasks to several sub-agents and receives all their replies, replies may arrive concurrently. The storage layer has no races (writes are serialized, `check_inbox` claiming is atomic), but the consuming side must follow two conventions:
-
-1. **Single consumer loop** — the main agent runs exactly one `check_inbox` polling loop. Multiple concurrent polls under the same agent name won't double-claim, but messages get randomly split across consumers.
-2. **Process and ack one at a time** — when N replies arrive at once, process them in ascending `id` order, `ack_message` each as you finish, then poll again.
-
-Correlate tasks with `reply_to`: remember the message id returned by `send_message` when dispatching; sub-agents reply with `reply_to`, and the main agent matches them up by it.
-
-```python
-# Main-agent consumer loop skeleton
-while True:
-    inbox = check_inbox(agent="hub", wait_seconds=30)
-    for msg in sorted(inbox["messages"], key=lambda m: m["id"]):
-        task_id = msg["reply_to"]          # the message id from dispatch
-        handle_reply(task_id, msg)         # process one at a time, don't batch into the LLM
-        ack_message(agent="hub", message_id=msg["id"], lease_token=msg["lease_token"])
-```
+| `closed` | Task archived (a terminal state) |
 
 ## Role Files
 
-The `agents/` directory ships ready-to-use role definitions: `_protocol.md` (shared communication conventions), `hub.md` (orchestrator), `reviewer.md`, `implementer.md`. Bind a role at startup:
+The `agents/` directory ships ready-to-use role definitions: `_protocol.md` (shared **execution conventions**), `hub.md` (orchestrator), `implementer.md`, `reviewer.md`, `tester.md`, and more. The runner injects the matching role's `.md` into the step prompt, and the agent works from it.
+
+`hub` can also run as your **interactive main session** — splitting goals, integrating, and accepting:
 
 ```bash
-claude --append-system-prompt "$(cat agents/hub.md)"        # main session doubling as orchestrator
-agy -i 'read agents/reviewer.md and work as that role'      # agy as reviewer
-codex "read agents/implementer.md and work as that role"    # codex as implementer
+claude --append-system-prompt "$(cat agents/hub.md)"
 ```
 
 `CLAUDE.md` / `AGENTS.md` / `GEMINI.md` are thin entry points holding only project facts and role pointers.
 
 Add a role: copy `agents/_template.md` to `agents/<role-name>.md` and replace the placeholders — the template carries the naming rules and the criteria for splitting responsibilities.
-
-## Appendix: Tool Return Formats
-
-All tools return JSON (as a text content block, and populate structuredContent where possible).
-
-The agent object in `register_agent` / `list_agents`:
-
-```json
-{
-  "name": "claude-code",
-  "description": "Claude Code session in ~/developer/orbit",
-  "registered_at": "2026-07-03T02:43:21+00:00",
-  "last_seen": "2026-07-03T03:00:52+00:00"
-}
-```
-
-`register_agent` wraps it: `{"registered": "claude-code", "agents": [<agent>, ...]}`.
-
-`send_message`:
-
-```json
-{ "delivered": 1, "message_ids": [4] }
-```
-
-For a broadcast, `delivered` is the actual recipient count (one independent message id each); a broadcast with no other registered agents returns `delivered=0` plus a `note` field.
-
-A direct message requires both `sender` and `to` to be registered agents; if a name doesn't exist, `delivered=0` and an `error` field is returned — avoiding messages that get stuck forever after a typo in the recipient.
-
-`check_inbox`:
-
-```json
-{
-  "agent": "claude-code",
-  "count": 1,
-  "messages": [
-    {
-      "id": 5,
-      "sender": "antigravity",
-      "recipient": "claude-code",
-      "content": "…review content…",
-      "reply_to": 4,
-      "created_at": "2026-07-03T02:52:30+00:00",
-      "delivery_count": 1,
-      "lease_expires_at": "2026-07-03T02:57:30+00:00",
-      "lease_token": "9b6c0e3d2d2f4d0a8b8b92d5a1b0d3c4"
-    }
-  ]
-}
-```
-
-`check_inbox` only claims under a lease; it does not mark messages read. After processing, call `ack_message`:
-
-```json
-{ "acked": true, "message_id": 5 }
-```
-
-When calling `ack_message` you must pass back the message's `lease_token`. If a consumer crashes or forgets to ack, the message becomes claimable again after `lease_expires_at`, `delivery_count` increments, and a new `lease_token` is issued.
-
-`get_thread` returns an array of message objects (with extra `read_at` / `leased_until` / `lease_owner` fields beyond inbox messages), in ascending id order starting from the thread root.

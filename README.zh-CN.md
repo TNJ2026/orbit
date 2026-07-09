@@ -2,31 +2,29 @@
 
 **简体中文** | [English](./README.md)
 
-> 本地 MCP server，让多个大模型 CLI / Agent（Claude Code、Codex CLI、Gemini CLI、自研 agent）通过一个共享信箱互相传递提示词，并跑多角色任务工作流。
+> 本地多 agent 工作流编排器：把编码目标拆成任务，在一张可配置的工作流图上流转，runner 无头调用各 agent CLI（Claude Code、Codex CLI、Gemini CLI、自研 agent）执行「实现 → 测试 → 评审 → 集成」，每个任务在独立 git worktree 隔离进行，失败自动返工。
 
 ```
-Claude Code ──┐
-Codex CLI  ───┼── HTTP (Streamable) ──▶ orbit daemon :8848/mcp ──▶ SQLite ~/.orbit/projects/<project>/messages.db
-Gemini CLI ───┘
+目标/任务 ──▶ orbit（工作流引擎 + 调度）──▶ runner ──▶ agent CLI（Claude Code / Codex / Gemini …）
+                    │                                       │
+                    └──────── SQLite ~/.orbit/projects/<project>/ ◀── 结果回收（WORKFLOW_OUTCOME）
 ```
 
-- 单个常驻 HTTP daemon，所有客户端连同一端口，状态天然共享
-- 默认按启动目录分项目存储：不同项目的 agent / message 不会混在同一个数据库
-- 消息持久化到 SQLite：daemon 重启不丢消息，收件人晚上线也能收到
-- 异步信箱模型：`send_message` 投递，`check_inbox` 租约领取，`ack_message` 确认完成（支持最长 60s 长轮询）
+- 一条命令起：Web UI + 调度 + 内嵌 runner 全在一个进程
+- 任务在可配置工作流图上流转：并行分支、汇合、返工回环、机器验证门
+- 每个任务在独立 git worktree 隔离执行，`integrate` 步骤把分支合并回主干
+- runner 无头调用 agent CLI，可按角色 / agent 拆分、水平扩展
+- 状态持久化到 SQLite：进程重启不丢，超时 / 卡死有兜底
 
 ## 目录
 
 - [安装](#安装)
 - [启动](#启动)
 - [工作流引擎](#工作流引擎)
-- [客户端接入](#客户端接入)
 - [MCP 工具](#mcp-工具)
 - [本地 Web UI](#本地-web-ui)
 - [任务协作模型](#任务协作模型)
-- [编排者模式](#编排者模式)
 - [角色文件](#角色文件)
-- [附录：工具返回值格式](#附录工具返回值格式)
 
 ## 安装
 
@@ -66,22 +64,20 @@ uvx --from git+<repo-url> orbit up         # 没装也行，uvx 临时拉起
 
 ### 在仓库内定制
 
-需要改角色提示词、自定义工作流并提交给团队共享时，用 `orbit init`：它会把 `agents/*.md`、`.orbit/workflow.json`、`team.json`、`.mcp.json`、`CLAUDE.md` 段落写进仓库，这些是**故意不 gitignore** 的，供 commit 共享。
+需要改角色提示词、自定义工作流并提交给团队共享时，用 `orbit init`：它会把 `agents/*.md`、`.orbit/workflow.json`、`team.json`、`CLAUDE.md` 段落写进仓库，这些是**故意不 gitignore** 的，供 commit 共享。
 
 ### 数据库与运维模型
 
 默认数据库路径形如 `~/.orbit/projects/<项目目录名>-<路径hash>/messages.db`，项目目录按最近的 `.git` / `pyproject.toml` 向上探测——从子目录启动也会解析到同一个库。需要手动共享或指定旧库时，用 `--db` 覆盖。
 
-**一个项目 = 一个 daemon = 一个端口。** db 由 daemon 的启动目录决定，与客户端从哪个项目连入无关——所有连到同一端口的客户端共享同一个信箱。要隔离多个项目，就为每个项目起独立 daemon 并用 `--port` 错开端口，各项目的 MCP 客户端配置指向各自的端口。
+**一个项目 = 一个 daemon = 一个端口。** db 由 daemon 的启动目录决定。要同时跑多个项目，就为每个项目起独立 daemon 并用 `--port` 错开端口。
 
 从旧版本升级：旧的全局库在 `~/.dev_loop/messages.db`，不再被默认加载（启动时会打印提示）。想沿用它，`orbit serve --db ~/.dev_loop/messages.db`；想迁移进某个项目，把该文件 cp 到启动提示打印的新路径。
 
 ### 访问入口
 
-启动后有两个入口：
-
-- MCP endpoint：`http://127.0.0.1:8848/mcp`
-- 本地 Web UI：`http://127.0.0.1:8848/ui`
+- 本地 Web UI：`http://127.0.0.1:8848/ui`（观察和操作任务 / 工作流 / 队列的主入口）
+- 工作流 MCP endpoint：`http://127.0.0.1:8848/mcp`（仅暴露工作流工具 `start_workflow_task` / `complete_step` / `get_workflow_task_state`，供已连入的会话推进任务；日常用不到）
 
 每个 daemon 启动时会把当前项目写入 `~/.orbit/projects/index.json`。任意一个项目的 `/ui` 都能从这个索引里看到其它项目 daemon：在线项目可以直接在顶部 Project 下拉框切换；离线项目只显示元数据，需要先在该项目目录启动对应 daemon。跨项目 UI 只是聚合视图，写操作仍发到被选中项目自己的 daemon。
 
@@ -94,10 +90,12 @@ uvx --from git+<repo-url> orbit up         # 没装也行，uvx 临时拉起
 | **Scheduler**（serve 内线程） | 把"要执行某 step"写入 `run_jobs` 队列；单点消费执行完的 job 并推进工作流（dispatch / rework / accept）；跑 timeout / health 兜底 |
 | **Runner / Worker** | 从 `run_jobs` 领取任务（带租约 + 心跳）、执行各 agent 的 CLI、流式记录 stdout/stderr、解析 outcome，把结果写回 job |
 
+默认工作流：`intake(hub) → product_design → [ui_design ∥ architecture] → implement → test → review → integrate(hub) → accept(hub)`，其中 `review` 有一条回到 `implement` 的返工回环，`test` 可配 `verify` 命令作为机器验证门。runner 把步骤 prompt 交给 agent CLI 无头执行，agent 在末尾打印 `WORKFLOW_OUTCOME: done|rework|blocked` 汇报（详见 `agents/_protocol.md`）。
+
 ### 默认：一体进程
 
 ```bash
-orbit serve        # UI + MCP + Scheduler + 内嵌 Runner，全在一个进程
+orbit serve        # UI + 调度 + 内嵌 Runner，全在一个进程
 ```
 
 `serve` 默认**内嵌一个 in-process runner**（名字 `serve-embedded`，并发 5），所以启动一个 goal 后不需要再手动起 runner——建 job → 内嵌 runner 执行 → scheduler 推进，全自动。UI 的 **Jobs** 标签页能看到队列状态(pending / running / finished / done)。
@@ -138,7 +136,7 @@ orbit runner --project /path/to/repo --name box-a       # 显式指定项目
 
 ### 目标收敛验证（goal_verify）最佳实践
 
-当一个目标（Goal）下的业务子任务全部自测通过并关闭后，orbit 会在主分支执行 `goal_verify` 命令，对整体成果进行客观验收。以下指南帮助终端用户正确配置、运行并排查这一流程。
+当一个目标（Goal）下的业务子任务全部自测通过并关闭后，orbit 会在主分支执行 `goal_verify` 命令，对整体成果进行客观验收。以下指南帮助正确配置、运行并排查这一流程。
 
 #### 何时显式配置
 
@@ -158,12 +156,6 @@ orbit runner --project /path/to/repo --name box-a       # 显式指定项目
    - Rust：`cargo test --all`
    - Monorepo：`./scripts/goal-verify.sh`
 
-#### 运行环境与结构
-
-- `goal_verify` 在项目根目录执行，isolated step 的改动已合并回主工作树；若实际代码位于子目录，请在命令中先 `cd` 或使用脚本包装。
-- runner 主机需具备与开发环境一致的运行时，并提前安装依赖（例如在部署脚本中执行 `uv sync`、`npm ci`、`cargo fetch`）。
-- 可通过设置缓存相关环境变量（如 `UV_CACHE_DIR=/var/cache/uv`）来缩短验证时长，并保证缓存目录可写。
-
 #### 超时与成本控制
 
 - 验证命令受 `VERIFY_HARD_TIMEOUT_SECONDS`（默认 900 秒）限制；预估执行时间过长时，需优化命令或拆分目标，否则将被视为失败。
@@ -172,285 +164,94 @@ orbit runner --project /path/to/repo --name box-a       # 显式指定项目
 #### 结果与观测
 
 - 每次运行都会在 UI 的 Runs 面板显示，并在状态目录写入日志：`<项目根>/.orbit/tasks/<goal_id>/run-XXX/verify`。
-- 日志记录了完整命令、退出码以及 stdout/stderr 尾部（最多 2000 字符），便于快速定位问题。
-- 成功时目标状态自动置为 `accepted`；失败则为 `stalled`，并向 hub 发送通知提醒人工介入。
-
-#### 失败恢复流程
-
-1. 查看 hub 通知或日志文件，定位失败原因（测试未通过、依赖缺失、超时等）。
-2. 修复代码或补齐依赖；如需重新验收，可重新打开受影响的子任务或再次触发闭环，这会让引擎重新排队 `goal_verify`。
-3. 验证命令修复后，所有子任务重新关闭即会自动再触发 `goal_verify`，无需手动干预。
-
-#### 团队协作建议
-
-- 在项目 README/团队手册中写明 `goal_verify` 命令、依赖版本和必要环境变量，帮助新成员快速对齐。
-- 对复杂命令使用脚本封装，并在脚本内输出清晰的阶段性日志（建议 `set -euo pipefail`）。
-- 定期回顾验证时长和日志，必要时优化缓存策略或拆分目标规模，确保验证链路可持续。
-
-## 客户端接入
-
-### Claude Code
-
-```bash
-claude mcp add --transport http orbit http://127.0.0.1:8848/mcp
-```
-
-### Gemini CLI
-
-在 `~/.gemini/settings.json` 中加入：
-
-```json
-{
-  "mcpServers": {
-    "orbit": {
-      "httpUrl": "http://127.0.0.1:8848/mcp"
-    }
-  }
-}
-```
-
-### Codex CLI
-
-在 `~/.codex/config.toml` 中加入（新版支持 HTTP transport）：
-
-```toml
-[mcp_servers.orbit]
-url = "http://127.0.0.1:8848/mcp"
-```
-
-若你的 Codex 版本只支持 stdio MCP，用 `mcp-remote` 桥接：
-
-```toml
-[mcp_servers.orbit]
-command = "npx"
-args = ["-y", "mcp-remote", "http://127.0.0.1:8848/mcp"]
-```
-
-### Google Antigravity CLI（agy）
-
-agy 通过 plugin 机制加载 MCP server（`settings.json` 里的 `mcpServers` 不是配置入口）。建一个最小 plugin：
-
-```bash
-mkdir -p /tmp/orbit-plugin && cd /tmp/orbit-plugin
-cat > plugin.json <<'EOF'
-{ "name": "orbit", "version": "0.1.0", "description": "orbit mailbox MCP server" }
-EOF
-cat > mcp_config.json <<'EOF'
-{ "mcpServers": { "orbit": { "serverUrl": "http://127.0.0.1:8848/mcp" } } }
-EOF
-agy plugin install /tmp/orbit-plugin
-```
-
-安装后落盘在 `~/.gemini/config/plugins/orbit/`。可选：在 `~/.gemini/antigravity-cli/settings.json` 的 `permissions.allow` 加 `mcp(orbit/register_agent)` 等条目免确认弹窗。
-
-### 其它标准 MCP 客户端
-
-任何支持 Streamable HTTP transport 的 MCP 客户端，指向 `http://127.0.0.1:8848/mcp` 即可。
-
-### 自研 Python Agent（SDK 直连）
-
-用官方 `mcp` 包的 `streamablehttp_client` 直连，注册 → 长轮询收信 → 回复：
-
-```python
-import asyncio, json
-from mcp import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
-
-URL = "http://127.0.0.1:8848/mcp"
-
-def parse(result):
-    """Tool results arrive as JSON text content blocks."""
-    if result.structuredContent is not None:
-        return result.structuredContent
-    return json.loads("".join(c.text for c in result.content if c.type == "text"))
-
-async def main():
-    async with streamablehttp_client(URL) as (read, write, _):
-        async with ClientSession(read, write) as s:
-            await s.initialize()
-            await s.call_tool("register_agent", {
-                "name": "my-agent", "description": "custom python agent",
-            })
-            while True:
-                inbox = parse(await s.call_tool("check_inbox", {
-                    "agent": "my-agent", "wait_seconds": 30,   # 长轮询
-                }))
-                for msg in inbox["messages"]:
-                    print(f"from {msg['sender']}: {msg['content']}")
-                    await s.call_tool("send_message", {
-                        "sender": "my-agent", "to": msg["sender"],
-                        "content": "收到，处理完了", "reply_to": msg["id"],
-                    })
-                    await s.call_tool("ack_message", {
-                        "agent": "my-agent",
-                        "message_id": msg["id"],
-                        "lease_token": msg["lease_token"],
-                    })
-
-asyncio.run(main())
-```
+- 成功时目标状态自动置为 `accepted`；失败则为 `stalled`，并向 hub 发送通知提醒人工介入。所有子任务重新关闭即会自动再触发 `goal_verify`。
 
 ## MCP 工具
 
+信箱已不再对外暴露为 MCP 工具；`/mcp` 只保留推进工作流的三个工具，供已连入的会话使用（日常用 Web UI 即可，无需手动接入）：
+
 | 工具 | 说明 |
 |---|---|
-| `register_agent(name, description)` | 注册自己，返回当前所有已注册 agent |
-| `list_agents()` | 查看有哪些 agent 可以收消息 |
-| `send_message(sender, to, content, reply_to?, kind?, title?, task_status?)` | 发提示词或任务；`to="*"` 广播给所有其它 agent |
-| `check_inbox(agent, wait_seconds=0, lease_seconds=300)` | 租约领取未读消息；`wait_seconds=30` 长轮询近实时；未 ack 的消息在租约过期后会重投递 |
-| `ack_message(agent, message_id, lease_token)` | 确认消息已处理，之后不会再次投递；`lease_token` 来自 `check_inbox` 返回的消息 |
-| `get_thread(message_id)` | 沿 `reply_to` 链取回整个对话线程 |
+| `start_workflow_task(agent, task_id)` | 把一个已存在的任务放进配置的工作流，派发入口步骤 |
+| `complete_step(agent, task_id, step, outcome, result)` | 汇报被派发步骤的结果（`done` / `rework` / `blocked`） |
+| `get_workflow_task_state(task_id)` | 查看任务当前在工作流的位置、活动步骤与流转历史 |
+
+> runner 执行的 agent **不需要**调这些工具——它把 prompt 干完、打印 `WORKFLOW_OUTCOME`，派发器代为提交。
 
 ## 本地 Web UI
 
-`/ui` 是一个最小可用的本地控制台，用来观察和操作同一个 SQLite mailbox：
+`/ui` 是本地控制台，用来观察和操作工作流：
 
 - 顶部 Project 下拉框切换已启动的项目 daemon
-- 查看已安装的常见 agent CLI 和当前已注册 session
-- 查看最近消息，按 `available` / `leased` / `read` 过滤
-- 查看任务消息，按 `created` / `assigned` / `in_progress` / `reviewing` / `accepted` / `blocked` / `stalled` / `closed` 过滤
-- 选择 agent 后 claim inbox，拿到租约和 ack token
-- 查看消息 thread
-- 用 Analyze / Implement / Review / Test 模板发送编程任务，或按 `reply_to` 回复
-- 标记任务状态
-- 对已 claim 的消息执行 ack
-- **Jobs** 标签页：查看 `run_jobs` 执行队列（status / outcome / 领取者 / 租约到期），确认 runner 在正常消费
-- **Goals** 标签页：查看 goal 进度、子树 token 消耗，可 **Force End** 强制结束(杀该 goal 全部在跑 runner + 关整树)
+- 查看已安装的常见 agent CLI 与团队配置
+- **看板**：任务按状态分列（todo / 进行中 / 测试 / 评审 / 阻塞 / 完成）
+- **Workflow**：可视化编辑工作流图（步骤、角色、边、`verify` 命令、goal 预算）
+- **Jobs**：查看 `run_jobs` 执行队列（status / outcome / 领取者 / 租约到期），确认 runner 在正常消费
+- **Goals**：查看 goal 进度、子树 token 消耗，可 **Force End** 强制结束（杀该 goal 全部在跑 runner + 关整树）
+- 查看每个 step 的运行日志（命令、退出码、stdout/stderr 尾部）
 
-UI 只通过 `/api/*` JSON route 访问本地 store。直接查看消息列表不会领取消息；只有点击 Claim inbox 才会创建租约。
+UI 只通过 `/api/*` JSON route 访问本地 store，且强制仅本机可访问。
 
 ## 任务协作模型
 
-建议把 orbit 当成轻量任务分发器，而不是群聊。
+给 hub 一个目标（goal），引擎自动拆成业务子任务，各自并行走工作流；每个步骤由对应角色的 agent 无头执行。
 
 ### 角色分工与约束
 
-推荐 agent 分工：
+默认工作流涉及的角色（见 `agents/`）：
 
-- `hub`：主编排 agent。负责拆任务、合并结论、改主工作树、最终验收
-- `impl-*`：实现型 agent。负责局部实现或 patch 建议
-- `review-*`：审查型 agent。负责找 bug、测试缺口和设计风险
-- `test-*`：验证型 agent。负责测试计划、失败复现和命令输出
+- `hub`：编排者。拆 goal、集成合并、最终验收；不做大块实现 / review。
+- `implementer`：按任务改代码并自测。
+- `reviewer`：找 bug、测试缺口、设计风险；只评审不改码。
+- `tester`：设计执行测试、复现失败、报告覆盖风险。
+- `architect` / `product_designer` / `ui_designer` / `security_auditor` / `refactorer`：按需接入的设计 / 审计 / 重构角色。
 
-推荐约束：
+约束：
 
-1. 默认只有 `hub` 写主工作树
-2. worker 每次只处理一个边界清楚的小任务
-3. worker 回复必须包含文件引用、结论和验证方式
+1. 默认只有 `hub`（在 `integrate` 步骤）写主工作树；其它角色在各自 worktree 里干。
+2. worker 每次只处理一个边界清楚的小任务。
+3. worker 产出写文件，输出末尾给「一行结论 + 产物路径」并打印 `WORKFLOW_OUTCOME`。
 
-### 任务消息格式
+### 任务内容格式
 
-任务消息建议使用 `kind="task"`，并设置：
+任务的 `content` 建议结构化，便于 agent 无歧义执行：
 
-```json
-{
-  "title": "Review auth flow",
-  "task_status": "assigned",
-  "content": "Task Type: review\n\nContext:\n- Repo path: ...\n- Change under review: ...\n\nDeliverable:\n- Findings ordered by severity\n- Missing tests\n- Residual risk"
-}
+```
+Task Type: review
+
+Context:
+- Repo path: ...
+- Change under review: ...
+
+Deliverable:
+- Findings ordered by severity
+- Missing tests
+- Residual risk
 ```
 
 ### 任务状态
 
 | 状态 | 含义 |
 |---|---|
-| `created` | 已创建，还未正式派发 |
-| `assigned` | 已派发给目标 agent |
-| `in_progress` | worker 已 claim 并开始处理 |
-| `reviewing` | reviewer 正在评审 |
-| `accepted` | hub 接受该结果 |
-| `blocked` | worker 被阻塞，需要输入或环境变化 |
+| `created` | 已创建，还未进入工作流 |
+| `assigned` | 已派发给目标角色 |
+| `in_progress` | 某步骤的 runner 正在执行 |
+| `reviewing` | 在评审步骤 |
+| `accepted` | hub 接受该结果（终结态之一） |
+| `blocked` | 被阻塞，需要输入或环境变化 |
 | `stalled` | 父级目标因子任务阻塞而停滞 |
-| `closed` | 任务已归档 |
-
-## 编排者模式
-
-一个主 agent 向多个子 agent 派发任务、接收所有回复时，多个回复可能同时到达。存储层没有竞态（写入串行、`check_inbox` 租约领取原子），但消费侧要遵守两条约定：
-
-1. **单消费循环**——主 agent 只跑一个 `check_inbox` 轮询循环。同名 agent 开多个并发轮询不会重复领取，但消息会被随机拆散到不同消费者
-2. **逐条处理并 ack**——一次领到 N 条回复时，按 `id` 升序逐条处理，处理完一条就 `ack_message` 一条，再进下一轮轮询
-
-任务关联用 `reply_to`：派发时记住 `send_message` 返回的 message id，子 agent 回复带 `reply_to`，主 agent 按此对号入座。
-
-```python
-# 主 agent 消费循环骨架
-while True:
-    inbox = check_inbox(agent="hub", wait_seconds=30)
-    for msg in sorted(inbox["messages"], key=lambda m: m["id"]):
-        task_id = msg["reply_to"]          # 对应派发时的 message id
-        handle_reply(task_id, msg)         # 逐条处理，别整批扔给 LLM
-        ack_message(agent="hub", message_id=msg["id"], lease_token=msg["lease_token"])
-```
+| `closed` | 任务已归档（终结态之一） |
 
 ## 角色文件
 
-`agents/` 目录提供开箱即用的角色定义：`_protocol.md`（公共通信约定）、`hub.md`（编排者）、`reviewer.md`、`implementer.md`。启动时绑定角色：
+`agents/` 目录提供开箱即用的角色定义：`_protocol.md`（公共**执行约定**）、`hub.md`（编排者）、`implementer.md`、`reviewer.md`、`tester.md` 等。runner 会把对应角色的 `.md` 注入到步骤 prompt 里，agent 据此干活。
+
+`hub` 也可以作为你的**交互主会话**运行——负责拆 goal、集成与验收：
 
 ```bash
-claude --append-system-prompt "$(cat agents/hub.md)"        # 主会话兼编排者
-agy -i '读取 agents/reviewer.md 并按该角色工作'               # agy 当 reviewer
-codex "读 agents/implementer.md，按该角色工作"                # codex 当 implementer
+claude --append-system-prompt "$(cat agents/hub.md)"
 ```
 
 `CLAUDE.md` / `AGENTS.md` / `GEMINI.md` 是薄入口，只含项目事实和角色指引。
 
 新增角色：复制 `agents/_template.md` 为 `agents/<角色名>.md`，替换占位符即可——模板里带命名规则和职责拆分的判断标准。
-
-## 附录：工具返回值格式
-
-所有工具返回 JSON（作为 text content block，同时尽量填充 structuredContent）。
-
-`register_agent` / `list_agents` 中的 agent 对象：
-
-```json
-{
-  "name": "claude-code",
-  "description": "Claude Code session in ~/developer/orbit",
-  "registered_at": "2026-07-03T02:43:21+00:00",
-  "last_seen": "2026-07-03T03:00:52+00:00"
-}
-```
-
-`register_agent` 外层包一层：`{"registered": "claude-code", "agents": [<agent>, ...]}`。
-
-`send_message`：
-
-```json
-{ "delivered": 1, "message_ids": [4] }
-```
-
-广播时 `delivered` 为实际收件人数（每人一条独立 message id）；广播且无其它注册 agent 时 `delivered=0` 并附 `note` 字段。
-
-直发消息要求 `sender` 和 `to` 都是已注册 agent；名字不存在时 `delivered=0` 并返回 `error` 字段，避免拼错收件人后消息永久无人领取。
-
-`check_inbox`：
-
-```json
-{
-  "agent": "claude-code",
-  "count": 1,
-  "messages": [
-    {
-      "id": 5,
-      "sender": "antigravity",
-      "recipient": "claude-code",
-      "content": "……review 内容……",
-      "reply_to": 4,
-      "created_at": "2026-07-03T02:52:30+00:00",
-      "delivery_count": 1,
-      "lease_expires_at": "2026-07-03T02:57:30+00:00",
-      "lease_token": "9b6c0e3d2d2f4d0a8b8b92d5a1b0d3c4"
-    }
-  ]
-}
-```
-
-`check_inbox` 只租约领取，不直接标记已读。处理完成后调用 `ack_message`：
-
-```json
-{ "acked": true, "message_id": 5 }
-```
-
-调用 `ack_message` 时必须传回该消息的 `lease_token`。如果消费者崩溃或忘记 ack，消息会在 `lease_expires_at` 后重新变为可领取，`delivery_count` 会递增，并生成新的 `lease_token`。
-
-`get_thread` 返回消息对象数组（比 inbox 消息多 `read_at` / `leased_until` / `lease_owner` 字段），按 id 升序、从线程根消息开始。
