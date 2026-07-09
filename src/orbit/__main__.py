@@ -15,9 +15,9 @@ from .server import create_server, runner_loop
 _CLAUDE_MD_SECTION = """
 ## 多 agent 角色
 
-本项目用 Orbit 做多 agent 协作（MCP server 名 `orbit`）。如果启动时被指定了角色\
+本项目用 Orbit 做多 agent 工作流协作。如果启动时被指定了角色\
 （如「按 agents/hub.md 工作」），读取 `agents/<role>.md` 并遵循；\
-通信协议见 `agents/_protocol.md`。未指定角色时忽略本节。
+执行约定见 `agents/_protocol.md`。未指定角色时忽略本节。
 """
 
 

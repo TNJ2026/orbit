@@ -4458,7 +4458,7 @@ def create_server(
         title: str,
         task_status: str,
     ) -> dict:
-        """Shared delivery path for the MCP tool and the HTTP API."""
+        """Shared delivery path for the HTTP API."""
         await _to_thread(store.touch_agent, sender)
         try:
             ids = await _to_thread(

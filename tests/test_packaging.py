@@ -84,8 +84,8 @@ class PackagingTests(unittest.TestCase):
 
     def test_create_server_locals_do_not_shadow_module_functions(self):
         # A closure-local function reusing a module-level name shadows it for
-        # every call site inside create_server (this broke workflow start:
-        # _engine_start resolved the MCP tool instead of the engine function).
+        # every call site inside create_server (this once broke workflow start:
+        # a local wrapper shadowed the module-level engine function).
         import ast
         import inspect
         import orbit.server as server
