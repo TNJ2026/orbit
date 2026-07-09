@@ -210,7 +210,7 @@ def main() -> None:
     sub.add_parser(
         "serve",
         parents=[serve_common],
-        help="Start the UI/API + Scheduler server (Streamable HTTP)",
+        help="Start the UI/API + Scheduler server",
     )
 
     sub.add_parser(

@@ -4439,8 +4439,8 @@ def create_server(
         ).start()
 
     # Plain Starlette app: collect route definitions as they are declared, then
-    # build the app at the end. `route` mirrors the old @mcp.custom_route API so
-    # the endpoint bodies are unchanged.
+    # build the app at the end. `route` is a thin decorator shim so the endpoint
+    # bodies read the same as before the switch to plain Starlette.
     routes: list[Route] = []
 
     def route(path: str, methods: list[str]):
