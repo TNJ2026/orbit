@@ -1193,6 +1193,9 @@ def _workflow_execution_errors(
         errors.append("no entry step")
     if not terminals:
         errors.append("no terminal step")
+    for step in cfg["steps"]:
+        if step.get("decompose") and not _forward_out(cfg, back, step["id"]):
+            errors.append(f"decompose step '{step['id']}' has no forward successor")
     main_entry = entries[0] if entries else None
     # Reachability includes rework edges, so an explicitly rework-only step is
     # still reachable, not dead.
@@ -1742,6 +1745,23 @@ def _complete_goal_intake_locked(
     _validate_goal_auto_runners(
         store, project_root, goal.get("title", ""), goal.get("content", "")
     )
+    # Resolve where the subtasks begin — and validate it — BEFORE the settle
+    # below, so a failed precondition leaves the decompose step open for retry
+    # instead of stranding the goal (settled + dropped out) with no subtasks.
+    #  - decompose at the entry step (default / no flag): subtasks run the whole
+    #    workflow from the entry, exactly as before (target_steps stays None).
+    #  - decompose at a later step (after goal-level design/architecture): subtasks
+    #    begin at that step's forward successors, carrying the goal's decompose
+    #    output forward, so the design steps run once on the goal, not per subtask.
+    cfg = read_workflow_config(project_root)
+    back = _workflow_graph(cfg)
+    target_steps: list[str] | None = None
+    if step["id"] not in set(_workflow_entry_steps(cfg, back)):
+        target_steps = _forward_out(cfg, back, step["id"])
+        if not target_steps:
+            raise InvalidInputError(
+                f"decompose step '{step['id']}' has no forward successor"
+            )
     # Settle the goal's own intake card and record the intake before dispatching
     # the business subtasks — subtask dispatch can raise, and if it did after
     # this point the intake card would be left stuck in_progress forever.
@@ -1755,21 +1775,13 @@ def _complete_goal_intake_locked(
         goal["id"], workflow_step="", task_status="in_progress"
     )
     _settle_step_card(store, goal, step["id"], "done")
-    # Where the subtasks begin depends on where the split happens:
-    #  - decompose at the entry step (default / no flag): subtasks run the whole
-    #    workflow from the entry, exactly as before.
-    #  - decompose at a later step (after goal-level design/architecture): subtasks
-    #    begin at that step's forward successors, carrying the goal's decompose
-    #    output forward, so the design steps run once on the goal, not per subtask.
-    cfg = read_workflow_config(project_root)
-    back = _workflow_graph(cfg)
-    if step["id"] in set(_workflow_entry_steps(cfg, back)):
+    if target_steps is None:
         started = _start_goal_business_subtasks(store, project_root, goal, actor, subtasks)
     else:
         started = _start_goal_business_subtasks(
             store, project_root, goal, actor, subtasks,
             from_step=step["id"],
-            target_steps=_forward_out(cfg, back, step["id"]),
+            target_steps=target_steps,
             upstream_result=result,
         )
     return {
