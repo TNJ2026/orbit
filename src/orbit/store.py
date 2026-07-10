@@ -184,6 +184,8 @@ CREATE INDEX IF NOT EXISTS idx_messages_reply_to
     ON messages (reply_to);
 CREATE INDEX IF NOT EXISTS idx_tasks_status
     ON tasks (status);
+CREATE INDEX IF NOT EXISTS idx_transitions_task
+    ON task_transitions (task_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_assignee
     ON tasks (assignee);
 CREATE INDEX IF NOT EXISTS idx_tasks_parent

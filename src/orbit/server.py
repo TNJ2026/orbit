@@ -863,10 +863,24 @@ def _reject_unknown_roles(role_ids: set[str], project_root: str | None) -> None:
         raise InvalidInputError("unknown roles: " + ", ".join(unknown))
 
 
-def goals_summary(store: Store) -> list[dict[str, Any]]:
+def goals_summary(
+    store: Store, project_root: str | None = None
+) -> list[dict[str, Any]]:
     """Goals with aggregated subtask progress for the Goals page. Children
-    are linked via parent_task_id (subtasks reply to the goal's message)."""
+    are linked via parent_task_id (subtasks reply to the goal's message).
+    With a project_root, each subtask's visible status is workflow-projected so
+    the Goals page shows the same phase (testing/reviewing/…) as the board; the
+    closed/blocked counters use override statuses, which projection preserves."""
     tasks = store.list_goals_with_children()
+    cfg = read_workflow_config(project_root) if project_root is not None else None
+
+    def _visible_status(sub: dict[str, Any]) -> str:
+        if cfg is None:
+            return sub["task_status"]
+        return _project_workflow_task_status(store, project_root, sub, cfg)[
+            "task_status"
+        ]
+
     children: dict[int, list[dict[str, Any]]] = {}
     for task in tasks:
         parent = task.get("parent_task_id")
@@ -890,7 +904,7 @@ def goals_summary(store: Store) -> list[dict[str, Any]]:
                 {
                     "id": s["id"],
                     "title": s["title"],
-                    "task_status": s["task_status"],
+                    "task_status": _visible_status(s),
                     "workflow_step": s.get("workflow_step", ""),
                     "assignee": s.get("assignee", ""),
                     "step_total": len(children.get(s["id"], [])),
@@ -1354,6 +1368,12 @@ def _project_workflow_task_status(
     """Overlay the visible task status from workflow transitions when available."""
     if task.get("is_goal"):
         return task
+    # Override statuses win regardless of transitions (see
+    # _workflow_derived_task_status), so skip the per-task transitions query for
+    # them — most rows in a long-lived DB are closed, and the board poll
+    # projects every row.
+    if (task.get("task_status") or task.get("status") or "") in _WORKFLOW_STATUS_OVERRIDES:
+        return task
     transitions = store.list_task_transitions(int(task["id"]))
     if not transitions:
         return task
@@ -1363,6 +1383,29 @@ def _project_workflow_task_status(
     projected["task_status"] = status
     projected["status"] = status
     return projected
+
+
+def _manual_status_rejection(
+    store: Store, task: dict[str, Any] | None, status: str
+) -> str | None:
+    """Why a manual status write would be invisible, or None when it sticks.
+
+    While a task has active workflow steps its visible status is derived from
+    the workflow, so only the override statuses survive projection; silently
+    accepting anything else would store a value the board never shows."""
+    if task is None or task.get("is_goal"):
+        return None
+    if status in _WORKFLOW_STATUS_OVERRIDES:
+        return None
+    active = _active_steps(store.list_task_transitions(int(task["id"])))
+    if not active:
+        return None
+    return (
+        f"task {task['id']} is at workflow step(s) {', '.join(sorted(active))}; "
+        "its visible status is derived from the workflow, so a manual "
+        f"{status!r} would not show. Use one of "
+        f"{sorted(_WORKFLOW_STATUS_OVERRIDES)}, or complete/rework the step."
+    )
 
 
 def _active_step_assignees(transitions: list[dict[str, Any]]) -> dict[str, str]:
@@ -5435,16 +5478,18 @@ def create_server(
             limit = _parse_int(params.get("limit", "200"), "limit")
 
             def _load() -> list[dict[str, Any]]:
-                if status != "all" and status not in TASK_STATUSES:
+                filtered = status != "all"
+                if filtered and status not in TASK_STATUSES:
                     raise InvalidInputError(
                         f"invalid task_status: {status!r} "
                         f"(expected one of {sorted(s for s in TASK_STATUSES if s)})"
                     )
-                rows = store.list_tasks(
-                    "all" if status != "all" else status,
-                    assignee,
-                    -1 if status != "all" else limit,
-                )
+                # The visible status is derived per row (workflow projection), so
+                # a status filter must scan every task and filter after
+                # projecting — a stored-status WHERE would miss/mismatch rows.
+                # The projection short-circuits goals/overrides, so this stays
+                # one indexed transitions query per in-flight row.
+                rows = store.list_tasks("all", assignee, -1 if filtered else limit)
                 cfg = read_workflow_config(current_project.get("project_root"))
                 rows = [
                     _project_workflow_task_status(
@@ -5452,7 +5497,7 @@ def create_server(
                     )
                     for row in rows
                 ]
-                if status != "all":
+                if filtered:
                     rows = [row for row in rows if row.get("task_status") == status]
                     if limit >= 0:
                         rows = rows[:limit]
@@ -5492,7 +5537,9 @@ def create_server(
     async def api_list_goals(request: Request) -> JSONResponse:
         if forbidden := _forbid_non_local(request):
             return forbidden
-        goals = await _to_thread(goals_summary, store)
+        goals = await _to_thread(
+            goals_summary, store, current_project.get("project_root")
+        )
         return _json(request, {"goals": goals})
 
     @route("/api/run-jobs", methods=["GET"])
@@ -5614,6 +5661,15 @@ def create_server(
         if not task_status:
             return _json_error("task_status is required", request=request)
         try:
+            # Reject writes the workflow projection would hide (explicit error
+            # instead of a silently-invisible store write).
+            rejection = await _to_thread(
+                lambda: _manual_status_rejection(
+                    store, store.get_task(task_id), task_status
+                )
+            )
+            if rejection:
+                return _json_error(rejection, request=request)
             updated = await _to_thread(
                 store.update_task_item_status, task_id, task_status
             )

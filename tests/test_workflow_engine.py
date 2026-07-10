@@ -195,6 +195,67 @@ class WorkflowEngineTests(unittest.TestCase):
             )
             self.assertEqual("blocked", projected["task_status"])
 
+    def test_manual_status_rejected_while_steps_active(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            task_id = h.create_task()
+            h.start(task_id)  # intake active
+            task = h.task(task_id)
+            # a non-override manual status would be hidden by projection -> rejected
+            reason = server._manual_status_rejection(h.store, task, "testing")
+            self.assertIsNotNone(reason)
+            self.assertIn("intake", reason)
+            # overrides always stick
+            for ok in ("blocked", "stalled", "closed"):
+                self.assertIsNone(server._manual_status_rejection(h.store, task, ok))
+            # no active steps (never started) -> anything goes
+            idle_id = h.create_task(title="idle")
+            self.assertIsNone(
+                server._manual_status_rejection(h.store, h.task(idle_id), "testing")
+            )
+
+    def test_goals_summary_projects_subtask_status(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, team=[
+                {"agent_name": "hub-agent", "role_id": "hub", "runner_command": "cat"},
+                {"agent_name": "codex", "role_id": "implementer", "runner_command": "cat"},
+                {"agent_name": "integrator", "role_id": "integrator", "runner_command": "cat"},
+                {"agent_name": "rev", "role_id": "reviewer", "runner_command": "cat"},
+            ])
+            goal_id = h.create_task(title="goal")
+            h.store.update_task_metadata(goal_id, is_goal=True)
+            h.start(goal_id)
+            step = next(
+                s for s in server.read_workflow_config(tmp)["steps"]
+                if s["id"] == "intake"
+            )
+            member = {
+                **next(m for m in server.read_team_config(tmp)["members"]
+                       if m["agent_name"] == "hub-agent"),
+                "runner_command":
+                    "printf '%s' '{\"tasks\":[{\"title\":\"A\",\"content\":\"a\"}]}'",
+            }
+            server.run_step_worker(h.store, tmp, goal_id, step, member)
+            sub = next(
+                t for t in h.store.list_tasks(status="all")
+                if t.get("parent_task_id") == goal_id
+                and t.get("source_message_id") is not None
+            )
+            # advance the subtask past intake -> implement active, then repoint
+            # implement's column in the config; the summary must follow the
+            # derived status while the stored one stays behind
+            h.complete("hub-agent", sub["id"], "intake", "done")
+            steps = [dict(s) for s in LINEAR_STEPS]
+            steps[1]["task_status"] = "testing"
+            server.write_workflow_config(steps, tmp, LINEAR_EDGES)
+            stored = h.task(sub["id"])["task_status"]
+            self.assertEqual("in_progress", stored)
+            [projected] = server.goals_summary(h.store, tmp)[0]["subtasks"]
+            self.assertEqual("testing", projected["task_status"])  # derived
+            # without a project_root the summary keeps the stored status
+            [raw] = server.goals_summary(h.store)[0]["subtasks"]
+            self.assertEqual(stored, raw["task_status"])
+
     def test_optional_late_branch_does_not_redispatch_join_target(self):
         steps = [
             {"id": "a", "name": "A", "role_id": "hub", "task_status": "created", "required": True},
