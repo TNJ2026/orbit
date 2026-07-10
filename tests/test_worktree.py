@@ -53,7 +53,7 @@ class WorkflowSchemaTests(unittest.TestCase):
         self.assertEqual("integrator", steps["integrate"]["role_id"])
 
         pairs = {(e["from"], e["to"]) for e in server.default_workflow_edges()}
-        self.assertIn(("review", "integrate"), pairs)
+        self.assertIn(("test", "integrate"), pairs)  # review -> test -> integrate
         self.assertIn(("integrate", "accept"), pairs)
         self.assertIn(("integrate", "implement"), pairs)  # merge-conflict rework
 

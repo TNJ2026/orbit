@@ -332,23 +332,24 @@ def default_workflow_steps() -> list[dict[str, Any]]:
     # subtasks partitioned by the architecture's modules. Each subtask starts at
     # `implement`, so the design steps run per goal, not per subtask.
     specs = [
+        # Fully linear forward chain (design runs sequentially: UI then arch), so
+        # every card sits on one row; rework edges loop back underneath.
         ("intake", "Triage", "hub", "created", True, False, False, False, 40, _DEFAULT_STEP_MID_Y),
-        ("product_design", "Product Design", "product_designer", "assigned", False, False, False, False, 360, _DEFAULT_STEP_MID_Y),
-        # Parallel branch cards stack vertically at x=700; keep enough gap
-        # for a full card (~400px tall with the name/timeout fields).
-        ("ui_design", "UI Design", "ui_designer", "assigned", False, False, False, False, 700, 40),
-        ("architecture", "Architecture", "architect", "assigned", False, False, False, False, 700, 500),
-        # plan: the decomposition gate. ui_design + architecture merge here, and
-        # hub splits the goal into subtasks that begin at implement.
-        ("plan", "Plan", "hub", "in_progress", True, False, False, True, 1060, _DEFAULT_STEP_MID_Y),
-        ("implement", "Implement", "implementer", "in_progress", True, True, False, False, 1400, _DEFAULT_STEP_MID_Y),
-        # test is the mandatory machine-verification gate: set its `verify`
-        # command (e.g. the project's test suite) so a failing run objectively
-        # sends the task back to implement instead of trusting a self-report.
-        ("test", "Test", "tester", "testing", False, True, False, False, 1740, _DEFAULT_STEP_MID_Y),
-        ("review", "Review", "reviewer", "reviewing", True, True, False, False, 2080, _DEFAULT_STEP_MID_Y),
-        ("integrate", "Integrate", "integrator", "in_progress", True, False, True, False, 2420, _DEFAULT_STEP_MID_Y),
-        ("accept", "Accept", "reviewer", "accepted", True, False, False, False, 2760, _DEFAULT_STEP_MID_Y),
+        ("product_design", "Product Design", "product_designer", "assigned", False, False, False, False, 340, _DEFAULT_STEP_MID_Y),
+        ("ui_design", "UI Design", "ui_designer", "assigned", False, False, False, False, 640, _DEFAULT_STEP_MID_Y),
+        ("architecture", "Architecture", "architect", "assigned", False, False, False, False, 940, _DEFAULT_STEP_MID_Y),
+        # plan: the decomposition gate. architecture feeds it, and hub splits the
+        # goal into subtasks that begin at implement.
+        ("plan", "Plan", "hub", "in_progress", True, False, False, True, 1240, _DEFAULT_STEP_MID_Y),
+        ("implement", "Implement", "implementer", "in_progress", True, True, False, False, 1540, _DEFAULT_STEP_MID_Y),
+        # review runs before test: a human/agent review first, then test is the
+        # mandatory machine-verification gate. Set test's `verify` command (e.g.
+        # the project's test suite) so a failing run objectively sends the task
+        # back to implement instead of trusting a self-report.
+        ("review", "Review", "reviewer", "reviewing", True, True, False, False, 1840, _DEFAULT_STEP_MID_Y),
+        ("test", "Test", "tester", "testing", False, True, False, False, 2140, _DEFAULT_STEP_MID_Y),
+        ("integrate", "Integrate", "integrator", "in_progress", True, False, True, False, 2440, _DEFAULT_STEP_MID_Y),
+        ("accept", "Accept", "reviewer", "accepted", True, False, False, False, 2740, _DEFAULT_STEP_MID_Y),
     ]
     return [
         {
@@ -369,24 +370,22 @@ def default_workflow_steps() -> list[dict[str, Any]]:
 
 def default_workflow_edges() -> list[dict[str, str]]:
     # Design-first flow: the goal runs intake + design, then splits at `plan`.
-    #   parallel : product_design fans out to ui_design + architecture
-    #   merge    : ui_design + architecture both feed plan (the decompose step)
+    #   sequential: product_design -> ui_design -> architecture (UI before arch)
     #   split    : plan -> implement — subtasks begin here, one per module
     #   loop-back: review / test / integrate return to implement on rework
     return [
         {"from": "intake", "to": "product_design"},
-        {"from": "product_design", "to": "ui_design"},      # parallel
-        {"from": "product_design", "to": "architecture"},   # parallel
-        {"from": "ui_design", "to": "plan"},                # merge into decompose
-        {"from": "architecture", "to": "plan"},             # merge into decompose
+        {"from": "product_design", "to": "ui_design"},      # design chain
+        {"from": "ui_design", "to": "architecture"},        # UI first, then arch
+        {"from": "architecture", "to": "plan"},             # feeds the decompose step
         {"from": "plan", "to": "implement"},                # split: subtasks start here
-        {"from": "implement", "to": "test"},
-        {"from": "test", "to": "review"},
+        {"from": "implement", "to": "review"},              # review first
+        {"from": "review", "to": "test"},                   # then the verify gate
+        {"from": "review", "to": "implement"},              # loop-back (rework)
+        {"from": "test", "to": "integrate"},                # merge worktree branch to main
         {"from": "test", "to": "implement"},                # verify failed -> rework
-        {"from": "review", "to": "integrate"},              # merge worktree branch to main
         {"from": "integrate", "to": "accept"},
         {"from": "integrate", "to": "implement"},           # loop-back (merge conflict -> rework)
-        {"from": "review", "to": "implement"},              # loop-back (rework)
     ]
 
 
@@ -500,7 +499,7 @@ def _normalize_workflow_step(
         # agent, in the same working tree. Its real exit code overrides the
         # agent's self-reported `done` (a failing gate the agent can't fake).
         "verify": str(step.get("verify", "") or "").strip(),
-        "x": _coord("x", 40 + index * 320),
+        "x": _coord("x", 40 + index * 300),
         "y": _coord("y", _DEFAULT_STEP_MID_Y),
     }
 

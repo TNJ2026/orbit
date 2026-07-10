@@ -2221,7 +2221,7 @@
       const rects = wfNodeRects();
       const g = new window.dagre.graphlib.Graph({ directed: true });
       // rankdir LR matches the intended left→right flow (intake … accept).
-      g.setGraph({ rankdir: "LR", nodesep: 40, ranksep: 90, marginx: 40, marginy: 40 });
+      g.setGraph({ rankdir: "LR", nodesep: 40, ranksep: 100, marginx: 40, marginy: 40 });
       g.setDefaultEdgeLabel(() => ({}));
       steps.forEach(s => {
         const r = rects[s.id];
@@ -3525,7 +3525,10 @@
         } else {
           renderTaskDetails(null);
         }
-        if ($("workflowPage").classList.contains("active")) renderWorkflow();
+        // The workflow canvas is config-driven (not live task data), so the poll
+        // must NOT re-render it: rebuilding #workflowSteps recreates the scroll
+        // container and snaps the canvas back to the start mid-scroll. It already
+        // re-renders on open / manual Refresh / save / edit.
         // Goals feed both the Goals page and the bar above the kanban.
         if ($("goalsPage").classList.contains("active") || $("tasksPage").classList.contains("active")) await loadGoals();
       } catch (error) {

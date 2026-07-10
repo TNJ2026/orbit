@@ -601,7 +601,7 @@ class PackagingTests(unittest.TestCase):
         self.assertFalse(by_id["qa"]["required"])
         self.assertFalse(by_id["qa"]["required_locked"])
 
-    def test_default_workflow_has_parallel_merge_and_loopback(self):
+    def test_default_workflow_is_sequential_with_split_and_loopback(self):
         import orbit.server as server
 
         edges = server.default_workflow_edges()
@@ -612,10 +612,12 @@ class PackagingTests(unittest.TestCase):
             self.assertIn(e["to"], ids)
         out_of = lambda n: [e["to"] for e in edges if e["from"] == n]
         into = lambda n: [e["from"] for e in edges if e["to"] == n]
-        # parallel: product_design fans out to two branches
-        self.assertEqual({"ui_design", "architecture"}, set(out_of("product_design")))
-        # merge: both design branches feed the decompose step (plan)
-        self.assertLessEqual({"ui_design", "architecture"}, set(into("plan")))
+        # sequential design chain: product -> ui -> architecture -> plan
+        self.assertEqual(["ui_design"], out_of("product_design"))
+        self.assertEqual(["architecture"], out_of("ui_design"))
+        self.assertEqual(["plan"], out_of("architecture"))
+        # architecture is plan's only forward predecessor
+        self.assertEqual(["architecture"], into("plan"))
         # split: subtasks begin at implement, one per module
         self.assertIn("implement", out_of("plan"))
         # loop-back: review returns to implement

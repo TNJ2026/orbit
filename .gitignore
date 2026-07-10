@@ -9,3 +9,4 @@ build/
 .codegraph/
 .DS_Store
 docs/orbit-与-loop-engineering.md
+.playwright-cli/
