@@ -2074,7 +2074,15 @@
       const enabledRoles = new Set((state.team.members || [])
         .filter(member => member.enabled)
         .map(member => member.role_id));
-      const missingRoles = REQUIRED_TEAM_ROLES.filter(roleId => !enabledRoles.has(roleId));
+      // Roles referenced by workflow steps — every one needs an enabled member.
+      const wfRoleIds = [];
+      const seen = new Set();
+      (state.workflow.steps || []).forEach(s => {
+        const rid = s.role_id;
+        if (rid && !seen.has(rid)) { seen.add(rid); wfRoleIds.push(rid); }
+      });
+      const missingRoles = wfRoleIds.filter(rid => !enabledRoles.has(rid));
+      const wfRoleSet = new Set(wfRoleIds);
       const prevRole = roleSelect.value;
       roleSelect.innerHTML = state.roles.length ? state.roles.map(role => `
         <option value="${escapeHtml(role.id)}">${escapeHtml(role.id)}</option>
@@ -2098,12 +2106,6 @@
       $("teamPath").textContent = state.team.path ? t("team.config", state.team.path) : "";
       // Required roles are derived from the workflow steps: every role a step
       // references must have an enabled team member to run it.
-      const wfRoleIds = [];
-      const seen = new Set();
-      (state.workflow.steps || []).forEach(s => {
-        const rid = s.role_id;
-        if (rid && !seen.has(rid)) { seen.add(rid); wfRoleIds.push(rid); }
-      });
       const allPresent = wfRoleIds.length > 0 && wfRoleIds.every(rid => enabledRoles.has(rid));
       const titleColor = wfRoleIds.length === 0 ? "var(--muted)" : (allPresent ? "var(--accent)" : "var(--danger)");
       const reqHtml = wfRoleIds.length ? wfRoleIds.map(rid => {
@@ -2134,7 +2136,7 @@
           <div class="team-group-head">
             <span>${escapeHtml(roleId)}</span>
             <span class="badge">${groups.get(roleId).length}</span>
-            ${REQUIRED_TEAM_ROLES.includes(roleId) ? `<span class="meta" style="color: var(--warn); border: 1px solid var(--warn); border-radius: 4px; padding: 1px 6px; font-size: 10px; text-transform: lowercase; font-weight: normal; margin-left: auto; background: #fff;">${t("team.required")}</span>` : ""}
+            ${wfRoleSet.has(roleId) ? `<span class="meta" style="color: var(--warn); border: 1px solid var(--warn); border-radius: 4px; padding: 1px 6px; font-size: 10px; text-transform: lowercase; font-weight: normal; margin-left: auto; background: #fff;">${t("team.required")}</span>` : ""}
           </div>
           <div class="team-group-members">
             ${groups.get(roleId).map(({ member, index }) => teamMemberHtml(member, index, roleId === "implementer")).join("")}
@@ -3079,7 +3081,6 @@
         `<option value="${escapeHtml(opt.value)}" ${selectedValue === opt.value ? "selected" : ""}>${escapeHtml(stLabel(opt.value))}</option>`
       ).join("");
     }
-    const REQUIRED_TEAM_ROLES = ["hub", "implementer", "integrator", "reviewer"];
 
     async function loadTasks() {
       if (!state.apiBase) {
