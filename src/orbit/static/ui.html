@@ -37,8 +37,14 @@
     .brand {
       min-width: 0;
       display: flex;
-      align-items: center;
-      gap: 12px;
+      align-items: baseline;
+      gap: 8px;
+    }
+    .app-version {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--muted);
+      letter-spacing: 0.02em;
     }
     .header-meta {
       min-width: 0;
@@ -1298,6 +1304,7 @@
   <header>
     <div class="brand">
       <h1>Orbit</h1>
+      <span id="appVersion" class="app-version" title="orbit version"></span>
     </div>
     <div class="header-meta">
       <div id="status" class="meta"></div>
@@ -1980,6 +1987,7 @@
       const data = await api("/api/status");
       $("dbPath").textContent = data.db_path || "";
       $("dbPath").title = data.db_path || "";
+      if (data.version) $("appVersion").textContent = "v" + data.version;
     }
 
     async function refreshWorkspace() {

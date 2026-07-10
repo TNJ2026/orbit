@@ -30,6 +30,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from starlette.routing import Route
 
+from . import __version__
 from .project_index import list_projects
 from .store import (
     DEFAULT_LEASE_SECONDS,
@@ -4989,6 +4990,7 @@ def create_server(
         return _json(
             request,
             {
+                "version": __version__,
                 "db_path": str(store.db_path),
                 "project": {**current_project, "db_path": str(store.db_path)},
             },

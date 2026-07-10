@@ -1,6 +1,6 @@
 [project]
 name = "orbit"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Local multi-agent workflow orchestrator that runs coding tasks across agent CLIs"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -15,6 +15,10 @@ orbit = "orbit.__main__:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+# Single source of truth for the version: src/orbit/__init__.py's __version__.
+[tool.hatch.version]
+path = "src/orbit/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/orbit"]

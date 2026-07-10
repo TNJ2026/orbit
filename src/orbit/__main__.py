@@ -8,6 +8,7 @@ from pathlib import Path
 
 import uvicorn
 
+from . import __version__
 from .project_index import upsert_project
 from .store import Store, project_db_path, project_state_dir, resolve_project_root
 from .server import create_server, runner_loop
@@ -193,6 +194,10 @@ def _serve(args) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="orbit", description="Local multi-agent workflow orchestrator")
+    parser.add_argument(
+        "--version", action="version", version=f"orbit {__version__}",
+        help="Show the orbit version and exit",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     # Shared flags for the two ways to bring the server up (serve / up).
