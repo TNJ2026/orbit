@@ -1259,7 +1259,7 @@
     }
     .wf-status-row {
       display: grid;
-      grid-template-columns: minmax(80px, 120px) minmax(90px, 140px) auto;
+      grid-template-columns: minmax(120px, 180px) auto;
       gap: 4px;
       align-items: center;
       padding: 5px;
@@ -1647,6 +1647,7 @@
         "wf.statuses": "Task statuses", "wf.statusValue": "value",
         "wf.statusLabel": "label", "wf.statusAdd": "Add status",
         "wf.statusRemove": "Remove status", "wf.statusSaved": "Statuses saved",
+        "wf.statusInUse": "Status \"{0}\" is used by a workflow step and cannot be removed",
         "roles.noRoles": "No workflow roles detected.",
         "roles.edit": "Edit", "roles.save": "Save", "roles.cancel": "Cancel",
         "roles.saved": "Role {0} saved successfully",
@@ -1771,6 +1772,7 @@
         "wf.statuses": "任务状态", "wf.statusValue": "状态值",
         "wf.statusLabel": "显示名", "wf.statusAdd": "添加状态",
         "wf.statusRemove": "移除状态", "wf.statusSaved": "状态已保存",
+        "wf.statusInUse": "状态“{0}”正被工作流步骤使用，无法移除",
         "roles.noRoles": "未检测到工作流角色。",
         "roles.edit": "编辑", "roles.save": "保存", "roles.cancel": "取消",
         "roles.saved": "角色 {0} 保存成功",
@@ -2493,8 +2495,7 @@
         <div class="wf-status-list">
           ${statuses.map((status, index) => `
             <div class="wf-status-row" data-status-index="${index}">
-              <input class="wf-status-value" maxlength="12" value="${escapeHtml(status.value || "")}" placeholder="${escapeHtml(t("wf.statusValue"))}">
-              <input class="wf-status-label" maxlength="32" value="${escapeHtml(status.label || "")}" placeholder="${escapeHtml(t("wf.statusLabel"))}">
+              <input class="wf-status-label" maxlength="32" value="${escapeHtml(status.label || status.value || "")}" placeholder="${escapeHtml(t("wf.statusLabel"))}" title="${escapeHtml(status.value || "")}">
               <button type="button" class="wf-status-remove" title="${escapeHtml(t("wf.statusRemove"))}">×</button>
             </div>
           `).join("")}
@@ -2515,29 +2516,28 @@
       });
       host.querySelectorAll(".wf-status-row").forEach(row => {
         const index = Number(row.dataset.statusIndex);
-        const valueInput = row.querySelector(".wf-status-value");
         const labelInput = row.querySelector(".wf-status-label");
         const sync = () => {
           const statuses = state.workflow.statuses || [];
           if (!statuses[index]) return;
           statuses[index] = {
-            value: (valueInput.value || "").trim().slice(0, 12),
+            ...statuses[index],
             label: (labelInput.value || "").trim(),
           };
         };
-        valueInput.addEventListener("input", sync);
         labelInput.addEventListener("input", sync);
-        valueInput.addEventListener("change", () => run(async () => {
-          sync();
-          await saveWorkflow();
-          setStatus(t("wf.statusSaved"));
-        }));
         labelInput.addEventListener("change", () => run(async () => {
           sync();
           await saveWorkflow();
           setStatus(t("wf.statusSaved"));
         }));
         row.querySelector(".wf-status-remove").addEventListener("click", () => run(async () => {
+          const status = (state.workflow.statuses || [])[index];
+          if (!status) return;
+          if ((state.workflow.steps || []).some(step => step.task_status === status.value)) {
+            setStatus(t("wf.statusInUse", status.label || status.value), true);
+            return;
+          }
           state.workflow.statuses = (state.workflow.statuses || []).filter((_, i) => i !== index);
           await saveWorkflow();
           setStatus(t("wf.statusSaved"));
