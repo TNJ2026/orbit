@@ -1288,13 +1288,7 @@
       <button id="workflowTab" class="menu-button" type="button" data-i18n="tab.workflow">Workflow</button>
       <button id="rolesTab" class="menu-button" type="button" data-i18n="tab.roles">Roles</button>
       <button id="toolsTab" class="menu-button" type="button" data-i18n="tab.agents">Agents</button>
-      <div class="lang-switch">
-        <label data-i18n="lang.label">Language</label>
-        <select id="langSelect">
-          <option value="en">English</option>
-          <option value="zh">中文</option>
-        </select>
-      </div>
+      <button id="settingsTab" class="menu-button" type="button" data-i18n="tab.settings">Settings</button>
     </aside>
     <div class="workspace">
     <div id="goalsPage" class="page goals-page">
@@ -1393,6 +1387,31 @@
       </div>
       <div id="agentRoles"></div>
     </div>
+    <div id="settingsPage" class="page settings-page">
+      <div class="pane-head">
+        <h2 data-i18n="settings.title">Settings</h2>
+      </div>
+      <div class="stack" style="max-width:520px; padding:16px; gap:18px;">
+        <label style="display:flex; flex-direction:column; gap:5px; font-size:13px;">
+          <span data-i18n="lang.label">Language</span>
+          <select id="langSelect" style="width:170px;">
+            <option value="en">English</option>
+            <option value="zh">中文</option>
+          </select>
+        </label>
+        <label style="display:flex; flex-direction:column; gap:5px; font-size:13px;">
+          <span data-i18n="settings.maxRework">Max rework rounds (2–5)</span>
+          <input id="setMaxRework" type="number" min="2" max="5" step="1" style="width:120px;">
+          <span class="meta" style="font-size:11px;" data-i18n="settings.maxReworkHint">How many times a step may loop back before the engine blocks the task for the hub.</span>
+        </label>
+        <label style="display:flex; flex-direction:column; gap:5px; font-size:13px;">
+          <span data-i18n="settings.maxConcurrent">Max concurrent tasks (1–6)</span>
+          <input id="setMaxConcurrent" type="number" min="1" max="6" step="1" style="width:120px;">
+          <span class="meta" style="font-size:11px;" data-i18n="settings.maxConcurrentHint">How many workflow steps run at the same time across all runners.</span>
+        </label>
+        <div><button id="saveSettings" class="primary" type="button" data-i18n="settings.save">Save</button></div>
+      </div>
+    </div>
     </div>
   </main>
   <div id="errorModalBackdrop" class="error-modal-backdrop">
@@ -1472,6 +1491,14 @@
       en: {
         "tab.goals": "Goals", "tab.tasks": "Tasks", "tab.team": "Team",
         "tab.workflow": "Workflow", "tab.roles": "Roles", "tab.agents": "Agents",
+        "tab.settings": "Settings",
+        "settings.title": "Settings",
+        "settings.maxRework": "Max rework rounds (2–5)",
+        "settings.maxReworkHint": "How many times a step may loop back before the engine blocks the task for the hub.",
+        "settings.maxConcurrent": "Max concurrent tasks (1–6)",
+        "settings.maxConcurrentHint": "How many workflow steps run at the same time across all runners.",
+        "settings.save": "Save",
+        "settings.saved": "Settings saved",
         "lang.label": "Language",
         "goals.title": "Goals", "goals.hideClosed": "Hide closed", "goals.refresh": "Refresh",
         "goals.placeholder": "Describe the objective, key milestones, or sprint goal here...",
@@ -1576,6 +1603,14 @@
       zh: {
         "tab.goals": "目标", "tab.tasks": "任务", "tab.team": "团队",
         "tab.workflow": "工作流", "tab.roles": "角色", "tab.agents": "Agents",
+        "tab.settings": "设置",
+        "settings.title": "设置",
+        "settings.maxRework": "最大返工次数 (2–5)",
+        "settings.maxReworkHint": "一个步骤最多返工多少次后，引擎将任务打回给 hub 阻塞。",
+        "settings.maxConcurrent": "最大同时任务数 (1–6)",
+        "settings.maxConcurrentHint": "所有 runner 加起来同时运行多少个工作流步骤。",
+        "settings.save": "保存",
+        "settings.saved": "设置已保存",
         "lang.label": "语言",
         "goals.title": "目标", "goals.hideClosed": "隐藏已关闭", "goals.refresh": "刷新",
         "goals.placeholder": "在此描述目标、关键里程碑或冲刺目标…",
@@ -1712,13 +1747,14 @@
       if (sel) sel.value = LANG;
     }
 
-    const PAGES = ["goals", "tasks", "tools", "team", "workflow", "roles"];
+    const PAGES = ["goals", "tasks", "tools", "team", "workflow", "roles", "settings"];
     function setPage(page) {
       if (!PAGES.includes(page)) page = "tasks";
       PAGES.forEach(name => {
         $(`${name}Page`).classList.toggle("active", name === page);
         $(`${name}Tab`).classList.toggle("active", name === page);
       });
+      if (page === "settings") loadSettings();
       // Edges are measured from node heights (offsetHeight). When the workflow
       // page is rendered while hidden those read 0, so the initial geometry is
       // wrong until a later re-render. Redraw once the page is visible and laid
@@ -1748,6 +1784,31 @@
       }
       const selected = state.projects.find(project => project.id === state.selectedProjectId);
       state.apiBase = selected && selected.online ? selected.server_url : "";
+    }
+
+    async function loadSettings() {
+      try {
+        const s = await api("/api/settings");
+        const rework = $("setMaxRework"), concurrent = $("setMaxConcurrent");
+        if (rework && document.activeElement !== rework) rework.value = s.max_rework_rounds;
+        if (concurrent && document.activeElement !== concurrent) concurrent.value = s.max_concurrent_tasks;
+      } catch (err) { /* offline project: leave inputs as-is */ }
+    }
+
+    async function saveSettings() {
+      await run(async () => {
+        const s = await api("/api/settings", {
+          method: "POST",
+          body: JSON.stringify({
+            max_rework_rounds: parseInt($("setMaxRework").value, 10),
+            max_concurrent_tasks: parseInt($("setMaxConcurrent").value, 10)
+          })
+        });
+        // Reflect the server's clamped values back into the inputs.
+        $("setMaxRework").value = s.max_rework_rounds;
+        $("setMaxConcurrent").value = s.max_concurrent_tasks;
+        setStatus(t("settings.saved"));
+      });
     }
 
     function clearWorkspace() {
@@ -3382,6 +3443,8 @@
       }
     });
     $("toolsTab").addEventListener("click", () => setPage("tools"));
+    $("settingsTab").addEventListener("click", () => setPage("settings"));
+    $("saveSettings").addEventListener("click", saveSettings);
     $("teamTab").addEventListener("click", () => setPage("team"));
     $("workflowTab").addEventListener("click", () => setPage("workflow"));
     $("rolesTab").addEventListener("click", () => setPage("roles"));

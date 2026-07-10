@@ -102,7 +102,11 @@ _TASK_RUN_FILES = {
     "result": "result.md",
     "diff": "diff.patch",
 }
+# Roles a sound default team should provide. The workflow itself remains
+# configurable; write_workflow_config only enforces the older core workflow roles
+# below so custom workflows without an integrate step stay valid.
 REQUIRED_TEAM_ROLES = {"hub", "implementer", "reviewer"}
+CORE_WORKFLOW_ROLES = {"hub", "implementer", "reviewer"}
 TASK_IMPORTANCE_SCORES = {"low": 0, "normal": 10, "high": 25, "critical": 40}
 TASK_SIZE_SCORES = {"small": 0, "medium": 8, "large": 18}
 TASK_RISK_SCORES = {"low": 0, "medium": 10, "high": 25}
@@ -222,6 +226,66 @@ def _workflow_config_path(project_root: str | None) -> Path:
     return project_state_dir(_project_root(project_root)) / "workflow.json"
 
 
+def _settings_config_path(project_root: str | None) -> Path:
+    return project_state_dir(_project_root(project_root)) / "settings.json"
+
+
+# Project settings editable from the UI Settings page. Each is clamped to its
+# range on read and write, so a hand-edited file can never push the engine
+# out of bounds.
+MAX_REWORK_MIN, MAX_REWORK_MAX, _DEFAULT_MAX_REWORK = 2, 5, 3
+MAX_CONCURRENT_MIN, MAX_CONCURRENT_MAX, _DEFAULT_MAX_CONCURRENT = 1, 6, 5
+
+
+def _clamp_int(value: Any, lo: int, hi: int, default: int) -> int:
+    try:
+        return max(lo, min(hi, int(value)))
+    except (TypeError, ValueError):
+        return default
+
+
+def read_settings(project_root: str | None = None) -> dict[str, Any]:
+    path = _settings_config_path(project_root)
+    data: dict[str, Any] = {}
+    if path.exists():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                data = loaded
+        except (OSError, json.JSONDecodeError):
+            pass
+    return {
+        "max_rework_rounds": _clamp_int(
+            data.get("max_rework_rounds"), MAX_REWORK_MIN, MAX_REWORK_MAX, _DEFAULT_MAX_REWORK
+        ),
+        "max_concurrent_tasks": _clamp_int(
+            data.get("max_concurrent_tasks"), MAX_CONCURRENT_MIN, MAX_CONCURRENT_MAX, _DEFAULT_MAX_CONCURRENT
+        ),
+        "path": str(path),
+    }
+
+
+def write_settings(
+    project_root: str | None = None,
+    max_rework_rounds: Any = None,
+    max_concurrent_tasks: Any = None,
+) -> dict[str, Any]:
+    current = read_settings(project_root)
+    rework = (
+        current["max_rework_rounds"] if max_rework_rounds is None
+        else _clamp_int(max_rework_rounds, MAX_REWORK_MIN, MAX_REWORK_MAX, current["max_rework_rounds"])
+    )
+    concurrent = (
+        current["max_concurrent_tasks"] if max_concurrent_tasks is None
+        else _clamp_int(max_concurrent_tasks, MAX_CONCURRENT_MIN, MAX_CONCURRENT_MAX, current["max_concurrent_tasks"])
+    )
+    path = _settings_config_path(project_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = {"max_rework_rounds": rework, "max_concurrent_tasks": concurrent}
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    return {**data, "path": str(path)}
+
+
 # Default canvas layout. Nodes carry explicit x/y because the flow is not a
 # simple row: product design fans out to two parallel branches (UI design and
 # architecture) that merge back into implementation, and review loops back to
@@ -261,8 +325,8 @@ def default_workflow_steps() -> list[dict[str, Any]]:
     # (id, name, role_id, task_status, required, isolate, integrate, decompose, x, y)
     # isolate: run in a per-task git worktree (implement/test/review all share
     # one worktree per task, so review reads exactly what implement produced).
-    # integrate: single-assignee (hub) step that merges the task's worktree
-    # branch back into the main tree; runs in project_root, serialized by hub.
+    # integrate: single-assignee step that merges the task's worktree branch
+    # back into the main tree; runs in project_root, serialized by the main tree.
     # decompose: design-first — the goal itself runs intake + the product/UI/
     # architecture design once, then `plan` (hub) splits it into implementation
     # subtasks partitioned by the architecture's modules. Each subtask starts at
@@ -657,7 +721,7 @@ def write_workflow_config(
     # a raw POST can't save a workflow with the core loop deleted. Reads stay
     # lenient so legacy configs still load.
     missing_core = sorted(
-        REQUIRED_TEAM_ROLES - {step["role_id"] for step in normalized}
+        CORE_WORKFLOW_ROLES - {step["role_id"] for step in normalized}
     )
     if missing_core:
         raise InvalidInputError(
@@ -1206,6 +1270,14 @@ def _main_workflow_reachable_steps(
     return [step for step in cfg["steps"] if step["id"] in seen]
 
 
+def _required_workflow_roles(cfg: dict[str, Any], back: set[tuple[str, str]]) -> set[str]:
+    return {
+        step["role_id"]
+        for step in _main_workflow_reachable_steps(cfg, back)
+        if step.get("required") and step.get("role_id")
+    }
+
+
 def _team_role_of(members: list[dict[str, Any]], agent: str) -> str | None:
     for member in members:
         if member["agent_name"] == agent and member.get("enabled", True):
@@ -1379,7 +1451,10 @@ def _validate_goal_auto_runners(
             + ". Check the Workflow page warnings."
         )
     team = read_team_config(project_root)
-    missing_roles = team["missing_roles"]
+    enabled_roles = {
+        member["role_id"] for member in team["members"] if member.get("enabled", True)
+    }
+    missing_roles = sorted(_required_workflow_roles(cfg, back) - enabled_roles)
     if missing_roles:
         raise InvalidInputError(
             "team is missing required roles: "
@@ -2305,17 +2380,18 @@ def _advance_workflow_task_locked(
             and t["from_step"] == step
             and t["to_step"] in targets
         )
-        if prior_rework >= MAX_REWORK_ROUNDS:
+        max_rework = read_settings(project_root)["max_rework_rounds"]
+        if prior_rework >= max_rework:
             store.record_task_transition(
                 task_id, step, step, agent, "blocked",
-                f"rework limit reached ({MAX_REWORK_ROUNDS} rounds); {result}",
+                f"rework limit reached ({max_rework} rounds); {result}",
             )
             store.set_task_workflow_state(task_id, task_status="blocked")
             _settle_step_card(store, task, step, "blocked")
             _recompute_parent_goal_status(store, task, project_root)
             notice = _notify_hub(
                 store, members,
-                f"Task #{task_id} hit the rework limit ({MAX_REWORK_ROUNDS} rounds) "
+                f"Task #{task_id} hit the rework limit ({max_rework} rounds) "
                 f"at step '{step}' -> {', '.join(targets)}; blocked instead of "
                 f"looping again. Last result: {result or 'no details'}",
             )
@@ -3865,6 +3941,11 @@ def run_queued_job(
     result through the same run_step_worker path used by the legacy in-process
     runner. `agents`/`steps` narrow which jobs this runner will claim.
     """
+    # Global concurrency cap: don't claim a new job while the configured number
+    # of steps are already executing. A small race (two workers both pass the
+    # check) is bounded by the worker count and self-corrects on the next poll.
+    if store.count_running_run_jobs() >= read_settings(project_root)["max_concurrent_tasks"]:
+        return None
     job = store.claim_next_run_job(
         runner_name=runner_name,
         agents=agents,
@@ -5039,6 +5120,30 @@ def create_server(
         except InvalidInputError as exc:
             return _json_error(str(exc), request=request)
         return _json(request, {"success": True, **workflow})
+
+    @route("/api/settings", methods=["GET"])
+    async def api_get_settings(request: Request) -> JSONResponse:
+        if forbidden := _forbid_non_local(request):
+            return forbidden
+        settings = await _to_thread(read_settings, current_project.get("project_root"))
+        return _json(request, {
+            **settings,
+            "max_rework_range": [MAX_REWORK_MIN, MAX_REWORK_MAX],
+            "max_concurrent_range": [MAX_CONCURRENT_MIN, MAX_CONCURRENT_MAX],
+        })
+
+    @route("/api/settings", methods=["POST"])
+    async def api_save_settings(request: Request) -> JSONResponse:
+        if forbidden := _forbid_non_local(request):
+            return forbidden
+        data = await _read_json(request)
+        settings = await _to_thread(
+            write_settings,
+            current_project.get("project_root"),
+            data.get("max_rework_rounds"),
+            data.get("max_concurrent_tasks"),
+        )
+        return _json(request, {"success": True, **settings})
 
     @route("/api/agents", methods=["POST"])
     async def api_register_agent(request: Request) -> JSONResponse:

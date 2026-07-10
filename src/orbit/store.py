@@ -1409,6 +1409,17 @@ class Store:
             self._conn.commit()
         return cur.rowcount
 
+    def count_running_run_jobs(self) -> int:
+        """How many run_jobs a runner is actively executing right now (claimed,
+        lease still valid). Used as a global concurrency cap before claiming."""
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT COUNT(*) AS n FROM run_jobs
+                   WHERE status = 'running' AND leased_until > ?""",
+                (_now(),),
+            ).fetchone()
+        return int(row["n"]) if row else 0
+
     def active_task_counts(self) -> dict[str, int]:
         with self._lock:
             rows = self._conn.execute(
