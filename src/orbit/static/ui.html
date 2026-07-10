@@ -1247,35 +1247,6 @@
       background: #f6f5ef; border: 1px solid var(--line);
       line-height: 1.4;
     }
-    .wf-statuses {
-      padding: 10px 12px 0;
-      display: grid;
-      gap: 8px;
-    }
-    .wf-status-list {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 6px;
-    }
-    .wf-status-row {
-      display: grid;
-      grid-template-columns: minmax(120px, 180px) auto;
-      gap: 4px;
-      align-items: center;
-      padding: 5px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: #fff;
-    }
-    .wf-status-row input {
-      min-width: 0;
-      padding: 5px 7px;
-      font-size: 12px;
-    }
-    .wf-status-row button {
-      padding: 5px 8px;
-      min-width: 30px;
-    }
     .composer {
       border-top: 1px solid var(--line);
       background: #fbfbf9;
@@ -1466,7 +1437,6 @@
         </div>
       </div>
       <div id="workflowPath" class="meta" style="padding: 10px 12px;"></div>
-      <div id="workflowStatuses" class="wf-statuses"></div>
       <div id="workflowSteps"></div>
     </div>
     <div id="rolesPage" class="page roles-page">
@@ -1517,7 +1487,7 @@
       <div id="addStepModalTitle" class="modal-title" data-i18n="modal.addStep.title">Add workflow step</div>
       <label><div class="meta" data-i18n="modal.addStep.name">Name</div><input id="addStepName" type="text" placeholder="Step name" data-i18n-ph="modal.addStep.namePh"></label>
       <label id="addStepRoleField"><div class="meta" data-i18n="modal.addStep.role">Role</div><select id="addStepRole"></select></label>
-      <label id="addStepStatusField"><div class="meta" data-i18n="modal.addStep.status">Status</div><input id="addStepStatus" type="text" maxlength="12" placeholder="created" list="workflowStatusOptions" data-i18n-title="modal.addStep.statusTitle"><datalist id="workflowStatusOptions"></datalist></label>
+      <label id="addStepStatusField"><div class="meta" data-i18n="modal.addStep.status">Status</div><select id="addStepStatus"></select></label>
       <label id="addStepRequiredField" class="modal-check"><input id="addStepRequired" type="checkbox"><span class="meta" data-i18n="modal.addStep.required">Required (a step the flow must include)</span></label>
       <div class="modal-actions">
         <button id="addStepDelete" type="button" class="danger" style="margin-right: auto; display: none;" data-i18n="modal.addStep.delete">Delete</button>
@@ -1644,20 +1614,14 @@
         "wf.stepAdded": "Step \"{0}\" added", "wf.stepSaved": "Step \"{0}\" saved",
         "wf.coreNoRemove": "Core steps cannot be removed", "wf.updated": "Workflow updated",
         "wf.layoutFailed": "Auto-layout failed: {0}",
-        "wf.statuses": "Task statuses", "wf.statusValue": "value",
-        "wf.statusLabel": "label", "wf.statusAdd": "Add status",
-        "wf.statusRemove": "Remove status", "wf.statusSaved": "Statuses saved",
-        "wf.statusInUse": "Status \"{0}\" is used by a workflow step and cannot be removed",
         "roles.noRoles": "No workflow roles detected.",
         "roles.edit": "Edit", "roles.save": "Save", "roles.cancel": "Cancel",
         "roles.saved": "Role {0} saved successfully",
         "status.todo": "Todo", "status.assigned": "Assigned", "status.in_progress": "In Progress",
-        "status.testing": "In Testing", "status.reviewing": "Under Review", "status.accepted": "Accepted",
-        "status.blocked": "Blocked", "status.stalled": "Stalled", "status.closed": "Closed",
+        "status.accepted": "Accepted",
+        "status.blocked": "Blocked", "status.stalled": "On Hold", "status.closed": "Done",
         "status.new": "New", "status.designing": "Designing", "status.decomposing": "Decomposing",
         "status.running": "Running", "status.verifying": "Verifying",
-        "col.todo": "Todo", "col.progress": "In Progress", "col.testing": "In Testing",
-        "col.blocked": "Blocked", "col.review": "Under Review", "col.done": "Done",
         "task.fallback": "Task", "task.fallbackId": "#{0} Task", "task.goal": "🎯 goal", "task.subtask": "↳ #{0}", "task.step": "⚙ {0}",
         "task.subtaskTitle": "subtask of goal #{0}",
         "task.waiting": "⏳ waiting {0}", "task.waitingTitle": "held until its prerequisite tasks close (their work is merged to main)",
@@ -1769,20 +1733,14 @@
         "wf.stepAdded": "步骤 \"{0}\" 已添加", "wf.stepSaved": "步骤 \"{0}\" 已保存",
         "wf.coreNoRemove": "核心步骤不可删除", "wf.updated": "工作流已更新",
         "wf.layoutFailed": "自动布局失败: {0}",
-        "wf.statuses": "任务状态", "wf.statusValue": "状态值",
-        "wf.statusLabel": "显示名", "wf.statusAdd": "添加状态",
-        "wf.statusRemove": "移除状态", "wf.statusSaved": "状态已保存",
-        "wf.statusInUse": "状态“{0}”正被工作流步骤使用，无法移除",
         "roles.noRoles": "未检测到工作流角色。",
         "roles.edit": "编辑", "roles.save": "保存", "roles.cancel": "取消",
         "roles.saved": "角色 {0} 保存成功",
         "status.todo": "待办", "status.assigned": "已分配", "status.in_progress": "进行中",
-        "status.testing": "测试中", "status.reviewing": "评审中", "status.accepted": "已接受",
-        "status.blocked": "已阻塞", "status.stalled": "已停滞", "status.closed": "已关闭",
+        "status.accepted": "已接受",
+        "status.blocked": "已阻塞", "status.stalled": "暂停", "status.closed": "完成",
         "status.new": "新建", "status.designing": "设计中", "status.decomposing": "拆解中",
         "status.running": "运行中", "status.verifying": "验证中",
-        "col.todo": "待办", "col.progress": "进行中", "col.testing": "测试中",
-        "col.blocked": "已阻塞", "col.review": "评审中", "col.done": "已完成",
         "task.fallback": "任务", "task.fallbackId": "#{0} 任务", "task.goal": "🎯 目标", "task.subtask": "↳ #{0}", "task.step": "⚙ {0}",
         "task.subtaskTitle": "目标 #{0} 的子任务",
         "task.waiting": "⏳ 等待 {0}", "task.waitingTitle": "前置任务全部关闭（成果并入 main）后才开工",
@@ -1834,12 +1792,10 @@
       const s = (I18N[LANG] && I18N[LANG][key]) || I18N.en[key] || key;
       return args.length ? s.replace(/\{(\d+)\}/g, (_, i) => (args[i] != null ? args[i] : "")) : s;
     }
-    // Translate a task-status value; custom (non-canonical) statuses fall back
-    // to their raw value so user-defined workflow statuses still render.
+    // Task statuses are fixed product concepts; translate the stable value in
+    // the browser so English and Chinese always describe the same lifecycle.
     function stLabel(v) {
       if (!v) return "";
-      const wf = (state.workflow.statuses || []).find(s => s.value === v);
-      if (wf && wf.label) return wf.label;
       const k = "status." + v;
       return (I18N[LANG] && I18N[LANG][k]) || v;
     }
@@ -2470,83 +2426,14 @@
     }
 
     function workflowStatusList() {
-      const statuses = [];
-      const seen = new Set();
-      const add = (value, label) => {
-        value = String(value || "").trim().slice(0, 12);
-        if (!value || seen.has(value)) return;
-        seen.add(value);
-        statuses.push({ value, label: String(label || "").trim() || stLabel(value) || value });
-      };
-      (state.workflow.statuses || []).forEach(s => add(s.value, s.label));
-      (state.workflow.steps || []).forEach(s => add(s.task_status, ""));
-      return statuses;
-    }
-
-    function renderWorkflowStatuses() {
-      const host = $("workflowStatuses");
-      if (!host) return;
-      const statuses = state.workflow.statuses || [];
-      host.innerHTML = `
-        <div class="row" style="justify-content: space-between; align-items: center;">
-          <strong>${t("wf.statuses")}</strong>
-          <button type="button" id="wfAddStatus">${t("wf.statusAdd")}</button>
-        </div>
-        <div class="wf-status-list">
-          ${statuses.map((status, index) => `
-            <div class="wf-status-row" data-status-index="${index}">
-              <input class="wf-status-label" maxlength="32" value="${escapeHtml(status.label || status.value || "")}" placeholder="${escapeHtml(t("wf.statusLabel"))}" title="${escapeHtml(status.value || "")}">
-              <button type="button" class="wf-status-remove" title="${escapeHtml(t("wf.statusRemove"))}">×</button>
-            </div>
-          `).join("")}
-        </div>
-      `;
-      $("wfAddStatus").addEventListener("click", () => {
-        const existing = new Set((state.workflow.statuses || []).map(s => s.value));
-        let value = "status";
-        for (let i = 2; existing.has(value); i += 1) value = `status_${i}`;
-        state.workflow.statuses = [
-          ...(state.workflow.statuses || []),
-          { value: value.slice(0, 12), label: value.replace("_", " ") },
-        ];
-        run(async () => {
-          await saveWorkflow();
-          setStatus(t("wf.statusSaved"));
-        });
-      });
-      host.querySelectorAll(".wf-status-row").forEach(row => {
-        const index = Number(row.dataset.statusIndex);
-        const labelInput = row.querySelector(".wf-status-label");
-        const sync = () => {
-          const statuses = state.workflow.statuses || [];
-          if (!statuses[index]) return;
-          statuses[index] = {
-            ...statuses[index],
-            label: (labelInput.value || "").trim(),
-          };
-        };
-        labelInput.addEventListener("input", sync);
-        labelInput.addEventListener("change", () => run(async () => {
-          sync();
-          await saveWorkflow();
-          setStatus(t("wf.statusSaved"));
-        }));
-        row.querySelector(".wf-status-remove").addEventListener("click", () => run(async () => {
-          const status = (state.workflow.statuses || [])[index];
-          if (!status) return;
-          if ((state.workflow.steps || []).some(step => step.task_status === status.value)) {
-            setStatus(t("wf.statusInUse", status.label || status.value), true);
-            return;
-          }
-          state.workflow.statuses = (state.workflow.statuses || []).filter((_, i) => i !== index);
-          await saveWorkflow();
-          setStatus(t("wf.statusSaved"));
-        }));
-      });
+      return (state.workflow.statuses || []).map(status => ({
+        value: status.value,
+        label: stLabel(status.value),
+      }));
     }
 
     function renderWorkflowStatusOptions() {
-      const list = $("workflowStatusOptions");
+      const list = $("addStepStatus");
       if (!list) return;
       list.innerHTML = workflowStatusList().map(status => `
         <option value="${escapeHtml(status.value)}">${escapeHtml(status.label || status.value)}</option>
@@ -2616,7 +2503,6 @@
         state.workflow.path ? t("wf.config", escapeHtml(state.workflow.path)) : "",
         wfWarnings.length ? `<span style="color: var(--warn)">⚠ ${wfWarnings.map(escapeHtml).join(" · ")}</span>` : ""
       ].filter(Boolean).join(" — ");
-      renderWorkflowStatuses();
       renderWorkflowStatusOptions();
       const steps = state.workflow.steps || [];
       // Terminals: a start node has flow out but nothing pointing in; an end node
@@ -2981,7 +2867,6 @@
         method: "POST",
         body: JSON.stringify({
           steps: state.workflow.steps || [],
-          statuses: state.workflow.statuses || [],
           edges: state.workflow.edges || [],
         })
       });

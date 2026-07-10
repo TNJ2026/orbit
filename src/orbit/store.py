@@ -41,9 +41,6 @@ TASK_STATUSES = {
     "created",
     "assigned",
     "in_progress",
-    "testing",
-    "reviewing",
-    "accepted",
     "blocked",
     "stalled",
     "closed",
@@ -54,7 +51,7 @@ TASK_STATUSES = {
 # Goals (is_goal=1 rows) run a lifecycle of their own, decoupled from the
 # per-task/step statuses above: a goal traverses its design + decompose phase,
 # then rolls up its subtasks. A goal row is validated against THIS set, never
-# TASK_STATUSES, so a step column (e.g. "reviewing") can never land on a goal
+# TASK_STATUSES, so a task state can never land on a goal
 # and a goal phase (e.g. "decomposing") can never land on a task. The server
 # owns the phase→status mapping; here we only police the vocabulary.
 GOAL_STATUSES = {
@@ -268,25 +265,13 @@ def _validate_kind(kind: str) -> str:
     return kind
 
 
-# Custom workflow-step statuses (free-form column labels typed in the step
-# editor) land on task rows via dispatch; cap their length. Must match
-# server.MAX_STEP_STATUS_LEN.
-_MAX_CUSTOM_STATUS_LEN = 12
-
-
 def _validate_task_status(task_status: str) -> str:
     task_status = (task_status or "").strip()
     if task_status in TASK_STATUSES:
         return task_status
-    # Free-form step status: any short label. TASK_STATUSES keeps the
-    # engine-semantic set (terminal/override checks compare those literals);
-    # anything else behaves as a generic active phase.
-    if 0 < len(task_status) <= _MAX_CUSTOM_STATUS_LEN:
-        return task_status
     raise InvalidInputError(
         f"invalid task_status: {task_status!r} "
-        f"(expected one of {sorted(s for s in TASK_STATUSES if s)} "
-        f"or a custom label of at most {_MAX_CUSTOM_STATUS_LEN} chars)"
+        f"(expected one of {sorted(s for s in TASK_STATUSES if s)})"
     )
 
 
@@ -299,8 +284,6 @@ _TASK_TO_GOAL_STATUS = {
     "created": "new",
     "assigned": "designing",
     "in_progress": "running",
-    "testing": "running",
-    "reviewing": "running",
     "blocked": "stalled",
 }
 
@@ -889,9 +872,8 @@ class Store:
     def list_non_terminal_tasks(self) -> list[dict[str, Any]]:
         """Return tasks that are not finished, for the health watchdog — avoids
         scanning closed history every cycle. A task is finished when it is
-        'closed', or — for a goal — 'accepted' (goals rest there). A regular
-        task at 'accepted' is only passing through the accept step (which may be
-        non-terminal, with steps after it), so it is still watched."""
+        'closed', or — for a goal — 'accepted' (goals use a separate lifecycle
+        vocabulary and rest there)."""
         with self._lock:
             rows = self._conn.execute(
                 """SELECT id, source_message_id, title, content, sender,

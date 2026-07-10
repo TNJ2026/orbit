@@ -296,12 +296,9 @@ _WORKFLOW_STATUS_LABELS = {
     "created": "Todo",
     "assigned": "Assigned",
     "in_progress": "In Progress",
-    "testing": "In Testing",
-    "reviewing": "Under Review",
-    "accepted": "Accepted",
     "blocked": "Blocked",
-    "stalled": "Stalled",
-    "closed": "Closed",
+    "stalled": "On Hold",
+    "closed": "Done",
 }
 
 
@@ -312,9 +309,6 @@ def default_workflow_statuses() -> list[dict[str, str]]:
             "created",
             "assigned",
             "in_progress",
-            "testing",
-            "reviewing",
-            "accepted",
             "blocked",
             "stalled",
             "closed",
@@ -347,10 +341,10 @@ def default_workflow_steps() -> list[dict[str, Any]]:
         # mandatory machine-verification gate. Set test's `verify` command (e.g.
         # the project's test suite) so a failing run objectively sends the task
         # back to implement instead of trusting a self-report.
-        ("review", "Review", "reviewer", "reviewing", True, True, False, False, 1840, _DEFAULT_STEP_MID_Y),
-        ("test", "Test", "tester", "testing", False, True, False, False, 2140, _DEFAULT_STEP_MID_Y),
+        ("review", "Review", "reviewer", "in_progress", True, True, False, False, 1840, _DEFAULT_STEP_MID_Y),
+        ("test", "Test", "tester", "in_progress", False, True, False, False, 2140, _DEFAULT_STEP_MID_Y),
         ("integrate", "Integrate", "integrator", "in_progress", True, False, True, False, 2440, _DEFAULT_STEP_MID_Y),
-        ("accept", "Accept", "reviewer", "accepted", True, False, False, False, 2740, _DEFAULT_STEP_MID_Y),
+        ("accept", "Accept", "reviewer", "in_progress", True, False, False, False, 2740, _DEFAULT_STEP_MID_Y),
     ]
     return [
         {
@@ -390,40 +384,6 @@ def default_workflow_edges() -> list[dict[str, str]]:
     ]
 
 
-# Step statuses are free-form (typed into the step editor, not picked from a
-# list); cap the length so board chips and prompts stay readable.
-MAX_STEP_STATUS_LEN = 12
-
-
-def _normalize_workflow_statuses(statuses: Any = None) -> list[dict[str, str]]:
-    if statuses is None:
-        return default_workflow_statuses()
-    if not isinstance(statuses, list):
-        raise InvalidInputError("workflow statuses must be a list")
-    normalized: list[dict[str, str]] = []
-    seen: set[str] = set()
-    for item in statuses:
-        if isinstance(item, str):
-            value = item.strip()
-            label = _WORKFLOW_STATUS_LABELS.get(value, value.replace("_", " ").title())
-        elif isinstance(item, dict):
-            value = str(item.get("value", "")).strip()
-            label = str(
-                item.get("label", "") or _WORKFLOW_STATUS_LABELS.get(value, "")
-            ).strip()
-        else:
-            raise InvalidInputError("workflow status must be a string or object")
-        if not value:
-            raise InvalidInputError("workflow status value is required")
-        if len(value) > MAX_STEP_STATUS_LEN:
-            raise InvalidInputError("workflow status value is invalid: too long")
-        if value in seen:
-            continue
-        seen.add(value)
-        normalized.append({"value": value, "label": label or value})
-    return normalized
-
-
 def _workflow_status_values(statuses: list[dict[str, str]]) -> set[str]:
     return {status["value"] for status in statuses}
 
@@ -454,13 +414,11 @@ def _normalize_workflow_step(
 
     if not _is_valid_role_id(role_id):
         raise InvalidInputError("workflow step role_id is invalid")
-    # Step statuses are free-form column labels (the visible task status is
-    # derived from them), capped so the board chips stay readable. The workflow
-    # `statuses` list no longer constrains them; `allowed_statuses` is kept for
-    # call-site compatibility.
-    if len(task_status) > MAX_STEP_STATUS_LEN:
+    allowed_statuses = allowed_statuses or _workflow_status_values(default_workflow_statuses())
+    if task_status and task_status not in allowed_statuses:
         raise InvalidInputError(
-            f"workflow step task_status is invalid: longer than {MAX_STEP_STATUS_LEN} chars"
+            "workflow step task_status is invalid: expected one of "
+            + ", ".join(sorted(allowed_statuses))
         )
     try:
         timeout_minutes = int(step.get("timeout_minutes", 0) or 0)
@@ -632,9 +590,7 @@ def read_workflow_config(project_root: str | None = None) -> dict[str, Any]:
     steps = data.get("steps", []) if isinstance(data, dict) else []
     if not isinstance(steps, list):
         raise InvalidInputError("workflow steps must be a list")
-    statuses = _normalize_workflow_statuses(
-        data.get("statuses") if isinstance(data, dict) else None
-    )
+    statuses = default_workflow_statuses()
     allowed_statuses = _workflow_status_values(statuses)
     normalized = [
         _normalize_workflow_step(step, index, allowed_statuses)
@@ -708,11 +664,10 @@ def write_workflow_config(
     steps: list[Any],
     project_root: str | None = None,
     edges: Any = None,
-    statuses: Any = None,
 ) -> dict[str, Any]:
     if not isinstance(steps, list):
         raise InvalidInputError("steps must be a list")
-    normalized_statuses = _normalize_workflow_statuses(statuses)
+    normalized_statuses = default_workflow_statuses()
     allowed_statuses = _workflow_status_values(normalized_statuses)
     normalized = [
         _normalize_workflow_step(step, index, allowed_statuses)
@@ -751,11 +706,7 @@ def write_workflow_config(
         {k: v for k, v in step.items() if k != "required_locked"}
         for step in normalized
     ]
-    data = {
-        "statuses": normalized_statuses,
-        "steps": persisted,
-        "edges": normalized_edges,
-    }
+    data = {"steps": persisted, "edges": normalized_edges}
     path.write_text(
         json.dumps(data, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
@@ -875,8 +826,8 @@ def goals_summary(
     """Goals with aggregated subtask progress for the Goals page. Children
     are linked via parent_task_id (subtasks reply to the goal's message).
     With a project_root, each subtask's visible status is workflow-projected so
-    the Goals page shows the same phase (testing/reviewing/…) as the board; the
-    closed/blocked counters use override statuses, which projection preserves."""
+    the Goals page and task board show the same lifecycle state; closed/blocked
+    counters use override statuses, which projection preserves."""
     tasks = store.list_goals_with_children()
     cfg = read_workflow_config(project_root) if project_root is not None else None
 
@@ -2910,10 +2861,6 @@ def _build_step_prompt(
 
 
 _TASK_RUNNING_TERMINAL = ("closed", "accepted")
-# Statuses that already place a task in its own board column while its runner
-# works (Under Review / In Testing). Don't overwrite them with the
-# generic in_progress, or those columns would never show anything.
-_TASK_PHASE_STATUSES = ("testing", "reviewing")
 
 
 def _mark_task_running(store: Store, task_id: int | None) -> None:
@@ -2930,9 +2877,7 @@ def _mark_task_running(store: Store, task_id: int | None) -> None:
             break
         status = task.get("task_status")
         if (
-            status not in _TASK_RUNNING_TERMINAL
-            and status not in _TASK_PHASE_STATUSES
-            and status != "in_progress"
+            status not in _TASK_RUNNING_TERMINAL and status != "in_progress"
         ):
             store.set_task_workflow_state(current, task_status="in_progress")
         current = task.get("parent_task_id")
@@ -3457,9 +3402,7 @@ WORKTREE_LOCK_RETRIES = 5
 
 def _task_workflow_finished(task: dict[str, Any] | None) -> bool:
     """True when a task has left the workflow for good: it is gone, 'closed', or
-    — for a goal — 'accepted' (goals rest at accepted). A regular task at
-    'accepted' is only passing through the accept step, which may be non-terminal
-    with steps after it, so it is NOT finished and its worktree must be kept."""
+    — for a goal — 'accepted' (goals use a separate lifecycle vocabulary)."""
     if task is None:
         return True
     status = task.get("task_status")
@@ -4703,6 +4646,7 @@ def _check_task_health_locked(
         # B. advance_workflow_task records rework before dispatching the target.
         # If the server dies in that small window, the old step is settled but
         # the target never becomes active.
+        undispatched_rework = False
         if transitions and not active and not _task_has_running_run(store, task_id):
             reworks = [
                 t for t in transitions
@@ -4724,6 +4668,7 @@ def _check_task_health_locked(
                     and t["to_step"] == target
                     for t in transitions
                 )
+                undispatched_rework = not dispatched
                 if not dispatched and not alerted:
                     store.record_task_transition(
                         task_id,
@@ -4746,6 +4691,13 @@ def _check_task_health_locked(
                         "problem": "undispatched rework",
                         "notice": notice,
                     })
+
+        # The rework recovery branch above owns this state, including after its
+        # alert has been deduplicated. Do not also classify the same gap as a
+        # generic orphan merely because every active phase now projects to the
+        # common in_progress task status.
+        if undispatched_rework:
+            continue
 
         # C. A non-goal task claims to be in progress but has no active step and
         # no run in flight — orphaned (e.g. an advance recorded a step done but
@@ -5412,7 +5364,6 @@ def create_server(
                 data.get("steps", []),
                 current_project.get("project_root"),
                 data.get("edges"),
-                data.get("statuses"),
             )
         except InvalidInputError as exc:
             return _json_error(str(exc), request=request)
@@ -5485,12 +5436,10 @@ def create_server(
 
             def _load() -> list[dict[str, Any]]:
                 filtered = status != "all"
-                if filtered and status not in TASK_STATUSES \
-                        and len(status) > MAX_STEP_STATUS_LEN:
+                if filtered and status not in TASK_STATUSES:
                     raise InvalidInputError(
                         f"invalid task_status: {status!r} "
-                        f"(expected one of {sorted(s for s in TASK_STATUSES if s)} "
-                        "or a custom step status)"
+                        f"(expected one of {sorted(s for s in TASK_STATUSES if s)})"
                     )
                 # The visible status is derived per row (workflow projection), so
                 # a status filter must scan every task and filter after

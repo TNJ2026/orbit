@@ -121,9 +121,9 @@ class StoreTests(unittest.TestCase):
         self.assertEqual("Review auth flow", tasks[0]["title"])
         self.assertEqual("assigned", tasks[0]["task_status"])
 
-        self.assertTrue(store.update_task_status(task_id, "accepted"))
-        accepted = store.list_messages(agent="b", kind="task", task_status="accepted")
-        self.assertEqual([task_id], [m["id"] for m in accepted])
+        self.assertTrue(store.update_task_status(task_id, "closed"))
+        closed = store.list_messages(agent="b", kind="task", task_status="closed")
+        self.assertEqual([task_id], [m["id"] for m in closed])
 
     def test_task_message_creates_executable_task(self):
         store = self.make_store()
@@ -213,8 +213,8 @@ class StoreTests(unittest.TestCase):
         [message_id] = store.send_message("a", "b", "run tests", kind="task")
         [task] = store.list_tasks()
 
-        self.assertTrue(store.update_task_item_status(task["id"], "testing"))
-        self.assertEqual("testing", store.list_tasks()[0]["task_status"])
+        self.assertTrue(store.update_task_item_status(task["id"], "in_progress"))
+        self.assertEqual("in_progress", store.list_tasks()[0]["task_status"])
 
     def test_goal_queries_return_only_goals_and_direct_children(self):
         store = self.make_store()
@@ -255,10 +255,10 @@ class StoreTests(unittest.TestCase):
         self.register_pair(store)
         [message_id] = store.send_message("a", "b", "fix lint", kind="task")
 
-        self.assertTrue(store.update_task_status(message_id, "testing"))
-        [task] = store.list_tasks(status="testing", assignee="b")
+        self.assertTrue(store.update_task_status(message_id, "in_progress"))
+        [task] = store.list_tasks(status="in_progress", assignee="b")
         self.assertEqual(message_id, task["source_message_id"])
-        self.assertEqual("testing", task["task_status"])
+        self.assertEqual("in_progress", task["task_status"])
 
     def test_task_runs_track_execution_attempts(self):
         store = self.make_store()
@@ -465,22 +465,17 @@ class StoreTests(unittest.TestCase):
     def test_invalid_task_status_is_rejected_not_cleaned(self):
         store = self.make_store()
         self.register_pair(store)
-        # custom free-form labels (<=12 chars) are allowed — they come from
-        # free-form workflow step statuses landing on task rows via dispatch
-        [ok_id] = store.send_message(
-            "a", "b", "x", kind="task", task_status="urgent"
-        )
-        self.assertEqual("urgent", store.get_message(ok_id)["task_status"])
-        # over the cap -> rejected
+        # Task statuses are a fixed product vocabulary; arbitrary workflow
+        # phase names are not valid task states.
         with self.assertRaises(InvalidInputError):
             store.send_message(
-                "a", "b", "x", kind="task", task_status="a" * 13
+                "a", "b", "x", kind="task", task_status="urgent"
             )
         [task_id] = store.send_message(
             "a", "b", "x", kind="task", task_status="assigned"
         )
         with self.assertRaises(InvalidInputError):
-            store.update_task_status(task_id, "a" * 13)
+            store.update_task_status(task_id, "custom")
         with self.assertRaises(InvalidInputError):
             store.update_task_status(task_id, "")
         # status untouched by the failed updates

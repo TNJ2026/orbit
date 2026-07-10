@@ -247,11 +247,11 @@ Deliverable:
 | `created` | 已创建，还未进入工作流 |
 | `assigned` | 已派发给目标角色 |
 | `in_progress` | 某步骤的 runner 正在执行 |
-| `reviewing` | 在评审步骤 |
-| `accepted` | hub 接受该结果（终结态之一） |
 | `blocked` | 被阻塞，需要输入或环境变化 |
-| `stalled` | 父级目标因子任务阻塞而停滞 |
-| `closed` | 任务已归档（终结态之一） |
+| `stalled` | 暂停，当前不再推进 |
+| `closed` | 完成（终结态） |
+
+Task 状态在所有工作流中固定不变。设计、评审、测试、审批等领域阶段属于工作流步骤，不属于 Task 状态。
 
 ## 角色文件
 

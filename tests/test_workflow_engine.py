@@ -32,8 +32,8 @@ def tearDownModule():
 LINEAR_STEPS = [
     {"id": "intake", "name": "Intake", "role_id": "hub", "task_status": "created", "required": True},
     {"id": "implement", "name": "Implement", "role_id": "implementer", "task_status": "in_progress", "required": True},
-    {"id": "review", "name": "Review", "role_id": "reviewer", "task_status": "reviewing", "required": True},
-    {"id": "accept", "name": "Accept", "role_id": "hub", "task_status": "accepted", "required": True},
+    {"id": "review", "name": "Review", "role_id": "reviewer", "task_status": "in_progress", "required": True},
+    {"id": "accept", "name": "Accept", "role_id": "hub", "task_status": "in_progress", "required": True},
 ]
 LINEAR_EDGES = [
     {"from": "intake", "to": "implement"},
@@ -119,7 +119,7 @@ class WorkflowEngineTests(unittest.TestCase):
 
             h.complete("codex", task_id, "implement", "done", "tests added")
             h.complete("rev", task_id, "review", "done", "lgtm")
-            self.assertEqual("accepted", h.task(task_id)["task_status"])
+            self.assertEqual("in_progress", h.task(task_id)["task_status"])
 
             closed = h.complete("hub-agent", task_id, "accept", "done", "shipped")
             self.assertTrue(closed["closed"])
@@ -132,8 +132,8 @@ class WorkflowEngineTests(unittest.TestCase):
         steps = [
             {"id": "a", "name": "A", "role_id": "hub", "task_status": "created", "required": True},
             {"id": "b", "name": "B", "role_id": "implementer", "task_status": "in_progress", "required": True},
-            {"id": "c", "name": "C", "role_id": "reviewer", "task_status": "reviewing", "required": True},
-            {"id": "d", "name": "D", "role_id": "hub", "task_status": "accepted", "required": True},
+            {"id": "c", "name": "C", "role_id": "reviewer", "task_status": "in_progress", "required": True},
+            {"id": "d", "name": "D", "role_id": "hub", "task_status": "in_progress", "required": True},
         ]
         edges = [
             {"from": "a", "to": "b"},
@@ -171,14 +171,14 @@ class WorkflowEngineTests(unittest.TestCase):
             self.assertEqual("in_progress", h.state(task_id)["status"])
 
             steps = [dict(step) for step in LINEAR_STEPS]
-            steps[1]["task_status"] = "testing"
+            steps[1]["task_status"] = "in_progress"
             server.write_workflow_config(steps, tmp, LINEAR_EDGES)
 
-            self.assertEqual("testing", h.state(task_id)["status"])
+            self.assertEqual("in_progress", h.state(task_id)["status"])
             projected = server._project_workflow_task_status(
                 h.store, tmp, h.task(task_id)
             )
-            self.assertEqual("testing", projected["task_status"])
+            self.assertEqual("in_progress", projected["task_status"])
             self.assertEqual("in_progress", h.task(task_id)["task_status"])
 
     def test_blocked_status_overrides_active_step_projection(self):
@@ -202,7 +202,7 @@ class WorkflowEngineTests(unittest.TestCase):
             h.start(task_id)  # intake active
             task = h.task(task_id)
             # a non-override manual status would be hidden by projection -> rejected
-            reason = server._manual_status_rejection(h.store, task, "testing")
+            reason = server._manual_status_rejection(h.store, task, "in_progress")
             self.assertIsNotNone(reason)
             self.assertIn("intake", reason)
             # overrides always stick
@@ -211,7 +211,7 @@ class WorkflowEngineTests(unittest.TestCase):
             # no active steps (never started) -> anything goes
             idle_id = h.create_task(title="idle")
             self.assertIsNone(
-                server._manual_status_rejection(h.store, h.task(idle_id), "testing")
+                server._manual_status_rejection(h.store, h.task(idle_id), "in_progress")
             )
 
     def test_goals_summary_projects_subtask_status(self):
@@ -246,12 +246,12 @@ class WorkflowEngineTests(unittest.TestCase):
             # derived status while the stored one stays behind
             h.complete("hub-agent", sub["id"], "intake", "done")
             steps = [dict(s) for s in LINEAR_STEPS]
-            steps[1]["task_status"] = "testing"
+            steps[1]["task_status"] = "in_progress"
             server.write_workflow_config(steps, tmp, LINEAR_EDGES)
             stored = h.task(sub["id"])["task_status"]
             self.assertEqual("in_progress", stored)
             [projected] = server.goals_summary(h.store, tmp)[0]["subtasks"]
-            self.assertEqual("testing", projected["task_status"])  # derived
+            self.assertEqual("in_progress", projected["task_status"])  # derived
             # without a project_root the summary keeps the stored status
             [raw] = server.goals_summary(h.store)[0]["subtasks"]
             self.assertEqual(stored, raw["task_status"])
@@ -260,8 +260,8 @@ class WorkflowEngineTests(unittest.TestCase):
         steps = [
             {"id": "a", "name": "A", "role_id": "hub", "task_status": "created", "required": True},
             {"id": "b", "name": "B", "role_id": "implementer", "task_status": "in_progress", "required": True},
-            {"id": "c", "name": "C", "role_id": "tester", "task_status": "testing", "required": False},
-            {"id": "d", "name": "D", "role_id": "reviewer", "task_status": "reviewing", "required": True},
+            {"id": "c", "name": "C", "role_id": "tester", "task_status": "in_progress", "required": False},
+            {"id": "d", "name": "D", "role_id": "reviewer", "task_status": "in_progress", "required": True},
         ]
         edges = [
             {"from": "a", "to": "b"},
@@ -336,7 +336,7 @@ class WorkflowEngineTests(unittest.TestCase):
 
     def test_optional_step_without_member_is_skipped(self):
         steps = LINEAR_STEPS[:2] + [
-            {"id": "test", "name": "Test", "role_id": "tester", "task_status": "testing", "required": False},
+            {"id": "test", "name": "Test", "role_id": "tester", "task_status": "in_progress", "required": False},
         ] + LINEAR_STEPS[2:]
         edges = [
             {"from": "intake", "to": "implement"},
@@ -387,8 +387,8 @@ class WorkflowEngineTests(unittest.TestCase):
         steps = [
             {"id": "intake", "name": "Intake", "role_id": "hub", "task_status": "created", "required": True},
             {"id": "implement", "name": "Implement", "role_id": "implementer", "task_status": "in_progress", "required": True},
-            {"id": "review", "name": "Review", "role_id": "reviewer", "task_status": "reviewing", "required": True},
-            {"id": "optional_check", "name": "Optional Check", "role_id": "tester", "task_status": "testing", "required": False},
+            {"id": "review", "name": "Review", "role_id": "reviewer", "task_status": "in_progress", "required": True},
+            {"id": "optional_check", "name": "Optional Check", "role_id": "tester", "task_status": "in_progress", "required": False},
         ]
         edges = [
             {"from": "intake", "to": "implement"},
@@ -406,9 +406,9 @@ class WorkflowEngineTests(unittest.TestCase):
         steps = [
             {"id": "intake", "name": "Intake", "role_id": "hub", "task_status": "created", "required": True},
             {"id": "implement", "name": "Implement", "role_id": "implementer", "task_status": "in_progress", "required": True},
-            {"id": "review", "name": "Review", "role_id": "reviewer", "task_status": "reviewing", "required": True},
-            {"id": "optional_a", "name": "Optional A", "role_id": "tester", "task_status": "testing", "required": False},
-            {"id": "optional_b", "name": "Optional B", "role_id": "tester", "task_status": "testing", "required": False},
+            {"id": "review", "name": "Review", "role_id": "reviewer", "task_status": "in_progress", "required": True},
+            {"id": "optional_a", "name": "Optional A", "role_id": "tester", "task_status": "in_progress", "required": False},
+            {"id": "optional_b", "name": "Optional B", "role_id": "tester", "task_status": "in_progress", "required": False},
         ]
         edges = [
             {"from": "intake", "to": "implement"},
@@ -502,9 +502,9 @@ class WorkflowEngineTests(unittest.TestCase):
         steps = [
             {"id": "intake", "name": "Intake", "role_id": "hub", "task_status": "created", "required": True},
             {"id": "implement", "name": "Implement", "role_id": "implementer", "task_status": "in_progress", "required": True},
-            {"id": "review", "name": "Review", "role_id": "reviewer", "task_status": "reviewing", "required": True},
-            {"id": "test", "name": "Test", "role_id": "tester", "task_status": "testing", "required": True},
-            {"id": "accept", "name": "Accept", "role_id": "hub", "task_status": "accepted", "required": True},
+            {"id": "review", "name": "Review", "role_id": "reviewer", "task_status": "in_progress", "required": True},
+            {"id": "test", "name": "Test", "role_id": "tester", "task_status": "in_progress", "required": True},
+            {"id": "accept", "name": "Accept", "role_id": "hub", "task_status": "in_progress", "required": True},
         ]
         edges = [
             {"from": "intake", "to": "implement"},
@@ -910,7 +910,7 @@ class StepCardTests(unittest.TestCase):
             h.complete("hub-agent", subtask["id"], "implement", "done")
             cards = self._cards(h, subtask["id"])
             self.assertEqual("closed", cards["implement"]["task_status"])
-            self.assertEqual("reviewing", cards["review"]["task_status"])
+            self.assertEqual("in_progress", cards["review"]["task_status"])
 
             # rework closes the review card and opens a fresh implement card
             h.complete("rev", subtask["id"], "review", "rework", "tests missing")
@@ -1541,16 +1541,13 @@ class MarkTaskRunningTests(unittest.TestCase):
             self.assertEqual("in_progress", h.task(sub_id)["task_status"])
             self.assertEqual("running", h.task(goal_id)["task_status"])  # goal vocabulary
 
-    def test_phase_status_card_kept_in_its_column(self):
-        # A running review/test card must stay in "reviewing"/"testing" (Under
-        # Review / In Testing), not get flipped to generic in_progress.
+    def test_running_card_remains_in_progress(self):
         with TemporaryDirectory() as tmp:
             h = EngineHarness(tmp)
-            for phase in ("reviewing", "testing"):
-                tid = h.create_task(title=phase)
-                self._set_status(h.store, tid, phase)
-                server._mark_task_running(h.store, tid)
-                self.assertEqual(phase, h.task(tid)["task_status"])
+            tid = h.create_task(title="active")
+            self._set_status(h.store, tid, "in_progress")
+            server._mark_task_running(h.store, tid)
+            self.assertEqual("in_progress", h.task(tid)["task_status"])
 
     def test_terminal_parent_is_not_reopened(self):
         with TemporaryDirectory() as tmp:
