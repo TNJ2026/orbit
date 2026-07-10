@@ -38,7 +38,8 @@ CLI（Claude Code、Codex 等），按需自行安装。原生支持 macOS、Lin
 ```bash
 uv tool install git+https://github.com/TNJ2026/orbit.git
 uv tool update-shell            # 确保 ~/.local/bin 在 PATH（仅首次）
-# 之后更新：  uv tool upgrade orbit
+# 之后更新
+uv tool upgrade orbit
 ```
 
 **从本地 checkout**（开发 orbit 本身时）：
@@ -46,7 +47,8 @@ uv tool update-shell            # 确保 ~/.local/bin 在 PATH（仅首次）
 ```bash
 git clone https://github.com/TNJ2026/orbit.git
 uv tool install --editable ./orbit   # 全局 `orbit`，改代码即时生效
-# 或不安装、就地跑：  cd orbit && uv run orbit serve
+# 或不安装、就地跑
+cd orbit && uv run orbit serve
 ```
 
 `uv run orbit …` 和 `uv tool` 首次使用时会自动建环境，**无需单独 `uv sync`**。
