@@ -2086,15 +2086,15 @@
             ${REQUIRED_TEAM_ROLES.includes(roleId) ? `<span class="meta" style="color: var(--warn); border: 1px solid var(--warn); border-radius: 4px; padding: 1px 6px; font-size: 10px; text-transform: lowercase; font-weight: normal; margin-left: auto; background: #fff;">${t("team.required")}</span>` : ""}
           </div>
           <div class="team-group-members">
-            ${groups.get(roleId).map(({ member, index }) => teamMemberHtml(member, index, groups.get(roleId).length > 1)).join("")}
+            ${groups.get(roleId).map(({ member, index }) => teamMemberHtml(member, index, roleId === "implementer")).join("")}
           </div>
         </div>
       `).join("") : `<div class="empty">${t("team.noMembers")}</div>`;
     }
 
-    // showExpertise: expertise only matters when a role has several agents
-    // competing for assignment, so single-agent roles hide the selector.
-    function teamMemberHtml(member, index, showExpertise) {
+    // showExtras: only the implementer role exposes the Expertise selector and
+    // the Capabilities input; other roles keep a lean card (role / notes / cmd).
+    function teamMemberHtml(member, index, showExtras) {
       return `
         <div class="team-member ${member.enabled ? "" : "disabled"}">
           <div class="team-member-header">
@@ -2112,7 +2112,7 @@
                 ${roleOptionsHtml(member.role_id)}
               </select>
             </label>
-            ${showExpertise ? `
+            ${showExtras ? `
             <label style="display: block;">
               <div class="meta" style="margin-bottom: 4px;">${t("team.expertise")}</div>
               <select onchange="updateTeamMember(${index}, 'expertise_level', this.value)" style="font-size: 13px; padding: 5px 8px;">
@@ -2124,10 +2124,11 @@
           </div>
 
           <div class="team-member-inputs">
+            ${showExtras ? `
             <div class="input-with-label">
               <span class="meta label-text">${t("team.capabilities")}</span>
               <input value="${escapeHtml((member.capabilities || []).join(', '))}" placeholder="${escapeHtml(t("team.capPh"))}" onchange="updateTeamMember(${index}, 'capabilities', this.value)" style="font-size: 13px; padding: 5px 8px;">
-            </div>
+            </div>` : ""}
             <div class="input-with-label">
               <span class="meta label-text">${t("team.notes")}</span>
               <input value="${escapeHtml(member.notes || "")}" placeholder="${escapeHtml(t("team.notesPh"))}" onchange="updateTeamMember(${index}, 'notes', this.value)" style="font-size: 13px; padding: 5px 8px;">
