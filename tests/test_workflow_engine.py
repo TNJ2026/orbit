@@ -153,7 +153,7 @@ class WorkflowEngineTests(unittest.TestCase):
             self.assertEqual({"b", "c"}, set(h.state(task_id)["active_steps"]))
             # Multiple active steps derive the visible task status from the
             # workflow configuration order instead of whichever dispatch ran last.
-            self.assertEqual("in_progress", h.task(task_id)["task_status"])
+            self.assertEqual("in_progress", h.state(task_id)["status"])
 
             first = h.complete("codex", task_id, "b", "done")
             self.assertEqual([], first["dispatched"])
@@ -161,6 +161,39 @@ class WorkflowEngineTests(unittest.TestCase):
 
             second = h.complete("rev", task_id, "c", "done")
             self.assertEqual([{"step": "d", "assignee": "hub-agent"}], second["dispatched"])
+
+    def test_visible_status_is_derived_from_current_workflow_config(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            task_id = h.create_task()
+            h.start(task_id)
+            h.complete("hub-agent", task_id, "intake", "done")
+            self.assertEqual("in_progress", h.state(task_id)["status"])
+
+            steps = [dict(step) for step in LINEAR_STEPS]
+            steps[1]["task_status"] = "testing"
+            server.write_workflow_config(steps, tmp, LINEAR_EDGES)
+
+            self.assertEqual("testing", h.state(task_id)["status"])
+            projected = server._project_workflow_task_status(
+                h.store, tmp, h.task(task_id)
+            )
+            self.assertEqual("testing", projected["task_status"])
+            self.assertEqual("in_progress", h.task(task_id)["task_status"])
+
+    def test_blocked_status_overrides_active_step_projection(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            task_id = h.create_task()
+            h.start(task_id)
+            h.complete("hub-agent", task_id, "intake", "done")
+
+            h.store.set_task_workflow_state(task_id, task_status="blocked")
+            self.assertEqual("blocked", h.state(task_id)["status"])
+            projected = server._project_workflow_task_status(
+                h.store, tmp, h.task(task_id)
+            )
+            self.assertEqual("blocked", projected["task_status"])
 
     def test_optional_late_branch_does_not_redispatch_join_target(self):
         steps = [

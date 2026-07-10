@@ -1326,6 +1326,45 @@ def _workflow_status_for_active_steps(
     return None
 
 
+_WORKFLOW_STATUS_OVERRIDES = {"blocked", "closed", "stalled"}
+
+
+def _workflow_derived_task_status(
+    task: dict[str, Any],
+    transitions: list[dict[str, Any]],
+    cfg: dict[str, Any],
+) -> str:
+    stored = task.get("task_status") or task.get("status") or ""
+    if task.get("is_goal"):
+        return stored
+    if stored in _WORKFLOW_STATUS_OVERRIDES:
+        return stored
+    active = _active_steps(transitions)
+    if not active:
+        return stored
+    return _workflow_status_for_active_steps(active, cfg) or stored
+
+
+def _project_workflow_task_status(
+    store: Store,
+    project_root: str | None,
+    task: dict[str, Any],
+    cfg: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Overlay the visible task status from workflow transitions when available."""
+    if task.get("is_goal"):
+        return task
+    transitions = store.list_task_transitions(int(task["id"]))
+    if not transitions:
+        return task
+    cfg = cfg or read_workflow_config(project_root)
+    projected = dict(task)
+    status = _workflow_derived_task_status(projected, transitions, cfg)
+    projected["task_status"] = status
+    projected["status"] = status
+    return projected
+
+
 def _active_step_assignees(transitions: list[dict[str, Any]]) -> dict[str, str]:
     last_dispatch, last_finish = _last_dispatch_and_finish(transitions)
     return {
@@ -2205,7 +2244,6 @@ def _dispatch_targets(
         store.set_task_workflow_state(
             task_id,
             workflow_step=",".join(active),
-            task_status=_workflow_status_for_active_steps(active, cfg),
         )
     return dispatched, notices
 
@@ -4709,10 +4747,12 @@ def workflow_task_state(
     if not task:
         raise InvalidInputError(f"unknown task: {task_id}")
     transitions = store.list_task_transitions(task_id)
+    cfg = read_workflow_config(project_root)
+    active_steps = _active_steps(transitions)
     return {
         "task_id": task_id,
-        "status": task.get("task_status") or task.get("status"),
-        "active_steps": _active_steps(transitions),
+        "status": _workflow_derived_task_status(task, transitions, cfg),
+        "active_steps": active_steps,
         "transitions": transitions,
     }
 
@@ -5393,7 +5433,27 @@ def create_server(
             limit = _parse_int(params.get("limit", "200"), "limit")
 
             def _load() -> list[dict[str, Any]]:
-                rows = store.list_tasks(status, assignee, limit)
+                if status != "all" and status not in TASK_STATUSES:
+                    raise InvalidInputError(
+                        f"invalid task_status: {status!r} "
+                        f"(expected one of {sorted(s for s in TASK_STATUSES if s)})"
+                    )
+                rows = store.list_tasks(
+                    "all" if status != "all" else status,
+                    assignee,
+                    -1 if status != "all" else limit,
+                )
+                cfg = read_workflow_config(current_project.get("project_root"))
+                rows = [
+                    _project_workflow_task_status(
+                        store, current_project.get("project_root"), row, cfg
+                    )
+                    for row in rows
+                ]
+                if status != "all":
+                    rows = [row for row in rows if row.get("task_status") == status]
+                    if limit >= 0:
+                        rows = rows[:limit]
                 # Attach the block reason so every render path (the drawer
                 # re-renders from this list) can show why a task is blocked.
                 for row in rows:
@@ -5415,6 +5475,9 @@ def create_server(
         def _load() -> dict[str, Any] | None:
             t = store.get_task(task_id)
             if t is not None:
+                t = _project_workflow_task_status(
+                    store, current_project.get("project_root"), t
+                )
                 t["blocked_reason"] = _task_blocked_reason(store, t)
             return t
 
