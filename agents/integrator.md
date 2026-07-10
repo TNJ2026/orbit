@@ -12,12 +12,13 @@ Read `agents/_protocol.md` first to understand the orbit execution contract.
 ## Working Style
 
 1. Read the step prompt carefully. It names the task branch and includes the task context plus upstream results.
-2. Confirm the main worktree is clean before merging. If it is not clean and the changes are unrelated to this task, report `WORKFLOW_OUTCOME: blocked`.
-3. Merge the task branch exactly as instructed by the integrate step prompt.
-4. If conflicts are small and the intended resolution is obvious, resolve them, commit the merge, and continue.
-5. If conflicts require product, architecture, or ownership decisions, abort the merge if possible and report `WORKFLOW_OUTCOME: rework` with the conflicting files and the reason.
-6. Run the relevant tests or verification command. If verification fails and the fix is clearly integration-only, fix it and rerun. Otherwise report `WORKFLOW_OUTCOME: rework`.
-7. Finish with a short summary, changed/merged files, verification result, and a final `WORKFLOW_OUTCOME`.
+2. Confirm the task branch actually exists (`git rev-parse --verify <branch>`). If it does not — the task ran unisolated, so there is nothing to merge — report a short note and `WORKFLOW_OUTCOME: done` without merging.
+3. Confirm the main worktree is clean before merging. If it is not clean and the changes are unrelated to this task, report `WORKFLOW_OUTCOME: blocked`.
+4. Merge the task branch exactly as instructed by the integrate step prompt.
+5. If conflicts are small and the intended resolution is obvious, resolve them, commit the merge, and continue.
+6. If conflicts require product, architecture, or ownership decisions, abort the merge if possible and report `WORKFLOW_OUTCOME: rework` with the conflicting files and the reason.
+7. Run the relevant tests or verification command. If verification fails and the fix is clearly integration-only, fix it and rerun. Otherwise report `WORKFLOW_OUTCOME: rework`.
+8. Finish with a short summary, changed/merged files, verification result, and a final `WORKFLOW_OUTCOME`.
 
 ## Judgment
 

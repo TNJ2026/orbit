@@ -333,11 +333,11 @@ def default_workflow_steps() -> list[dict[str, Any]]:
     # `implement`, so the design steps run per goal, not per subtask.
     specs = [
         ("intake", "Triage", "hub", "created", True, False, False, False, 40, _DEFAULT_STEP_MID_Y),
-        ("product_design", "Product Design", "product_designer", "assigned", True, False, False, False, 360, _DEFAULT_STEP_MID_Y),
+        ("product_design", "Product Design", "product_designer", "assigned", False, False, False, False, 360, _DEFAULT_STEP_MID_Y),
         # Parallel branch cards stack vertically at x=700; keep enough gap
         # for a full card (~400px tall with the name/timeout fields).
         ("ui_design", "UI Design", "ui_designer", "assigned", False, False, False, False, 700, 40),
-        ("architecture", "Architecture", "architect", "assigned", True, False, False, False, 700, 500),
+        ("architecture", "Architecture", "architect", "assigned", False, False, False, False, 700, 500),
         # plan: the decomposition gate. ui_design + architecture merge here, and
         # hub splits the goal into subtasks that begin at implement.
         ("plan", "Plan", "hub", "in_progress", True, False, False, True, 1060, _DEFAULT_STEP_MID_Y),
@@ -345,10 +345,10 @@ def default_workflow_steps() -> list[dict[str, Any]]:
         # test is the mandatory machine-verification gate: set its `verify`
         # command (e.g. the project's test suite) so a failing run objectively
         # sends the task back to implement instead of trusting a self-report.
-        ("test", "Test", "tester", "testing", True, True, False, False, 1740, _DEFAULT_STEP_MID_Y),
+        ("test", "Test", "tester", "testing", False, True, False, False, 1740, _DEFAULT_STEP_MID_Y),
         ("review", "Review", "reviewer", "reviewing", True, True, False, False, 2080, _DEFAULT_STEP_MID_Y),
         ("integrate", "Integrate", "integrator", "in_progress", True, False, True, False, 2420, _DEFAULT_STEP_MID_Y),
-        ("accept", "Accept", "hub", "accepted", True, False, False, False, 2760, _DEFAULT_STEP_MID_Y),
+        ("accept", "Accept", "reviewer", "accepted", True, False, False, False, 2760, _DEFAULT_STEP_MID_Y),
     ]
     return [
         {
@@ -3604,15 +3604,20 @@ def run_step_worker(
     exec_dir = _project_root(project_root)
     isolated = False
     can_rework = False
-    # Non-git degrade: an integrate step has no task branch to merge when the
-    # project isn't a git repo (git absent, or the isolate steps also ran
-    # unisolated in project_root). Pass it instead of spawning the hub CLI to run
-    # `git merge` that would only fail — so a non-git workflow completes cleanly.
-    integrate_noop = bool(step.get("integrate")) and not _is_git_repo(exec_dir)
+    # No-branch degrade: an integrate step has no task branch to merge when the
+    # project isn't a git repo (git absent) OR it is a git repo but the task ran
+    # unisolated — no isolate step upstream, so `orbit/task-<id>` was never
+    # created. Either way, pass instead of spawning the integrator CLI to run a
+    # `git merge <phantom-branch>` that would only fail — so the workflow
+    # completes cleanly. Mirrors the guidance in agents/integrator.md.
+    integrate_noop = bool(step.get("integrate")) and (
+        not _is_git_repo(exec_dir)
+        or not _branch_exists(exec_dir, _worktree_branch(task_id))
+    )
     if integrate_noop:
         outcome, result, status = "done", (
-            "integrate skipped: not a git repository, so there is no task branch "
-            "to merge (isolation degraded to project root)"
+            "integrate skipped: no task branch to merge (project is not a git "
+            "repo, or the task ran unisolated in project root)"
         ), "succeeded"
     elif not command:
         result = (

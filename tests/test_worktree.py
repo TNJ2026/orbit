@@ -93,9 +93,9 @@ class WorkflowSchemaTests(unittest.TestCase):
         )
         self.assertEqual("", blank["verify"])
 
-    def test_default_test_is_mandatory_gate_with_rework_edge(self):
+    def test_default_test_is_optional_gate_with_rework_edge(self):
         steps = {s["id"]: s for s in server.default_workflow_steps()}
-        self.assertTrue(steps["test"]["required"])  # mandatory verification step
+        self.assertFalse(steps["test"]["required"])  # optional verification step
         pairs = {(e["from"], e["to"]) for e in server.default_workflow_edges()}
         self.assertIn(("test", "implement"), pairs)  # verify failed -> rework
 
@@ -336,7 +336,34 @@ class GitProvisioningTests(unittest.TestCase):
                 upstream_result="", advance=False,
             )
             self.assertEqual("done", res["outcome"])
-            self.assertIn("not a git repository", res["result"])
+            self.assertIn("no task branch to merge", res["result"])
+            store.close()
+
+    def test_integrate_noops_when_task_branch_missing_in_git_repo(self):
+        # A git repo whose task ran unisolated has no orbit/task-<id> branch;
+        # integrate must pass (done) instead of dispatching a `git merge` of a
+        # phantom branch that would fail.
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _init_repo(root)
+            store = Store(root / ".orbit" / "messages.db")
+            store.register_agent("hub", "")
+            ids = store.send_message("hub", "hub", "do it", kind="task", title="t")
+            task_id = store.get_task_by_source_message(ids[0])["id"]
+            self.assertFalse(
+                server._branch_exists(root, server._worktree_branch(task_id))
+            )
+            step = {
+                "id": "integrate", "name": "Integrate", "role_id": "hub",
+                "isolate": False, "integrate": True, "task_status": "in_progress",
+            }
+            member = {"agent_name": "hub", "runner_command": "false"}
+            res = server.run_step_worker(
+                store, str(root), task_id, step, member,
+                upstream_result="", advance=False,
+            )
+            self.assertEqual("done", res["outcome"])
+            self.assertIn("no task branch to merge", res["result"])
             store.close()
 
 
