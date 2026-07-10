@@ -5,6 +5,7 @@ import sys
 import threading
 import time
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
@@ -1645,8 +1646,7 @@ class HubInspectTests(unittest.TestCase):
             )
             h.store._conn.commit()
             server._HUB_SWEEP_STATE.clear()
-            server.hub_inspect_sweep(h.store, tmp)          # 1st: record size
-            flagged = server.hub_inspect_sweep(h.store, tmp)  # 2nd: silent -> hub KILL
+            flagged = server.hub_inspect_sweep(h.store, tmp)  # silent > 10m -> hub KILL
             server._HUB_SWEEP_STATE.clear()
             self.assertIn(run["id"], flagged)
             # the sweep only signals; it does not kill a pid itself
@@ -1670,8 +1670,7 @@ class HubInspectTests(unittest.TestCase):
             )
             h.store._conn.commit()
             server._HUB_SWEEP_STATE.clear()
-            server.hub_inspect_sweep(h.store, tmp)            # 1st: record size
-            flagged = server.hub_inspect_sweep(h.store, tmp)  # 2nd: silent -> hub KILL
+            flagged = server.hub_inspect_sweep(h.store, tmp)  # silent > 10m -> hub KILL
             server._HUB_SWEEP_STATE.clear()
             self.assertIn(run["id"], flagged)
             self.assertTrue(h.store.run_cancel_requested(run["id"]))
@@ -1725,6 +1724,27 @@ class HubInspectTests(unittest.TestCase):
             self.assertEqual([], server.hub_inspect_sweep(h.store, tmp))
             # output grew -> still producing -> skipped, not killed
             (run_dir / "stdout.log").write_text("start more", encoding="utf-8")
+            self.assertEqual([], server.hub_inspect_sweep(h.store, tmp))
+            server._HUB_SWEEP_STATE.clear()
+
+    def test_sweep_waits_for_ten_minutes_without_output(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, team=self._hub_team("echo 'DECISION 1: KILL'"))
+            tid = h.create_task()
+            run = h.store.create_task_run(
+                tid, worker="codex", command="x", workflow_step="implement")
+            run_dir = Path(tmp) / "rundir"
+            run_dir.mkdir()
+            (run_dir / "stdout.log").write_text("", encoding="utf-8")
+            recent_start = (
+                datetime.now(timezone.utc) - timedelta(seconds=60)
+            ).isoformat(timespec="seconds")
+            h.store._conn.execute(
+                "UPDATE task_runs SET started_at=?, log_dir=?, pid=? WHERE id=?",
+                (recent_start, str(run_dir), 999999999, run["id"]),
+            )
+            h.store._conn.commit()
+            server._HUB_SWEEP_STATE.clear()
             self.assertEqual([], server.hub_inspect_sweep(h.store, tmp))
             server._HUB_SWEEP_STATE.clear()
 

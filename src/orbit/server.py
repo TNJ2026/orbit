@@ -2473,10 +2473,11 @@ SCHEDULER_APPLYING_LEASE_SECONDS = 60
 # is submitted via the engine as the step result.
 # runner_command on the member overrides the per-tool default.
 RUNNER_DEFAULT_TIMEOUT_SECONDS = 1800
-# Soft/hard timeouts for a running step. At each soft interval the hub agent is
-# asked to inspect the still-running step and decide KILL (stuck/errored) or
-# CONTINUE; the hard cap force-kills regardless so nothing runs forever.
-RUNNER_SOFT_TIMEOUT_SECONDS = 300
+# Soft/hard timeouts for a running step. Once a step has produced no stdout or
+# stderr for the soft interval, the hub agent is asked to inspect it and decide
+# KILL (stuck/errored) or CONTINUE; the hard cap force-kills regardless so
+# nothing runs forever.
+RUNNER_SOFT_TIMEOUT_SECONDS = 600
 RUNNER_HARD_TIMEOUT_SECONDS = 1800
 # The hub inspection is itself a CLI call; keep it bounded.
 HUB_INSPECT_TIMEOUT_SECONDS = 180
@@ -2989,6 +2990,28 @@ def _run_output_size(log_dir: str | None) -> int:
     return total
 
 
+def _run_last_output_at(log_dir: str | None, started_at: datetime) -> datetime:
+    """Best-effort timestamp of the latest actual stdout/stderr byte.
+
+    Empty log files mean the process has produced no output, so silence is
+    measured from the run start instead of the file creation timestamp.
+    """
+    latest = started_at
+    if not log_dir:
+        return latest
+    for name in ("stdout.log", "stderr.log"):
+        try:
+            stat = (Path(log_dir) / name).stat()
+        except OSError:
+            continue
+        if stat.st_size <= 0:
+            continue
+        mtime = datetime.fromtimestamp(stat.st_mtime, timezone.utc)
+        if mtime > latest:
+            latest = mtime
+    return latest
+
+
 def _read_run_output_tail(log_dir: str | None, tail_bytes: int = 4000) -> str:
     """Last tail_bytes of each log file — a long-running step's logs can be huge,
     and the hub prompt only needs the recent tail. Seeks instead of reading all."""
@@ -3034,7 +3057,8 @@ def _hub_inspect_batch(
         lines.append(
             f"[{i}] 任务 #{c['task_id']}: {c.get('title') or ''}\n"
             f"    步骤 {c.get('step') or ''}（{c.get('assignee') or ''} 执行），"
-            f"已运行约 {int(c['elapsed'] // 60)} 分钟，输出: {out}"
+            f"已运行约 {int(c['elapsed'] // 60)} 分钟，"
+            f"无新输出约 {int(float(c.get('silent_for') or 0) // 60)} 分钟，输出: {out}"
         )
     prompt = (
         "你是编排 hub。下面这些工作流步骤运行较久且长时间无新输出，逐个判断它是"
@@ -3070,13 +3094,14 @@ def _hub_inspect_batch(
 def hub_inspect_sweep(
     store: Store, project_root: str | None, now: float | None = None
 ) -> list[int]:
-    """Central soft-timeout check (one hub call for all): find runs past the soft
-    timeout that produced no new output since the last sweep (filter A — a run
-    still streaming output is working and is skipped), ask the hub whether each
-    is stuck, and flag the condemned ones for their owning runner to kill (the
+    """Central soft-timeout check (one hub call for all): find runs whose latest
+    stdout/stderr output is older than the soft timeout (filter A — a run still
+    streaming output is working and is skipped), ask the hub whether each is
+    stuck, and flag the condemned ones for their owning runner to kill (the
     runner owns the process, so no reused/foreign pid is ever signalled).
     Returns the flagged run ids."""
     now = now if now is not None else time.monotonic()
+    now_dt = datetime.now(timezone.utc)
     candidates: list[dict[str, Any]] = []
     live_ids: set[int] = set()
     for run in store.list_running_task_runs():
@@ -3088,17 +3113,25 @@ def hub_inspect_sweep(
             continue
         size = _run_output_size(run.get("log_dir"))
         prev = _HUB_SWEEP_STATE.get(rid)
-        _HUB_SWEEP_STATE[rid] = {"size": size, "inspected": (prev or {}).get("inspected", 0.0)}
         try:
-            elapsed = (
-                datetime.now(timezone.utc) - datetime.fromisoformat(run["started_at"])
-            ).total_seconds()
+            started_at = datetime.fromisoformat(run["started_at"])
         except (TypeError, ValueError):
             continue
-        if elapsed < RUNNER_SOFT_TIMEOUT_SECONDS:
-            continue
-        # filter A: only inspect runs not producing new output since last sweep
+        if started_at.tzinfo is None:
+            started_at = started_at.replace(tzinfo=timezone.utc)
+        elapsed = (now_dt - started_at).total_seconds()
+        last_output_at = _run_last_output_at(run.get("log_dir"), started_at)
+        silent_for = (now_dt - last_output_at).total_seconds()
+        _HUB_SWEEP_STATE[rid] = {
+            "size": size,
+            "inspected": (prev or {}).get("inspected", 0.0),
+            "last_output": last_output_at.timestamp(),
+        }
+        # filter A: only inspect runs that have been silent for the full interval
         if prev is None or size > prev.get("size", -1):
+            if silent_for < RUNNER_SOFT_TIMEOUT_SECONDS:
+                continue
+        elif silent_for < RUNNER_SOFT_TIMEOUT_SECONDS:
             continue
         # cadence: inspect a given run at most once per soft interval
         if now - _HUB_SWEEP_STATE[rid]["inspected"] < RUNNER_SOFT_TIMEOUT_SECONDS:
@@ -3109,6 +3142,7 @@ def hub_inspect_sweep(
             "title": task.get("title") if task else "",
             "step": run.get("workflow_step") or (task.get("workflow_step") if task else ""),
             "assignee": run.get("worker"), "elapsed": elapsed,
+            "silent_for": silent_for,
             "output": _read_run_output_tail(run.get("log_dir")),
         })
     for gone in [k for k in _HUB_SWEEP_STATE if k not in live_ids]:
