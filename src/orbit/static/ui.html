@@ -143,17 +143,27 @@
     }
     .tasks-page {
       height: 100%;
-      overflow: auto;
       background: var(--panel);
     }
+    .tasks-page.active {
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
     .tasks-layout {
-      display: block;
-      min-height: 460px;
+      display: flex;
+      flex-direction: column;
+      flex: 1 1 auto;
+      min-height: 0;
       background: var(--bg);
     }
     .tasks-list {
       min-width: 0;
-      overflow: visible;
+      flex: 1 1 auto;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
     }
     /* Task details as a right slide-over drawer (overlay). */
     .drawer-backdrop {
@@ -308,7 +318,8 @@
       display: flex;
       gap: 16px;
       padding: 16px;
-      min-height: 100%;
+      flex: 1 1 auto;
+      min-height: 0;
       overflow-x: auto;
       background: var(--bg);
     }
@@ -316,6 +327,7 @@
       flex: 1;
       min-width: 250px;
       max-width: 320px;
+      min-height: 0;
       background: var(--panel);
       border: 1px solid var(--line);
       border-radius: 8px;
@@ -1290,9 +1302,17 @@
         height: auto;
         overflow: visible;
       }
+      .tasks-page.active {
+        overflow: auto;
+      }
       .tasks-layout {
         grid-template-columns: 1fr;
         height: auto;
+        flex: none;
+      }
+      .tasks-list {
+        flex: none;
+        overflow: visible;
       }
       .task-details {
         border-left: 0;
