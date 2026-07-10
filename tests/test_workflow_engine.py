@@ -2192,6 +2192,48 @@ class DecomposeStepTests(unittest.TestCase):
             # The goal itself has left the step flow.
             self.assertEqual("", h.task(goal_id)["workflow_step"])
 
+    def test_held_subtask_released_after_decompose_keeps_upstream_result(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, steps=self.STEPS, edges=self.EDGES, team=self.TEAM)
+            goal_id = h.create_task(title="Big goal")
+            h.store.update_task_metadata(goal_id, is_goal=True)
+            h.start(goal_id)
+            plan_step = next(
+                s for s in server.read_workflow_config(tmp)["steps"] if s["id"] == "plan"
+            )
+            upstream = (
+                '{"tasks":[{"title":"A","content":"do A"},'
+                '{"title":"B","content":"do B","depends_on":[1]}],'
+                '"design":"shared architecture"}'
+            )
+            server._complete_goal_intake_locked(
+                h.store, tmp, h.store.get_task(goal_id), plan_step, "hub-agent",
+                upstream,
+            )
+            business = {
+                t["title"]: t for t in h.store.list_tasks(status="all")
+                if t.get("parent_task_id") == goal_id
+                and t.get("source_message_id") is not None
+            }
+            a, b = business["A"], business["B"]
+            self.assertTrue(h.task(a["id"])["workflow_step"])
+            self.assertFalse(h.task(b["id"])["workflow_step"])
+
+            h.store.set_task_workflow_state(a["id"], task_status="closed")
+            server._recompute_parent_goal_status(h.store, h.task(a["id"]), tmp)
+
+            b = h.task(b["id"])
+            self.assertEqual("implement", b["workflow_step"])
+            transitions = h.store.list_task_transitions(b["id"])
+            self.assertTrue(
+                any(t["from_step"] == "plan" and t["note"] == upstream for t in transitions)
+            )
+            jobs = [
+                job for job in h.store.list_run_jobs("all")
+                if job["task_id"] == b["id"] and job["step"] == "implement"
+            ]
+            self.assertEqual(upstream, jobs[-1]["upstream_result"])
+
     def test_decompose_warnings(self):
         two = [dict(s, decompose=True) for s in self.STEPS if s["id"] in ("plan", "design")]
         rest = [s for s in self.STEPS if s["id"] not in ("plan", "design")]

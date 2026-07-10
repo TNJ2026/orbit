@@ -1696,6 +1696,22 @@ def _dispatch_business_subtask(
     )
 
 
+def _goal_decompose_upstream_result(
+    store: Store, goal_id: int, decompose_step: str
+) -> str:
+    if not decompose_step:
+        return ""
+    transitions = store.list_task_transitions(goal_id)
+    for transition in reversed(transitions):
+        if (
+            transition.get("from_step") == decompose_step
+            and transition.get("to_step") == ""
+            and transition.get("outcome") == "done"
+        ):
+            return transition.get("note") or ""
+    return ""
+
+
 def _release_ready_subtasks(
     store: Store, project_root: str | None, goal_id: int, actor: str
 ) -> list[int]:
@@ -1727,6 +1743,7 @@ def _release_ready_subtasks(
     if decompose_id and decompose_id not in entries:
         target_steps = _forward_out(cfg, back, decompose_id)
         from_step = decompose_id
+    upstream_result = _goal_decompose_upstream_result(store, goal_id, from_step)
     _ensure_engine_agent(store)
     released: list[int] = []
     for s in held:
@@ -1736,7 +1753,8 @@ def _release_ready_subtasks(
         ):
             continue
         _dispatch_business_subtask(
-            store, project_root, actor, s["id"], from_step, target_steps, ""
+            store, project_root, actor, s["id"], from_step, target_steps,
+            upstream_result,
         )
         released.append(s["id"])
     return released
