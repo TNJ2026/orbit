@@ -96,14 +96,14 @@ class WorkflowEngineTests(unittest.TestCase):
             self.assertEqual([{"step": "intake", "assignee": "hub-agent"}], started["dispatched"])
             task = h.task(task_id)
             self.assertEqual("hub-agent", task["assignee"])
-            self.assertEqual("created", task["task_status"])
+            self.assertEqual("assigned", task["task_status"])
             self.assertEqual("intake", task["workflow_step"])
 
             done = h.complete("hub-agent", task_id, "intake", "done", "requirements clear")
             self.assertEqual([{"step": "implement", "assignee": "codex"}], done["dispatched"])
             task = h.task(task_id)
             self.assertEqual("codex", task["assignee"])
-            self.assertEqual("in_progress", task["task_status"])
+            self.assertEqual("assigned", task["task_status"])
 
             # dispatch message carries the upstream result
             messages = h.inbox_senders("codex")
@@ -115,11 +115,11 @@ class WorkflowEngineTests(unittest.TestCase):
             # review rejects -> loop back to implement
             rework = h.complete("rev", task_id, "review", "rework", "tests missing")
             self.assertEqual([{"step": "implement", "assignee": "codex"}], rework["dispatched"])
-            self.assertEqual("in_progress", h.task(task_id)["task_status"])
+            self.assertEqual("assigned", h.task(task_id)["task_status"])
 
             h.complete("codex", task_id, "implement", "done", "tests added")
             h.complete("rev", task_id, "review", "done", "lgtm")
-            self.assertEqual("in_progress", h.task(task_id)["task_status"])
+            self.assertEqual("assigned", h.task(task_id)["task_status"])
 
             closed = h.complete("hub-agent", task_id, "accept", "done", "shipped")
             self.assertTrue(closed["closed"])
@@ -151,9 +151,7 @@ class WorkflowEngineTests(unittest.TestCase):
                 {"b", "c"}, {d["step"] for d in fanout["dispatched"]}
             )
             self.assertEqual({"b", "c"}, set(h.state(task_id)["active_steps"]))
-            # Multiple active steps derive the visible task status from the
-            # workflow configuration order instead of whichever dispatch ran last.
-            self.assertEqual("in_progress", h.state(task_id)["status"])
+            self.assertEqual("assigned", h.state(task_id)["status"])
 
             first = h.complete("codex", task_id, "b", "done")
             self.assertEqual([], first["dispatched"])
@@ -162,24 +160,24 @@ class WorkflowEngineTests(unittest.TestCase):
             second = h.complete("rev", task_id, "c", "done")
             self.assertEqual([{"step": "d", "assignee": "hub-agent"}], second["dispatched"])
 
-    def test_visible_status_is_derived_from_current_workflow_config(self):
+    def test_visible_status_is_independent_of_workflow_step_config(self):
         with TemporaryDirectory() as tmp:
             h = EngineHarness(tmp)
             task_id = h.create_task()
             h.start(task_id)
             h.complete("hub-agent", task_id, "intake", "done")
-            self.assertEqual("in_progress", h.state(task_id)["status"])
+            self.assertEqual("assigned", h.state(task_id)["status"])
 
             steps = [dict(step) for step in LINEAR_STEPS]
             steps[1]["task_status"] = "in_progress"
             server.write_workflow_config(steps, tmp, LINEAR_EDGES)
 
-            self.assertEqual("in_progress", h.state(task_id)["status"])
+            self.assertEqual("assigned", h.state(task_id)["status"])
             projected = server._project_workflow_task_status(
                 h.store, tmp, h.task(task_id)
             )
-            self.assertEqual("in_progress", projected["task_status"])
-            self.assertEqual("in_progress", h.task(task_id)["task_status"])
+            self.assertEqual("assigned", projected["task_status"])
+            self.assertEqual("assigned", h.task(task_id)["task_status"])
 
     def test_blocked_status_overrides_active_step_projection(self):
         with TemporaryDirectory() as tmp:
@@ -241,17 +239,16 @@ class WorkflowEngineTests(unittest.TestCase):
                 if t.get("parent_task_id") == goal_id
                 and t.get("source_message_id") is not None
             )
-            # advance the subtask past intake -> implement active, then repoint
-            # implement's column in the config; the summary must follow the
-            # derived status while the stored one stays behind
+            # Advancing to another step changes workflow_step, while lifecycle
+            # status remains assigned until a runner starts.
             h.complete("hub-agent", sub["id"], "intake", "done")
             steps = [dict(s) for s in LINEAR_STEPS]
             steps[1]["task_status"] = "in_progress"
             server.write_workflow_config(steps, tmp, LINEAR_EDGES)
             stored = h.task(sub["id"])["task_status"]
-            self.assertEqual("in_progress", stored)
+            self.assertEqual("assigned", stored)
             [projected] = server.goals_summary(h.store, tmp)[0]["subtasks"]
-            self.assertEqual("in_progress", projected["task_status"])  # derived
+            self.assertEqual("assigned", projected["task_status"])
             # without a project_root the summary keeps the stored status
             [raw] = server.goals_summary(h.store)[0]["subtasks"]
             self.assertEqual(stored, raw["task_status"])
@@ -816,7 +813,7 @@ class StepCardTests(unittest.TestCase):
             cards = self._cards(h, goal_id)
             self.assertEqual(["intake"], list(cards))
             self.assertEqual("hub-agent", cards["intake"]["assignee"])
-            self.assertEqual("created", cards["intake"]["task_status"])
+            self.assertEqual("assigned", cards["intake"]["task_status"])
             self.assertIn("Intake", cards["intake"]["title"])
 
             report = server.run_step_worker(
@@ -901,7 +898,7 @@ class StepCardTests(unittest.TestCase):
             h.complete("hub-agent", subtask["id"], "intake", "done")
             cards = self._cards(h, subtask["id"])
             self.assertEqual("closed", cards["intake"]["task_status"])
-            self.assertEqual("in_progress", cards["implement"]["task_status"])
+            self.assertEqual("assigned", cards["implement"]["task_status"])
             self.assertEqual("codex", cards["implement"]["assignee"])
 
             # blocked marks the card blocked; recovery closes it
@@ -910,7 +907,7 @@ class StepCardTests(unittest.TestCase):
             h.complete("hub-agent", subtask["id"], "implement", "done")
             cards = self._cards(h, subtask["id"])
             self.assertEqual("closed", cards["implement"]["task_status"])
-            self.assertEqual("in_progress", cards["review"]["task_status"])
+            self.assertEqual("assigned", cards["review"]["task_status"])
 
             # rework closes the review card and opens a fresh implement card
             h.complete("rev", subtask["id"], "review", "rework", "tests missing")

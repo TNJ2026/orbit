@@ -1487,7 +1487,6 @@
       <div id="addStepModalTitle" class="modal-title" data-i18n="modal.addStep.title">Add workflow step</div>
       <label><div class="meta" data-i18n="modal.addStep.name">Name</div><input id="addStepName" type="text" placeholder="Step name" data-i18n-ph="modal.addStep.namePh"></label>
       <label id="addStepRoleField"><div class="meta" data-i18n="modal.addStep.role">Role</div><select id="addStepRole"></select></label>
-      <label id="addStepStatusField"><div class="meta" data-i18n="modal.addStep.status">Status</div><select id="addStepStatus"></select></label>
       <label id="addStepRequiredField" class="modal-check"><input id="addStepRequired" type="checkbox"><span class="meta" data-i18n="modal.addStep.required">Required (a step the flow must include)</span></label>
       <div class="modal-actions">
         <button id="addStepDelete" type="button" class="danger" style="margin-right: auto; display: none;" data-i18n="modal.addStep.delete">Delete</button>
@@ -1577,8 +1576,7 @@
         "action.close": "Close",
         "modal.addStep.title": "Add workflow step", "modal.addStep.editTitle": "Edit step",
         "modal.addStep.name": "Name", "modal.addStep.namePh": "Step name",
-        "modal.addStep.role": "Role", "modal.addStep.status": "Status",
-        "modal.addStep.statusTitle": "Free-form column label shown while a task sits at this step (max 12 chars)",
+        "modal.addStep.role": "Role",
         "modal.addStep.required": "Required (a step the flow must include)",
         "modal.addStep.delete": "Delete", "modal.addStep.cancel": "Cancel",
         "modal.addStep.add": "Add", "modal.addStep.save": "Save",
@@ -1696,8 +1694,7 @@
         "action.close": "关闭",
         "modal.addStep.title": "添加工作流步骤", "modal.addStep.editTitle": "编辑步骤",
         "modal.addStep.name": "名称", "modal.addStep.namePh": "步骤名称",
-        "modal.addStep.role": "角色", "modal.addStep.status": "状态",
-        "modal.addStep.statusTitle": "任务停在此步骤时显示的自定义列标签（最多 12 字符）",
+        "modal.addStep.role": "角色",
         "modal.addStep.required": "必选（流程必须包含的步骤）",
         "modal.addStep.delete": "删除", "modal.addStep.cancel": "取消",
         "modal.addStep.add": "添加", "modal.addStep.save": "保存",
@@ -2432,14 +2429,6 @@
       }));
     }
 
-    function renderWorkflowStatusOptions() {
-      const list = $("addStepStatus");
-      if (!list) return;
-      list.innerHTML = workflowStatusList().map(status => `
-        <option value="${escapeHtml(status.value)}">${escapeHtml(status.label || status.value)}</option>
-      `).join("");
-    }
-
 
     // Every card exposes four connection points — top / bottom / left / right,
     // each at its side's midpoint — carrying the side's outward normal so an
@@ -2503,7 +2492,6 @@
         state.workflow.path ? t("wf.config", escapeHtml(state.workflow.path)) : "",
         wfWarnings.length ? `<span style="color: var(--warn)">⚠ ${wfWarnings.map(escapeHtml).join(" · ")}</span>` : ""
       ].filter(Boolean).join(" — ");
-      renderWorkflowStatusOptions();
       const steps = state.workflow.steps || [];
       // Terminals: a start node has flow out but nothing pointing in; an end node
       // has flow in but nothing out. Rendered as fixed start/end pill nodes.
@@ -2895,7 +2883,6 @@
       $("addStepName").value = "";
       $("addStepName").placeholder = t("modal.addStep.namePh");
       $("addStepRole").innerHTML = roleOptionsHtml((state.roles[0] || {}).id || "");
-      $("addStepStatus").value = "created";
       $("addStepRequired").checked = false;
       $("addStepRequired").disabled = false;
       $("addStepModalBackdrop").classList.add("open");
@@ -2912,7 +2899,6 @@
       $("addStepDelete").style.display = step.required_locked ? "none" : "";
       $("addStepName").value = step.name || "";
       $("addStepRole").innerHTML = roleOptionsHtml(step.role_id || "");
-      $("addStepStatus").value = step.task_status || "";
       $("addStepRequired").checked = !!step.required;
       $("addStepRequired").disabled = !!step.required_locked;
       $("addStepModalBackdrop").classList.add("open");
@@ -2931,7 +2917,6 @@
     async function confirmAddStep() {
       const name = ($("addStepName").value || "").trim() || t("wf.step");
       const roleId = $("addStepRole").value || (state.roles[0] || {}).id || "hub";
-      const taskStatus = ($("addStepStatus").value || "").trim().slice(0, 12) || "created";
       const required = $("addStepRequired").checked;
       const steps = state.workflow.steps || [];
       // Seed coordinates only; saveWorkflow re-lays-out the graph with dagre.
@@ -2939,7 +2924,7 @@
       // "code_review"); fall back to a timestamp suffix on collisions.
       let newId = name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "step";
       if (steps.some(s => s.id === newId)) newId = `${newId}_${Date.now().toString(36)}`;
-      const newStep = { id: newId, name, role_id: roleId, task_status: taskStatus, required, x: 40, y: 60 };
+      const newStep = { id: newId, name, role_id: roleId, required, x: 40, y: 60 };
       state.workflow.steps = [...steps, newStep];
       closeAddStepModal();
       await run(async () => {
@@ -2955,7 +2940,6 @@
       if (!step) { closeAddStepModal(); return; }
       step.name = ($("addStepName").value || "").trim() || step.name || t("wf.step");
       step.role_id = $("addStepRole").value || step.role_id;
-      step.task_status = ($("addStepStatus").value || "").trim().slice(0, 12) || step.task_status;
       if (!step.required_locked) step.required = $("addStepRequired").checked;
       closeAddStepModal();
       await run(async () => {

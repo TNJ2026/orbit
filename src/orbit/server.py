@@ -317,7 +317,7 @@ def default_workflow_statuses() -> list[dict[str, str]]:
 
 
 def default_workflow_steps() -> list[dict[str, Any]]:
-    # (id, name, role_id, task_status, required, isolate, integrate, decompose, x, y)
+    # (id, name, role_id, required, isolate, integrate, decompose, x, y)
     # isolate: run in a per-task git worktree (implement/test/review all share
     # one worktree per task, so review reads exactly what implement produced).
     # integrate: single-assignee step that merges the task's worktree branch
@@ -329,29 +329,28 @@ def default_workflow_steps() -> list[dict[str, Any]]:
     specs = [
         # Fully linear forward chain (design runs sequentially: UI then arch), so
         # every card sits on one row; rework edges loop back underneath.
-        ("intake", "Triage", "hub", "created", True, False, False, False, 40, _DEFAULT_STEP_MID_Y),
-        ("product_design", "Product Design", "product_designer", "assigned", False, False, False, False, 340, _DEFAULT_STEP_MID_Y),
-        ("ui_design", "UI Design", "ui_designer", "assigned", False, False, False, False, 640, _DEFAULT_STEP_MID_Y),
-        ("architecture", "Architecture", "architect", "assigned", False, False, False, False, 940, _DEFAULT_STEP_MID_Y),
+        ("intake", "Triage", "hub", True, False, False, False, 40, _DEFAULT_STEP_MID_Y),
+        ("product_design", "Product Design", "product_designer", False, False, False, False, 340, _DEFAULT_STEP_MID_Y),
+        ("ui_design", "UI Design", "ui_designer", False, False, False, False, 640, _DEFAULT_STEP_MID_Y),
+        ("architecture", "Architecture", "architect", False, False, False, False, 940, _DEFAULT_STEP_MID_Y),
         # plan: the decomposition gate. architecture feeds it, and hub splits the
         # goal into subtasks that begin at implement.
-        ("plan", "Plan", "hub", "in_progress", True, False, False, True, 1240, _DEFAULT_STEP_MID_Y),
-        ("implement", "Implement", "implementer", "in_progress", True, True, False, False, 1540, _DEFAULT_STEP_MID_Y),
+        ("plan", "Plan", "hub", True, False, False, True, 1240, _DEFAULT_STEP_MID_Y),
+        ("implement", "Implement", "implementer", True, True, False, False, 1540, _DEFAULT_STEP_MID_Y),
         # review runs before test: a human/agent review first, then test is the
         # mandatory machine-verification gate. Set test's `verify` command (e.g.
         # the project's test suite) so a failing run objectively sends the task
         # back to implement instead of trusting a self-report.
-        ("review", "Review", "reviewer", "in_progress", True, True, False, False, 1840, _DEFAULT_STEP_MID_Y),
-        ("test", "Test", "tester", "in_progress", False, True, False, False, 2140, _DEFAULT_STEP_MID_Y),
-        ("integrate", "Integrate", "integrator", "in_progress", True, False, True, False, 2440, _DEFAULT_STEP_MID_Y),
-        ("accept", "Accept", "reviewer", "in_progress", True, False, False, False, 2740, _DEFAULT_STEP_MID_Y),
+        ("review", "Review", "reviewer", True, True, False, False, 1840, _DEFAULT_STEP_MID_Y),
+        ("test", "Test", "tester", False, True, False, False, 2140, _DEFAULT_STEP_MID_Y),
+        ("integrate", "Integrate", "integrator", True, False, True, False, 2440, _DEFAULT_STEP_MID_Y),
+        ("accept", "Accept", "reviewer", True, False, False, False, 2740, _DEFAULT_STEP_MID_Y),
     ]
     return [
         {
             "id": step_id,
             "name": name,
             "role_id": role_id,
-            "task_status": task_status,
             "required": required,
             "isolate": isolate,
             "integrate": integrate,
@@ -359,7 +358,7 @@ def default_workflow_steps() -> list[dict[str, Any]]:
             "x": x,
             "y": y,
         }
-        for step_id, name, role_id, task_status, required, isolate, integrate, decompose, x, y in specs
+        for step_id, name, role_id, required, isolate, integrate, decompose, x, y in specs
     ]
 
 
@@ -384,21 +383,15 @@ def default_workflow_edges() -> list[dict[str, str]]:
     ]
 
 
-def _workflow_status_values(statuses: list[dict[str, str]]) -> set[str]:
-    return {status["value"] for status in statuses}
-
-
 def _normalize_workflow_step(
     step: Any,
     index: int,
-    allowed_statuses: set[str] | None = None,
 ) -> dict[str, Any]:
     if not isinstance(step, dict):
         raise InvalidInputError("workflow step must be an object")
     step_id = _agent_slug(str(step.get("id", "") or f"step-{index + 1}"))
     name = str(step.get("name", "") or step_id).strip()
     role_id = str(step.get("role_id", "")).strip()
-    task_status = str(step.get("task_status", "")).strip()
     if not name:
         raise InvalidInputError("workflow step name is required")
 
@@ -414,12 +407,6 @@ def _normalize_workflow_step(
 
     if not _is_valid_role_id(role_id):
         raise InvalidInputError("workflow step role_id is invalid")
-    allowed_statuses = allowed_statuses or _workflow_status_values(default_workflow_statuses())
-    if task_status and task_status not in allowed_statuses:
-        raise InvalidInputError(
-            "workflow step task_status is invalid: expected one of "
-            + ", ".join(sorted(allowed_statuses))
-        )
     try:
         timeout_minutes = int(step.get("timeout_minutes", 0) or 0)
     except (TypeError, ValueError):
@@ -443,7 +430,6 @@ def _normalize_workflow_step(
         "id": step_id,
         "name": name,
         "role_id": role_id,
-        "task_status": task_status or "created",
         "required": required,
         "required_locked": required_locked,
         "timeout_minutes": timeout_minutes,
@@ -572,10 +558,9 @@ def read_workflow_config(project_root: str | None = None) -> dict[str, Any]:
         # Normalize the defaults too so unsaved workflows carry the same
         # derived fields (required_locked, timeout_minutes) as saved ones.
         statuses = default_workflow_statuses()
-        allowed_statuses = _workflow_status_values(statuses)
         return {
             "steps": [
-                _normalize_workflow_step(step, index, allowed_statuses)
+                _normalize_workflow_step(step, index)
                 for index, step in enumerate(default_workflow_steps())
             ],
             "statuses": statuses,
@@ -591,9 +576,8 @@ def read_workflow_config(project_root: str | None = None) -> dict[str, Any]:
     if not isinstance(steps, list):
         raise InvalidInputError("workflow steps must be a list")
     statuses = default_workflow_statuses()
-    allowed_statuses = _workflow_status_values(statuses)
     normalized = [
-        _normalize_workflow_step(step, index, allowed_statuses)
+        _normalize_workflow_step(step, index)
         for index, step in enumerate(steps)
     ]
     valid_ids = {step["id"] for step in normalized}
@@ -668,9 +652,8 @@ def write_workflow_config(
     if not isinstance(steps, list):
         raise InvalidInputError("steps must be a list")
     normalized_statuses = default_workflow_statuses()
-    allowed_statuses = _workflow_status_values(normalized_statuses)
     normalized = [
-        _normalize_workflow_step(step, index, allowed_statuses)
+        _normalize_workflow_step(step, index)
         for index, step in enumerate(steps)
     ]
     if not normalized:
@@ -1287,16 +1270,6 @@ def _active_steps(transitions: list[dict[str, Any]]) -> list[str]:
     ]
 
 
-def _workflow_status_for_active_steps(
-    active_steps: list[str], cfg: dict[str, Any]
-) -> str | None:
-    active = set(active_steps)
-    for step in cfg["steps"]:
-        if step["id"] in active:
-            return step["task_status"]
-    return None
-
-
 _WORKFLOW_STATUS_OVERRIDES = {"blocked", "closed", "stalled"}
 
 
@@ -1310,10 +1283,7 @@ def _workflow_derived_task_status(
         return stored
     if stored in _WORKFLOW_STATUS_OVERRIDES:
         return stored
-    active = _active_steps(transitions)
-    if not active:
-        return stored
-    return _workflow_status_for_active_steps(active, cfg) or stored
+    return stored
 
 
 def _project_workflow_task_status(
@@ -1322,7 +1292,7 @@ def _project_workflow_task_status(
     task: dict[str, Any],
     cfg: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Overlay the visible task status from workflow transitions when available."""
+    """Return a task with its lifecycle status ready for API presentation."""
     if task.get("is_goal"):
         return task
     # Override statuses win regardless of transitions (see
@@ -2078,7 +2048,7 @@ def _upsert_step_card(
     if card:
         # Redispatch (rework loop / timeout reassign): reuse the open card.
         store.set_task_workflow_state(
-            card["id"], task_status=step["task_status"], assignee=assignee
+            card["id"], task_status="assigned", assignee=assignee
         )
         return
     # Title = step type + what THIS task is actually about (the parent task's
@@ -2095,7 +2065,7 @@ def _upsert_step_card(
         ),
         sender=WORKFLOW_ENGINE_AGENT,
         assignee=assignee,
-        status=step["task_status"],
+        status="assigned",
         role_required=step["role_id"],
     )
 
@@ -2154,8 +2124,8 @@ def _dispatch_step(
     store.record_task_transition(
         task_id, "", step["id"], WORKFLOW_ENGINE_AGENT, "dispatched", assignee
     )
-    # A root goal keeps its own lifecycle status (new/designing/decomposing),
-    # decoupled from the step's task column; only real tasks/cards adopt it.
+    # A root goal keeps its own lifecycle status (new/designing/decomposing).
+    # Regular tasks become assigned until their runner actually starts.
     if task.get("is_goal"):
         store.set_task_workflow_state(
             task_id,
@@ -2164,7 +2134,7 @@ def _dispatch_step(
         )
     else:
         store.set_task_workflow_state(
-            task_id, task_status=step["task_status"], assignee=assignee
+            task_id, task_status="assigned", assignee=assignee
         )
     if _materializes_step_cards(task):
         _upsert_step_card(store, project_root, task, step, assignee)

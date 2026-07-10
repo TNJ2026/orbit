@@ -472,7 +472,7 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual(["plan", "ship", "check"], [step["id"] for step in loaded["steps"]])
         self.assertTrue(loaded["path"].endswith(".orbit/workflow.json"))
 
-    def test_workflow_step_status_uses_fixed_task_statuses(self):
+    def test_workflow_steps_do_not_configure_task_status(self):
         import orbit.server as server
         from orbit.store import InvalidInputError
 
@@ -490,17 +490,7 @@ class PackagingTests(unittest.TestCase):
             saved = server.write_workflow_config(steps, tmp)
             self.assertEqual(server.default_workflow_statuses(), saved["statuses"])
             by_id = {s["id"]: s for s in saved["steps"]}
-            self.assertEqual("assigned", by_id["b"]["task_status"])
-
-            with self.assertRaisesRegex(InvalidInputError, "task_status is invalid"):
-                server.write_workflow_config(
-                    steps[:2]
-                    + [{
-                        "id": "c", "name": "C", "role_id": "reviewer",
-                        "task_status": "custom",
-                    }],
-                    tmp,
-                )
+            self.assertNotIn("task_status", by_id["b"])
 
     def test_workflow_rejects_payload_missing_core_role_steps(self):
         import orbit.server as server
