@@ -204,7 +204,7 @@ class WorkflowEngineTests(unittest.TestCase):
             self.assertIsNotNone(reason)
             self.assertIn("intake", reason)
             # overrides always stick
-            for ok in ("blocked", "stalled", "closed"):
+            for ok in ("blocked", "closed"):
                 self.assertIsNone(server._manual_status_rejection(h.store, task, ok))
             # no active steps (never started) -> anything goes
             idle_id = h.create_task(title="idle")
@@ -815,6 +815,10 @@ class StepCardTests(unittest.TestCase):
             self.assertEqual("hub-agent", cards["intake"]["assignee"])
             self.assertEqual("assigned", cards["intake"]["task_status"])
             self.assertIn("Intake", cards["intake"]["title"])
+            [summary] = server.goals_summary(h.store, tmp)
+            self.assertEqual(
+                ["intake"], [step["workflow_step"] for step in summary["steps"]]
+            )
 
             report = server.run_step_worker(
                 h.store,

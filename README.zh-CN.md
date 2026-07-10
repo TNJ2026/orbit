@@ -248,7 +248,6 @@ Deliverable:
 | `assigned` | 已派发给目标角色 |
 | `in_progress` | 某步骤的 runner 正在执行 |
 | `blocked` | 被阻塞，需要输入或环境变化 |
-| `stalled` | 暂停，当前不再推进 |
 | `closed` | 完成（终结态） |
 
 Task 状态在所有工作流中固定不变。设计、评审、测试、审批等领域阶段属于工作流步骤，不属于 Task 状态。

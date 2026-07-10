@@ -297,7 +297,6 @@ _WORKFLOW_STATUS_LABELS = {
     "assigned": "Assigned",
     "in_progress": "In Progress",
     "blocked": "Blocked",
-    "stalled": "On Hold",
     "closed": "Done",
 }
 
@@ -310,7 +309,6 @@ def default_workflow_statuses() -> list[dict[str, str]]:
             "assigned",
             "in_progress",
             "blocked",
-            "stalled",
             "closed",
         )
     ]
@@ -834,12 +832,26 @@ def goals_summary(
             child for child in children.get(task["id"], [])
             if child.get("source_message_id") is not None
         ]
+        goal_steps = [
+            child for child in children.get(task["id"], [])
+            if child.get("source_message_id") is None
+        ]
         goals.append({
             **task,
             "subtask_total": len(subs),
             "subtask_closed": sum(1 for s in subs if s["task_status"] == "closed"),
             "subtask_blocked": sum(1 for s in subs if s["task_status"] == "blocked"),
             "tokens_total": store.sum_goal_tokens(task["id"]),
+            "steps": [
+                {
+                    "id": step["id"],
+                    "workflow_step": step.get("workflow_step", ""),
+                    "title": step.get("title", ""),
+                    "task_status": step["task_status"],
+                    "assignee": step.get("assignee", ""),
+                }
+                for step in sorted(goal_steps, key=lambda item: item["id"])
+            ],
             "subtasks": [
                 {
                     "id": s["id"],
@@ -1270,7 +1282,7 @@ def _active_steps(transitions: list[dict[str, Any]]) -> list[str]:
     ]
 
 
-_WORKFLOW_STATUS_OVERRIDES = {"blocked", "closed", "stalled"}
+_WORKFLOW_STATUS_OVERRIDES = {"blocked", "closed"}
 
 
 def _workflow_derived_task_status(

@@ -1629,6 +1629,7 @@
         "goal.enterFirst": "Enter a goal first",
         "goal.started": "Goal #{0} started", "goal.startedWith": "Goal #{0} started ({1})",
         "goal.noSubtasks": "no subtasks yet", "goal.analyzing": "Analyzing goal, splitting subtasks…",
+        "goal.phases": "Goal phases",
         "goal.tokensTitle": "Tokens consumed across this goal's runs (only counts runners that report usage)",
         "goal.budgetChip": "budget {0}M", "goal.budgetChipTitle": "This goal's hard token ceiling (millions); dispatch freezes once used tokens exceed it",
         "goal.done": "{0}/{1} done", "goal.blocked": "{0} blocked", "goal.tokens": "🔢 {0} tokens",
@@ -1747,6 +1748,7 @@
         "goal.enterFirst": "请先输入目标",
         "goal.started": "目标 #{0} 已启动", "goal.startedWith": "目标 #{0} 已启动（{1}）",
         "goal.noSubtasks": "暂无子任务", "goal.analyzing": "正在分析目标，拆解子任务…",
+        "goal.phases": "目标阶段",
         "goal.tokensTitle": "该目标所有运行消耗的 tokens（仅统计上报用量的 runner）",
         "goal.budgetChip": "预算 {0}M", "goal.budgetChipTitle": "本目标的 token 硬上限（百万）；用量超出后冻结派发",
         "goal.done": "{0}/{1} 已完成", "goal.blocked": "{0} 已阻塞", "goal.tokens": "🔢 {0} tokens",
@@ -3071,20 +3073,16 @@
     function renderTasks() {
       // The board shows the real tasks — a goal's business subtasks (or all,
       // incl. standalone tasks). Goals live on the Goals page. A subtask's step
-      // cards stay hidden here (listed in the task detail), but a GOAL's own
-      // step cards — the design / decompose phase it runs before splitting
-      // (product_design, ui_design, architecture, …) — are surfaced as cards so
-      // that phase is visible instead of buried under the goal.
+      // cards stay hidden here and are shown in their parent task/goal detail.
+      // The board contains business work only, never workflow bookkeeping.
       // The goal chips above the board filter to one goal so the board shows that
       // goal's work rather than the whole history.
       const filter = goalFilterId();
-      const goalIds = new Set((state.tasks || []).filter(t => t.is_goal).map(t => t.id));
       const visibleTasks = [];
       (state.tasks || []).forEach(task => {
         if (task.is_goal) return;
         const isStepCard = task.parent_task_id && !task.source_message_id;
-        // Hide subtask step cards; keep goal-level step cards (parent is a goal).
-        if (isStepCard && !goalIds.has(task.parent_task_id)) return;
+        if (isStepCard) return;
         if (filter !== "all" && task.parent_task_id !== filter) return;  // other goal / standalone
         visibleTasks.push(task);
       });
@@ -3264,6 +3262,25 @@
         <div class="goal-progress"><div class="goal-progress-fill" style="width: ${pct}%"></div></div>`;
     }
 
+    function workflowStepName(stepId, fallback) {
+      const step = (state.workflow.steps || []).find(item => item.id === stepId);
+      return (step && step.name) || fallback || stepId;
+    }
+
+    function goalStepsHtml(goal) {
+      const steps = goal.steps || [];
+      if (!steps.length) return "";
+      return `
+        <div class="goal-subtasks">
+          <div class="meta" style="margin-bottom: 5px;">${t("goal.phases")}</div>
+          ${steps.map(step => {
+            const status = step.task_status || "assigned";
+            const icon = status === "closed" ? "✓" : status === "blocked" ? "!" : "●";
+            return `<div class="meta"><span aria-hidden="true">${icon}</span> ${escapeHtml(workflowStepName(step.workflow_step, step.title))} · ${escapeHtml(stLabel(status))}${step.assignee ? ` · ${escapeHtml(step.assignee)}` : ""}</div>`;
+          }).join("")}
+        </div>`;
+    }
+
     function renderGoals() {
       const allGoals = state.goals || [];
       const hideClosed = $("hideClosedGoals") ? $("hideClosedGoals").checked : true;
@@ -3282,13 +3299,14 @@
               ${(goal.task_status !== "closed" && goal.task_status !== "accepted") ? `<button type="button" class="danger" onclick="event.stopPropagation(); forceCloseGoal(${goal.id})" title="${escapeHtml(t("goal.forceEndTitle"))}">${t("goal.forceEnd")}</button>` : ""}
             </span>
           </div>
-          ${goal.workflow_step ? `<div class="meta">⚙ ${escapeHtml(goal.workflow_step)} · ${escapeHtml(goal.assignee || "")}</div>` : ""}
+          ${goal.workflow_step ? `<div class="meta">⚙ ${escapeHtml(workflowStepName(goal.workflow_step))} · ${escapeHtml(goal.assignee || "")}</div>` : ""}
           ${goalProgressHtml(goal)}
+          ${goalStepsHtml(goal)}
           ${goal.subtasks.length ? `
             <div class="goal-subtasks">
               ${goal.subtasks.map(sub => `
                 <div class="meta goal-subtask-row" onclick="event.stopPropagation(); openGoalTask(${sub.id})" style="cursor: pointer;" tabindex="0" role="button" aria-label="#${sub.id} ${escapeHtml(sub.title || "")}">
-                  #${sub.id} ${escapeHtml(sub.title || "")} — ${escapeHtml(stLabel(sub.task_status))}${sub.workflow_step ? ` · ⚙ ${escapeHtml(sub.workflow_step)}` : ""}
+                  #${sub.id} ${escapeHtml(sub.title || "")} — ${escapeHtml(stLabel(sub.task_status))}${sub.workflow_step ? ` · ⚙ ${escapeHtml(workflowStepName(sub.workflow_step))}` : ""}
                 </div>
               `).join("")}
             </div>` : ""}

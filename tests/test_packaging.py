@@ -195,6 +195,8 @@ class PackagingTests(unittest.TestCase):
         self.assertNotIn('id="workflowStatuses"', html)
         self.assertIn("function workflowStatusList()", html)
         self.assertIn("function taskBoardColumns(tasks)", html)
+        self.assertIn("function goalStepsHtml(goal)", html)
+        self.assertIn("if (isStepCard) return;", html)
         self.assertNotIn("const COLUMN_MAP", html)
         self.assertIn("workflow-canvas", html)
         self.assertIn("workflow-node", html)

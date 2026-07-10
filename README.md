@@ -172,7 +172,7 @@ Every run records a token count, aggregated per goal so you can watch and cap sp
 
 - Switch between running project daemons via the Project dropdown at the top
 - View installed common agent CLIs and the team config
-- **Board**: tasks by status column (todo / assigned / in progress / blocked / on hold / done)
+- **Board**: tasks by status column (todo / assigned / in progress / blocked / done)
 - **Workflow**: visually edit the workflow graph (steps, roles, edges, per-step `verify` command)
 - **Jobs**: the `run_jobs` execution queue (status / outcome / claimant / lease expiry) to confirm the runner is consuming
 - **Goals**: goal progress and subtree token spend; **Force End** to hard-stop (kill running runners + close the whole tree)
@@ -226,7 +226,6 @@ Deliverable:
 | `assigned` | Dispatched to the target role |
 | `in_progress` | A step's runner is executing |
 | `blocked` | Blocked, needs input or an environment change |
-| `stalled` | On hold; not currently progressing |
 | `closed` | Done (terminal) |
 
 These task statuses are fixed across all workflows. Domain-specific phases such
