@@ -219,7 +219,7 @@ class PackagingTests(unittest.TestCase):
         self.assertIn('class="step-item', html)
         self.assertNotIn('id="jobsTab"', html)                 # jobs page removed
         self.assertIn('id="teamRequirements"', html)
-        self.assertIn('const REQUIRED_TEAM_ROLES = ["hub", "implementer", "reviewer"]', html)
+        self.assertIn('const REQUIRED_TEAM_ROLES = ["hub", "implementer", "integrator", "reviewer"]', html)
         self.assertNotIn("function recommendAgent(taskId)", html)
         self.assertNotIn("function renderAssignmentCandidates()", html)
         self.assertNotIn("/api/tasks/${taskId}/assignment-candidates", html)

@@ -2989,7 +2989,7 @@
         `<option value="${escapeHtml(opt.value)}" ${selectedValue === opt.value ? "selected" : ""}>${escapeHtml(stLabel(opt.value))}</option>`
       ).join("");
     }
-    const REQUIRED_TEAM_ROLES = ["hub", "implementer", "reviewer"];
+    const REQUIRED_TEAM_ROLES = ["hub", "implementer", "integrator", "reviewer"];
 
     async function loadTasks() {
       if (!state.apiBase) {
