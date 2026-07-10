@@ -268,14 +268,26 @@ def _validate_kind(kind: str) -> str:
     return kind
 
 
+# Custom workflow-step statuses (free-form column labels typed in the step
+# editor) land on task rows via dispatch; cap their length. Must match
+# server.MAX_STEP_STATUS_LEN.
+_MAX_CUSTOM_STATUS_LEN = 12
+
+
 def _validate_task_status(task_status: str) -> str:
     task_status = (task_status or "").strip()
-    if task_status not in TASK_STATUSES:
-        raise InvalidInputError(
-            f"invalid task_status: {task_status!r} "
-            f"(expected one of {sorted(s for s in TASK_STATUSES if s)})"
-        )
-    return task_status
+    if task_status in TASK_STATUSES:
+        return task_status
+    # Free-form step status: any short label. TASK_STATUSES keeps the
+    # engine-semantic set (terminal/override checks compare those literals);
+    # anything else behaves as a generic active phase.
+    if 0 < len(task_status) <= _MAX_CUSTOM_STATUS_LEN:
+        return task_status
+    raise InvalidInputError(
+        f"invalid task_status: {task_status!r} "
+        f"(expected one of {sorted(s for s in TASK_STATUSES if s)} "
+        f"or a custom label of at most {_MAX_CUSTOM_STATUS_LEN} chars)"
+    )
 
 
 # Engine paths that drive a *task* through the workflow also drive a goal through

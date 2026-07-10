@@ -465,13 +465,22 @@ class StoreTests(unittest.TestCase):
     def test_invalid_task_status_is_rejected_not_cleaned(self):
         store = self.make_store()
         self.register_pair(store)
+        # custom free-form labels (<=12 chars) are allowed — they come from
+        # free-form workflow step statuses landing on task rows via dispatch
+        [ok_id] = store.send_message(
+            "a", "b", "x", kind="task", task_status="urgent"
+        )
+        self.assertEqual("urgent", store.get_message(ok_id)["task_status"])
+        # over the cap -> rejected
         with self.assertRaises(InvalidInputError):
-            store.send_message("a", "b", "x", kind="task", task_status="urgent")
+            store.send_message(
+                "a", "b", "x", kind="task", task_status="a" * 13
+            )
         [task_id] = store.send_message(
             "a", "b", "x", kind="task", task_status="assigned"
         )
         with self.assertRaises(InvalidInputError):
-            store.update_task_status(task_id, "done")
+            store.update_task_status(task_id, "a" * 13)
         with self.assertRaises(InvalidInputError):
             store.update_task_status(task_id, "")
         # status untouched by the failed updates

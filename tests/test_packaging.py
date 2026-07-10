@@ -468,7 +468,7 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual(["plan", "ship", "check"], [step["id"] for step in loaded["steps"]])
         self.assertTrue(loaded["path"].endswith(".orbit/workflow.json"))
 
-    def test_workflow_step_status_must_come_from_workflow_statuses(self):
+    def test_workflow_step_status_is_free_form_but_capped(self):
         import orbit.server as server
         from orbit.store import InvalidInputError
 
@@ -478,7 +478,8 @@ class PackagingTests(unittest.TestCase):
                 "id": "b",
                 "name": "B",
                 "role_id": "implementer",
-                "task_status": "in_progress",
+                # free-form label, not in the statuses list
+                "task_status": "designing",
             },
             {"id": "c", "name": "C", "role_id": "reviewer", "task_status": "testing"},
         ]
@@ -487,24 +488,22 @@ class PackagingTests(unittest.TestCase):
             {"value": "in_progress", "label": "In Progress"},
         ]
         with TemporaryDirectory() as tmp:
+            saved = server.write_workflow_config(steps, tmp, statuses=statuses)
+            self.assertEqual(statuses, saved["statuses"])
+            by_id = {s["id"]: s for s in saved["steps"]}
+            self.assertEqual("designing", by_id["b"]["task_status"])
+
+            # over the 12-char cap -> rejected
             with self.assertRaisesRegex(InvalidInputError, "task_status is invalid"):
-                server.write_workflow_config(steps, tmp, statuses=statuses)
-
-            saved = server.write_workflow_config(
-                steps[:2]
-                + [
-                    {
-                        "id": "c",
-                        "name": "C",
-                        "role_id": "reviewer",
-                        "task_status": "created",
-                    },
-                ],
-                tmp,
-                statuses=statuses,
-            )
-
-        self.assertEqual(statuses, saved["statuses"])
+                server.write_workflow_config(
+                    steps[:2]
+                    + [{
+                        "id": "c", "name": "C", "role_id": "reviewer",
+                        "task_status": "a" * 13,
+                    }],
+                    tmp,
+                    statuses=statuses,
+                )
 
     def test_workflow_rejects_payload_missing_core_role_steps(self):
         import orbit.server as server

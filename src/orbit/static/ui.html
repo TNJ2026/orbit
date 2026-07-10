@@ -1489,7 +1489,7 @@
       <div id="addStepModalTitle" class="modal-title" data-i18n="modal.addStep.title">Add workflow step</div>
       <label><div class="meta" data-i18n="modal.addStep.name">Name</div><input id="addStepName" type="text" placeholder="Step name" data-i18n-ph="modal.addStep.namePh"></label>
       <label id="addStepRoleField"><div class="meta" data-i18n="modal.addStep.role">Role</div><select id="addStepRole"></select></label>
-      <label id="addStepStatusField"><div class="meta" data-i18n="modal.addStep.status">Status</div><select id="addStepStatus"></select></label>
+      <label id="addStepStatusField"><div class="meta" data-i18n="modal.addStep.status">Status</div><input id="addStepStatus" type="text" maxlength="12" placeholder="created" data-i18n-title="modal.addStep.statusTitle"></label>
       <label id="addStepRequiredField" class="modal-check"><input id="addStepRequired" type="checkbox"><span class="meta" data-i18n="modal.addStep.required">Required (a step the flow must include)</span></label>
       <div class="modal-actions">
         <button id="addStepDelete" type="button" class="danger" style="margin-right: auto; display: none;" data-i18n="modal.addStep.delete">Delete</button>
@@ -1580,6 +1580,7 @@
         "modal.addStep.title": "Add workflow step", "modal.addStep.editTitle": "Edit step",
         "modal.addStep.name": "Name", "modal.addStep.namePh": "Step name",
         "modal.addStep.role": "Role", "modal.addStep.status": "Status",
+        "modal.addStep.statusTitle": "Free-form column label shown while a task sits at this step (max 12 chars)",
         "modal.addStep.required": "Required (a step the flow must include)",
         "modal.addStep.delete": "Delete", "modal.addStep.cancel": "Cancel",
         "modal.addStep.add": "Add", "modal.addStep.save": "Save",
@@ -1700,6 +1701,7 @@
         "modal.addStep.title": "添加工作流步骤", "modal.addStep.editTitle": "编辑步骤",
         "modal.addStep.name": "名称", "modal.addStep.namePh": "步骤名称",
         "modal.addStep.role": "角色", "modal.addStep.status": "状态",
+        "modal.addStep.statusTitle": "任务停在此步骤时显示的自定义列标签（最多 12 字符）",
         "modal.addStep.required": "必选（流程必须包含的步骤）",
         "modal.addStep.delete": "删除", "modal.addStep.cancel": "取消",
         "modal.addStep.add": "添加", "modal.addStep.save": "保存",
@@ -2883,7 +2885,7 @@
       $("addStepName").value = "";
       $("addStepName").placeholder = t("modal.addStep.namePh");
       $("addStepRole").innerHTML = roleOptionsHtml((state.roles[0] || {}).id || "");
-      $("addStepStatus").innerHTML = statusOptionsHtml((workflowStatusOptions()[0] || {}).value || "");
+      $("addStepStatus").value = "created";
       $("addStepRequired").checked = false;
       $("addStepRequired").disabled = false;
       $("addStepModalBackdrop").classList.add("open");
@@ -2900,7 +2902,7 @@
       $("addStepDelete").style.display = step.required_locked ? "none" : "";
       $("addStepName").value = step.name || "";
       $("addStepRole").innerHTML = roleOptionsHtml(step.role_id || "");
-      $("addStepStatus").innerHTML = statusOptionsHtml(step.task_status || "");
+      $("addStepStatus").value = step.task_status || "";
       $("addStepRequired").checked = !!step.required;
       $("addStepRequired").disabled = !!step.required_locked;
       $("addStepModalBackdrop").classList.add("open");
@@ -2919,7 +2921,7 @@
     async function confirmAddStep() {
       const name = ($("addStepName").value || "").trim() || t("wf.step");
       const roleId = $("addStepRole").value || (state.roles[0] || {}).id || "hub";
-      const taskStatus = $("addStepStatus").value || (workflowStatusOptions()[0] || {}).value || "created";
+      const taskStatus = ($("addStepStatus").value || "").trim().slice(0, 12) || "created";
       const required = $("addStepRequired").checked;
       const steps = state.workflow.steps || [];
       // Seed coordinates only; saveWorkflow re-lays-out the graph with dagre.
@@ -2943,7 +2945,7 @@
       if (!step) { closeAddStepModal(); return; }
       step.name = ($("addStepName").value || "").trim() || step.name || t("wf.step");
       step.role_id = $("addStepRole").value || step.role_id;
-      step.task_status = $("addStepStatus").value || step.task_status;
+      step.task_status = ($("addStepStatus").value || "").trim().slice(0, 12) || step.task_status;
       if (!step.required_locked) step.required = $("addStepRequired").checked;
       closeAddStepModal();
       await run(async () => {
@@ -3058,34 +3060,8 @@
       "accepted": "progress",
       "closed": "done"
     };
-    // Fallback only; the workflow config returned by the server is the source
-    // of truth for status choices in step cards.
-    const DEFAULT_WORKFLOW_STATUSES = [
-      { value: "created", label: "created" },
-      { value: "assigned", label: "assigned" },
-      { value: "in_progress", label: "in_progress" },
-      { value: "testing", label: "testing" },
-      { value: "reviewing", label: "reviewing" },
-      { value: "accepted", label: "accepted" },
-      { value: "blocked", label: "blocked" },
-      { value: "stalled", label: "stalled" },
-      { value: "closed", label: "closed" }
-    ];
-    function workflowStatusOptions() {
-      const statuses = state.workflow && Array.isArray(state.workflow.statuses)
-        ? state.workflow.statuses
-        : [];
-      return statuses.length ? statuses : DEFAULT_WORKFLOW_STATUSES;
-    }
-    function statusOptionsHtml(selected) {
-      const options = workflowStatusOptions();
-      const selectedValue = options.some(opt => opt.value === selected)
-        ? selected
-        : (options[0] || {}).value || "";
-      return options.map(opt =>
-        `<option value="${escapeHtml(opt.value)}" ${selectedValue === opt.value ? "selected" : ""}>${escapeHtml(stLabel(opt.value))}</option>`
-      ).join("");
-    }
+    // Step statuses are free-form labels typed in the step editor (max 12
+    // chars); unknown ones fall into the "todo" column via COLUMN_MAP above.
 
     async function loadTasks() {
       if (!state.apiBase) {

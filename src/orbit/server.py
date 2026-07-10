@@ -390,6 +390,11 @@ def default_workflow_edges() -> list[dict[str, str]]:
     ]
 
 
+# Step statuses are free-form (typed into the step editor, not picked from a
+# list); cap the length so board chips and prompts stay readable.
+MAX_STEP_STATUS_LEN = 12
+
+
 def _normalize_workflow_statuses(statuses: Any = None) -> list[dict[str, str]]:
     if statuses is None:
         return default_workflow_statuses()
@@ -410,8 +415,8 @@ def _normalize_workflow_statuses(statuses: Any = None) -> list[dict[str, str]]:
             raise InvalidInputError("workflow status must be a string or object")
         if not value:
             raise InvalidInputError("workflow status value is required")
-        if value not in TASK_STATUSES or value == "":
-            raise InvalidInputError("workflow status value is invalid")
+        if len(value) > MAX_STEP_STATUS_LEN:
+            raise InvalidInputError("workflow status value is invalid: too long")
         if value in seen:
             continue
         seen.add(value)
@@ -451,11 +456,14 @@ def _normalize_workflow_step(
 
     if not _is_valid_role_id(role_id):
         raise InvalidInputError("workflow step role_id is invalid")
-    allowed_statuses = allowed_statuses or _workflow_status_values(
-        default_workflow_statuses()
-    )
-    if task_status and task_status not in allowed_statuses:
-        raise InvalidInputError("workflow step task_status is invalid")
+    # Step statuses are free-form column labels (the visible task status is
+    # derived from them), capped so the board chips stay readable. The workflow
+    # `statuses` list no longer constrains them; `allowed_statuses` is kept for
+    # call-site compatibility.
+    if len(task_status) > MAX_STEP_STATUS_LEN:
+        raise InvalidInputError(
+            f"workflow step task_status is invalid: longer than {MAX_STEP_STATUS_LEN} chars"
+        )
     try:
         timeout_minutes = int(step.get("timeout_minutes", 0) or 0)
     except (TypeError, ValueError):
@@ -5479,10 +5487,12 @@ def create_server(
 
             def _load() -> list[dict[str, Any]]:
                 filtered = status != "all"
-                if filtered and status not in TASK_STATUSES:
+                if filtered and status not in TASK_STATUSES \
+                        and len(status) > MAX_STEP_STATUS_LEN:
                     raise InvalidInputError(
                         f"invalid task_status: {status!r} "
-                        f"(expected one of {sorted(s for s in TASK_STATUSES if s)})"
+                        f"(expected one of {sorted(s for s in TASK_STATUSES if s)} "
+                        "or a custom step status)"
                     )
                 # The visible status is derived per row (workflow projection), so
                 # a status filter must scan every task and filter after
