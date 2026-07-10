@@ -2,7 +2,7 @@
 
 **简体中文** | [English](./README.md)
 
-> 本地多 agent 工作流编排器：把编码目标拆成任务，在一张可配置的工作流图上流转，runner 无头调用各 agent CLI（Claude Code、Codex CLI、Gemini CLI、自研 agent）执行「实现 → 测试 → 评审 → 集成」，每个任务在独立 git worktree 隔离进行，失败自动返工。
+> 本地多 agent 工作流编排器：把编码目标拆成任务，在一张可配置的工作流图上流转，runner 无头调用各 agent CLI（Claude Code、Codex CLI、Gemini CLI、自研 agent）执行「实现 → 评审 → 测试 → 集成」，每个任务在独立 git worktree 隔离进行，失败自动返工。
 
 ```
 目标/任务 ──▶ orbit（工作流引擎 + 调度）──▶ runner ──▶ agent CLI（Claude Code / Codex / Gemini …）
@@ -125,7 +125,7 @@ orbit runner --project /path/to/repo --name box-a      # 显式指定项目
 | **Scheduler**（serve 内线程） | 把"要执行某 step"写入 `run_jobs` 队列；单点消费执行完的 job 并推进工作流（dispatch / rework / accept）；跑 timeout / health 兜底 |
 | **Runner / Worker** | 从 `run_jobs` 领取任务（带租约 + 心跳）、执行各 agent 的 CLI、流式记录 stdout/stderr、解析 outcome，把结果写回 job |
 
-默认工作流（设计优先）：`intake(hub) → product_design → [ui_design ∥ architecture] → plan(hub) → implement → test → review → integrate(hub) → accept(hub)`。goal 先跑一次设计步，再由 `plan` 拆成实现子任务（每模块一个），子任务各自从 `implement` 起；`review` 有一条回到 `implement` 的返工回环，`test` 可配 `verify` 命令作为机器验证门。runner 把步骤 prompt 交给 agent CLI 无头执行，agent 在末尾打印 `WORKFLOW_OUTCOME: done|rework|blocked` 汇报（详见 `agents/_protocol.md`）。
+默认工作流（设计优先）：`intake(hub) → product_design → ui_design → architecture → plan(hub) → implement → review → test → integrate(integrator) → accept(reviewer)`。设计步串行执行（先 UI 再架构），goal 先跑一次；再由 `plan` 拆成实现子任务（每模块一个），子任务各自从 `implement` 起。`implement` 之后先 `review` 再 `test`（`test` 是机器验证门，可配 `verify` 命令）；`review` 和 `test` 都有回到 `implement` 的返工回环。runner 把步骤 prompt 交给 agent CLI 无头执行，agent 在末尾打印 `WORKFLOW_OUTCOME: done|rework|blocked` 汇报（详见 `agents/_protocol.md`）。
 
 ### 默认：一体进程
 
@@ -141,7 +141,7 @@ orbit serve        # UI + 调度 + 内嵌 Runner，全在一个进程
 
 ### 设计优先与 `decompose` 步
 
-goal 在哪一步拆成子任务，由打了 `decompose: true` 的那步决定。默认工作流把 `plan` 标为 decompose，所以 goal **自己**先跑一次设计步（`intake → product_design → [ui_design ∥ architecture] → plan`），再由 `plan`（hub）**结合设计产出**输出子任务 JSON。每个子任务从拆解步的**后继步**（`implement` 起）开始并继承该产出——于是设计步在 goal 层**只跑一次**（而非每个子任务一遍），子任务按架构模块干净切分。
+goal 在哪一步拆成子任务，由打了 `decompose: true` 的那步决定。默认工作流把 `plan` 标为 decompose，所以 goal **自己**先跑一次设计步（`intake → product_design → ui_design → architecture → plan`），再由 `plan`（hub）**结合设计产出**输出子任务 JSON。每个子任务从拆解步的**后继步**（`implement` 起）开始并继承该产出——于是设计步在 goal 层**只跑一次**（而非每个子任务一遍），子任务按架构模块干净切分。
 
 想换拆解点，就在 `.orbit/workflow.json` 里给别的步打标记；**不打** `decompose` 标记时，goal 会退回在入口步（`intake`）拆，每个子任务重跑整条工作流——更简单，但设计变成按子任务重复。该标记只能改 JSON 配置（同 `isolate`/`integrate`）；decompose 步自动 required、从不隔离、且必须有后继步供子任务起跑。
 

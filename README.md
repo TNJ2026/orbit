@@ -2,7 +2,7 @@
 
 [简体中文](./README.zh-CN.md) | **English**
 
-> A local multi-agent workflow orchestrator: it splits a coding goal into tasks that move through a configurable workflow graph, and runners headlessly invoke agent CLIs (Claude Code, Codex CLI, Gemini CLI, your own agent) to run implement → test → review → integrate. Each task runs isolated in its own git worktree, and failures loop back for rework.
+> A local multi-agent workflow orchestrator: it splits a coding goal into tasks that move through a configurable workflow graph, and runners headlessly invoke agent CLIs (Claude Code, Codex CLI, Gemini CLI, your own agent) to run implement → review → test → integrate. Each task runs isolated in its own git worktree, and failures loop back for rework.
 
 ```
 goal/task ──▶ orbit (workflow engine + scheduler) ──▶ runner ──▶ agent CLI (Claude Code / Codex / Gemini …)
@@ -127,7 +127,7 @@ The workflow engine is logically three layers — **Scheduler** (decides the nex
 | **Scheduler** (thread inside serve) | Enqueues "run this step" into `run_jobs`; single-point-consumes finished jobs and advances the workflow (dispatch / rework / accept); runs timeout / health backstops |
 | **Runner / Worker** | Claims jobs from `run_jobs` (with lease + heartbeat), executes each agent's CLI, streams stdout/stderr, parses the outcome, and writes the result back to the job |
 
-Default workflow (design-first): `intake(hub) → product_design → [ui_design ∥ architecture] → plan(hub) → implement → test → review → integrate(hub) → accept(hub)`. The goal runs the design steps once, then `plan` splits it into implementation subtasks (one per module) that each begin at `implement`; `review` has a loop-back edge to `implement`, and `test` can carry a `verify` command as a machine gate. The runner hands the step prompt to an agent CLI headlessly; the agent reports by printing `WORKFLOW_OUTCOME: done|rework|blocked` at the end (see `agents/_protocol.md`).
+Default workflow (design-first): `intake(hub) → product_design → ui_design → architecture → plan(hub) → implement → review → test → integrate(integrator) → accept(reviewer)`. The design steps run sequentially (UI first, then architecture); the goal runs them once, then `plan` splits it into implementation subtasks (one per module) that each begin at `implement`. After `implement` comes `review`, then `test` (the machine gate — it can carry a `verify` command); both `review` and `test` have loop-back edges to `implement` on rework. The runner hands the step prompt to an agent CLI headlessly; the agent reports by printing `WORKFLOW_OUTCOME: done|rework|blocked` at the end (see `agents/_protocol.md`).
 
 ### Default: single process
 
@@ -143,7 +143,7 @@ orbit serve        # UI + Scheduler + embedded Runner, all in one process
 
 ### Design-first & the `decompose` step
 
-Where a goal splits into subtasks is set by the step flagged `decompose: true`. The default workflow flags `plan`, so the goal itself runs the design steps once (`intake → product_design → [ui_design ∥ architecture] → plan`), then `plan` (hub) emits the subtask JSON using the design output as context. Each subtask begins at the decompose step's successors (`implement` onward), inheriting that output — so the design steps run **once** on the goal, not per subtask, and subtasks partition cleanly by the architecture's modules.
+Where a goal splits into subtasks is set by the step flagged `decompose: true`. The default workflow flags `plan`, so the goal itself runs the design steps once (`intake → product_design → ui_design → architecture → plan`), then `plan` (hub) emits the subtask JSON using the design output as context. Each subtask begins at the decompose step's successors (`implement` onward), inheriting that output — so the design steps run **once** on the goal, not per subtask, and subtasks partition cleanly by the architecture's modules.
 
 Move the split by flagging a different step in `.orbit/workflow.json`; with **no** `decompose` flag, a goal splits at the entry step instead (`intake`), and every subtask re-runs the whole workflow — simpler, but design then happens per subtask. The flag is config-only (edit the JSON, same as `isolate`/`integrate`); a decompose step is auto-required, never isolated, and must have a forward successor for its subtasks to start at.
 
