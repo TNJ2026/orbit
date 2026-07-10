@@ -2916,7 +2916,10 @@
       const required = $("addStepRequired").checked;
       const steps = state.workflow.steps || [];
       // Seed coordinates only; saveWorkflow re-lays-out the graph with dagre.
-      const newId = "step-" + Date.now().toString(36);
+      // Slugify the name into a stable step id (e.g. "Code Review" →
+      // "code_review"); fall back to a timestamp suffix on collisions.
+      let newId = name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "step";
+      if (steps.some(s => s.id === newId)) newId = `${newId}_${Date.now().toString(36)}`;
       const newStep = { id: newId, name, role_id: roleId, task_status: taskStatus, required, x: 40, y: 60 };
       state.workflow.steps = [...steps, newStep];
       closeAddStepModal();
