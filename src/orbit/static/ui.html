@@ -165,6 +165,67 @@
       flex-direction: column;
       overflow: hidden;
     }
+    .goal-execution {
+      flex: 0 0 auto;
+      padding: 14px 16px 0;
+      background: var(--bg);
+    }
+    .goal-execution-summary {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px 8px 0 0;
+      background: var(--panel);
+    }
+    .goal-execution-title {
+      min-width: 0;
+      font-weight: 650;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .goal-flow {
+      display: flex;
+      align-items: stretch;
+      gap: 0;
+      padding: 12px 14px;
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-top: 0;
+      border-radius: 0 0 8px 8px;
+      background: #fbfbf9;
+    }
+    .goal-flow-step {
+      min-width: 150px;
+      max-width: 210px;
+      padding: 9px 10px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: #fff;
+    }
+    .goal-flow-step.actionable { cursor: pointer; }
+    .goal-flow-step.actionable:hover { border-color: #9fc7b9; }
+    .goal-flow-step.done { background: #eef7f4; border-color: #9fc7b9; }
+    .goal-flow-step.running { background: #fff8e8; border-color: #d7b866; }
+    .goal-flow-step.blocked { background: #fff0ed; border-color: #d78b7d; }
+    .goal-flow-step-name { font-size: 12px; font-weight: 650; }
+    .goal-flow-arrow {
+      flex: 0 0 28px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--muted);
+    }
+    .tasks-section-label {
+      padding: 12px 16px 0;
+      background: var(--bg);
+      font-size: 12px;
+      font-weight: 650;
+      color: var(--muted);
+    }
     /* Task details as a right slide-over drawer (overlay). */
     .drawer-backdrop {
       position: fixed;
@@ -1406,7 +1467,7 @@
     <div id="tasksPage" class="page tasks-page active">
       <div class="pane-head">
         <div style="min-width: 0;">
-          <h2 data-i18n="tasks.title">Development Tasks</h2>
+          <h2 data-i18n="tasks.title">Goal Execution</h2>
           <div id="tasksGoalBar"></div>
         </div>
         <button id="refreshTasks" data-i18n="tasks.refresh">Refresh</button>
@@ -1551,13 +1612,8 @@
       selectedRunFileKey: "events",
       runFiles: {},
       goals: [],
-      selectedGoalId: null,  // board goal filter: goal id, "all", or null (default to newest active)
       taskDetailsCollapsed: localStorage.getItem("orbit-task-details-collapsed") !== "0"
     };
-    {
-      const gf = localStorage.getItem("orbit-goal-filter");
-      state.selectedGoalId = gf === "all" ? "all" : (gf ? Number(gf) : null);
-    }
 
     const $ = (id) => document.getElementById(id);
 
@@ -1586,7 +1642,12 @@
         "goal.verifyLabel": "Goal verify command (optional — runs on main after all subtasks close)",
         "goal.verifyPh": "e.g. python -m pytest",
         "goals.start": "▶ Start Goal",
-        "tasks.title": "Development Tasks", "tasks.refresh": "Refresh", "tasks.noSelected": "No task selected.",
+        "tasks.title": "Goal Execution", "tasks.refresh": "Refresh", "tasks.noSelected": "No task selected.",
+        "tasks.workflow": "Goal workflow", "tasks.work": "Business tasks",
+        "tasks.noGoal": "No goals yet. Start one from the Goals page.",
+        "tasks.noActiveGoal": "Latest goal", "tasks.mainTask": "Main task",
+        "tasks.awaitingTasks": "Business tasks will appear after planning completes.",
+        "tasks.waiting": "Waiting", "tasks.skipped": "Skipped",
         "tasks.close": "×",
         "agents.title": "Agents", "agents.refresh": "Refresh",
         "team.title": "Team", "team.refresh": "Refresh", "team.role": "Role", "team.agent": "Agent", "team.add": "Add to Team",
@@ -1705,7 +1766,12 @@
         "goal.verifyLabel": "目标验收命令（可选 —— 所有子任务关闭后在主干上运行）",
         "goal.verifyPh": "如 python -m pytest",
         "goals.start": "▶ 开始目标",
-        "tasks.title": "开发任务", "tasks.refresh": "刷新", "tasks.noSelected": "未选择任务。",
+        "tasks.title": "Goal 执行", "tasks.refresh": "刷新", "tasks.noSelected": "未选择任务。",
+        "tasks.workflow": "Goal 流程", "tasks.work": "业务任务",
+        "tasks.noGoal": "暂无 Goal，请先在 Goals 页面启动一个。",
+        "tasks.noActiveGoal": "最近 Goal", "tasks.mainTask": "主任务",
+        "tasks.awaitingTasks": "规划完成后将在这里生成业务任务。",
+        "tasks.waiting": "等待中", "tasks.skipped": "已跳过",
         "tasks.close": "×",
         "agents.title": "Agents", "agents.refresh": "刷新",
         "team.title": "团队", "team.refresh": "刷新", "team.role": "角色", "team.agent": "Agent", "team.add": "加入团队",
@@ -3090,22 +3156,84 @@
       return order.map(status => columns[status]);
     }
 
+    function currentBoardGoal() {
+      const goals = state.goals || [];
+      return goals.find(goal => !["closed", "accepted"].includes(goal.task_status))
+        || goals[0]
+        || null;
+    }
+
+    function goalWorkflowSteps() {
+      const steps = state.workflow.steps || [];
+      if (!steps.length) return [];
+      const decomposeIndex = steps.findIndex(step => step.decompose);
+      // Without an explicit decomposition marker, the engine treats the entry
+      // step as the goal-level split point. Match that behavior in the board.
+      return decomposeIndex >= 0 ? steps.slice(0, decomposeIndex + 1) : steps.slice(0, 1);
+    }
+
+    function goalFlowHtml(goal) {
+      const cards = new Map((goal.steps || []).map(card => [card.workflow_step, card]));
+      const phases = goalWorkflowSteps();
+      if (!phases.length) return "";
+      return `<div class="goal-flow" aria-label="${escapeHtml(t("tasks.workflow"))}">
+        ${phases.map((phase, index) => {
+          const card = cards.get(phase.id);
+          const status = card ? (card.task_status || "assigned") : "waiting";
+          const tone = status === "closed" ? "done"
+            : status === "blocked" ? "blocked"
+            : status === "in_progress" ? "running" : "";
+          const icon = status === "closed" ? "✓" : status === "blocked" ? "!"
+            : status === "in_progress" ? "●" : "○";
+          const statusLabel = status === "waiting" ? t("tasks.waiting") : stLabel(status);
+          const action = card ? ` onclick="showTaskDetails(${card.id})" tabindex="0" role="button"` : "";
+          const node = `<div class="goal-flow-step ${tone} ${card ? "actionable" : ""}"${action}>
+            <div class="goal-flow-step-name">${icon} ${escapeHtml(phase.name || phase.id)}</div>
+            <div class="meta">${escapeHtml(statusLabel)}${card && card.assignee ? ` · ${escapeHtml(card.assignee)}` : ""}</div>
+          </div>`;
+          return `${index ? '<div class="goal-flow-arrow" aria-hidden="true">→</div>' : ""}${node}`;
+        }).join("")}
+      </div>`;
+    }
+
+    function goalExecutionHtml(goal) {
+      const total = goal.subtask_total || 0;
+      const progress = total
+        ? `${t("goal.done", goal.subtask_closed || 0, total)}${goal.subtask_blocked ? ` · ${t("goal.blocked", goal.subtask_blocked)}` : ""}`
+        : t("tasks.awaitingTasks");
+      const historical = ["closed", "accepted"].includes(goal.task_status)
+        ? `<span class="badge">${escapeHtml(t("tasks.noActiveGoal"))}</span>` : "";
+      return `<div class="goal-execution">
+        <div class="goal-execution-summary">
+          <div style="min-width:0">
+            <div class="goal-execution-title">🎯 #${goal.id} ${escapeHtml(goal.title || t("goal.fallback"))}</div>
+            <div class="meta">${escapeHtml(stLabel(goal.task_status))} · ${escapeHtml(progress)}</div>
+          </div>
+          ${historical}
+        </div>
+        ${goalFlowHtml(goal)}
+      </div>`;
+    }
+
     function renderTasks() {
-      // The board shows the real tasks — a goal's business subtasks (or all,
-      // incl. standalone tasks). Goals live on the Goals page. A subtask's step
-      // cards stay hidden here and are shown in their parent task/goal detail.
-      // The board contains business work only, never workflow bookkeeping.
-      // The goal chips above the board filter to one goal so the board shows that
-      // goal's work rather than the whole history.
-      const filter = goalFilterId();
-      const visibleTasks = [];
-      (state.tasks || []).forEach(task => {
-        if (task.is_goal) return;
-        const isStepCard = task.parent_task_id && !task.source_message_id;
-        if (isStepCard) return;
-        if (filter !== "all" && task.parent_task_id !== filter) return;  // other goal / standalone
-        visibleTasks.push(task);
-      });
+      // This is the execution surface for the one current goal. Goal-level
+      // workflow steps appear above; only its business tasks enter the columns.
+      const goal = currentBoardGoal();
+      if (!goal) {
+        $("tasksList").innerHTML = `<div class="empty" style="padding:40px">${t("tasks.noGoal")}</div>`;
+        return;
+      }
+      let visibleTasks = (state.tasks || []).filter(task =>
+        !task.is_goal && task.parent_task_id === goal.id && !!task.source_message_id
+      );
+      // Before decomposition there is real work but no business child yet. Show
+      // the goal itself as a single main-task projection so the board is useful.
+      if (!visibleTasks.length) {
+        const root = (state.tasks || []).find(task => task.id === goal.id) || goal;
+        const projectionStatus = ["closed", "accepted"].includes(goal.task_status)
+          ? "closed" : goal.task_status;
+        visibleTasks = [{ ...root, task_status: projectionStatus, _goalProjection: true }];
+      }
       const columns = taskBoardColumns(visibleTasks);
       const byStatus = Object.fromEntries(columns.map(col => [col.status, col]));
       visibleTasks.forEach(task => {
@@ -3113,7 +3241,8 @@
         (byStatus[status] || columns[0]).tasks.push(task);
       });
 
-      $("tasksList").innerHTML = `
+      $("tasksList").innerHTML = `${goalExecutionHtml(goal)}
+        <div class="tasks-section-label">${t("tasks.work")}</div>
         <div class="kanban-board">
           ${columns.map(col => `
             <div class="kanban-column">
@@ -3126,10 +3255,11 @@
                   <div class="kanban-card" onclick="showTaskDetails(${task.id})" tabindex="0" role="button" aria-label="${escapeHtml(t("tasks.title"))} #${escapeHtml(task.display_id || String(task.id))}">
                     <div class="kanban-card-title">#${escapeHtml(task.display_id || String(task.id))} ${escapeHtml(task.title || t("task.fallback"))}</div>
                     <div class="kanban-card-content">${escapeHtml(task.content)}</div>
+                    ${task._goalProjection ? `<div class="meta" style="margin-bottom:4px"><span class="badge wf-step-badge">${t("tasks.mainTask")}</span></div>` : ""}
                     ${task.workflow_step || task.parent_task_id || task.is_goal ? `<div class="meta" style="margin-bottom: 4px; display: flex; gap: 4px; flex-wrap: wrap;">
                       ${task.is_goal ? `<span class="badge wf-step-badge">${t("task.goal")}</span>` : ""}
                       ${task.parent_task_id ? `<span class="badge" title="${escapeHtml(t("task.subtaskTitle", task.parent_task_id))}">${t("task.subtask", task.parent_task_id)}</span>` : ""}
-                      ${task.workflow_step ? `<span class="badge wf-step-badge">${t("task.step", escapeHtml(task.workflow_step))}</span>` : ""}
+                      ${task.workflow_step ? `<span class="badge wf-step-badge">${t("task.step", escapeHtml(workflowStepName(task.workflow_step)))}</span>` : ""}
                       ${(task.depends_on && task.depends_on.length && !task.workflow_step) ? `<span class="badge" title="${escapeHtml(t("task.waitingTitle"))}" style="color: var(--warn); border-color: var(--warn);">${t("task.waiting", task.depends_on.map(id => "#" + id).join(" "))}</span>` : ""}
                     </div>` : ""}
                     <div class="kanban-card-meta">
@@ -3256,7 +3386,7 @@
       state.goals = data.goals || [];
       renderGoals();
       renderTasksGoalBar();
-      renderTasks();  // goals drive the board's goal filter; re-render with it
+      renderTasks();  // the current goal drives the single-goal execution board
     }
 
     function goalProgressHtml(goal) {
@@ -3363,44 +3493,10 @@
       });
     }
 
-    // One-line subtitle under the Tasks heading summarizing active goals;
-    // long text truncates with an ellipsis. Click opens the Goals page.
-    // The board filter: the selected goal if still active, "all" if chosen
-    // explicitly, otherwise default to the newest active goal (so the board
-    // shows one goal's work, not the whole history).
-    function goalFilterId() {
-      const active = (state.goals || []).filter(g => g.task_status !== "closed");
-      const sel = state.selectedGoalId;
-      if (sel === "all") return "all";
-      if (sel != null && active.some(g => g.id === sel)) return sel;
-      return active.length ? active[0].id : "all";
-    }
-
-    function selectGoalFilter(id) {
-      state.selectedGoalId = id;
-      try { localStorage.setItem("orbit-goal-filter", String(id)); } catch (e) {}
-      renderTasksGoalBar();
-      renderTasks();
-    }
-
     function renderTasksGoalBar() {
       const bar = $("tasksGoalBar");
       if (!bar) return;
-      const active = (state.goals || []).filter(g => g.task_status !== "closed");
-      if (!active.length) { bar.innerHTML = ""; return; }
-      const sel = goalFilterId();
-      const chip = (id, label, title) =>
-        `<button class="goal-chip ${sel === id ? "active" : ""}" title="${escapeHtml(title || label)}"
-           onclick="selectGoalFilter(${id === "all" ? "'all'" : id})">${escapeHtml(label)}</button>`;
-      const goalChips = active.map(goal => {
-        const analyzing = !goal.subtask_total && goal.workflow_step
-          && !["stalled", "closed", "accepted"].includes(goal.task_status);
-        const progress = goal.subtask_total
-          ? ` · ${goal.subtask_closed}/${goal.subtask_total}${goal.subtask_blocked ? ` ⛔${goal.subtask_blocked}` : ""}`
-          : analyzing ? " · ⏳" : "";
-        return chip(goal.id, `🎯 #${goal.id} ${goal.title || t("goal.fallback")}${progress}`, goal.title);
-      }).join("");
-      bar.innerHTML = `<div class="goal-chips">${chip("all", t("goal.all"))}${goalChips}</div>`;
+      bar.innerHTML = `<span class="meta">${escapeHtml(t("tasks.workflow"))}</span>`;
     }
 
     async function showTaskDetails(taskId) {
