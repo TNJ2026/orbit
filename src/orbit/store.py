@@ -49,6 +49,23 @@ TASK_STATUSES = {
 }
 # Must stay in sync with the scoring tables in server.py — an off-list value
 # would silently score as the default there.
+
+# Goals (is_goal=1 rows) run a lifecycle of their own, decoupled from the
+# per-task/step statuses above: a goal traverses its design + decompose phase,
+# then rolls up its subtasks. A goal row is validated against THIS set, never
+# TASK_STATUSES, so a step column (e.g. "reviewing") can never land on a goal
+# and a goal phase (e.g. "decomposing") can never land on a task. The server
+# owns the phase→status mapping; here we only police the vocabulary.
+GOAL_STATUSES = {
+    "new",           # created, intake pending
+    "designing",     # at a pre-decompose design step (product/ui/architecture)
+    "decomposing",   # at the decompose step, splitting into subtasks
+    "running",       # subtasks dispatched and executing
+    "verifying",     # all subtasks closed, goal_verify running on integrated main
+    "accepted",      # verified / accepted (terminal)
+    "stalled",       # a subtask blocked, verify failed, or budget frozen
+    "closed",        # explicitly closed (terminal)
+}
 TASK_IMPORTANCE_LEVELS = {"low", "normal", "high", "critical"}
 TASK_SIZES = {"small", "medium", "large"}
 TASK_RISKS = {"low", "medium", "high"}
@@ -256,6 +273,40 @@ def _validate_task_status(task_status: str) -> str:
             f"(expected one of {sorted(s for s in TASK_STATUSES if s)})"
         )
     return task_status
+
+
+# Engine paths that drive a *task* through the workflow also drive a goal through
+# its pre-decompose phase, and would otherwise write a task-status onto the goal
+# row. Map those to the goal's own vocabulary so a goal never carries a step
+# column, without every call site having to special-case is_goal. (The dispatch
+# path picks richer phase names — designing/decomposing — before we get here.)
+_TASK_TO_GOAL_STATUS = {
+    "created": "new",
+    "assigned": "designing",
+    "in_progress": "running",
+    "testing": "running",
+    "reviewing": "running",
+    "blocked": "stalled",
+}
+
+
+def _validate_goal_status(status: str) -> str:
+    status = (status or "").strip()
+    if status in GOAL_STATUSES:
+        return status
+    mapped = _TASK_TO_GOAL_STATUS.get(status)
+    if mapped:
+        return mapped
+    raise InvalidInputError(
+        f"invalid goal status: {status!r} "
+        f"(expected one of {sorted(GOAL_STATUSES)})"
+    )
+
+
+def _validate_status_for(is_goal: bool, status: str) -> str:
+    """Route a status through the right vocabulary: goal rows against
+    GOAL_STATUSES, everything else against TASK_STATUSES."""
+    return _validate_goal_status(status) if is_goal else _validate_task_status(status)
 
 
 def _validate_agent_name(name: str) -> str:
@@ -868,11 +919,15 @@ class Store:
         return self.get_task(task_id)
 
     def update_task_item_status(self, task_id: int, task_status: str) -> bool:
-        task_status = _validate_task_status(task_status)
-        if not task_status:
+        if not (task_status or "").strip():
             raise InvalidInputError("task_status must not be empty for an update")
         now = _now()
         with self._lock:
+            # Goal rows (is_goal=1) validate against GOAL_STATUSES; the manual
+            # status API (e.g. close a goal) shares this path.
+            task_status = _validate_status_for(
+                self._row_is_goal_locked(task_id), task_status
+            )
             cur = self._conn.execute(
                 "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?",
                 (task_status, now, task_id),
@@ -945,23 +1000,32 @@ class Store:
         task_status: str | None = None,
         assignee: str | None = None,
     ) -> bool:
-        updates: list[str] = []
-        params: list[Any] = []
-        if workflow_step is not None:
-            updates.append("workflow_step = ?")
-            params.append(workflow_step)
-        if task_status is not None:
-            updates.append("status = ?")
-            params.append(_validate_task_status(task_status))
-        if assignee is not None:
-            updates.append("assignee = ?")
-            params.append(assignee)
-        if not updates:
+        if workflow_step is None and task_status is None and assignee is None:
             return False
-        updates.append("updated_at = ?")
-        params.append(_now())
-        params.append(task_id)
         with self._lock:
+            # Validate the status against the row's own vocabulary (goal rows use
+            # GOAL_STATUSES, tasks/cards use TASK_STATUSES) — so this single method
+            # serves both without ever letting a status cross the boundary.
+            if task_status is not None:
+                task_status = _validate_status_for(
+                    self._row_is_goal_locked(task_id), task_status
+                )
+            updates: list[str] = []
+            params: list[Any] = []
+            if workflow_step is not None:
+                updates.append("workflow_step = ?")
+                params.append(workflow_step)
+            if task_status is not None:
+                updates.append("status = ?")
+                params.append(task_status)
+            if assignee is not None:
+                updates.append("assignee = ?")
+                params.append(assignee)
+            if not updates:
+                return False
+            updates.append("updated_at = ?")
+            params.append(_now())
+            params.append(task_id)
             cur = self._conn.execute(
                 f"UPDATE tasks SET {', '.join(updates)} WHERE id = ?", params
             )
@@ -975,6 +1039,12 @@ class Store:
                 )
             self._conn.commit()
         return cur.rowcount > 0
+
+    def _row_is_goal_locked(self, task_id: int) -> bool:
+        row = self._conn.execute(
+            "SELECT is_goal FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        return bool(row["is_goal"]) if row else False
 
     def record_task_transition(
         self,

@@ -1589,6 +1589,8 @@
         "status.todo": "Todo", "status.assigned": "Assigned", "status.in_progress": "In Progress",
         "status.testing": "In Testing", "status.reviewing": "Under Review", "status.accepted": "Accepted",
         "status.blocked": "Blocked", "status.stalled": "Stalled", "status.closed": "Closed",
+        "status.new": "New", "status.designing": "Designing", "status.decomposing": "Decomposing",
+        "status.running": "Running", "status.verifying": "Verifying",
         "col.todo": "Todo", "col.progress": "In Progress", "col.testing": "In Testing",
         "col.blocked": "Blocked", "col.review": "Under Review", "col.done": "Done",
         "task.fallback": "Task", "task.fallbackId": "#{0} Task", "task.goal": "🎯 goal", "task.subtask": "↳ #{0}", "task.step": "⚙ {0}",
@@ -1703,6 +1705,8 @@
         "status.todo": "待办", "status.assigned": "已分配", "status.in_progress": "进行中",
         "status.testing": "测试中", "status.reviewing": "评审中", "status.accepted": "已接受",
         "status.blocked": "已阻塞", "status.stalled": "已停滞", "status.closed": "已关闭",
+        "status.new": "新建", "status.designing": "设计中", "status.decomposing": "拆解中",
+        "status.running": "运行中", "status.verifying": "验证中",
         "col.todo": "待办", "col.progress": "进行中", "col.testing": "测试中",
         "col.blocked": "已阻塞", "col.review": "评审中", "col.done": "已完成",
         "task.fallback": "任务", "task.fallbackId": "#{0} 任务", "task.goal": "🎯 目标", "task.subtask": "↳ #{0}", "task.step": "⚙ {0}",
@@ -3185,7 +3189,7 @@
         : "";
       // Intake in flight: goal started, hub is splitting it, no subtask cards yet.
       const analyzing = !goal.subtask_total && goal.workflow_step
-        && !["blocked", "closed", "accepted"].includes(goal.task_status);
+        && !["stalled", "closed", "accepted"].includes(goal.task_status);
       if (analyzing) {
         return `<span class="goal-analyzing"><span class="spinner"></span>${t("goal.analyzing")}${tokens}</span>`;
       }
@@ -3288,7 +3292,7 @@
            onclick="selectGoalFilter(${id === "all" ? "'all'" : id})">${escapeHtml(label)}</button>`;
       const goalChips = active.map(goal => {
         const analyzing = !goal.subtask_total && goal.workflow_step
-          && !["blocked", "closed", "accepted"].includes(goal.task_status);
+          && !["stalled", "closed", "accepted"].includes(goal.task_status);
         const progress = goal.subtask_total
           ? ` · ${goal.subtask_closed}/${goal.subtask_total}${goal.subtask_blocked ? ` ⛔${goal.subtask_blocked}` : ""}`
           : analyzing ? " · ⏳" : "";

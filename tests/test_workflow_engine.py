@@ -781,7 +781,7 @@ class StepCardTests(unittest.TestCase):
             )
 
             self.assertEqual("blocked", report["outcome"])
-            self.assertEqual("blocked", h.task(goal_id)["task_status"])
+            self.assertEqual("stalled", h.task(goal_id)["task_status"])  # goal vocabulary
             self.assertEqual("blocked", self._cards(h, goal_id)["intake"]["task_status"])
 
     def test_business_task_step_cards_settle_and_goal_waits_for_acceptance(self):
@@ -1391,7 +1391,7 @@ class MarkTaskRunningTests(unittest.TestCase):
 
             self.assertEqual("in_progress", h.task(card_id)["task_status"])
             self.assertEqual("in_progress", h.task(sub_id)["task_status"])
-            self.assertEqual("in_progress", h.task(goal_id)["task_status"])
+            self.assertEqual("running", h.task(goal_id)["task_status"])  # goal vocabulary
 
     def test_phase_status_card_kept_in_its_column(self):
         # A running review/test card must stay in "reviewing"/"testing" (Under
@@ -1463,7 +1463,7 @@ class GoalRollupTests(unittest.TestCase):
             self._mk(h, "s1", "closed", parent=goal)
             s2 = self._mk(h, "s2", "in_progress", parent=goal)
             server._recompute_parent_goal_status(h.store, h.task(s2), h.root)
-            self.assertEqual("in_progress", h.task(goal)["task_status"])
+            self.assertEqual("running", h.task(goal)["task_status"])
 
     def test_explicitly_closed_goal_is_left_alone(self):
         with TemporaryDirectory() as tmp:

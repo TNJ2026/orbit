@@ -1621,7 +1621,7 @@ def _enforce_goal_token_budget(
             goal_id, "budget_exceeded",
             note=f"goal tokens {total} exceed budget {budget}",
         )
-        store.set_task_workflow_state(goal_id, task_status="blocked")
+        store.set_task_workflow_state(goal_id, task_status="stalled")
         members = read_team_config(project_root)["members"]
         _notify_hub(
             store, members,
@@ -1720,14 +1720,14 @@ def _recompute_parent_goal_status(
                 store.create_workflow_action(
                     parent_id, "goal_verify", note=note,
                 )
-                if parent.get("task_status") != "in_progress":
-                    store.set_task_workflow_state(parent_id, task_status="in_progress")
+                if parent.get("task_status") != "verifying":
+                    store.set_task_workflow_state(parent_id, task_status="verifying")
             return
         new_status = "accepted"
     elif any(status == "blocked" for status in statuses):
         new_status = "stalled"
     else:
-        new_status = "in_progress"
+        new_status = "running"
     if parent.get("task_status") != new_status:
         store.set_task_workflow_state(parent_id, task_status=new_status)
 
@@ -1764,6 +1764,20 @@ def _is_root_goal_decompose_step(
     cfg = read_workflow_config(project_root)
     back = _workflow_graph(cfg)
     return step["id"] == _root_goal_decompose_step_id(cfg, back)
+
+
+def _goal_status_for_step(project_root: str | None, step_id: str) -> str:
+    """A root goal's own lifecycle status while it sits at `step_id`. A goal
+    traverses the pre-decompose steps (entry -> design -> decompose) before
+    splitting, so its status reflects that phase rather than the step's task
+    column (which would read as e.g. 'assigned' / 'reviewing' on the goal)."""
+    cfg = read_workflow_config(project_root)
+    back = _workflow_graph(cfg)
+    if step_id in set(_workflow_entry_steps(cfg, back)):
+        return "new"
+    if step_id == _root_goal_decompose_step_id(cfg, back):
+        return "decomposing"
+    return "designing"
 
 
 def _complete_goal_intake_locked(
@@ -1810,7 +1824,7 @@ def _complete_goal_intake_locked(
     )
     store.record_task_transition(goal["id"], step["id"], "", actor, "done", result)
     store.set_task_workflow_state(
-        goal["id"], workflow_step="", task_status="in_progress"
+        goal["id"], workflow_step="", task_status="running"
     )
     _settle_step_card(store, goal, step["id"], "done")
     if target_steps is None:
@@ -1927,7 +1941,10 @@ def _dispatch_step(
             task_id, "", step["id"], WORKFLOW_ENGINE_AGENT, "blocked",
             "goal token budget exceeded; dispatch frozen",
         )
-        store.set_task_workflow_state(task_id, task_status="blocked")
+        # A goal row uses its own vocabulary ("stalled"); a subtask stays "blocked".
+        store.set_task_workflow_state(
+            task_id, task_status="stalled" if task.get("is_goal") else "blocked"
+        )
         return None
     _ensure_engine_agent(store)
     if not store.agent_exists(assignee):
@@ -1948,9 +1965,18 @@ def _dispatch_step(
     store.record_task_transition(
         task_id, "", step["id"], WORKFLOW_ENGINE_AGENT, "dispatched", assignee
     )
-    store.set_task_workflow_state(
-        task_id, task_status=step["task_status"], assignee=assignee
-    )
+    # A root goal keeps its own lifecycle status (new/designing/decomposing),
+    # decoupled from the step's task column; only real tasks/cards adopt it.
+    if task.get("is_goal"):
+        store.set_task_workflow_state(
+            task_id,
+            task_status=_goal_status_for_step(project_root, step["id"]),
+            assignee=assignee,
+        )
+    else:
+        store.set_task_workflow_state(
+            task_id, task_status=step["task_status"], assignee=assignee
+        )
     if _materializes_step_cards(task):
         _upsert_step_card(store, project_root, task, step, assignee)
     command = _runner_command_for(member)

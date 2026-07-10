@@ -27,6 +27,52 @@ def _init_repo(root: Path) -> None:
     subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "init"], check=True, env=env)
 
 
+class GoalStatusDecoupleTests(unittest.TestCase):
+    """Goals carry their own status vocabulary, decoupled from task/step statuses."""
+
+    def test_goal_status_for_default_workflow_phases(self):
+        with TemporaryDirectory() as tmp:
+            self.assertEqual("new", server._goal_status_for_step(tmp, "intake"))
+            self.assertEqual(
+                "designing", server._goal_status_for_step(tmp, "product_design")
+            )
+            self.assertEqual(
+                "designing", server._goal_status_for_step(tmp, "architecture")
+            )
+            self.assertEqual("decomposing", server._goal_status_for_step(tmp, "plan"))
+
+    def test_goal_status_validation_maps_task_statuses(self):
+        from orbit.store import GOAL_STATUSES, InvalidInputError, _validate_goal_status
+
+        for status in GOAL_STATUSES:
+            self.assertEqual(status, _validate_goal_status(status))
+        # Engine paths that drive a goal through its phase write task statuses;
+        # those map onto the goal lifecycle instead of being rejected.
+        self.assertEqual("new", _validate_goal_status("created"))
+        self.assertEqual("designing", _validate_goal_status("assigned"))
+        self.assertEqual("running", _validate_goal_status("in_progress"))
+        self.assertEqual("stalled", _validate_goal_status("blocked"))
+        with self.assertRaises(InvalidInputError):
+            _validate_goal_status("nonsense")
+
+    def test_goal_row_never_carries_a_step_column(self):
+        with TemporaryDirectory() as tmp:
+            store = Store(Path(tmp) / ".orbit" / "messages.db")
+            store.register_agent("hub", "")
+            ids = store.send_message("hub", "hub", "g", kind="task", title="g")
+            gid = store.get_task_by_source_message(ids[0])["id"]
+            store.update_task_metadata(gid, is_goal=True)
+            # A step column written to the goal row is mapped to goal vocabulary.
+            store.set_task_workflow_state(gid, task_status="reviewing")
+            self.assertEqual("running", store.get_task(gid)["task_status"])
+            # A regular task keeps step vocabulary untouched.
+            tids = store.send_message("hub", "hub", "t", kind="task", title="t")
+            tid = store.get_task_by_source_message(tids[0])["id"]
+            store.set_task_workflow_state(tid, task_status="reviewing")
+            self.assertEqual("reviewing", store.get_task(tid)["task_status"])
+            store.close()
+
+
 class WorkflowSchemaTests(unittest.TestCase):
     def test_integrate_flag_forces_isolate_off(self):
         norm = server._normalize_workflow_step(
@@ -499,7 +545,7 @@ class GoalConvergenceGateTests(unittest.TestCase):
             store, goal_id, sub_id = self._goal_with_closed_subtask(tmp, verify="true")
             server._recompute_parent_goal_status(store, store.get_task(sub_id), tmp)
             # Not accepted yet: the sweep owns that decision.
-            self.assertEqual("in_progress", store.get_task(goal_id)["task_status"])
+            self.assertEqual("verifying", store.get_task(goal_id)["task_status"])
             self.assertTrue(store.has_workflow_action(goal_id, "goal_verify"))
             # Idempotent: recompute again doesn't create a second action.
             server._recompute_parent_goal_status(store, store.get_task(sub_id), tmp)
@@ -549,7 +595,7 @@ class GoalConvergenceGateTests(unittest.TestCase):
             # rework re-close -> recompute fires again -> re-queue
             server._recompute_parent_goal_status(store, store.get_task(sub_id), tmp)
             self.assertTrue(store.has_pending_workflow_action(goal_id, "goal_verify"))
-            self.assertEqual("in_progress", store.get_task(goal_id)["task_status"])
+            self.assertEqual("verifying", store.get_task(goal_id)["task_status"])
             store.close()
 
     def test_accepted_goal_not_requeued(self):
@@ -647,7 +693,7 @@ class GoalVerifyDetectionTests(unittest.TestCase):
             sub = store.get_task_by_source_message(smsgs[0])
             store.update_task_item_status(sub["id"], "closed")
             server._recompute_parent_goal_status(store, store.get_task(sub["id"]), tmp)
-            self.assertEqual("in_progress", store.get_task(goal["id"])["task_status"])
+            self.assertEqual("verifying", store.get_task(goal["id"])["task_status"])
             self.assertTrue(store.has_pending_workflow_action(goal["id"], "goal_verify"))
             store.close()
 
@@ -843,7 +889,7 @@ class TokenBudgetGateTests(unittest.TestCase):
             self.assertFalse(
                 server._enforce_goal_token_budget(store, tmp, store.get_task(sub_id))
             )
-            self.assertNotEqual("blocked", store.get_task(goal_id)["task_status"])
+            self.assertNotEqual("stalled", store.get_task(goal_id)["task_status"])
             store.close()
 
     def test_over_budget_blocks_goal_notifies_once(self):
@@ -852,7 +898,7 @@ class TokenBudgetGateTests(unittest.TestCase):
             self.assertTrue(
                 server._enforce_goal_token_budget(store, tmp, store.get_task(sub_id))
             )
-            self.assertEqual("blocked", store.get_task(goal_id)["task_status"])
+            self.assertEqual("stalled", store.get_task(goal_id)["task_status"])
             self.assertTrue(store.has_workflow_action(goal_id, "budget_exceeded"))
             self.assertTrue(store.has_unread("hub"))
             # Idempotent: still True, but no second action / re-notify.
