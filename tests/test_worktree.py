@@ -50,7 +50,7 @@ class WorkflowSchemaTests(unittest.TestCase):
             self.assertTrue(steps[isolated]["isolate"], isolated)
         self.assertTrue(steps["integrate"]["integrate"])
         self.assertFalse(steps["integrate"]["isolate"])
-        self.assertEqual("hub", steps["integrate"]["role_id"])
+        self.assertEqual("integrator", steps["integrate"]["role_id"])
 
         pairs = {(e["from"], e["to"]) for e in server.default_workflow_edges()}
         self.assertIn(("review", "integrate"), pairs)

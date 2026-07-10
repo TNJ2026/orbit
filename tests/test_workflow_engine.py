@@ -586,6 +586,7 @@ class GoalTests(unittest.TestCase):
             h = EngineHarness(tmp, team=[
                 {"agent_name": "hub-agent", "role_id": "hub", "runner_command": "cat"},
                 {"agent_name": "codex", "role_id": "implementer", "runner_command": "cat"},
+                {"agent_name": "integrator", "role_id": "integrator", "runner_command": "cat"},
                 {"agent_name": "rev", "role_id": "reviewer", "runner_command": "cat"},
             ])
             goal_id = h.create_task(title="goal")
@@ -697,6 +698,7 @@ class StepCardTests(unittest.TestCase):
         return [
             {"agent_name": "hub-agent", "role_id": "hub", "runner_command": "cat"},
             {"agent_name": "codex", "role_id": "implementer", "runner_command": "cat"},
+            {"agent_name": "integrator", "role_id": "integrator", "runner_command": "cat"},
             {"agent_name": "rev", "role_id": "reviewer", "runner_command": "cat"},
         ]
 

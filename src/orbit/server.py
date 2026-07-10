@@ -105,7 +105,7 @@ _TASK_RUN_FILES = {
 # Roles a sound default team should provide. The workflow itself remains
 # configurable; write_workflow_config only enforces the older core workflow roles
 # below so custom workflows without an integrate step stay valid.
-REQUIRED_TEAM_ROLES = {"hub", "implementer", "reviewer"}
+REQUIRED_TEAM_ROLES = {"hub", "implementer", "integrator", "reviewer"}
 CORE_WORKFLOW_ROLES = {"hub", "implementer", "reviewer"}
 TASK_IMPORTANCE_SCORES = {"low": 0, "normal": 10, "high": 25, "critical": 40}
 TASK_SIZE_SCORES = {"small": 0, "medium": 8, "large": 18}
@@ -347,7 +347,7 @@ def default_workflow_steps() -> list[dict[str, Any]]:
         # sends the task back to implement instead of trusting a self-report.
         ("test", "Test", "tester", "testing", True, True, False, False, 1740, _DEFAULT_STEP_MID_Y),
         ("review", "Review", "reviewer", "reviewing", True, True, False, False, 2080, _DEFAULT_STEP_MID_Y),
-        ("integrate", "Integrate", "hub", "in_progress", True, False, True, False, 2420, _DEFAULT_STEP_MID_Y),
+        ("integrate", "Integrate", "integrator", "in_progress", True, False, True, False, 2420, _DEFAULT_STEP_MID_Y),
         ("accept", "Accept", "hub", "accepted", True, False, False, False, 2760, _DEFAULT_STEP_MID_Y),
     ]
     return [

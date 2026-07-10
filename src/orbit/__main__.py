@@ -68,7 +68,7 @@ def init_project(project_root: Path) -> dict[str, list[str]]:
         _mark(workflow_path, True)
 
     # 3. Default team: spread the core roles over the installed agent CLIs
-    # (repeating when fewer than three are installed).
+    # (repeating when fewer than four are installed).
     team_path = state_dir / "team.json"
     if team_path.exists():
         _mark(team_path, False)
@@ -79,7 +79,7 @@ def init_project(project_root: Path) -> dict[str, list[str]]:
         names = installed or ["claude-code"]
         members = [
             {"agent_name": names[index % len(names)], "role_id": role_id}
-            for index, role_id in enumerate(("hub", "implementer", "reviewer"))
+            for index, role_id in enumerate(("hub", "implementer", "integrator", "reviewer"))
         ]
         write_team_config(members, str(project_root))
         _mark(team_path, True)

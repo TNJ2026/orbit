@@ -31,7 +31,7 @@ class PackagingTests(unittest.TestCase):
             # team covers the core roles
             team = json.loads((root / ".orbit" / "team.json").read_text(encoding="utf-8"))
             roles = {m["role_id"] for m in team["members"]}
-            self.assertEqual({"hub", "implementer", "reviewer"}, roles)
+            self.assertEqual({"hub", "implementer", "integrator", "reviewer"}, roles)
 
     def test_ensure_state_dir_gitignored_adds_entry_once(self):
         from orbit.__main__ import ensure_state_dir_gitignored
@@ -124,7 +124,10 @@ class PackagingTests(unittest.TestCase):
     def test_role_templates_are_packaged(self):
         templates = resources.files("orbit") / "role_templates"
         names = {entry.name for entry in templates.iterdir()}
-        for required in ("_protocol.md", "_template.md", "hub.md", "implementer.md", "reviewer.md"):
+        for required in (
+            "_protocol.md", "_template.md", "hub.md", "implementer.md",
+            "integrator.md", "reviewer.md",
+        ):
             self.assertIn(required, names)
 
     def test_ui_asset_is_present_and_loadable(self):
@@ -801,7 +804,7 @@ class PackagingTests(unittest.TestCase):
             )
             loaded = server.read_team_config(tmp)
 
-        self.assertEqual(["reviewer"], saved["missing_roles"])
+        self.assertEqual(["integrator", "reviewer"], saved["missing_roles"])
         self.assertEqual(3, len(loaded["members"]))
 
     def test_team_config_saves_single_member(self):
@@ -813,7 +816,7 @@ class PackagingTests(unittest.TestCase):
             )
 
         self.assertEqual(1, len(saved["members"]))
-        self.assertEqual(["hub", "reviewer"], saved["missing_roles"])
+        self.assertEqual(["hub", "integrator", "reviewer"], saved["missing_roles"])
 
     def test_team_config_rejects_invalid_role_id(self):
         import orbit.server as server
