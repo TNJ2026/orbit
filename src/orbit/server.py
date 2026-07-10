@@ -421,8 +421,6 @@ def _normalize_workflow_statuses(statuses: Any = None) -> list[dict[str, str]]:
             continue
         seen.add(value)
         normalized.append({"value": value, "label": label or value})
-    if not normalized:
-        raise InvalidInputError("workflow statuses must include at least one status")
     return normalized
 
 

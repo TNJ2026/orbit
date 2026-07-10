@@ -192,6 +192,10 @@ class PackagingTests(unittest.TestCase):
         self.assertIn('data-action="add-step"', html)
         self.assertNotIn('id="addWorkflowStep"', html)
         self.assertIn('id="addStepModalBackdrop"', html)
+        self.assertIn('id="workflowStatuses"', html)
+        self.assertIn("function workflowStatusList()", html)
+        self.assertIn("function taskBoardColumns(tasks)", html)
+        self.assertNotIn("const COLUMN_MAP", html)
         self.assertIn("workflow-canvas", html)
         self.assertIn("workflow-node", html)
         self.assertIn('id="wfArrow"', html)
@@ -491,6 +495,11 @@ class PackagingTests(unittest.TestCase):
             saved = server.write_workflow_config(steps, tmp, statuses=statuses)
             self.assertEqual(statuses, saved["statuses"])
             by_id = {s["id"]: s for s in saved["steps"]}
+            self.assertEqual("designing", by_id["b"]["task_status"])
+
+            empty_statuses = server.write_workflow_config(steps, tmp, statuses=[])
+            self.assertEqual([], empty_statuses["statuses"])
+            by_id = {s["id"]: s for s in empty_statuses["steps"]}
             self.assertEqual("designing", by_id["b"]["task_status"])
 
             # over the 12-char cap -> rejected
