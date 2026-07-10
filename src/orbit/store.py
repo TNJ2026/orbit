@@ -344,11 +344,12 @@ class Store:
             "workflow_step": "TEXT NOT NULL DEFAULT ''",
             "parent_task_id": "INTEGER",
             "is_goal": "INTEGER NOT NULL DEFAULT 0",
-            # Per-goal token budget override (raw tokens); 0 falls back to the
-            # workflow-level goal_token_budget default.
+            # Per-goal token ceiling (raw tokens); 0 = unlimited.
             "token_budget": "INTEGER NOT NULL DEFAULT 0",
             # Human-facing hierarchical label for step cards, e.g. "2474.3".
             "display_id": "TEXT NOT NULL DEFAULT ''",
+            # Per-goal convergence-verify command; '' falls back to auto-detect.
+            "goal_verify": "TEXT NOT NULL DEFAULT ''",
         }
         for column, definition in task_defaults.items():
             if column not in task_columns:
@@ -700,7 +701,7 @@ class Store:
                            created_at, updated_at,
                            role_required, importance, size, risk,
                            required_capabilities, exclusive_workspace,
-                           workflow_step, parent_task_id, is_goal, display_id, token_budget
+                           workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify
                     FROM tasks
                     {where}
                     ORDER BY id DESC
@@ -716,7 +717,7 @@ class Store:
                           assignee, assignee AS recipient, status AS task_status,
                           created_at, updated_at, role_required, importance, size,
                           risk, required_capabilities, exclusive_workspace,
-                          workflow_step, parent_task_id, is_goal, display_id, token_budget
+                          workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify
                    FROM tasks
                    WHERE id = ?""",
                 (task_id,),
@@ -730,7 +731,7 @@ class Store:
                           assignee, assignee AS recipient, status AS task_status,
                           created_at, updated_at, role_required, importance, size,
                           risk, required_capabilities, exclusive_workspace,
-                          workflow_step, parent_task_id, is_goal, display_id, token_budget
+                          workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify
                    FROM tasks
                    WHERE source_message_id = ?""",
                 (message_id,),
@@ -744,7 +745,7 @@ class Store:
                           assignee, assignee AS recipient, status AS task_status,
                           created_at, updated_at, role_required, importance, size,
                           risk, required_capabilities, exclusive_workspace,
-                          workflow_step, parent_task_id, is_goal, display_id, token_budget
+                          workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify
                    FROM tasks
                    WHERE parent_task_id = ?
                    ORDER BY id DESC""",
@@ -760,7 +761,7 @@ class Store:
                           assignee, assignee AS recipient, status AS task_status,
                           created_at, updated_at, role_required, importance, size,
                           risk, required_capabilities, exclusive_workspace,
-                          workflow_step, parent_task_id, is_goal, display_id, token_budget
+                          workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify
                    FROM tasks
                    WHERE is_goal = 1
                       OR parent_task_id IN (SELECT id FROM tasks WHERE is_goal = 1)
@@ -776,7 +777,7 @@ class Store:
                           assignee, assignee AS recipient, status AS task_status,
                           created_at, updated_at, role_required, importance, size,
                           risk, required_capabilities, exclusive_workspace,
-                          workflow_step, parent_task_id, is_goal, display_id, token_budget
+                          workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify
                    FROM tasks
                    WHERE workflow_step != ''
                      AND status NOT IN ('blocked', 'closed')
@@ -796,7 +797,7 @@ class Store:
                           assignee, assignee AS recipient, status AS task_status,
                           created_at, updated_at, role_required, importance, size,
                           risk, required_capabilities, exclusive_workspace,
-                          workflow_step, parent_task_id, is_goal, display_id, token_budget
+                          workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify
                    FROM tasks
                    WHERE status != 'closed'
                      AND NOT (status = 'accepted' AND is_goal = 1)
@@ -815,6 +816,7 @@ class Store:
         exclusive_workspace: bool | None = None,
         is_goal: bool | None = None,
         token_budget: int | None = None,
+        goal_verify: str | None = None,
     ) -> dict[str, Any] | None:
         updates: list[str] = []
         params: list[Any] = []
@@ -847,6 +849,9 @@ class Store:
         if token_budget is not None:
             updates.append("token_budget = ?")
             params.append(max(0, int(token_budget)))
+        if goal_verify is not None:
+            updates.append("goal_verify = ?")
+            params.append(str(goal_verify).strip())
         if not updates:
             return self.get_task(task_id)
         updates.append("updated_at = ?")

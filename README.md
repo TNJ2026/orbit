@@ -151,8 +151,9 @@ Move the split by flagging a different step in `.orbit/workflow.json`; with **no
 
 Once all of a goal's business subtasks self-test and close, orbit runs the `goal_verify` command on the integrated main tree to accept the whole result objectively.
 
-- **Auto-detected by default**: with no `goal_verify` set, orbit infers a common test command from project markers (`npm test`, `cargo test`, `python -m unittest discover -s tests`, …). Good for a quick try — confirm the guess in the Workflow panel.
-- **Declare it explicitly for real use**: save the command into `.orbit/workflow.json` (via UI/CLI). It should be idempotent, runnable offline, and cover unit/integration tests. Point it at a script (`./scripts/goal-verify.sh`) for monorepos.
+- **Set per goal**: type the command in the **Goal verify command** box on the Goals page when you start a goal — it applies to that goal only. Leave it empty to auto-detect (see below).
+- **Auto-detected when empty**: with no command set, orbit infers a common test command from project markers (`npm test`, `cargo test`, `python -m unittest discover -s tests`, …). Good for a quick try.
+- **Declare it explicitly for real use**: it should be idempotent, runnable offline, and cover unit/integration tests. Point it at a script (`./scripts/goal-verify.sh`) for monorepos.
 - It runs in the project root under a hard timeout (`VERIFY_HARD_TIMEOUT_SECONDS`, default 900s). Pass → goal `accepted`; fail → `stalled` + hub is notified.
 - `goal_verify` is a plain shell/test command — it uses no LLM, so it **consumes no tokens and does not count against a goal's token budget**.
 
@@ -172,7 +173,7 @@ Every run records a token count, aggregated per goal so you can watch and cap sp
 - Switch between running project daemons via the Project dropdown at the top
 - View installed common agent CLIs and the team config
 - **Board**: tasks by status column (todo / in progress / testing / review / blocked / done)
-- **Workflow**: visually edit the workflow graph (steps, roles, edges, `verify` command, goal_verify)
+- **Workflow**: visually edit the workflow graph (steps, roles, edges, per-step `verify` command)
 - **Jobs**: the `run_jobs` execution queue (status / outcome / claimant / lease expiry) to confirm the runner is consuming
 - **Goals**: goal progress and subtree token spend; **Force End** to hard-stop (kill running runners + close the whole tree)
 - Per-step run logs (command, exit code, stdout/stderr tail)

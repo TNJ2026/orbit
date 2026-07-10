@@ -1313,6 +1313,10 @@
       </div>
       <div class="goal-composer stack">
         <textarea id="goalInput" class="goal-textarea" data-i18n-ph="goals.placeholder" placeholder="Describe the objective, key milestones, or sprint goal here..."></textarea>
+        <label style="display:flex; flex-direction:column; gap:3px; font-size:11px; color:var(--muted);">
+          <span data-i18n="goal.verifyLabel">Goal verify command (optional — runs on main after all subtasks close)</span>
+          <input id="goalVerify" type="text" data-i18n-ph="goal.verifyPh" placeholder="e.g. python -m pytest" style="width:100%;">
+        </label>
         <div class="row" style="justify-content: space-between; align-items: flex-end;">
           <div class="meta" data-i18n="goals.hint">Start creates a goal, auto-splits it into tasks, and runs each task through the workflow.</div>
           <div class="row" style="gap: 10px; align-items: center;">
@@ -1380,13 +1384,6 @@
         </div>
       </div>
       <div id="workflowPath" class="meta" style="padding: 10px 12px;"></div>
-      <div id="workflowGates" style="display:flex; flex-wrap:wrap; gap:14px; align-items:flex-end; padding: 0 12px 10px;">
-        <label style="display:flex; flex-direction:column; gap:4px; flex:1; min-width:240px; font-size:12px; color:var(--muted);">
-          <span data-i18n="wf.goalVerifyLabel">Goal verify command</span>
-          <input id="wfGoalVerify" type="text" data-i18n-ph="wf.goalVerifyPh" style="width:100%;">
-        </label>
-        <button id="wfSaveGates" type="button" data-i18n="wf.saveGates">Save</button>
-      </div>
       <div id="workflowSteps"></div>
     </div>
     <div id="rolesPage" class="page roles-page">
@@ -1480,7 +1477,9 @@
         "goals.placeholder": "Describe the objective, key milestones, or sprint goal here...",
         "goals.hint": "Start creates a goal, auto-splits it into tasks, and runs each task through the workflow.",
         "goal.budgetLabel": "Token budget (M)",
-        "goal.budgetTitle": "Hard token ceiling for this goal (millions). 0 = use the workflow default.",
+        "goal.budgetTitle": "Hard token ceiling for this goal (millions). 0 = unlimited.",
+        "goal.verifyLabel": "Goal verify command (optional — runs on main after all subtasks close)",
+        "goal.verifyPh": "e.g. python -m pytest",
         "goals.start": "▶ Start Goal",
         "tasks.title": "Development Tasks", "tasks.refresh": "Refresh", "tasks.noSelected": "No task selected.",
         "tasks.close": "×",
@@ -1516,10 +1515,6 @@
         "wf.addStepTitle": "Add step: opens a form to set the name, role and status of a new step",
         "wf.connectTitle": "Connect: click the source node, then the target node, to draw an edge",
         "wf.noSteps": "No steps yet — click <strong>Add step</strong> to create one.",
-        "wf.goalVerifyLabel": "Goal verify command",
-        "wf.goalVerifyPh": "e.g. python -m pytest",
-        "wf.saveGates": "Save",
-        "wf.gatesSaved": "Gate settings saved",
         "wf.start": "▶ start", "wf.end": "⏹ end", "wf.required": "required", "wf.optional": "optional",
         "wf.step": "Step", "wf.dblClickEdit": "Double-click to edit", "wf.clickDelete": "Click to delete",
         "wf.connectCancelled": "Connect cancelled",
@@ -1586,7 +1581,9 @@
         "goals.placeholder": "在此描述目标、关键里程碑或冲刺目标…",
         "goals.hint": "点击开始会创建目标、自动拆分为任务，并逐个通过工作流执行。",
         "goal.budgetLabel": "Token 预算 (M)",
-        "goal.budgetTitle": "本目标的 token 硬上限（百万）。0 = 用工作流默认值。",
+        "goal.budgetTitle": "本目标的 token 硬上限（百万）。0 = 不限。",
+        "goal.verifyLabel": "目标验收命令（可选 —— 所有子任务关闭后在主干上运行）",
+        "goal.verifyPh": "如 python -m pytest",
         "goals.start": "▶ 开始目标",
         "tasks.title": "开发任务", "tasks.refresh": "刷新", "tasks.noSelected": "未选择任务。",
         "tasks.close": "×",
@@ -1622,10 +1619,6 @@
         "wf.addStepTitle": "添加步骤：打开表单设置新步骤的名称、角色和状态",
         "wf.connectTitle": "连接：先点击源节点，再点击目标节点，绘制连线",
         "wf.noSteps": "暂无步骤 — 点击 <strong>添加步骤</strong> 创建一个。",
-        "wf.goalVerifyLabel": "目标验收命令",
-        "wf.goalVerifyPh": "如 python -m pytest",
-        "wf.saveGates": "保存",
-        "wf.gatesSaved": "门槛设置已保存",
         "wf.start": "▶ 开始", "wf.end": "⏹ 结束", "wf.required": "必选", "wf.optional": "可选",
         "wf.step": "步骤", "wf.dblClickEdit": "双击编辑", "wf.clickDelete": "点击删除",
         "wf.connectCancelled": "已取消连接",
@@ -1881,7 +1874,6 @@
         edges: data.edges || [],
         path: data.path || "",
         warnings: data.warnings || [],
-        goal_verify: data.goal_verify || ""
       };
       // Render at the stored (last auto-laid-out) coordinates. Layout is only
       // recomputed on an explicit edit (saveWorkflow), never on load — viewing
@@ -2253,17 +2245,7 @@
       return { x: event.clientX - rect.left, y: event.clientY - rect.top };
     }
 
-    // Reflect the stored goal_verify into its input. Skip a focused field so a
-    // background re-render never clobbers what the user is typing.
-    function syncWorkflowGates() {
-      const verifyEl = $("wfGoalVerify");
-      if (verifyEl && document.activeElement !== verifyEl) {
-        verifyEl.value = state.workflow.goal_verify || "";
-      }
-    }
-
     function renderWorkflow() {
-      syncWorkflowGates();
       const wfWarnings = state.workflow.warnings || [];
       $("workflowPath").innerHTML = [
         state.workflow.path ? t("wf.config", escapeHtml(state.workflow.path)) : "",
@@ -2604,7 +2586,6 @@
           steps: state.workflow.steps || [],
           statuses: state.workflow.statuses || [],
           edges: state.workflow.edges || [],
-          goal_verify: state.workflow.goal_verify || ""
         })
       });
       state.workflow = {
@@ -2613,18 +2594,8 @@
         edges: data.edges || [],
         path: data.path || "",
         warnings: data.warnings || [],
-        goal_verify: data.goal_verify || ""
       };
       renderWorkflow();
-    }
-
-    // Persist the goal_verify command through the workflow save path.
-    async function saveWorkflowGates() {
-      state.workflow.goal_verify = ($("wfGoalVerify").value || "").trim();
-      await run(async () => {
-        await saveWorkflow();
-        setStatus(t("wf.gatesSaved"));
-      });
     }
 
     // The step modal serves both adding a new step (the Add-step toolbar tool)
@@ -2991,13 +2962,15 @@
       }
       const m = parseFloat($("goalBudget").value);
       const tokenBudget = (isFinite(m) && m > 0) ? Math.round(m * 1e6) : 0;
+      const goalVerify = ($("goalVerify").value || "").trim();
       await run(async () => {
         const result = await api("/api/goals", {
           method: "POST",
-          body: JSON.stringify({ content: goalVal, token_budget: tokenBudget })
+          body: JSON.stringify({ content: goalVal, token_budget: tokenBudget, goal_verify: goalVerify })
         });
         $("goalInput").value = "";
         $("goalBudget").value = "";
+        $("goalVerify").value = "";
         localStorage.removeItem("orbit-goal");
         await loadGoals();
         await loadTasks();
@@ -3387,7 +3360,6 @@
     wireRefresh("refreshRoles", loadRoles);
     wireRefresh("refreshTasks", loadTasks);
     wireRefresh("refreshGoals", loadGoals);
-    $("wfSaveGates").addEventListener("click", saveWorkflowGates);
     $("addTeamMember").addEventListener("click", addTeamMember);
     $("addStepCancel").addEventListener("click", closeAddStepModal);
     $("addStepConfirm").addEventListener("click", confirmStep);

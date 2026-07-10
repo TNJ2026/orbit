@@ -552,7 +552,6 @@ def read_workflow_config(project_root: str | None = None) -> dict[str, Any]:
             ],
             "statuses": statuses,
             "edges": default_workflow_edges(),
-            "goal_verify": "",
             "path": str(path),
             "warnings": [],
         }
@@ -582,17 +581,10 @@ def read_workflow_config(project_root: str | None = None) -> dict[str, Any]:
         ]
     else:
         edges = _normalize_workflow_edges(raw_edges, valid_ids)
-    goal_verify = ""
-    if isinstance(data, dict):
-        goal_verify = str(data.get("goal_verify") or "").strip()
     return {
         "steps": normalized,
         "statuses": statuses,
         "edges": edges,
-        # goal_verify: an objective command run on the integrated main tree once
-        # all of a goal's subtasks close, before the goal is accepted. Catches
-        # integration failures that per-subtask (isolated) tests can't see.
-        "goal_verify": goal_verify,
         "path": str(path),
         "warnings": _workflow_graph_warnings(normalized, edges),
     }
@@ -647,7 +639,6 @@ def write_workflow_config(
     project_root: str | None = None,
     edges: Any = None,
     statuses: Any = None,
-    goal_verify: str | None = None,
 ) -> dict[str, Any]:
     if not isinstance(steps, list):
         raise InvalidInputError("steps must be a list")
@@ -690,23 +681,10 @@ def write_workflow_config(
         {k: v for k, v in step.items() if k != "required_locked"}
         for step in normalized
     ]
-    # goal_verify: a caller that doesn't pass it (e.g. a UI save of only
-    # steps/statuses/edges) preserves the existing value instead of wiping it;
-    # an explicit value overrides.
-    preserved_verify = ""
-    if path.exists():
-        try:
-            prev = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(prev, dict):
-                preserved_verify = str(prev.get("goal_verify") or "").strip()
-        except (OSError, json.JSONDecodeError):
-            pass
-    final_verify = preserved_verify if goal_verify is None else str(goal_verify or "").strip()
     data = {
         "statuses": normalized_statuses,
         "steps": persisted,
         "edges": normalized_edges,
-        "goal_verify": final_verify,
     }
     path.write_text(
         json.dumps(data, ensure_ascii=False, indent=2) + "\n",
@@ -716,7 +694,6 @@ def write_workflow_config(
         "steps": normalized,
         "statuses": normalized_statuses,
         "edges": normalized_edges,
-        "goal_verify": final_verify,
         "path": str(path),
         "warnings": _workflow_graph_warnings(normalized, normalized_edges),
     }
@@ -1614,13 +1591,13 @@ def _detect_goal_verify(root: Path) -> str:
     return ""
 
 
-def _effective_goal_verify(project_root: str | None) -> str:
-    """The goal convergence command to actually run: the configured goal_verify
-    if set, otherwise a best-effort default detected from project markers. Empty
+def _effective_goal_verify(goal: dict[str, Any] | None, project_root: str | None) -> str:
+    """The convergence command to run for a goal: the goal's own goal_verify if
+    set, otherwise a best-effort default detected from project markers. Empty
     when neither is available."""
-    configured = str(read_workflow_config(project_root).get("goal_verify") or "").strip()
-    if configured:
-        return configured
+    own = str((goal or {}).get("goal_verify") or "").strip()
+    if own:
+        return own
     return _detect_goal_verify(_project_root(project_root))
 
 
@@ -1651,10 +1628,8 @@ def _recompute_parent_goal_status(
         # the integrated main can still fail. If a goal_verify command is set,
         # queue an objective check on main and let the async sweep accept or
         # stall the goal — don't accept on aggregation alone. Runs once per goal.
-        configured = str(
-            read_workflow_config(project_root).get("goal_verify") or ""
-        ).strip()
-        goal_verify = configured or _detect_goal_verify(_project_root(project_root))
+        own = str(parent.get("goal_verify") or "").strip()
+        goal_verify = own or _detect_goal_verify(_project_root(project_root))
         if goal_verify:
             # Already verified and accepted: nothing to do.
             if parent.get("task_status") == "accepted":
@@ -1665,7 +1640,7 @@ def _recompute_parent_goal_status(
             # (subtasks reopened then re-closed) gets verified again.
             if not store.has_pending_workflow_action(parent_id, "goal_verify"):
                 note = "all subtasks closed; goal verification queued"
-                if not configured:
+                if not own:
                     note += f" (auto-detected: {goal_verify})"
                 store.create_workflow_action(
                     parent_id, "goal_verify", note=note,
@@ -3425,10 +3400,8 @@ def goal_verify_sweep(store: Store, project_root: str | None) -> list[dict[str, 
     accept or stall each goal by the real exit code. Single-owner (one daemon):
     claims pending goal_verify actions plus any left 'running' by a crashed
     process. Runs the suite synchronously on its own thread, so goals verify one
-    at a time on main — no concurrent-suite thrash, no merge races."""
-    command = _effective_goal_verify(project_root)
-    if not command:
-        return []
+    at a time on main — no concurrent-suite thrash, no merge races. Each goal
+    runs its own goal_verify command (falling back to auto-detect)."""
     pending = [
         a for a in store.list_workflow_actions("pending", limit=100)
         if a["action_type"] == "goal_verify"
@@ -3445,6 +3418,14 @@ def goal_verify_sweep(store: Store, project_root: str | None) -> list[dict[str, 
         goal = store.get_task(goal_id)
         if not goal or not goal.get("is_goal") or goal.get("task_status") == "closed":
             store.finish_workflow_action(action["id"], "done", "goal gone/closed")
+            continue
+        command = _effective_goal_verify(goal, project_root)
+        if not command:
+            # No command to run (goal set none and nothing auto-detects): accept
+            # the goal on aggregation rather than leaving the action stuck.
+            store.set_task_workflow_state(goal_id, task_status="accepted")
+            store.finish_workflow_action(action["id"], "done", "no goal_verify command")
+            processed.append({"goal_id": goal_id, "exit_code": 0})
             continue
         # Mark running so a restart mid-verify can tell in-flight from queued.
         store.finish_workflow_action(action["id"], "running", "verifying integrated main")
@@ -5054,7 +5035,6 @@ def create_server(
                 current_project.get("project_root"),
                 data.get("edges"),
                 data.get("statuses"),
-                data.get("goal_verify"),
             )
         except InvalidInputError as exc:
             return _json_error(str(exc), request=request)
@@ -5185,6 +5165,7 @@ def create_server(
             store.update_task_metadata(
                 task["id"], is_goal=True,
                 token_budget=_coerce_token_budget(data.get("token_budget")),
+                goal_verify=str(data.get("goal_verify") or "").strip(),
             )
             try:
                 started = start_workflow_task(

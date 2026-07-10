@@ -1,6 +1,5 @@
 """Per-task git worktree isolation + the integrate merge gate."""
 
-import json
 import os
 import subprocess
 import sys
@@ -445,23 +444,13 @@ class VerifyGateTests(unittest.TestCase):
             store.close()
 
 
-def _set_goal_verify(tmp, command):
-    server.write_workflow_config(
-        server.default_workflow_steps(), tmp, server.default_workflow_edges()
-    )
-    path = Path(tmp) / ".orbit" / "workflow.json"
-    data = json.loads(path.read_text(encoding="utf-8"))
-    data["goal_verify"] = command
-    path.write_text(json.dumps(data), encoding="utf-8")
-
-
 class GoalConvergenceGateTests(unittest.TestCase):
-    def _goal_with_closed_subtask(self, tmp):
+    def _goal_with_closed_subtask(self, tmp, verify=""):
         store = Store(Path(tmp) / ".orbit" / "messages.db")
         store.register_agent("hub", "")
         gid_msgs = store.send_message("hub", "hub", "the goal", kind="task", title="G")
         goal = store.get_task_by_source_message(gid_msgs[0])
-        store.update_task_metadata(goal["id"], is_goal=True)
+        store.update_task_metadata(goal["id"], is_goal=True, goal_verify=verify)
         sub_msgs = store.send_message(
             "hub", "hub", "a subtask", reply_to=gid_msgs[0], kind="task", title="S"
         )
@@ -472,8 +461,7 @@ class GoalConvergenceGateTests(unittest.TestCase):
 
     def test_no_goal_verify_accepts_on_aggregation(self):
         with TemporaryDirectory() as tmp:
-            _set_goal_verify(tmp, "")
-            store, goal_id, sub_id = self._goal_with_closed_subtask(tmp)
+            store, goal_id, sub_id = self._goal_with_closed_subtask(tmp, verify="")
             server._recompute_parent_goal_status(store, store.get_task(sub_id), tmp)
             self.assertEqual("accepted", store.get_task(goal_id)["task_status"])
             self.assertFalse(store.has_workflow_action(goal_id, "goal_verify"))
@@ -481,8 +469,7 @@ class GoalConvergenceGateTests(unittest.TestCase):
 
     def test_configured_queues_action_and_holds_accept(self):
         with TemporaryDirectory() as tmp:
-            _set_goal_verify(tmp, "true")
-            store, goal_id, sub_id = self._goal_with_closed_subtask(tmp)
+            store, goal_id, sub_id = self._goal_with_closed_subtask(tmp, verify="true")
             server._recompute_parent_goal_status(store, store.get_task(sub_id), tmp)
             # Not accepted yet: the sweep owns that decision.
             self.assertEqual("in_progress", store.get_task(goal_id)["task_status"])
@@ -498,8 +485,7 @@ class GoalConvergenceGateTests(unittest.TestCase):
 
     def test_sweep_pass_accepts_goal(self):
         with TemporaryDirectory() as tmp:
-            _set_goal_verify(tmp, "true")
-            store, goal_id, sub_id = self._goal_with_closed_subtask(tmp)
+            store, goal_id, sub_id = self._goal_with_closed_subtask(tmp, verify="true")
             server._recompute_parent_goal_status(store, store.get_task(sub_id), tmp)
             processed = server.goal_verify_sweep(store, tmp)
             self.assertEqual([{"goal_id": goal_id, "exit_code": 0}], processed)
@@ -508,8 +494,7 @@ class GoalConvergenceGateTests(unittest.TestCase):
 
     def test_sweep_fail_stalls_goal_and_notifies_hub(self):
         with TemporaryDirectory() as tmp:
-            _set_goal_verify(tmp, "false")
-            store, goal_id, sub_id = self._goal_with_closed_subtask(tmp)
+            store, goal_id, sub_id = self._goal_with_closed_subtask(tmp, verify="false")
             server._recompute_parent_goal_status(store, store.get_task(sub_id), tmp)
             server.goal_verify_sweep(store, tmp)
             self.assertEqual("stalled", store.get_task(goal_id)["task_status"])
@@ -518,8 +503,7 @@ class GoalConvergenceGateTests(unittest.TestCase):
 
     def test_sweep_records_a_task_run(self):
         with TemporaryDirectory() as tmp:
-            _set_goal_verify(tmp, "true")
-            store, goal_id, sub_id = self._goal_with_closed_subtask(tmp)
+            store, goal_id, sub_id = self._goal_with_closed_subtask(tmp, verify="true")
             server._recompute_parent_goal_status(store, store.get_task(sub_id), tmp)
             server.goal_verify_sweep(store, tmp)
             runs = store.list_task_runs(goal_id)
@@ -530,8 +514,7 @@ class GoalConvergenceGateTests(unittest.TestCase):
         # A failed verification must not permanently block re-verification: after
         # the hub reworks and subtasks re-close, recompute queues a fresh check.
         with TemporaryDirectory() as tmp:
-            _set_goal_verify(tmp, "false")
-            store, goal_id, sub_id = self._goal_with_closed_subtask(tmp)
+            store, goal_id, sub_id = self._goal_with_closed_subtask(tmp, verify="false")
             server._recompute_parent_goal_status(store, store.get_task(sub_id), tmp)
             server.goal_verify_sweep(store, tmp)  # fails -> stalled, action failed
             self.assertEqual("stalled", store.get_task(goal_id)["task_status"])
@@ -544,8 +527,7 @@ class GoalConvergenceGateTests(unittest.TestCase):
 
     def test_accepted_goal_not_requeued(self):
         with TemporaryDirectory() as tmp:
-            _set_goal_verify(tmp, "true")
-            store, goal_id, sub_id = self._goal_with_closed_subtask(tmp)
+            store, goal_id, sub_id = self._goal_with_closed_subtask(tmp, verify="true")
             server._recompute_parent_goal_status(store, store.get_task(sub_id), tmp)
             server.goal_verify_sweep(store, tmp)  # passes -> accepted
             self.assertEqual("accepted", store.get_task(goal_id)["task_status"])
@@ -601,13 +583,14 @@ class GoalVerifyDetectionTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             self.assertEqual("", server._detect_goal_verify(Path(tmp)))
 
-    def test_configured_overrides_detected(self):
+    def test_own_goal_verify_overrides_detected(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
             (root / "tests").mkdir()
-            _set_goal_verify(tmp, "true")
-            self.assertEqual("true", server._effective_goal_verify(tmp))
+            self.assertEqual(
+                "true", server._effective_goal_verify({"goal_verify": "true"}, tmp)
+            )
 
     def test_effective_falls_back_to_detected(self):
         with TemporaryDirectory() as tmp:
@@ -616,7 +599,7 @@ class GoalVerifyDetectionTests(unittest.TestCase):
             (root / "tests").mkdir()
             self.assertEqual(
                 "python -m unittest discover -s tests",
-                server._effective_goal_verify(tmp),
+                server._effective_goal_verify({"goal_verify": ""}, tmp),
             )
 
     def test_detected_verify_queues_and_holds_accept(self):
@@ -787,25 +770,15 @@ class TokenBudgetConfigTests(unittest.TestCase):
         self.assertEqual(0, server._coerce_token_budget(-5))
         self.assertEqual(1000, server._coerce_token_budget("1000"))
 
-    def test_goal_verify_roundtrips_and_no_workflow_budget(self):
+    def test_workflow_config_has_no_goal_gates(self):
+        # goal_verify and the token budget are per-goal now — not in workflow config.
         with TemporaryDirectory() as tmp:
-            server.write_workflow_config(
-                server.default_workflow_steps(), tmp, server.default_workflow_edges(),
-                goal_verify="pytest -q",
-            )
-            self.assertEqual("pytest -q", server.read_workflow_config(tmp)["goal_verify"])
-            # A plain save (no goal_verify) preserves it; an explicit "" clears it.
             server.write_workflow_config(
                 server.default_workflow_steps(), tmp, server.default_workflow_edges()
             )
-            self.assertEqual("pytest -q", server.read_workflow_config(tmp)["goal_verify"])
-            cleared = server.write_workflow_config(
-                server.default_workflow_steps(), tmp, server.default_workflow_edges(),
-                goal_verify="",
-            )
-            self.assertEqual("", cleared["goal_verify"])
-            # Token budget is per goal only — no workflow-level field.
-            self.assertNotIn("goal_token_budget", server.read_workflow_config(tmp))
+            cfg = server.read_workflow_config(tmp)
+            self.assertNotIn("goal_verify", cfg)
+            self.assertNotIn("goal_token_budget", cfg)
 
 
 class TokenBudgetGateTests(unittest.TestCase):
