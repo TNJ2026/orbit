@@ -807,6 +807,23 @@
     }
     .wf-tool svg { display: block; flex: none; }
     .wf-tool-name { font-weight: 600; }
+    /* Zoom cluster in the floating toolbar (Ctrl/Cmd+wheel also zooms). */
+    .wf-zoom {
+      display: flex; align-items: center; gap: 2px;
+      margin-left: 4px; padding-left: 6px; border-left: 1px solid var(--line);
+    }
+    .wf-zoom-btn {
+      width: 26px; height: 26px; padding: 0;
+      display: flex; align-items: center; justify-content: center;
+      border: 1px solid var(--line); border-radius: 6px;
+      background: var(--panel); color: var(--ink);
+      cursor: pointer; font-size: 15px; line-height: 1; user-select: none;
+    }
+    .wf-zoom-btn:hover { border-color: var(--accent); background: #f3faf7; }
+    .wf-zoom-label {
+      min-width: 40px; text-align: center;
+      font-size: 11px; color: var(--muted); user-select: none;
+    }
     /* Interaction cheat-sheet pinned to the top-right of the canvas. Sits
        above the scrolling graph so it stays visible while panning. */
     .wf-help {
@@ -862,10 +879,17 @@
     .workflow-node.connect-source {
       box-shadow: 0 0 0 3px rgba(37, 108, 90, 0.35);
     }
-    .workflow-graph {
+    /* Sizer carries the scaled layout size (content × zoom) so the canvas
+       scrollbars track the zoomed graph; the inner .workflow-graph is the
+       transformed layer (unscaled internal coords). */
+    .wf-sizer {
       position: relative;
       min-width: 100%;
       flex: none;
+    }
+    .workflow-graph {
+      position: relative;
+      transform-origin: 0 0;
     }
     .workflow-edges {
       position: absolute;
@@ -1598,7 +1622,9 @@
         "wf.help.connect": "<kbd>Connect</kbd> tool — click two nodes in order to wire an edge",
         "wf.help.delEdge": "<kbd>Click</kbd> an edge — delete it",
         "wf.help.addStep": "<kbd>Add step</kbd> — create a new step",
-        "wf.help.layout": "Layout is auto-arranged by dagre; nodes are not draggable"
+        "wf.help.zoom": "<kbd>Ctrl/⌘ + wheel</kbd> — zoom; ⤢ fits the whole graph",
+        "wf.help.layout": "Layout is auto-arranged by dagre; nodes are not draggable",
+        "wf.zoomIn": "Zoom in", "wf.zoomOut": "Zoom out", "wf.zoomFit": "Fit to view"
       },
       zh: {
         "tab.goals": "目标", "tab.tasks": "任务", "tab.team": "团队",
@@ -1710,7 +1736,9 @@
         "wf.help.connect": "<kbd>连接</kbd> 工具 — 依次点击两个节点连线",
         "wf.help.delEdge": "<kbd>单击</kbd> 连线 — 删除该连线",
         "wf.help.addStep": "<kbd>添加步骤</kbd> — 新建步骤",
-        "wf.help.layout": "布局由 dagre 自动排列，节点不可拖动"
+        "wf.help.zoom": "<kbd>Ctrl/⌘ + 滚轮</kbd> — 缩放；⤢ 适应整图",
+        "wf.help.layout": "布局由 dagre 自动排列，节点不可拖动",
+        "wf.zoomIn": "放大", "wf.zoomOut": "缩小", "wf.zoomFit": "适应窗口"
       }
     };
     let LANG = (localStorage.getItem("orbit-lang") || "en");
@@ -2202,6 +2230,59 @@
     let wfTool = "";
     let wfConnectFrom = null; // source node id when in connect mode
 
+    // Canvas zoom. The graph layer is CSS-scaled; #wfSizer carries the scaled
+    // layout size so the scrollbars track it. Zoom survives re-renders (drawEdges
+    // re-applies it) because renderWorkflow rebuilds the DOM each time.
+    const WF_ZOOM_MIN = 0.4, WF_ZOOM_MAX = 2.0, WF_ZOOM_STEP = 1.1;
+    let wfZoom = 1;
+    let wfContentW = 0, wfContentH = 0;  // unscaled graph box, set by drawEdges
+
+    function updateWfZoomLabel() {
+      const el = $("wfZoomLabel");
+      if (el) el.textContent = Math.round(wfZoom * 100) + "%";
+    }
+
+    // Push the current zoom onto the DOM: scale the graph layer and size the
+    // sizer to content × zoom so panning reaches every corner.
+    function applyWfZoom() {
+      const sizer = $("wfSizer"), graph = $("wfGraph");
+      if (!sizer || !graph) return;
+      graph.style.transform = `scale(${wfZoom})`;
+      sizer.style.width = Math.round(wfContentW * wfZoom) + "px";
+      sizer.style.height = Math.round(wfContentH * wfZoom) + "px";
+      updateWfZoomLabel();
+    }
+
+    // Set zoom, clamped. With a `pivot` (client coords, e.g. the cursor) the
+    // content point under it stays put; without one it zooms about the top-left.
+    function setWfZoom(z, pivot) {
+      const canvas = $("wfCanvas");
+      const nz = Math.min(WF_ZOOM_MAX, Math.max(WF_ZOOM_MIN, z));
+      if (!canvas) { wfZoom = nz; return; }
+      const rect = canvas.getBoundingClientRect();
+      const viewX = pivot ? pivot.x - rect.left : 0;
+      const viewY = pivot ? pivot.y - rect.top : 0;
+      // content coord (unscaled) currently under the pivot
+      const cx = (canvas.scrollLeft + viewX) / wfZoom;
+      const cy = (canvas.scrollTop + viewY) / wfZoom;
+      wfZoom = nz;
+      applyWfZoom();
+      if (pivot) {
+        canvas.scrollLeft = cx * wfZoom - viewX;
+        canvas.scrollTop = cy * wfZoom - viewY;
+      }
+    }
+
+    // Fit the whole graph into the viewport (clamped to the zoom range).
+    function wfFit() {
+      const canvas = $("wfCanvas");
+      if (!canvas || !wfContentW || !wfContentH) return;
+      const z = Math.min(canvas.clientWidth / wfContentW, canvas.clientHeight / wfContentH);
+      setWfZoom(z);
+      canvas.scrollLeft = 0;
+      canvas.scrollTop = 0;
+    }
+
     function wfById() {
       return Object.fromEntries((state.workflow.steps || []).map(s => [s.id, s]));
     }
@@ -2302,8 +2383,13 @@
     function wfGraphPoint(event) {
       const graph = $("wfGraph");
       if (!graph) return { x: 0, y: 0 };
+      // getBoundingClientRect returns the scaled box, so divide by zoom to get
+      // the graph's unscaled internal coordinates (nodes live in that space).
       const rect = graph.getBoundingClientRect();
-      return { x: event.clientX - rect.left, y: event.clientY - rect.top };
+      return {
+        x: (event.clientX - rect.left) / wfZoom,
+        y: (event.clientY - rect.top) / wfZoom,
+      };
     }
 
     function renderWorkflow() {
@@ -2334,6 +2420,12 @@
             </svg>
             <span class="wf-tool-name">${t("wf.connect")}</span>
           </div>
+          <div class="wf-zoom">
+            <button type="button" class="wf-zoom-btn" data-wf-zoom="out" title="${escapeHtml(t("wf.zoomOut"))}">−</button>
+            <span class="wf-zoom-label" id="wfZoomLabel">${Math.round(wfZoom * 100)}%</span>
+            <button type="button" class="wf-zoom-btn" data-wf-zoom="in" title="${escapeHtml(t("wf.zoomIn"))}">+</button>
+            <button type="button" class="wf-zoom-btn" data-wf-zoom="fit" title="${escapeHtml(t("wf.zoomFit"))}">⤢</button>
+          </div>
         </div>`;
       const canvasCls = "workflow-canvas" + (wfTool === "connect" ? " tool-connect" : "");
       $("workflowSteps").innerHTML = `
@@ -2346,10 +2438,12 @@
               <div>${t("wf.help.connect")}</div>
               <div>${t("wf.help.delEdge")}</div>
               <div>${t("wf.help.addStep")}</div>
+              <div>${t("wf.help.zoom")}</div>
               <div style="margin-top:3px;">${t("wf.help.layout")}</div>
             </div>
             ${steps.length ? "" : `<div class="wf-empty-hint">${t("wf.noSteps")}</div>`}
             <div class="${canvasCls}" id="wfCanvas">
+              <div class="wf-sizer" id="wfSizer">
               <div class="workflow-graph" id="wfGraph">
                 <svg class="workflow-edges" id="wfEdges">
                   <defs>
@@ -2382,6 +2476,7 @@
                     </div>`;
                   }).join("")}
                 </div>
+              </div>
               </div>
             </div>
           </div>
@@ -2422,6 +2517,10 @@
       if (graph) { graph.style.width = maxX + "px"; graph.style.height = maxY + "px"; }
       svg.setAttribute("width", maxX);
       svg.setAttribute("height", maxY);
+      // Record the unscaled content box and re-apply the current zoom, so the
+      // scale/scroll size survive every re-render and connect-preview redraw.
+      wfContentW = maxX; wfContentH = maxY;
+      applyWfZoom();
 
       let paths = `<defs>
         <marker id="wfArrow" viewBox="0 0 10 10" refX="8" refY="5"
@@ -2520,6 +2619,16 @@
           }
         });
       }
+      // Ctrl/Cmd + wheel zooms about the cursor; a plain wheel keeps scrolling.
+      const canvas = $("wfCanvas");
+      if (canvas) {
+        canvas.addEventListener("wheel", event => {
+          if (!(event.ctrlKey || event.metaKey)) return;
+          event.preventDefault();
+          const factor = event.deltaY < 0 ? WF_ZOOM_STEP : 1 / WF_ZOOM_STEP;
+          setWfZoom(wfZoom * factor, { x: event.clientX, y: event.clientY });
+        }, { passive: false });
+      }
     }
 
     function wireToolbar() {
@@ -2529,6 +2638,13 @@
       document.querySelectorAll(".wf-tool[data-action]").forEach(btn => {
         btn.addEventListener("click", () => {
           if (btn.dataset.action === "add-step") openAddStepModal();
+        });
+      });
+      document.querySelectorAll("[data-wf-zoom]").forEach(btn => {
+        btn.addEventListener("click", () => {
+          const k = btn.dataset.wfZoom;
+          if (k === "fit") wfFit();
+          else setWfZoom(wfZoom * (k === "in" ? WF_ZOOM_STEP : 1 / WF_ZOOM_STEP));
         });
       });
     }
