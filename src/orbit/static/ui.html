@@ -3098,14 +3098,20 @@
       };
 
       // The board shows the real tasks — a goal's business subtasks (or all,
-      // incl. standalone tasks). Goals live on the Goals page; step cards (a
-      // task's per-step execution) are hidden here and listed in the task detail.
+      // incl. standalone tasks). Goals live on the Goals page. A subtask's step
+      // cards stay hidden here (listed in the task detail), but a GOAL's own
+      // step cards — the design / decompose phase it runs before splitting
+      // (product_design, ui_design, architecture, …) — are surfaced as cards so
+      // that phase is visible instead of buried under the goal.
       // The goal chips above the board filter to one goal so the board shows that
       // goal's work rather than the whole history.
       const filter = goalFilterId();
+      const goalIds = new Set((state.tasks || []).filter(t => t.is_goal).map(t => t.id));
       (state.tasks || []).forEach(task => {
         if (task.is_goal) return;
-        if (task.parent_task_id && !task.source_message_id) return;  // step card
+        const isStepCard = task.parent_task_id && !task.source_message_id;
+        // Hide subtask step cards; keep goal-level step cards (parent is a goal).
+        if (isStepCard && !goalIds.has(task.parent_task_id)) return;
         if (filter !== "all" && task.parent_task_id !== filter) return;  // other goal / standalone
         const colId = COLUMN_MAP[task.task_status] || "todo";
         columns[colId].tasks.push(task);
