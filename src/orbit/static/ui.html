@@ -2038,8 +2038,11 @@
       await loadStatus();
       await loadTools();
       await loadRoles();
-      await loadTeam();
+      // Workflow before team: renderTeam derives the required roles from the
+      // workflow steps, so state.workflow must be populated first (otherwise the
+      // Team page's requirements read empty on the initial load).
       await loadWorkflow();
+      await loadTeam();
       await loadTasks();
       await loadGoals();
     }

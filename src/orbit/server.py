@@ -3152,18 +3152,6 @@ def _kill_process_group(proc: "subprocess.Popen[bytes]") -> None:
 _HUB_SWEEP_STATE: dict[int, dict[str, float]] = {}
 
 
-def _run_output_size(log_dir: str | None) -> int:
-    if not log_dir:
-        return 0
-    total = 0
-    for name in ("stdout.log", "stderr.log"):
-        try:
-            total += (Path(log_dir) / name).stat().st_size
-        except OSError:
-            pass
-    return total
-
-
 def _run_last_output_at(log_dir: str | None, started_at: datetime) -> datetime:
     """Best-effort timestamp of the latest actual stdout/stderr byte.
 
@@ -3285,7 +3273,6 @@ def hub_inspect_sweep(
             # Already condemned by a prior sweep (kill requested + step blocked).
             # Don't burn another hub inspection re-judging it.
             continue
-        size = _run_output_size(run.get("log_dir"))
         prev = _HUB_SWEEP_STATE.get(rid)
         try:
             started_at = datetime.fromisoformat(run["started_at"])
@@ -3297,15 +3284,12 @@ def hub_inspect_sweep(
         last_output_at = _run_last_output_at(run.get("log_dir"), started_at)
         silent_for = (now_dt - last_output_at).total_seconds()
         _HUB_SWEEP_STATE[rid] = {
-            "size": size,
             "inspected": (prev or {}).get("inspected", 0.0),
             "last_output": last_output_at.timestamp(),
         }
-        # filter A: only inspect runs that have been silent for the full interval
-        if prev is None or size > prev.get("size", -1):
-            if silent_for < RUNNER_SOFT_TIMEOUT_SECONDS:
-                continue
-        elif silent_for < RUNNER_SOFT_TIMEOUT_SECONDS:
+        # filter A: a run still producing output (silent for less than the soft
+        # interval) is working — skip it; only inspect genuinely silent runs.
+        if silent_for < RUNNER_SOFT_TIMEOUT_SECONDS:
             continue
         # cadence: inspect a given run at most once per soft interval
         if now - _HUB_SWEEP_STATE[rid]["inspected"] < RUNNER_SOFT_TIMEOUT_SECONDS:
