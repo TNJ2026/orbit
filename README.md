@@ -176,6 +176,7 @@ Every run records a token count, aggregated per goal so you can watch and cap sp
 - **Workflow**: visually edit the workflow graph (steps, roles, edges, per-step `verify` command)
 - **Jobs**: the `run_jobs` execution queue (status / outcome / claimant / lease expiry) to confirm the runner is consuming
 - **Goals**: goal progress and subtree token spend; **Force End** to hard-stop (kill running runners + close the whole tree)
+- **Settings**: UI language, **max rework rounds** (2–5, how many times a step may loop back before the engine blocks it), and **max concurrent tasks** (1–6, how many workflow steps run at once across all runners). Saved to `.orbit/settings.json`.
 - Per-step run logs (command, exit code, stdout/stderr tail)
 
 The UI reaches the local store only through `/api/*` JSON routes, and only serves local clients.
