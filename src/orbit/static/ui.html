@@ -1634,6 +1634,7 @@
         "goal.started": "Goal #{0} started", "goal.startedWith": "Goal #{0} started ({1})",
         "goal.noSubtasks": "no subtasks yet", "goal.analyzing": "Analyzing goal, splitting subtasks…",
         "goal.tokensTitle": "Tokens consumed across this goal's runs (only counts runners that report usage)",
+        "goal.budgetChip": "budget {0}M", "goal.budgetChipTitle": "This goal's hard token ceiling (millions); dispatch freezes once used tokens exceed it",
         "goal.done": "{0}/{1} done", "goal.blocked": "{0} blocked", "goal.tokens": "🔢 {0} tokens",
         "goal.closedHidden": "{0} closed goal{1} hidden",
         "goal.close": "Close", "goal.forceEnd": "Force End",
@@ -1752,6 +1753,7 @@
         "goal.started": "目标 #{0} 已启动", "goal.startedWith": "目标 #{0} 已启动（{1}）",
         "goal.noSubtasks": "暂无子任务", "goal.analyzing": "正在分析目标，拆解子任务…",
         "goal.tokensTitle": "该目标所有运行消耗的 tokens（仅统计上报用量的 runner）",
+        "goal.budgetChip": "预算 {0}M", "goal.budgetChipTitle": "本目标的 token 硬上限（百万）；用量超出后冻结派发",
         "goal.done": "{0}/{1} 已完成", "goal.blocked": "{0} 已阻塞", "goal.tokens": "🔢 {0} tokens",
         "goal.closedHidden": "已隐藏 {0} 个已关闭目标",
         "goal.close": "关闭", "goal.forceEnd": "强制结束",
@@ -3266,16 +3268,22 @@
       const tokens = goal.tokens_total
         ? ` · <span class="meta" title="${escapeHtml(t("goal.tokensTitle"))}">🔢 ${goal.tokens_total.toLocaleString()} tokens</span>`
         : "";
+      // token_budget is a raw token count (millions × 1e6 at creation); show it
+      // back in millions. 0 = unlimited, so no chip.
+      const budget = goal.token_budget
+        ? ` · <span class="meta" title="${escapeHtml(t("goal.budgetChipTitle"))}">💰 ${t("goal.budgetChip", (goal.token_budget / 1e6).toLocaleString())}</span>`
+        : "";
+      const meta = tokens + budget;
       // Intake in flight: goal started, hub is splitting it, no subtask cards yet.
       const analyzing = !goal.subtask_total && goal.workflow_step
         && !["stalled", "closed", "accepted"].includes(goal.task_status);
       if (analyzing) {
-        return `<span class="goal-analyzing"><span class="spinner"></span>${t("goal.analyzing")}${tokens}</span>`;
+        return `<span class="goal-analyzing"><span class="spinner"></span>${t("goal.analyzing")}${meta}</span>`;
       }
-      if (!goal.subtask_total) return `<span class="meta">${t("goal.noSubtasks")}${tokens}</span>`;
+      if (!goal.subtask_total) return `<span class="meta">${t("goal.noSubtasks")}${meta}</span>`;
       const pct = Math.round(goal.subtask_closed / goal.subtask_total * 100);
       return `
-        <span class="meta">${t("goal.done", goal.subtask_closed, goal.subtask_total)}${goal.subtask_blocked ? ` · <span style="color: var(--danger)">${t("goal.blocked", goal.subtask_blocked)}</span>` : ""}${tokens}</span>
+        <span class="meta">${t("goal.done", goal.subtask_closed, goal.subtask_total)}${goal.subtask_blocked ? ` · <span style="color: var(--danger)">${t("goal.blocked", goal.subtask_blocked)}</span>` : ""}${meta}</span>
         <div class="goal-progress"><div class="goal-progress-fill" style="width: ${pct}%"></div></div>`;
     }
 
