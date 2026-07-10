@@ -1591,6 +1591,7 @@
         "team.reqMissing": "required enabled roles missing: {0}",
         "team.reqPresent": "required enabled roles present: {0}",
         "team.reqHint": "Roles the team must contain for required steps",
+        "team.reqNone": "No roles referenced by workflow steps",
         "team.config": "config: {0}", "team.required": "required",
         "team.noMembers": "No team members configured.", "team.remove": "Remove",
         "team.expertise": "Expertise", "team.capabilities": "Capabilities",
@@ -1708,6 +1709,7 @@
         "team.reqMissing": "缺少必启用角色: {0}",
         "team.reqPresent": "必启用角色已就位: {0}",
         "team.reqHint": "Team中必须包含必要步骤的Role",
+        "team.reqNone": "工作流步骤未引用任何角色",
         "team.config": "配置: {0}", "team.required": "必选",
         "team.noMembers": "尚未配置团队成员。", "team.remove": "移除",
         "team.expertise": "熟练度", "team.capabilities": "能力",
@@ -2012,6 +2014,7 @@
       // must not write the config (and the server locks workflow saves while
       // tasks are running).
       renderWorkflow();
+      renderTeam();
     }
 
     async function loadStatus() {
@@ -2091,12 +2094,23 @@
         agentSelect.value = prevAgent;
       }
       $("teamPath").textContent = state.team.path ? t("team.config", state.team.path) : "";
-      const reqHtml = REQUIRED_TEAM_ROLES.map(roleId => {
-        const present = enabledRoles.has(roleId);
-        return `<label><input type="checkbox" ${present ? "checked" : ""} disabled><span>${escapeHtml(roleId)}</span></label>`;
-      }).join("");
+      // Required roles are derived from the workflow steps: every role a step
+      // references must have an enabled team member to run it.
+      const wfRoleIds = [];
+      const seen = new Set();
+      (state.workflow.steps || []).forEach(s => {
+        const rid = s.role_id;
+        if (rid && !seen.has(rid)) { seen.add(rid); wfRoleIds.push(rid); }
+      });
+      const allPresent = wfRoleIds.length > 0 && wfRoleIds.every(rid => enabledRoles.has(rid));
+      const titleColor = wfRoleIds.length === 0 ? "var(--muted)" : (allPresent ? "var(--accent)" : "var(--danger)");
+      const reqHtml = wfRoleIds.length ? wfRoleIds.map(rid => {
+        const present = enabledRoles.has(rid);
+        const color = present ? "var(--accent)" : "var(--danger)";
+        return `<label style="color:${color}"><input type="checkbox" ${present ? "checked" : ""} disabled><span>${escapeHtml(rid)}</span></label>`;
+      }).join("") : `<span class="meta">${t("team.reqNone")}</span>`;
       $("teamRequirements").innerHTML =
-        `<div class="team-requirements-title">${t("team.reqHint")}</div>` +
+        `<div class="team-requirements-title" style="color:${titleColor}">${t("team.reqHint")}</div>` +
         `<div class="team-requirements-list">${reqHtml}</div>`;
 
       const members = state.team.members || [];
