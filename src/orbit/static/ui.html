@@ -1627,6 +1627,7 @@
         "col.blocked": "Blocked", "col.review": "Under Review", "col.done": "Done",
         "task.fallback": "Task", "task.fallbackId": "#{0} Task", "task.goal": "🎯 goal", "task.subtask": "↳ #{0}", "task.step": "⚙ {0}",
         "task.subtaskTitle": "subtask of goal #{0}",
+        "task.waiting": "⏳ waiting {0}", "task.waitingTitle": "held until its prerequisite tasks close (their work is merged to main)",
         "task.noTasks": "No tasks", "task.pickAgent": "Pick an agent to re-run with",
         "task.loadFailed": "Failed to load task #{0}: {1}",
         "task.rerun": "Re-running #{0} step \"{1}\" with {2}{3}", "task.rerunQueued": " (job #{0} queued)",
@@ -1746,6 +1747,7 @@
         "col.blocked": "已阻塞", "col.review": "评审中", "col.done": "已完成",
         "task.fallback": "任务", "task.fallbackId": "#{0} 任务", "task.goal": "🎯 目标", "task.subtask": "↳ #{0}", "task.step": "⚙ {0}",
         "task.subtaskTitle": "目标 #{0} 的子任务",
+        "task.waiting": "⏳ 等待 {0}", "task.waitingTitle": "前置任务全部关闭（成果并入 main）后才开工",
         "task.noTasks": "暂无任务", "task.pickAgent": "请选择一个 agent 重新运行",
         "task.loadFailed": "加载任务 #{0} 失败: {1}",
         "task.rerun": "用 {2} 重新运行 #{0} 步骤 \"{1}\"{3}", "task.rerunQueued": "（任务 #{0} 已排队）",
@@ -3140,6 +3142,7 @@
                       ${task.is_goal ? `<span class="badge wf-step-badge">${t("task.goal")}</span>` : ""}
                       ${task.parent_task_id ? `<span class="badge" title="${escapeHtml(t("task.subtaskTitle", task.parent_task_id))}">${t("task.subtask", task.parent_task_id)}</span>` : ""}
                       ${task.workflow_step ? `<span class="badge wf-step-badge">${t("task.step", escapeHtml(task.workflow_step))}</span>` : ""}
+                      ${(task.depends_on && task.depends_on.length && !task.workflow_step) ? `<span class="badge" title="${escapeHtml(t("task.waitingTitle"))}" style="color: var(--warn); border-color: var(--warn);">${t("task.waiting", task.depends_on.map(id => "#" + id).join(" "))}</span>` : ""}
                     </div>` : ""}
                     <div class="kanban-card-meta">
                       <span>${escapeHtml(task.sender)} ➜ ${escapeHtml(task.recipient)}</span>

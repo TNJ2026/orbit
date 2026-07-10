@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import sqlite3
 import threading
@@ -330,6 +331,38 @@ def _decode_capabilities(capabilities: str) -> list[str]:
     return [part.strip() for part in (capabilities or "").split(",") if part.strip()]
 
 
+def _encode_depends_on(ids: list[int] | None) -> str:
+    if not ids:
+        return ""
+    seen: list[int] = []
+    for value in ids:
+        try:
+            n = int(value)
+        except (TypeError, ValueError):
+            continue
+        if n not in seen:
+            seen.append(n)
+    return json.dumps(seen) if seen else ""
+
+
+def _decode_depends_on(raw: str) -> list[int]:
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(data, list):
+        return []
+    out: list[int] = []
+    for value in data:
+        try:
+            out.append(int(value))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 class Store:
     def __init__(self, db_path: Path | str | None = None):
         if db_path is None:
@@ -401,6 +434,9 @@ class Store:
             "display_id": "TEXT NOT NULL DEFAULT ''",
             # Per-goal convergence-verify command; '' falls back to auto-detect.
             "goal_verify": "TEXT NOT NULL DEFAULT ''",
+            # JSON list of prerequisite task ids a business subtask waits on; the
+            # engine holds it until they all close. '' / '[]' = no dependency.
+            "depends_on": "TEXT NOT NULL DEFAULT ''",
         }
         for column, definition in task_defaults.items():
             if column not in task_columns:
@@ -752,7 +788,7 @@ class Store:
                            created_at, updated_at,
                            role_required, importance, size, risk,
                            required_capabilities, exclusive_workspace,
-                           workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify
+                           workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify, depends_on
                     FROM tasks
                     {where}
                     ORDER BY id DESC
@@ -768,7 +804,7 @@ class Store:
                           assignee, assignee AS recipient, status AS task_status,
                           created_at, updated_at, role_required, importance, size,
                           risk, required_capabilities, exclusive_workspace,
-                          workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify
+                          workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify, depends_on
                    FROM tasks
                    WHERE id = ?""",
                 (task_id,),
@@ -782,7 +818,7 @@ class Store:
                           assignee, assignee AS recipient, status AS task_status,
                           created_at, updated_at, role_required, importance, size,
                           risk, required_capabilities, exclusive_workspace,
-                          workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify
+                          workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify, depends_on
                    FROM tasks
                    WHERE source_message_id = ?""",
                 (message_id,),
@@ -796,7 +832,7 @@ class Store:
                           assignee, assignee AS recipient, status AS task_status,
                           created_at, updated_at, role_required, importance, size,
                           risk, required_capabilities, exclusive_workspace,
-                          workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify
+                          workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify, depends_on
                    FROM tasks
                    WHERE parent_task_id = ?
                    ORDER BY id DESC""",
@@ -812,7 +848,7 @@ class Store:
                           assignee, assignee AS recipient, status AS task_status,
                           created_at, updated_at, role_required, importance, size,
                           risk, required_capabilities, exclusive_workspace,
-                          workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify
+                          workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify, depends_on
                    FROM tasks
                    WHERE is_goal = 1
                       OR parent_task_id IN (SELECT id FROM tasks WHERE is_goal = 1)
@@ -828,7 +864,7 @@ class Store:
                           assignee, assignee AS recipient, status AS task_status,
                           created_at, updated_at, role_required, importance, size,
                           risk, required_capabilities, exclusive_workspace,
-                          workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify
+                          workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify, depends_on
                    FROM tasks
                    WHERE workflow_step != ''
                      AND status NOT IN ('blocked', 'closed')
@@ -848,7 +884,7 @@ class Store:
                           assignee, assignee AS recipient, status AS task_status,
                           created_at, updated_at, role_required, importance, size,
                           risk, required_capabilities, exclusive_workspace,
-                          workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify
+                          workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify, depends_on
                    FROM tasks
                    WHERE status != 'closed'
                      AND NOT (status = 'accepted' AND is_goal = 1)
@@ -868,6 +904,7 @@ class Store:
         is_goal: bool | None = None,
         token_budget: int | None = None,
         goal_verify: str | None = None,
+        depends_on: list[int] | None = None,
     ) -> dict[str, Any] | None:
         updates: list[str] = []
         params: list[Any] = []
@@ -903,6 +940,9 @@ class Store:
         if goal_verify is not None:
             updates.append("goal_verify = ?")
             params.append(str(goal_verify).strip())
+        if depends_on is not None:
+            updates.append("depends_on = ?")
+            params.append(_encode_depends_on(depends_on))
         if not updates:
             return self.get_task(task_id)
         updates.append("updated_at = ?")
@@ -1830,4 +1870,5 @@ class Store:
         )
         task["exclusive_workspace"] = bool(task.get("exclusive_workspace", 1))
         task["is_goal"] = bool(task.get("is_goal", 0))
+        task["depends_on"] = _decode_depends_on(task.get("depends_on", ""))
         return task

@@ -870,6 +870,59 @@ class StepCardTests(unittest.TestCase):
             h.complete("hub-agent", task_id, "intake", "done")
             self.assertEqual({}, self._cards(h, task_id))
 
+    def test_parse_depends_on_to_zero_based_indices(self):
+        tasks = server._parse_goal_subtasks(
+            '{"tasks":[{"title":"A","content":"a"},'
+            '{"title":"B","content":"b","depends_on":[1]}]}'
+        )
+        self.assertEqual([], tasks[0]["deps"])
+        self.assertEqual([0], tasks[1]["deps"])
+
+    def test_parse_rejects_invalid_depends_on(self):
+        cases = [
+            '{"tasks":[{"title":"A","content":"a","depends_on":[2]}]}',        # out of range
+            '{"tasks":[{"title":"A","content":"a","depends_on":[1]}]}',        # self
+            '{"tasks":[{"title":"A","content":"a","depends_on":[2]},'
+            '{"title":"B","content":"b","depends_on":[1]}]}',                  # cycle
+            '{"tasks":[{"title":"A","content":"a","depends_on":"x"}]}',        # not a list
+        ]
+        for bad in cases:
+            with self.assertRaises(server.InvalidInputError):
+                server._parse_goal_subtasks(bad)
+
+    def test_dependent_subtask_is_held_then_released_on_prereq_close(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, team=self._team_with_runners())
+            goal_id = self._goal(h)
+            h.start(goal_id)
+            report = server.run_step_worker(
+                h.store, tmp, goal_id, self._step(h, "intake"),
+                {
+                    **self._member(h, "hub-agent"),
+                    "runner_command": (
+                        "printf '%s' "
+                        "'{\"tasks\":[{\"title\":\"A\",\"content\":\"a\"},"
+                        "{\"title\":\"B\",\"content\":\"b\",\"depends_on\":[1]}]}'"
+                    ),
+                },
+            )
+            self.assertEqual("done", report["outcome"])
+            business = {
+                t["title"]: t for t in h.store.list_tasks(status="all")
+                if t.get("parent_task_id") == goal_id
+                and t.get("source_message_id") is not None
+            }
+            a, b = business["A"], business["B"]
+            # A dispatched into the workflow; B held (created, no step) on A.
+            self.assertTrue(h.task(a["id"])["workflow_step"])
+            self.assertEqual("created", h.task(b["id"])["task_status"])
+            self.assertFalse(h.task(b["id"])["workflow_step"])
+            self.assertEqual([a["id"]], h.task(b["id"])["depends_on"])
+            # Close A -> roll-up releases B.
+            h.store.set_task_workflow_state(a["id"], task_status="closed")
+            server._recompute_parent_goal_status(h.store, h.task(a["id"]), tmp)
+            self.assertTrue(h.task(b["id"])["workflow_step"])
+
 
 class TeamLockTests(unittest.TestCase):
     def test_team_locked_while_workflow_tasks_run(self):

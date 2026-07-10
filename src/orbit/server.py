@@ -1509,12 +1509,59 @@ def _extract_json_object(text: str) -> dict[str, Any]:
     return data
 
 
-def _parse_goal_subtasks(text: str) -> list[dict[str, str]]:
+def _parse_subtask_deps(raw: Any, index: int, count: int) -> list[int]:
+    """Normalize a subtask's `depends_on` (1-based indices of other tasks in the
+    same batch) to sorted 0-based indices. Rejects out-of-range and self refs."""
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise InvalidInputError(
+            f"task {index} depends_on must be a list of task numbers"
+        )
+    out: set[int] = set()
+    for value in raw:
+        try:
+            ref = int(value)
+        except (TypeError, ValueError):
+            raise InvalidInputError(
+                f"task {index} depends_on has a non-numeric entry: {value!r}"
+            ) from None
+        if ref < 1 or ref > count:
+            raise InvalidInputError(
+                f"task {index} depends_on references task {ref}, out of range 1..{count}"
+            )
+        if ref == index:
+            raise InvalidInputError(f"task {index} cannot depend on itself")
+        out.add(ref - 1)
+    return sorted(out)
+
+
+def _reject_dependency_cycles(tasks: list[dict[str, Any]]) -> None:
+    """A dependency cycle would never release (each waits on the other), so
+    reject it at parse time — the goal blocks and the hub re-decomposes."""
+    state = [0] * len(tasks)  # 0=unseen, 1=on-stack, 2=done
+
+    def visit(i: int) -> None:
+        if state[i] == 1:
+            raise InvalidInputError("subtask dependencies form a cycle")
+        if state[i] == 2:
+            return
+        state[i] = 1
+        for dep in tasks[i]["deps"]:
+            visit(dep)
+        state[i] = 2
+
+    for i in range(len(tasks)):
+        visit(i)
+
+
+def _parse_goal_subtasks(text: str) -> list[dict[str, Any]]:
     data = _extract_json_object(text)
     raw_tasks = data.get("tasks")
     if not isinstance(raw_tasks, list) or not raw_tasks:
         raise InvalidInputError('intake JSON must include a non-empty "tasks" list')
-    tasks: list[dict[str, str]] = []
+    count = len(raw_tasks)
+    tasks: list[dict[str, Any]] = []
     for index, raw in enumerate(raw_tasks, 1):
         if not isinstance(raw, dict):
             raise InvalidInputError(f"task {index} must be an object")
@@ -1528,7 +1575,9 @@ def _parse_goal_subtasks(text: str) -> list[dict[str, str]]:
         body = content
         if acceptance:
             body += f"\n\nAcceptance:\n{acceptance}"
-        tasks.append({"title": title[:160], "content": body})
+        deps = _parse_subtask_deps(raw.get("depends_on"), index, count)
+        tasks.append({"title": title[:160], "content": body, "deps": deps})
+    _reject_dependency_cycles(tasks)
     return tasks
 
 
@@ -1551,7 +1600,9 @@ def _start_goal_business_subtasks(
     source_message_id = goal.get("source_message_id")
     if source_message_id is None:
         raise InvalidInputError("goal is missing source_message_id")
-    started: list[dict[str, Any]] = []
+    # 1. Create every subtask row first, so `depends_on` (referenced by 1-based
+    #    index in the batch) can be resolved to real task ids before any dispatch.
+    created: list[dict[str, Any]] = []
     for subtask in subtasks:
         [message_id] = store.send_message(
             actor,
@@ -1564,15 +1615,92 @@ def _start_goal_business_subtasks(
         task = store.get_task_by_source_message(message_id)
         if not task:
             raise InvalidInputError(f"task not created for message: {message_id}")
-        if target_steps is None:
-            result = _start_workflow_task_locked(store, project_root, actor, task["id"])
-        else:
-            result = _start_workflow_task_at_locked(
-                store, project_root, actor, task["id"],
-                from_step or "", target_steps, upstream_result,
-            )
+        created.append(task)
+    # 2. Persist each subtask's prerequisite task ids.
+    for idx, subtask in enumerate(subtasks):
+        dep_ids = [created[d]["id"] for d in subtask.get("deps", [])]
+        if dep_ids:
+            store.update_task_metadata(created[idx]["id"], depends_on=dep_ids)
+    # 3. Dispatch only the dependency-free subtasks; the rest stay held (status
+    #    "created", no workflow_step) until _release_ready_subtasks starts them
+    #    once their prerequisites close (and are thus integrated on main).
+    started: list[dict[str, Any]] = []
+    for idx, subtask in enumerate(subtasks):
+        task = created[idx]
+        if subtask.get("deps"):
+            started.append({"task": store.get_task(task["id"]), "held": True})
+            continue
+        result = _dispatch_business_subtask(
+            store, project_root, actor, task["id"],
+            from_step, target_steps, upstream_result,
+        )
         started.append({"task": store.get_task(task["id"]), **result})
     return started
+
+
+def _dispatch_business_subtask(
+    store: Store,
+    project_root: str | None,
+    actor: str,
+    task_id: int,
+    from_step: str | None,
+    target_steps: list[str] | None,
+    upstream_result: str,
+) -> dict[str, Any]:
+    """Start one business subtask in the workflow — at the entry step, or at the
+    decompose step's successors when the goal split after its design phase."""
+    if target_steps is None:
+        return _start_workflow_task_locked(store, project_root, actor, task_id)
+    return _start_workflow_task_at_locked(
+        store, project_root, actor, task_id,
+        from_step or "", target_steps, upstream_result,
+    )
+
+
+def _release_ready_subtasks(
+    store: Store, project_root: str | None, goal_id: int, actor: str
+) -> list[int]:
+    """Dispatch any held business subtasks whose prerequisites have all closed.
+
+    A subtask with `depends_on` is created but held (status 'created', no
+    workflow_step) until every task it depends on reaches 'closed' — by then that
+    work is integrated on main, so the released subtask's worktree branches off
+    it. Returns the ids dispatched this pass. Idempotent: a dispatched subtask no
+    longer matches the held filter."""
+    subtasks = _business_subtasks_for_goal(store, goal_id)
+    by_id = {s["id"]: s for s in subtasks}
+    held = [
+        s for s in subtasks
+        if s.get("depends_on")
+        and s.get("task_status") == "created"
+        and not s.get("workflow_step")
+    ]
+    if not held:
+        return []
+    # Released subtasks begin where their siblings did — the decompose step's
+    # successors when the goal split after its design phase, else the entry step.
+    cfg = read_workflow_config(project_root)
+    back = _workflow_graph(cfg)
+    decompose_id = _root_goal_decompose_step_id(cfg, back)
+    entries = set(_workflow_entry_steps(cfg, back))
+    target_steps: list[str] | None = None
+    from_step = ""
+    if decompose_id and decompose_id not in entries:
+        target_steps = _forward_out(cfg, back, decompose_id)
+        from_step = decompose_id
+    _ensure_engine_agent(store)
+    released: list[int] = []
+    for s in held:
+        prereqs = s.get("depends_on") or []
+        if not all(
+            (by_id.get(pid) or {}).get("task_status") == "closed" for pid in prereqs
+        ):
+            continue
+        _dispatch_business_subtask(
+            store, project_root, actor, s["id"], from_step, target_steps, ""
+        )
+        released.append(s["id"])
+    return released
 
 
 def _business_subtasks_for_goal(store: Store, goal_id: int) -> list[dict[str, Any]]:
@@ -1690,6 +1818,10 @@ def _recompute_parent_goal_status(
         return
     if parent.get("task_status") == "closed":
         return  # respect an explicit close of the whole goal
+    # A subtask just changed state; release any held dependents whose
+    # prerequisites have now all closed (runs before the roll-up below, so a
+    # freshly-released subtask counts as still-running, not "all closed").
+    _release_ready_subtasks(store, project_root, parent_id, WORKFLOW_ENGINE_AGENT)
     subtasks = [
         subtask
         for subtask in _business_subtasks_for_goal(store, parent_id)
@@ -2622,10 +2754,14 @@ def _build_step_prompt(
             "**据其模块与接口边界划分**，每个子任务对应一块不重叠的实现区域。\n"
             "你必须只输出一个 JSON 对象，不要 Markdown，不要代码块：\n"
             '{"tasks":[{"title":"子任务标题","content":"要做什么",'
-            '"acceptance":"验收标准"}]}\n'
-            "每个子任务必须可独立执行；按模块 / 目录 / 文件区域分区，尽量不碰"
-            "重叠代码（集成时各分支串行合并回主干，重叠越多冲突越多）；数量按"
-            "工作量定，不设固定上限。\n"
+            '"acceptance":"验收标准","depends_on":[前置任务序号]}]}\n'
+            "**优先拆成互相独立、可并行的任务**（按模块 / 目录 / 文件区域分区，"
+            "尽量不碰重叠代码；集成时各分支串行合并回主干，重叠越多冲突越多）；"
+            "数量按工作量定，不设固定上限。\n"
+            "只有当子任务 B 确实依赖 A 的产出（必须 A 完成合并后 B 才能开工）时，"
+            "才给 B 加 `depends_on`：值是本列表中前置任务的**序号**（从 1 开始，"
+            "如 `\"depends_on\":[1,2]`）。引擎会 hold 住 B，直到其所有前置任务关闭"
+            "（成果已并入 main）再派发。无依赖就省略该字段或给 `[]`。不要成环。\n"
             "**务必精简，避免 JSON 被截断**：`content` 一两句话说清做什么 + 涉及"
             "的文件/模块；`acceptance` 一两条验收。已有设计文档就按路径引用（如 "
             "`docs/…`），不要把整份规格复述进来——实现者会自己去读。只输出这一个 "
