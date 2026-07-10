@@ -2313,22 +2313,45 @@
       const edges = state.workflow.edges || [];
       if (!steps.length) return false;
       const rects = wfNodeRects();
-      const g = new window.dagre.graphlib.Graph({ directed: true });
-      // rankdir LR matches the intended left→right flow (intake … accept).
-      g.setGraph({ rankdir: "LR", nodesep: 40, ranksep: 100, marginx: 40, marginy: 40 });
-      g.setDefaultEdgeLabel(() => ({}));
-      steps.forEach(s => {
-        const r = rects[s.id];
-        g.setNode(s.id, { width: WF_NODE_W, height: (r && r.h) || 120 });
-      });
+      // Build + run an LR layout over the steps, wiring every edge except those
+      // in `skip`. Returns the laid-out graph, or null if dagre throws.
+      const layout = (skip) => {
+        const g = new window.dagre.graphlib.Graph({ directed: true });
+        // rankdir LR matches the intended left→right flow (intake … accept).
+        g.setGraph({ rankdir: "LR", nodesep: 40, ranksep: 100, marginx: 40, marginy: 40 });
+        g.setDefaultEdgeLabel(() => ({}));
+        steps.forEach(s => {
+          const r = rects[s.id];
+          g.setNode(s.id, { width: WF_NODE_W, height: (r && r.h) || 120 });
+        });
+        edges.forEach(e => {
+          if (skip && skip.has(e.from + " " + e.to)) return;
+          if (g.hasNode(e.from) && g.hasNode(e.to)) g.setEdge(e.from, e.to);
+        });
+        try {
+          window.dagre.layout(g);
+          return g;
+        } catch (err) {
+          setStatus(t("wf.layoutFailed", (err && err.message || err)), true);
+          return null;
+        }
+      };
+      // First pass with every edge, to discover the back-edges (target not to the
+      // right of source). Those are drawn as top/bottom loop-back arcs by the
+      // edge renderer, so feeding them to dagre only lifts nodes off the main row
+      // (e.g. review jumping up to route review→implement). A second pass without
+      // them keeps the forward chain on one straight line; genuine parallel
+      // branches are forward edges and are kept.
+      let g = layout(null);
+      if (!g) return false;
+      const back = new Set();
       edges.forEach(e => {
-        if (g.hasNode(e.from) && g.hasNode(e.to)) g.setEdge(e.from, e.to);
+        const a = g.node(e.from), b = g.node(e.to);
+        if (a && b && b.x <= a.x) back.add(e.from + " " + e.to);
       });
-      try {
-        window.dagre.layout(g);
-      } catch (err) {
-        setStatus(t("wf.layoutFailed", (err && err.message || err)), true);
-        return false;
+      if (back.size) {
+        const reduced = layout(back);
+        if (reduced) g = reduced;  // keep the full layout if the reduced one fails
       }
       steps.forEach(s => {
         const n = g.node(s.id);
