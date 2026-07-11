@@ -2424,12 +2424,16 @@ def rerun_workflow_step(
                 "cannot auto-run the step; pick a CLI-backed agent"
             )
         # Carry the upstream step's result forward so the re-run has the same
-        # context the original dispatch had (empty for entry steps).
+        # context the original dispatch had (empty for entry steps). The note is
+        # the raw transcript (truncated at record time); collapse it to the same
+        # structured block a live advance would have handed this step.
         upstream = [
             t for t in transitions
             if t["outcome"] == "done" and t["to_step"] == step_id
         ]
-        upstream_result = upstream[-1].get("note", "") if upstream else ""
+        upstream_result = (
+            _structured_upstream(upstream[-1].get("note", "")) if upstream else ""
+        )
         job = _dispatch_step(
             store, project_root, task, step_def, member, upstream_result
         )
@@ -2698,8 +2702,13 @@ def _advance_workflow_task_locked(
         }
 
     _settle_step_card(store, task, step, outcome)
+    # Forward flow hands the next step the structured upstream block (summary +
+    # artifact references it reads directly). Rework keeps the raw feedback:
+    # the reviewer's itemized reasons ARE the instructions for the redo, and
+    # collapsing them to a one-line summary would lose exactly what matters.
+    upstream = _structured_upstream(result) if outcome == "done" else result
     dispatched, notices = _dispatch_targets(
-        store, project_root, task, targets, cfg, back, members, result
+        store, project_root, task, targets, cfg, back, members, upstream
     )
     return {
         "task_id": task_id, "step": step, "outcome": outcome,
@@ -2848,6 +2857,26 @@ def _parse_step_output_metadata(text: str) -> tuple[str, list[str]]:
         ]
         summary = _tail("\n".join(legacy_lines), _STEP_SUMMARY_MAX)
     return summary, artifacts
+
+
+def _structured_upstream(result: str) -> str:
+    """The upstream context handed to the NEXT step: the completed step's
+    summary plus its artifact references, which the next agent reads directly —
+    instead of an arbitrarily truncated transcript of the previous runner.
+
+    Protocol runners (RESULT_SUMMARY/ARTIFACTS) collapse to a tight block;
+    legacy output degrades to its cleaned tail, which matches what the
+    transition note carried before, so older runners behave as they always did.
+    """
+    summary, artifacts = _parse_step_output_metadata(result)
+    lines: list[str] = []
+    if summary:
+        lines.append(summary)
+    if artifacts:
+        lines.append("ARTIFACTS:")
+        lines.extend(f"- {artifact}" for artifact in artifacts)
+        lines.append("（完整细节请直接读取上述产物文件/引用，不要依赖摘要复述。）")
+    return "\n".join(lines)
 
 
 # CLI-native token-usage formats, tried before the self-reported sentinel.

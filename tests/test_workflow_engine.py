@@ -197,6 +197,48 @@ class WorkflowEngineTests(unittest.TestCase):
             )
             self.assertEqual("blocked", projected["task_status"])
 
+    def test_forward_dispatch_carries_structured_upstream(self):
+        # A protocol runner's transcript collapses to the structured block
+        # (summary + artifact references) for the NEXT step; the chatter and
+        # protocol bookkeeping never reach the downstream prompt.
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            task_id = h.create_task()
+            h.start(task_id)
+            raw = (
+                "let me think about this...\n"
+                "long transcript of intermediate reasoning\n"
+                "RESULT_SUMMARY: API built with 3 endpoints\n"
+                'ARTIFACTS: ["src/api.py", "docs/api.md"]\n'
+                "WORKFLOW_OUTCOME: done"
+            )
+            h.complete("hub-agent", task_id, "intake", "done", raw)
+            up = h.task(task_id)["step_inputs"]["upstream_result"]
+            self.assertIn("API built with 3 endpoints", up)
+            self.assertIn("- src/api.py", up)
+            self.assertIn("- docs/api.md", up)
+            self.assertNotIn("long transcript", up)
+            self.assertNotIn("WORKFLOW_OUTCOME", up)
+
+    def test_rework_dispatch_keeps_raw_feedback(self):
+        # Rework feedback IS the instruction set for the redo — it must reach
+        # the implementer verbatim, not collapsed to a one-line summary.
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            task_id = h.create_task()
+            h.start(task_id)
+            h.complete("hub-agent", task_id, "intake", "done")
+            h.complete("codex", task_id, "implement", "done", "diff ready")
+            feedback = (
+                "RESULT_SUMMARY: rejected\n"
+                "1. tests missing for the error path\n"
+                "2. race condition in foo() when called concurrently"
+            )
+            h.complete("rev", task_id, "review", "rework", feedback)
+            up = h.task(task_id)["step_inputs"]["upstream_result"]
+            self.assertIn("race condition in foo()", up)
+            self.assertIn("tests missing", up)
+
     def test_manual_status_rejected_while_steps_active(self):
         with TemporaryDirectory() as tmp:
             h = EngineHarness(tmp)
