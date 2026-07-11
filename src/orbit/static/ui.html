@@ -1699,6 +1699,7 @@
         "modal.addStep.name": "Name", "modal.addStep.namePh": "Step name",
         "modal.addStep.agent": "Agents (up to 3 — first runs the step; 2-3 spread across decompose subtasks)", "modal.addStep.agentPh": "e.g. claude-code — blank uses the step id",
         "modal.addStep.agentDefault": "— use the step id —", "modal.addStep.agentMissing": "(not installed)",
+        "modal.addStep.agentAdd": "Add another agent", "modal.addStep.agentRemove": "Remove",
         "modal.addStep.command": "Command (optional)", "modal.addStep.commandPh": "runner CLI — blank uses the default command",
         "modal.addStep.required": "Required (a step the flow must include)",
         "modal.addStep.prompt": "Step prompt", "modal.addStep.promptPh": "Additional instructions for this step",
@@ -1843,6 +1844,7 @@
         "modal.addStep.name": "名称", "modal.addStep.namePh": "步骤名称",
         "modal.addStep.agent": "Agent（最多 3 个 —— 第一个跑本步；2-3 个分摊给 decompose 子任务）", "modal.addStep.agentPh": "如 claude-code —— 留空用步骤 id",
         "modal.addStep.agentDefault": "—— 用步骤 id ——", "modal.addStep.agentMissing": "(未安装)",
+        "modal.addStep.agentAdd": "加一个 agent", "modal.addStep.agentRemove": "移除",
         "modal.addStep.command": "命令（可选）", "modal.addStep.commandPh": "runner CLI —— 留空用默认命令",
         "modal.addStep.required": "必选（流程必须包含的步骤）",
         "modal.addStep.prompt": "步骤 Prompt", "modal.addStep.promptPh": "该步骤的附加执行指令",
@@ -2808,38 +2810,62 @@
     // Agent options for a step: a blank "use step id" default, the installed
     // CLI tools, plus an orphan entry if the step names an agent that isn't
     // installed (legacy / hand-edited config) so it isn't silently dropped.
-    // Checkbox list of installed CLI tools (up to 3). The first checked agent is
-    // the step's own assignee; a step with 2-3 checked forms the decompose
-    // subtask pool. `selected` is the step's agents list. Agents that aren't
-    // installed (legacy/hand-edited) still show as checked so they aren't lost.
-    function agentCheckboxesHtml(selected) {
-      const sel = new Set(selected || []);
-      const installed = (state.tools || []).filter(tool => tool.installed);
-      const names = installed.map(tool => tool.agent_name);
-      const rows = [
-        ...installed.map(tool => ({ name: tool.agent_name, label: tool.profile_name ? "Hermes" : tool.name })),
-        ...[...sel].filter(a => !names.includes(a)).map(a => ({ name: a, label: t("modal.addStep.agentMissing") })),
-      ];
-      if (!rows.length) return `<div class="meta">${t("modal.addStep.agentDefault")}</div>`;
-      return rows.map(r => `
-        <label style="display:flex;align-items:center;gap:6px;font-weight:normal;font-size:13px;margin:0;">
-          <input type="checkbox" class="step-agent-cb" value="${escapeHtml(r.name)}" ${sel.has(r.name) ? "checked" : ""}>
-          <span>${escapeHtml(r.name)} — ${escapeHtml(r.label)}</span>
-        </label>
-      `).join("");
-    }
+    // The step's agent rows (one <select> each). First is the step's own
+    // assignee; 2-3 rows means "spread these CLIs across decompose subtasks".
+    let stepAgentRows = [""];
 
-    // Enforce the 3-agent cap: a 4th check is rejected.
-    function wireStepAgentCap() {
-      document.querySelectorAll("#addStepAgents .step-agent-cb").forEach(cb => {
-        cb.addEventListener("change", () => {
-          if (document.querySelectorAll("#addStepAgents .step-agent-cb:checked").length > 3) cb.checked = false;
+    // One dropdown per row: options are the installed CLIs minus the agents
+    // already picked in the other rows (no duplicates), a blank default, and the
+    // row's own value if it names an uninstalled/legacy agent. A ＋ adds a row
+    // (up to 3); an × removes one.
+    function renderAgentSelectors() {
+      const installed = (state.tools || []).filter(tool => tool.installed);
+      if (!stepAgentRows.length) stepAgentRows = [""];
+      const rows = stepAgentRows;
+      const rowsHtml = rows.map((val, i) => {
+        const chosen = new Set(rows.filter((v, j) => j !== i && v));
+        const avail = installed.filter(tool => !chosen.has(tool.agent_name));
+        const known = installed.some(tool => tool.agent_name === val);
+        const opts = [`<option value="" ${val ? "" : "selected"}>${t("modal.addStep.agentDefault")}</option>`]
+          .concat(avail.map(tool => {
+            const label = tool.profile_name ? "Hermes" : tool.name;
+            return `<option value="${escapeHtml(tool.agent_name)}" ${val === tool.agent_name ? "selected" : ""}>${escapeHtml(tool.agent_name)} — ${escapeHtml(label)}</option>`;
+          }));
+        if (val && !known) opts.push(`<option value="${escapeHtml(val)}" selected>${escapeHtml(val)} ${t("modal.addStep.agentMissing")}</option>`);
+        const rm = rows.length > 1
+          ? `<button type="button" class="step-agent-rm" data-i="${i}" title="${t("modal.addStep.agentRemove")}" style="border:none;background:none;cursor:pointer;color:var(--muted);font-size:17px;line-height:1;padding:0 2px;">×</button>`
+          : "";
+        return `<div style="display:flex;align-items:center;gap:6px;">
+          <select class="step-agent-sel" data-i="${i}" style="flex:1;">${opts.join("")}</select>${rm}
+        </div>`;
+      }).join("");
+      const add = rows.length < 3
+        ? `<button type="button" id="addStepAgentAdd" title="${t("modal.addStep.agentAdd")}" style="align-self:flex-start;border:1px dashed var(--line);background:none;cursor:pointer;color:var(--accent);border-radius:6px;padding:1px 12px;font-size:15px;line-height:1.4;">＋</button>`
+        : "";
+      $("addStepAgents").innerHTML = rowsHtml + add;
+      document.querySelectorAll("#addStepAgents .step-agent-sel").forEach(sel => {
+        sel.addEventListener("change", () => { stepAgentRows[+sel.dataset.i] = sel.value; renderAgentSelectors(); });
+      });
+      document.querySelectorAll("#addStepAgents .step-agent-rm").forEach(btn => {
+        btn.addEventListener("click", () => {
+          stepAgentRows.splice(+btn.dataset.i, 1);
+          renderAgentSelectors();
         });
       });
+      const addBtn = $("addStepAgentAdd");
+      if (addBtn) addBtn.addEventListener("click", () => { stepAgentRows.push(""); renderAgentSelectors(); });
+    }
+
+    function setStepAgents(agents) {
+      stepAgentRows = (agents || []).slice(0, 3);
+      if (!stepAgentRows.length) stepAgentRows = [""];
+      renderAgentSelectors();
     }
 
     function selectedStepAgents() {
-      return [...document.querySelectorAll("#addStepAgents .step-agent-cb:checked")].map(cb => cb.value).slice(0, 3);
+      const out = [];
+      for (const v of stepAgentRows) { if (v && !out.includes(v)) out.push(v); }
+      return out.slice(0, 3);
     }
 
     function openAddStepModal() {
@@ -2852,8 +2878,7 @@
       $("addStepName").placeholder = t("modal.addStep.namePh");
       $("addStepPrompt").value = "";
       $("addStepPrompt").placeholder = t("modal.addStep.promptPh");
-      $("addStepAgents").innerHTML = agentCheckboxesHtml([]);
-      wireStepAgentCap();
+      setStepAgents([]);
       $("addStepCommand").value = "";
       $("addStepRequired").checked = false;
       $("addStepRequired").disabled = false;
@@ -2872,8 +2897,7 @@
       $("addStepName").value = step.name || "";
       $("addStepPrompt").value = step.prompt || "";
       $("addStepPrompt").placeholder = t("modal.addStep.promptPh");
-      $("addStepAgents").innerHTML = agentCheckboxesHtml(step.agents || []);
-      wireStepAgentCap();
+      setStepAgents(step.agents || []);
       $("addStepCommand").value = step.command || "";
       $("addStepRequired").checked = !!step.required;
       $("addStepRequired").disabled = !!step.required_locked;
