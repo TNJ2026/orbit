@@ -1590,7 +1590,7 @@
     <div class="modal" role="dialog" aria-modal="true" aria-labelledby="addStepModalTitle">
       <div id="addStepModalTitle" class="modal-title" data-i18n="modal.addStep.title">Add workflow step</div>
       <label><div class="meta" data-i18n="modal.addStep.name">Name</div><input id="addStepName" type="text" placeholder="Step name" data-i18n-ph="modal.addStep.namePh"></label>
-      <label><div class="meta" data-i18n="modal.addStep.agent">Agent (optional)</div><select id="addStepAgent"></select></label>
+      <label><div class="meta" data-i18n="modal.addStep.agent">Agents (up to 3 — first runs the step; 2-3 spread across decompose subtasks)</div><div id="addStepAgents" style="display:flex;flex-direction:column;gap:5px;padding:6px 0;"></div></label>
       <label><div class="meta" data-i18n="modal.addStep.command">Command (optional)</div><input id="addStepCommand" type="text" placeholder="runner CLI — blank uses the default command" data-i18n-ph="modal.addStep.commandPh"></label>
       <label id="addStepRequiredField" class="modal-check"><input id="addStepRequired" type="checkbox"><span class="meta" data-i18n="modal.addStep.required">Required (a step the flow must include)</span></label>
       <label><div class="meta" data-i18n="modal.addStep.prompt">Step prompt</div><textarea id="addStepPrompt" rows="7" data-i18n-ph="modal.addStep.promptPh" placeholder="Additional instructions for this step" style="width:100%;resize:vertical;"></textarea><div class="meta" data-i18n="modal.addStep.promptHint">Appended to the generated step instructions; the engine output protocol still takes priority.</div></label>
@@ -1697,7 +1697,7 @@
         "action.close": "Close",
         "modal.addStep.title": "Add workflow step", "modal.addStep.editTitle": "Edit step",
         "modal.addStep.name": "Name", "modal.addStep.namePh": "Step name",
-        "modal.addStep.agent": "Agent (optional)", "modal.addStep.agentPh": "e.g. claude-code — blank uses the step id",
+        "modal.addStep.agent": "Agents (up to 3 — first runs the step; 2-3 spread across decompose subtasks)", "modal.addStep.agentPh": "e.g. claude-code — blank uses the step id",
         "modal.addStep.agentDefault": "— use the step id —", "modal.addStep.agentMissing": "(not installed)",
         "modal.addStep.command": "Command (optional)", "modal.addStep.commandPh": "runner CLI — blank uses the default command",
         "modal.addStep.required": "Required (a step the flow must include)",
@@ -1841,7 +1841,7 @@
         "action.close": "关闭",
         "modal.addStep.title": "添加工作流步骤", "modal.addStep.editTitle": "编辑步骤",
         "modal.addStep.name": "名称", "modal.addStep.namePh": "步骤名称",
-        "modal.addStep.agent": "Agent（可选）", "modal.addStep.agentPh": "如 claude-code —— 留空用步骤 id",
+        "modal.addStep.agent": "Agent（最多 3 个 —— 第一个跑本步；2-3 个分摊给 decompose 子任务）", "modal.addStep.agentPh": "如 claude-code —— 留空用步骤 id",
         "modal.addStep.agentDefault": "—— 用步骤 id ——", "modal.addStep.agentMissing": "(未安装)",
         "modal.addStep.command": "命令（可选）", "modal.addStep.commandPh": "runner CLI —— 留空用默认命令",
         "modal.addStep.required": "必选（流程必须包含的步骤）",
@@ -2494,7 +2494,7 @@
                         <div class="wf-box-index">#${index + 1}</div>
                         <div class="wf-box-name">${escapeHtml(step.name || t("wf.step"))}</div>
                         <div class="wf-box-meta">
-                          <span class="wf-role-badge">${escapeHtml(step.agent || step.id)}</span>
+                          <span class="wf-role-badge">${escapeHtml((step.agents || []).join(" / ") || step.id)}</span>
                           ${tag}
                         </div>
                       </div>
@@ -2808,18 +2808,38 @@
     // Agent options for a step: a blank "use step id" default, the installed
     // CLI tools, plus an orphan entry if the step names an agent that isn't
     // installed (legacy / hand-edited config) so it isn't silently dropped.
-    function agentOptionsHtml(selected) {
+    // Checkbox list of installed CLI tools (up to 3). The first checked agent is
+    // the step's own assignee; a step with 2-3 checked forms the decompose
+    // subtask pool. `selected` is the step's agents list. Agents that aren't
+    // installed (legacy/hand-edited) still show as checked so they aren't lost.
+    function agentCheckboxesHtml(selected) {
+      const sel = new Set(selected || []);
       const installed = (state.tools || []).filter(tool => tool.installed);
-      const known = installed.some(tool => tool.agent_name === selected);
-      const blank = `<option value="" ${selected ? "" : "selected"}>${t("modal.addStep.agentDefault")}</option>`;
-      const orphan = selected && !known
-        ? `<option value="${escapeHtml(selected)}" selected>${escapeHtml(selected)} ${t("modal.addStep.agentMissing")}</option>`
-        : "";
-      const opts = installed.map(tool => {
-        const label = tool.profile_name ? "Hermes" : tool.name;
-        return `<option value="${escapeHtml(tool.agent_name)}" ${selected === tool.agent_name ? "selected" : ""}>${escapeHtml(tool.agent_name)} — ${escapeHtml(label)}</option>`;
-      }).join("");
-      return blank + orphan + opts;
+      const names = installed.map(tool => tool.agent_name);
+      const rows = [
+        ...installed.map(tool => ({ name: tool.agent_name, label: tool.profile_name ? "Hermes" : tool.name })),
+        ...[...sel].filter(a => !names.includes(a)).map(a => ({ name: a, label: t("modal.addStep.agentMissing") })),
+      ];
+      if (!rows.length) return `<div class="meta">${t("modal.addStep.agentDefault")}</div>`;
+      return rows.map(r => `
+        <label style="display:flex;align-items:center;gap:6px;font-weight:normal;font-size:13px;margin:0;">
+          <input type="checkbox" class="step-agent-cb" value="${escapeHtml(r.name)}" ${sel.has(r.name) ? "checked" : ""}>
+          <span>${escapeHtml(r.name)} — ${escapeHtml(r.label)}</span>
+        </label>
+      `).join("");
+    }
+
+    // Enforce the 3-agent cap: a 4th check is rejected.
+    function wireStepAgentCap() {
+      document.querySelectorAll("#addStepAgents .step-agent-cb").forEach(cb => {
+        cb.addEventListener("change", () => {
+          if (document.querySelectorAll("#addStepAgents .step-agent-cb:checked").length > 3) cb.checked = false;
+        });
+      });
+    }
+
+    function selectedStepAgents() {
+      return [...document.querySelectorAll("#addStepAgents .step-agent-cb:checked")].map(cb => cb.value).slice(0, 3);
     }
 
     function openAddStepModal() {
@@ -2832,7 +2852,8 @@
       $("addStepName").placeholder = t("modal.addStep.namePh");
       $("addStepPrompt").value = "";
       $("addStepPrompt").placeholder = t("modal.addStep.promptPh");
-      $("addStepAgent").innerHTML = agentOptionsHtml("");
+      $("addStepAgents").innerHTML = agentCheckboxesHtml([]);
+      wireStepAgentCap();
       $("addStepCommand").value = "";
       $("addStepRequired").checked = false;
       $("addStepRequired").disabled = false;
@@ -2851,7 +2872,8 @@
       $("addStepName").value = step.name || "";
       $("addStepPrompt").value = step.prompt || "";
       $("addStepPrompt").placeholder = t("modal.addStep.promptPh");
-      $("addStepAgent").innerHTML = agentOptionsHtml(step.agent || "");
+      $("addStepAgents").innerHTML = agentCheckboxesHtml(step.agents || []);
+      wireStepAgentCap();
       $("addStepCommand").value = step.command || "";
       $("addStepRequired").checked = !!step.required;
       $("addStepRequired").disabled = !!step.required_locked;
@@ -2870,7 +2892,7 @@
 
     async function confirmAddStep() {
       const name = ($("addStepName").value || "").trim() || t("wf.step");
-      const agent = ($("addStepAgent").value || "").trim();
+      const agents = selectedStepAgents();
       const command = ($("addStepCommand").value || "").trim();
       const required = $("addStepRequired").checked;
       const prompt = ($("addStepPrompt").value || "").trim();
@@ -2880,7 +2902,7 @@
       // "code_review"); fall back to a timestamp suffix on collisions.
       let newId = name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "step";
       if (steps.some(s => s.id === newId)) newId = `${newId}_${Date.now().toString(36)}`;
-      const newStep = { id: newId, name, agent, command, required, prompt, x: 40, y: 60 };
+      const newStep = { id: newId, name, agents, command, required, prompt, x: 40, y: 60 };
       state.workflow.steps = [...steps, newStep];
       closeAddStepModal();
       await run(async () => {
@@ -2895,7 +2917,7 @@
       const step = (state.workflow.steps || []).find(s => s.id === wfStepModalId);
       if (!step) { closeAddStepModal(); return; }
       step.name = ($("addStepName").value || "").trim() || step.name || t("wf.step");
-      step.agent = ($("addStepAgent").value || "").trim();
+      step.agents = selectedStepAgents();
       step.command = ($("addStepCommand").value || "").trim();
       step.prompt = ($("addStepPrompt").value || "").trim();
       if (!step.required_locked) step.required = $("addStepRequired").checked;
@@ -3446,7 +3468,7 @@
           <span class="badge">${escapeHtml(phaseStatusLabel(summary.status))}</span>
         </div>
         <div class="meta">${escapeHtml(t("tasks.phaseDetails"))} · ${escapeHtml(t("tasks.instances", summary.total))}</div>
-        <div class="meta">${phase.agent ? escapeHtml(phase.agent) + " · " : ""}${phase.required ? "required" : "optional"}</div>
+        <div class="meta">${(phase.agents || []).length ? escapeHtml(phase.agents.join(" / ")) + " · " : ""}${phase.required ? "required" : "optional"}</div>
         <div class="phase-instance-list">
           ${instances.map(instance => {
             const card = instance.card;

@@ -463,6 +463,25 @@ def default_workflow_edges() -> list[dict[str, str]]:
     ]
 
 
+def _normalize_agents(step: dict[str, Any]) -> list[str]:
+    """A step's agents as an ordered, deduped list capped at 3. Accepts the new
+    `agents` list or a legacy single `agent` string. These form the pool that
+    decompose rotates across subtasks (see _subtask_agent_pool)."""
+    raw = step.get("agents")
+    if isinstance(raw, list):
+        vals = [str(a).strip() for a in raw if str(a).strip()]
+    else:
+        single = str(step.get("agent") or "").strip()
+        vals = [single] if single else []
+    out: list[str] = []
+    for agent in vals:
+        if agent not in out:
+            out.append(agent)
+        if len(out) >= 3:
+            break
+    return out
+
+
 def _normalize_workflow_step(
     step: Any,
     index: int,
@@ -537,9 +556,10 @@ def _normalize_workflow_step(
         # command: the runner CLI for this step. Empty falls back to
         # settings.default_command.
         "command": str(step.get("command", "") or "").strip(),
-        # agent: the assignee this step dispatches to. Empty falls back to the
-        # step id.
-        "agent": str(step.get("agent", "") or "").strip(),
+        # agents: up to 3 CLIs. The first is this step's own assignee (single-task
+        # dispatch); the full list feeds the decompose subtask pool. Empty falls
+        # back to the step id / settings.default_command.
+        "agents": _normalize_agents(step),
         "x": _coord("x", 40 + index * 300),
         "y": _coord("y", _DEFAULT_STEP_MID_Y),
     }
@@ -1414,7 +1434,7 @@ def _start_goal_business_subtasks(
     # 2. Persist each subtask's prerequisite task ids, and its assigned agent:
     #    decompose may tag a subtask with an agent by content; untagged subtasks
     #    round-robin over settings.subtask_agents so different CLIs share the load.
-    pool = read_settings(project_root)["subtask_agents"]
+    pool = _subtask_agent_pool(project_root)
     rr = 0
     for idx, subtask in enumerate(subtasks):
         dep_ids = [created[d]["id"] for d in subtask.get("deps", [])]
@@ -2490,9 +2510,27 @@ def _step_command(step: dict[str, Any], project_root: str | None = None) -> str:
 
 
 def _step_assignee(step: dict[str, Any]) -> str:
-    """The agent a step dispatches to: its own `agent` if set, else the step id.
-    The workflow assigns the agent directly — no role/team matchmaking."""
-    return str(step.get("agent") or "").strip() or step["id"]
+    """The agent a step dispatches to for its own (single-task) execution: the
+    first of its `agents`, else the step id. A subtask's own agent (from the
+    pool) overrides this — see _task_step_assignee."""
+    agents = step.get("agents") or []
+    return agents[0] if agents else step["id"]
+
+
+def _subtask_agent_pool(project_root: str | None) -> list[str]:
+    """Agent pool decompose rotates across subtasks: the union (ordered, deduped)
+    of the agents on multi-agent steps (a step with 2-3 agents means "spread these
+    CLIs across subtasks"; a single-agent step is just that step's own assignee).
+    Falls back to settings.subtask_agents."""
+    cfg = read_workflow_config(project_root)
+    pool: list[str] = []
+    for step in cfg["steps"]:
+        agents = step.get("agents", [])
+        if len(agents) > 1:
+            for agent in agents:
+                if agent not in pool:
+                    pool.append(agent)
+    return pool or read_settings(project_root)["subtask_agents"]
 
 
 # Known coding CLIs → the full shell invocation that pipes the step prompt on
@@ -2678,7 +2716,7 @@ def _triage_config_snapshot(project_root: str | None) -> str:
             "steps": [
                 {
                     "id": step["id"],
-                    "agent": step.get("agent", ""),
+                    "agents": step.get("agents", []),
                     "required": bool(step.get("required")),
                     "isolate": bool(step.get("isolate")),
                     "integrate": bool(step.get("integrate")),
@@ -2748,7 +2786,7 @@ def _build_step_prompt(
         )
     goal_contract = ""
     if _is_root_goal_decompose_step(project_root, task, step):
-        agent_pool = read_settings(project_root)["subtask_agents"] or [
+        agent_pool = _subtask_agent_pool(project_root) or [
             tool["agent_name"] for tool in detect_agent_tools() if tool.get("installed")
         ]
         agent_line = (
@@ -4226,7 +4264,7 @@ def _steps_for_roles(
     cfg = read_workflow_config(project_root)
     return [
         s["id"] for s in cfg["steps"]
-        if s["id"] in wanted or s.get("agent") in wanted
+        if s["id"] in wanted or any(a in wanted for a in s.get("agents", []))
     ]
 
 

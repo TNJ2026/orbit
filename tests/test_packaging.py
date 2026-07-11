@@ -136,7 +136,7 @@ class PackagingTests(unittest.TestCase):
         # Role/team UI is gone: steps assign their own agent + command.
         self.assertNotIn("function renderRoles()", html)
         self.assertNotIn("function renderTeam()", html)
-        self.assertIn('id="addStepAgent"', html)
+        self.assertIn('id="addStepAgents"', html)
         self.assertIn('id="addStepCommand"', html)
         self.assertIn('id="setDefaultCommand"', html)
         # The Add-step toolbar tool opens the modal (add); double-click opens it

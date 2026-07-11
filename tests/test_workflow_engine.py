@@ -2403,6 +2403,25 @@ class SubtaskAgentTests(unittest.TestCase):
             # content tag kept; untagged round-robin over the pool
             self.assertEqual(["claude-code", "codex", "hermes"], [t["agent"] for t in subs])
 
+    def test_multi_agent_step_forms_subtask_pool(self):
+        with TemporaryDirectory() as tmp:
+            steps = [dict(s) for s in server.default_workflow_steps()]
+            for s in steps:
+                if s["id"] == "implement":
+                    s["agents"] = ["claude-code", "codex", "hermes"]
+                if s["id"] == "review":
+                    s["agents"] = ["codex"]  # single agent -> not a pool
+            server.write_workflow_config(steps, tmp, server.default_workflow_edges())
+            # pool = agents of multi-agent steps only (implement, not review)
+            self.assertEqual(["claude-code", "codex", "hermes"], server._subtask_agent_pool(tmp))
+            loaded = {s["id"]: s for s in server.read_workflow_config(tmp)["steps"]}
+            self.assertEqual(["claude-code", "codex", "hermes"], loaded["implement"]["agents"])
+            self.assertEqual(["codex"], loaded["review"]["agents"])
+        # cap at 3, dedupe, legacy single `agent` -> list
+        self.assertEqual(3, len(server._normalize_agents({"agents": ["a", "b", "c", "d"]})))
+        self.assertEqual(["a", "b"], server._normalize_agents({"agents": ["a", "b", "a"]}))
+        self.assertEqual(["x"], server._normalize_agents({"agent": "x"}))
+
     def test_subtask_agent_command_wins_at_dispatch(self):
         step = {"id": "implement", "name": "Implement", "command": "step-cmd", "agent": ""}
         task = {"id": 1, "agent": "hermes"}
