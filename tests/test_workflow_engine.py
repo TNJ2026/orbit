@@ -2362,5 +2362,57 @@ class DecomposeStepTests(unittest.TestCase):
         self.assertTrue(any("no outgoing step" in w for w in warns2), warns2)
 
 
+class SubtaskAgentTests(unittest.TestCase):
+    def test_command_for_agent_resolves_builtin_override_and_pattern(self):
+        with TemporaryDirectory() as tmp:
+            # built-in table + hermes-<profile> pattern
+            self.assertIn("hermes", server._command_for_agent("hermes"))
+            self.assertIn("--profile manager", server._command_for_agent("hermes-manager"))
+            self.assertEqual("", server._command_for_agent("nope"))
+            self.assertEqual("", server._command_for_agent(""))
+            # settings.agent_commands override wins
+            server.write_settings(tmp, agent_commands={"codex": "codex-custom"})
+            self.assertEqual("codex-custom", server._command_for_agent("codex", tmp))
+
+    def test_decompose_assigns_agent_by_content_then_round_robin(self):
+        with TemporaryDirectory() as tmp:
+            server.write_workflow_config(
+                server.default_workflow_steps(), tmp, server.default_workflow_edges()
+            )
+            server.write_settings(tmp, subtask_agents=["codex", "hermes"])
+            store = Store(Path(tmp) / "t.db")
+            store.register_agent("hub", "h")
+            store.send_message("hub", "hub", "goal", kind="task", title="G")
+            goal = store.list_tasks()[0]
+            store.update_task_metadata(goal["id"], is_goal=True)
+            goal = store.get_task(goal["id"])
+            subtasks = [
+                {"title": "A", "content": "a", "deps": [], "agent": "claude-code"},
+                {"title": "B", "content": "b", "deps": [], "agent": ""},
+                {"title": "C", "content": "c", "deps": [], "agent": ""},
+            ]
+            with mock.patch.object(
+                server, "_dispatch_business_subtask", return_value={"dispatched": []}
+            ):
+                server._start_goal_business_subtasks(store, tmp, goal, "hub", subtasks)
+            subs = sorted(
+                (t for t in store.list_tasks(status="all")
+                 if t.get("parent_task_id") == goal["id"] and t.get("source_message_id")),
+                key=lambda t: t["id"],
+            )
+            # content tag kept; untagged round-robin over the pool
+            self.assertEqual(["claude-code", "codex", "hermes"], [t["agent"] for t in subs])
+
+    def test_subtask_agent_command_wins_at_dispatch(self):
+        step = {"id": "implement", "name": "Implement", "command": "step-cmd", "agent": ""}
+        task = {"id": 1, "agent": "hermes"}
+        with TemporaryDirectory() as tmp:
+            # task's agent command overrides the step's own command
+            self.assertEqual("hermes", server._task_step_assignee(task, step))
+            self.assertIn("hermes", server._task_step_command(task, step, tmp))
+            # no task agent -> step command
+            self.assertEqual("step-cmd", server._task_step_command({"id": 2}, step, tmp))
+
+
 if __name__ == "__main__":
     unittest.main()

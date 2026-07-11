@@ -1562,6 +1562,16 @@
           <input id="setHubCommand" type="text" placeholder="optional — CLI used to judge stuck steps" style="width:100%;">
           <span class="meta" style="font-size:11px;" data-i18n="settings.hubCommandHint">Used to inspect long-silent steps and decide kill/continue. Blank disables supervision.</span>
         </label>
+        <label style="display:flex; flex-direction:column; gap:5px; font-size:13px;">
+          <span data-i18n="settings.subtaskAgents">Subtask agent pool (comma-separated)</span>
+          <input id="setSubtaskAgents" type="text" placeholder="e.g. claude-code, codex, hermes" style="width:100%;">
+          <span class="meta" style="font-size:11px;" data-i18n="settings.subtaskAgentsHint">Decompose rotates these CLIs across subtasks it didn't tag with an agent, so different agents share the load.</span>
+        </label>
+        <label style="display:flex; flex-direction:column; gap:5px; font-size:13px;">
+          <span data-i18n="settings.agentCommands">Agent command overrides (JSON)</span>
+          <textarea id="setAgentCommands" rows="4" placeholder='{"codex": "codex exec --full-auto \"$(cat)\""}' style="width:100%;resize:vertical;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;"></textarea>
+          <span class="meta" style="font-size:11px;" data-i18n="settings.agentCommandsHint">Map of agent name → full runner command; overrides the built-in table for known CLIs.</span>
+        </label>
         <div><button id="saveSettings" class="primary" type="button" data-i18n="settings.save">Save</button></div>
       </div>
     </div>
@@ -1651,6 +1661,11 @@
         "settings.defaultCommandHint": "Runs any step that does not set its own command. The prompt is piped on stdin.",
         "settings.hubCommand": "Hub supervision command",
         "settings.hubCommandHint": "Used to inspect long-silent steps and decide kill/continue. Blank disables supervision.",
+        "settings.subtaskAgents": "Subtask agent pool (comma-separated)",
+        "settings.subtaskAgentsHint": "Decompose rotates these CLIs across subtasks it didn't tag with an agent, so different agents share the load.",
+        "settings.agentCommands": "Agent command overrides (JSON)",
+        "settings.agentCommandsHint": "Map of agent name → full runner command; overrides the built-in table for known CLIs.",
+        "settings.agentCommandsInvalid": "Agent command overrides must be valid JSON.",
         "settings.save": "Save",
         "settings.saved": "Settings saved",
         "lang.label": "Language",
@@ -1790,6 +1805,11 @@
         "settings.defaultCommandHint": "未单独设置命令的步骤都用它执行；prompt 通过 stdin 传入。",
         "settings.hubCommand": "Hub 监督命令",
         "settings.hubCommandHint": "用于巡检长时间无输出的步骤并裁决 kill/continue；留空则关闭监督。",
+        "settings.subtaskAgents": "子任务 agent 池（逗号分隔）",
+        "settings.subtaskAgentsHint": "decompose 把这些 CLI 轮流分给它没标 agent 的子任务，让不同 agent 分担。",
+        "settings.agentCommands": "Agent 命令覆盖（JSON）",
+        "settings.agentCommandsHint": "agent 名 → 完整 runner 命令的映射；覆盖已知 CLI 的内置表。",
+        "settings.agentCommandsInvalid": "Agent 命令覆盖必须是合法 JSON。",
         "settings.save": "保存",
         "settings.saved": "设置已保存",
         "lang.label": "语言",
@@ -1999,10 +2019,21 @@
         if (concurrent && document.activeElement !== concurrent) concurrent.value = s.max_concurrent_tasks;
         if (defCmd && document.activeElement !== defCmd) defCmd.value = s.default_command || "";
         if (hubCmd && document.activeElement !== hubCmd) hubCmd.value = s.hub_command || "";
+        const pool = $("setSubtaskAgents"), acmds = $("setAgentCommands");
+        if (pool && document.activeElement !== pool) pool.value = (s.subtask_agents || []).join(", ");
+        if (acmds && document.activeElement !== acmds)
+          acmds.value = Object.keys(s.agent_commands || {}).length ? JSON.stringify(s.agent_commands, null, 2) : "";
       } catch (err) { /* offline project: leave inputs as-is */ }
     }
 
     async function saveSettings() {
+      const poolRaw = ($("setSubtaskAgents").value || "").split(",").map(s => s.trim()).filter(Boolean);
+      let agentCmds = {};
+      const acmdsRaw = ($("setAgentCommands").value || "").trim();
+      if (acmdsRaw) {
+        try { agentCmds = JSON.parse(acmdsRaw); }
+        catch (e) { showError(t("settings.agentCommandsInvalid")); return; }
+      }
       await run(async () => {
         const s = await api("/api/settings", {
           method: "POST",
@@ -2010,7 +2041,9 @@
             max_rework_rounds: parseInt($("setMaxRework").value, 10),
             max_concurrent_tasks: parseInt($("setMaxConcurrent").value, 10),
             default_command: $("setDefaultCommand").value,
-            hub_command: $("setHubCommand").value
+            hub_command: $("setHubCommand").value,
+            subtask_agents: poolRaw,
+            agent_commands: agentCmds
           })
         });
         // Reflect the server's clamped values back into the inputs.
@@ -2018,6 +2051,8 @@
         $("setMaxConcurrent").value = s.max_concurrent_tasks;
         $("setDefaultCommand").value = s.default_command || "";
         $("setHubCommand").value = s.hub_command || "";
+        $("setSubtaskAgents").value = (s.subtask_agents || []).join(", ");
+        $("setAgentCommands").value = Object.keys(s.agent_commands || {}).length ? JSON.stringify(s.agent_commands, null, 2) : "";
         setStatus(t("settings.saved"));
       });
     }

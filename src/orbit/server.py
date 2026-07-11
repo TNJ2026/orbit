@@ -247,8 +247,30 @@ def read_settings(project_root: str | None = None) -> dict[str, Any]:
         # Default runner command for any step that does not set its own. With
         # a homogeneous coding CLI this replaces per-role team runner commands.
         "default_command": str(data.get("default_command") or "").strip(),
+        # Per-agent command overrides ({agent_name: command}) that win over the
+        # built-in _AGENT_RUNNER_COMMANDS table.
+        "agent_commands": _norm_agent_commands(data.get("agent_commands")),
+        # Ordered pool of agent names decompose rotates across subtasks that it
+        # did not tag with an agent of their own.
+        "subtask_agents": _norm_subtask_agents(data.get("subtask_agents")),
         "path": str(path),
     }
+
+
+def _norm_agent_commands(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        str(k).strip(): str(v).strip()
+        for k, v in value.items()
+        if str(k).strip() and str(v).strip()
+    }
+
+
+def _norm_subtask_agents(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(a).strip() for a in value if str(a).strip()]
 
 
 def write_settings(
@@ -257,6 +279,8 @@ def write_settings(
     max_concurrent_tasks: Any = None,
     hub_command: Any = None,
     default_command: Any = None,
+    agent_commands: Any = None,
+    subtask_agents: Any = None,
 ) -> dict[str, Any]:
     current = read_settings(project_root)
     rework = (
@@ -275,6 +299,14 @@ def write_settings(
         current["default_command"] if default_command is None
         else str(default_command or "").strip()
     )
+    agent_cmds = (
+        current["agent_commands"] if agent_commands is None
+        else _norm_agent_commands(agent_commands)
+    )
+    sub_agents = (
+        current["subtask_agents"] if subtask_agents is None
+        else _norm_subtask_agents(subtask_agents)
+    )
     path = _settings_config_path(project_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     data = {
@@ -282,6 +314,8 @@ def write_settings(
         "max_concurrent_tasks": concurrent,
         "hub_command": hub_cmd,
         "default_command": default_cmd,
+        "agent_commands": agent_cmds,
+        "subtask_agents": sub_agents,
     }
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     return {**data, "path": str(path)}
@@ -1336,7 +1370,8 @@ def _parse_goal_subtasks(text: str) -> list[dict[str, Any]]:
         if acceptance:
             body += f"\n\nAcceptance:\n{acceptance}"
         deps = _parse_subtask_deps(raw.get("depends_on"), index, count)
-        tasks.append({"title": title[:160], "content": body, "deps": deps})
+        agent = str(raw.get("agent") or "").strip()
+        tasks.append({"title": title[:160], "content": body, "deps": deps, "agent": agent})
     _reject_dependency_cycles(tasks)
     return tasks
 
@@ -1376,11 +1411,21 @@ def _start_goal_business_subtasks(
         if not task:
             raise InvalidInputError(f"task not created for message: {message_id}")
         created.append(task)
-    # 2. Persist each subtask's prerequisite task ids.
+    # 2. Persist each subtask's prerequisite task ids, and its assigned agent:
+    #    decompose may tag a subtask with an agent by content; untagged subtasks
+    #    round-robin over settings.subtask_agents so different CLIs share the load.
+    pool = read_settings(project_root)["subtask_agents"]
+    rr = 0
     for idx, subtask in enumerate(subtasks):
         dep_ids = [created[d]["id"] for d in subtask.get("deps", [])]
         if dep_ids:
             store.update_task_metadata(created[idx]["id"], depends_on=dep_ids)
+        agent = str(subtask.get("agent") or "").strip()
+        if not agent and pool:
+            agent = pool[rr % len(pool)]
+            rr += 1
+        if agent:
+            store.update_task_metadata(created[idx]["id"], agent=agent)
     # 3. Dispatch only the dependency-free subtasks; the rest stay held (status
     #    "created", no workflow_step) until _release_ready_subtasks starts them
     #    once their prerequisites close (and are thus integrated on main).
@@ -1943,7 +1988,7 @@ def _dispatch_step(
         store.update_task_step_details(
             task_id, step_inputs=step_inputs, result_summary="", artifacts=[]
         )
-    command = _step_command(step, project_root) or member.get("runner_command", "")
+    command = _task_step_command(task, step, project_root) or member.get("runner_command", "")
     if command:
         return store.create_run_job(
             task_id,
@@ -1987,7 +2032,7 @@ def _dispatch_targets(
             notices.append(f"step {target} is waiting for other required branches")
             continue
         step = steps[target]
-        assignee = _step_assignee(step)
+        assignee = _task_step_assignee(task, step)
         action = store.create_workflow_action(
             task_id,
             "dispatch_step",
@@ -2450,6 +2495,56 @@ def _step_assignee(step: dict[str, Any]) -> str:
     return str(step.get("agent") or "").strip() or step["id"]
 
 
+# Known coding CLIs → the full shell invocation that pipes the step prompt on
+# stdin. This is a plain lookup table (not the old role/team system): it lets a
+# (sub)task name an agent by id and have orbit run the right CLI. Override or
+# extend per project via settings.agent_commands.
+_AGENT_RUNNER_COMMANDS = {
+    "claude-code": "claude -p --dangerously-skip-permissions",
+    "codex": 'codex exec --dangerously-bypass-approvals-and-sandbox "$(cat)"',
+    "gemini": 'gemini --yolo -p "$(cat)"',
+    "antigravity": 'agy --dangerously-skip-permissions --print "$(cat)"',
+    "hermes": 'hermes --yolo -z "$(cat)"',
+    "opencode": 'opencode run --auto "$(cat)"',
+}
+
+
+def _command_for_agent(agent: str | None, project_root: str | None = None) -> str:
+    """Resolve an agent name to its runner command: settings.agent_commands
+    override first, then the built-in table, then the hermes-<profile> pattern.
+    Empty agent (or unknown) returns ''."""
+    agent = (agent or "").strip()
+    if not agent:
+        return ""
+    if project_root is not None:
+        overrides = read_settings(project_root).get("agent_commands", {})
+        if isinstance(overrides, dict) and str(overrides.get(agent) or "").strip():
+            return str(overrides[agent]).strip()
+    if agent in _AGENT_RUNNER_COMMANDS:
+        return _AGENT_RUNNER_COMMANDS[agent]
+    if agent.startswith("hermes-"):
+        profile = agent[len("hermes-"):]
+        return f'hermes --profile {shlex.quote(profile)} --yolo -z "$(cat)"'
+    return ""
+
+
+def _task_step_assignee(task: dict[str, Any], step: dict[str, Any]) -> str:
+    """A (sub)task's assigned agent wins over the step's own agent/id, so every
+    step of a decompose subtask runs on the CLI decompose picked for it."""
+    return str(task.get("agent") or "").strip() or _step_assignee(step)
+
+
+def _task_step_command(
+    task: dict[str, Any], step: dict[str, Any], project_root: str | None
+) -> str:
+    """Command for a step: the (sub)task's assigned agent's command wins, else
+    the step's own command / settings.default_command."""
+    agent_cmd = _command_for_agent(task.get("agent"), project_root)
+    if agent_cmd:
+        return agent_cmd
+    return _step_command(step, project_root)
+
+
 def _tail(text: str, limit: int) -> str:
     text = (text or "").strip()
     return text if len(text) <= limit else text[-limit:]
@@ -2653,15 +2748,24 @@ def _build_step_prompt(
         )
     goal_contract = ""
     if _is_root_goal_decompose_step(project_root, task, step):
+        agent_pool = read_settings(project_root)["subtask_agents"] or [
+            tool["agent_name"] for tool in detect_agent_tools() if tool.get("installed")
+        ]
+        agent_line = (
+            f'可选 `agent` 字段：按子任务内容挑最合适的 CLI 执行，取值限 {agent_pool}；'
+            "不确定就省略该字段，引擎会自动在这些 CLI 间轮询分配。\n"
+            if agent_pool else ""
+        )
         goal_contract = (
             "\n## Decompose 引擎契约\n"
             "本步骤必须只输出一个 JSON 对象，不要 Markdown，不要代码块：\n"
             '{"tasks":[{"title":"子任务标题","content":"要做什么",'
-            '"acceptance":"验收标准","depends_on":[前置任务序号]}]}\n'
+            '"acceptance":"验收标准","depends_on":[前置任务序号],"agent":"可选CLI"}]}\n'
             "只有当子任务 B 确实依赖 A 的产出（必须 A 完成合并后 B 才能开工）时，"
             "才给 B 加 `depends_on`：值是本列表中前置任务的**序号**（从 1 开始，"
             "如 `\"depends_on\":[1,2]`）。引擎会 hold 住 B，直到其所有前置任务关闭"
             "（成果已并入 main）再派发。无依赖就省略该字段或给 `[]`。不要成环。\n"
+            + agent_line +
             "保持 JSON 精简以免截断：`content` 一两句话说清做什么 + 涉及"
             "的文件/模块；`acceptance` 一两条验收。已有设计文档就按路径引用（如 "
             "`docs/…`），不要把整份规格复述进来——实现者会自己去读。只输出这一个 "
@@ -5095,6 +5199,8 @@ def create_server(
             data.get("max_concurrent_tasks"),
             data.get("hub_command"),
             data.get("default_command"),
+            data.get("agent_commands"),
+            data.get("subtask_agents"),
         )
         return _json(request, {"success": True, **settings})
 
