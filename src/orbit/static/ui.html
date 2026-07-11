@@ -187,20 +187,23 @@
       text-overflow: ellipsis;
       white-space: nowrap;
     }
+    /* Linear stepper: one horizontal row of step pills in flow order. The full
+       graph (branches, rework arcs) lives on the Workflow page. */
     .goal-flow {
-      position: relative;
-      min-height: 108px;
+      display: flex;
+      align-items: stretch;
+      gap: 0;
+      padding: 12px 14px;
       overflow-x: auto;
-      overflow-y: auto;
       border: 1px solid var(--line);
       border-top: 0;
       border-radius: 0 0 8px 8px;
       background: #fbfbf9;
     }
     .goal-flow-step {
-      position: absolute;
-      width: 170px;
-      min-height: 66px;
+      flex: 0 0 auto;
+      min-width: 140px;
+      max-width: 210px;
       padding: 9px 10px;
       border: 1px solid var(--line);
       border-radius: 7px;
@@ -213,7 +216,13 @@
     .goal-flow-step.blocked { background: #fff0ed; border-color: #d78b7d; }
     .goal-flow-step-name { font-size: 12px; font-weight: 650; }
     .goal-flow-step-counts { margin-top: 4px; white-space: nowrap; }
-    .goal-flow-edges { position: absolute; inset: 0; pointer-events: none; }
+    .goal-flow-arrow {
+      flex: 0 0 24px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--muted);
+    }
     .tasks-section-label {
       padding: 12px 16px 0;
       background: var(--bg);
@@ -3286,41 +3295,17 @@
     function goalFlowHtml(goal) {
       const phases = goalWorkflowSteps();
       if (!phases.length) return "";
-      const positioned = phases.map((phase, index) => ({
-        phase,
-        x: Number.isFinite(Number(phase.x)) ? Number(phase.x) : index * 220,
-        y: Number.isFinite(Number(phase.y)) ? Number(phase.y) : 0,
-      }));
-      const minX = Math.min(...positioned.map(item => item.x));
-      const minY = Math.min(...positioned.map(item => item.y));
-      positioned.forEach(item => {
-        item.left = item.x - minX + 20;
-        item.top = item.y - minY + 20;
-      });
-      const byId = new Map(positioned.map(item => [item.phase.id, item]));
-      const width = Math.max(...positioned.map(item => item.left + 190), 380);
-      const height = Math.max(...positioned.map(item => item.top + 86), 108);
-      const edges = (state.workflow.edges || []).filter(edge =>
-        byId.has(edge.from) && byId.has(edge.to) && edge.from !== edge.to
+      // Linear stepper: sort by the dagre-computed canvas x (then y) — the
+      // canvas layout already ranks steps along the forward flow, so the x
+      // order IS the flow order. No edges are drawn: rework simply turns a
+      // step running again, and the full graph (branches, loop-back arcs)
+      // lives on the Workflow page.
+      const ordered = [...phases].sort((a, b) =>
+        ((Number(a.x) || 0) - (Number(b.x) || 0))
+        || ((Number(a.y) || 0) - (Number(b.y) || 0))
       );
-      const edgeSvg = edges.map(edge => {
-        const from = byId.get(edge.from);
-        const to = byId.get(edge.to);
-        const x1 = from.left + 170, y1 = from.top + 33;
-        const x2 = to.left, y2 = to.top + 33;
-        const backwards = x2 <= x1;
-        const d = backwards
-          ? `M ${x1} ${y1} C ${x1 + 45} ${height - 8}, ${x2 - 45} ${height - 8}, ${x2} ${y2}`
-          : `M ${x1} ${y1} C ${x1 + 35} ${y1}, ${x2 - 35} ${y2}, ${x2} ${y2}`;
-        return `<path d="${d}" fill="none" stroke="#aab3af" stroke-width="1.5" marker-end="url(#goalFlowArrow)"/>`;
-      }).join("");
       return `<div class="goal-flow" aria-label="${escapeHtml(t("tasks.workflow"))}">
-        <div style="position:relative;width:${width}px;height:${height}px">
-          <svg class="goal-flow-edges" width="${width}" height="${height}" aria-hidden="true">
-            <defs><marker id="goalFlowArrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#aab3af"/></marker></defs>
-            ${edgeSvg}
-          </svg>
-        ${positioned.map(({ phase, left, top }) => {
+        ${ordered.map((phase, index) => {
           const instances = phaseInstances(goal, phase);
           const summary = phaseSummary(instances);
           const status = summary.status;
@@ -3337,13 +3322,13 @@
           const assignee = oneCard && oneCard.assignee ? ` · ${escapeHtml(oneCard.assignee)}` : "";
           const counts = summary.total > 1
             ? `<div class="meta goal-flow-step-counts">${escapeHtml(t("tasks.instanceProgress", summary.settled, summary.total))}${summary.counts.blocked ? ` · ⛔${summary.counts.blocked}` : ""}</div>` : "";
-          return `<div class="goal-flow-step ${tone} actionable" data-id="${escapeHtml(phase.id)}" style="left:${left}px;top:${top}px"${action}>
+          const node = `<div class="goal-flow-step ${tone} actionable" data-id="${escapeHtml(phase.id)}"${action}>
             <div class="goal-flow-step-name">${icon} ${escapeHtml(phase.name || phase.id)}</div>
             <div class="meta">${escapeHtml(statusLabel)}${assignee}</div>
             ${counts}
           </div>`;
+          return `${index ? '<div class="goal-flow-arrow" aria-hidden="true">→</div>' : ""}${node}`;
         }).join("")}
-        </div>
       </div>`;
     }
 
