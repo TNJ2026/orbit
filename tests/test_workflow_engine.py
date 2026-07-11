@@ -1421,6 +1421,19 @@ class AutoRunnerTests(unittest.TestCase):
             self.assertEqual("codex", jobs[0]["assignee"])
             self.assertEqual("my-step-cli", jobs[0]["command"])
 
+    def test_default_command_drives_dispatch_without_step_or_team_command(self):
+        # No step command and no team runner_command: settings.default_command
+        # is the fallback, so every step dispatches with the one homogeneous CLI.
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)  # default TEAM: no runner_command anywhere
+            server.write_settings(tmp, default_command="default-cli")
+            task_id = h.create_task()
+            h.start(task_id)
+            h.complete("hub-agent", task_id, "intake", "done")
+            jobs = {j["step"]: j for j in h.store.list_run_jobs(status="all")}
+            self.assertEqual("default-cli", jobs["intake"]["command"])
+            self.assertEqual("default-cli", jobs["implement"]["command"])
+
     def test_runner_claims_and_reports_then_scheduler_advances(self):
         with TemporaryDirectory() as tmp:
             h = EngineHarness(tmp, team=self._team_with_runner("echo done"))

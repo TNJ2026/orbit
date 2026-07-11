@@ -265,6 +265,9 @@ def read_settings(project_root: str | None = None) -> dict[str, Any]:
         # Runner command for hub-supervision CLI calls (timeout KILL/CONTINUE).
         # Set here, hub supervision no longer needs a team member.
         "hub_command": str(data.get("hub_command") or "").strip(),
+        # Default runner command for any step that does not set its own. With
+        # a homogeneous coding CLI this replaces per-role team runner commands.
+        "default_command": str(data.get("default_command") or "").strip(),
         "path": str(path),
     }
 
@@ -274,6 +277,7 @@ def write_settings(
     max_rework_rounds: Any = None,
     max_concurrent_tasks: Any = None,
     hub_command: Any = None,
+    default_command: Any = None,
 ) -> dict[str, Any]:
     current = read_settings(project_root)
     rework = (
@@ -288,12 +292,17 @@ def write_settings(
         current["hub_command"] if hub_command is None
         else str(hub_command or "").strip()
     )
+    default_cmd = (
+        current["default_command"] if default_command is None
+        else str(default_command or "").strip()
+    )
     path = _settings_config_path(project_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     data = {
         "max_rework_rounds": rework,
         "max_concurrent_tasks": concurrent,
         "hub_command": hub_cmd,
+        "default_command": default_cmd,
     }
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     return {**data, "path": str(path)}
@@ -1577,7 +1586,7 @@ def _validate_goal_auto_runners(
                 missing.append(f"{step['id']} ({step['role_id']}): no enabled member")
             continue
         member = _member_named(members, assignee) or {"agent_name": assignee}
-        if not (_step_command(step) or _runner_command_for(member)):
+        if not (_step_command(step, project_root) or _runner_command_for(member)):
             missing.append(f"{step['id']} ({assignee}): no step command or runner_command")
     if missing:
         raise InvalidInputError(
@@ -2300,7 +2309,7 @@ def _dispatch_step(
         store.update_task_step_details(
             task_id, step_inputs=step_inputs, result_summary="", artifacts=[]
         )
-    command = _step_command(step) or _runner_command_for(member)
+    command = _step_command(step, project_root) or _runner_command_for(member)
     if command:
         return store.create_run_job(
             task_id,
@@ -2841,11 +2850,17 @@ _DEFAULT_RUNNER_COMMANDS = {
 }
 
 
-def _step_command(step: dict[str, Any]) -> str:
-    """Explicit per-step runner command. When set it drives execution directly,
-    so a workflow can bind a step to a CLI without going through team lookup.
-    Empty means fall back to the assigned member's runner command."""
-    return str(step.get("command") or "").strip()
+def _step_command(step: dict[str, Any], project_root: str | None = None) -> str:
+    """Runner command for a step, independent of any team member: the step's own
+    `command` if set, else settings.default_command (when project_root is given).
+    A homogeneous coding CLI configures default_command once and every step runs
+    it. Empty means fall back to the assigned member's runner command."""
+    command = str(step.get("command") or "").strip()
+    if command:
+        return command
+    if project_root is not None:
+        return read_settings(project_root).get("default_command", "").strip()
+    return ""
 
 
 def _runner_command_for(member: dict[str, Any]) -> str:
@@ -4106,7 +4121,7 @@ def run_step_worker(
         card = store.find_open_step_card(task_id, step["id"])
         if card:
             run_task_id = card["id"]
-    command = _step_command(step) or _runner_command_for(member)
+    command = _step_command(step, project_root) or _runner_command_for(member)
     run = store.create_task_run(
         run_task_id, worker=assignee, command=command, workflow_step=step["id"]
     )
@@ -5707,6 +5722,7 @@ def create_server(
             data.get("max_rework_rounds"),
             data.get("max_concurrent_tasks"),
             data.get("hub_command"),
+            data.get("default_command"),
         )
         return _json(request, {"success": True, **settings})
 
