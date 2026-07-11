@@ -242,11 +242,8 @@ def read_settings(project_root: str | None = None) -> dict[str, Any]:
             data.get("max_concurrent_tasks"), MAX_CONCURRENT_MIN, MAX_CONCURRENT_MAX, _DEFAULT_MAX_CONCURRENT
         ),
         # Runner command for hub-supervision CLI calls (timeout KILL/CONTINUE).
-        # Set here, hub supervision no longer needs a team member.
+        # Optional CLI used by hub supervision for KILL/CONTINUE decisions.
         "hub_command": str(data.get("hub_command") or "").strip(),
-        # Default runner command for any step that does not set its own. With
-        # a homogeneous coding CLI this replaces per-role team runner commands.
-        "default_command": str(data.get("default_command") or "").strip(),
         # Per-agent command overrides ({agent_name: command}) that win over the
         # built-in _AGENT_RUNNER_COMMANDS table.
         "agent_commands": _norm_agent_commands(data.get("agent_commands")),
@@ -278,7 +275,6 @@ def write_settings(
     max_rework_rounds: Any = None,
     max_concurrent_tasks: Any = None,
     hub_command: Any = None,
-    default_command: Any = None,
     agent_commands: Any = None,
     subtask_agents: Any = None,
 ) -> dict[str, Any]:
@@ -295,10 +291,6 @@ def write_settings(
         current["hub_command"] if hub_command is None
         else str(hub_command or "").strip()
     )
-    default_cmd = (
-        current["default_command"] if default_command is None
-        else str(default_command or "").strip()
-    )
     agent_cmds = (
         current["agent_commands"] if agent_commands is None
         else _norm_agent_commands(agent_commands)
@@ -313,7 +305,6 @@ def write_settings(
         "max_rework_rounds": rework,
         "max_concurrent_tasks": concurrent,
         "hub_command": hub_cmd,
-        "default_command": default_cmd,
         "agent_commands": agent_cmds,
         "subtask_agents": sub_agents,
     }
@@ -396,6 +387,20 @@ DEFAULT_STEP_PROMPTS = {
     ),
 }
 
+# Non-editable safety boundaries for sensitive workflow steps. Workflow
+# authors may refine a step's editable prompt, but cannot turn an independent
+# review into an implementation pass or let a test pass mutate production code.
+ENGINE_STEP_CONTRACTS = {
+    "review": (
+        "This is an independent, read-only review. Do not modify files, commit, "
+        "or implement fixes; return actionable findings or a clean verdict."
+    ),
+    "test": (
+        "Treat production code as read-only. You may create ephemeral test output, "
+        "but do not change or commit production files to make checks pass."
+    ),
+}
+
 
 def default_workflow_steps() -> list[dict[str, Any]]:
     # (id, name, required, isolate, integrate, decompose, x, y)
@@ -405,7 +410,7 @@ def default_workflow_steps() -> list[dict[str, Any]]:
     # branch into main, verifies it, and checks the task's acceptance criteria;
     # runs in project_root, serialized by the main tree.
     # decompose: design-first — the goal itself runs intake + the product/UI/
-    # architecture design once, then `decompose` (hub) splits it into implementation
+    # architecture design once, then `decompose` splits it into implementation
     # subtasks partitioned by the architecture's modules. Each subtask starts at
     # `implement`, so the design steps run per goal, not per subtask.
     specs = [
@@ -553,12 +558,12 @@ def _normalize_workflow_step(
         # agent, in the same working tree. Its real exit code overrides the
         # agent's self-reported `done` (a failing gate the agent can't fake).
         "verify": str(step.get("verify", "") or "").strip(),
-        # command: the runner CLI for this step. Empty falls back to
-        # settings.default_command.
+        # command: optional per-step override. Empty uses the selected agent's
+        # built-in command (or settings.agent_commands override).
         "command": str(step.get("command", "") or "").strip(),
-        # agents: up to 3 CLIs. The first is this step's own assignee (single-task
-        # dispatch); the full list feeds the decompose subtask pool. Empty falls
-        # back to the step id / settings.default_command.
+        # agents: up to 3 CLIs. The first is this step's own assignee. A multi-
+        # agent step directly after Decompose also supplies implementation owners
+        # for round-robin subtask assignment. Empty falls back to the step id.
         "agents": _normalize_agents(step),
         "x": _coord("x", 40 + index * 300),
         "y": _coord("y", _DEFAULT_STEP_MID_Y),
@@ -605,11 +610,12 @@ def _workflow_graph_warnings(
     # git prerequisite for isolation/integration. The engine auto-inits a repo at
     # flow start when git is installed (see _ensure_git_repo), so a non-git dir is
     # NOT worth warning about — only a missing git binary is unrecoverable: those
-    # steps then run without a worktree and integrate is skipped.
+    # isolate steps then run without a worktree; integrate still performs its
+    # acceptance checks, but has no branch to merge.
     if any(s.get("isolate") or s.get("integrate") for s in steps) and not _git_available():
         warnings.append(
             "git is not installed: isolate steps will run without a per-task "
-            "worktree and the integrate step will be skipped"
+            "worktree; integrate cannot merge a branch but will still run acceptance checks"
         )
     # A decompose step is where a goal splits into subtasks; the subtasks begin at
     # its forward successors, so it must have an outgoing step, and only one such
@@ -782,7 +788,7 @@ def write_workflow_config(
     if project_root_path not in (resolved_path, *resolved_path.parents):
         raise InvalidInputError("workflow config path escapes project root")
     path.parent.mkdir(parents=True, exist_ok=True)
-    # required_locked is derived from the role on every read; keep it out of
+    # required_locked is derived from engine step flags on every read; keep it out of
     # the persisted file so hand-edits can't desync it.
     persisted = [
         {k: v for k, v in step.items() if k != "required_locked"}
@@ -800,18 +806,6 @@ def write_workflow_config(
         "path": str(path),
         "warnings": _workflow_graph_warnings(normalized, normalized_edges),
     }
-
-
-def _legacy_priority_to_expertise(priority: int) -> int:
-    if priority >= 120:
-        return 5
-    if priority >= 100:
-        return 4
-    if priority >= 75:
-        return 3
-    if priority >= 50:
-        return 2
-    return 1
 
 
 def goals_summary(
@@ -1295,10 +1289,13 @@ def _validate_goal_auto_runners(
             missing.append(
                 f"{step['id']} ({_step_assignee(step)}): no command"
             )
+    for agent in _subtask_agent_pool(project_root):
+        if not _command_for_agent(agent, project_root):
+            missing.append(f"decompose agent pool ({agent}): no built-in command")
     if missing:
         raise InvalidInputError(
-            "goal cannot auto-run until each required step has a command "
-            "(set the step's command or settings.default_command): "
+            "goal cannot auto-run until each required step has a runnable agent "
+            "(select an installed agent or set the step's command): "
             + "; ".join(missing)
         )
 
@@ -1369,7 +1366,9 @@ def _reject_dependency_cycles(tasks: list[dict[str, Any]]) -> None:
         visit(i)
 
 
-def _parse_goal_subtasks(text: str) -> list[dict[str, Any]]:
+def _parse_goal_subtasks(
+    text: str, allowed_agents: list[str] | None = None
+) -> list[dict[str, Any]]:
     data = _extract_json_object(text)
     raw_tasks = data.get("tasks")
     if not isinstance(raw_tasks, list) or not raw_tasks:
@@ -1391,6 +1390,11 @@ def _parse_goal_subtasks(text: str) -> list[dict[str, Any]]:
             body += f"\n\nAcceptance:\n{acceptance}"
         deps = _parse_subtask_deps(raw.get("depends_on"), index, count)
         agent = str(raw.get("agent") or "").strip()
+        if agent and allowed_agents is not None and agent not in allowed_agents:
+            allowed = ", ".join(allowed_agents) or "none"
+            raise InvalidInputError(
+                f"task {index} agent {agent!r} is not in the allowed agent pool: {allowed}"
+            )
         tasks.append({"title": title[:160], "content": body, "deps": deps, "agent": agent})
     _reject_dependency_cycles(tasks)
     return tasks
@@ -1434,6 +1438,9 @@ def _start_goal_business_subtasks(
     # 2. Persist each subtask's prerequisite task ids, and its assigned agent:
     #    decompose may tag a subtask with an agent by content; untagged subtasks
     #    round-robin over settings.subtask_agents so different CLIs share the load.
+    # Only an explicitly configured pool is used for automatic round-robin.
+    # Installed tools are valid when Decompose selects one deliberately, but
+    # their mere presence must not silently replace a step's own Agent.
     pool = _subtask_agent_pool(project_root)
     rr = 0
     for idx, subtask in enumerate(subtasks):
@@ -1789,7 +1796,7 @@ def _complete_goal_intake_locked(
     # Record the raw output first so a parse failure (bad JSON) still leaves the
     # decompose step's result inspectable on its card.
     _record_step_result(store, goal, step["id"], result)
-    subtasks = _parse_goal_subtasks(result)
+    subtasks = _parse_goal_subtasks(result, _allowed_subtask_agents(project_root))
     intake_card = store.find_open_step_card(goal["id"], step["id"])
     if intake_card:
         store.update_task_step_details(
@@ -1886,7 +1893,7 @@ def _upsert_step_card(
             card["id"], step_inputs=step_inputs, result_summary="", artifacts=[]
         ) or card
     # Title = step type + what THIS task is actually about (the parent task's
-    # title), so each card reflects its own work — not the generic role duty.
+    # title), so each card reflects its own work — not a generic step label.
     work = (parent.get("title") or "").strip()
     title = f"{step['name']} · {work[:60]}" if work else step["name"]
     return store.create_step_card(
@@ -2008,7 +2015,12 @@ def _dispatch_step(
         store.update_task_step_details(
             task_id, step_inputs=step_inputs, result_summary="", artifacts=[]
         )
-    command = _task_step_command(task, step, project_root) or member.get("runner_command", "")
+    # An explicit dispatch override (manual Re-run) must win over the task's
+    # normal ownership routing, otherwise the UI can say "gemini" while the job
+    # still executes the original task agent's CLI.
+    command = str(member.get("runner_command") or "").strip() or _task_step_command(
+        task, step, project_root
+    )
     if command:
         return store.create_run_job(
             task_id,
@@ -2052,7 +2064,7 @@ def _dispatch_targets(
             notices.append(f"step {target} is waiting for other required branches")
             continue
         step = steps[target]
-        assignee = _task_step_assignee(task, step)
+        assignee = _task_step_assignee(task, step, project_root)
         action = store.create_workflow_action(
             task_id,
             "dispatch_step",
@@ -2164,11 +2176,15 @@ def rerun_workflow_step(
                 f"a run is already in progress for step {step_id!r}; wait for it "
                 "to finish before re-running"
             )
-        member = {"agent_name": agent, "runner_command": ""}
-        if not _step_command(step_def, project_root):
+        rerun_command = _command_for_agent(agent, project_root)
+        if not rerun_command:
+            # A custom/generic assignee may still use an explicit step command.
+            rerun_command = str(step_def.get("command") or "").strip()
+        member = {"agent_name": agent, "runner_command": rerun_command}
+        if not rerun_command:
             raise InvalidInputError(
-                f"step {step_id!r} has no command (set the step's command or "
-                "settings.default_command), so it cannot auto-run"
+                f"step {step_id!r} has no runnable agent (select an installed "
+                "agent or set the step's command), so it cannot auto-run"
             )
         # Carry the upstream step's result forward so the re-run has the same
         # context the original dispatch had (empty for entry steps). The note is
@@ -2188,7 +2204,7 @@ def rerun_workflow_step(
             "task_id": task_id,
             "step": step_id,
             "assignee": agent,
-            "runner_command": _step_command(step_def, project_root),
+            "runner_command": rerun_command,
             "queued_job_id": job["id"] if job else None,
             "reran": True,
         }
@@ -2497,16 +2513,11 @@ RUNNER_STREAM_DRAIN_SECONDS = 5
 
 
 def _step_command(step: dict[str, Any], project_root: str | None = None) -> str:
-    """Runner command for a step, independent of any team member: the step's own
-    `command` if set, else settings.default_command (when project_root is given).
-    A homogeneous coding CLI configures default_command once and every step runs
-    it. Empty means fall back to the assigned member's runner command."""
+    """Resolve the explicit command or the selected agent's built-in command."""
     command = str(step.get("command") or "").strip()
     if command:
         return command
-    if project_root is not None:
-        return read_settings(project_root).get("default_command", "").strip()
-    return ""
+    return _command_for_agent(_step_assignee(step), project_root)
 
 
 def _step_assignee(step: dict[str, Any]) -> str:
@@ -2517,14 +2528,40 @@ def _step_assignee(step: dict[str, Any]) -> str:
     return agents[0] if agents else step["id"]
 
 
-def _subtask_agent_pool(project_root: str | None) -> list[str]:
-    """Agent pool decompose rotates across subtasks: the union (ordered, deduped)
-    of the agents on multi-agent steps (a step with 2-3 agents means "spread these
-    CLIs across subtasks"; a single-agent step is just that step's own assignee).
-    Falls back to settings.subtask_agents."""
+def _decompose_successor_steps(project_root: str | None) -> list[dict[str, Any]]:
+    """Configured forward steps directly after Decompose."""
     cfg = read_workflow_config(project_root)
+    back = _workflow_graph(cfg)
+    decompose_id = _root_goal_decompose_step_id(cfg, back)
+    successor_ids = {
+        edge["to"] for edge in cfg["edges"]
+        if decompose_id
+        and edge["from"] == decompose_id
+        and (edge["from"], edge["to"]) not in back
+    }
+    return [step for step in cfg["steps"] if step["id"] in successor_ids]
+
+
+def _decompose_successor_agents(project_root: str | None) -> list[str]:
+    """Ordered Agents configured directly after Decompose."""
     pool: list[str] = []
-    for step in cfg["steps"]:
+    for step in _decompose_successor_steps(project_root):
+        agents = step.get("agents", [])
+        for agent in agents:
+            if agent not in pool:
+                pool.append(agent)
+    return pool
+
+
+def _subtask_agent_pool(project_root: str | None) -> list[str]:
+    """Explicit round-robin pool for implementation ownership.
+
+    A direct successor contributes only when it selected multiple Agents. A
+    single Agent already owns that step without writing task-level ownership.
+    Review/Test/Integrate Agents never enter this pool.
+    """
+    pool: list[str] = []
+    for step in _decompose_successor_steps(project_root):
         agents = step.get("agents", [])
         if len(agents) > 1:
             for agent in agents:
@@ -2533,8 +2570,21 @@ def _subtask_agent_pool(project_root: str | None) -> list[str]:
     return pool or read_settings(project_root)["subtask_agents"]
 
 
+def _allowed_subtask_agents(project_root: str | None) -> list[str]:
+    """Effective, server-enforced Agent pool advertised to Decompose."""
+    configured = _subtask_agent_pool(project_root)
+    if configured:
+        return configured
+    successor_agents = _decompose_successor_agents(project_root)
+    if successor_agents:
+        return successor_agents
+    return [
+        tool["agent_name"] for tool in detect_agent_tools() if tool.get("installed")
+    ]
+
+
 # Known coding CLIs → the full shell invocation that pipes the step prompt on
-# stdin. This is a plain lookup table (not the old role/team system): it lets a
+# stdin. This plain lookup table lets a
 # (sub)task name an agent by id and have orbit run the right CLI. Override or
 # extend per project via settings.agent_commands.
 _AGENT_RUNNER_COMMANDS = {
@@ -2566,20 +2616,47 @@ def _command_for_agent(agent: str | None, project_root: str | None = None) -> st
     return ""
 
 
-def _task_step_assignee(task: dict[str, Any], step: dict[str, Any]) -> str:
-    """A (sub)task's assigned agent wins over the step's own agent/id, so every
-    step of a decompose subtask runs on the CLI decompose picked for it."""
-    return str(task.get("agent") or "").strip() or _step_assignee(step)
+def _task_agent_owns_step(
+    task: dict[str, Any], step: dict[str, Any], project_root: str | None
+) -> bool:
+    """Whether Decompose's task Agent owns this implementation-entry step."""
+    if not str(task.get("agent") or "").strip() or not task.get("parent_task_id"):
+        return False
+    cfg = read_workflow_config(project_root)
+    back = _workflow_graph(cfg)
+    decompose_id = _root_goal_decompose_step_id(cfg, back)
+    is_successor = bool(decompose_id) and any(
+        edge["from"] == decompose_id
+        and edge["to"] == step["id"]
+        and (edge["from"], edge["to"]) not in back
+        for edge in cfg["edges"]
+    )
+    if not is_successor:
+        return False
+    step_agents = step.get("agents") or []
+    task_agent = str(task.get("agent") or "").strip()
+    settings_pool = read_settings(project_root)["subtask_agents"]
+    return not step_agents or task_agent in step_agents or task_agent in settings_pool
+
+
+def _task_step_assignee(
+    task: dict[str, Any], step: dict[str, Any], project_root: str | None = None
+) -> str:
+    """Use task ownership only at the implementation entry; later gates use
+    their own configured Agent so Review/Test/Integrate remain independent."""
+    if _task_agent_owns_step(task, step, project_root):
+        return str(task.get("agent") or "").strip()
+    return _step_assignee(step)
 
 
 def _task_step_command(
     task: dict[str, Any], step: dict[str, Any], project_root: str | None
 ) -> str:
-    """Command for a step: the (sub)task's assigned agent's command wins, else
-    the step's own command / settings.default_command."""
-    agent_cmd = _command_for_agent(task.get("agent"), project_root)
-    if agent_cmd:
-        return agent_cmd
+    """Use the implementation owner's CLI only on its owned entry step."""
+    if _task_agent_owns_step(task, step, project_root):
+        agent_cmd = _command_for_agent(task.get("agent"), project_root)
+        if agent_cmd:
+            return agent_cmd
     return _step_command(step, project_root)
 
 
@@ -2717,6 +2794,15 @@ def _triage_config_snapshot(project_root: str | None) -> str:
                 {
                     "id": step["id"],
                     "agents": step.get("agents", []),
+                    "assignee": _step_assignee(step),
+                    "runnable": bool(_step_command(step, project_root)),
+                    "command_source": (
+                        "step"
+                        if str(step.get("command") or "").strip()
+                        else "agent"
+                        if _command_for_agent(_step_assignee(step), project_root)
+                        else "missing"
+                    ),
                     "required": bool(step.get("required")),
                     "isolate": bool(step.get("isolate")),
                     "integrate": bool(step.get("integrate")),
@@ -2786,9 +2872,7 @@ def _build_step_prompt(
         )
     goal_contract = ""
     if _is_root_goal_decompose_step(project_root, task, step):
-        agent_pool = _subtask_agent_pool(project_root) or [
-            tool["agent_name"] for tool in detect_agent_tools() if tool.get("installed")
-        ]
+        agent_pool = _allowed_subtask_agents(project_root)
         agent_line = (
             f'可选 `agent` 字段：按子任务内容挑最合适的 CLI 执行，取值限 {agent_pool}；'
             "不确定就省略该字段，引擎会自动在这些 CLI 间轮询分配。\n"
@@ -2810,6 +2894,13 @@ def _build_step_prompt(
             "JSON 对象，前后不要任何说明或推理文字。\n"
         )
     custom_step_prompt = str(step.get("prompt") or "").strip()
+    engine_step_contract = ENGINE_STEP_CONTRACTS.get(step.get("id", ""), "")
+    engine_step_block = (
+        "\n## 引擎步骤契约（不可由自定义 Prompt 覆盖）\n"
+        + engine_step_contract
+        + "\n"
+        if engine_step_contract else ""
+    )
     custom_step_block = (
         "\n## 自定义 Step Prompt（不得覆盖引擎输出协议）\n"
         + custom_step_prompt
@@ -2854,6 +2945,7 @@ def _build_step_prompt(
         + goal_contract
         + integrate_block
         + custom_step_block
+        + engine_step_block
         + (f"## 上游产出\n{upstream_result}\n\n" if upstream_result else "")
         + final_instruction
     )
@@ -3833,8 +3925,8 @@ def run_step_worker(
     can_rework = False
     if not command:
         result = (
-            f"no runner command for step {step['id']} (agent {assignee}); set the "
-            "step's command or settings.default_command"
+            f"no runner command for step {step['id']} (agent {assignee}); select "
+            "an installed agent or set the step's command"
         )
     else:
         _cfg = read_workflow_config(project_root)
@@ -4006,7 +4098,7 @@ def run_step_worker(
     goal_intake = _is_root_goal_decompose_step(project_root, task, step)
     if outcome == "done" and goal_intake:
         try:
-            _parse_goal_subtasks(result)
+            _parse_goal_subtasks(result, _allowed_subtask_agents(project_root))
         except InvalidInputError as exc:
             outcome = "blocked"
             status = "failed"
@@ -4253,19 +4345,15 @@ def run_queued_job(
         raise
 
 
-def _steps_for_roles(
-    project_root: str | None, roles: list[str] | None
+def _configured_step_scope(
+    project_root: str | None, step_ids: list[str] | None
 ) -> list[str] | None:
-    """Resolve a runner's --roles scope to workflow step ids: a value matches a
-    step by its id or its assigned agent. None means no filter (claim any step)."""
-    wanted = {r.strip() for r in (roles or []) if r.strip()}
+    """Validate a runner's --steps scope against configured workflow step ids."""
+    wanted = {step_id.strip() for step_id in (step_ids or []) if step_id.strip()}
     if not wanted:
         return None
     cfg = read_workflow_config(project_root)
-    return [
-        s["id"] for s in cfg["steps"]
-        if s["id"] in wanted or any(a in wanted for a in s.get("agents", []))
-    ]
+    return [step["id"] for step in cfg["steps"] if step["id"] in wanted]
 
 
 def runner_loop(
@@ -4275,17 +4363,20 @@ def runner_loop(
     agents: list[str] | None = None,
     poll_seconds: float = 2.0,
     once: bool = False,
-    roles: list[str] | None = None,
+    steps: list[str] | None = None,
     max_concurrency: int = 5,
 ) -> None:
-    """Poll and execute queued run_jobs until interrupted. `agents`/`roles`
+    """Poll and execute queued run_jobs until interrupted. `agents`/`steps`
     scope which jobs are claimed; max_concurrency runs that many jobs in
     parallel (each parallel worker leases under a distinct name)."""
-    steps = _steps_for_roles(project_root, roles)
-    # A role filter that matches no step would silently claim nothing; treat an
+    claim_steps = _configured_step_scope(project_root, steps)
+    # A step filter that matches no step would silently claim nothing; treat an
     # empty resolved set as a hard stop rather than "all steps".
-    if roles and not steps:
-        print(f"runner {runner_name}: no steps match roles {roles}; nothing to do", flush=True)
+    if steps and not claim_steps:
+        print(
+            f"runner {runner_name}: no configured steps match {steps}; nothing to do",
+            flush=True,
+        )
         return
 
     def _worker(name: str) -> None:
@@ -4295,7 +4386,7 @@ def runner_loop(
                 project_root,
                 runner_name=name,
                 agents=agents,
-                steps=steps,
+                steps=claim_steps,
             )
             if result:
                 print(f"runner {name}: job #{result['job_id']} {result['status']}", flush=True)
@@ -4398,10 +4489,7 @@ def check_workflow_step_timeouts(
 def _check_workflow_step_timeouts_locked(
     store: Store, project_root: str | None, now: datetime | None = None
 ) -> list[dict[str, Any]]:
-    """Steps with timeout_minutes > 0 whose latest dispatch is older than the
-    timeout get reassigned to the best other member for the role; when nobody
-    else is available the hub is notified instead. Each dispatch triggers at
-    most one action (the timeout/reassigned transition marks it handled)."""
+    """Notify hub once when an active step exceeds its configured timeout."""
     now = now or datetime.now(timezone.utc)
     cfg = read_workflow_config(project_root)
     steps = {s["id"]: s for s in cfg["steps"]}
@@ -5236,7 +5324,6 @@ def create_server(
             data.get("max_rework_rounds"),
             data.get("max_concurrent_tasks"),
             data.get("hub_command"),
-            data.get("default_command"),
             data.get("agent_commands"),
             data.get("subtask_agents"),
         )
@@ -5504,7 +5591,6 @@ def create_server(
             task = await _to_thread(
                 store.update_task_metadata,
                 task_id,
-                data.get("role_required"),
                 data.get("importance"),
                 data.get("size"),
                 data.get("risk"),

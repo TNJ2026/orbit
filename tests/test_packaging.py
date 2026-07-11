@@ -133,12 +133,10 @@ class PackagingTests(unittest.TestCase):
         self.assertNotIn("function createTaskRun(taskId)", html)
         self.assertIn("function renderTaskRuns()", html)
         self.assertIn("function renderWorkflow()", html)
-        # Role/team UI is gone: steps assign their own agent + command.
-        self.assertNotIn("function renderRoles()", html)
-        self.assertNotIn("function renderTeam()", html)
+        # Steps assign their own Agent and command directly.
         self.assertIn('id="addStepAgents"', html)
         self.assertIn('id="addStepCommand"', html)
-        self.assertIn('id="setDefaultCommand"', html)
+        self.assertNotIn('id="setDefaultCommand"', html)
         # The Add-step toolbar tool opens the modal (add); double-click opens it
         # (edit). No standalone Add-step button in the pane header.
         self.assertIn("function saveEditStep()", html)
@@ -188,18 +186,15 @@ class PackagingTests(unittest.TestCase):
         self.assertNotIn("function startNodeDrag(", html)
         self.assertNotIn("function startExistingEdgeDrag(", html)
         self.assertNotIn("function updateWorkflowEdgeTarget(", html)
-        self.assertIn('t("task.role", escapeHtml(task.role_required', html)
         self.assertNotIn("<strong>Assignment</strong>", html)  # Assignment section removed
         self.assertIn("function toggleStep(", html)            # inline-expand step detail
         self.assertIn('class="step-item', html)
         self.assertNotIn('id="jobsTab"', html)                 # jobs page removed
-        self.assertNotIn('id="teamRequirements"', html)        # team page removed
         self.assertNotIn('const REQUIRED_TEAM_ROLES', html)
         self.assertNotIn("function recommendAgent(taskId)", html)
         self.assertNotIn("function renderAssignmentCandidates()", html)
         self.assertNotIn("/api/tasks/${taskId}/assignment-candidates", html)
         self.assertNotIn("Weight", html)
-        self.assertNotIn("function wireRoleActionButtons()", html)  # roles page removed
         self.assertIn("selectedProjectId", html)
         self.assertIn("async function refreshWorkspace()", html)
         self.assertIn("function wireRefresh(", html)
@@ -323,20 +318,20 @@ class PackagingTests(unittest.TestCase):
                     {
                         "id": "plan",
                         "name": "Plan",
-                        "role_id": "hub",
+
                         "task_status": "created",
                         "required": True,
                     },
                     {
                         "id": "ship",
                         "name": "Ship",
-                        "role_id": "implementer",
+
                         "task_status": "closed",
                     },
                     {
                         "id": "check",
                         "name": "Check",
-                        "role_id": "reviewer",
+
                         "task_status": "in_progress",
                     },
                 ],
@@ -358,14 +353,14 @@ class PackagingTests(unittest.TestCase):
         from orbit.store import InvalidInputError
 
         steps = [
-            {"id": "a", "name": "A", "role_id": "hub", "task_status": "created"},
+            {"id": "a", "name": "A", "task_status": "created"},
             {
                 "id": "b",
                 "name": "B",
-                "role_id": "implementer",
+
                 "task_status": "assigned",
             },
-            {"id": "c", "name": "C", "role_id": "reviewer", "task_status": "in_progress"},
+            {"id": "c", "name": "C", "task_status": "in_progress"},
         ]
         with TemporaryDirectory() as tmp:
             saved = server.write_workflow_config(steps, tmp)
@@ -377,9 +372,9 @@ class PackagingTests(unittest.TestCase):
         import orbit.server as server
 
         steps = [
-            {"id": "a", "name": "A", "role_id": "hub"},
-            {"id": "b", "name": "B", "role_id": "implementer"},
-            {"id": "c", "name": "C", "role_id": "reviewer"},
+            {"id": "a", "name": "A"},
+            {"id": "b", "name": "B"},
+            {"id": "c", "name": "C"},
         ]
         with TemporaryDirectory() as tmp:
             connected = server.write_workflow_config(
@@ -399,9 +394,9 @@ class PackagingTests(unittest.TestCase):
         import orbit.server as server
 
         steps = [
-            {"id": "a", "name": "A", "role_id": "hub"},
-            {"id": "b", "name": "B", "role_id": "implementer"},
-            {"id": "c", "name": "C", "role_id": "reviewer"},
+            {"id": "a", "name": "A"},
+            {"id": "b", "name": "B"},
+            {"id": "c", "name": "C"},
         ]
         # b <-> c form a cycle with no entry from a's component.
         with TemporaryDirectory() as tmp:
@@ -418,10 +413,10 @@ class PackagingTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             saved = server.write_workflow_config(
                 [
-                    {"id": "impl", "name": "Impl", "role_id": "implementer", "required": False},
-                    {"id": "split", "name": "Split", "role_id": "hub", "decompose": True, "required": False},
-                    {"id": "merge", "name": "Merge", "role_id": "hub", "integrate": True, "required": False},
-                    {"id": "qa", "name": "QA", "role_id": "tester", "required": False},
+                    {"id": "impl", "name": "Impl", "required": False},
+                    {"id": "split", "name": "Split", "decompose": True, "required": False},
+                    {"id": "merge", "name": "Merge", "integrate": True, "required": False},
+                    {"id": "qa", "name": "QA", "required": False},
                 ],
                 tmp,
             )
@@ -470,9 +465,9 @@ class PackagingTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             saved = server.write_workflow_config(
                 [
-                    {"id": "a", "name": "A", "role_id": "hub", "x": 100, "y": 50},
-                    {"id": "b", "name": "B", "role_id": "implementer", "x": 400, "y": 200},
-                    {"id": "c", "name": "C", "role_id": "reviewer", "x": 700, "y": 50},
+                    {"id": "a", "name": "A", "x": 100, "y": 50},
+                    {"id": "b", "name": "B", "x": 400, "y": 200},
+                    {"id": "c", "name": "C", "x": 700, "y": 50},
                 ],
                 tmp,
                 [{"from": "a", "to": "b"}],
@@ -489,9 +484,9 @@ class PackagingTests(unittest.TestCase):
         from orbit.store import InvalidInputError
 
         steps = [
-            {"id": "a", "name": "A", "role_id": "hub"},
-            {"id": "b", "name": "B", "role_id": "implementer"},
-            {"id": "c", "name": "C", "role_id": "reviewer"},
+            {"id": "a", "name": "A"},
+            {"id": "b", "name": "B"},
+            {"id": "c", "name": "C"},
         ]
         with TemporaryDirectory() as tmp:
             saved = server.write_workflow_config(
@@ -515,9 +510,9 @@ class PackagingTests(unittest.TestCase):
             cfg = Path(tmp) / ".orbit" / "workflow.json"
             cfg.parent.mkdir(parents=True)
             cfg.write_text(_json.dumps({"steps": [
-                {"id": "a", "name": "A", "role_id": "hub"},
-                {"id": "b", "name": "B", "role_id": "hub"},
-                {"id": "c", "name": "C", "role_id": "hub"},
+                {"id": "a", "name": "A"},
+                {"id": "b", "name": "B"},
+                {"id": "c", "name": "C"},
             ]}))
             loaded = server.read_workflow_config(tmp)
         self.assertEqual(
@@ -547,7 +542,6 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual(saved, loaded)
         for step in loaded["steps"]:
             self.assertNotIn("kind", step)
-            self.assertNotIn("role_id", step)
 
 
 if __name__ == "__main__":

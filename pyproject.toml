@@ -22,7 +22,7 @@ path = "src/orbit/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/orbit"]
-# Non-Python resources (the Web UI, the vendored dagre bundle, role templates)
+# Non-Python resources (the Web UI and vendored dagre bundle)
 # are loaded via importlib.resources at runtime. hatchling already ships every
 # non-ignored file under the package tree, so they are included automatically —
 # a force-include table here only duplicates them and makes the wheel build fail

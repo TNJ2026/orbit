@@ -30,10 +30,10 @@ def tearDownModule():
 
 
 LINEAR_STEPS = [
-    {"id": "intake", "name": "Intake", "role_id": "hub", "task_status": "created", "required": True},
-    {"id": "implement", "name": "Implement", "role_id": "implementer", "task_status": "in_progress", "required": True},
-    {"id": "review", "name": "Review", "role_id": "reviewer", "task_status": "in_progress", "required": True},
-    {"id": "accept", "name": "Accept", "role_id": "hub", "task_status": "in_progress", "required": True},
+    {"id": "intake", "name": "Intake", "assignment": "hub", "task_status": "created", "required": True},
+    {"id": "implement", "name": "Implement", "assignment": "implementer", "task_status": "in_progress", "required": True},
+    {"id": "review", "name": "Review", "assignment": "reviewer", "task_status": "in_progress", "required": True},
+    {"id": "accept", "name": "Accept", "assignment": "hub", "task_status": "in_progress", "required": True},
 ]
 LINEAR_EDGES = [
     {"from": "intake", "to": "implement"},
@@ -45,42 +45,42 @@ ENTRY_DECOMPOSE_STEPS = [
     {**step, **({"decompose": True} if step["id"] == "intake" else {})}
     for step in LINEAR_STEPS
 ]
-TEAM = [
-    {"agent_name": "hub-agent", "role_id": "hub"},
-    {"agent_name": "codex", "role_id": "implementer"},
-    {"agent_name": "rev", "role_id": "reviewer"},
+BINDINGS = [
+    {"agent_name": "hub-agent", "assignment": "hub"},
+    {"agent_name": "codex", "assignment": "implementer"},
+    {"agent_name": "rev", "assignment": "reviewer"},
 ]
 
 
 class EngineHarness:
-    def __init__(self, tmp, steps=None, edges=None, team=None):
+    def __init__(self, tmp, steps=None, edges=None, bindings=None):
         self.root = tmp
-        team = TEAM if team is None else team
-        # Roles are gone: compile the old role-based team into the new model by
-        # stamping each step with its agent (assignee) and command directly.
-        role_agent = {m["role_id"]: m["agent_name"] for m in team}
-        role_cmd = {m["role_id"]: m.get("runner_command", "") for m in team}
+        bindings = BINDINGS if bindings is None else bindings
+        # Compile this test fixture's symbolic assignments into direct step
+        # Agents and commands, matching the production workflow schema.
+        assignment_agent = {m["assignment"]: m["agent_name"] for m in bindings}
+        assignment_cmd = {m["assignment"]: m.get("runner_command", "") for m in bindings}
         compiled = []
         for step in (steps or LINEAR_STEPS):
             step = dict(step)
-            role = step.get("role_id", "")
-            step.setdefault("agent", role_agent.get(role, ""))
-            if "command" not in step and role_cmd.get(role):
-                step["command"] = role_cmd[role]
+            assignment = step.get("assignment", "")
+            step.setdefault("agent", assignment_agent.get(assignment, ""))
+            if "command" not in step and assignment_cmd.get(assignment):
+                step["command"] = assignment_cmd[assignment]
             compiled.append(step)
         server.write_workflow_config(compiled, tmp, edges or LINEAR_EDGES)
         # A hub member's runner_command now lives in settings (hub supervision is
-        # team-independent); mirror it so team-based fixtures keep working.
+        # bindings-independent); mirror it so bindings-based fixtures keep working.
         hub_cmd = next(
-            (m.get("runner_command", "") for m in team
-             if m["role_id"] == "hub" and m.get("runner_command")),
+            (m.get("runner_command", "") for m in bindings
+             if m["assignment"] == "hub" and m.get("runner_command")),
             "",
         )
         if hub_cmd:
             server.write_settings(tmp, hub_command=hub_cmd)
         self.store = Store(Path(tmp) / "test.db")
-        for member in team:
-            self.store.register_agent(member["agent_name"], member["role_id"])
+        for member in bindings:
+            self.store.register_agent(member["agent_name"], member["assignment"])
         # Recipient for engine blocker/timeout notices (and a generic hub actor
         # for override-based tests).
         if not self.store.agent_exists(server.HUB_NOTIFY_AGENT):
@@ -159,10 +159,10 @@ class WorkflowEngineTests(unittest.TestCase):
 
     def test_merge_waits_for_all_required_branches(self):
         steps = [
-            {"id": "a", "name": "A", "role_id": "hub", "task_status": "created", "required": True},
-            {"id": "b", "name": "B", "role_id": "implementer", "task_status": "in_progress", "required": True},
-            {"id": "c", "name": "C", "role_id": "reviewer", "task_status": "in_progress", "required": True},
-            {"id": "d", "name": "D", "role_id": "hub", "task_status": "in_progress", "required": True},
+            {"id": "a", "name": "A", "assignment": "hub", "task_status": "created", "required": True},
+            {"id": "b", "name": "B", "assignment": "implementer", "task_status": "in_progress", "required": True},
+            {"id": "c", "name": "C", "assignment": "reviewer", "task_status": "in_progress", "required": True},
+            {"id": "d", "name": "D", "assignment": "hub", "task_status": "in_progress", "required": True},
         ]
         edges = [
             {"from": "a", "to": "b"},
@@ -285,11 +285,11 @@ class WorkflowEngineTests(unittest.TestCase):
 
     def test_goals_summary_projects_subtask_status(self):
         with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp, steps=ENTRY_DECOMPOSE_STEPS, team=[
-                {"agent_name": "hub-agent", "role_id": "hub", "runner_command": "cat"},
-                {"agent_name": "codex", "role_id": "implementer", "runner_command": "cat"},
-                {"agent_name": "integrator", "role_id": "integrator", "runner_command": "cat"},
-                {"agent_name": "rev", "role_id": "reviewer", "runner_command": "cat"},
+            h = EngineHarness(tmp, steps=ENTRY_DECOMPOSE_STEPS, bindings=[
+                {"agent_name": "hub-agent", "assignment": "hub", "runner_command": "cat"},
+                {"agent_name": "codex", "assignment": "implementer", "runner_command": "cat"},
+                {"agent_name": "integrator", "assignment": "integrator", "runner_command": "cat"},
+                {"agent_name": "rev", "assignment": "reviewer", "runner_command": "cat"},
             ])
             goal_id = h.create_task(title="goal")
             h.store.update_task_metadata(goal_id, is_goal=True)
@@ -325,10 +325,10 @@ class WorkflowEngineTests(unittest.TestCase):
 
     def test_optional_late_branch_does_not_redispatch_join_target(self):
         steps = [
-            {"id": "a", "name": "A", "role_id": "hub", "task_status": "created", "required": True},
-            {"id": "b", "name": "B", "role_id": "implementer", "task_status": "in_progress", "required": True},
-            {"id": "c", "name": "C", "role_id": "tester", "task_status": "in_progress", "required": False},
-            {"id": "d", "name": "D", "role_id": "reviewer", "task_status": "in_progress", "required": True},
+            {"id": "a", "name": "A", "assignment": "hub", "task_status": "created", "required": True},
+            {"id": "b", "name": "B", "assignment": "implementer", "task_status": "in_progress", "required": True},
+            {"id": "c", "name": "C", "assignment": "tester", "task_status": "in_progress", "required": False},
+            {"id": "d", "name": "D", "assignment": "reviewer", "task_status": "in_progress", "required": True},
         ]
         edges = [
             {"from": "a", "to": "b"},
@@ -336,9 +336,9 @@ class WorkflowEngineTests(unittest.TestCase):
             {"from": "b", "to": "d"},
             {"from": "c", "to": "d"},
         ]
-        team = TEAM + [{"agent_name": "test-agent", "role_id": "tester"}]
+        bindings = BINDINGS + [{"agent_name": "test-agent", "assignment": "tester"}]
         with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp, steps=steps, edges=edges, team=team)
+            h = EngineHarness(tmp, steps=steps, edges=edges, bindings=bindings)
             task_id = h.create_task()
             h.start(task_id)
             h.complete("hub-agent", task_id, "a", "done")
@@ -348,7 +348,7 @@ class WorkflowEngineTests(unittest.TestCase):
             late = h.complete("test-agent", task_id, "c", "done")
             self.assertEqual([], late["dispatched"])
 
-    def test_role_mismatch_is_rejected(self):
+    def test_assignee_mismatch_is_rejected(self):
         with TemporaryDirectory() as tmp:
             h = EngineHarness(tmp)
             task_id = h.create_task()
@@ -406,30 +406,30 @@ class WorkflowEngineTests(unittest.TestCase):
         # a non-empty workflow always has an entry and a terminal — the
         # executability pre-check only guards degenerate configs.)
         steps = [
-            {"id": "intake", "name": "Intake", "role_id": "hub", "task_status": "created", "required": True},
-            {"id": "implement", "name": "Implement", "role_id": "implementer", "task_status": "in_progress", "required": True},
-            {"id": "review", "name": "Review", "role_id": "reviewer", "task_status": "in_progress", "required": True},
-            {"id": "optional_check", "name": "Optional Check", "role_id": "tester", "task_status": "in_progress", "required": False},
+            {"id": "intake", "name": "Intake", "assignment": "hub", "task_status": "created", "required": True},
+            {"id": "implement", "name": "Implement", "assignment": "implementer", "task_status": "in_progress", "required": True},
+            {"id": "review", "name": "Review", "assignment": "reviewer", "task_status": "in_progress", "required": True},
+            {"id": "optional_check", "name": "Optional Check", "assignment": "tester", "task_status": "in_progress", "required": False},
         ]
         edges = [
             {"from": "intake", "to": "implement"},
             {"from": "review", "to": "optional_check"},
             {"from": "optional_check", "to": "review"},
         ]
-        team = TEAM + [{"agent_name": "test-agent", "role_id": "tester"}]
+        bindings = BINDINGS + [{"agent_name": "test-agent", "assignment": "tester"}]
         with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp, steps=steps, edges=edges, team=team)
+            h = EngineHarness(tmp, steps=steps, edges=edges, bindings=bindings)
             task_id = h.create_task()
             with self.assertRaisesRegex(InvalidInputError, "required steps unreachable"):
                 h.start(task_id)
 
     def test_start_allows_warning_for_dangling_optional_step(self):
         steps = [
-            {"id": "intake", "name": "Intake", "role_id": "hub", "task_status": "created", "required": True},
-            {"id": "implement", "name": "Implement", "role_id": "implementer", "task_status": "in_progress", "required": True},
-            {"id": "review", "name": "Review", "role_id": "reviewer", "task_status": "in_progress", "required": True},
-            {"id": "optional_a", "name": "Optional A", "role_id": "tester", "task_status": "in_progress", "required": False},
-            {"id": "optional_b", "name": "Optional B", "role_id": "tester", "task_status": "in_progress", "required": False},
+            {"id": "intake", "name": "Intake", "assignment": "hub", "task_status": "created", "required": True},
+            {"id": "implement", "name": "Implement", "assignment": "implementer", "task_status": "in_progress", "required": True},
+            {"id": "review", "name": "Review", "assignment": "reviewer", "task_status": "in_progress", "required": True},
+            {"id": "optional_a", "name": "Optional A", "assignment": "tester", "task_status": "in_progress", "required": False},
+            {"id": "optional_b", "name": "Optional B", "assignment": "tester", "task_status": "in_progress", "required": False},
         ]
         edges = [
             {"from": "intake", "to": "implement"},
@@ -513,11 +513,11 @@ class WorkflowEngineTests(unittest.TestCase):
         # each step keeps its own rework budget: a tester rework must not drain
         # the reviewer's, so the reviewer can still loop back afterwards.
         steps = [
-            {"id": "intake", "name": "Intake", "role_id": "hub", "task_status": "created", "required": True},
-            {"id": "implement", "name": "Implement", "role_id": "implementer", "task_status": "in_progress", "required": True},
-            {"id": "review", "name": "Review", "role_id": "reviewer", "task_status": "in_progress", "required": True},
-            {"id": "test", "name": "Test", "role_id": "tester", "task_status": "in_progress", "required": True},
-            {"id": "accept", "name": "Accept", "role_id": "hub", "task_status": "in_progress", "required": True},
+            {"id": "intake", "name": "Intake", "assignment": "hub", "task_status": "created", "required": True},
+            {"id": "implement", "name": "Implement", "assignment": "implementer", "task_status": "in_progress", "required": True},
+            {"id": "review", "name": "Review", "assignment": "reviewer", "task_status": "in_progress", "required": True},
+            {"id": "test", "name": "Test", "assignment": "tester", "task_status": "in_progress", "required": True},
+            {"id": "accept", "name": "Accept", "assignment": "hub", "task_status": "in_progress", "required": True},
         ]
         edges = [
             {"from": "intake", "to": "implement"},
@@ -527,14 +527,14 @@ class WorkflowEngineTests(unittest.TestCase):
             {"from": "review", "to": "implement"},  # rework loop-back
             {"from": "test", "to": "implement"},     # rework loop-back
         ]
-        team = [
-            {"agent_name": "hub-agent", "role_id": "hub"},
-            {"agent_name": "codex", "role_id": "implementer"},
-            {"agent_name": "rev", "role_id": "reviewer"},
-            {"agent_name": "qa", "role_id": "tester"},
+        bindings = [
+            {"agent_name": "hub-agent", "assignment": "hub"},
+            {"agent_name": "codex", "assignment": "implementer"},
+            {"agent_name": "rev", "assignment": "reviewer"},
+            {"agent_name": "qa", "assignment": "tester"},
         ]
         with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp, steps=steps, edges=edges, team=team)
+            h = EngineHarness(tmp, steps=steps, edges=edges, bindings=bindings)
             tid = h.create_task()
             h.start(tid)
             h.complete("hub-agent", tid, "intake", "done")
@@ -672,13 +672,13 @@ class StepTimeoutTests(unittest.TestCase):
 class GoalTests(unittest.TestCase):
     def test_goal_intake_card_settled_even_if_subtask_dispatch_fails(self):
         with TemporaryDirectory() as tmp:
-            # A runner-ready team clears the pre-dispatch validation gate, so the
+            # A runner-ready bindings clears the pre-dispatch validation gate, so the
             # mocked dispatch crash below exercises the settle-before-dispatch path.
-            h = EngineHarness(tmp, team=[
-                {"agent_name": "hub-agent", "role_id": "hub", "runner_command": "cat"},
-                {"agent_name": "codex", "role_id": "implementer", "runner_command": "cat"},
-                {"agent_name": "integrator", "role_id": "integrator", "runner_command": "cat"},
-                {"agent_name": "rev", "role_id": "reviewer", "runner_command": "cat"},
+            h = EngineHarness(tmp, bindings=[
+                {"agent_name": "hub-agent", "assignment": "hub", "runner_command": "cat"},
+                {"agent_name": "codex", "assignment": "implementer", "runner_command": "cat"},
+                {"agent_name": "integrator", "assignment": "integrator", "runner_command": "cat"},
+                {"agent_name": "rev", "assignment": "reviewer", "runner_command": "cat"},
             ])
             goal_id = h.create_task(title="goal")
             h.store.update_task_metadata(goal_id, is_goal=True)
@@ -750,12 +750,12 @@ class StepCardTests(unittest.TestCase):
             and t.get("source_message_id") is None
         }
 
-    def _team_with_runners(self):
+    def _bindings_with_runners(self):
         return [
-            {"agent_name": "hub-agent", "role_id": "hub", "runner_command": "cat"},
-            {"agent_name": "codex", "role_id": "implementer", "runner_command": "cat"},
-            {"agent_name": "integrator", "role_id": "integrator", "runner_command": "cat"},
-            {"agent_name": "rev", "role_id": "reviewer", "runner_command": "cat"},
+            {"agent_name": "hub-agent", "assignment": "hub", "runner_command": "cat"},
+            {"agent_name": "codex", "assignment": "implementer", "runner_command": "cat"},
+            {"agent_name": "integrator", "assignment": "integrator", "runner_command": "cat"},
+            {"agent_name": "rev", "assignment": "reviewer", "runner_command": "cat"},
         ]
 
     def _step(self, h, step_id):
@@ -763,7 +763,7 @@ class StepCardTests(unittest.TestCase):
         return next(s for s in cfg["steps"] if s["id"] == step_id)
 
     def _member(self, h, name):
-        # Roles/teams are gone; run_step_worker just needs an agent_name (and an
+        # run_step_worker just needs an agent_name (and an
         # optional runner_command the caller may override). The step carries the
         # command otherwise.
         return {"agent_name": name}
@@ -771,7 +771,7 @@ class StepCardTests(unittest.TestCase):
     def test_goal_intake_creates_business_tasks_and_step_cards(self):
         with TemporaryDirectory() as tmp:
             h = EngineHarness(
-                tmp, steps=ENTRY_DECOMPOSE_STEPS, team=self._team_with_runners()
+                tmp, steps=ENTRY_DECOMPOSE_STEPS, bindings=self._bindings_with_runners()
             )
             goal_id = self._goal(h)
             h.start(goal_id)
@@ -816,14 +816,14 @@ class StepCardTests(unittest.TestCase):
 
     def test_goal_runner_preflight_rejects_missing_command(self):
         with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp)  # no step commands, no default_command
+            h = EngineHarness(tmp)  # fixture agents have no built-in commands
             with self.assertRaisesRegex(InvalidInputError, "no command"):
                 server._validate_goal_auto_runners(h.store, tmp, "Goal", "Build it")
 
     def test_goal_intake_invalid_json_blocks_goal(self):
         with TemporaryDirectory() as tmp:
             h = EngineHarness(
-                tmp, steps=ENTRY_DECOMPOSE_STEPS, team=self._team_with_runners()
+                tmp, steps=ENTRY_DECOMPOSE_STEPS, bindings=self._bindings_with_runners()
             )
             goal_id = self._goal(h)
             h.start(goal_id)
@@ -843,7 +843,7 @@ class StepCardTests(unittest.TestCase):
     def test_business_task_step_cards_settle_and_goal_waits_for_acceptance(self):
         with TemporaryDirectory() as tmp:
             h = EngineHarness(
-                tmp, steps=ENTRY_DECOMPOSE_STEPS, team=self._team_with_runners()
+                tmp, steps=ENTRY_DECOMPOSE_STEPS, bindings=self._bindings_with_runners()
             )
             goal_id = self._goal(h)
             goal = h.task(goal_id)
@@ -897,7 +897,7 @@ class StepCardTests(unittest.TestCase):
 
     def test_blocked_reason_for_step_card_uses_parent_transition(self):
         with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp, team=self._team_with_runners())
+            h = EngineHarness(tmp, bindings=self._bindings_with_runners())
             goal = h.task(self._goal(h))
             [mid] = h.store.send_message(
                 "hub-agent", "hub-agent", "Build API",
@@ -947,10 +947,15 @@ class StepCardTests(unittest.TestCase):
             with self.assertRaises(server.InvalidInputError):
                 server._parse_goal_subtasks(bad)
 
+    def test_parse_rejects_agent_outside_server_pool(self):
+        payload = '{"tasks":[{"title":"A","content":"a","agent":"unknown"}]}'
+        with self.assertRaisesRegex(server.InvalidInputError, "allowed agent pool"):
+            server._parse_goal_subtasks(payload, ["codex", "gemini"])
+
     def test_dependent_subtask_is_held_then_released_on_prereq_close(self):
         with TemporaryDirectory() as tmp:
             h = EngineHarness(
-                tmp, steps=ENTRY_DECOMPOSE_STEPS, team=self._team_with_runners()
+                tmp, steps=ENTRY_DECOMPOSE_STEPS, bindings=self._bindings_with_runners()
             )
             goal_id = self._goal(h)
             h.start(goal_id)
@@ -984,12 +989,12 @@ class StepCardTests(unittest.TestCase):
 
 
 class AutoRunnerTests(unittest.TestCase):
-    def _team_with_runner(self, command="cat"):
-        team = [dict(m) for m in TEAM]
-        for m in team:
+    def _bindings_with_runner(self, command="cat"):
+        bindings = [dict(m) for m in BINDINGS]
+        for m in bindings:
             if m["agent_name"] == "codex":
                 m["runner_command"] = command
-        return team
+        return bindings
 
     def _implement_step(self, h):
         cfg = __import__("orbit.server", fromlist=["server"]).read_workflow_config(h.root)
@@ -1011,12 +1016,12 @@ class AutoRunnerTests(unittest.TestCase):
 
     def test_reviewer_runner_rework_verdict_loops_back(self):
         with TemporaryDirectory() as tmp:
-            team = [dict(m) for m in TEAM]
-            for m in team:
+            bindings = [dict(m) for m in BINDINGS]
+            for m in bindings:
                 m["max_concurrent_tasks"] = 0
                 if m["agent_name"] == "rev":
                     m["runner_command"] = "printf 'looks off\\nWORKFLOW_OUTCOME: rework\\n'"
-            h = EngineHarness(tmp, team=team)
+            h = EngineHarness(tmp, bindings=bindings)
             task_id = h.create_task()
             h.start(task_id)
             h.complete("hub-agent", task_id, "intake", "done")
@@ -1033,10 +1038,10 @@ class AutoRunnerTests(unittest.TestCase):
 
     def test_runner_blocked_verdict_blocks_despite_exit0(self):
         with TemporaryDirectory() as tmp:
-            team = [dict(m) for m in TEAM]
-            for m in team:
+            bindings = [dict(m) for m in BINDINGS]
+            for m in bindings:
                 m["runner_command"] = "printf 'ran but broke\\nWORKFLOW_OUTCOME: blocked\\n'"
-            h = EngineHarness(tmp, team=team)
+            h = EngineHarness(tmp, bindings=bindings)
             task_id = h.create_task()
             h.start(task_id)
             h.complete("hub-agent", task_id, "intake", "done")
@@ -1054,7 +1059,7 @@ class AutoRunnerTests(unittest.TestCase):
         # open after the command exits, so the reader's os.read never sees EOF.
         # The runner must still finish promptly (bounded join), not hang forever.
         with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp, team=self._team_with_runner("sleep 5 & printf ok"))
+            h = EngineHarness(tmp, bindings=self._bindings_with_runner("sleep 5 & printf ok"))
             task_id = h.create_task()
             h.start(task_id)
             h.complete("hub-agent", task_id, "intake", "done")
@@ -1083,12 +1088,12 @@ class AutoRunnerTests(unittest.TestCase):
 
     def test_reviewer_runner_default_verdict_advances(self):
         with TemporaryDirectory() as tmp:
-            team = [dict(m) for m in TEAM]
-            for m in team:
+            bindings = [dict(m) for m in BINDINGS]
+            for m in bindings:
                 m["max_concurrent_tasks"] = 0
                 if m["agent_name"] == "rev":
                     m["runner_command"] = "echo lgtm"  # no verdict line -> done
-            h = EngineHarness(tmp, team=team)
+            h = EngineHarness(tmp, bindings=bindings)
             task_id = h.create_task()
             h.start(task_id)
             h.complete("hub-agent", task_id, "intake", "done")
@@ -1101,7 +1106,7 @@ class AutoRunnerTests(unittest.TestCase):
 
     def test_worker_success_advances_step_with_stdout_result(self):
         with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp, team=self._team_with_runner("echo done: docs/x.md"))
+            h = EngineHarness(tmp, bindings=self._bindings_with_runner("echo done: docs/x.md"))
             task_id = h.create_task()
             h.start(task_id)
             h.complete("hub-agent", task_id, "intake", "done")
@@ -1130,7 +1135,7 @@ class AutoRunnerTests(unittest.TestCase):
                 "ARTIFACTS: [\"data.csv\", \"notes.md\"]\\n"
                 "WORKFLOW_OUTCOME: done\\n'"
             )
-            h = EngineHarness(tmp, team=self._team_with_runner(command))
+            h = EngineHarness(tmp, bindings=self._bindings_with_runner(command))
             goal_id = h.create_task(title="Research")
             h.store.update_task_metadata(goal_id, is_goal=True)
             h.start(goal_id)
@@ -1158,7 +1163,7 @@ class AutoRunnerTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             h = EngineHarness(
                 tmp,
-                team=self._team_with_runner("printf first; sleep 0.6; printf second"),
+                bindings=self._bindings_with_runner("printf first; sleep 0.6; printf second"),
             )
             task_id = h.create_task()
             h.start(task_id)
@@ -1194,7 +1199,7 @@ class AutoRunnerTests(unittest.TestCase):
     def test_worker_timeout_is_not_blocked_by_unread_stdin(self):
         with TemporaryDirectory() as tmp:
             command = f'"{sys.executable}" -c "import time; time.sleep(5)"'
-            h = EngineHarness(tmp, team=self._team_with_runner(command))
+            h = EngineHarness(tmp, bindings=self._bindings_with_runner(command))
             task_id = h.create_task()
             h.start(task_id)
             h.complete("hub-agent", task_id, "intake", "done")
@@ -1219,7 +1224,7 @@ class AutoRunnerTests(unittest.TestCase):
 
     def test_worker_failure_blocks_and_notifies_hub(self):
         with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp, team=self._team_with_runner("echo boom >&2; exit 3"))
+            h = EngineHarness(tmp, bindings=self._bindings_with_runner("echo boom >&2; exit 3"))
             task_id = h.create_task()
             h.start(task_id)
             h.complete("hub-agent", task_id, "intake", "done")
@@ -1237,7 +1242,7 @@ class AutoRunnerTests(unittest.TestCase):
 
     def test_worker_timeout_blocks(self):
         with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp, team=self._team_with_runner("sleep 5"))
+            h = EngineHarness(tmp, bindings=self._bindings_with_runner("sleep 5"))
             task_id = h.create_task()
             h.start(task_id)
             h.complete("hub-agent", task_id, "intake", "done")
@@ -1257,7 +1262,7 @@ class AutoRunnerTests(unittest.TestCase):
 
     def test_dispatch_queues_runner_job_only_when_runner_command_exists(self):
         with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp, team=self._team_with_runner())
+            h = EngineHarness(tmp, bindings=self._bindings_with_runner())
             task_id = h.create_task()
             h.start(task_id)  # intake -> hub-agent, no default runner
             self.assertEqual([], h.store.list_run_jobs(status="all"))
@@ -1268,16 +1273,16 @@ class AutoRunnerTests(unittest.TestCase):
             self.assertEqual("implement", jobs[0]["step"])
             self.assertEqual("codex", jobs[0]["assignee"])
 
-    def test_step_command_drives_run_job_without_team_runner_command(self):
+    def test_step_command_drives_run_job_without_bindings_runner_command(self):
         # A step carrying an explicit `command` dispatches with that command
         # even when the assigned member has no runner_command — the step binds
-        # itself to a CLI, no team-side runner needed.
+        # itself to a CLI, no bindings-side runner needed.
         steps = [
             {**s, **({"command": "my-step-cli"} if s["id"] == "implement" else {})}
             for s in LINEAR_STEPS
         ]
         with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp, steps=steps)  # default TEAM: no runner_command
+            h = EngineHarness(tmp, steps=steps)  # default BINDINGS: no runner_command
             task_id = h.create_task()
             h.start(task_id)  # intake -> hub-agent, no command anywhere
             self.assertEqual([], h.store.list_run_jobs(status="all"))
@@ -1288,22 +1293,20 @@ class AutoRunnerTests(unittest.TestCase):
             self.assertEqual("codex", jobs[0]["assignee"])
             self.assertEqual("my-step-cli", jobs[0]["command"])
 
-    def test_default_command_drives_dispatch_without_step_or_team_command(self):
-        # No step command and no team runner_command: settings.default_command
-        # is the fallback, so every step dispatches with the one homogeneous CLI.
+    def test_selected_agent_builtin_command_drives_dispatch(self):
+        # No step command is needed when the selected agent has a built-in CLI.
         with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp)  # default TEAM: no runner_command anywhere
-            server.write_settings(tmp, default_command="default-cli")
+            steps = [{**step, "agents": ["codex"]} for step in LINEAR_STEPS]
+            h = EngineHarness(tmp, steps=steps)
             task_id = h.create_task()
             h.start(task_id)
-            h.complete("hub-agent", task_id, "intake", "done")
+            h.complete("codex", task_id, "intake", "done")
             jobs = {j["step"]: j for j in h.store.list_run_jobs(status="all")}
-            self.assertEqual("default-cli", jobs["intake"]["command"])
-            self.assertEqual("default-cli", jobs["implement"]["command"])
+            self.assertIn("codex exec", jobs["intake"]["command"])
+            self.assertIn("codex exec", jobs["implement"]["command"])
 
-    def test_step_agent_binds_directly_over_team_ranking(self):
-        # A step naming its own agent dispatches to it, bypassing team role
-        # matchmaking (default TEAM would pick "codex" for the implementer role).
+    def test_step_agent_binds_directly_over_bindings_ranking(self):
+        # A step naming its own agent dispatches to it directly.
         steps = [
             {**s, **({"agent": "my-bot", "command": "cli"} if s["id"] == "implement" else {})}
             for s in LINEAR_STEPS
@@ -1321,7 +1324,7 @@ class AutoRunnerTests(unittest.TestCase):
 
     def test_runner_claims_and_reports_then_scheduler_advances(self):
         with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp, team=self._team_with_runner("echo done"))
+            h = EngineHarness(tmp, bindings=self._bindings_with_runner("echo done"))
             task_id = h.create_task()
             h.start(task_id)
             h.complete("hub-agent", task_id, "intake", "done")
@@ -1350,7 +1353,7 @@ class AutoRunnerTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             # `true` exits 0 with no output — a silent runner (like agy producing
             # nothing) must not count as done.
-            h = EngineHarness(tmp, team=self._team_with_runner("true"))
+            h = EngineHarness(tmp, bindings=self._bindings_with_runner("true"))
             task_id = h.create_task()
             h.start(task_id)
             h.complete("hub-agent", task_id, "intake", "done")  # queues implement
@@ -1360,7 +1363,7 @@ class AutoRunnerTests(unittest.TestCase):
 
     def test_goal_step_run_recorded_on_step_card(self):
         with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp, team=self._team_with_runner("echo built"))
+            h = EngineHarness(tmp, bindings=self._bindings_with_runner("echo built"))
             goal_id = h.create_task(title="Goal")
             h.store.update_task_metadata(goal_id, is_goal=True)
             goal = h.task(goal_id)
@@ -1394,15 +1397,18 @@ class AutoRunnerTests(unittest.TestCase):
 
     def test_missing_runner_command_blocks(self):
         with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp, team=self._team_with_runner(""))
+            bindings = self._bindings_with_runner("")
+            implementer = next(m for m in bindings if m["assignment"] == "implementer")
+            implementer["agent_name"] = "custom-agent"
+            h = EngineHarness(tmp, bindings=bindings)
             task_id = h.create_task()
             h.start(task_id)
             h.complete("hub-agent", task_id, "intake", "done")
 
-            # no step command and no default_command -> blocked
+            # no step command and the fixture agent has no built-in command -> blocked
             server.run_step_worker(
                 h.store, tmp, task_id, self._implement_step(h),
-                self._member(h, "codex"),
+                self._member(h, "custom-agent"),
             )
             self.assertEqual("blocked", h.task(task_id)["task_status"])
             self.assertTrue(
@@ -1411,15 +1417,15 @@ class AutoRunnerTests(unittest.TestCase):
 
 
 class RerunTests(unittest.TestCase):
-    def _team(self):
-        team = [dict(m) for m in TEAM]
-        for m in team:
+    def _bindings(self):
+        bindings = [dict(m) for m in BINDINGS]
+        for m in bindings:
             m["runner_command"] = "cat"
-        return team
+        return bindings
 
     def test_rerun_blocked_step_dispatches_to_chosen_agent(self):
         with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp, team=self._team())
+            h = EngineHarness(tmp, bindings=self._bindings())
             task_id = h.create_task()
             server.start_workflow_task(h.store, tmp, "hub-agent", task_id)
             server.advance_workflow_task(
@@ -1436,6 +1442,8 @@ class RerunTests(unittest.TestCase):
             self.assertEqual("pending", job["status"])
             self.assertEqual("intake", job["step"])
             self.assertEqual("codex", job["assignee"])
+            self.assertIn("codex exec", job["command"])
+            self.assertNotEqual("cat", job["command"])
             transitions = h.store.list_task_transitions(task_id)
             redispatched = [
                 t["note"] for t in transitions
@@ -1446,7 +1454,7 @@ class RerunTests(unittest.TestCase):
 
     def test_rerun_on_step_card_redirects_to_parent(self):
         with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp, team=self._team())
+            h = EngineHarness(tmp, bindings=self._bindings())
             tid = h.create_task()
             server.start_workflow_task(h.store, tmp, "hub-agent", tid)
             server.advance_workflow_task(
@@ -1467,7 +1475,7 @@ class RerunTests(unittest.TestCase):
 
     def test_rerun_refuses_when_a_run_is_in_progress(self):
         with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp, team=self._team())
+            h = EngineHarness(tmp, bindings=self._bindings())
             task_id = h.create_task()
             server.start_workflow_task(h.store, tmp, "hub-agent", task_id)
             # A runner is still in flight for this task's step.
@@ -1479,7 +1487,7 @@ class RerunTests(unittest.TestCase):
 
     def test_rerun_ignores_stale_running_attempt_when_latest_failed(self):
         with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp, team=self._team())
+            h = EngineHarness(tmp, bindings=self._bindings())
             task_id = h.create_task()
             server.start_workflow_task(h.store, tmp, "hub-agent", task_id)
             server.advance_workflow_task(
@@ -1703,12 +1711,12 @@ class RunJobLeaseTests(unittest.TestCase):
 
 
 class HubInspectTests(unittest.TestCase):
-    def _hub_team(self, hub_command):
-        team = [dict(m) for m in TEAM]
-        for m in team:
-            if m["role_id"] == "hub":
+    def _hub_bindings(self, hub_command):
+        bindings = [dict(m) for m in BINDINGS]
+        for m in bindings:
+            if m["assignment"] == "hub":
                 m["runner_command"] = hub_command
-        return team
+        return bindings
 
     def _cands(self):
         return [
@@ -1721,26 +1729,26 @@ class HubInspectTests(unittest.TestCase):
     def test_batch_parses_per_run_decisions(self):
         with TemporaryDirectory() as tmp:
             h = EngineHarness(
-                tmp, team=self._hub_team("printf 'DECISION 1: KILL\\nDECISION 2: CONTINUE\\n'"))
+                tmp, bindings=self._hub_bindings("printf 'DECISION 1: KILL\\nDECISION 2: CONTINUE\\n'"))
             d = server._hub_inspect_batch(h.store, tmp, self._cands())
             self.assertEqual("kill", d[11])
             self.assertEqual("continue", d[22])
 
     def test_batch_unclear_defaults_continue(self):
         with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp, team=self._hub_team("echo idk"))
+            h = EngineHarness(tmp, bindings=self._hub_bindings("echo idk"))
             self.assertEqual({11: "continue", 22: "continue"},
                              server._hub_inspect_batch(h.store, tmp, self._cands()))
 
     def test_batch_no_hub_command_defaults_continue(self):
         with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp)  # default team's hub has no runner command
+            h = EngineHarness(tmp)  # default bindings's hub has no runner command
             self.assertEqual({11: "continue", 22: "continue"},
                              server._hub_inspect_batch(h.store, tmp, self._cands()))
 
     def test_sweep_flags_stuck_run_instead_of_killing_pid(self):
         with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp, team=self._hub_team("echo 'DECISION 1: KILL'"))
+            h = EngineHarness(tmp, bindings=self._hub_bindings("echo 'DECISION 1: KILL'"))
             tid = h.create_task()
             run = h.store.create_task_run(
                 tid, worker="codex", command="x", workflow_step="implement")
@@ -1761,7 +1769,7 @@ class HubInspectTests(unittest.TestCase):
 
     def test_sweep_kill_blocks_the_workflow_task(self):
         with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp, team=self._hub_team("echo 'DECISION 1: KILL'"))
+            h = EngineHarness(tmp, bindings=self._hub_bindings("echo 'DECISION 1: KILL'"))
             tid = h.create_task()
             h.start(tid)
             h.complete("hub-agent", tid, "intake", "done")  # implement now active (codex)
@@ -1789,7 +1797,7 @@ class HubInspectTests(unittest.TestCase):
         # A run already flagged for kill isn't re-inspected: no second hub call,
         # and it is not returned as freshly flagged.
         with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp, team=self._hub_team("echo 'DECISION 1: KILL'"))
+            h = EngineHarness(tmp, bindings=self._hub_bindings("echo 'DECISION 1: KILL'"))
             tid = h.create_task()
             run = h.store.create_task_run(
                 tid, worker="codex", command="x", workflow_step="implement")
@@ -1816,7 +1824,7 @@ class HubInspectTests(unittest.TestCase):
 
     def test_sweep_skips_run_that_is_producing_output(self):
         with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp, team=self._hub_team("echo 'DECISION 1: KILL'"))
+            h = EngineHarness(tmp, bindings=self._hub_bindings("echo 'DECISION 1: KILL'"))
             run_dir = Path(tmp) / "run"
             run_dir.mkdir()
             (run_dir / "stdout.log").write_text("start", encoding="utf-8")
@@ -1836,7 +1844,7 @@ class HubInspectTests(unittest.TestCase):
 
     def test_sweep_waits_for_ten_minutes_without_output(self):
         with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp, team=self._hub_team("echo 'DECISION 1: KILL'"))
+            h = EngineHarness(tmp, bindings=self._hub_bindings("echo 'DECISION 1: KILL'"))
             tid = h.create_task()
             run = h.store.create_task_run(
                 tid, worker="codex", command="x", workflow_step="implement")
@@ -1857,16 +1865,18 @@ class HubInspectTests(unittest.TestCase):
 
 
 class RunnerScopeTests(unittest.TestCase):
-    def test_steps_for_roles_resolves(self):
+    def test_configured_step_scope_resolves_ids(self):
         with TemporaryDirectory() as tmp:
             EngineHarness(tmp)  # writes the default workflow
-            # --roles now scopes by step id (or a step's assigned agent).
-            self.assertEqual(["implement"], server._steps_for_roles(tmp, ["implement"]))
+            self.assertEqual(
+                ["implement"], server._configured_step_scope(tmp, ["implement"])
+            )
             self.assertEqual(
                 {"intake", "review"},
-                set(server._steps_for_roles(tmp, ["intake", "review"])),
+                set(server._configured_step_scope(tmp, ["intake", "review"])),
             )
-            self.assertIsNone(server._steps_for_roles(tmp, []))
+            self.assertEqual([], server._configured_step_scope(tmp, ["codex"]))
+            self.assertIsNone(server._configured_step_scope(tmp, []))
 
     def test_claim_filters_by_step(self):
         with TemporaryDirectory() as tmp:
@@ -2161,7 +2171,7 @@ class TokenStatsTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             EngineHarness(tmp)
             step = {"id": "implement", "name": "Implement",
-                    "role_id": "implementer", "task_status": "in_progress",
+                    "assignment": "implementer", "task_status": "in_progress",
                     "required": True}
             prompt = server._build_step_prompt(
                 tmp, {"id": 1, "title": "t", "content": ""}, step, ""
@@ -2199,12 +2209,12 @@ class DecomposeStepTests(unittest.TestCase):
     subtasks then begin at that step's successors, not the workflow entry."""
 
     STEPS = [
-        {"id": "intake", "name": "Intake", "role_id": "hub", "required": True},
-        {"id": "design", "name": "Design", "role_id": "architect", "required": True},
-        {"id": "plan", "name": "Plan", "role_id": "hub", "decompose": True},
-        {"id": "implement", "name": "Implement", "role_id": "implementer", "required": True},
-        {"id": "review", "name": "Review", "role_id": "reviewer", "required": True},
-        {"id": "accept", "name": "Accept", "role_id": "hub", "required": True},
+        {"id": "intake", "name": "Intake", "assignment": "hub", "required": True},
+        {"id": "design", "name": "Design", "assignment": "architect", "required": True},
+        {"id": "plan", "name": "Plan", "assignment": "hub", "decompose": True},
+        {"id": "implement", "name": "Implement", "assignment": "implementer", "required": True},
+        {"id": "review", "name": "Review", "assignment": "reviewer", "required": True},
+        {"id": "accept", "name": "Accept", "assignment": "hub", "required": True},
     ]
     EDGES = [
         {"from": "intake", "to": "design"},
@@ -2213,16 +2223,16 @@ class DecomposeStepTests(unittest.TestCase):
         {"from": "implement", "to": "review"},
         {"from": "review", "to": "accept"},
     ]
-    TEAM = [
-        {"agent_name": "hub-agent", "role_id": "hub", "runner_command": "cat"},
-        {"agent_name": "arch", "role_id": "architect", "runner_command": "cat"},
-        {"agent_name": "codex", "role_id": "implementer", "runner_command": "cat"},
-        {"agent_name": "rev", "role_id": "reviewer", "runner_command": "cat"},
+    BINDINGS = [
+        {"agent_name": "hub-agent", "assignment": "hub", "runner_command": "cat"},
+        {"agent_name": "arch", "assignment": "architect", "runner_command": "cat"},
+        {"agent_name": "codex", "assignment": "implementer", "runner_command": "cat"},
+        {"agent_name": "rev", "assignment": "reviewer", "runner_command": "cat"},
     ]
 
     def test_flag_normalizes_locks_required_and_forces_isolate_off(self):
         norm = server._normalize_workflow_step(
-            {"id": "plan", "name": "Plan", "role_id": "hub",
+            {"id": "plan", "name": "Plan", "assignment": "hub",
              "decompose": True, "required": False, "isolate": True}, 0
         )
         self.assertTrue(norm["decompose"])
@@ -2288,7 +2298,7 @@ class DecomposeStepTests(unittest.TestCase):
 
     def test_subtasks_start_at_decompose_successor(self):
         with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp, steps=self.STEPS, edges=self.EDGES, team=self.TEAM)
+            h = EngineHarness(tmp, steps=self.STEPS, edges=self.EDGES, bindings=self.BINDINGS)
             goal_id = h.create_task(title="Big goal")
             h.store.update_task_metadata(goal_id, is_goal=True)
             h.start(goal_id)  # dispatches the goal's own intake
@@ -2310,7 +2320,7 @@ class DecomposeStepTests(unittest.TestCase):
 
     def test_held_subtask_released_after_decompose_keeps_upstream_result(self):
         with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp, steps=self.STEPS, edges=self.EDGES, team=self.TEAM)
+            h = EngineHarness(tmp, steps=self.STEPS, edges=self.EDGES, bindings=self.BINDINGS)
             goal_id = h.create_task(title="Big goal")
             h.store.update_task_metadata(goal_id, is_goal=True)
             h.start(goal_id)
@@ -2410,27 +2420,45 @@ class SubtaskAgentTests(unittest.TestCase):
                 if s["id"] == "implement":
                     s["agents"] = ["claude-code", "codex", "hermes"]
                 if s["id"] == "review":
-                    s["agents"] = ["codex"]  # single agent -> not a pool
+                    s["agents"] = ["gemini", "opencode"]
             server.write_workflow_config(steps, tmp, server.default_workflow_edges())
-            # pool = agents of multi-agent steps only (implement, not review)
+            # Only the direct implementation successor contributes. Review's
+            # own multi-agent selection must not leak into implementation.
             self.assertEqual(["claude-code", "codex", "hermes"], server._subtask_agent_pool(tmp))
             loaded = {s["id"]: s for s in server.read_workflow_config(tmp)["steps"]}
             self.assertEqual(["claude-code", "codex", "hermes"], loaded["implement"]["agents"])
-            self.assertEqual(["codex"], loaded["review"]["agents"])
+            self.assertEqual(["gemini", "opencode"], loaded["review"]["agents"])
         # cap at 3, dedupe, legacy single `agent` -> list
         self.assertEqual(3, len(server._normalize_agents({"agents": ["a", "b", "c", "d"]})))
         self.assertEqual(["a", "b"], server._normalize_agents({"agents": ["a", "b", "a"]}))
         self.assertEqual(["x"], server._normalize_agents({"agent": "x"}))
 
-    def test_subtask_agent_command_wins_at_dispatch(self):
-        step = {"id": "implement", "name": "Implement", "command": "step-cmd", "agent": ""}
-        task = {"id": 1, "agent": "hermes"}
+    def test_subtask_agent_only_owns_implementation_entry(self):
         with TemporaryDirectory() as tmp:
-            # task's agent command overrides the step's own command
-            self.assertEqual("hermes", server._task_step_assignee(task, step))
-            self.assertIn("hermes", server._task_step_command(task, step, tmp))
-            # no task agent -> step command
-            self.assertEqual("step-cmd", server._task_step_command({"id": 2}, step, tmp))
+            steps = [dict(step) for step in server.default_workflow_steps()]
+            for step in steps:
+                if step["id"] == "implement":
+                    step["agents"] = ["hermes", "codex"]
+                elif step["id"] == "review":
+                    step["agents"] = ["gemini"]
+            server.write_workflow_config(steps, tmp, server.default_workflow_edges())
+            loaded = {
+                step["id"]: step for step in server.read_workflow_config(tmp)["steps"]
+            }
+            task = {"id": 1, "parent_task_id": 99, "agent": "hermes"}
+
+            self.assertEqual(
+                "hermes", server._task_step_assignee(task, loaded["implement"], tmp)
+            )
+            self.assertIn(
+                "hermes", server._task_step_command(task, loaded["implement"], tmp)
+            )
+            self.assertEqual(
+                "gemini", server._task_step_assignee(task, loaded["review"], tmp)
+            )
+            self.assertIn(
+                "gemini", server._task_step_command(task, loaded["review"], tmp)
+            )
 
 
 if __name__ == "__main__":

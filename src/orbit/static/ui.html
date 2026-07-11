@@ -126,20 +126,10 @@
       overflow: auto;
       background: var(--bg);
     }
-    .team-page {
-      height: 100%;
-      overflow: hidden;
-      background: var(--bg);
-    }
     .workflow-page {
       height: 100%;
       overflow: auto;
       background: var(--panel);
-    }
-    .roles-page {
-      height: 100%;
-      overflow: auto;
-      background: var(--bg);
     }
     .tasks-page {
       height: 100%;
@@ -733,134 +723,6 @@
       color: var(--ink);
       font-weight: 600;
     }
-    .role {
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      margin: 16px;
-      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
-      overflow: hidden;
-    }
-    .role-title {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 10px;
-      padding: 12px 16px;
-      background: #eef5f1;
-      border-bottom: 1px solid var(--line);
-      border-left: 4px solid var(--accent);
-      font-weight: 700;
-      font-size: 15px;
-      color: var(--accent);
-    }
-    .role-body {
-      margin: 0;
-      max-width: 980px;
-      white-space: pre-wrap;
-      overflow-wrap: anywhere;
-      color: #2f383c;
-      font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    }
-    .role-action {
-      min-height: 28px;
-      padding: 3px 10px;
-      font-size: 12px;
-    }
-    .team-layout {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) minmax(240px, 0.34fr);
-      height: calc(100vh - 102px);
-    }
-    #teamMembers {
-      overflow-y: auto;
-      height: 100%;
-    }
-    .team-builder {
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      padding: 20px;
-      margin: 16px;
-      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.06);
-      align-content: start;
-      height: fit-content;
-    }
-    .team-group {
-      margin-bottom: 24px;
-      background: transparent;
-    }
-    .team-group-head {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      padding: 12px 16px;
-      background: #eef5f1;
-      border-bottom: 1px solid var(--line);
-      border-left: 4px solid var(--accent);
-      border-radius: 6px;
-      margin: 16px 16px 0;
-      font-weight: 700;
-      font-size: 14px;
-      color: var(--accent);
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-    }
-    .team-group-members {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-      gap: 16px;
-      padding: 16px;
-    }
-    .team-member {
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      padding: 16px;
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
-      transition: transform 0.2s, box-shadow 0.2s;
-    }
-    .team-member:hover {
-      transform: translateY(-1px);
-      box-shadow: 0 4px 10px rgba(0, 0, 0, 0.06);
-    }
-    .team-member.disabled {
-      opacity: 0.62;
-      background: #fafafa;
-    }
-    .team-member-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: flex-start;
-      gap: 12px;
-      border-bottom: 1px dashed var(--line);
-      padding-bottom: 10px;
-      margin-bottom: 2px;
-    }
-    .team-member-controls {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 10px;
-      align-items: end;
-    }
-    .team-member-inputs {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-    }
-    .input-with-label {
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
-    }
-    .input-with-label .label-text {
-      font-size: 11px;
-      color: var(--muted);
-      margin: 0;
-    }
     .workflow-canvas {
       position: relative;
       min-height: calc(100vh - 150px);
@@ -1071,7 +933,7 @@
     .wf-box-meta {
       margin-top: 5px; display: flex; justify-content: center; align-items: center; gap: 7px;
     }
-    .wf-role-badge {
+    .wf-agent-badge {
       padding: 1px 8px; border-radius: 999px;
       background: #eef5f1; color: var(--accent); font-size: 11px;
     }
@@ -1144,44 +1006,6 @@
     .workflow-node.drop-target {
       box-shadow: 0 0 0 3px rgba(37, 108, 90, 0.4);
       border-color: var(--accent);
-    }
-    .workflow-required {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-    }
-    .workflow-required input[type="checkbox"] {
-      width: auto;
-    }
-    .team-requirements {
-      margin-top: auto;
-      padding-top: 12px;
-      border-top: 1px solid var(--line);
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-    }
-    .team-requirements-title {
-      font-size: 12px;
-      color: var(--muted);
-      margin-bottom: 2px;
-    }
-    .team-requirements-list {
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
-    }
-    .team-requirements-list label {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      font-size: 12px;
-      color: var(--ink);
-    }
-    .team-requirements-list input[type="checkbox"] {
-      width: auto;
-      margin: 0;
-      pointer-events: none;
     }
     .preview { color: #3f494e; }
     .badge {
@@ -1417,17 +1241,6 @@
         grid-template-columns: 1fr;
         height: auto;
       }
-      .team-layout {
-        grid-template-columns: 1fr;
-      }
-      .team-builder {
-        border-left: 0;
-        border-top: 0;
-        margin: 16px;
-      }
-      .team-member-grid {
-        grid-template-columns: 1fr;
-      }
       .brand {
         width: 100%;
         align-items: flex-start;
@@ -1553,11 +1366,6 @@
           <span class="meta" style="font-size:11px;" data-i18n="settings.maxConcurrentHint">How many workflow steps run at the same time across all runners.</span>
         </label>
         <label style="display:flex; flex-direction:column; gap:5px; font-size:13px;">
-          <span data-i18n="settings.defaultCommand">Default runner command</span>
-          <input id="setDefaultCommand" type="text" placeholder="e.g. claude -p --dangerously-skip-permissions" style="width:100%;">
-          <span class="meta" style="font-size:11px;" data-i18n="settings.defaultCommandHint">Runs any step that does not set its own command. The prompt is piped on stdin.</span>
-        </label>
-        <label style="display:flex; flex-direction:column; gap:5px; font-size:13px;">
           <span data-i18n="settings.hubCommand">Hub supervision command</span>
           <input id="setHubCommand" type="text" placeholder="optional — CLI used to judge stuck steps" style="width:100%;">
           <span class="meta" style="font-size:11px;" data-i18n="settings.hubCommandHint">Used to inspect long-silent steps and decide kill/continue. Blank disables supervision.</span>
@@ -1596,8 +1404,9 @@
           <button type="button" id="addStepAgentAdd" title="Add another agent" data-i18n-title="modal.addStep.agentAdd" style="border:1px dashed var(--line);background:none;cursor:pointer;color:var(--accent);border-radius:6px;padding:0 9px;font-size:15px;line-height:1.5;">＋</button>
         </div>
         <div id="addStepAgents" style="display:flex;flex-direction:column;gap:5px;padding:6px 0;"></div>
+        <div class="meta" data-i18n="modal.addStep.agentHint">The first Agent runs this step. Multiple Agents on the step immediately after Decompose are distributed across implementation tasks.</div>
       </div>
-      <label><div class="meta" data-i18n="modal.addStep.command">Command (optional)</div><input id="addStepCommand" type="text" placeholder="runner CLI — blank uses the default command" data-i18n-ph="modal.addStep.commandPh"></label>
+      <label><div class="meta" data-i18n="modal.addStep.command">Command (optional)</div><input id="addStepCommand" type="text" placeholder="runner CLI — blank uses the selected Agent's built-in command" data-i18n-ph="modal.addStep.commandPh"></label>
       <label id="addStepRequiredField" class="modal-check"><input id="addStepRequired" type="checkbox"><span class="meta" data-i18n="modal.addStep.required">Required (a step the flow must include)</span></label>
       <label><div class="meta" data-i18n="modal.addStep.prompt">Step prompt</div><textarea id="addStepPrompt" rows="7" data-i18n-ph="modal.addStep.promptPh" placeholder="Additional instructions for this step" style="width:100%;resize:vertical;"></textarea><div class="meta" data-i18n="modal.addStep.promptHint">Appended to the generated step instructions; the engine output protocol still takes priority.</div></label>
       <div class="modal-actions">
@@ -1632,8 +1441,6 @@
       selectedProjectId: "",
       apiBase: "",
       tools: [],
-      roles: [],
-      team: { members: [], path: "" },
       workflow: { steps: [], statuses: [], edges: [], path: "" },
       tasks: [],
       selectedTaskId: null,
@@ -1655,16 +1462,14 @@
     // placeholders. setLang() persists the choice and re-renders everything.
     const I18N = {
       en: {
-        "tab.goals": "Goals", "tab.tasks": "Execution", "tab.team": "Team",
-        "tab.workflow": "Workflow", "tab.roles": "Roles", "tab.agents": "Agents",
+        "tab.goals": "Goals", "tab.tasks": "Execution",
+        "tab.workflow": "Workflow", "tab.agents": "Agents",
         "tab.settings": "Settings",
         "settings.title": "Settings",
         "settings.maxRework": "Max rework rounds (2–5)",
         "settings.maxReworkHint": "How many times a step may loop back before the engine blocks the task for the hub.",
         "settings.maxConcurrent": "Max concurrent tasks (1–6)",
         "settings.maxConcurrentHint": "How many workflow steps run at the same time across all runners.",
-        "settings.defaultCommand": "Default runner command",
-        "settings.defaultCommandHint": "Runs any step that does not set its own command. The prompt is piped on stdin.",
         "settings.hubCommand": "Hub supervision command",
         "settings.hubCommandHint": "Used to inspect long-silent steps and decide kill/continue. Blank disables supervision.",
         "settings.subtaskAgents": "Subtask agent pool (comma-separated)",
@@ -1696,9 +1501,7 @@
         "tasks.waiting": "Waiting", "tasks.skipped": "Skipped",
         "tasks.close": "×",
         "agents.title": "Agents", "agents.refresh": "Refresh",
-        "team.title": "Team", "team.refresh": "Refresh", "team.role": "Role", "team.agent": "Agent", "team.add": "Add to Team",
         "workflow.title": "Workflow", "workflow.refresh": "Refresh",
-        "roles.title": "Workflow Roles", "roles.refresh": "Refresh",
         "error.title": "⚠ Error", "error.ok": "OK",
         "action.close": "Close",
         "modal.addStep.title": "Add workflow step", "modal.addStep.editTitle": "Edit step",
@@ -1706,32 +1509,19 @@
         "modal.addStep.agent": "Agents", "modal.addStep.agentPh": "e.g. claude-code — blank uses the step id",
         "modal.addStep.agentDefault": "— use the step id —", "modal.addStep.agentMissing": "(not installed)",
         "modal.addStep.agentAdd": "Add another agent", "modal.addStep.agentRemove": "Remove",
-        "modal.addStep.command": "Command (optional)", "modal.addStep.commandPh": "runner CLI — blank uses the default command",
+        "modal.addStep.agentHint": "The first Agent runs this step. Multiple Agents on the step immediately after Decompose are distributed across implementation tasks.",
+        "modal.addStep.command": "Command (optional)", "modal.addStep.commandPh": "runner CLI — blank uses the selected Agent's built-in command",
         "modal.addStep.required": "Required (a step the flow must include)",
         "modal.addStep.prompt": "Step prompt", "modal.addStep.promptPh": "Additional instructions for this step",
-        "modal.addStep.promptHint": "Appended to the generated step instructions; the engine output protocol still takes priority.",
+        "modal.addStep.promptHint": "Appended to the generated instructions; engine safety contracts and the output protocol still take priority.",
         "modal.addStep.delete": "Delete", "modal.addStep.cancel": "Cancel",
         "modal.addStep.add": "Add", "modal.addStep.save": "Save",
         "status.offline": "offline",
         "tool.installed": "installed", "tool.missing": "missing",
         "tool.agent": "agent:", "tool.registered": "registered", "tool.profile": "profile:",
         "tool.noTools": "No known tools detected.",
-        "team.noRoles": "No roles", "team.noAgents": "No installed agents",
-        "team.reqMissing": "required enabled roles missing: {0}",
-        "team.reqPresent": "required enabled roles present: {0}",
-        "team.reqHint": "Roles the team must contain for all workflow steps",
-        "team.reqNone": "No roles referenced by workflow steps",
-        "team.config": "config: {0}", "team.required": "required",
-        "team.noMembers": "No team members configured.", "team.remove": "Remove",
-        "team.expertise": "Expertise", "team.capabilities": "Capabilities",
-        "team.notes": "Notes", "team.runnerCmd": "Runner Command",
-        "team.capPh": "capability subscriptions (comma separated)",
-        "team.notesPh": "notes", "team.runnerPh": "runner command",
-        "team.runnerTitle": "When set, dispatched steps spawn this CLI (prompt on stdin); empty uses a per-tool default if available",
-        "team.missing": "(missing)", "team.unavailable": "unavailable",
-        "team.alreadyOn": "{0} already on the team as {1}", "team.updated": "Team updated",
         "wf.config": "config: {0}", "wf.addStep": "Add step", "wf.connect": "Connect",
-        "wf.addStepTitle": "Add step: opens a form to set the name, role and status of a new step",
+        "wf.addStepTitle": "Add step: opens a form to set the name, Agent, prompt, and execution options",
         "wf.connectTitle": "Connect: click the source node, then the target node, to draw an edge",
         "wf.noSteps": "No steps yet — click <strong>Add step</strong> to create one.",
         "wf.start": "▶ start", "wf.end": "⏹ end", "wf.required": "required", "wf.optional": "optional",
@@ -1744,9 +1534,6 @@
         "wf.stepAdded": "Step \"{0}\" added", "wf.stepSaved": "Step \"{0}\" saved",
         "wf.coreNoRemove": "Core steps cannot be removed", "wf.updated": "Workflow updated",
         "wf.layoutFailed": "Auto-layout failed: {0}",
-        "roles.noRoles": "No workflow roles detected.",
-        "roles.edit": "Edit", "roles.save": "Save", "roles.cancel": "Cancel",
-        "roles.saved": "Role {0} saved successfully",
         "status.todo": "Todo", "status.assigned": "Assigned", "status.in_progress": "In Progress",
         "status.accepted": "Accepted",
         "status.blocked": "Blocked", "status.stalled": "On Hold", "status.closed": "Done",
@@ -1780,7 +1567,7 @@
         "goal.isGoal": "🎯 this is a goal — subtask progress on the Goals page",
         "goal.pageLink": "Goals page",
         "task.blockedReason": "⛔ Blocked reason", "task.noReason": "no reason recorded",
-        "task.parent": "parent:", "task.role": "role: {0}", "task.importance": "importance: {0}",
+        "task.parent": "parent:", "task.importance": "importance: {0}",
         "task.size": "size: {0}", "task.risk": "risk: {0}", "task.capabilities": "capabilities: {0}",
         "task.exclusive": "exclusive workspace", "task.steps": "Steps", "task.runsFor": "runs for {0}",
         "task.open": "open ↗", "task.runs": "Runs",
@@ -1800,16 +1587,14 @@
         "wf.zoomIn": "Zoom in", "wf.zoomOut": "Zoom out", "wf.zoomFit": "Fit to view"
       },
       zh: {
-        "tab.goals": "目标", "tab.tasks": "执行", "tab.team": "团队",
-        "tab.workflow": "工作流", "tab.roles": "角色", "tab.agents": "Agents",
+        "tab.goals": "目标", "tab.tasks": "执行",
+        "tab.workflow": "工作流", "tab.agents": "Agents",
         "tab.settings": "设置",
         "settings.title": "设置",
         "settings.maxRework": "最大返工次数 (2–5)",
         "settings.maxReworkHint": "一个步骤最多返工多少次后，引擎将任务打回给 hub 阻塞。",
         "settings.maxConcurrent": "最大同时任务数 (1–6)",
         "settings.maxConcurrentHint": "所有 runner 加起来同时运行多少个工作流步骤。",
-        "settings.defaultCommand": "默认 runner 命令",
-        "settings.defaultCommandHint": "未单独设置命令的步骤都用它执行；prompt 通过 stdin 传入。",
         "settings.hubCommand": "Hub 监督命令",
         "settings.hubCommandHint": "用于巡检长时间无输出的步骤并裁决 kill/continue；留空则关闭监督。",
         "settings.subtaskAgents": "子任务 agent 池（逗号分隔）",
@@ -1841,9 +1626,7 @@
         "tasks.waiting": "等待中", "tasks.skipped": "已跳过",
         "tasks.close": "×",
         "agents.title": "Agents", "agents.refresh": "刷新",
-        "team.title": "团队", "team.refresh": "刷新", "team.role": "角色", "team.agent": "Agent", "team.add": "加入团队",
         "workflow.title": "工作流", "workflow.refresh": "刷新",
-        "roles.title": "工作流角色", "roles.refresh": "刷新",
         "error.title": "⚠ 错误", "error.ok": "确定",
         "action.close": "关闭",
         "modal.addStep.title": "添加工作流步骤", "modal.addStep.editTitle": "编辑步骤",
@@ -1851,32 +1634,19 @@
         "modal.addStep.agent": "Agent", "modal.addStep.agentPh": "如 claude-code —— 留空用步骤 id",
         "modal.addStep.agentDefault": "—— 用步骤 id ——", "modal.addStep.agentMissing": "(未安装)",
         "modal.addStep.agentAdd": "加一个 agent", "modal.addStep.agentRemove": "移除",
-        "modal.addStep.command": "命令（可选）", "modal.addStep.commandPh": "runner CLI —— 留空用默认命令",
+        "modal.addStep.agentHint": "第一个 Agent 执行本步骤；Decompose 后紧邻步骤配置多个 Agent 时，会分配到不同实现任务。",
+        "modal.addStep.command": "命令（可选）", "modal.addStep.commandPh": "runner CLI —— 留空使用所选 Agent 的内置命令",
         "modal.addStep.required": "必选（流程必须包含的步骤）",
         "modal.addStep.prompt": "步骤 Prompt", "modal.addStep.promptPh": "该步骤的附加执行指令",
-        "modal.addStep.promptHint": "追加到引擎生成的步骤指令中；引擎输出协议仍具有最高优先级。",
+        "modal.addStep.promptHint": "追加到引擎生成的指令中；引擎安全契约和输出协议仍具有更高优先级。",
         "modal.addStep.delete": "删除", "modal.addStep.cancel": "取消",
         "modal.addStep.add": "添加", "modal.addStep.save": "保存",
         "status.offline": "离线",
         "tool.installed": "已安装", "tool.missing": "未安装",
         "tool.agent": "agent:", "tool.registered": "已注册", "tool.profile": "profile:",
         "tool.noTools": "未检测到可用工具。",
-        "team.noRoles": "无角色", "team.noAgents": "无已安装 agent",
-        "team.reqMissing": "缺少必启用角色: {0}",
-        "team.reqPresent": "必启用角色已就位: {0}",
-        "team.reqHint": "Team中必须包含流程中所有的role",
-        "team.reqNone": "工作流步骤未引用任何角色",
-        "team.config": "配置: {0}", "team.required": "必选",
-        "team.noMembers": "尚未配置团队成员。", "team.remove": "移除",
-        "team.expertise": "熟练度", "team.capabilities": "能力",
-        "team.notes": "备注", "team.runnerCmd": "运行命令",
-        "team.capPh": "能力订阅（逗号分隔）",
-        "team.notesPh": "备注", "team.runnerPh": "运行命令",
-        "team.runnerTitle": "设置后，派发的步骤会启动该 CLI（prompt 走 stdin）；留空则使用工具默认命令",
-        "team.missing": "(缺失)", "team.unavailable": "不可用",
-        "team.alreadyOn": "{0} 已以 {1} 身份在团队中", "team.updated": "团队已更新",
         "wf.config": "配置: {0}", "wf.addStep": "添加步骤", "wf.connect": "连接",
-        "wf.addStepTitle": "添加步骤：打开表单设置新步骤的名称、角色和状态",
+        "wf.addStepTitle": "添加步骤：打开表单设置名称、Agent、Prompt 和执行选项",
         "wf.connectTitle": "连接：先点击源节点，再点击目标节点，绘制连线",
         "wf.noSteps": "暂无步骤 — 点击 <strong>添加步骤</strong> 创建一个。",
         "wf.start": "▶ 开始", "wf.end": "⏹ 结束", "wf.required": "必选", "wf.optional": "可选",
@@ -1889,9 +1659,6 @@
         "wf.stepAdded": "步骤 \"{0}\" 已添加", "wf.stepSaved": "步骤 \"{0}\" 已保存",
         "wf.coreNoRemove": "核心步骤不可删除", "wf.updated": "工作流已更新",
         "wf.layoutFailed": "自动布局失败: {0}",
-        "roles.noRoles": "未检测到工作流角色。",
-        "roles.edit": "编辑", "roles.save": "保存", "roles.cancel": "取消",
-        "roles.saved": "角色 {0} 保存成功",
         "status.todo": "待办", "status.assigned": "已分配", "status.in_progress": "进行中",
         "status.accepted": "已接受",
         "status.blocked": "已阻塞", "status.stalled": "暂停", "status.closed": "完成",
@@ -1925,7 +1692,7 @@
         "goal.isGoal": "🎯 这是一个目标 — 子任务进度见目标页",
         "goal.pageLink": "目标页",
         "task.blockedReason": "⛔ 阻塞原因", "task.noReason": "无记录原因",
-        "task.parent": "父任务:", "task.role": "角色: {0}", "task.importance": "重要性: {0}",
+        "task.parent": "父任务:", "task.importance": "重要性: {0}",
         "task.size": "规模: {0}", "task.risk": "风险: {0}", "task.capabilities": "能力: {0}",
         "task.exclusive": "独占工作区", "task.steps": "步骤", "task.runsFor": "{0} 的运行记录",
         "task.open": "打开 ↗", "task.runs": "运行记录",
@@ -2022,10 +1789,9 @@
       try {
         const s = await api("/api/settings");
         const rework = $("setMaxRework"), concurrent = $("setMaxConcurrent");
-        const defCmd = $("setDefaultCommand"), hubCmd = $("setHubCommand");
+        const hubCmd = $("setHubCommand");
         if (rework && document.activeElement !== rework) rework.value = s.max_rework_rounds;
         if (concurrent && document.activeElement !== concurrent) concurrent.value = s.max_concurrent_tasks;
-        if (defCmd && document.activeElement !== defCmd) defCmd.value = s.default_command || "";
         if (hubCmd && document.activeElement !== hubCmd) hubCmd.value = s.hub_command || "";
         const pool = $("setSubtaskAgents"), acmds = $("setAgentCommands");
         if (pool && document.activeElement !== pool) pool.value = (s.subtask_agents || []).join(", ");
@@ -2048,7 +1814,6 @@
           body: JSON.stringify({
             max_rework_rounds: parseInt($("setMaxRework").value, 10),
             max_concurrent_tasks: parseInt($("setMaxConcurrent").value, 10),
-            default_command: $("setDefaultCommand").value,
             hub_command: $("setHubCommand").value,
             subtask_agents: poolRaw,
             agent_commands: agentCmds
@@ -2057,7 +1822,6 @@
         // Reflect the server's clamped values back into the inputs.
         $("setMaxRework").value = s.max_rework_rounds;
         $("setMaxConcurrent").value = s.max_concurrent_tasks;
-        $("setDefaultCommand").value = s.default_command || "";
         $("setHubCommand").value = s.hub_command || "";
         $("setSubtaskAgents").value = (s.subtask_agents || []).join(", ");
         $("setAgentCommands").value = Object.keys(s.agent_commands || {}).length ? JSON.stringify(s.agent_commands, null, 2) : "";
@@ -2502,7 +2266,7 @@
                         <div class="wf-box-index">#${index + 1}</div>
                         <div class="wf-box-name">${escapeHtml(step.name || t("wf.step"))}</div>
                         <div class="wf-box-meta">
-                          <span class="wf-role-badge">${escapeHtml((step.agents || []).join(" / ") || step.id)}</span>
+                          <span class="wf-agent-badge">${escapeHtml((step.agents || []).join(" / ") || step.id)}</span>
                           ${tag}
                         </div>
                       </div>
@@ -2817,7 +2581,8 @@
     // CLI tools, plus an orphan entry if the step names an agent that isn't
     // installed (legacy / hand-edited config) so it isn't silently dropped.
     // The step's agent rows (one <select> each). First is the step's own
-    // assignee; 2-3 rows means "spread these CLIs across decompose subtasks".
+    // assignee. On a direct successor of Decompose, 2-3 rows also spread those
+    // CLIs across implementation subtasks; later gates keep their own Agents.
     let stepAgentRows = [""];
 
     // One dropdown per row: options are the installed CLIs minus the agents
@@ -3592,8 +3357,7 @@
           </div>` : ""}
         ${task.is_goal ? `<div class="meta">${t("goal.isGoal").replace(t("goal.pageLink"), `<a href="#" onclick="event.preventDefault(); setPage('goals')">${t("goal.pageLink")}</a>`)}</div>` : ""}
         <div class="meta">
-          ${t("task.role", escapeHtml(task.role_required || "implementer"))}
-          - ${t("task.importance", escapeHtml(task.importance || "normal"))}
+          ${t("task.importance", escapeHtml(task.importance || "normal"))}
           - ${t("task.size", escapeHtml(task.size || "medium"))}
           - ${t("task.risk", escapeHtml(task.risk || "medium"))}
           ${(task.required_capabilities || []).length ? ` - ${t("task.capabilities", escapeHtml(task.required_capabilities.join(", ")))}` : ""}

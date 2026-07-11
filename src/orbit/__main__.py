@@ -181,7 +181,7 @@ def main() -> None:
         aliases=["up"],  # back-compat: `orbit up` still works
         parents=[serve_common],
         help="Zero-setup start: gitignore the state dir, then serve with the "
-        "packaged role/workflow defaults — no files copied into the repo. "
+        "packaged workflow defaults — no config copied into the repo. "
         "Run `orbit config` instead to customize and commit them.",
     )
 
@@ -206,10 +206,10 @@ def main() -> None:
         help="Only run jobs assigned to this agent; repeatable. Default: all agents.",
     )
     runner.add_argument(
-        "--roles",
+        "--steps",
         default="",
-        help="Only run jobs for these workflow roles (comma-separated, e.g. "
-        "implementer,reviewer). Default: all roles.",
+        help="Only run jobs for these workflow step ids (comma-separated, e.g. "
+        "implement,review). Default: all steps.",
     )
     runner.add_argument(
         "--project",
@@ -237,9 +237,8 @@ def main() -> None:
     config_cmd = sub.add_parser(
         "config",
         aliases=["init"],  # back-compat: `orbit init` still works
-        help="Generate editable, committable project config (role prompts, "
-        "workflow/team, CLAUDE.md section). Optional — up/serve work without it; "
-        "run this only to customize and share config with the team.",
+        help="Generate editable, committable workflow config. Optional — "
+        "start/serve work without it; use this to customize the workflow.",
     )
     config_cmd.add_argument("--host", default="127.0.0.1", help="Host for the printed serve hint (default: 127.0.0.1)")
     config_cmd.add_argument("--port", type=int, default=8848, help="Port for the printed serve hint (default: 8848)")
@@ -256,7 +255,7 @@ def main() -> None:
         print(
             f"\nproject ready: {project_root}\n"
             f"next: {_serve_hint(args.host, args.port)}\n"
-            f"then open http://{args.host}:{args.port}/ui to review the team & workflow",
+            f"then open http://{args.host}:{args.port}/ui to configure Agents and workflow",
             flush=True,
         )
         return
@@ -286,12 +285,12 @@ def main() -> None:
     if args.command == "runner":
         project_root = resolve_project_root(args.project)
         db_path = args.db or str(project_db_path(project_root))
-        roles = [r.strip() for r in (args.roles or "").split(",") if r.strip()]
+        steps = [s.strip() for s in (args.steps or "").split(",") if s.strip()]
         scope = []
         if args.agent:
             scope.append(f"agents={','.join(args.agent)}")
-        if roles:
-            scope.append(f"roles={','.join(roles)}")
+        if steps:
+            scope.append(f"steps={','.join(steps)}")
         if args.max_concurrency > 1:
             scope.append(f"concurrency={args.max_concurrency}")
         suffix = f" [{'; '.join(scope)}]" if scope else ""
@@ -306,7 +305,7 @@ def main() -> None:
             agents=args.agent or None,
             poll_seconds=args.poll_seconds,
             once=args.once,
-            roles=roles or None,
+            steps=steps or None,
             max_concurrency=args.max_concurrency,
         )
         return

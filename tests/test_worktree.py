@@ -76,7 +76,7 @@ class GoalStatusDecoupleTests(unittest.TestCase):
 class WorkflowSchemaTests(unittest.TestCase):
     def test_integrate_flag_forces_isolate_off(self):
         norm = server._normalize_workflow_step(
-            {"id": "x", "name": "X", "role_id": "hub", "isolate": True, "integrate": True},
+            {"id": "x", "name": "X", "isolate": True, "integrate": True},
             0,
         )
         self.assertTrue(norm["integrate"])
@@ -84,7 +84,7 @@ class WorkflowSchemaTests(unittest.TestCase):
 
     def test_isolate_flag_roundtrips(self):
         norm = server._normalize_workflow_step(
-            {"id": "impl", "name": "Impl", "role_id": "implementer", "isolate": True},
+            {"id": "impl", "name": "Impl", "isolate": True},
             0,
         )
         self.assertTrue(norm["isolate"])
@@ -138,12 +138,12 @@ class WorkflowSchemaTests(unittest.TestCase):
         )
         self.assertTrue(all(step["prompt"].strip() for step in steps))
         inherited = server._normalize_workflow_step(
-            {"id": "implement", "name": "Implement", "role_id": "implementer"}, 0
+            {"id": "implement", "name": "Implement"}, 0
         )
         self.assertEqual(server.DEFAULT_STEP_PROMPTS["implement"], inherited["prompt"])
         cleared = server._normalize_workflow_step(
             {
-                "id": "implement", "name": "Implement", "role_id": "implementer",
+                "id": "implement", "name": "Implement",
                 "prompt": "",
             },
             0,
@@ -153,7 +153,7 @@ class WorkflowSchemaTests(unittest.TestCase):
     def test_verify_field_roundtrips(self):
         norm = server._normalize_workflow_step(
             {
-                "id": "test", "name": "Test", "role_id": "tester",
+                "id": "test", "name": "Test",
                 "verify": "  pytest -q  ", "prompt": "  Focus on regressions.  ",
             },
             0,
@@ -161,7 +161,7 @@ class WorkflowSchemaTests(unittest.TestCase):
         self.assertEqual("pytest -q", norm["verify"])
         self.assertEqual("Focus on regressions.", norm["prompt"])
         blank = server._normalize_workflow_step(
-            {"id": "impl", "name": "Impl", "role_id": "implementer"}, 0
+            {"id": "impl", "name": "Impl"}, 0
         )
         self.assertEqual("", blank["verify"])
         self.assertEqual("", blank["prompt"])
@@ -170,9 +170,9 @@ class WorkflowSchemaTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             server.write_workflow_config(
                 [
-                    {"id": "a", "name": "A", "role_id": "hub", "prompt": "Triage briefly."},
-                    {"id": "b", "name": "B", "role_id": "implementer"},
-                    {"id": "c", "name": "C", "role_id": "reviewer"},
+                    {"id": "a", "name": "A", "prompt": "Triage briefly."},
+                    {"id": "b", "name": "B"},
+                    {"id": "c", "name": "C"},
                 ],
                 tmp,
                 [{"from": "a", "to": "b"}, {"from": "b", "to": "c"}],
@@ -181,7 +181,7 @@ class WorkflowSchemaTests(unittest.TestCase):
         self.assertEqual("Triage briefly.", loaded[0]["prompt"])
         with self.assertRaisesRegex(server.InvalidInputError, "prompt must be a string"):
             server._normalize_workflow_step(
-                {"id": "x", "name": "X", "role_id": "hub", "prompt": ["bad"]}, 0
+                {"id": "x", "name": "X", "prompt": ["bad"]}, 0
             )
 
     def test_default_test_is_optional_gate_with_rework_edge(self):
@@ -197,9 +197,9 @@ class StepSeparationTests(unittest.TestCase):
 
     def test_cramped_same_row_is_separated(self):
         steps = [
-            {"id": "test", "name": "T", "role_id": "tester", "y": 94.0, "x": 1490.0},
-            {"id": "integrate", "name": "I", "role_id": "hub", "y": 94.0, "x": 1635.0},
-            {"id": "accept", "name": "A", "role_id": "hub", "y": 94.0, "x": 1780.0},
+            {"id": "test", "name": "T", "y": 94.0, "x": 1490.0},
+            {"id": "integrate", "name": "I", "y": 94.0, "x": 1635.0},
+            {"id": "accept", "name": "A", "y": 94.0, "x": 1780.0},
         ]
         server._separate_overlapping_steps(steps)
         xs = sorted(s["x"] for s in steps)
@@ -217,16 +217,16 @@ class StepSeparationTests(unittest.TestCase):
         # Branches stacked vertically (dy beyond the row tolerance) must not be
         # treated as an overlap and pushed apart.
         steps = [
-            {"id": "arch", "name": "A", "role_id": "architect", "x": 620.0, "y": 40.0},
-            {"id": "ui", "name": "U", "role_id": "ui_designer", "x": 620.0, "y": 148.0},
+            {"id": "arch", "name": "A", "x": 620.0, "y": 40.0},
+            {"id": "ui", "name": "U", "x": 620.0, "y": 148.0},
         ]
         server._separate_overlapping_steps(steps)
         self.assertEqual([620.0, 620.0], [s["x"] for s in steps])
 
     def test_duplicate_position_is_split(self):
         steps = [
-            {"id": "a", "name": "A", "role_id": "hub", "x": 500.0, "y": 94.0},
-            {"id": "b", "name": "B", "role_id": "hub", "x": 500.0, "y": 94.0},
+            {"id": "a", "name": "A", "x": 500.0, "y": 94.0},
+            {"id": "b", "name": "B", "x": 500.0, "y": 94.0},
         ]
         server._separate_overlapping_steps(steps)
         self.assertNotEqual(steps[0]["x"], steps[1]["x"])
@@ -235,7 +235,7 @@ class StepSeparationTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             steps = server.default_workflow_steps()
             by = {s["id"]: s for s in steps}
-            # Jam integrate on top of test (both isolate/role fine for a write).
+            # Jam integrate on top of test; normalization must separate them.
             by["integrate"]["x"], by["integrate"]["y"] = by["test"]["x"] + 20, by["test"]["y"]
             saved = server.write_workflow_config(
                 steps, tmp, server.default_workflow_edges()
@@ -254,7 +254,7 @@ class StepPromptTests(unittest.TestCase):
             step = server._normalize_workflow_step(
                 {
                     "id": "integrate", "name": "Integrate",
-                    "role_id": "integrator", "integrate": True,
+ "integrate": True,
                 },
                 0,
             )
@@ -270,7 +270,7 @@ class StepPromptTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             p = server._build_step_prompt(
                 tmp, self.TASK,
-                {"id": "implement", "name": "Implement", "role_id": "implementer"},
+                {"id": "implement", "name": "Implement"},
                 "", can_rework=True, isolated=True,
             )
         self.assertIn("orbit/task-42", p)
@@ -280,17 +280,35 @@ class StepPromptTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             p = server._build_step_prompt(
                 tmp, self.TASK,
-                {"id": "intake", "name": "Triage", "role_id": "hub"},
+                {"id": "intake", "name": "Triage"},
                 "", can_rework=False, isolated=False,
             )
         self.assertIn("项目根目录", p)
         self.assertNotIn("worktree", p)
 
+    def test_review_and_test_keep_non_editable_safety_contracts(self):
+        with TemporaryDirectory() as tmp:
+            cases = (
+                ("review", "read-only review"),
+                ("test", "production code as read-only"),
+            )
+            for step_id, phrase in cases:
+                p = server._build_step_prompt(
+                    tmp,
+                    self.TASK,
+                    {"id": step_id, "name": step_id.title(), "prompt": ""},
+                    "",
+                    can_rework=True,
+                    isolated=True,
+                )
+                self.assertIn("引擎步骤契约", p)
+                self.assertIn(phrase, p)
+
     def test_triage_prompt_contains_effective_config_snapshot(self):
         goal = {**self.TASK, "is_goal": 1}
         with TemporaryDirectory() as tmp:
             step = server._normalize_workflow_step(
-                {"id": "intake", "name": "Triage", "role_id": "hub"}, 0
+                {"id": "intake", "name": "Triage"}, 0
             )
             p = server._build_step_prompt(
                 tmp, goal, step,
@@ -324,7 +342,7 @@ class StepPromptTests(unittest.TestCase):
             p = server._build_step_prompt(
                 tmp, self.TASK,
                 {
-                    "id": "implement", "name": "Implement", "role_id": "implementer",
+                    "id": "implement", "name": "Implement",
                     "prompt": "Use the repository service abstraction.",
                 },
                 "", can_rework=True, isolated=True,
@@ -456,8 +474,8 @@ class GitProvisioningTests(unittest.TestCase):
         # No isolate/integrate step -> git is irrelevant, so no warning even
         # when git is unavailable.
         steps = [
-            {"id": "intake", "name": "T", "role_id": "hub", "isolate": False, "integrate": False},
-            {"id": "accept", "name": "A", "role_id": "hub", "isolate": False, "integrate": False},
+            {"id": "intake", "name": "T", "isolate": False, "integrate": False},
+            {"id": "accept", "name": "A", "isolate": False, "integrate": False},
         ]
         edges = [{"from": "intake", "to": "accept"}]
         with mock.patch.object(server, "_git_available", return_value=False):
@@ -474,7 +492,7 @@ class GitProvisioningTests(unittest.TestCase):
             ids = store.send_message("hub", "hub", "do it", kind="task", title="t")
             task_id = store.get_task_by_source_message(ids[0])["id"]
             step = {
-                "id": "integrate", "name": "Integrate", "role_id": "hub",
+                "id": "integrate", "name": "Integrate",
                 "isolate": False, "integrate": True, "task_status": "in_progress",
             }
             member = {
@@ -503,7 +521,7 @@ class GitProvisioningTests(unittest.TestCase):
                 server._branch_exists(root, server._worktree_branch(task_id))
             )
             step = {
-                "id": "integrate", "name": "Integrate", "role_id": "hub",
+                "id": "integrate", "name": "Integrate",
                 "isolate": False, "integrate": True, "task_status": "in_progress",
             }
             member = {
@@ -565,7 +583,7 @@ class VerifyGateTests(unittest.TestCase):
         # step id 'test' has a test->implement rework edge in the default config,
         # so a failing gate is rework-capable.
         step = {
-            "id": "test", "name": "Test", "role_id": "tester",
+            "id": "test", "name": "Test",
             "isolate": True, "integrate": False, "task_status": "in_progress",
             "verify": verify,
         }
@@ -1024,7 +1042,7 @@ class TokenBudgetGateTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             store, goal_id, sub_id = self._goal_with_subtask_tokens(tmp, 1200, budget=500)
             sub = store.get_task(sub_id)
-            step = {"id": "implement", "name": "Implement", "role_id": "implementer",
+            step = {"id": "implement", "name": "Implement",
                     "task_status": "in_progress"}
             member = {"agent_name": "dev", "runner_command": "echo hi"}
             job = server._dispatch_step(store, tmp, sub, step, member, "")

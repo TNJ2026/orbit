@@ -27,7 +27,7 @@ def _resolve_state_dir(parent: Path) -> Path:
 
 
 def project_state_dir(project_root: Path | str) -> Path:
-    """Per-project state dir (workflow/team config, task logs, worktrees).
+    """Per-project state dir (workflow/settings, task logs, worktrees).
     `.orbit`, or a legacy `.dev_loop` when that is what the project already has."""
     return _resolve_state_dir(Path(project_root))
 
@@ -98,7 +98,6 @@ CREATE TABLE IF NOT EXISTS tasks (
     sender            TEXT NOT NULL,
     assignee          TEXT NOT NULL,
     status            TEXT NOT NULL DEFAULT 'created',
-    role_required     TEXT NOT NULL DEFAULT 'implementer',
     importance        TEXT NOT NULL DEFAULT 'normal',
     size              TEXT NOT NULL DEFAULT 'medium',
     risk              TEXT NOT NULL DEFAULT 'medium',
@@ -451,7 +450,6 @@ class Store:
         if "source_message_id" not in task_columns:
             self._conn.execute("ALTER TABLE tasks ADD COLUMN source_message_id INTEGER")
         task_defaults = {
-            "role_required": "TEXT NOT NULL DEFAULT 'implementer'",
             "importance": "TEXT NOT NULL DEFAULT 'normal'",
             "size": "TEXT NOT NULL DEFAULT 'medium'",
             "risk": "TEXT NOT NULL DEFAULT 'medium'",
@@ -470,7 +468,7 @@ class Store:
             # engine holds it until they all close. '' / '[]' = no dependency.
             "depends_on": "TEXT NOT NULL DEFAULT ''",
             # Preferred agent CLI for this (sub)task, assigned at decompose time.
-            # '' falls back to the step's command / settings.default_command.
+            # '' falls back to the step's selected agent / explicit command.
             "agent": "TEXT NOT NULL DEFAULT ''",
             # Structured data for one materialized workflow-step execution.
             "step_inputs": "TEXT NOT NULL DEFAULT '{}'",
@@ -825,7 +823,7 @@ class Store:
         query = f"""SELECT id, source_message_id, title, content, sender,
                            assignee, assignee AS recipient, status AS task_status,
                            created_at, updated_at,
-                           role_required, agent, importance, size, risk,
+                           agent, importance, size, risk,
                            required_capabilities, exclusive_workspace,
                            workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify, depends_on,
                            step_inputs, result_summary, artifacts
@@ -842,7 +840,7 @@ class Store:
             row = self._conn.execute(
                 """SELECT id, source_message_id, title, content, sender,
                           assignee, assignee AS recipient, status AS task_status,
-                          created_at, updated_at, role_required, agent, importance, size,
+                          created_at, updated_at, agent, importance, size,
                           risk, required_capabilities, exclusive_workspace,
                           workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify, depends_on,
                           step_inputs, result_summary, artifacts
@@ -857,7 +855,7 @@ class Store:
             row = self._conn.execute(
                 """SELECT id, source_message_id, title, content, sender,
                           assignee, assignee AS recipient, status AS task_status,
-                          created_at, updated_at, role_required, agent, importance, size,
+                          created_at, updated_at, agent, importance, size,
                           risk, required_capabilities, exclusive_workspace,
                           workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify, depends_on,
                           step_inputs, result_summary, artifacts
@@ -872,7 +870,7 @@ class Store:
             rows = self._conn.execute(
                 """SELECT id, source_message_id, title, content, sender,
                           assignee, assignee AS recipient, status AS task_status,
-                          created_at, updated_at, role_required, agent, importance, size,
+                          created_at, updated_at, agent, importance, size,
                           risk, required_capabilities, exclusive_workspace,
                           workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify, depends_on,
                           step_inputs, result_summary, artifacts
@@ -889,7 +887,7 @@ class Store:
             rows = self._conn.execute(
                 """SELECT id, source_message_id, title, content, sender,
                           assignee, assignee AS recipient, status AS task_status,
-                          created_at, updated_at, role_required, agent, importance, size,
+                          created_at, updated_at, agent, importance, size,
                           risk, required_capabilities, exclusive_workspace,
                           workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify, depends_on,
                           step_inputs, result_summary, artifacts
@@ -901,12 +899,12 @@ class Store:
         return [self._task_row(row) for row in rows]
 
     def list_active_workflow_tasks(self) -> list[dict[str, Any]]:
-        """Return workflow tasks that can affect team locks or timeouts."""
+        """Return workflow tasks that can affect scheduling or timeouts."""
         with self._lock:
             rows = self._conn.execute(
                 """SELECT id, source_message_id, title, content, sender,
                           assignee, assignee AS recipient, status AS task_status,
-                          created_at, updated_at, role_required, agent, importance, size,
+                          created_at, updated_at, agent, importance, size,
                           risk, required_capabilities, exclusive_workspace,
                           workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify, depends_on,
                           step_inputs, result_summary, artifacts
@@ -926,7 +924,7 @@ class Store:
             rows = self._conn.execute(
                 """SELECT id, source_message_id, title, content, sender,
                           assignee, assignee AS recipient, status AS task_status,
-                          created_at, updated_at, role_required, agent, importance, size,
+                          created_at, updated_at, agent, importance, size,
                           risk, required_capabilities, exclusive_workspace,
                           workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify, depends_on,
                           step_inputs, result_summary, artifacts
@@ -940,7 +938,6 @@ class Store:
     def update_task_metadata(
         self,
         task_id: int,
-        role_required: str | None = None,
         importance: str | None = None,
         size: str | None = None,
         risk: str | None = None,
@@ -958,7 +955,6 @@ class Store:
             updates.append("agent = ?")
             params.append(str(agent).strip())
         for column, value, allowed in (
-            ("role_required", role_required, None),
             ("importance", importance, TASK_IMPORTANCE_LEVELS),
             ("size", size, TASK_SIZES),
             ("risk", risk, TASK_RISKS),
@@ -970,8 +966,6 @@ class Store:
                 raise InvalidInputError(
                     f"invalid {column}: {value!r} (expected one of {sorted(allowed)})"
                 )
-            if column == "role_required" and not value:
-                raise InvalidInputError("role_required must not be empty")
             updates.append(f"{column} = ?")
             params.append(value)
         if required_capabilities is not None:
@@ -1041,7 +1035,6 @@ class Store:
         sender: str,
         assignee: str,
         status: str,
-        role_required: str = "implementer",
         step_inputs: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Materialize one workflow step of a goal as its own task card."""
@@ -1058,13 +1051,13 @@ class Store:
             display_id = f"{parent_task_id}.{int(row['n']) + 1}"
             cur = self._conn.execute(
                 """INSERT INTO tasks (
-                       title, content, sender, assignee, status, role_required,
+                       title, content, sender, assignee, status,
                        parent_task_id, workflow_step, display_id, step_inputs,
                        created_at, updated_at
                    )
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    title, content, sender, assignee, status, role_required,
+                    title, content, sender, assignee, status,
                     parent_task_id, workflow_step, display_id,
                     _encode_step_inputs(step_inputs), now, now,
                 ),

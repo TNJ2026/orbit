@@ -144,7 +144,6 @@ class StoreTests(unittest.TestCase):
         self.assertEqual("b", task["assignee"])
         self.assertEqual("b", task["recipient"])
         self.assertEqual("created", task["task_status"])
-        self.assertEqual("implementer", task["role_required"])
         self.assertEqual("normal", task["importance"])
         self.assertEqual("medium", task["size"])
         self.assertEqual("medium", task["risk"])
@@ -159,7 +158,6 @@ class StoreTests(unittest.TestCase):
 
         updated = store.update_task_metadata(
             task["id"],
-            role_required="implementer",
             importance="critical",
             size="large",
             risk="high",
@@ -208,8 +206,6 @@ class StoreTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(InvalidInputError, f"invalid {field}"):
                 store.update_task_metadata(task["id"], **{field: value})
-        with self.assertRaisesRegex(InvalidInputError, "role_required"):
-            store.update_task_metadata(task["id"], role_required="  ")
         # valid values still pass untouched
         updated = store.update_task_metadata(task["id"], importance="high")
         self.assertEqual("high", updated["importance"])
