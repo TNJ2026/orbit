@@ -133,6 +133,25 @@ class WorkflowSchemaTests(unittest.TestCase):
         self.assertTrue(loaded["integrate"]["integrate"])
         self.assertFalse(loaded["integrate"]["isolate"])
 
+    def test_default_step_prompts_are_populated_and_clearable(self):
+        steps = server.default_workflow_steps()
+        self.assertEqual(
+            {step["id"] for step in steps}, set(server.DEFAULT_STEP_PROMPTS)
+        )
+        self.assertTrue(all(step["prompt"].strip() for step in steps))
+        inherited = server._normalize_workflow_step(
+            {"id": "implement", "name": "Implement", "role_id": "implementer"}, 0
+        )
+        self.assertEqual(server.DEFAULT_STEP_PROMPTS["implement"], inherited["prompt"])
+        cleared = server._normalize_workflow_step(
+            {
+                "id": "implement", "name": "Implement", "role_id": "implementer",
+                "prompt": "",
+            },
+            0,
+        )
+        self.assertEqual("", cleared["prompt"])
+
     def test_verify_field_roundtrips(self):
         norm = server._normalize_workflow_step(
             {
@@ -234,15 +253,20 @@ class StepPromptTests(unittest.TestCase):
 
     def test_integrate_prompt_has_merge_instructions(self):
         with TemporaryDirectory() as tmp:
+            step = server._normalize_workflow_step(
+                {
+                    "id": "integrate", "name": "Integrate",
+                    "role_id": "integrator", "integrate": True,
+                },
+                0,
+            )
             p = server._build_step_prompt(
-                tmp, self.TASK,
-                {"id": "integrate", "name": "Integrate", "role_id": "hub", "integrate": True},
+                tmp, self.TASK, step,
                 "", can_rework=True,
             )
         self.assertIn("orbit/task-42", p)
         self.assertIn("git merge", p)
-        self.assertIn("Acceptance", p)
-        self.assertIn("直接关闭", p)
+        self.assertIn(server.DEFAULT_STEP_PROMPTS["integrate"], p)
 
     def test_isolated_prompt_mentions_worktree_branch(self):
         with TemporaryDirectory() as tmp:
@@ -267,18 +291,20 @@ class StepPromptTests(unittest.TestCase):
     def test_triage_prompt_contains_effective_config_snapshot(self):
         goal = {**self.TASK, "is_goal": 1}
         with TemporaryDirectory() as tmp:
+            step = server._normalize_workflow_step(
+                {"id": "intake", "name": "Triage", "role_id": "hub"}, 0
+            )
             p = server._build_step_prompt(
-                tmp, goal,
-                {"id": "intake", "name": "Triage", "role_id": "hub"},
+                tmp, goal, step,
                 "", can_rework=False, isolated=False,
             )
-        self.assertIn("Triage：目标与执行配置体检", p)
+        self.assertIn("Triage 动态配置上下文", p)
         self.assertIn('"workflow"', p)
         self.assertIn('"team"', p)
         self.assertIn('"missing_core_roles"', p)
         self.assertIn("runner 仅暴露是否可用", p)
         self.assertIn("CONFIG_CHECK: ok|warning|blocked", p)
-        self.assertIn("不要在本步骤做设计、任务拆解或实现", p)
+        self.assertIn(server.DEFAULT_STEP_PROMPTS["intake"], p)
 
     def test_decompose_step_contract_is_the_only_output_contract(self):
         goal = {**self.TASK, "is_goal": 1}
@@ -291,7 +317,7 @@ class StepPromptTests(unittest.TestCase):
                 tmp, goal, step, "architecture ready",
                 can_rework=False, isolated=False,
             )
-        self.assertEqual(1, p.count("## Goal 拆分输出格式"))
+        self.assertEqual(1, p.count("## Decompose 引擎契约"))
         self.assertIn("## 输出协议（最高优先级）", p)
         self.assertIn("只输出上述 JSON 对象", p)
         self.assertNotIn("WORKFLOW_OUTCOME", p)

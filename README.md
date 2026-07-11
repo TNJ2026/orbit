@@ -129,6 +129,8 @@ The workflow engine is logically three layers — **Scheduler** (decides the nex
 
 Default workflow (design-first): `intake(hub) → product_design → ui_design → architecture → decompose(hub) → implement → review → test → integrate(integrator)`. The design steps run sequentially (UI first, then architecture); the goal runs them once, then `decompose` splits it into implementation subtasks (one per module) that each begin at `implement`. After `implement` comes `review`, then `test` (the machine gate — it can carry a `verify` command). `review`, `test`, and `integrate` can loop back to `implement` on rework. Integrate is the terminal per-task gate: it merges the task branch when present, checks the acceptance criteria, verifies main, and closes the task on `done`. The runner hands the step prompt to an agent CLI headlessly; the agent reports by printing `WORKFLOW_OUTCOME: done|rework|blocked` at the end (see `agents/_protocol.md`).
 
+Every standard step includes an editable default **Step prompt**. Double-click a node on the Workflow page to customize it; clearing the field intentionally disables that default. The custom text refines the generated step contract, while dynamic context and the engine-owned output protocol remain protected.
+
 ### Default: single process
 
 ```bash

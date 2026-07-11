@@ -314,6 +314,56 @@ def default_workflow_statuses() -> list[dict[str, str]]:
     ]
 
 
+DEFAULT_STEP_PROMPTS = {
+    "intake": (
+        "Normalize the Goal into scope, acceptance criteria, constraints, and only genuinely "
+        "blocking ambiguities. Review the supplied effective workflow/team snapshot for role, "
+        "runner, capability, capacity, gate, and rework-path problems. Keep this pass brief; do "
+        "not design, decompose, or implement."
+    ),
+    "product_design": (
+        "Define the target users, core scenarios, scope, priorities, constraints, non-goals, and "
+        "verifiable acceptance criteria. Reuse the Triage brief, keep the product definition "
+        "implementation-neutral, and persist a concise product artifact when useful."
+    ),
+    "ui_design": (
+        "Turn the product definition into an implementable UI specification covering layout, "
+        "components, states, interactions, responsive behavior, accessibility, and concrete "
+        "visual tokens. Follow existing interface patterns and record the durable spec when useful."
+    ),
+    "architecture": (
+        "Define the simplest sound architecture for the approved product and UI design. Specify "
+        "module boundaries, interfaces, data models, migrations, reuse decisions, risks, and "
+        "verification strategy without implementing the solution."
+    ),
+    "decompose": (
+        "Use the upstream product, UI, and architecture artifacts to split the Goal into focused, "
+        "independently executable tasks aligned with ownership and module boundaries. Add dependencies "
+        "only when one task truly requires another task's merged result."
+    ),
+    "implement": (
+        "Implement the assigned task against its acceptance criteria using existing project patterns. "
+        "Keep the change scoped, run relevant checks, and leave the task branch complete and reviewable. "
+        "Surface approval-requiring design choices instead of expanding scope."
+    ),
+    "review": (
+        "Independently review the submitted work for correctness, regressions, concurrency, security, "
+        "maintainability, and test coverage. Do not modify the work. Report actionable findings with "
+        "severity, evidence, and precise locations; request rework for material issues."
+    ),
+    "test": (
+        "Run risk-based unit, integration, regression, and manual checks appropriate to the task. "
+        "Record reproducible commands, inputs, expected and actual results, coverage boundaries, and "
+        "remaining risk. Do not modify production code."
+    ),
+    "integrate": (
+        "Integrate the task conservatively, verify the resulting main tree, and check every acceptance "
+        "criterion before closing the task. Resolve only straightforward integration-local issues; "
+        "request rework when conflicts, failures, or unmet criteria require implementation changes."
+    ),
+}
+
+
 def default_workflow_steps() -> list[dict[str, Any]]:
     # (id, name, role_id, required, isolate, integrate, decompose, x, y)
     # isolate: run in a per-task git worktree (implement/test/review all share
@@ -353,6 +403,7 @@ def default_workflow_steps() -> list[dict[str, Any]]:
             "isolate": isolate,
             "integrate": integrate,
             "decompose": decompose,
+            "prompt": DEFAULT_STEP_PROMPTS[step_id],
             "x": x,
             "y": y,
         }
@@ -410,7 +461,12 @@ def _normalize_workflow_step(
         raise InvalidInputError("workflow step timeout_minutes must be an integer") from None
     if timeout_minutes < 0:
         raise InvalidInputError("workflow step timeout_minutes must be >= 0")
-    raw_prompt = step.get("prompt", "")
+    # Known standard steps receive their editable default only when the field is
+    # absent. An explicit empty string means the user intentionally cleared it.
+    raw_prompt = (
+        step["prompt"] if "prompt" in step
+        else DEFAULT_STEP_PROMPTS.get(step_id, "")
+    )
     if not isinstance(raw_prompt, str):
         raise InvalidInputError("workflow step prompt must be a string")
     # Core-role steps are always required; so is any integrate step — it merges
@@ -2990,15 +3046,11 @@ def _build_step_prompt(
         and not task.get("parent_task_id")
     ):
         triage_block = (
-            "\n## Triage：目标与执行配置体检\n"
-            "保持轻量，只做目标归一化、关键阻塞识别，以及 workflow/team 是否适合执行"
-            "本 Goal 的检查。下面是引擎解析后的有效配置快照（runner 仅暴露是否可用，不暴露命令）：\n"
+            "\n## Triage 动态配置上下文\n"
+            "下面是引擎解析后的有效 workflow/team 快照（runner 仅暴露是否可用，不暴露命令）：\n"
             f"```json\n{_triage_config_snapshot(project_root)}\n```\n"
-            "检查 workflow 是否有合理的入口、设计/拆解边界、验证与集成终点、返工路径；"
-            "检查步骤 Role 是否匹配职责，以及 team 的启用成员、runner、能力和并发是否足以执行。\n"
-            "引擎已完成硬性可执行性预检。只有具体问题会使执行失败、不安全或明显不适合本 Goal 时才 `blocked`；"
-            "普通优化建议标为 warning，不要阻塞。不要在本步骤做设计、任务拆解或实现。\n"
-            "输出简短的 Goal/Scope/Acceptance/Constraints/Open blocker，并附：\n"
+            "引擎已完成硬性可执行性预检；按本步骤的可编辑 Prompt 做合理性判断。"
+            "普通优化建议不得阻塞。结果中附：\n"
             "`CONFIG_CHECK: ok|warning|blocked`\n"
             "`CONFIG_FINDINGS: <简短结论>`\n"
         )
@@ -3012,28 +3064,21 @@ def _build_step_prompt(
             f"2. 有任务分支时执行 `git merge --no-ff {branch}`；\n"
             "3. 有冲突：能安全解决就解决后 `git commit`；无法安全解决则 "
             "`git merge --abort` 并裁决 `rework`，在原因里列出冲突文件；\n"
-            "4. 对照任务描述和 Acceptance 验收标准检查集成后的实际结果；不满足则 `rework`；\n"
-            "5. 在主工作树运行相关测试；测试失败且本步无法修复则 `rework`；\n"
-            "6. 合并（如需）、验收和测试全部通过后才裁决 `done`，该任务随后直接关闭。\n"
+            "完成分支处理后，按本步骤的可编辑 Prompt 执行验收与验证。\n"
             "不要手动删除该 worktree 或分支——集成完成后引擎会自动回收。\n"
         )
     goal_contract = ""
     if _is_root_goal_decompose_step(project_root, task, step):
         goal_contract = (
-            "\n## Goal 拆分输出格式\n"
-            "把目标拆成业务子任务。若上游已有产品/UI/架构设计产出，"
-            "**据其模块与接口边界划分**，每个子任务对应一块不重叠的实现区域。\n"
-            "你必须只输出一个 JSON 对象，不要 Markdown，不要代码块：\n"
+            "\n## Decompose 引擎契约\n"
+            "本步骤必须只输出一个 JSON 对象，不要 Markdown，不要代码块：\n"
             '{"tasks":[{"title":"子任务标题","content":"要做什么",'
             '"acceptance":"验收标准","depends_on":[前置任务序号]}]}\n'
-            "**优先拆成互相独立、可并行的任务**（按模块 / 目录 / 文件区域分区，"
-            "尽量不碰重叠代码；集成时各分支串行合并回主干，重叠越多冲突越多）；"
-            "数量按工作量定，不设固定上限。\n"
             "只有当子任务 B 确实依赖 A 的产出（必须 A 完成合并后 B 才能开工）时，"
             "才给 B 加 `depends_on`：值是本列表中前置任务的**序号**（从 1 开始，"
             "如 `\"depends_on\":[1,2]`）。引擎会 hold 住 B，直到其所有前置任务关闭"
             "（成果已并入 main）再派发。无依赖就省略该字段或给 `[]`。不要成环。\n"
-            "**务必精简，避免 JSON 被截断**：`content` 一两句话说清做什么 + 涉及"
+            "保持 JSON 精简以免截断：`content` 一两句话说清做什么 + 涉及"
             "的文件/模块；`acceptance` 一两条验收。已有设计文档就按路径引用（如 "
             "`docs/…`），不要把整份规格复述进来——实现者会自己去读。只输出这一个 "
             "JSON 对象，前后不要任何说明或推理文字。\n"
