@@ -3314,7 +3314,7 @@
           const assignee = oneCard && oneCard.assignee ? ` · ${escapeHtml(oneCard.assignee)}` : "";
           const counts = summary.total > 1
             ? `<div class="meta goal-flow-step-counts">${escapeHtml(t("tasks.instanceProgress", summary.settled, summary.total))}${summary.counts.blocked ? ` · ⛔${summary.counts.blocked}` : ""}</div>` : "";
-          return `<div class="goal-flow-step ${tone} actionable" style="left:${left}px;top:${top}px"${action}>
+          return `<div class="goal-flow-step ${tone} actionable" data-id="${escapeHtml(phase.id)}" style="left:${left}px;top:${top}px"${action}>
             <div class="goal-flow-step-name">${icon} ${escapeHtml(phase.name || phase.id)}</div>
             <div class="meta">${escapeHtml(statusLabel)}${assignee}</div>
             ${counts}
@@ -3343,16 +3343,32 @@
       </div>`;
     }
 
-    function revealCurrentGoalStep() {
+    // The 5s poll rebuilds #tasksList, which resets the goal-flow scroll. Keep
+    // the user's position across re-renders and only auto-scroll to the current
+    // step when it actually changes (goal or step id differs from last reveal).
+    let goalFlowScrollLeft = null;
+    let goalFlowRevealKey = "";
+
+    function revealCurrentGoalStep(goalId) {
       const flow = document.querySelector("#tasksList .goal-flow");
-      const current = flow && flow.querySelector(".goal-flow-step.blocked, .goal-flow-step.running");
-      if (flow && current) flow.scrollLeft = Math.max(0, current.offsetLeft - 32);
+      if (!flow) return;
+      if (goalFlowScrollLeft !== null) flow.scrollLeft = goalFlowScrollLeft;
+      const current = flow.querySelector(".goal-flow-step.blocked, .goal-flow-step.running");
+      const key = goalId + ":" + (current ? current.dataset.id : "");
+      if (current && key !== goalFlowRevealKey) {
+        flow.scrollLeft = Math.max(0, current.offsetLeft - 32);
+      }
+      goalFlowRevealKey = key;
+      goalFlowScrollLeft = flow.scrollLeft;
     }
 
     function renderTasks() {
       // The workflow is always the primary execution view. A Kanban appears
       // only when decomposition produced multiple independently tracked items.
       const goal = currentBoardGoal();
+      // Capture the flow scroll before the rebuild wipes the DOM.
+      const liveFlow = document.querySelector("#tasksList .goal-flow");
+      if (liveFlow) goalFlowScrollLeft = liveFlow.scrollLeft;
       if (!goal) {
         $("tasksList").innerHTML = `<div class="empty" style="padding:40px">${t("tasks.noGoal")}</div>`;
         return;
@@ -3362,7 +3378,7 @@
         const note = visibleTasks.length ? t("tasks.singleFlow") : t("tasks.awaitingTasks");
         $("tasksList").innerHTML = `${goalExecutionHtml(goal)}
           <div class="empty" style="padding:28px 16px">${escapeHtml(note)}</div>`;
-        revealCurrentGoalStep();
+        revealCurrentGoalStep(goal.id);
         return;
       }
       const columns = taskBoardColumns(visibleTasks);
@@ -3402,7 +3418,7 @@
           `).join("")}
         </div>
       `;
-      revealCurrentGoalStep();
+      revealCurrentGoalStep(goal.id);
 
     }
 

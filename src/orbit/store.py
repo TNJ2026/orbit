@@ -56,12 +56,11 @@ TASK_STATUSES = {
 # owns the phase→status mapping; here we only police the vocabulary.
 GOAL_STATUSES = {
     "new",           # created, intake pending
-    "designing",     # at a pre-decompose design step (product/ui/architecture)
-    "decomposing",   # at the decompose step, splitting into subtasks
-    "running",       # subtasks dispatched and executing
-    "verifying",     # all subtasks closed, goal_verify running on integrated main
+    "decomposing",   # at the decompose step, splitting into work items
+    "running",       # traversing its workflow / work items executing
+    "verifying",     # workflow done or all work items closed; goal_verify running
     "accepted",      # verified / accepted (terminal)
-    "stalled",       # a subtask blocked, verify failed, or budget frozen
+    "stalled",       # blocked work item, verify failed, or budget frozen
     "closed",        # explicitly closed (terminal)
 }
 TASK_IMPORTANCE_LEVELS = {"low", "normal", "high", "critical"}
@@ -278,14 +277,14 @@ def _validate_task_status(task_status: str) -> str:
     )
 
 
-# Engine paths that drive a *task* through the workflow also drive a goal through
-# its pre-decompose phase, and would otherwise write a task-status onto the goal
+# Engine paths that drive a *task* through the workflow also drive a goal
+# through its own steps, and would otherwise write a task-status onto the goal
 # row. Map those to the goal's own vocabulary so a goal never carries a step
 # column, without every call site having to special-case is_goal. (The dispatch
-# path picks richer phase names — designing/decomposing — before we get here.)
+# path picks richer phase names — new/decomposing/running — before we get here.)
 _TASK_TO_GOAL_STATUS = {
     "created": "new",
-    "assigned": "designing",
+    "assigned": "running",
     "in_progress": "running",
     "blocked": "stalled",
 }

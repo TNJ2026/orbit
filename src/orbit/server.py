@@ -1986,8 +1986,10 @@ def _complete_goal_intake_locked(
     actor: str,
     result: str,
 ) -> dict[str, Any]:
-    subtasks = _parse_goal_subtasks(result)
+    # Record the raw output first so a parse failure (bad JSON) still leaves the
+    # decompose step's result inspectable on its card.
     _record_step_result(store, goal, step["id"], result)
+    subtasks = _parse_goal_subtasks(result)
     intake_card = store.find_open_step_card(goal["id"], step["id"])
     if intake_card:
         store.update_task_step_details(
@@ -2781,6 +2783,11 @@ def _tail(text: str, limit: int) -> str:
 _VERDICT_RE = re.compile(
     r"WORKFLOW_OUTCOME\s*[:=]\s*(done|rework|blocked)", re.IGNORECASE
 )
+# Cap on the stored per-step result summary. It travels in every board-poll
+# task row, so a legacy runner's full-output fallback must not bloat payloads
+# (200 rows x 20KB was ~4MB per 5s poll).
+_STEP_SUMMARY_MAX = 2000
+
 _RESULT_SUMMARY_RE = re.compile(
     r"(?im)^RESULT_SUMMARY\s*:\s*(.+?)\s*$"
 )
@@ -2814,7 +2821,9 @@ def _parse_step_output_metadata(text: str) -> tuple[str, list[str]]:
     """
     text = (text or "").strip()
     summaries = _RESULT_SUMMARY_RE.findall(text)
-    summary = summaries[-1].strip()[:20000] if summaries else ""
+    # Summaries ride along in every /api/tasks row and /api/goals step entry, so
+    # keep them small — the full output stays in the run's stdout log.
+    summary = summaries[-1].strip()[:_STEP_SUMMARY_MAX] if summaries else ""
     artifacts: list[str] = []
     artifact_matches = _ARTIFACTS_RE.findall(text)
     if artifact_matches:
@@ -2833,11 +2842,11 @@ def _parse_step_output_metadata(text: str) -> tuple[str, list[str]]:
         legacy_lines = [
             line for line in text.splitlines()
             if not re.match(
-                r"(?i)^\s*(WORKFLOW_OUTCOME|TOKENS_USED|ARTIFACTS)\s*[:=]",
+                r"(?i)^\s*(WORKFLOW_OUTCOME|TOKENS_USED|RESULT_SUMMARY|ARTIFACTS)\s*[:=]",
                 line,
             )
         ]
-        summary = _tail("\n".join(legacy_lines), 20000)
+        summary = _tail("\n".join(legacy_lines), _STEP_SUMMARY_MAX)
     return summary, artifacts
 
 
@@ -4232,7 +4241,10 @@ def apply_run_outcome(
     task = store.get_task(task_id)
     if not task:
         return {"task_id": task_id, "step": step["id"], "error": f"unknown task: {task_id}"}
-    _record_step_result(store, task, step["id"], result)
+    # The result is recorded by whichever handler accepts it below
+    # (_complete_goal_intake_locked / _advance_workflow_task_locked); recording
+    # here too double-writes, and would land a stale runner's output on the
+    # current step when the advance rejects it (step reassigned meanwhile).
     goal_intake = _is_root_goal_decompose_step(project_root, task, step)
     if outcome == "done" and goal_intake:
         try:
@@ -4811,17 +4823,26 @@ def _check_task_health_locked(
         if undispatched_rework:
             continue
 
-        # C. A regular task, or a goal that owns its workflow because there is no
-        # decompose step, has no active step/run after an interrupted advance.
-        # Recover it into a visible state, or finish it if the terminal settle
-        # was recorded but the final status write was interrupted.
+        # C. A regular task — or a goal still driving the workflow itself (no
+        # decompose step, or the split hasn't produced work items yet) — has no
+        # active step/run after an interrupted advance. Recover it into a
+        # visible state, or finish it if the terminal settle was recorded but
+        # the final status write was interrupted. Goals WITH work items are
+        # owned by the roll-up path instead.
         direct_goal = bool(
             task.get("is_goal")
-            and _root_goal_decompose_step_id(cfg, back) is None
+            and (
+                _root_goal_decompose_step_id(cfg, back) is None
+                or not any(
+                    child.get("source_message_id") is not None
+                    for child in _business_subtasks_for_goal(store, task_id)
+                )
+            )
         )
         if (
             (not task.get("is_goal") or direct_goal)
-            and task.get("task_status") in {"in_progress", "new", "running"}
+            and task.get("task_status")
+            in {"in_progress", "new", "running", "decomposing"}
             and transitions
             and not active
             and not _task_has_running_run(store, task_id)

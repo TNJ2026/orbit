@@ -49,7 +49,7 @@ class GoalStatusDecoupleTests(unittest.TestCase):
         # Engine paths that drive a goal through its phase write task statuses;
         # those map onto the goal lifecycle instead of being rejected.
         self.assertEqual("new", _validate_goal_status("created"))
-        self.assertEqual("designing", _validate_goal_status("assigned"))
+        self.assertEqual("running", _validate_goal_status("assigned"))
         self.assertEqual("running", _validate_goal_status("in_progress"))
         self.assertEqual("stalled", _validate_goal_status("blocked"))
         with self.assertRaises(InvalidInputError):
