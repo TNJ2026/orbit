@@ -507,9 +507,12 @@ def _normalize_workflow_step(
     # An integrate step merges the worktree branch back to main, so skipping it
     # would strand every isolated step's commits on their branch; a decompose
     # step splits a goal into subtasks. Both are structural, so always required.
+    # The Triage entry step (`intake`) is the goal's front door — always required
+    # and locked so it can't be unchecked or removed.
     decompose = bool(step.get("decompose", False))
     required_locked = (
-        bool(step.get("integrate", False))
+        step_id == "intake"
+        or bool(step.get("integrate", False))
         or decompose
     )
     required = True if required_locked else bool(step.get("required", False))

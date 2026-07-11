@@ -462,6 +462,20 @@ class PackagingTests(unittest.TestCase):
             self.assertFalse(by_id[free]["required"], free)
             self.assertFalse(by_id[free]["required_locked"], free)
 
+    def test_triage_intake_step_is_required_and_locked(self):
+        import orbit.server as server
+
+        with TemporaryDirectory() as tmp:
+            saved = server.write_workflow_config(
+                [{"id": "intake", "name": "Triage", "required": False},
+                 {"id": "impl", "name": "Impl", "required": False}],
+                tmp, [{"from": "intake", "to": "impl"}],
+            )
+            intake = {s["id"]: s for s in saved["steps"]}["intake"]
+            # Locked even though it was submitted required=False.
+            self.assertTrue(intake["required"])
+            self.assertTrue(intake["required_locked"])
+
     def test_default_workflow_is_sequential_with_split_and_loopback(self):
         import orbit.server as server
 
