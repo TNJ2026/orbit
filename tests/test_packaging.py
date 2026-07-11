@@ -19,7 +19,6 @@ class PackagingTests(unittest.TestCase):
             self.assertTrue((root / "agents" / "hub.md").exists())
             self.assertTrue((root / "agents" / "_protocol.md").exists())
             self.assertTrue((root / ".orbit" / "workflow.json").exists())
-            self.assertTrue((root / ".orbit" / "team.json").exists())
             self.assertIn(".orbit/tasks/", (root / ".gitignore").read_text(encoding="utf-8"))
             self.assertIn("多 agent 角色", (root / "CLAUDE.md").read_text(encoding="utf-8"))
             self.assertTrue(first["created"])
@@ -27,11 +26,6 @@ class PackagingTests(unittest.TestCase):
             # second run touches nothing
             second = init_project(root)
             self.assertEqual([], second["created"])
-
-            # team covers the core roles
-            team = json.loads((root / ".orbit" / "team.json").read_text(encoding="utf-8"))
-            roles = {m["role_id"] for m in team["members"]}
-            self.assertEqual({"hub", "implementer", "integrator", "reviewer"}, roles)
 
     def test_ensure_state_dir_gitignored_adds_entry_once(self):
         from orbit.__main__ import ensure_state_dir_gitignored
@@ -385,89 +379,6 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual("manager qa", by_id["hermes-manager-qa"]["profile_name"])
         self.assertEqual("manager/qa", by_id["hermes-manager-qa-2"]["profile_name"])
 
-    def test_team_config_round_trips_project_file(self):
-        import orbit.server as server
-
-        with TemporaryDirectory() as tmp:
-            team = server.write_team_config(
-                [
-                    {
-                        "agent_name": "hermes-manager",
-                        "role_id": "hub",
-                    },
-                    {
-                        "agent_name": "codex",
-                        "role_id": "implementer",
-                        "enabled": True,
-                        "expertise_level": "4",
-                        "max_concurrent_tasks": "2",
-                        "capabilities": "python, tests",
-                        "notes": "primary builder",
-                    },
-                    {
-                        "agent_name": "claude-code",
-                        "role_id": "reviewer",
-                    },
-                ],
-                tmp,
-            )
-            loaded = server.read_team_config(tmp)
-
-        self.assertEqual(team, loaded)
-        implementer = next(
-            member for member in loaded["members"] if member["role_id"] == "implementer"
-        )
-        self.assertEqual("codex", implementer["agent_name"])
-        self.assertEqual(4, implementer["expertise_level"])
-        self.assertEqual(2, implementer["max_concurrent_tasks"])
-        self.assertEqual(["python", "tests"], implementer["capabilities"])
-        self.assertTrue(loaded["path"].endswith(".orbit/team.json"))
-
-    def test_team_config_migrates_legacy_priority_to_expertise(self):
-        import orbit.server as server
-
-        member = server._normalize_team_member(
-            {"agent_name": "codex", "role_id": "implementer", "priority": 120}
-        )
-
-        self.assertEqual(5, member["expertise_level"])
-        self.assertNotIn("priority", member)
-        self.assertNotIn("weight", member)
-
-    def test_team_config_allows_unlimited_concurrency(self):
-        import orbit.server as server
-
-        member = server._normalize_team_member(
-            {
-                "agent_name": "codex",
-                "role_id": "implementer",
-                "max_concurrent_tasks": "0",
-            }
-        )
-
-        self.assertEqual(0, member["max_concurrent_tasks"])
-
-    def test_team_config_parses_string_enabled_explicitly(self):
-        import orbit.server as server
-
-        member = server._normalize_team_member(
-            {
-                "agent_name": "codex",
-                "role_id": "implementer",
-                "enabled": "false",
-            }
-        )
-
-        self.assertFalse(member["enabled"])
-        with self.assertRaisesRegex(ValueError, "enabled"):
-            server._normalize_team_member(
-                {
-                    "agent_name": "codex",
-                    "role_id": "implementer",
-                    "enabled": "nope",
-                }
-            )
-
     def test_workflow_config_defaults_and_round_trips_project_file(self):
         import orbit.server as server
 
@@ -528,40 +439,6 @@ class PackagingTests(unittest.TestCase):
             by_id = {s["id"]: s for s in saved["steps"]}
             self.assertNotIn("task_status", by_id["b"])
 
-    def test_workflow_rejects_payload_missing_core_role_steps(self):
-        import orbit.server as server
-        from orbit.store import InvalidInputError
-
-        with TemporaryDirectory() as tmp:
-            with self.assertRaisesRegex(
-                InvalidInputError,
-                "workflow must keep steps for core roles: hub, reviewer",
-            ):
-                server.write_workflow_config(
-                    [{"id": "impl", "name": "Impl", "role_id": "implementer"}],
-                    tmp,
-                )
-
-    def test_write_rejects_roles_without_role_file(self):
-        import orbit.server as server
-        from orbit.store import InvalidInputError
-
-        with TemporaryDirectory() as tmp:
-            with self.assertRaisesRegex(InvalidInputError, "unknown roles: ghost_role"):
-                server.write_workflow_config(
-                    [
-                        {"id": "a", "name": "A", "role_id": "hub"},
-                        {"id": "b", "name": "B", "role_id": "implementer"},
-                        {"id": "c", "name": "C", "role_id": "reviewer"},
-                        {"id": "g", "name": "G", "role_id": "ghost_role"},
-                    ],
-                    tmp,
-                )
-            with self.assertRaisesRegex(InvalidInputError, "unknown roles: ghost_role"):
-                server.write_team_config(
-                    [{"agent_name": "codex", "role_id": "ghost_role"}], tmp
-                )
-
     def test_workflow_reports_graph_warnings(self):
         import orbit.server as server
 
@@ -601,15 +478,15 @@ class PackagingTests(unittest.TestCase):
         self.assertTrue(any("unreachable" in w for w in saved["warnings"]))
         self.assertTrue(any("no path to an end" in w for w in saved["warnings"]))
 
-    def test_core_role_steps_are_always_required_and_locked(self):
+    def test_integrate_and_decompose_steps_are_always_required_and_locked(self):
         import orbit.server as server
 
         with TemporaryDirectory() as tmp:
             saved = server.write_workflow_config(
                 [
                     {"id": "impl", "name": "Impl", "role_id": "implementer", "required": False},
-                    {"id": "check", "name": "Check", "role_id": "reviewer", "required": False},
-                    {"id": "gate", "name": "Gate", "role_id": "hub", "required": False},
+                    {"id": "split", "name": "Split", "role_id": "hub", "decompose": True, "required": False},
+                    {"id": "merge", "name": "Merge", "role_id": "hub", "integrate": True, "required": False},
                     {"id": "qa", "name": "QA", "role_id": "tester", "required": False},
                 ],
                 tmp,
@@ -618,11 +495,13 @@ class PackagingTests(unittest.TestCase):
 
         self.assertEqual(saved, loaded)
         by_id = {step["id"]: step for step in loaded["steps"]}
-        for core in ("impl", "check", "gate"):
-            self.assertTrue(by_id[core]["required"], core)
-            self.assertTrue(by_id[core]["required_locked"], core)
-        self.assertFalse(by_id["qa"]["required"])
-        self.assertFalse(by_id["qa"]["required_locked"])
+        # integrate/decompose steps are structural -> always required and locked.
+        for locked in ("split", "merge"):
+            self.assertTrue(by_id[locked]["required"], locked)
+            self.assertTrue(by_id[locked]["required_locked"], locked)
+        for free in ("impl", "qa"):
+            self.assertFalse(by_id[free]["required"], free)
+            self.assertFalse(by_id[free]["required_locked"], free)
 
     def test_default_workflow_is_sequential_with_split_and_loopback(self):
         import orbit.server as server
@@ -719,137 +598,6 @@ class PackagingTests(unittest.TestCase):
             with self.assertRaisesRegex(InvalidInputError, "role_id is invalid"):
                 server.write_workflow_config(
                     [{"name": "Bad", "role_id": "bad-role"}],
-                    tmp,
-                )
-
-    def test_assignment_candidates_rank_by_capabilities_expertise_and_load(self):
-        import orbit.server as server
-
-        task = {
-            "id": 1,
-            "role_required": "implementer",
-            "importance": "critical",
-            "size": "large",
-            "risk": "high",
-            "required_capabilities": ["python", "sqlite"],
-            "exclusive_workspace": True,
-        }
-        members = [
-            {
-                "agent_name": "codex",
-                "role_id": "implementer",
-                "enabled": True,
-                "expertise_level": 5,
-                "max_concurrent_tasks": 2,
-                "capabilities": ["python", "sqlite"],
-            },
-            {
-                "agent_name": "gemini",
-                "role_id": "implementer",
-                "enabled": True,
-                "expertise_level": 5,
-                "max_concurrent_tasks": 1,
-                "capabilities": ["python"],
-            },
-            {
-                "agent_name": "claude-code",
-                "role_id": "reviewer",
-                "enabled": True,
-                "expertise_level": 5,
-                "max_concurrent_tasks": 1,
-                "capabilities": ["python", "sqlite"],
-            },
-        ]
-
-        ranked = server.rank_assignment_candidates(task, members, {"codex": 1})
-
-        self.assertEqual("implementer", ranked["role_id"])
-        self.assertEqual(5, ranked["required_expertise_level"])
-        self.assertEqual("codex", ranked["selected"]["agent_name"])
-        self.assertEqual([], ranked["selected"]["missing_capabilities"])
-        self.assertNotIn(
-            "claude-code", [candidate["agent_name"] for candidate in ranked["candidates"]]
-        )
-
-    def test_assignment_candidates_penalize_low_expertise_for_complex_tasks(self):
-        import orbit.server as server
-
-        task = {
-            "id": 1,
-            "role_required": "implementer",
-            "importance": "critical",
-            "size": "large",
-            "risk": "high",
-            "required_capabilities": ["python"],
-            "exclusive_workspace": True,
-        }
-        members = [
-            {
-                "agent_name": "junior",
-                "role_id": "implementer",
-                "enabled": True,
-                "expertise_level": 2,
-                "max_concurrent_tasks": 1,
-                "capabilities": ["python"],
-            },
-            {
-                "agent_name": "senior",
-                "role_id": "implementer",
-                "enabled": True,
-                "expertise_level": 5,
-                "max_concurrent_tasks": 1,
-                "capabilities": ["python"],
-            },
-        ]
-
-        ranked = server.rank_assignment_candidates(task, members)
-        junior = next(
-            candidate for candidate in ranked["candidates"] if candidate["agent_name"] == "junior"
-        )
-
-        self.assertEqual("senior", ranked["selected"]["agent_name"])
-        self.assertEqual(3, junior["expertise_gap"])
-
-    def test_team_config_reports_missing_core_roles_without_rejecting(self):
-        import orbit.server as server
-
-        with TemporaryDirectory() as tmp:
-            saved = server.write_team_config(
-                [
-                    {"agent_name": "hermes-manager", "role_id": "hub"},
-                    {"agent_name": "codex", "role_id": "implementer"},
-                    {
-                        "agent_name": "claude-code",
-                        "role_id": "reviewer",
-                        "enabled": False,
-                    },
-                ],
-                tmp,
-            )
-            loaded = server.read_team_config(tmp)
-
-        self.assertEqual(["integrator", "reviewer"], saved["missing_roles"])
-        self.assertEqual(3, len(loaded["members"]))
-
-    def test_team_config_saves_single_member(self):
-        import orbit.server as server
-
-        with TemporaryDirectory() as tmp:
-            saved = server.write_team_config(
-                [{"agent_name": "codex", "role_id": "implementer"}], tmp
-            )
-
-        self.assertEqual(1, len(saved["members"]))
-        self.assertEqual(["hub", "integrator", "reviewer"], saved["missing_roles"])
-
-    def test_team_config_rejects_invalid_role_id(self):
-        import orbit.server as server
-        from orbit.store import InvalidInputError
-
-        with TemporaryDirectory() as tmp:
-            with self.assertRaises(InvalidInputError):
-                server.write_team_config(
-                    [{"agent_name": "codex", "role_id": "bad-role"}],
                     tmp,
                 )
 

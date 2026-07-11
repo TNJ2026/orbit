@@ -55,11 +55,36 @@ TEAM = [
 class EngineHarness:
     def __init__(self, tmp, steps=None, edges=None, team=None):
         self.root = tmp
-        server.write_workflow_config(steps or LINEAR_STEPS, tmp, edges or LINEAR_EDGES)
-        server.write_team_config(team if team is not None else TEAM, tmp)
+        team = TEAM if team is None else team
+        # Roles are gone: compile the old role-based team into the new model by
+        # stamping each step with its agent (assignee) and command directly.
+        role_agent = {m["role_id"]: m["agent_name"] for m in team}
+        role_cmd = {m["role_id"]: m.get("runner_command", "") for m in team}
+        compiled = []
+        for step in (steps or LINEAR_STEPS):
+            step = dict(step)
+            role = step.get("role_id", "")
+            step.setdefault("agent", role_agent.get(role, ""))
+            if "command" not in step and role_cmd.get(role):
+                step["command"] = role_cmd[role]
+            compiled.append(step)
+        server.write_workflow_config(compiled, tmp, edges or LINEAR_EDGES)
+        # A hub member's runner_command now lives in settings (hub supervision is
+        # team-independent); mirror it so team-based fixtures keep working.
+        hub_cmd = next(
+            (m.get("runner_command", "") for m in team
+             if m["role_id"] == "hub" and m.get("runner_command")),
+            "",
+        )
+        if hub_cmd:
+            server.write_settings(tmp, hub_command=hub_cmd)
         self.store = Store(Path(tmp) / "test.db")
-        for member in (team if team is not None else TEAM):
+        for member in team:
             self.store.register_agent(member["agent_name"], member["role_id"])
+        # Recipient for engine blocker/timeout notices (and a generic hub actor
+        # for override-based tests).
+        if not self.store.agent_exists(server.HUB_NOTIFY_AGENT):
+            self.store.register_agent(server.HUB_NOTIFY_AGENT, "hub")
 
     def create_task(self, title="Ship feature"):
         ids = self.store.send_message(
@@ -274,8 +299,7 @@ class WorkflowEngineTests(unittest.TestCase):
                 if s["id"] == "intake"
             )
             member = {
-                **next(m for m in server.read_team_config(tmp)["members"]
-                       if m["agent_name"] == "hub-agent"),
+                "agent_name": "hub-agent",
                 "runner_command":
                     "printf '%s' '{\"tasks\":[{\"title\":\"A\",\"content\":\"a\"}]}'",
             }
@@ -332,19 +356,8 @@ class WorkflowEngineTests(unittest.TestCase):
             h.complete("hub-agent", task_id, "intake", "done")
             with self.assertRaisesRegex(InvalidInputError, "not assigned"):
                 h.complete("rev", task_id, "implement", "done")
-            # hub may complete any step
-            h.complete("hub-agent", task_id, "implement", "done")
-
-    def test_unassigned_same_role_agent_cannot_complete_active_step(self):
-        team = TEAM + [{"agent_name": "other-codex", "role_id": "implementer"}]
-        with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp, team=team)
-            task_id = h.create_task()
-            h.start(task_id)
-            h.complete("hub-agent", task_id, "intake", "done")
-
-            with self.assertRaisesRegex(InvalidInputError, "not assigned"):
-                h.complete("other-codex", task_id, "implement", "done")
+            # the hub agent may complete any step
+            h.complete("hub", task_id, "implement", "done")
 
     def test_inactive_step_completion_is_rejected(self):
         with TemporaryDirectory() as tmp:
@@ -371,46 +384,11 @@ class WorkflowEngineTests(unittest.TestCase):
                 "codex", task_id, "implement", "blocked", "need choice: A or B"
             )
             self.assertEqual("blocked", h.task(task_id)["task_status"])
-            self.assertIn("notified hub-agent", blocked["notices"][0])
-            messages = h.inbox_senders("hub-agent")
+            self.assertIn("notified hub", blocked["notices"][0])
+            messages = h.inbox_senders("hub")
             self.assertTrue(
                 any("need choice: A or B" in content for _, content in messages)
             )
-
-    def test_optional_step_without_member_is_skipped(self):
-        steps = LINEAR_STEPS[:2] + [
-            {"id": "test", "name": "Test", "role_id": "tester", "task_status": "in_progress", "required": False},
-        ] + LINEAR_STEPS[2:]
-        edges = [
-            {"from": "intake", "to": "implement"},
-            {"from": "implement", "to": "test"},
-            {"from": "test", "to": "review"},
-            {"from": "review", "to": "accept"},
-        ]
-        with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp, steps=steps, edges=edges)  # team has no tester
-            task_id = h.create_task()
-            h.start(task_id)
-            h.complete("hub-agent", task_id, "intake", "done")
-
-            result = h.complete("codex", task_id, "implement", "done")
-            # tester step skipped, review dispatched directly
-            self.assertEqual([{"step": "review", "assignee": "rev"}], result["dispatched"])
-            self.assertTrue(any("skipped" in n for n in result["notices"]))
-
-    def test_required_step_without_member_blocks(self):
-        team = [m for m in TEAM if m["role_id"] != "reviewer"]
-        with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp, team=team)
-            task_id = h.create_task()
-            h.start(task_id)
-            h.complete("hub-agent", task_id, "intake", "done")
-
-            result = h.complete("codex", task_id, "implement", "done")
-            self.assertEqual([], result["dispatched"])
-            self.assertEqual("blocked", h.task(task_id)["task_status"])
-            messages = h.inbox_senders("hub-agent")
-            self.assertTrue(any("no" in c and "reviewer" in c for _, c in messages))
 
     def test_start_twice_is_rejected(self):
         with TemporaryDirectory() as tmp:
@@ -466,26 +444,18 @@ class WorkflowEngineTests(unittest.TestCase):
             task_id = h.create_task()
 
             started = h.start(task_id)
-            self.assertEqual(
-                [{"step": "intake", "assignee": "hub-agent"}],
-                started["dispatched"],
+            self.assertIn(
+                {"step": "intake", "assignee": "hub-agent"}, started["dispatched"]
             )
 
-    def test_ui_actor_resolves_to_enabled_hub_member(self):
+    def test_ui_actor_defaults_to_hub_agent(self):
         with TemporaryDirectory() as tmp:
             EngineHarness(tmp)
-            self.assertEqual("hub-agent", server._workflow_api_actor("", tmp))
-            self.assertEqual("hub-agent", server._workflow_api_actor("ui", tmp))
+            # No agent name (or the legacy "ui") acts as the hub; a named agent
+            # is used as-is.
+            self.assertEqual(server.HUB_NOTIFY_AGENT, server._workflow_api_actor("", tmp))
+            self.assertEqual(server.HUB_NOTIFY_AGENT, server._workflow_api_actor("ui", tmp))
             self.assertEqual("codex", server._workflow_api_actor("codex", tmp))
-
-    def test_ui_actor_without_hub_member_is_rejected(self):
-        team = [m for m in TEAM if m["role_id"] != "hub"] + [
-            {"agent_name": "hub-agent", "role_id": "hub", "enabled": False},
-        ]
-        with TemporaryDirectory() as tmp:
-            EngineHarness(tmp, team=team)
-            with self.assertRaisesRegex(InvalidInputError, "no enabled hub member"):
-                server._workflow_api_actor("", tmp)
 
     def test_workflow_config_locked_while_task_active(self):
         with TemporaryDirectory() as tmp:
@@ -635,20 +605,14 @@ class WorkflowEngineTests(unittest.TestCase):
 
 
 class StepTimeoutTests(unittest.TestCase):
-    def test_hub_command_prefers_settings_over_team(self):
+    def test_hub_command_from_settings(self):
         with TemporaryDirectory() as tmp:
-            server.write_team_config(
-                [{"agent_name": "hub-agent", "role_id": "hub",
-                  "runner_command": "team-hub"}],
-                tmp,
-            )
-            # No settings.hub_command -> fall back to the team hub's command.
-            self.assertEqual("team-hub", server._hub_command(tmp))
-            # settings.hub_command wins and needs no team member.
-            saved = server.write_settings(tmp, hub_command="settings-hub")
-            self.assertEqual("settings-hub", saved["hub_command"])
-            self.assertEqual("settings-hub", server.read_settings(tmp)["hub_command"])
-            self.assertEqual("settings-hub", server._hub_command(tmp))
+            # Unset -> supervision disabled (empty command).
+            self.assertEqual("", server._hub_command(tmp))
+            saved = server.write_settings(tmp, hub_command="my-hub")
+            self.assertEqual("my-hub", saved["hub_command"])
+            self.assertEqual("my-hub", server.read_settings(tmp)["hub_command"])
+            self.assertEqual("my-hub", server._hub_command(tmp))
 
     def _timed_steps(self, timeout=30):
         steps = [dict(s) for s in LINEAR_STEPS]
@@ -660,32 +624,6 @@ class StepTimeoutTests(unittest.TestCase):
     def _start_at_implement(self, h, task_id):
         h.start(task_id)
         h.complete("hub-agent", task_id, "intake", "done")
-
-    def test_timed_out_step_is_reassigned_to_other_member(self):
-        from datetime import datetime, timedelta, timezone
-
-        team = TEAM + [{"agent_name": "other-codex", "role_id": "implementer"}]
-        with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp, steps=self._timed_steps(), team=team)
-            task_id = h.create_task()
-            self._start_at_implement(h, task_id)
-
-            later = datetime.now(timezone.utc) + timedelta(minutes=31)
-            actions = server.check_workflow_step_timeouts(h.store, tmp, now=later)
-
-            self.assertEqual(1, len(actions))
-            self.assertEqual("reassigned", actions[0]["action"])
-            self.assertEqual("codex", actions[0]["from"])
-            self.assertEqual("other-codex", actions[0]["to"])
-            # old assignee lost the step, new one can complete it
-            with self.assertRaisesRegex(InvalidInputError, "not assigned"):
-                h.complete("codex", task_id, "implement", "done")
-            result = h.complete("other-codex", task_id, "implement", "done")
-            self.assertEqual([{"step": "review", "assignee": "rev"}], result["dispatched"])
-            # hub heard about the reassignment
-            self.assertTrue(
-                any("timed out" in c for _, c in h.inbox_senders("hub-agent"))
-            )
 
     def test_timeout_without_alternative_notifies_hub_once(self):
         from datetime import datetime, timedelta, timezone
@@ -762,41 +700,6 @@ class GoalTests(unittest.TestCase):
             # left stuck in_progress when dispatch blows up
             self.assertEqual("closed", h.task(card["id"])["task_status"])
 
-    def test_goal_intake_revalidates_team_before_dispatch(self):
-        with TemporaryDirectory() as tmp:
-            runners = [
-                {"agent_name": "hub-agent", "role_id": "hub", "runner_command": "cat"},
-                {"agent_name": "codex", "role_id": "implementer", "runner_command": "cat"},
-                {"agent_name": "rev", "role_id": "reviewer", "runner_command": "cat"},
-            ]
-            h = EngineHarness(tmp, team=runners)
-            goal_id = h.create_task(title="goal")
-            h.store.update_task_metadata(goal_id, is_goal=True)
-            h.start(goal_id)
-            step = next(
-                s for s in server.read_workflow_config(tmp)["steps"] if s["id"] == "intake"
-            )
-            # Team loses its implementer after the goal started but before intake
-            # finished: dispatching the business subtasks now would only strand
-            # them blocked, so completing intake must refuse instead.
-            server.write_team_config(
-                [m for m in runners if m["role_id"] != "implementer"], tmp
-            )
-            result = '{"tasks":[{"title":"t","content":"c"}]}'
-            with self.assertRaisesRegex(InvalidInputError, "implementer"):
-                server._complete_goal_intake_locked(
-                    h.store, tmp, h.task(goal_id), step, "hub-agent", result
-                )
-            # intake stays open (not settled) so hub can retry after fixing team,
-            # and no business subtask was dispatched
-            self.assertIsNotNone(h.store.find_open_step_card(goal_id, "intake"))
-            business = [
-                t for t in h.store.list_tasks(status="all")
-                if t.get("parent_task_id") == goal_id
-                and t.get("source_message_id") is not None
-            ]
-            self.assertEqual([], business)
-
     def test_subtask_links_to_goal_and_summary_aggregates(self):
         with TemporaryDirectory() as tmp:
             h = EngineHarness(tmp)
@@ -860,10 +763,10 @@ class StepCardTests(unittest.TestCase):
         return next(s for s in cfg["steps"] if s["id"] == step_id)
 
     def _member(self, h, name):
-        return next(
-            m for m in server.read_team_config(h.root)["members"]
-            if m["agent_name"] == name
-        )
+        # Roles/teams are gone; run_step_worker just needs an agent_name (and an
+        # optional runner_command the caller may override). The step carries the
+        # command otherwise.
+        return {"agent_name": name}
 
     def test_goal_intake_creates_business_tasks_and_step_cards(self):
         with TemporaryDirectory() as tmp:
@@ -913,16 +816,8 @@ class StepCardTests(unittest.TestCase):
 
     def test_goal_runner_preflight_rejects_missing_command(self):
         with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp)  # hub-agent has no runner command/default
-            with self.assertRaisesRegex(InvalidInputError, "runner commands"):
-                server._validate_goal_auto_runners(h.store, tmp, "Goal", "Build it")
-
-    def test_goal_preflight_rejects_missing_required_role(self):
-        with TemporaryDirectory() as tmp:
-            # reviewer role has no enabled member -> team is not sound
-            team = [m for m in self._team_with_runners() if m["role_id"] != "reviewer"]
-            h = EngineHarness(tmp, team=team)
-            with self.assertRaisesRegex(InvalidInputError, "missing required roles"):
+            h = EngineHarness(tmp)  # no step commands, no default_command
+            with self.assertRaisesRegex(InvalidInputError, "no command"):
                 server._validate_goal_auto_runners(h.store, tmp, "Goal", "Build it")
 
     def test_goal_intake_invalid_json_blocks_goal(self):
@@ -972,10 +867,10 @@ class StepCardTests(unittest.TestCase):
             self.assertEqual("assigned", cards["implement"]["task_status"])
             self.assertEqual("codex", cards["implement"]["assignee"])
 
-            # blocked marks the card blocked; recovery closes it
+            # blocked marks the card blocked; the hub agent recovers and closes it
             h.complete("codex", subtask["id"], "implement", "blocked", "need choice")
             self.assertEqual("blocked", self._cards(h, subtask["id"])["implement"]["task_status"])
-            h.complete("hub-agent", subtask["id"], "implement", "done")
+            h.complete("hub", subtask["id"], "implement", "done")
             cards = self._cards(h, subtask["id"])
             self.assertEqual("closed", cards["implement"]["task_status"])
             self.assertEqual("assigned", cards["review"]["task_status"])
@@ -1088,32 +983,6 @@ class StepCardTests(unittest.TestCase):
             self.assertTrue(h.task(b["id"])["workflow_step"])
 
 
-class TeamLockTests(unittest.TestCase):
-    def test_team_locked_while_workflow_tasks_run(self):
-        with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp)
-            self.assertIsNone(server.team_locked_reason(h.store))
-
-            task_id = h.create_task()
-            h.start(task_id)
-            reason = server.team_locked_reason(h.store)
-            self.assertIn(f"#{task_id}", reason)
-
-            # blocked task releases the lock — fixing the team is the way out
-            h.complete("hub-agent", task_id, "intake", "blocked", "need input")
-            self.assertIsNone(server.team_locked_reason(h.store))
-
-            # resuming (hub completes the active step) locks again
-            h.complete("hub-agent", task_id, "intake", "done")
-            self.assertIsNotNone(server.team_locked_reason(h.store))
-
-            # run to completion -> closed -> unlocked
-            h.complete("codex", task_id, "implement", "done")
-            h.complete("rev", task_id, "review", "done")
-            h.complete("hub-agent", task_id, "accept", "done")
-            self.assertIsNone(server.team_locked_reason(h.store))
-
-
 class AutoRunnerTests(unittest.TestCase):
     def _team_with_runner(self, command="cat"):
         team = [dict(m) for m in TEAM]
@@ -1127,9 +996,7 @@ class AutoRunnerTests(unittest.TestCase):
         return next(s for s in cfg["steps"] if s["id"] == "implement")
 
     def _member(self, h, name):
-        import orbit.server as server
-        members = server.read_team_config(h.root)["members"]
-        return next(m for m in members if m["agent_name"] == name)
+        return {"agent_name": name}
 
     def _run_event_types(self, run):
         path = Path(run["log_dir"]) / "events.jsonl"
@@ -1365,7 +1232,7 @@ class AutoRunnerTests(unittest.TestCase):
             self.assertEqual("blocked", h.task(task_id)["task_status"])
             self.assertEqual("failed", h.store.list_task_runs(task_id)[0]["status"])
             self.assertTrue(
-                any("runner exited 3" in c for _, c in h.inbox_senders("hub-agent"))
+                any("runner exited 3" in c for _, c in h.inbox_senders("hub"))
             )
 
     def test_worker_timeout_blocks(self):
@@ -1524,40 +1391,22 @@ class AutoRunnerTests(unittest.TestCase):
             self.assertEqual("succeeded", runs[0]["status"])
             self.assertEqual("codex", runs[0]["worker"])
 
-    def test_cli_runner_command_defaults(self):
-        cmd = server._runner_command_for({"agent_name": "antigravity"})
-        self.assertEqual('agy --dangerously-skip-permissions --print "$(cat)"', cmd)
-
-        cmd = server._runner_command_for({"agent_name": "hermes"})
-        self.assertEqual('hermes --yolo -z "$(cat)"', cmd)
-        cmd = server._runner_command_for({"agent_name": "opencode"})
-        self.assertEqual('opencode run --auto "$(cat)"', cmd)
-        cmd = server._runner_command_for({"agent_name": "hermes-manager"})
-        self.assertEqual('hermes --profile manager --yolo -z "$(cat)"', cmd)
-        # explicit runner_command still wins
-        cmd = server._runner_command_for(
-            {"agent_name": "hermes-manager", "runner_command": "hermes chat"}
-        )
-        self.assertEqual("hermes chat", cmd)
 
     def test_missing_runner_command_blocks(self):
-        from unittest import mock
-
         with TemporaryDirectory() as tmp:
             h = EngineHarness(tmp, team=self._team_with_runner(""))
             task_id = h.create_task()
             h.start(task_id)
             h.complete("hub-agent", task_id, "intake", "done")
 
-            # no member override and no per-tool default -> blocked
-            with mock.patch.dict(server._DEFAULT_RUNNER_COMMANDS, {}, clear=True):
-                server.run_step_worker(
-                    h.store, tmp, task_id, self._implement_step(h),
-                    self._member(h, "codex"),
-                )
+            # no step command and no default_command -> blocked
+            server.run_step_worker(
+                h.store, tmp, task_id, self._implement_step(h),
+                self._member(h, "codex"),
+            )
             self.assertEqual("blocked", h.task(task_id)["task_status"])
             self.assertTrue(
-                any("no runner command" in c for _, c in h.inbox_senders("hub-agent"))
+                any("no runner command" in c for _, c in h.inbox_senders("hub"))
             )
 
 
@@ -1646,19 +1495,6 @@ class RerunTests(unittest.TestCase):
             self.assertEqual("codex", result["assignee"])
             self.assertEqual("running", h.store.get_task_run(stale["id"])["status"])
             self.assertEqual("pending", h.store.get_run_job(result["queued_job_id"])["status"])
-
-    def test_rerun_unknown_agent_without_runner_is_rejected(self):
-        with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp, team=self._team())
-            task_id = h.create_task()
-            server.start_workflow_task(h.store, tmp, "hub-agent", task_id)
-            server.advance_workflow_task(
-                h.store, tmp, "hub-agent", task_id, "intake", "blocked", "stuck"
-            )
-            with mock.patch.dict(server._DEFAULT_RUNNER_COMMANDS, {}, clear=True):
-                with self.assertRaises(InvalidInputError) as ctx:
-                    server.rerun_workflow_step(h.store, tmp, task_id, "nobody")
-            self.assertIn("no runner command", str(ctx.exception))
 
 
 class MarkTaskRunningTests(unittest.TestCase):
@@ -1769,31 +1605,6 @@ class GoalRollupTests(unittest.TestCase):
             s1 = self._mk(h, "s1", "blocked", parent=goal)
             server._recompute_parent_goal_status(h.store, h.task(s1), h.root)
             self.assertEqual("closed", h.task(goal)["task_status"])
-
-
-class UnlimitedConcurrencyTests(unittest.TestCase):
-    def _member(self, max_concurrent):
-        return {
-            "agent_name": "solo",
-            "role_id": "hub",
-            "enabled": True,
-            "expertise_level": 3,
-            "max_concurrent_tasks": max_concurrent,
-            "capabilities": [],
-        }
-
-    def test_unlimited_member_never_excluded_on_load(self):
-        ranked = server.rank_assignment_candidates(
-            {"role_required": "hub"}, [self._member(0)], {"solo": 5}, role_id="hub"
-        )
-        self.assertIsNotNone(ranked.get("selected"))
-        self.assertEqual("solo", ranked["selected"]["agent_name"])
-
-    def test_positive_cap_still_excludes_when_full(self):
-        ranked = server.rank_assignment_candidates(
-            {"role_required": "hub"}, [self._member(1)], {"solo": 1}, role_id="hub"
-        )
-        self.assertIsNone(ranked.get("selected"))
 
 
 class RunJobLeaseTests(unittest.TestCase):

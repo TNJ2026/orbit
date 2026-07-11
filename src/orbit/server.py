@@ -106,8 +106,6 @@ _TASK_RUN_FILES = {
 # Roles a sound default team should provide. The workflow itself remains
 # configurable; write_workflow_config only enforces the older core workflow roles
 # below so custom workflows without an integrate step stay valid.
-REQUIRED_TEAM_ROLES = {"hub", "implementer", "integrator", "reviewer"}
-CORE_WORKFLOW_ROLES = {"hub", "implementer", "reviewer"}
 TASK_IMPORTANCE_SCORES = {"low": 0, "normal": 10, "high": 25, "critical": 40}
 TASK_SIZE_SCORES = {"small": 0, "medium": 8, "large": 18}
 TASK_RISK_SCORES = {"low": 0, "medium": 10, "high": 25}
@@ -217,10 +215,6 @@ def _agent_slug(value: str) -> str:
 
 def _project_root(project_root: str | None) -> Path:
     return Path(project_root).resolve() if project_root else Path.cwd().resolve()
-
-
-def _team_config_path(project_root: str | None) -> Path:
-    return project_state_dir(_project_root(project_root)) / "team.json"
 
 
 def _workflow_config_path(project_root: str | None) -> Path:
@@ -490,15 +484,12 @@ def _normalize_workflow_step(
     )
     if not isinstance(raw_prompt, str):
         raise InvalidInputError("workflow step prompt must be a string")
-    # Core-role steps are always required; so is any integrate step — it merges
-    # the worktree branch back to main, so skipping it would strand every
-    # isolated step's commits on their branch. Lock it by the integrate flag
-    # itself, not just its (currently hub) role, so re-assigning the role can't
-    # silently make it optional.
+    # An integrate step merges the worktree branch back to main, so skipping it
+    # would strand every isolated step's commits on their branch; a decompose
+    # step splits a goal into subtasks. Both are structural, so always required.
     decompose = bool(step.get("decompose", False))
     required_locked = (
-        role_id in REQUIRED_TEAM_ROLES
-        or bool(step.get("integrate", False))
+        bool(step.get("integrate", False))
         or decompose
     )
     required = True if required_locked else bool(step.get("required", False))
@@ -749,17 +740,6 @@ def write_workflow_config(
     valid_ids = {step["id"] for step in normalized}
     if len(valid_ids) != len(normalized):
         raise InvalidInputError("workflow step ids must be unique")
-    # The UI hides Remove on core-role cards; enforce the same rule here so
-    # a raw POST can't save a workflow with the core loop deleted. Reads stay
-    # lenient so legacy configs still load.
-    missing_core = sorted(
-        CORE_WORKFLOW_ROLES - {step["role_id"] for step in normalized}
-    )
-    if missing_core:
-        raise InvalidInputError(
-            "workflow must keep steps for core roles: " + ", ".join(missing_core)
-        )
-    _reject_unknown_roles({step["role_id"] for step in normalized if step["role_id"]}, project_root)
     # Fallback for configs written outside the UI (hand edit / API / script): keep
     # nodes from stacking on the canvas, where a covered edge reads as "not
     # connected". A UI save has already dagre-spaced them, so this is a no-op there.
@@ -791,62 +771,6 @@ def write_workflow_config(
     }
 
 
-def _normalize_team_member(member: Any) -> dict[str, Any]:
-    if not isinstance(member, dict):
-        raise InvalidInputError("team member must be an object")
-    agent_name = str(member.get("agent_name", "")).strip()
-    role_id = str(member.get("role_id", "")).strip()
-    if not agent_name:
-        raise InvalidInputError("agent_name is required")
-    if not _is_valid_role_id(role_id):
-        raise InvalidInputError("role_id is invalid")
-    capabilities = member.get("capabilities", [])
-    if isinstance(capabilities, str):
-        capabilities = [
-            capability.strip()
-            for capability in capabilities.split(",")
-            if capability.strip()
-        ]
-    if not isinstance(capabilities, list) or not all(
-        isinstance(capability, str) for capability in capabilities
-    ):
-        raise InvalidInputError("capabilities must be a list of strings")
-    try:
-        legacy_priority = int(member.get("weight", member.get("priority", 75)))
-        expertise_level = int(
-            member.get("expertise_level", _legacy_priority_to_expertise(legacy_priority))
-        )
-        max_concurrent_tasks = int(member.get("max_concurrent_tasks", 1))
-    except (TypeError, ValueError):
-        raise InvalidInputError(
-            "expertise_level and max_concurrent_tasks must be integers"
-        ) from None
-    enabled = member.get("enabled", True)
-    if isinstance(enabled, bool):
-        enabled_value = enabled
-    elif isinstance(enabled, str):
-        lowered = enabled.strip().lower()
-        if lowered not in {"true", "false"}:
-            raise InvalidInputError("enabled must be a boolean")
-        enabled_value = lowered == "true"
-    else:
-        raise InvalidInputError("enabled must be a boolean")
-    return {
-        "agent_name": agent_name,
-        "role_id": role_id,
-        "enabled": enabled_value,
-        "expertise_level": max(1, min(expertise_level, 5)),
-        # 0 (or negative) means unlimited concurrency; a positive value is a
-        # hard cap with no upper ceiling.
-        "max_concurrent_tasks": max(0, max_concurrent_tasks),
-        "capabilities": [capability.strip() for capability in capabilities if capability.strip()],
-        "notes": str(member.get("notes", "")).strip(),
-        # Members with a runner command/default auto-run dispatched steps.
-        # Empty means the step waits for a live session/manual completion.
-        "runner_command": str(member.get("runner_command", "")).strip(),
-    }
-
-
 def _legacy_priority_to_expertise(priority: int) -> int:
     if priority >= 120:
         return 5
@@ -857,38 +781,6 @@ def _legacy_priority_to_expertise(priority: int) -> int:
     if priority >= 50:
         return 2
     return 1
-
-
-def required_expertise_for_task(task: dict[str, Any]) -> int:
-    importance = str(task.get("importance") or "normal")
-    size = str(task.get("size") or "medium")
-    risk = str(task.get("risk") or "medium")
-    required = 2
-    if importance in {"normal", "high", "critical"}:
-        required += 1
-    if importance in {"high", "critical"}:
-        required += 1
-    if importance == "critical":
-        required += 1
-    if size == "large":
-        required += 1
-    if risk == "high":
-        required += 1
-    return max(1, min(required, 5))
-
-
-def _reject_unknown_roles(role_ids: set[str], project_root: str | None) -> None:
-    # Role ids are only syntax-checked during normalization; here they must
-    # also match an actual agents/<role>.md, otherwise the UI selects (which
-    # can't represent an unknown role) would silently rewrite them. Skipped
-    # when no roles can be listed at all, so configs stay writable in bare
-    # environments.
-    known = {role["id"] for role in list_agent_roles(_agents_dir(project_root))}
-    if not known:
-        return
-    unknown = sorted(role_ids - known)
-    if unknown:
-        raise InvalidInputError("unknown roles: " + ", ".join(unknown))
 
 
 def goals_summary(
@@ -994,21 +886,6 @@ def active_goal_conflict_reason(
     return None
 
 
-def team_locked_reason(store: Store) -> str | None:
-    """Team config is frozen while any task is actively executing workflow
-    steps: reassignment math, role constraints, and running auto-runners all
-    read the team live, so edits mid-flight corrupt routing. Blocked tasks
-    do NOT lock — fixing the team is the documented way to unblock them."""
-    busy = _active_workflow_task_ids(store)
-    if not busy:
-        return None
-    ids = ", ".join(f"#{task_id}" for task_id in busy[:10])
-    return (
-        f"team config is locked while workflow tasks are running ({ids}); "
-        "wait for them to finish, or block/close them first"
-    )
-
-
 def workflow_locked_reason(store: Store) -> str | None:
     busy = _active_workflow_task_ids(store)
     if not busy:
@@ -1029,146 +906,17 @@ def _active_workflow_task_ids(store: Store) -> list[int]:
     ]
 
 
-def _missing_team_roles(members: list[dict[str, Any]]) -> list[str]:
-    enabled_roles = {
-        member["role_id"] for member in members if member.get("enabled", True)
-    }
-    return sorted(REQUIRED_TEAM_ROLES - enabled_roles)
-
-
-def read_team_config(project_root: str | None = None) -> dict[str, Any]:
-    path = _team_config_path(project_root)
-    if not path.exists():
-        return {
-            "members": [],
-            "path": str(path),
-            "missing_roles": sorted(REQUIRED_TEAM_ROLES),
-        }
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise InvalidInputError(f"invalid team config: {exc}") from exc
-    members = data.get("members", []) if isinstance(data, dict) else []
-    if not isinstance(members, list):
-        raise InvalidInputError("team members must be a list")
-    normalized = [_normalize_team_member(member) for member in members]
-    return {
-        "members": normalized,
-        "path": str(path),
-        "missing_roles": _missing_team_roles(normalized),
-    }
-
-
-def write_team_config(
-    members: list[Any], project_root: str | None = None
-) -> dict[str, Any]:
-    if not isinstance(members, list):
-        raise InvalidInputError("members must be a list")
-    normalized = [_normalize_team_member(member) for member in members]
-    _reject_unknown_roles({member["role_id"] for member in normalized}, project_root)
-    # Missing core roles are reported, not rejected: a hard error here made
-    # it impossible to build a team up one member at a time. Readiness is
-    # checked where work actually starts.
-    missing_roles = _missing_team_roles(normalized)
-    path = _team_config_path(project_root)
-    project_root_path = _project_root(project_root)
-    resolved_path = path.resolve()
-    if project_root_path not in (resolved_path, *resolved_path.parents):
-        raise InvalidInputError("team config path escapes project root")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    data = {"members": normalized}
-    path.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    return {"members": normalized, "path": str(path), "missing_roles": missing_roles}
-
-
-def rank_assignment_candidates(
-    task: dict[str, Any],
-    members: list[dict[str, Any]],
-    active_counts: dict[str, int] | None = None,
-    role_id: str | None = None,
-) -> dict[str, Any]:
-    active_counts = active_counts or {}
-    required_role = (role_id or task.get("role_required") or "implementer").strip()
-    required_capabilities = set(task.get("required_capabilities") or [])
-    importance = str(task.get("importance") or "normal")
-    size = str(task.get("size") or "medium")
-    risk = str(task.get("risk") or "medium")
-    required_expertise = required_expertise_for_task(task)
-    importance_bonus = TASK_IMPORTANCE_SCORES.get(importance, 10)
-    size_penalty = TASK_SIZE_SCORES.get(size, 8)
-    risk_penalty = TASK_RISK_SCORES.get(risk, 10)
-    candidates = []
-    for member in members:
-        if not member.get("enabled", True):
-            continue
-        if member.get("role_id") != required_role:
-            continue
-        member_capabilities = set(member.get("capabilities") or [])
-        missing_capabilities = sorted(required_capabilities - member_capabilities)
-        active_count = active_counts.get(member["agent_name"], 0)
-        max_concurrent = int(member.get("max_concurrent_tasks", 1))
-        # max_concurrent <= 0 means unlimited: never hard-exclude on load
-        # (load_penalty below still soft-prefers idle members).
-        if max_concurrent > 0 and active_count >= max_concurrent:
-            continue
-        expertise_level = int(member.get("expertise_level", 3))
-        capability_bonus = 15 * (
-            len(required_capabilities) - len(missing_capabilities)
-        )
-        missing_penalty = 100 * len(missing_capabilities)
-        expertise_gap = max(0, required_expertise - expertise_level)
-        expertise_bonus = 18 * max(0, expertise_level - required_expertise)
-        expertise_penalty = 90 * expertise_gap
-        load_penalty = 50 * active_count
-        exclusive_penalty = 35 * active_count if task.get("exclusive_workspace") else 0
-        score = (
-            capability_bonus
-            + expertise_bonus
-            + importance_bonus
-            - size_penalty
-            - risk_penalty
-            - missing_penalty
-            - expertise_penalty
-            - load_penalty
-            - exclusive_penalty
-        )
-        candidates.append(
-            {
-                **member,
-                "active_tasks": active_count,
-                "available_slots": max_concurrent - active_count,
-                "missing_capabilities": missing_capabilities,
-                "expertise_gap": expertise_gap,
-                "score": score,
-            }
-        )
-    candidates.sort(
-        key=lambda item: (
-            item["score"],
-            -item["active_tasks"],
-            item.get("expertise_level", 3),
-        ),
-        reverse=True,
-    )
-    return {
-        "role_id": required_role,
-        "required_expertise_level": required_expertise,
-        "candidates": candidates,
-        "selected": candidates[0] if candidates else None,
-    }
-
-
 # --- Workflow constraint engine ---------------------------------------------
 # The workflow graph drives task routing. Completing a step advances the task
 # along forward edges (layer increases); "rework" follows loop-back edges;
 # merge steps wait until every *required* forward predecessor has completed;
-# each dispatched step is assigned to the best-ranked team member for its
-# role. All movements are recorded in task_transitions.
+# each dispatched step goes to the agent the step names (step.agent, else the
+# step id). All movements are recorded in task_transitions.
 
 WORKFLOW_ENGINE_AGENT = "workflow"
+# In-app recipient for engine blocker/timeout notices. A human or supervising
+# agent registered under this name sees them; if none is, the notice is dropped.
+HUB_NOTIFY_AGENT = "hub"
 WORKFLOW_OUTCOMES = {"done", "rework", "blocked"}
 # How many times a loop-back (rework) target may be re-entered before the engine
 # stops looping and blocks the task for the hub. Prevents review/implement
@@ -1325,21 +1073,6 @@ def _main_workflow_reachable_steps(
     return [step for step in cfg["steps"] if step["id"] in seen]
 
 
-def _required_workflow_roles(cfg: dict[str, Any], back: set[tuple[str, str]]) -> set[str]:
-    return {
-        step["role_id"]
-        for step in _main_workflow_reachable_steps(cfg, back)
-        if step.get("required") and step.get("role_id")
-    }
-
-
-def _team_role_of(members: list[dict[str, Any]], agent: str) -> str | None:
-    for member in members:
-        if member["agent_name"] == agent and member.get("enabled", True):
-            return member["role_id"]
-    return None
-
-
 # Outcomes that close out one dispatch of a step: the agent finished it
 # (done/rework) or the engine took it away (reassigned on timeout).
 _STEP_FINISHING_OUTCOMES = ("done", "rework", "reassigned")
@@ -1484,25 +1217,6 @@ def _join_ready(
     return all(pred in arrived for pred in required_preds)
 
 
-def _pick_assignee(
-    store: Store, task: dict[str, Any], step: dict[str, Any],
-    members: list[dict[str, Any]],
-) -> str | None:
-    # A step that names its own agent binds directly, skipping team ranking —
-    # the workflow assigns the agent, no role matchmaking needed.
-    explicit = str(step.get("agent") or "").strip()
-    if explicit:
-        return explicit
-    ranked = rank_assignment_candidates(
-        {**task, "role_required": step["role_id"]},
-        members,
-        store.active_task_counts(),
-        role_id=step["role_id"],
-    )
-    selected = ranked.get("selected")
-    return selected["agent_name"] if selected else None
-
-
 def _ensure_engine_agent(store: Store) -> None:
     if not store.agent_exists(WORKFLOW_ENGINE_AGENT):
         store.register_agent(
@@ -1511,12 +1225,8 @@ def _ensure_engine_agent(store: Store) -> None:
         )
 
 
-def _notify_hub(store: Store, members: list[dict[str, Any]], text: str) -> str:
-    hub_agent = next(
-        (m["agent_name"] for m in members
-         if m["role_id"] == "hub" and m.get("enabled", True)),
-        "hub",
-    )
+def _notify_hub(store: Store, text: str) -> str:
+    hub_agent = HUB_NOTIFY_AGENT
     try:
         if not store.agent_exists(hub_agent):
             return f"hub agent {hub_agent!r} not registered; notice dropped"
@@ -1528,29 +1238,12 @@ def _notify_hub(store: Store, members: list[dict[str, Any]], text: str) -> str:
 
 
 def _workflow_api_actor(raw_agent: str, project_root: str | None) -> str:
-    # The UI sends no agent name (older pages sent "ui"); it acts as the
-    # team's hub member so the engine's assignee/hub constraint recognizes it.
+    # The UI sends no agent name (older pages sent "ui"); it acts as the hub so
+    # the engine's assignee/override constraint recognizes it.
     agent = (raw_agent or "").strip()
     if agent and agent != "ui":
         return agent
-    members = read_team_config(project_root)["members"]
-    hub_agent = next(
-        (
-            m["agent_name"] for m in members
-            if m["role_id"] == "hub" and m.get("enabled", True)
-        ),
-        None,
-    )
-    if hub_agent is None:
-        raise InvalidInputError(
-            "team has no enabled hub member to act for the UI; "
-            "add one on the Team page or pass an agent name"
-        )
-    return hub_agent
-
-
-def _member_named(members: list[dict[str, Any]], agent_name: str) -> dict[str, Any] | None:
-    return next((m for m in members if m["agent_name"] == agent_name), None)
+    return HUB_NOTIFY_AGENT
 
 
 def _validate_goal_auto_runners(
@@ -1565,41 +1258,16 @@ def _validate_goal_auto_runners(
             + "; ".join(errors)
             + ". Check the Workflow page warnings."
         )
-    team = read_team_config(project_root)
-    enabled_roles = {
-        member["role_id"] for member in team["members"] if member.get("enabled", True)
-    }
-    missing_roles = sorted(_required_workflow_roles(cfg, back) - enabled_roles)
-    if missing_roles:
-        raise InvalidInputError(
-            "team is missing required roles: "
-            + ", ".join(missing_roles)
-            + ". Enable a member for each on the Team page."
-        )
-    members = team["members"]
-    probe_task = {
-        "id": 0,
-        "title": title,
-        "content": content,
-        "importance": "normal",
-        "size": "medium",
-        "risk": "medium",
-        "required_capabilities": [],
-        "exclusive_workspace": True,
-    }
     missing: list[str] = []
     for step in _main_workflow_reachable_steps(cfg, back):
-        assignee = _pick_assignee(store, probe_task, step, members)
-        if assignee is None:
-            if step["required"]:
-                missing.append(f"{step['id']} ({step['role_id']}): no enabled member")
-            continue
-        member = _member_named(members, assignee) or {"agent_name": assignee}
-        if not (_step_command(step, project_root) or _runner_command_for(member)):
-            missing.append(f"{step['id']} ({assignee}): no step command or runner_command")
+        if step["required"] and not _step_command(step, project_root):
+            missing.append(
+                f"{step['id']} ({_step_assignee(step)}): no command"
+            )
     if missing:
         raise InvalidInputError(
-            "goal cannot auto-run until runner commands are configured: "
+            "goal cannot auto-run until each required step has a command "
+            "(set the step's command or settings.default_command): "
             + "; ".join(missing)
         )
 
@@ -1883,9 +1551,8 @@ def _enforce_goal_token_budget(
             note=f"goal tokens {total} exceed budget {budget}",
         )
         store.set_task_workflow_state(goal_id, task_status="stalled")
-        members = read_team_config(project_root)["members"]
         _notify_hub(
-            store, members,
+            store,
             f"目标 #{goal_id} 触及 token 硬预算：已用 {total} > 预算 {budget}。"
             "已冻结后续派发，需人工介入（提高预算 / 重新拆分 / 终止目标）。",
         )
@@ -2318,7 +1985,7 @@ def _dispatch_step(
         store.update_task_step_details(
             task_id, step_inputs=step_inputs, result_summary="", artifacts=[]
         )
-    command = _step_command(step, project_root) or _runner_command_for(member)
+    command = _step_command(step, project_root) or member.get("runner_command", "")
     if command:
         return store.create_run_job(
             task_id,
@@ -2338,7 +2005,6 @@ def _dispatch_targets(
     targets: list[str],
     cfg: dict[str, Any],
     back: set[tuple[str, str]],
-    members: list[dict[str, Any]],
     upstream_result: str,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     steps = {s["id"]: s for s in cfg["steps"]}
@@ -2363,29 +2029,7 @@ def _dispatch_targets(
             notices.append(f"step {target} is waiting for other required branches")
             continue
         step = steps[target]
-        assignee = _pick_assignee(store, task, step, members)
-        if assignee is None:
-            if step["required"]:
-                store.record_task_transition(
-                    task_id, "", target, WORKFLOW_ENGINE_AGENT, "blocked",
-                    f"no available team member for role {step['role_id']}",
-                )
-                store.set_task_workflow_state(task_id, task_status="blocked")
-                notices.append(_notify_hub(
-                    store, members,
-                    f"Task #{task_id} blocked: required step '{target}' has no "
-                    f"available team member for role {step['role_id']}.",
-                ))
-                continue
-            # Optional step with nobody to run it: pass through to successors.
-            for nxt in _forward_out(cfg, back, target):
-                store.record_task_transition(
-                    task_id, target, nxt, WORKFLOW_ENGINE_AGENT, "skipped",
-                    f"no team member for optional step {target}",
-                )
-                queue.append(nxt)
-            notices.append(f"optional step {target} skipped (no team member)")
-            continue
+        assignee = _step_assignee(step)
         action = store.create_workflow_action(
             task_id,
             "dispatch_step",
@@ -2396,7 +2040,7 @@ def _dispatch_targets(
         try:
             _dispatch_step(
                 store, project_root, task, step,
-                _member_named(members, assignee) or {"agent_name": assignee},
+                {"agent_name": assignee},
                 upstream_result,
             )
         except Exception as exc:
@@ -2497,22 +2141,11 @@ def rerun_workflow_step(
                 f"a run is already in progress for step {step_id!r}; wait for it "
                 "to finish before re-running"
             )
-        members = read_team_config(project_root)["members"]
-        base = _member_named(members, agent) or {}
-        member = {
-            "agent_name": agent,
-            "role_id": step_def["role_id"],
-            "enabled": True,
-            "expertise_level": int(base.get("expertise_level", 3)),
-            "max_concurrent_tasks": int(base.get("max_concurrent_tasks", 0)),
-            "capabilities": list(base.get("capabilities", [])),
-            "notes": base.get("notes", ""),
-            "runner_command": base.get("runner_command", ""),
-        }
-        if not _runner_command_for(member):
+        member = {"agent_name": agent, "runner_command": ""}
+        if not _step_command(step_def, project_root):
             raise InvalidInputError(
-                f"agent {agent!r} has no runner command or built-in default, so it "
-                "cannot auto-run the step; pick a CLI-backed agent"
+                f"step {step_id!r} has no command (set the step's command or "
+                "settings.default_command), so it cannot auto-run"
             )
         # Carry the upstream step's result forward so the re-run has the same
         # context the original dispatch had (empty for entry steps). The note is
@@ -2532,7 +2165,7 @@ def rerun_workflow_step(
             "task_id": task_id,
             "step": step_id,
             "assignee": agent,
-            "runner_command": _runner_command_for(member),
+            "runner_command": _step_command(step_def, project_root),
             "queued_job_id": job["id"] if job else None,
             "reran": True,
         }
@@ -2593,9 +2226,8 @@ def _start_workflow_task_locked(
         step_id for step_id in _workflow_entry_steps(cfg, back)
         if steps[step_id]["required"] or _forward_out(cfg, back, step_id)
     ]
-    members = read_team_config(project_root)["members"]
     dispatched, notices = _dispatch_targets(
-        store, project_root, task, entries, cfg, back, members, ""
+        store, project_root, task, entries, cfg, back, ""
     )
     return {
         "task_id": task_id,
@@ -2632,9 +2264,8 @@ def _start_workflow_task_at_locked(
     # to and including the decompose step.)
     for target in targets:
         store.record_task_transition(task_id, from_step, target, agent, "done", upstream_result)
-    members = read_team_config(project_root)["members"]
     dispatched, notices = _dispatch_targets(
-        store, project_root, task, targets, cfg, back, members, upstream_result
+        store, project_root, task, targets, cfg, back, upstream_result
     )
     return {
         "task_id": task_id,
@@ -2689,16 +2320,14 @@ def _advance_workflow_task_locked(
     steps = {s["id"]: s for s in cfg["steps"]}
     if step not in steps:
         raise InvalidInputError(f"unknown workflow step: {step}")
-    members = read_team_config(project_root)["members"]
     transitions = store.list_task_transitions(task_id)
     active_assignees = _active_step_assignees(transitions)
     if step not in active_assignees:
         raise InvalidInputError(f"workflow step {step} is not active for task {task_id}")
     assigned_agent = active_assignees[step]
     # Constraint: only the agent that was dispatched the active step may
-    # complete it. Hub can override any active step for recovery.
-    actor_role = _team_role_of(members, agent)
-    if agent != assigned_agent and actor_role != "hub":
+    # complete it. The hub agent can override any active step for recovery.
+    if agent != assigned_agent and agent != HUB_NOTIFY_AGENT:
         raise InvalidInputError(
             f"agent {agent} is not assigned to active step {step} "
             f"(assigned to {assigned_agent})"
@@ -2725,7 +2354,7 @@ def _advance_workflow_task_locked(
         _settle_step_card(store, task, step, "blocked")
         _recompute_parent_goal_status(store, task, project_root)
         notice = _notify_hub(
-            store, members,
+            store,
             f"Task #{task_id} blocked at step '{step}' by {agent}: {result or 'no details'}",
         )
         return {
@@ -2759,7 +2388,7 @@ def _advance_workflow_task_locked(
             _settle_step_card(store, task, step, "blocked")
             _recompute_parent_goal_status(store, task, project_root)
             notice = _notify_hub(
-                store, members,
+                store,
                 f"Task #{task_id} hit the rework limit ({max_rework} rounds) "
                 f"at step '{step}' -> {', '.join(targets)}; blocked instead of "
                 f"looping again. Last result: {result or 'no details'}",
@@ -2799,7 +2428,7 @@ def _advance_workflow_task_locked(
     # collapsing them to a one-line summary would lose exactly what matters.
     upstream = _structured_upstream(result) if outcome == "done" else result
     dispatched, notices = _dispatch_targets(
-        store, project_root, task, targets, cfg, back, members, upstream
+        store, project_root, task, targets, cfg, back, upstream
     )
     return {
         "task_id": task_id, "step": step, "outcome": outcome,
@@ -2842,21 +2471,6 @@ RUNNER_CANCEL_POLL_SECONDS = 10
 # to drain before force-closing the pipes — bounds the wedge when an escaped child
 # keeps a pipe open so EOF never arrives.
 RUNNER_STREAM_DRAIN_SECONDS = 5
-# Headless CLIs default to asking for permission on every file write / tool
-# call, which no one is there to answer — a runner without full permissions
-# can only produce inline text. These defaults grant maximum autonomy; set
-# runner_command on the member to run with a tighter policy.
-_DEFAULT_RUNNER_COMMANDS = {
-    "antigravity": 'agy --dangerously-skip-permissions --print "$(cat)"',
-    "claude-code": "claude -p --dangerously-skip-permissions",
-    "codex": "codex exec --dangerously-bypass-approvals-and-sandbox -",
-    # gemini additionally refuses to start headless in an untrusted dir.
-    "gemini": "GEMINI_CLI_TRUST_WORKSPACE=true gemini --yolo",
-    # opencode's `run` takes the prompt as a positional arg (not stdin), so
-    # $(cat) bridges the piped prompt; --auto auto-approves permissions not
-    # explicitly denied (its headless-autonomy flag).
-    "opencode": 'opencode run --auto "$(cat)"',
-}
 
 
 def _step_command(step: dict[str, Any], project_root: str | None = None) -> str:
@@ -2872,20 +2486,10 @@ def _step_command(step: dict[str, Any], project_root: str | None = None) -> str:
     return ""
 
 
-def _runner_command_for(member: dict[str, Any]) -> str:
-    command = str(member.get("runner_command") or "").strip()
-    if command:
-        return command
-    agent_name = member.get("agent_name", "")
-    if agent_name in _DEFAULT_RUNNER_COMMANDS:
-        return _DEFAULT_RUNNER_COMMANDS[agent_name]
-    # Hermes takes the prompt as a -z argument, not on stdin ($(cat) bridges
-    # it); profile agents are named hermes-<profile>, so match dynamically.
-    if agent_name == "hermes" or agent_name.startswith("hermes-"):
-        profile = agent_name[len("hermes-"):] if agent_name.startswith("hermes-") else ""
-        profile_arg = f"--profile {shlex.quote(profile)} " if profile else ""
-        return f'hermes {profile_arg}--yolo -z "$(cat)"'
-    return ""
+def _step_assignee(step: dict[str, Any]) -> str:
+    """The agent a step dispatches to: its own `agent` if set, else the step id.
+    The workflow assigns the agent directly — no role/team matchmaking."""
+    return str(step.get("agent") or "").strip() or step["id"]
 
 
 def _tail(text: str, limit: int) -> str:
@@ -3017,7 +2621,6 @@ def _triage_config_snapshot(project_root: str | None) -> str:
     exposing full runner commands in the prompt.
     """
     workflow = read_workflow_config(project_root)
-    team = read_team_config(project_root)
     snapshot = {
         "workflow": {
             "steps": [
@@ -3035,20 +2638,6 @@ def _triage_config_snapshot(project_root: str | None) -> str:
             ],
             "edges": workflow["edges"],
             "warnings": workflow.get("warnings", []),
-        },
-        "team": {
-            "members": [
-                {
-                    "agent": member.get("agent_name", ""),
-                    "role": member.get("role_id", ""),
-                    "enabled": bool(member.get("enabled", True)),
-                    "runner_ready": bool(_runner_command_for(member)),
-                    "max_concurrent_tasks": member.get("max_concurrent_tasks", 1),
-                    "capabilities": member.get("capabilities", []),
-                }
-                for member in team["members"]
-            ],
-            "missing_core_roles": team.get("missing_roles", []),
         },
     }
     return json.dumps(snapshot, ensure_ascii=False, indent=2)
@@ -3524,26 +3113,10 @@ def _read_run_output_tail(log_dir: str | None, tail_bytes: int = 4000) -> str:
     return "\n".join(parts)
 
 
-def _hub_command(
-    project_root: str | None, members: list[dict[str, Any]] | None = None
-) -> str:
-    """Runner command for hub-supervision CLI calls (timeout KILL/CONTINUE).
-    Prefers settings.hub_command so supervision does not depend on a team
-    member; falls back to an enabled hub team member's runner command."""
-    configured = read_settings(project_root).get("hub_command", "").strip()
-    if configured:
-        return configured
-    if members is None:
-        try:
-            members = read_team_config(project_root)["members"]
-        except Exception:
-            members = []
-    hub = next(
-        (m for m in members
-         if m.get("role_id") == "hub" and m.get("enabled", True) and _runner_command_for(m)),
-        None,
-    )
-    return _runner_command_for(hub) if hub else ""
+def _hub_command(project_root: str | None) -> str:
+    """Runner command for hub-supervision CLI calls (timeout KILL/CONTINUE),
+    configured via settings.hub_command. Empty disables supervision."""
+    return read_settings(project_root).get("hub_command", "").strip()
 
 
 def _hub_inspect_batch(
@@ -4050,7 +3623,6 @@ def goal_verify_sweep(store: Store, project_root: str | None) -> list[dict[str, 
         if a["action_type"] == "goal_verify"
         and _iso_age_seconds(a.get("updated_at", "")) > GOAL_VERIFY_STALE_SECONDS
     ]
-    members = read_team_config(project_root)["members"]
     processed: list[dict[str, Any]] = []
     for action in pending + stale:
         goal_id = int(action["task_id"])
@@ -4092,7 +3664,7 @@ def goal_verify_sweep(store: Store, project_root: str | None) -> list[dict[str, 
                 action["id"], "failed", f"goal verify failed (exit {code})"
             )
             _notify_hub(
-                store, members,
+                store,
                 f"目标 #{goal_id} 收敛验证失败：`{command}` 退出码 {code}"
                 "（引擎在集成后的 main 上判定，非 agent 自报）。"
                 "各子任务在各自 worktree 里通过，但合并后失败——需人工介入或补修子任务。\n"
@@ -4130,7 +3702,7 @@ def run_step_worker(
         card = store.find_open_step_card(task_id, step["id"])
         if card:
             run_task_id = card["id"]
-    command = _step_command(step, project_root) or _runner_command_for(member)
+    command = member.get("runner_command", "") or _step_command(step, project_root)
     run = store.create_task_run(
         run_task_id, worker=assignee, command=command, workflow_step=step["id"]
     )
@@ -4169,8 +3741,8 @@ def run_step_worker(
     can_rework = False
     if not command:
         result = (
-            f"no runner command for agent {assignee}; set runner_command on "
-            "the team member"
+            f"no runner command for step {step['id']} (agent {assignee}); set the "
+            "step's command or settings.default_command"
         )
     else:
         _cfg = read_workflow_config(project_root)
@@ -4528,13 +4100,9 @@ def run_queued_job(
                 runner_name=runner_name, current_status="running",
             )
             return {"job_id": job["id"], "status": "failed", "error": "step missing"}
-        members = read_team_config(project_root)["members"]
-        base = _member_named(members, job["assignee"]) or {}
         member = {
-            **base,
             "agent_name": job["assignee"],
             "role_id": step["role_id"],
-            "enabled": True,
             "runner_command": job["command"],
         }
         # Heartbeat: a long step can outrun the lease; renew it periodically so
@@ -4744,7 +4312,6 @@ def _check_workflow_step_timeouts_locked(
     now = now or datetime.now(timezone.utc)
     cfg = read_workflow_config(project_root)
     steps = {s["id"]: s for s in cfg["steps"]}
-    members = read_team_config(project_root)["members"]
     actions: list[dict[str, Any]] = []
     for task in store.list_active_workflow_tasks():
         task_id = task["id"]
@@ -4779,45 +4346,20 @@ def _check_workflow_step_timeouts_locked(
             )
             if already_handled:
                 continue
-            other_members = [m for m in members if m["agent_name"] != assignee]
-            new_assignee = _pick_assignee(store, task, step, other_members)
-            if new_assignee:
-                store.record_task_transition(
-                    task_id, step_id, step_id, WORKFLOW_ENGINE_AGENT, "reassigned",
-                    f"step timed out after {timeout_minutes}m on {assignee}; "
-                    f"reassigned to {new_assignee}",
-                )
-                _dispatch_step(
-                    store, project_root, task, step,
-                    _member_named(members, new_assignee) or {"agent_name": new_assignee},
-                    "",
-                )
-                notice = _notify_hub(
-                    store, members,
-                    f"Task #{task_id} step '{step_id}' timed out on {assignee} "
-                    f"after {timeout_minutes}m; reassigned to {new_assignee}.",
-                )
-                actions.append({
-                    "task_id": task_id, "step": step_id, "action": "reassigned",
-                    "from": assignee, "to": new_assignee, "notice": notice,
-                })
-            else:
-                store.record_task_transition(
-                    task_id, step_id, step_id, WORKFLOW_ENGINE_AGENT, "timeout",
-                    f"step timed out after {timeout_minutes}m on {assignee}; "
-                    f"no alternative member for role {step['role_id']}",
-                )
-                notice = _notify_hub(
-                    store, members,
-                    f"Task #{task_id} step '{step_id}' timed out on {assignee} "
-                    f"after {timeout_minutes}m and no other member has role "
-                    f"{step['role_id']}. Please intervene (complete_step as hub, "
-                    f"or adjust the team).",
-                )
-                actions.append({
-                    "task_id": task_id, "step": step_id, "action": "notified_hub",
-                    "from": assignee, "notice": notice,
-                })
+            store.record_task_transition(
+                task_id, step_id, step_id, WORKFLOW_ENGINE_AGENT, "timeout",
+                f"step timed out after {timeout_minutes}m on {assignee}",
+            )
+            notice = _notify_hub(
+                store,
+                f"Task #{task_id} step '{step_id}' timed out on {assignee} after "
+                f"{timeout_minutes}m. Please intervene (complete_step as hub, or "
+                f"re-run the step).",
+            )
+            actions.append({
+                "task_id": task_id, "step": step_id, "action": "notified_hub",
+                "from": assignee, "notice": notice,
+            })
     return actions
 
 
@@ -4885,7 +4427,6 @@ def _check_task_health_locked(
     directly-executing goal with no active step and no run in progress. Alerts
     are deduped via a `health_alert` transition so the hub is not re-pinged
     every cycle for the same unchanged problem."""
-    members = read_team_config(project_root)["members"]
     cfg = read_workflow_config(project_root)
     back = _workflow_graph(cfg)
     steps = {s["id"]: s for s in cfg["steps"]}
@@ -4904,7 +4445,6 @@ def _check_task_health_locked(
             continue
         notice = _notify_hub(
             store,
-            members,
             f"Task #{action['task_id']} has a pending dispatch action for step "
             f"'{action['step']}' to {action['assignee']} that did not complete. "
             "The server may have stopped mid-advance; inspect the task and re-run "
@@ -4956,7 +4496,7 @@ def _check_task_health_locked(
                 f"step '{step_id}' stalled: {assignee} runner is dead, nothing running",
             )
             notice = _notify_hub(
-                store, members,
+                store,
                 f"Task #{task_id} step '{step_id}' looks stuck: the {assignee} runner "
                 "died and nothing is running. Re-run it (pick an agent) or "
                 "complete_step as hub.",
@@ -5000,7 +4540,7 @@ def _check_task_health_locked(
                         f"rework to '{target}' was recorded but never dispatched",
                     )
                     notice = _notify_hub(
-                        store, members,
+                        store,
                         f"Task #{task_id} recorded rework from "
                         f"'{last_rework['from_step']}' to '{target}', but the "
                         "target step was never dispatched and nothing is running. "
@@ -5060,7 +4600,7 @@ def _check_task_health_locked(
                     task_status="stalled" if direct_goal else "blocked",
                 )
                 notice = _notify_hub(
-                    store, members,
+                    store,
                     f"Task #{task_id} was orphaned (advance interrupted at "
                     f"'{stalled_step}'); marked blocked. Re-run it or close it.",
                 )
@@ -5647,36 +5187,6 @@ def create_server(
         await _to_thread(_write_role)
         roles = await _to_thread(list_agent_roles, agents_dir)
         return _json(request, {"success": True, "roles": roles})
-
-    @route("/api/team", methods=["GET"])
-    async def api_get_team(request: Request) -> JSONResponse:
-        if forbidden := _forbid_non_local(request):
-            return forbidden
-        try:
-            team = await _to_thread(
-                read_team_config, current_project.get("project_root")
-            )
-        except InvalidInputError as exc:
-            return _json_error(str(exc), request=request)
-        return _json(request, team)
-
-    @route("/api/team", methods=["POST"])
-    async def api_save_team(request: Request) -> JSONResponse:
-        if forbidden := _forbid_non_local(request):
-            return forbidden
-        data = await _read_json(request)
-        locked = await _to_thread(team_locked_reason, store)
-        if locked:
-            return _json_error(locked, 409, request)
-        try:
-            team = await _to_thread(
-                write_team_config,
-                data.get("members", []),
-                current_project.get("project_root"),
-            )
-        except InvalidInputError as exc:
-            return _json_error(str(exc), request=request)
-        return _json(request, {"success": True, **team})
 
     @route("/api/workflow", methods=["GET"])
     async def api_get_workflow(request: Request) -> JSONResponse:

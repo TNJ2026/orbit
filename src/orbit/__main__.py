@@ -24,13 +24,11 @@ _CLAUDE_MD_SECTION = """
 
 def init_project(project_root: Path) -> dict[str, list[str]]:
     """Bootstrap a project for orbit in one shot: role prompts, default
-    workflow/team config, gitignore, CLAUDE.md section. Idempotent — existing
+    workflow config, gitignore, CLAUDE.md section. Idempotent — existing
     files are left untouched."""
     from .server import (
         default_workflow_edges,
         default_workflow_steps,
-        detect_agent_tools,
-        write_team_config,
         write_workflow_config,
     )
 
@@ -68,24 +66,7 @@ def init_project(project_root: Path) -> dict[str, list[str]]:
         )
         _mark(workflow_path, True)
 
-    # 3. Default team: spread the core roles over the installed agent CLIs
-    # (repeating when fewer than four are installed).
-    team_path = state_dir / "team.json"
-    if team_path.exists():
-        _mark(team_path, False)
-    else:
-        installed = [
-            tool["agent_name"] for tool in detect_agent_tools() if tool.get("installed")
-        ]
-        names = installed or ["claude-code"]
-        members = [
-            {"agent_name": names[index % len(names)], "role_id": role_id}
-            for index, role_id in enumerate(("hub", "implementer", "integrator", "reviewer"))
-        ]
-        write_team_config(members, str(project_root))
-        _mark(team_path, True)
-
-    # 4. Keep runtime task logs and per-task worktree checkouts out of git.
+    # 3. Keep runtime task logs and per-task worktree checkouts out of git.
     gitignore = project_root / ".gitignore"
     existing = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
     wanted = [f"{state_dir.name}/tasks/", f"{state_dir.name}/worktrees/"]

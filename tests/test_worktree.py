@@ -300,8 +300,6 @@ class StepPromptTests(unittest.TestCase):
             )
         self.assertIn("Triage 动态配置上下文", p)
         self.assertIn('"workflow"', p)
-        self.assertIn('"team"', p)
-        self.assertIn('"missing_core_roles"', p)
         self.assertIn("runner 仅暴露是否可用", p)
         self.assertIn("CONFIG_CHECK: ok|warning|blocked", p)
         self.assertIn(server.DEFAULT_STEP_PROMPTS["intake"], p)
