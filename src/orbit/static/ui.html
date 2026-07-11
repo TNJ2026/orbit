@@ -1745,6 +1745,8 @@
         "goal.tokensTitle": "Tokens consumed across this goal's runs (only counts runners that report usage)",
         "goal.budgetChip": "budget {0}M", "goal.budgetChipTitle": "This goal's hard token ceiling (millions); dispatch freezes once used tokens exceed it",
         "goal.done": "{0}/{1} done", "goal.blocked": "{0} blocked", "goal.tokens": "🔢 {0} tokens",
+        "goal.stepProgress": "⚙ {0}% steps",
+        "goal.stepProgressTitle": "Step progress: settled step cells (work items × workflow steps) over the whole grid; rework can move it backwards",
         "goal.closedHidden": "{0} closed goal{1} hidden",
         "goal.close": "Close", "goal.forceEnd": "Force End",
         "goal.forceEndTitle": "Kill all running runners in this goal and close the whole tree",
@@ -1874,6 +1876,8 @@
         "goal.tokensTitle": "该目标所有运行消耗的 tokens（仅统计上报用量的 runner）",
         "goal.budgetChip": "预算 {0}M", "goal.budgetChipTitle": "本目标的 token 硬上限（百万）；用量超出后冻结派发",
         "goal.done": "{0}/{1} 已完成", "goal.blocked": "{0} 已阻塞", "goal.tokens": "🔢 {0} tokens",
+        "goal.stepProgress": "⚙ 步骤进度 {0}%",
+        "goal.stepProgressTitle": "步骤进度：已完成的步骤格（工作项 × 工作流步骤）占整个矩阵的比例；返工会使其回退",
         "goal.closedHidden": "已隐藏 {0} 个已关闭目标",
         "goal.close": "关闭", "goal.forceEnd": "强制结束",
         "goal.forceEndTitle": "终止该目标下所有运行中的 runner 并关闭整棵树",
@@ -3260,6 +3264,25 @@
       return { counts, total, settled, status };
     }
 
+    // Step-cell progress: work items × workflow steps form a grid; progress is
+    // settled cells (closed/skipped) over total cells. When items interleave
+    // across the pipeline (one at implement, one at review, one at test) this
+    // reads as a smooth percentage, while "x/N done" stays the hard
+    // landed-work metric. Rework reopens cells, so the percentage can honestly
+    // go backwards.
+    function goalStepProgress(goal) {
+      const phases = goalWorkflowSteps();
+      if (!phases.length) return null;
+      let settled = 0, total = 0;
+      phases.forEach(phase => {
+        const summary = phaseSummary(phaseInstances(goal, phase));
+        settled += summary.settled;
+        total += summary.total;
+      });
+      if (!total) return null;
+      return { settled, total, pct: Math.round(settled / total * 100) };
+    }
+
     function goalFlowHtml(goal) {
       const phases = goalWorkflowSteps();
       if (!phases.length) return "";
@@ -3329,13 +3352,17 @@
       const progress = total
         ? `${t("goal.done", goal.subtask_closed || 0, total)}${goal.subtask_blocked ? ` · ${t("goal.blocked", goal.subtask_blocked)}` : ""}`
         : t("tasks.awaitingTasks");
+      const sp = goalStepProgress(goal);
+      const stepChip = sp
+        ? ` · <span title="${escapeHtml(t("goal.stepProgressTitle"))}">${t("goal.stepProgress", sp.pct)}</span>`
+        : "";
       const historical = ["closed", "accepted"].includes(goal.task_status)
         ? `<span class="badge">${escapeHtml(t("tasks.noActiveGoal"))}</span>` : "";
       return `<div class="goal-execution">
         <div class="goal-execution-summary">
           <div style="min-width:0">
             <div class="goal-execution-title">🎯 #${goal.id} ${escapeHtml(goal.title || t("goal.fallback"))}</div>
-            <div class="meta">${escapeHtml(stLabel(goal.task_status))} · ${escapeHtml(progress)}</div>
+            <div class="meta">${escapeHtml(stLabel(goal.task_status))} · ${escapeHtml(progress)}${stepChip}</div>
           </div>
           ${historical}
         </div>
@@ -3546,17 +3573,32 @@
         ? ` · <span class="meta" title="${escapeHtml(t("goal.budgetChipTitle"))}">💰 ${t("goal.budgetChip", (goal.token_budget / 1e6).toLocaleString())}</span>`
         : "";
       const meta = tokens + budget;
+      const sp = goalStepProgress(goal);
+      const stepChip = sp
+        ? ` · <span class="meta" title="${escapeHtml(t("goal.stepProgressTitle"))}">${t("goal.stepProgress", sp.pct)}</span>`
+        : "";
       // Intake in flight: goal started, hub is splitting it, no subtask cards yet.
       const analyzing = !goal.subtask_total && goal.workflow_step
         && !["stalled", "closed", "accepted"].includes(goal.task_status);
       if (analyzing) {
         return `<span class="goal-analyzing"><span class="spinner"></span>${t("goal.analyzing")}${meta}</span>`;
       }
-      if (!goal.subtask_total) return `<span class="meta">${t("goal.noSubtasks")}${meta}</span>`;
+      if (!goal.subtask_total) {
+        // A direct goal (no work items) still traverses the workflow: its
+        // step-cell progress is the meaningful bar.
+        if (sp) {
+          return `
+        <span class="meta">${t("goal.noSubtasks")}${stepChip}${meta}</span>
+        <div class="goal-progress"><div class="goal-progress-fill" style="width: ${sp.pct}%"></div></div>`;
+        }
+        return `<span class="meta">${t("goal.noSubtasks")}${meta}</span>`;
+      }
+      // Bar tracks step-cell progress (smooth while items interleave across the
+      // pipeline); the text keeps the hard landed-work count.
       const pct = Math.round(goal.subtask_closed / goal.subtask_total * 100);
       return `
-        <span class="meta">${t("goal.done", goal.subtask_closed, goal.subtask_total)}${goal.subtask_blocked ? ` · <span style="color: var(--danger)">${t("goal.blocked", goal.subtask_blocked)}</span>` : ""}${meta}</span>
-        <div class="goal-progress"><div class="goal-progress-fill" style="width: ${pct}%"></div></div>`;
+        <span class="meta">${t("goal.done", goal.subtask_closed, goal.subtask_total)}${goal.subtask_blocked ? ` · <span style="color: var(--danger)">${t("goal.blocked", goal.subtask_blocked)}</span>` : ""}${stepChip}${meta}</span>
+        <div class="goal-progress"><div class="goal-progress-fill" style="width: ${sp ? sp.pct : pct}%"></div></div>`;
     }
 
     function workflowStepName(stepId, fallback) {
