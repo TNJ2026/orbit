@@ -96,7 +96,6 @@ class WorkflowSchemaTests(unittest.TestCase):
             self.assertTrue(steps[isolated]["isolate"], isolated)
         self.assertTrue(steps["integrate"]["integrate"])
         self.assertFalse(steps["integrate"]["isolate"])
-        self.assertEqual("integrator", steps["integrate"]["role_id"])
 
         pairs = {(e["from"], e["to"]) for e in server.default_workflow_edges()}
         self.assertIn(("test", "integrate"), pairs)  # review -> test -> integrate
@@ -112,7 +111,6 @@ class WorkflowSchemaTests(unittest.TestCase):
         # design-first: the goal splits at `decompose` after the design steps.
         self.assertTrue(steps["decompose"]["decompose"])
         self.assertEqual("Decompose", steps["decompose"]["name"])
-        self.assertEqual("hub", steps["decompose"]["role_id"])
         self.assertFalse(steps["decompose"]["isolate"])
         with TemporaryDirectory() as tmp:
             cfg = server.read_workflow_config(tmp)
@@ -300,7 +298,7 @@ class StepPromptTests(unittest.TestCase):
             )
         self.assertIn("Triage 动态配置上下文", p)
         self.assertIn('"workflow"', p)
-        self.assertIn("runner 仅暴露是否可用", p)
+        self.assertIn("引擎解析后的有效 workflow 快照", p)
         self.assertIn("CONFIG_CHECK: ok|warning|blocked", p)
         self.assertIn(server.DEFAULT_STEP_PROMPTS["intake"], p)
 

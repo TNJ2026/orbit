@@ -1860,8 +1860,12 @@ class RunnerScopeTests(unittest.TestCase):
     def test_steps_for_roles_resolves(self):
         with TemporaryDirectory() as tmp:
             EngineHarness(tmp)  # writes the default workflow
-            self.assertEqual(["implement"], server._steps_for_roles(tmp, ["implementer"]))
-            self.assertEqual({"intake", "accept"}, set(server._steps_for_roles(tmp, ["hub"])))
+            # --roles now scopes by step id (or a step's assigned agent).
+            self.assertEqual(["implement"], server._steps_for_roles(tmp, ["implement"]))
+            self.assertEqual(
+                {"intake", "review"},
+                set(server._steps_for_roles(tmp, ["intake", "review"])),
+            )
             self.assertIsNone(server._steps_for_roles(tmp, []))
 
     def test_claim_filters_by_step(self):

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-from importlib import resources
 from pathlib import Path
 
 import uvicorn
@@ -23,9 +22,9 @@ _CLAUDE_MD_SECTION = """
 
 
 def init_project(project_root: Path) -> dict[str, list[str]]:
-    """Bootstrap a project for orbit in one shot: role prompts, default
-    workflow config, gitignore, CLAUDE.md section. Idempotent — existing
-    files are left untouched."""
+    """Bootstrap a project for orbit in one shot: default workflow config,
+    gitignore, CLAUDE.md section. Idempotent — existing files are left
+    untouched."""
     from .server import (
         default_workflow_edges,
         default_workflow_steps,
@@ -38,25 +37,11 @@ def init_project(project_root: Path) -> dict[str, list[str]]:
     def _mark(path: Path, was_created: bool) -> None:
         (created if was_created else skipped).append(str(path.relative_to(project_root)))
 
-    # 1. Role prompts from the packaged templates.
-    agents_dir = project_root / "agents"
-    agents_dir.mkdir(parents=True, exist_ok=True)
-    templates = resources.files("orbit") / "role_templates"
-    for entry in sorted(templates.iterdir(), key=lambda e: e.name):
-        if not entry.name.endswith(".md"):
-            continue
-        dest = agents_dir / entry.name
-        if dest.exists():
-            _mark(dest, False)
-            continue
-        dest.write_text(entry.read_text(encoding="utf-8"), encoding="utf-8")
-        _mark(dest, True)
-
     # Per-project state dir: .orbit for fresh projects, or a legacy .dev_loop
     # if that is what this project already uses.
     state_dir = project_state_dir(project_root)
 
-    # 2. Default workflow (after roles exist, so role validation passes).
+    # 1. Default workflow.
     workflow_path = state_dir / "workflow.json"
     if workflow_path.exists():
         _mark(workflow_path, False)

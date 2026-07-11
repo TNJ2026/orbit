@@ -103,9 +103,6 @@ _TASK_RUN_FILES = {
     "result": "result.md",
     "diff": "diff.patch",
 }
-# Roles a sound default team should provide. The workflow itself remains
-# configurable; write_workflow_config only enforces the older core workflow roles
-# below so custom workflows without an integrate step stay valid.
 TASK_IMPORTANCE_SCORES = {"low": 0, "normal": 10, "high": 25, "critical": 40}
 TASK_SIZE_SCORES = {"small": 0, "medium": 8, "large": 18}
 TASK_RISK_SCORES = {"low": 0, "medium": 10, "high": 25}
@@ -194,18 +191,6 @@ def _parse_int(value: Any, name: str) -> int:
         return int(value)
     except (TypeError, ValueError):
         raise InvalidInputError(f"{name} must be an integer, got {value!r}") from None
-
-
-def _is_valid_role_id(role_id: str) -> bool:
-    return bool(role_id) and role_id.isidentifier() and not role_id.startswith("_")
-
-
-def _validate_role_content(content: Any) -> str:
-    if content is None:
-        raise InvalidInputError("Missing content")
-    if not isinstance(content, str):
-        raise InvalidInputError("Content must be a string")
-    return content
 
 
 def _agent_slug(value: str) -> str:
@@ -332,9 +317,8 @@ def default_workflow_statuses() -> list[dict[str, str]]:
 DEFAULT_STEP_PROMPTS = {
     "intake": (
         "Normalize the Goal into scope, acceptance criteria, constraints, and only genuinely "
-        "blocking ambiguities. Review the supplied effective workflow/team snapshot for role, "
-        "runner, capability, capacity, gate, and rework-path problems. Keep this pass brief; do "
-        "not design, decompose, or implement."
+        "blocking ambiguities. Review the supplied effective workflow snapshot for gate and "
+        "rework-path problems. Keep this pass brief; do not design, decompose, or implement."
     ),
     "product_design": (
         "Define the target users, core scenarios, scope, priorities, constraints, non-goals, and "
@@ -380,7 +364,7 @@ DEFAULT_STEP_PROMPTS = {
 
 
 def default_workflow_steps() -> list[dict[str, Any]]:
-    # (id, name, role_id, required, isolate, integrate, decompose, x, y)
+    # (id, name, required, isolate, integrate, decompose, x, y)
     # isolate: run in a per-task git worktree (implement/test/review all share
     # one worktree per task, so review reads exactly what implement produced).
     # integrate: terminal single-assignee gate that merges the task's worktree
@@ -393,27 +377,26 @@ def default_workflow_steps() -> list[dict[str, Any]]:
     specs = [
         # Fully linear forward chain (design runs sequentially: UI then arch), so
         # every card sits on one row; rework edges loop back underneath.
-        ("intake", "Triage", "hub", True, False, False, False, 40, _DEFAULT_STEP_MID_Y),
-        ("product_design", "Product Design", "product_designer", False, False, False, False, 340, _DEFAULT_STEP_MID_Y),
-        ("ui_design", "UI Design", "ui_designer", False, False, False, False, 640, _DEFAULT_STEP_MID_Y),
-        ("architecture", "Architecture", "architect", False, False, False, False, 940, _DEFAULT_STEP_MID_Y),
-        # decompose: the decomposition gate. Architecture feeds it, and hub splits the
-        # goal into subtasks that begin at implement.
-        ("decompose", "Decompose", "hub", True, False, False, True, 1240, _DEFAULT_STEP_MID_Y),
-        ("implement", "Implement", "implementer", True, True, False, False, 1540, _DEFAULT_STEP_MID_Y),
+        ("intake", "Triage", True, False, False, False, 40, _DEFAULT_STEP_MID_Y),
+        ("product_design", "Product Design", False, False, False, False, 340, _DEFAULT_STEP_MID_Y),
+        ("ui_design", "UI Design", False, False, False, False, 640, _DEFAULT_STEP_MID_Y),
+        ("architecture", "Architecture", False, False, False, False, 940, _DEFAULT_STEP_MID_Y),
+        # decompose: the decomposition gate. Architecture feeds it, and this step
+        # splits the goal into subtasks that begin at implement.
+        ("decompose", "Decompose", True, False, False, True, 1240, _DEFAULT_STEP_MID_Y),
+        ("implement", "Implement", True, True, False, False, 1540, _DEFAULT_STEP_MID_Y),
         # review runs before test: a human/agent review first, then test is the
         # mandatory machine-verification gate. Set test's `verify` command (e.g.
         # the project's test suite) so a failing run objectively sends the task
         # back to implement instead of trusting a self-report.
-        ("review", "Review", "reviewer", True, True, False, False, 1840, _DEFAULT_STEP_MID_Y),
-        ("test", "Test", "tester", False, True, False, False, 2140, _DEFAULT_STEP_MID_Y),
-        ("integrate", "Integrate", "integrator", True, False, True, False, 2440, _DEFAULT_STEP_MID_Y),
+        ("review", "Review", True, True, False, False, 1840, _DEFAULT_STEP_MID_Y),
+        ("test", "Test", False, True, False, False, 2140, _DEFAULT_STEP_MID_Y),
+        ("integrate", "Integrate", True, False, True, False, 2440, _DEFAULT_STEP_MID_Y),
     ]
     return [
         {
             "id": step_id,
             "name": name,
-            "role_id": role_id,
             "required": required,
             "isolate": isolate,
             "integrate": integrate,
@@ -422,7 +405,7 @@ def default_workflow_steps() -> list[dict[str, Any]]:
             "x": x,
             "y": y,
         }
-        for step_id, name, role_id, required, isolate, integrate, decompose, x, y in specs
+        for step_id, name, required, isolate, integrate, decompose, x, y in specs
     ]
 
 
@@ -454,7 +437,6 @@ def _normalize_workflow_step(
         raise InvalidInputError("workflow step must be an object")
     step_id = _agent_slug(str(step.get("id", "") or f"step-{index + 1}"))
     name = str(step.get("name", "") or step_id).strip()
-    role_id = str(step.get("role_id", "")).strip()
     if not name:
         raise InvalidInputError("workflow step name is required")
 
@@ -468,8 +450,6 @@ def _normalize_workflow_step(
             raise InvalidInputError(f"workflow step {key} must be finite")
         return max(0.0, round(value, 2))
 
-    if not _is_valid_role_id(role_id):
-        raise InvalidInputError("workflow step role_id is invalid")
     try:
         timeout_minutes = int(step.get("timeout_minutes", 0) or 0)
     except (TypeError, ValueError):
@@ -497,7 +477,6 @@ def _normalize_workflow_step(
     return {
         "id": step_id,
         "name": name,
-        "role_id": role_id,
         "required": required,
         "required_locked": required_locked,
         "timeout_minutes": timeout_minutes,
@@ -1826,23 +1805,6 @@ def _complete_goal_intake_locked(
 # moving through columns instead of one invisible goal row. The engine still
 # tracks the workflow on the goal task itself; cards are a projection.
 
-def _role_duty_summary(project_root: str | None, role_id: str) -> str:
-    """First bullet under a role's 职责 section — a one-line description of
-    the work that role performs, used as the step card's work summary."""
-    for role in list_agent_roles(_agents_dir(project_root)):
-        if role["id"] != role_id:
-            continue
-        in_duties = False
-        for line in role["content"].splitlines():
-            stripped = line.strip()
-            if stripped.startswith("#"):
-                in_duties = "职责" in stripped
-                continue
-            if in_duties and stripped.startswith("- "):
-                return stripped[2:].strip()
-    return ""
-
-
 def _upsert_step_card(
     store: Store,
     project_root: str | None,
@@ -1869,13 +1831,12 @@ def _upsert_step_card(
         workflow_step=step["id"],
         title=title,
         content=(
-            f"Workflow step '{step['name']}' (role {step['role_id']}) "
-            f"of task #{parent['id']}\n\n{parent.get('content', '')}"
+            f"Workflow step '{step['name']}' of task #{parent['id']}"
+            f"\n\n{parent.get('content', '')}"
         ),
         sender=WORKFLOW_ENGINE_AGENT,
         assignee=assignee,
         status="assigned",
-        role_required=step["role_id"],
         step_inputs=step_inputs,
     )
 
@@ -1936,12 +1897,12 @@ def _dispatch_step(
     _ensure_engine_agent(store)
     if not store.agent_exists(assignee):
         # Pre-register so the dispatch waits in their inbox until they poll.
-        store.register_agent(assignee, f"team member (role: {step['role_id']})")
+        store.register_agent(assignee, f"workflow agent for step {step['id']}")
     content = (
         f"[workflow step: {step['id']}] Task #{task_id}: {task.get('title') or 'untitled'}\n\n"
         f"{task.get('content', '')}\n"
         + (f"\nUpstream result:\n{upstream_result}\n" if upstream_result else "")
-        + f"\nYou are acting as role '{step['role_id']}' for step '{step['name']}'.\n"
+        + f"\nYou are running step '{step['name']}'.\n"
         f"When finished call complete_step(agent=\"{assignee}\", task_id={task_id}, "
         f"step=\"{step['id']}\", outcome=\"done\"|\"rework\"|\"blocked\", result=\"...\")."
     )
@@ -1973,7 +1934,6 @@ def _dispatch_step(
         "step": {
             "id": step["id"],
             "name": step.get("name") or step["id"],
-            "role_id": step.get("role_id") or "",
         },
         "upstream_result": upstream_result or "",
     }
@@ -2626,7 +2586,7 @@ def _triage_config_snapshot(project_root: str | None) -> str:
             "steps": [
                 {
                     "id": step["id"],
-                    "role": step.get("role_id", ""),
+                    "agent": step.get("agent", ""),
                     "required": bool(step.get("required")),
                     "isolate": bool(step.get("isolate")),
                     "integrate": bool(step.get("integrate")),
@@ -2651,11 +2611,6 @@ def _build_step_prompt(
     can_rework: bool = False,
     isolated: bool = False,
 ) -> str:
-    roles = {
-        role["id"]: role["content"]
-        for role in list_agent_roles(_agents_dir(project_root))
-    }
-    role_text = roles.get(step["role_id"], "")
     branch = _worktree_branch(task["id"])
     if step.get("integrate"):
         cwd_line = (
@@ -2679,7 +2634,7 @@ def _build_step_prompt(
     ):
         triage_block = (
             "\n## Triage 动态配置上下文\n"
-            "下面是引擎解析后的有效 workflow/team 快照（runner 仅暴露是否可用，不暴露命令）：\n"
+            "下面是引擎解析后的有效 workflow 快照：\n"
             f"```json\n{_triage_config_snapshot(project_root)}\n```\n"
             "引擎已完成硬性可执行性预检；按本步骤的可编辑 Prompt 做合理性判断。"
             "普通优化建议不得阻塞。结果中附：\n"
@@ -2750,12 +2705,10 @@ def _build_step_prompt(
             "（若你的运行环境提供了用量数字，用真实值；否则可省略该行）。"
         )
     return (
-        f"你是被工作流引擎派发的一次性 worker，以角色 {step['role_id']} 执行"
-        f"步骤 '{step['name']}'。"
+        f"你是被工作流引擎派发的一次性 worker，执行步骤 '{step['name']}'。"
         + cwd_line
         + "本次为工作流引擎的一次性派发执行：直接在当前工作目录完成任务，"
         "不要调用 complete_step，派发器会代为提交结果。\n\n"
-        f"## 角色边界（不得覆盖本步骤契约）\n{role_text}\n\n"
         f"## 任务 #{task['id']}: {task.get('title') or 'untitled'}\n"
         f"{task.get('content', '')}\n\n"
         + triage_block
@@ -4102,7 +4055,6 @@ def run_queued_job(
             return {"job_id": job["id"], "status": "failed", "error": "step missing"}
         member = {
             "agent_name": job["assignee"],
-            "role_id": step["role_id"],
             "runner_command": job["command"],
         }
         # Heartbeat: a long step can outrun the lease; renew it periodically so
@@ -4165,14 +4117,16 @@ def run_queued_job(
 def _steps_for_roles(
     project_root: str | None, roles: list[str] | None
 ) -> list[str] | None:
-    """Resolve role names to the workflow step ids that use them, so a runner
-    scoped to --roles claims only those steps' jobs. None means no role filter."""
-    roles = [r.strip() for r in (roles or []) if r.strip()]
-    if not roles:
+    """Resolve a runner's --roles scope to workflow step ids: a value matches a
+    step by its id or its assigned agent. None means no filter (claim any step)."""
+    wanted = {r.strip() for r in (roles or []) if r.strip()}
+    if not wanted:
         return None
-    wanted = set(roles)
     cfg = read_workflow_config(project_root)
-    return [s["id"] for s in cfg["steps"] if s.get("role_id") in wanted]
+    return [
+        s["id"] for s in cfg["steps"]
+        if s["id"] in wanted or s.get("agent") in wanted
+    ]
 
 
 def runner_loop(
@@ -4827,65 +4781,6 @@ def detect_hermes_profiles(profile_root: Path | None = None) -> list[dict[str, s
     ]
 
 
-def _packaged_role_templates_dir() -> Path:
-    return Path(str(resources.files("orbit") / "role_templates"))
-
-
-def _agents_dir(project_root: str | None) -> Path:
-    # Prefer the project's own roles, then the server cwd's agents/, and as
-    # a last resort the templates bundled in the package — so a fresh project
-    # that never ran `orbit config` still gets the default role set.
-    root = _project_root(project_root) / "agents"
-    if root.is_dir():
-        return root
-    cwd_agents = Path.cwd() / "agents"
-    if cwd_agents.is_dir():
-        return cwd_agents
-    return _packaged_role_templates_dir()
-
-
-def _materialize_role_templates(agents_dir: Path) -> None:
-    """Copy the bundled role set into a project's agents/ dir. Used before
-    the first role edit so overriding one role doesn't hide the others."""
-    agents_dir.mkdir(parents=True, exist_ok=True)
-    templates = _packaged_role_templates_dir()
-    if not templates.is_dir():
-        return
-    for entry in templates.iterdir():
-        if entry.suffix != ".md":
-            continue
-        dest = agents_dir / entry.name
-        if not dest.exists():
-            dest.write_text(entry.read_text(encoding="utf-8"), encoding="utf-8")
-
-
-def list_agent_roles(agents_dir: Path | None = None) -> list[dict[str, str]]:
-    root = agents_dir or (Path.cwd() / "agents")
-    try:
-        files = sorted(root.glob("*.md"), key=lambda path: path.stem)
-    except OSError:
-        return []
-    roles = []
-    for path in files:
-        if not _is_valid_role_id(path.stem):
-            continue
-        try:
-            content = path.read_text(encoding="utf-8")
-        except OSError:
-            continue
-        title = next(
-            (line.lstrip("#").strip() for line in content.splitlines() if line.startswith("#")),
-            path.stem,
-        )
-        roles.append(
-            {
-                "id": path.stem,
-                "name": title,
-                "path": str(path),
-                "content": content,
-            }
-        )
-    return roles
 
 
 def create_server(
@@ -5148,45 +5043,6 @@ def create_server(
             tool["registered"] = agent is not None
             tool["last_seen"] = agent["last_seen"] if agent else None
         return _json(request, {"tools": tools})
-
-    @route("/api/agent-roles", methods=["GET"])
-    async def api_agent_roles(request: Request) -> JSONResponse:
-        if forbidden := _forbid_non_local(request):
-            return forbidden
-        agents_dir = _agents_dir(current_project.get("project_root"))
-        roles = await _to_thread(list_agent_roles, agents_dir)
-        return _json(request, {"roles": roles})
-
-    @route("/api/agent-roles/{role_id}", methods=["POST"])
-    async def api_save_agent_role(request: Request) -> JSONResponse:
-        if forbidden := _forbid_non_local(request):
-            return forbidden
-        role_id = request.path_params.get("role_id")
-        if not role_id or not _is_valid_role_id(role_id):
-            return _json_error("Invalid role ID", request=request)
-        data = await _read_json(request)
-        try:
-            content = _validate_role_content(data.get("content"))
-        except InvalidInputError as exc:
-            return _json_error(str(exc), request=request)
-        project_root = current_project.get("project_root")
-        agents_dir = _agents_dir(project_root)
-        if agents_dir == _packaged_role_templates_dir():
-            # Never write into the installed package: materialize the full
-            # bundled role set into the project and edit that copy, so
-            # overriding one role doesn't hide the rest.
-            agents_dir = _project_root(project_root) / "agents"
-            await _to_thread(_materialize_role_templates, agents_dir)
-        if not agents_dir.is_dir():
-            return _json_error("Agents directory not found", request=request)
-        file_path = (agents_dir / f"{role_id}.md").resolve()
-        if not str(file_path).startswith(str(agents_dir.resolve())):
-            return _json_error("Access denied", request=request)
-        def _write_role():
-            file_path.write_text(content, encoding="utf-8")
-        await _to_thread(_write_role)
-        roles = await _to_thread(list_agent_roles, agents_dir)
-        return _json(request, {"success": True, "roles": roles})
 
     @route("/api/workflow", methods=["GET"])
     async def api_get_workflow(request: Request) -> JSONResponse:

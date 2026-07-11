@@ -16,8 +16,6 @@ class PackagingTests(unittest.TestCase):
             root = Path(tmp)
             first = init_project(root)
 
-            self.assertTrue((root / "agents" / "hub.md").exists())
-            self.assertTrue((root / "agents" / "_protocol.md").exists())
             self.assertTrue((root / ".orbit" / "workflow.json").exists())
             self.assertIn(".orbit/tasks/", (root / ".gitignore").read_text(encoding="utf-8"))
             self.assertIn("多 agent 角色", (root / "CLAUDE.md").read_text(encoding="utf-8"))
@@ -67,30 +65,6 @@ class PackagingTests(unittest.TestCase):
             (root / ".gitignore").write_text("agents\n", encoding="utf-8")
             self.assertEqual([], append_missing_gitignore(root, ["agents/"]))
 
-    def test_agents_dir_falls_back_to_packaged_templates(self):
-        import orbit.server as server
-
-        with TemporaryDirectory() as project, TemporaryDirectory() as cwd:
-            with mock.patch.object(server.Path, "cwd", return_value=Path(cwd)):
-                resolved = server._agents_dir(project)
-            self.assertEqual(server._packaged_role_templates_dir(), resolved)
-            roles = server.list_agent_roles(resolved)
-            self.assertIn("hub", {role["id"] for role in roles})
-
-    def test_materialize_role_templates_fills_project_agents(self):
-        import orbit.server as server
-
-        with TemporaryDirectory() as tmp:
-            agents_dir = Path(tmp) / "agents"
-            server._materialize_role_templates(agents_dir)
-            names = {p.name for p in agents_dir.glob("*.md")}
-            self.assertIn("hub.md", names)
-            self.assertIn("_protocol.md", names)
-            # existing files are not overwritten
-            (agents_dir / "hub.md").write_text("custom", encoding="utf-8")
-            server._materialize_role_templates(agents_dir)
-            self.assertEqual("custom", (agents_dir / "hub.md").read_text(encoding="utf-8"))
-
     def test_create_server_locals_do_not_shadow_module_functions(self):
         # A closure-local function reusing a module-level name shadows it for
         # every call site inside create_server (this once broke workflow start:
@@ -114,34 +88,6 @@ class PackagingTests(unittest.TestCase):
             and node is not create
         }
         self.assertEqual(set(), module_funcs & inner_funcs)
-
-    def test_role_templates_are_packaged(self):
-        templates = resources.files("orbit") / "role_templates"
-        names = {entry.name for entry in templates.iterdir()}
-        for required in (
-            "_protocol.md", "_template.md", "hub.md", "implementer.md",
-            "integrator.md", "reviewer.md",
-        ):
-            self.assertIn(required, names)
-
-    def test_role_prompts_are_compact_boundaries_not_step_protocols(self):
-        templates = resources.files("orbit") / "role_templates"
-        roles = [
-            entry for entry in templates.iterdir()
-            if entry.name.endswith(".md") and not entry.name.startswith("_")
-        ]
-        self.assertTrue(roles)
-        for role in roles:
-            text = role.read_text(encoding="utf-8")
-            with self.subTest(role=role.name):
-                for heading in (
-                    "## Mission", "## Responsibilities", "## Boundaries", "## Judgment"
-                ):
-                    self.assertIn(heading, text)
-                self.assertLessEqual(len(text.split()), 110)
-                self.assertNotIn("WORKFLOW_OUTCOME", text)
-                self.assertNotIn("TOKENS_USED", text)
-                self.assertNotIn("complete_step", text)
 
     def test_ui_asset_is_present_and_loadable(self):
         html = (
@@ -590,64 +536,16 @@ class PackagingTests(unittest.TestCase):
             [{"from": "a", "to": "b"}, {"from": "b", "to": "c"}], loaded["edges"]
         )
 
-    def test_workflow_config_rejects_invalid_step_role(self):
-        import orbit.server as server
-        from orbit.store import InvalidInputError
-
-        with TemporaryDirectory() as tmp:
-            with self.assertRaisesRegex(InvalidInputError, "role_id is invalid"):
-                server.write_workflow_config(
-                    [{"name": "Bad", "role_id": "bad-role"}],
-                    tmp,
-                )
-
-    def test_agent_role_detection_lists_non_private_role_files(self):
-        import orbit.server as server
-
-        with TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "hub.md").write_text("# 角色：hub\n\nbody", encoding="utf-8")
-            (root / "reviewer.md").write_text("# 角色：reviewer\n", encoding="utf-8")
-            (root / "tester.md").write_text("# 角色：tester\n", encoding="utf-8")
-            (root / "bad-name.md").write_text("# bad\n", encoding="utf-8")
-            (root / "123bad.md").write_text("# bad\n", encoding="utf-8")
-            (root / "_protocol.md").write_text("# protocol\n", encoding="utf-8")
-
-            roles = server.list_agent_roles(root)
-
-        self.assertEqual(["hub", "reviewer", "tester"], [role["id"] for role in roles])
-        self.assertEqual("角色：hub", roles[0]["name"])
-        self.assertIn("body", roles[0]["content"])
-
-    def test_role_id_validation_rejects_private_and_non_identifiers(self):
-        import orbit.server as server
-
-        self.assertTrue(server._is_valid_role_id("tester"))
-        self.assertTrue(server._is_valid_role_id("security_auditor"))
-        self.assertFalse(server._is_valid_role_id("_protocol"))
-        self.assertFalse(server._is_valid_role_id("bad-name"))
-        self.assertFalse(server._is_valid_role_id("123bad"))
-
-    def test_role_content_validation_requires_string(self):
-        import orbit.server as server
-        from orbit.store import InvalidInputError
-
-        self.assertEqual("body", server._validate_role_content("body"))
-        with self.assertRaises(InvalidInputError):
-            server._validate_role_content(None)
-        with self.assertRaises(InvalidInputError):
-            server._validate_role_content([])
-
     def test_workflow_steps_have_no_kind_field(self):
-        # Decision nodes were removed: every node is a role-bearing step, and the
-        # normalized config no longer carries a "kind" field. Branching is
-        # expressed with plain edges (parallel/merge) and rework loop-backs.
+        # Every node is a plain step; the normalized config carries no "kind"
+        # field. Branching is expressed with edges (parallel/merge) and rework
+        # loop-backs.
         import orbit.server as server
 
         steps = [
-            {"id": "intake", "name": "Triage", "role_id": "hub", "task_status": "created", "required": True},
-            {"id": "implement", "name": "Implement", "role_id": "implementer", "task_status": "in_progress", "required": True},
-            {"id": "review", "name": "Review", "role_id": "reviewer", "task_status": "in_progress", "required": True},
+            {"id": "intake", "name": "Triage", "required": True},
+            {"id": "implement", "name": "Implement", "required": True},
+            {"id": "review", "name": "Review", "required": True},
         ]
         edges = [
             {"from": "intake", "to": "implement"},
@@ -661,21 +559,7 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual(saved, loaded)
         for step in loaded["steps"]:
             self.assertNotIn("kind", step)
-            self.assertTrue(step["role_id"])
-
-    def test_workflow_decision_node_is_rejected(self):
-        # A former decision node (kind set, no role) is no longer accepted: with
-        # decisions gone it normalizes as a plain step and fails role validation.
-        import orbit.server as server
-        from orbit.store import InvalidInputError
-
-        steps = [
-            {"id": "intake", "name": "Triage", "role_id": "hub", "task_status": "created", "required": True},
-            {"id": "branch_decision", "name": "Branch Decision", "kind": "decision"},
-        ]
-        with TemporaryDirectory() as tmp:
-            with self.assertRaises(InvalidInputError):
-                server.write_workflow_config(steps, tmp, edges=[{"from": "intake", "to": "branch_decision"}])
+            self.assertNotIn("role_id", step)
 
 
 if __name__ == "__main__":
