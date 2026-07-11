@@ -1590,7 +1590,13 @@
     <div class="modal" role="dialog" aria-modal="true" aria-labelledby="addStepModalTitle">
       <div id="addStepModalTitle" class="modal-title" data-i18n="modal.addStep.title">Add workflow step</div>
       <label><div class="meta" data-i18n="modal.addStep.name">Name</div><input id="addStepName" type="text" placeholder="Step name" data-i18n-ph="modal.addStep.namePh"></label>
-      <label><div class="meta" data-i18n="modal.addStep.agent">Agents (up to 3 — first runs the step; 2-3 spread across decompose subtasks)</div><div id="addStepAgents" style="display:flex;flex-direction:column;gap:5px;padding:6px 0;"></div></label>
+      <div>
+        <div class="meta" style="display:flex;align-items:center;justify-content:space-between;">
+          <span data-i18n="modal.addStep.agent">Agents</span>
+          <button type="button" id="addStepAgentAdd" title="Add another agent" data-i18n-title="modal.addStep.agentAdd" style="border:1px dashed var(--line);background:none;cursor:pointer;color:var(--accent);border-radius:6px;padding:0 9px;font-size:15px;line-height:1.5;">＋</button>
+        </div>
+        <div id="addStepAgents" style="display:flex;flex-direction:column;gap:5px;padding:6px 0;"></div>
+      </div>
       <label><div class="meta" data-i18n="modal.addStep.command">Command (optional)</div><input id="addStepCommand" type="text" placeholder="runner CLI — blank uses the default command" data-i18n-ph="modal.addStep.commandPh"></label>
       <label id="addStepRequiredField" class="modal-check"><input id="addStepRequired" type="checkbox"><span class="meta" data-i18n="modal.addStep.required">Required (a step the flow must include)</span></label>
       <label><div class="meta" data-i18n="modal.addStep.prompt">Step prompt</div><textarea id="addStepPrompt" rows="7" data-i18n-ph="modal.addStep.promptPh" placeholder="Additional instructions for this step" style="width:100%;resize:vertical;"></textarea><div class="meta" data-i18n="modal.addStep.promptHint">Appended to the generated step instructions; the engine output protocol still takes priority.</div></label>
@@ -1697,7 +1703,7 @@
         "action.close": "Close",
         "modal.addStep.title": "Add workflow step", "modal.addStep.editTitle": "Edit step",
         "modal.addStep.name": "Name", "modal.addStep.namePh": "Step name",
-        "modal.addStep.agent": "Agents (up to 3 — first runs the step; 2-3 spread across decompose subtasks)", "modal.addStep.agentPh": "e.g. claude-code — blank uses the step id",
+        "modal.addStep.agent": "Agents", "modal.addStep.agentPh": "e.g. claude-code — blank uses the step id",
         "modal.addStep.agentDefault": "— use the step id —", "modal.addStep.agentMissing": "(not installed)",
         "modal.addStep.agentAdd": "Add another agent", "modal.addStep.agentRemove": "Remove",
         "modal.addStep.command": "Command (optional)", "modal.addStep.commandPh": "runner CLI — blank uses the default command",
@@ -1842,7 +1848,7 @@
         "action.close": "关闭",
         "modal.addStep.title": "添加工作流步骤", "modal.addStep.editTitle": "编辑步骤",
         "modal.addStep.name": "名称", "modal.addStep.namePh": "步骤名称",
-        "modal.addStep.agent": "Agent（最多 3 个 —— 第一个跑本步；2-3 个分摊给 decompose 子任务）", "modal.addStep.agentPh": "如 claude-code —— 留空用步骤 id",
+        "modal.addStep.agent": "Agent", "modal.addStep.agentPh": "如 claude-code —— 留空用步骤 id",
         "modal.addStep.agentDefault": "—— 用步骤 id ——", "modal.addStep.agentMissing": "(未安装)",
         "modal.addStep.agentAdd": "加一个 agent", "modal.addStep.agentRemove": "移除",
         "modal.addStep.command": "命令（可选）", "modal.addStep.commandPh": "runner CLI —— 留空用默认命令",
@@ -2839,10 +2845,7 @@
           <select class="step-agent-sel" data-i="${i}" style="flex:1;">${opts.join("")}</select>${rm}
         </div>`;
       }).join("");
-      const add = rows.length < 3
-        ? `<button type="button" id="addStepAgentAdd" title="${t("modal.addStep.agentAdd")}" style="align-self:flex-start;border:1px dashed var(--line);background:none;cursor:pointer;color:var(--accent);border-radius:6px;padding:1px 12px;font-size:15px;line-height:1.4;">＋</button>`
-        : "";
-      $("addStepAgents").innerHTML = rowsHtml + add;
+      $("addStepAgents").innerHTML = rowsHtml;
       document.querySelectorAll("#addStepAgents .step-agent-sel").forEach(sel => {
         sel.addEventListener("change", () => { stepAgentRows[+sel.dataset.i] = sel.value; renderAgentSelectors(); });
       });
@@ -2852,8 +2855,9 @@
           renderAgentSelectors();
         });
       });
+      // The ＋ lives in the Agents title row (static markup); hide it at 3 rows.
       const addBtn = $("addStepAgentAdd");
-      if (addBtn) addBtn.addEventListener("click", () => { stepAgentRows.push(""); renderAgentSelectors(); });
+      if (addBtn) addBtn.style.display = rows.length < 3 ? "" : "none";
     }
 
     function setStepAgents(agents) {
@@ -3777,6 +3781,7 @@
     $("addStepCancel").addEventListener("click", closeAddStepModal);
     $("addStepConfirm").addEventListener("click", confirmStep);
     $("addStepDelete").addEventListener("click", deleteStepFromModal);
+    $("addStepAgentAdd").addEventListener("click", () => { if (stepAgentRows.length < 3) { stepAgentRows.push(""); renderAgentSelectors(); } });
     $("addStepName").addEventListener("keydown", (e) => {
       if (e.key === "Enter") confirmStep();
       else if (e.key === "Escape") closeAddStepModal();
