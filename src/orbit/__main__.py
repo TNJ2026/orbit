@@ -12,19 +12,10 @@ from .project_index import upsert_project
 from .store import Store, project_db_path, project_state_dir, resolve_project_root
 from .server import create_server, runner_loop
 
-_CLAUDE_MD_SECTION = """
-## 多 agent 角色
-
-本项目用 Orbit 做多 agent 工作流协作。如果启动时被指定了角色\
-（如「按 agents/hub.md 工作」），读取 `agents/<role>.md` 并遵循；\
-执行约定见 `agents/_protocol.md`。未指定角色时忽略本节。
-"""
-
 
 def init_project(project_root: Path) -> dict[str, list[str]]:
-    """Bootstrap a project for orbit in one shot: default workflow config,
-    gitignore, CLAUDE.md section. Idempotent — existing files are left
-    untouched."""
+    """Bootstrap a project for orbit in one shot: default workflow config and
+    gitignore. Idempotent — existing files are left untouched."""
     from .server import (
         default_workflow_edges,
         default_workflow_steps,
@@ -65,15 +56,6 @@ def init_project(project_root: Path) -> dict[str, list[str]]:
             encoding="utf-8",
         )
         _mark(gitignore, True)
-
-    # 5. CLAUDE.md pointer so role-assigned sessions know where to look.
-    claude_md = project_root / "CLAUDE.md"
-    existing = claude_md.read_text(encoding="utf-8") if claude_md.exists() else ""
-    if "多 agent 角色" in existing:
-        _mark(claude_md, False)
-    else:
-        claude_md.write_text(existing + _CLAUDE_MD_SECTION, encoding="utf-8")
-        _mark(claude_md, True)
 
     return {"created": created, "skipped": skipped}
 
@@ -282,16 +264,15 @@ def main() -> None:
     if args.command in ("start", "up"):
         project_root = resolve_project_root()
         state_name = project_state_dir(project_root).name
-        # Ignore the state dir and agents/: under `start` a UI role edit materializes
-        # agents/ into the repo on demand, so keep it out of git too — `start` copies
-        # nothing you need to commit. (A committed agents/ stays tracked regardless.)
-        added = append_missing_gitignore(project_root, [f"{state_name}/", "agents/"])
+        # Keep the per-project state dir out of git; `start` copies nothing you
+        # need to commit.
+        added = append_missing_gitignore(project_root, [f"{state_name}/"])
         if added:
             print(f"gitignore: added {', '.join(added)}", flush=True)
         else:
-            print(f"gitignore: {state_name}/ and agents/ already ignored", flush=True)
+            print(f"gitignore: {state_name}/ already ignored", flush=True)
         print(
-            "orbit start: serving with packaged role/workflow defaults — no files "
+            "orbit start: serving with packaged workflow defaults — no files "
             "copied into the repo. Run `orbit config` to customize and commit them.",
             flush=True,
         )

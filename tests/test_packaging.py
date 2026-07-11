@@ -18,7 +18,6 @@ class PackagingTests(unittest.TestCase):
 
             self.assertTrue((root / ".orbit" / "workflow.json").exists())
             self.assertIn(".orbit/tasks/", (root / ".gitignore").read_text(encoding="utf-8"))
-            self.assertIn("多 agent 角色", (root / "CLAUDE.md").read_text(encoding="utf-8"))
             self.assertTrue(first["created"])
 
             # second run touches nothing
@@ -101,16 +100,11 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("/api/projects", html)
         self.assertIn('id="agentTools"', html)
         self.assertIn('id="toolsTab"', html)
-        self.assertIn('id="teamTab"', html)
         self.assertIn('id="workflowTab"', html)
-        self.assertIn('id="rolesTab"', html)
         self.assertIn('id="tasksTab"', html)
         self.assertIn('id="toolsPage"', html)
-        self.assertIn('id="teamPage"', html)
         self.assertIn('id="workflowPage"', html)
-        self.assertIn('id="rolesPage"', html)
         self.assertIn('id="tasksPage"', html)
-        self.assertIn('id="agentRoles"', html)
         self.assertIn('id="tasksList"', html)
         self.assertIn('id="taskDetails"', html)
         self.assertIn('id="toggleTaskDetails"', html)
@@ -126,8 +120,6 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("tool.profile_path", html)
         self.assertIn("function setPage(page)", html)
         self.assertIn("/api/agent-tools", html)
-        self.assertIn("/api/agent-roles", html)
-        self.assertIn("/api/team", html)
         self.assertIn("/api/workflow", html)
         self.assertIn("/api/tasks?limit=200", html)
         self.assertIn("/api/tasks/${goalId}/status", html)
@@ -140,10 +132,13 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("/api/tasks/${taskId}/rerun", html)
         self.assertNotIn("function createTaskRun(taskId)", html)
         self.assertIn("function renderTaskRuns()", html)
-        self.assertIn("function renderRoles()", html)
-        self.assertIn("function renderTeam()", html)
-        self.assertIn("function addTeamMember()", html)
         self.assertIn("function renderWorkflow()", html)
+        # Role/team UI is gone: steps assign their own agent + command.
+        self.assertNotIn("function renderRoles()", html)
+        self.assertNotIn("function renderTeam()", html)
+        self.assertIn('id="addStepAgent"', html)
+        self.assertIn('id="addStepCommand"', html)
+        self.assertIn('id="setDefaultCommand"', html)
         # The Add-step toolbar tool opens the modal (add); double-click opens it
         # (edit). No standalone Add-step button in the pane header.
         self.assertIn("function saveEditStep()", html)
@@ -198,18 +193,13 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("function toggleStep(", html)            # inline-expand step detail
         self.assertIn('class="step-item', html)
         self.assertNotIn('id="jobsTab"', html)                 # jobs page removed
-        self.assertIn('id="teamRequirements"', html)
-        self.assertIn('team-requirements-list', html)
+        self.assertNotIn('id="teamRequirements"', html)        # team page removed
         self.assertNotIn('const REQUIRED_TEAM_ROLES', html)
         self.assertNotIn("function recommendAgent(taskId)", html)
         self.assertNotIn("function renderAssignmentCandidates()", html)
         self.assertNotIn("/api/tasks/${taskId}/assignment-candidates", html)
-        self.assertIn("Expertise", html)
-        self.assertIn("capability subscriptions", html)
         self.assertNotIn("Weight", html)
-        self.assertIn("function wireRoleActionButtons()", html)
-        self.assertIn('data-action="edit"', html)
-        self.assertIn('data-role-id=', html)
+        self.assertNotIn("function wireRoleActionButtons()", html)  # roles page removed
         self.assertIn("selectedProjectId", html)
         self.assertIn("async function refreshWorkspace()", html)
         self.assertIn("function wireRefresh(", html)
@@ -218,9 +208,7 @@ class PackagingTests(unittest.TestCase):
         self.assertNotIn("function completeTaskStep(", html)
         for button_id in (
             "refreshTools",
-            "refreshTeam",
             "refreshWorkflow",
-            "refreshRoles",
             "refreshTasks",
         ):
             self.assertIn(f'wireRefresh("{button_id}"', html)

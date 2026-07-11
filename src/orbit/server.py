@@ -500,13 +500,11 @@ def _normalize_workflow_step(
         # agent, in the same working tree. Its real exit code overrides the
         # agent's self-reported `done` (a failing gate the agent can't fake).
         "verify": str(step.get("verify", "") or "").strip(),
-        # command: an explicit runner CLI for this step. When set, dispatch runs
-        # it directly instead of resolving the step's role to a team member's
-        # command — the step binds itself to a CLI.
+        # command: the runner CLI for this step. Empty falls back to
+        # settings.default_command.
         "command": str(step.get("command", "") or "").strip(),
-        # agent: the assignee this step dispatches to. When set it binds directly,
-        # skipping team role matchmaking. Empty falls back to team ranking (which
-        # goes away once roles/teams are removed).
+        # agent: the assignee this step dispatches to. Empty falls back to the
+        # step id.
         "agent": str(step.get("agent", "") or "").strip(),
         "x": _coord("x", 40 + index * 300),
         "y": _coord("y", _DEFAULT_STEP_MID_Y),
@@ -1733,8 +1731,8 @@ def _complete_goal_intake_locked(
             intake_card["id"],
             result_summary=f"Created {len(subtasks)} work item(s)",
         )
-    # Re-validate workflow/team/state before dispatching the business subtasks.
-    # The goal passed this gate at creation, but team/workflow config can change
+    # Re-validate workflow/state before dispatching the business subtasks.
+    # The goal passed this gate at creation, but the workflow config can change
     # while intake is being worked; refuse to dispatch a batch that would only
     # strand subtasks as blocked, and surface the reason to hub. Runs before the
     # settle below so a failed precondition leaves intake open for retry.
@@ -2038,7 +2036,7 @@ def rerun_workflow_step(
 
     Used by the task panel to recover a step that blocked — e.g. the assigned
     CLI hit a rate/session limit — by re-dispatching it to a different agent
-    (a different model) without editing the team. Records a fresh dispatch to
+    (a different model) without editing the workflow. Records a fresh dispatch to
     `agent` for the step and spawns its runner; on success the engine advances
     as usual."""
     agent = (agent or "").strip()
@@ -2573,12 +2571,11 @@ def _parse_run_tokens(stdout: str, stderr: str) -> int | None:
 
 
 def _triage_config_snapshot(project_root: str | None) -> str:
-    """Return a compact, non-secret view of the effective workflow and team.
+    """Return a compact, non-secret view of the effective workflow.
 
     Goal preflight already rejects mechanically unexecutable configurations.
-    Triage receives this snapshot to judge whether the remaining role choices,
-    optional gates, and capacity are sensible for the requested goal without
-    exposing full runner commands in the prompt.
+    Triage receives this snapshot to judge whether the steps, optional gates,
+    and rework paths are sensible for the requested goal.
     """
     workflow = read_workflow_config(project_root)
     snapshot = {

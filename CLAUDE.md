@@ -1,11 +1,8 @@
 # orbit
 
-本地多 agent 工作流编排器：任务在一张工作流图上流转，runner 把每个步骤交给对应的 agent CLI 执行。Python + Starlette + uvicorn（依赖 `starlette` + `uvicorn`）。
+本地多 agent 工作流编排器：任务在一张工作流图上流转，runner 把每个步骤交给它指定的 agent CLI 执行。每个步骤自带 `agent`（谁执行）和 `command`（跑什么 CLI），没有角色/团队中间层。Python + Starlette + uvicorn（依赖 `starlette` + `uvicorn`）。
 
 - 启动：`uv run orbit serve`（UI + 调度 + 内嵌 runner；Web UI 在 127.0.0.1:8848/ui，db 默认按当前项目目录分开存储）
 - 代码：`src/orbit/`（`store.py` SQLite 层，`server.py` 工作流引擎 + Web UI/HTTP API，Starlette + uvicorn 托管）
 - 测试：`.venv/bin/python -m unittest discover -s tests -v`
-
-## 多 agent 角色
-
-本仓库用 orbit 做多 agent 协作。如果启动时被指定了角色（如「按 agents/hub.md 工作」），读取 `agents/<role>.md` 并遵循；执行约定见 `agents/_protocol.md`。未指定角色时忽略本节。
+- 步骤命令：步骤未设 `command` 时回落 `settings.default_command`；`settings.hub_command` 供卡死巡检。

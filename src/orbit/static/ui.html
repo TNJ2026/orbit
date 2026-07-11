@@ -1458,9 +1458,7 @@
     <aside class="side-menu" aria-label="View">
       <button id="goalsTab" class="menu-button" type="button" data-i18n="tab.goals">Goals</button>
       <button id="tasksTab" class="menu-button active" type="button" data-i18n="tab.tasks">Execution</button>
-      <button id="teamTab" class="menu-button" type="button" data-i18n="tab.team">Team</button>
       <button id="workflowTab" class="menu-button" type="button" data-i18n="tab.workflow">Workflow</button>
-      <button id="rolesTab" class="menu-button" type="button" data-i18n="tab.roles">Roles</button>
       <button id="toolsTab" class="menu-button" type="button" data-i18n="tab.agents">Agents</button>
       <button id="settingsTab" class="menu-button" type="button" data-i18n="tab.settings">Settings</button>
     </aside>
@@ -1522,28 +1520,6 @@
       </div>
       <div id="agentTools" class="tools-grid"></div>
     </div>
-    <div id="teamPage" class="page team-page">
-      <div class="pane-head">
-        <h2 data-i18n="team.title">Team</h2>
-        <button id="refreshTeam" data-i18n="team.refresh">Refresh</button>
-      </div>
-      <div class="team-layout">
-        <div id="teamMembers"></div>
-        <div class="team-builder stack">
-          <label>
-            <div class="meta" data-i18n="team.role">Role</div>
-            <select id="teamRoleSelect"></select>
-          </label>
-          <label>
-            <div class="meta" data-i18n="team.agent">Agent</div>
-            <select id="teamAgentSelect"></select>
-          </label>
-          <button id="addTeamMember" class="primary" type="button" data-i18n="team.add">Add to Team</button>
-          <div id="teamPath" class="meta"></div>
-          <div id="teamRequirements" class="team-requirements"></div>
-        </div>
-      </div>
-    </div>
     <div id="workflowPage" class="page workflow-page">
       <div class="pane-head">
         <h2 data-i18n="workflow.title">Workflow</h2>
@@ -1553,13 +1529,6 @@
       </div>
       <div id="workflowPath" class="meta" style="padding: 10px 12px;"></div>
       <div id="workflowSteps"></div>
-    </div>
-    <div id="rolesPage" class="page roles-page">
-      <div class="pane-head">
-        <h2 data-i18n="roles.title">Workflow Roles</h2>
-        <button id="refreshRoles" data-i18n="roles.refresh">Refresh</button>
-      </div>
-      <div id="agentRoles"></div>
     </div>
     <div id="settingsPage" class="page settings-page">
       <div class="pane-head">
@@ -1583,6 +1552,16 @@
           <input id="setMaxConcurrent" type="number" min="1" max="6" step="1" style="width:120px;">
           <span class="meta" style="font-size:11px;" data-i18n="settings.maxConcurrentHint">How many workflow steps run at the same time across all runners.</span>
         </label>
+        <label style="display:flex; flex-direction:column; gap:5px; font-size:13px;">
+          <span data-i18n="settings.defaultCommand">Default runner command</span>
+          <input id="setDefaultCommand" type="text" placeholder="e.g. claude -p --dangerously-skip-permissions" style="width:100%;">
+          <span class="meta" style="font-size:11px;" data-i18n="settings.defaultCommandHint">Runs any step that does not set its own command. The prompt is piped on stdin.</span>
+        </label>
+        <label style="display:flex; flex-direction:column; gap:5px; font-size:13px;">
+          <span data-i18n="settings.hubCommand">Hub supervision command</span>
+          <input id="setHubCommand" type="text" placeholder="optional — CLI used to judge stuck steps" style="width:100%;">
+          <span class="meta" style="font-size:11px;" data-i18n="settings.hubCommandHint">Used to inspect long-silent steps and decide kill/continue. Blank disables supervision.</span>
+        </label>
         <div><button id="saveSettings" class="primary" type="button" data-i18n="settings.save">Save</button></div>
       </div>
     </div>
@@ -1601,7 +1580,8 @@
     <div class="modal" role="dialog" aria-modal="true" aria-labelledby="addStepModalTitle">
       <div id="addStepModalTitle" class="modal-title" data-i18n="modal.addStep.title">Add workflow step</div>
       <label><div class="meta" data-i18n="modal.addStep.name">Name</div><input id="addStepName" type="text" placeholder="Step name" data-i18n-ph="modal.addStep.namePh"></label>
-      <label id="addStepRoleField"><div class="meta" data-i18n="modal.addStep.role">Role</div><select id="addStepRole"></select></label>
+      <label><div class="meta" data-i18n="modal.addStep.agent">Agent (optional)</div><input id="addStepAgent" type="text" placeholder="e.g. claude-code — blank uses the step id" data-i18n-ph="modal.addStep.agentPh"></label>
+      <label><div class="meta" data-i18n="modal.addStep.command">Command (optional)</div><input id="addStepCommand" type="text" placeholder="runner CLI — blank uses the default command" data-i18n-ph="modal.addStep.commandPh"></label>
       <label id="addStepRequiredField" class="modal-check"><input id="addStepRequired" type="checkbox"><span class="meta" data-i18n="modal.addStep.required">Required (a step the flow must include)</span></label>
       <label><div class="meta" data-i18n="modal.addStep.prompt">Step prompt</div><textarea id="addStepPrompt" rows="7" data-i18n-ph="modal.addStep.promptPh" placeholder="Additional instructions for this step" style="width:100%;resize:vertical;"></textarea><div class="meta" data-i18n="modal.addStep.promptHint">Appended to the generated step instructions; the engine output protocol still takes priority.</div></label>
       <div class="modal-actions">
@@ -1667,6 +1647,10 @@
         "settings.maxReworkHint": "How many times a step may loop back before the engine blocks the task for the hub.",
         "settings.maxConcurrent": "Max concurrent tasks (1–6)",
         "settings.maxConcurrentHint": "How many workflow steps run at the same time across all runners.",
+        "settings.defaultCommand": "Default runner command",
+        "settings.defaultCommandHint": "Runs any step that does not set its own command. The prompt is piped on stdin.",
+        "settings.hubCommand": "Hub supervision command",
+        "settings.hubCommandHint": "Used to inspect long-silent steps and decide kill/continue. Blank disables supervision.",
         "settings.save": "Save",
         "settings.saved": "Settings saved",
         "lang.label": "Language",
@@ -1698,7 +1682,8 @@
         "action.close": "Close",
         "modal.addStep.title": "Add workflow step", "modal.addStep.editTitle": "Edit step",
         "modal.addStep.name": "Name", "modal.addStep.namePh": "Step name",
-        "modal.addStep.role": "Role",
+        "modal.addStep.agent": "Agent (optional)", "modal.addStep.agentPh": "e.g. claude-code — blank uses the step id",
+        "modal.addStep.command": "Command (optional)", "modal.addStep.commandPh": "runner CLI — blank uses the default command",
         "modal.addStep.required": "Required (a step the flow must include)",
         "modal.addStep.prompt": "Step prompt", "modal.addStep.promptPh": "Additional instructions for this step",
         "modal.addStep.promptHint": "Appended to the generated step instructions; the engine output protocol still takes priority.",
@@ -1800,6 +1785,10 @@
         "settings.maxReworkHint": "一个步骤最多返工多少次后，引擎将任务打回给 hub 阻塞。",
         "settings.maxConcurrent": "最大同时任务数 (1–6)",
         "settings.maxConcurrentHint": "所有 runner 加起来同时运行多少个工作流步骤。",
+        "settings.defaultCommand": "默认 runner 命令",
+        "settings.defaultCommandHint": "未单独设置命令的步骤都用它执行；prompt 通过 stdin 传入。",
+        "settings.hubCommand": "Hub 监督命令",
+        "settings.hubCommandHint": "用于巡检长时间无输出的步骤并裁决 kill/continue；留空则关闭监督。",
         "settings.save": "保存",
         "settings.saved": "设置已保存",
         "lang.label": "语言",
@@ -1831,7 +1820,8 @@
         "action.close": "关闭",
         "modal.addStep.title": "添加工作流步骤", "modal.addStep.editTitle": "编辑步骤",
         "modal.addStep.name": "名称", "modal.addStep.namePh": "步骤名称",
-        "modal.addStep.role": "角色",
+        "modal.addStep.agent": "Agent（可选）", "modal.addStep.agentPh": "如 claude-code —— 留空用步骤 id",
+        "modal.addStep.command": "命令（可选）", "modal.addStep.commandPh": "runner CLI —— 留空用默认命令",
         "modal.addStep.required": "必选（流程必须包含的步骤）",
         "modal.addStep.prompt": "步骤 Prompt", "modal.addStep.promptPh": "该步骤的附加执行指令",
         "modal.addStep.promptHint": "追加到引擎生成的步骤指令中；引擎输出协议仍具有最高优先级。",
@@ -1952,14 +1942,14 @@
       localStorage.setItem("orbit-lang", LANG);
       applyStaticI18n();
       // Re-render all dynamic content so the new locale takes effect everywhere.
-      renderTools(); renderTeam(); renderRoles(); renderWorkflow(); renderTasks(); renderGoals();
+      renderTools(); renderWorkflow(); renderTasks(); renderGoals();
       renderTasksGoalBar();
       renderTaskDetails(state.tasks.find(t0 => t0.id === state.selectedTaskId) || null);
       const sel = $("langSelect");
       if (sel) sel.value = LANG;
     }
 
-    const PAGES = ["goals", "tasks", "tools", "team", "workflow", "roles", "settings"];
+    const PAGES = ["goals", "tasks", "tools", "workflow", "settings"];
     function setPage(page) {
       if (!PAGES.includes(page)) page = "tasks";
       PAGES.forEach(name => {
@@ -2002,8 +1992,11 @@
       try {
         const s = await api("/api/settings");
         const rework = $("setMaxRework"), concurrent = $("setMaxConcurrent");
+        const defCmd = $("setDefaultCommand"), hubCmd = $("setHubCommand");
         if (rework && document.activeElement !== rework) rework.value = s.max_rework_rounds;
         if (concurrent && document.activeElement !== concurrent) concurrent.value = s.max_concurrent_tasks;
+        if (defCmd && document.activeElement !== defCmd) defCmd.value = s.default_command || "";
+        if (hubCmd && document.activeElement !== hubCmd) hubCmd.value = s.hub_command || "";
       } catch (err) { /* offline project: leave inputs as-is */ }
     }
 
@@ -2013,20 +2006,22 @@
           method: "POST",
           body: JSON.stringify({
             max_rework_rounds: parseInt($("setMaxRework").value, 10),
-            max_concurrent_tasks: parseInt($("setMaxConcurrent").value, 10)
+            max_concurrent_tasks: parseInt($("setMaxConcurrent").value, 10),
+            default_command: $("setDefaultCommand").value,
+            hub_command: $("setHubCommand").value
           })
         });
         // Reflect the server's clamped values back into the inputs.
         $("setMaxRework").value = s.max_rework_rounds;
         $("setMaxConcurrent").value = s.max_concurrent_tasks;
+        $("setDefaultCommand").value = s.default_command || "";
+        $("setHubCommand").value = s.hub_command || "";
         setStatus(t("settings.saved"));
       });
     }
 
     function clearWorkspace() {
       state.tools = [];
-      state.roles = [];
-      state.team = { members: [], path: "" };
       state.workflow = { steps: [], statuses: [], edges: [], path: "" };
       state.tasks = [];
       state.selectedTaskId = null;
@@ -2037,8 +2032,6 @@
       state.selectedRunFileKey = "events";
       state.runFiles = {};
       renderTools();
-      renderRoles();
-      renderTeam();
       renderWorkflow();
       renderTasks();
       renderTaskDetails(null);
@@ -2114,28 +2107,6 @@
       renderTools();
     }
 
-    async function loadRoles() {
-      if (!state.apiBase) {
-        state.roles = [];
-        renderRoles();
-        return;
-      }
-      const data = await api("/api/agent-roles");
-      state.roles = data.roles || [];
-      renderRoles();
-    }
-
-    async function loadTeam() {
-      if (!state.apiBase) {
-        state.team = { members: [], path: "" };
-        renderTeam();
-        return;
-      }
-      const data = await api("/api/team");
-      state.team = { members: data.members || [], path: data.path || "" };
-      renderTeam();
-    }
-
     async function loadWorkflow() {
       if (!state.apiBase) {
         state.workflow = { steps: [], statuses: [], edges: [], path: "" };
@@ -2155,7 +2126,6 @@
       // must not write the config (and the server locks workflow saves while
       // tasks are running).
       renderWorkflow();
-      renderTeam();
     }
 
     async function loadStatus() {
@@ -2174,12 +2144,7 @@
       await loadProjects();
       await loadStatus();
       await loadTools();
-      await loadRoles();
-      // Workflow before team: renderTeam derives the required roles from the
-      // workflow steps, so state.workflow must be populated first (otherwise the
-      // Team page's requirements read empty on the initial load).
       await loadWorkflow();
-      await loadTeam();
       await loadTasks();
       await loadGoals();
     }
@@ -2207,221 +2172,6 @@
           ` : ""}
         </div>
       `).join("") : `<div class="empty">${t("tool.noTools")}</div>`;
-    }
-
-    function renderTeam() {
-      const roleSelect = $("teamRoleSelect");
-      const agentSelect = $("teamAgentSelect");
-      if (!roleSelect || !agentSelect) return;
-      const enabledRoles = new Set((state.team.members || [])
-        .filter(member => member.enabled)
-        .map(member => member.role_id));
-      // Roles referenced by workflow steps — every one needs an enabled member.
-      const wfRoleIds = [];
-      const seen = new Set();
-      (state.workflow.steps || []).forEach(s => {
-        const rid = s.role_id;
-        if (rid && !seen.has(rid)) { seen.add(rid); wfRoleIds.push(rid); }
-      });
-      const missingRoles = wfRoleIds.filter(rid => !enabledRoles.has(rid));
-      const wfRoleSet = new Set(wfRoleIds);
-      const prevRole = roleSelect.value;
-      roleSelect.innerHTML = state.roles.length ? state.roles.map(role => `
-        <option value="${escapeHtml(role.id)}">${escapeHtml(role.id)}</option>
-      `).join("") : `<option value="">${t("team.noRoles")}</option>`;
-      // Keep the user's selection across re-renders; otherwise suggest the
-      // first still-missing required role.
-      if (prevRole && state.roles.some(role => role.id === prevRole)) {
-        roleSelect.value = prevRole;
-      } else if (missingRoles.length && state.roles.some(role => role.id === missingRoles[0])) {
-        roleSelect.value = missingRoles[0];
-      }
-      const prevAgent = agentSelect.value;
-      // Only installed agents can actually run, so don't offer the rest.
-      const installedTools = state.tools.filter(tool => tool.installed);
-      agentSelect.innerHTML = installedTools.length ? installedTools.map(tool => `
-        <option value="${escapeHtml(tool.agent_name)}">${escapeHtml(tool.agent_name)} - ${escapeHtml(tool.profile_name ? "Hermes" : tool.name)}</option>
-      `).join("") : `<option value="">${t("team.noAgents")}</option>`;
-      if (prevAgent && installedTools.some(tool => tool.agent_name === prevAgent)) {
-        agentSelect.value = prevAgent;
-      }
-      $("teamPath").textContent = state.team.path ? t("team.config", state.team.path) : "";
-      // Required roles are derived from the workflow steps: every role a step
-      // references must have an enabled team member to run it.
-      const allPresent = wfRoleIds.length > 0 && wfRoleIds.every(rid => enabledRoles.has(rid));
-      const titleColor = wfRoleIds.length === 0 ? "var(--muted)" : (allPresent ? "var(--accent)" : "var(--danger)");
-      const reqHtml = wfRoleIds.length ? wfRoleIds.map(rid => {
-        const present = enabledRoles.has(rid);
-        const color = present ? "var(--accent)" : "var(--danger)";
-        return `<label style="color:${color}"><input type="checkbox" ${present ? "checked" : ""} disabled><span>${escapeHtml(rid)}</span></label>`;
-      }).join("") : `<span class="meta">${t("team.reqNone")}</span>`;
-      $("teamRequirements").innerHTML =
-        `<div class="team-requirements-title" style="color:${titleColor}">${t("team.reqHint")}</div>` +
-        `<div class="team-requirements-list">${reqHtml}</div>`;
-
-      const members = state.team.members || [];
-      // Group by role, ordered like the roles list; indexes stay pointed at
-      // the original members array so edit/remove handlers keep working.
-      const groups = new Map();
-      members.forEach((member, index) => {
-        const key = member.role_id || "unassigned";
-        if (!groups.has(key)) groups.set(key, []);
-        groups.get(key).push({ member, index });
-      });
-      const roleOrder = state.roles.map(role => role.id);
-      const sortedRoleIds = [...groups.keys()].sort((a, b) => {
-        const ia = roleOrder.indexOf(a), ib = roleOrder.indexOf(b);
-        return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib) || a.localeCompare(b);
-      });
-      $("teamMembers").innerHTML = members.length ? sortedRoleIds.map(roleId => `
-        <div class="team-group">
-          <div class="team-group-head">
-            <span>${escapeHtml(roleId)}</span>
-            <span class="badge">${groups.get(roleId).length}</span>
-            ${wfRoleSet.has(roleId) ? `<span class="meta" style="color: var(--warn); border: 1px solid var(--warn); border-radius: 4px; padding: 1px 6px; font-size: 10px; text-transform: lowercase; font-weight: normal; margin-left: auto; background: #fff;">${t("team.required")}</span>` : ""}
-          </div>
-          <div class="team-group-members">
-            ${groups.get(roleId).map(({ member, index }) => teamMemberHtml(member, index, roleId === "implementer")).join("")}
-          </div>
-        </div>
-      `).join("") : `<div class="empty">${t("team.noMembers")}</div>`;
-    }
-
-    // showExtras: only the implementer role exposes the Expertise selector and
-    // the Capabilities input; other roles keep a lean card (role / notes / cmd).
-    function teamMemberHtml(member, index, showExtras) {
-      return `
-        <div class="team-member ${member.enabled ? "" : "disabled"}">
-          <div class="team-member-header">
-            <div>
-              <strong style="font-size: 15px; color: var(--ink);">${escapeHtml(member.agent_name)}</strong>
-              <div class="meta" style="margin-top: 2px;">${escapeHtml(agentLabel(member.agent_name))}</div>
-            </div>
-            <button class="danger" type="button" onclick="removeTeamMember(${index})" style="min-height: 28px; padding: 2px 8px; font-size: 12px;">${t("team.remove")}</button>
-          </div>
-
-          <div class="team-member-controls">
-            <label style="display: block;">
-              <div class="meta" style="margin-bottom: 4px;">${t("team.role")}</div>
-              <select ${member.role_id ? 'disabled' : ''} onchange="updateTeamMember(${index}, 'role_id', this.value)" style="font-size: 13px; padding: 5px 8px;">
-                ${roleOptionsHtml(member.role_id)}
-              </select>
-            </label>
-            ${showExtras ? `
-            <label style="display: block;">
-              <div class="meta" style="margin-bottom: 4px;">${t("team.expertise")}</div>
-              <select onchange="updateTeamMember(${index}, 'expertise_level', this.value)" style="font-size: 13px; padding: 5px 8px;">
-                ${[1, 2, 3, 4, 5].map(level => `
-                  <option value="${level}" ${(member.expertise_level || 3) === level ? "selected" : ""}>L${level}</option>
-                `).join("")}
-              </select>
-            </label>` : `<div style="display: block;"></div>`}
-          </div>
-
-          <div class="team-member-inputs">
-            ${showExtras ? `
-            <div class="input-with-label">
-              <span class="meta label-text">${t("team.capabilities")}</span>
-              <input value="${escapeHtml((member.capabilities || []).join(', '))}" placeholder="${escapeHtml(t("team.capPh"))}" onchange="updateTeamMember(${index}, 'capabilities', this.value)" style="font-size: 13px; padding: 5px 8px;">
-            </div>` : ""}
-            <div class="input-with-label">
-              <span class="meta label-text">${t("team.notes")}</span>
-              <input value="${escapeHtml(member.notes || "")}" placeholder="${escapeHtml(t("team.notesPh"))}" onchange="updateTeamMember(${index}, 'notes', this.value)" style="font-size: 13px; padding: 5px 8px;">
-            </div>
-            <div class="input-with-label">
-              <span class="meta label-text">${t("team.runnerCmd")}</span>
-              <input value="${escapeHtml(member.runner_command || "")}" placeholder="${escapeHtml(t("team.runnerPh"))}" title="${escapeHtml(t("team.runnerTitle"))}" onchange="updateTeamMember(${index}, 'runner_command', this.value)" style="font-size: 13px; padding: 5px 8px;">
-            </div>
-          </div>
-        </div>
-      `;
-    }
-
-    // Role options for a select; if the current value has no matching role
-    // file (legacy/hand-edited config), show it explicitly instead of letting
-    // the browser silently fall back to the first option.
-    function roleOptionsHtml(selectedId) {
-      const known = state.roles.some(role => role.id === selectedId);
-      const orphan = selectedId && !known
-        ? `<option value="${escapeHtml(selectedId)}" selected>${escapeHtml(selectedId)} ${t("team.missing")}</option>`
-        : "";
-      return orphan + state.roles.map(role => `
-        <option value="${escapeHtml(role.id)}" ${selectedId === role.id ? "selected" : ""}>${escapeHtml(role.id)}</option>
-      `).join("");
-    }
-
-    function agentLabel(agentName) {
-      const tool = state.tools.find(candidate => candidate.agent_name === agentName);
-      return tool ? tool.name : t("team.unavailable");
-    }
-
-    async function saveTeam() {
-      try {
-        const data = await api("/api/team", {
-          method: "POST",
-          body: JSON.stringify({ members: state.team.members || [] })
-        });
-        state.team = { members: data.members || [], path: data.path || "" };
-        renderTeam();
-      } catch (error) {
-        // Rejected (e.g. locked while workflow tasks run): reload the saved
-        // config so the board doesn't keep the phantom local edit.
-        await loadTeam();
-        throw error;
-      }
-    }
-
-    async function addTeamMember() {
-      const roleId = $("teamRoleSelect").value;
-      const agentName = $("teamAgentSelect").value;
-      if (!roleId || !agentName) return;
-      const existing = state.team.members || [];
-      if (existing.some(m => m.agent_name === agentName && m.role_id === roleId)) {
-        setStatus(t("team.alreadyOn", agentName, roleId), true);
-        return;
-      }
-      state.team.members = [
-        ...(state.team.members || []),
-        {
-          agent_name: agentName,
-          role_id: roleId,
-          enabled: true,
-          expertise_level: 3,
-          max_concurrent_tasks: 0,
-          capabilities: [],
-          notes: ""
-        }
-      ];
-      await run(async () => {
-        await saveTeam();
-        setStatus(t("team.updated"));
-      });
-    }
-
-    async function removeTeamMember(index) {
-      state.team.members.splice(index, 1);
-      await run(async () => {
-        await saveTeam();
-        setStatus(t("team.updated"));
-      });
-    }
-
-    async function updateTeamMember(index, field, value) {
-      const member = state.team.members[index];
-      if (!member) return;
-      if (field === "expertise_level" || field === "max_concurrent_tasks") {
-        member[field] = Number(value);
-      } else if (field === "enabled") {
-        member[field] = Boolean(value);
-      } else if (field === "capabilities") {
-        member[field] = String(value).split(",").map(item => item.trim()).filter(Boolean);
-      } else {
-        member[field] = value;
-      }
-      await run(async () => {
-        await saveTeam();
-        setStatus(t("team.updated"));
-      });
     }
 
     // --- Auto-laid-out workflow editor -----------------------------------
@@ -2707,7 +2457,7 @@
                         <div class="wf-box-index">#${index + 1}</div>
                         <div class="wf-box-name">${escapeHtml(step.name || t("wf.step"))}</div>
                         <div class="wf-box-meta">
-                          <span class="wf-role-badge">${escapeHtml(step.role_id || "?")}</span>
+                          <span class="wf-role-badge">${escapeHtml(step.agent || step.id)}</span>
                           ${tag}
                         </div>
                       </div>
@@ -3028,7 +2778,8 @@
       $("addStepName").placeholder = t("modal.addStep.namePh");
       $("addStepPrompt").value = "";
       $("addStepPrompt").placeholder = t("modal.addStep.promptPh");
-      $("addStepRole").innerHTML = roleOptionsHtml((state.roles[0] || {}).id || "");
+      $("addStepAgent").value = "";
+      $("addStepCommand").value = "";
       $("addStepRequired").checked = false;
       $("addStepRequired").disabled = false;
       $("addStepModalBackdrop").classList.add("open");
@@ -3046,7 +2797,8 @@
       $("addStepName").value = step.name || "";
       $("addStepPrompt").value = step.prompt || "";
       $("addStepPrompt").placeholder = t("modal.addStep.promptPh");
-      $("addStepRole").innerHTML = roleOptionsHtml(step.role_id || "");
+      $("addStepAgent").value = step.agent || "";
+      $("addStepCommand").value = step.command || "";
       $("addStepRequired").checked = !!step.required;
       $("addStepRequired").disabled = !!step.required_locked;
       $("addStepModalBackdrop").classList.add("open");
@@ -3064,7 +2816,8 @@
 
     async function confirmAddStep() {
       const name = ($("addStepName").value || "").trim() || t("wf.step");
-      const roleId = $("addStepRole").value || (state.roles[0] || {}).id || "hub";
+      const agent = ($("addStepAgent").value || "").trim();
+      const command = ($("addStepCommand").value || "").trim();
       const required = $("addStepRequired").checked;
       const prompt = ($("addStepPrompt").value || "").trim();
       const steps = state.workflow.steps || [];
@@ -3073,7 +2826,7 @@
       // "code_review"); fall back to a timestamp suffix on collisions.
       let newId = name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "step";
       if (steps.some(s => s.id === newId)) newId = `${newId}_${Date.now().toString(36)}`;
-      const newStep = { id: newId, name, role_id: roleId, required, prompt, x: 40, y: 60 };
+      const newStep = { id: newId, name, agent, command, required, prompt, x: 40, y: 60 };
       state.workflow.steps = [...steps, newStep];
       closeAddStepModal();
       await run(async () => {
@@ -3088,7 +2841,8 @@
       const step = (state.workflow.steps || []).find(s => s.id === wfStepModalId);
       if (!step) { closeAddStepModal(); return; }
       step.name = ($("addStepName").value || "").trim() || step.name || t("wf.step");
-      step.role_id = $("addStepRole").value || step.role_id;
+      step.agent = ($("addStepAgent").value || "").trim();
+      step.command = ($("addStepCommand").value || "").trim();
       step.prompt = ($("addStepPrompt").value || "").trim();
       if (!step.required_locked) step.required = $("addStepRequired").checked;
       closeAddStepModal();
@@ -3112,82 +2866,6 @@
       await run(async () => {
         await saveWorkflow();
         setStatus(t("wf.updated"));
-      });
-    }
-
-    function renderRoles() {
-      $("agentRoles").innerHTML = state.roles.length ? state.roles.map(role => `
-        <div class="role" id="role-card-${escapeHtml(role.id)}">
-          <div class="role-title">
-            <div style="display: flex; align-items: center; gap: 8px;">
-              <span>${escapeHtml(role.name)}</span>
-              <span class="badge" style="background: #fff; border-color: #9fc7b9; color: var(--accent);">${escapeHtml(role.id)}</span>
-            </div>
-            <div class="role-actions" id="actions-${escapeHtml(role.id)}" style="display: flex; gap: 6px;">
-              <button class="role-action" data-action="edit" data-role-id="${escapeHtml(role.id)}">${t("roles.edit")}</button>
-            </div>
-          </div>
-          <div style="padding: 16px;">
-            <div id="body-container-${escapeHtml(role.id)}">
-              <pre class="role-body">${escapeHtml(role.content)}</pre>
-            </div>
-          </div>
-        </div>
-      `).join("") : `<div class="empty">${t("roles.noRoles")}</div>`;
-      wireRoleActionButtons();
-    }
-
-    function wireRoleActionButtons() {
-      document.querySelectorAll(".role-action").forEach(button => {
-        button.addEventListener("click", () => {
-          const roleId = button.dataset.roleId || "";
-          if (button.dataset.action === "edit") editRole(roleId);
-          if (button.dataset.action === "save") saveRole(roleId);
-          if (button.dataset.action === "cancel") cancelEdit(roleId);
-        });
-      });
-    }
-
-    function editRole(roleId) {
-      const role = state.roles.find(r => r.id === roleId);
-      if (!role) return;
-
-      $("actions-" + roleId).innerHTML = `
-        <button class="role-action primary" data-action="save" data-role-id="${escapeHtml(roleId)}">${t("roles.save")}</button>
-        <button class="role-action" data-action="cancel" data-role-id="${escapeHtml(roleId)}">${t("roles.cancel")}</button>
-      `;
-      wireRoleActionButtons();
-
-      $("body-container-" + roleId).innerHTML = `
-        <textarea id="textarea-${escapeHtml(roleId)}" class="role-body" style="width: 100%; min-height: 400px; margin-top: 10px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; line-height: 1.45; color: #2f383c; background: #fafafa; border: 1px solid var(--line); border-radius: 6px; padding: 10px; resize: vertical;"></textarea>
-      `;
-      $("textarea-" + roleId).value = role.content;
-    }
-
-    function cancelEdit(roleId) {
-      const role = state.roles.find(r => r.id === roleId);
-      if (!role) return;
-
-      $("actions-" + roleId).innerHTML = `
-        <button class="role-action" data-action="edit" data-role-id="${escapeHtml(roleId)}">${t("roles.edit")}</button>
-      `;
-      wireRoleActionButtons();
-
-      $("body-container-" + roleId).innerHTML = `
-        <pre class="role-body">${escapeHtml(role.content)}</pre>
-      `;
-    }
-
-    async function saveRole(roleId) {
-      const newContent = $("textarea-" + roleId).value;
-      await run(async () => {
-        const data = await api("/api/agent-roles/" + encodeURIComponent(roleId), {
-          method: "POST",
-          body: JSON.stringify({ content: newContent })
-        });
-        state.roles = data.roles || [];
-        renderRoles();
-        setStatus(t("roles.saved", roleId));
       });
     }
 
@@ -3714,7 +3392,7 @@
           <span class="badge">${escapeHtml(phaseStatusLabel(summary.status))}</span>
         </div>
         <div class="meta">${escapeHtml(t("tasks.phaseDetails"))} · ${escapeHtml(t("tasks.instances", summary.total))}</div>
-        <div class="meta">${escapeHtml(t("task.role", phase.role_id || ""))}${phase.required ? " · required" : " · optional"}</div>
+        <div class="meta">${phase.agent ? escapeHtml(phase.agent) + " · " : ""}${phase.required ? "required" : "optional"}</div>
         <div class="phase-instance-list">
           ${instances.map(instance => {
             const card = instance.card;
@@ -3993,12 +3671,9 @@
       });
     }
     wireRefresh("refreshTools", async () => { await loadProjects(); await loadStatus(); await loadTools(); });
-    wireRefresh("refreshTeam", async () => { await loadRoles(); await loadTools(); await loadTeam(); });
-    wireRefresh("refreshWorkflow", async () => { await loadRoles(); await loadTasks(); await loadWorkflow(); });
-    wireRefresh("refreshRoles", loadRoles);
+    wireRefresh("refreshWorkflow", async () => { await loadTasks(); await loadWorkflow(); });
     wireRefresh("refreshTasks", loadTasks);
     wireRefresh("refreshGoals", loadGoals);
-    $("addTeamMember").addEventListener("click", addTeamMember);
     $("addStepCancel").addEventListener("click", closeAddStepModal);
     $("addStepConfirm").addEventListener("click", confirmStep);
     $("addStepDelete").addEventListener("click", deleteStepFromModal);
@@ -4022,9 +3697,7 @@
     $("toolsTab").addEventListener("click", () => setPage("tools"));
     $("settingsTab").addEventListener("click", () => setPage("settings"));
     $("saveSettings").addEventListener("click", saveSettings);
-    $("teamTab").addEventListener("click", () => setPage("team"));
     $("workflowTab").addEventListener("click", () => setPage("workflow"));
-    $("rolesTab").addEventListener("click", () => setPage("roles"));
     $("goalsTab").addEventListener("click", () => setPage("goals"));
     $("startGoal").addEventListener("click", createGoal);
     $("goalInput").addEventListener("input", () => {
