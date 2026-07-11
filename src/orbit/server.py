@@ -534,6 +534,10 @@ def _normalize_workflow_step(
         # it directly instead of resolving the step's role to a team member's
         # command — the step binds itself to a CLI.
         "command": str(step.get("command", "") or "").strip(),
+        # agent: the assignee this step dispatches to. When set it binds directly,
+        # skipping team role matchmaking. Empty falls back to team ranking (which
+        # goes away once roles/teams are removed).
+        "agent": str(step.get("agent", "") or "").strip(),
         "x": _coord("x", 40 + index * 300),
         "y": _coord("y", _DEFAULT_STEP_MID_Y),
     }
@@ -1484,6 +1488,11 @@ def _pick_assignee(
     store: Store, task: dict[str, Any], step: dict[str, Any],
     members: list[dict[str, Any]],
 ) -> str | None:
+    # A step that names its own agent binds directly, skipping team ranking —
+    # the workflow assigns the agent, no role matchmaking needed.
+    explicit = str(step.get("agent") or "").strip()
+    if explicit:
+        return explicit
     ranked = rank_assignment_candidates(
         {**task, "role_required": step["role_id"]},
         members,

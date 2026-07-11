@@ -1434,6 +1434,24 @@ class AutoRunnerTests(unittest.TestCase):
             self.assertEqual("default-cli", jobs["intake"]["command"])
             self.assertEqual("default-cli", jobs["implement"]["command"])
 
+    def test_step_agent_binds_directly_over_team_ranking(self):
+        # A step naming its own agent dispatches to it, bypassing team role
+        # matchmaking (default TEAM would pick "codex" for the implementer role).
+        steps = [
+            {**s, **({"agent": "my-bot", "command": "cli"} if s["id"] == "implement" else {})}
+            for s in LINEAR_STEPS
+        ]
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, steps=steps)
+            task_id = h.create_task()
+            h.start(task_id)
+            done = h.complete("hub-agent", task_id, "intake", "done")
+            self.assertEqual([{"step": "implement", "assignee": "my-bot"}], done["dispatched"])
+            jobs = h.store.list_run_jobs(status="all")
+            self.assertEqual(1, len(jobs))
+            self.assertEqual("my-bot", jobs[0]["assignee"])
+            self.assertEqual("cli", jobs[0]["command"])
+
     def test_runner_claims_and_reports_then_scheduler_advances(self):
         with TemporaryDirectory() as tmp:
             h = EngineHarness(tmp, team=self._team_with_runner("echo done"))
