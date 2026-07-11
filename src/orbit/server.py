@@ -3818,6 +3818,9 @@ def run_step_worker(
 
     outcome, result, status, exit_code = "blocked", "", "failed", None
     stdout, stderr = "", ""
+    # The goal-intake (Decompose) step emits one JSON object the engine parses
+    # into subtasks. Its result must stay whole — see the exit-0 branch below.
+    goal_intake = _is_root_goal_decompose_step(project_root, task, step)
     # Defaults so the post-run verify gate can reference these even on the
     # no-command path (where they are never assigned in the else branch).
     exec_dir = _project_root(project_root)
@@ -3956,7 +3959,14 @@ def run_step_worker(
             if status == "timeout":
                 pass
             elif exit_code == 0:
-                result = _tail(stdout, 4000) or "runner finished with no output"
+                # Decompose output is a single JSON object the engine parses into
+                # subtasks — keep it whole (tail-truncating would slice off the
+                # opening `{"tasks":[` and break the parse). Every other step's
+                # result is a human summary, so the tail cap is fine there.
+                result = (
+                    (stdout.strip() if goal_intake else _tail(stdout, 4000))
+                    or "runner finished with no output"
+                )
                 # A clean exit defaults to done, but the runner can override via
                 # a `WORKFLOW_OUTCOME:` line: any step may self-report `blocked`
                 # (it ran but the work failed / is stuck); a rework-capable step
@@ -3995,7 +4005,6 @@ def run_step_worker(
                     )
                 except (InvalidInputError, OSError):
                     pass
-    goal_intake = _is_root_goal_decompose_step(project_root, task, step)
     if outcome == "done" and goal_intake:
         try:
             _parse_goal_subtasks(result)

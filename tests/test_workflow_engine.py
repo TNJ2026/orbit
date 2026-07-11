@@ -337,6 +337,39 @@ class WorkflowEngineTests(unittest.TestCase):
             [raw] = server.goals_summary(h.store)[0]["subtasks"]
             self.assertEqual(stored, raw["task_status"])
 
+    def test_large_decompose_json_is_not_tail_truncated(self):
+        # Regression: a Decompose output longer than the human-summary tail cap
+        # (4000 chars) must still parse. Tail-truncating it would slice off the
+        # opening `{"tasks":[` and blow up with "Extra data", stalling the goal.
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, steps=ENTRY_DECOMPOSE_STEPS, bindings=[
+                {"agent_name": "hub-agent", "assignment": "hub", "runner_command": "cat"},
+                {"agent_name": "codex", "assignment": "implementer", "runner_command": "cat"},
+                {"agent_name": "integrator", "assignment": "integrator", "runner_command": "cat"},
+                {"agent_name": "rev", "assignment": "reviewer", "runner_command": "cat"},
+            ])
+            goal_id = h.create_task(title="goal")
+            h.store.update_task_metadata(goal_id, is_goal=True)
+            h.start(goal_id)
+            step = next(
+                s for s in server.read_workflow_config(tmp)["steps"]
+                if s["id"] == "intake"
+            )
+            payload = json.dumps(
+                {"tasks": [{"title": f"T{i}", "content": "x" * 600} for i in range(8)]},
+                ensure_ascii=False,
+            )
+            self.assertGreater(len(payload), 4000)  # exceeds the tail cap
+            self.assertNotIn("'", payload)  # safe inside single-quoted printf
+            member = {"agent_name": "hub-agent",
+                      "runner_command": f"printf '%s' '{payload}'"}
+            server.run_step_worker(h.store, tmp, goal_id, step, member)
+            subs = [t for t in h.store.list_tasks(status="all")
+                    if t.get("parent_task_id") == goal_id
+                    and t.get("source_message_id") is not None]
+            self.assertEqual(8, len(subs))
+            self.assertNotEqual("stalled", h.task(goal_id)["task_status"])
+
     def test_optional_late_branch_does_not_redispatch_join_target(self):
         steps = [
             {"id": "a", "name": "A", "assignment": "hub", "task_status": "created", "required": True},
