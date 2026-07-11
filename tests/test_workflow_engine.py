@@ -635,6 +635,21 @@ class WorkflowEngineTests(unittest.TestCase):
 
 
 class StepTimeoutTests(unittest.TestCase):
+    def test_hub_command_prefers_settings_over_team(self):
+        with TemporaryDirectory() as tmp:
+            server.write_team_config(
+                [{"agent_name": "hub-agent", "role_id": "hub",
+                  "runner_command": "team-hub"}],
+                tmp,
+            )
+            # No settings.hub_command -> fall back to the team hub's command.
+            self.assertEqual("team-hub", server._hub_command(tmp))
+            # settings.hub_command wins and needs no team member.
+            saved = server.write_settings(tmp, hub_command="settings-hub")
+            self.assertEqual("settings-hub", saved["hub_command"])
+            self.assertEqual("settings-hub", server.read_settings(tmp)["hub_command"])
+            self.assertEqual("settings-hub", server._hub_command(tmp))
+
     def _timed_steps(self, timeout=30):
         steps = [dict(s) for s in LINEAR_STEPS]
         for s in steps:
@@ -1385,6 +1400,26 @@ class AutoRunnerTests(unittest.TestCase):
             self.assertEqual("pending", jobs[0]["status"])
             self.assertEqual("implement", jobs[0]["step"])
             self.assertEqual("codex", jobs[0]["assignee"])
+
+    def test_step_command_drives_run_job_without_team_runner_command(self):
+        # A step carrying an explicit `command` dispatches with that command
+        # even when the assigned member has no runner_command — the step binds
+        # itself to a CLI, no team-side runner needed.
+        steps = [
+            {**s, **({"command": "my-step-cli"} if s["id"] == "implement" else {})}
+            for s in LINEAR_STEPS
+        ]
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, steps=steps)  # default TEAM: no runner_command
+            task_id = h.create_task()
+            h.start(task_id)  # intake -> hub-agent, no command anywhere
+            self.assertEqual([], h.store.list_run_jobs(status="all"))
+            h.complete("hub-agent", task_id, "intake", "done")  # -> codex + step command
+            jobs = h.store.list_run_jobs(status="all")
+            self.assertEqual(1, len(jobs))
+            self.assertEqual("implement", jobs[0]["step"])
+            self.assertEqual("codex", jobs[0]["assignee"])
+            self.assertEqual("my-step-cli", jobs[0]["command"])
 
     def test_runner_claims_and_reports_then_scheduler_advances(self):
         with TemporaryDirectory() as tmp:

@@ -262,6 +262,9 @@ def read_settings(project_root: str | None = None) -> dict[str, Any]:
         "max_concurrent_tasks": _clamp_int(
             data.get("max_concurrent_tasks"), MAX_CONCURRENT_MIN, MAX_CONCURRENT_MAX, _DEFAULT_MAX_CONCURRENT
         ),
+        # Runner command for hub-supervision CLI calls (timeout KILL/CONTINUE).
+        # Set here, hub supervision no longer needs a team member.
+        "hub_command": str(data.get("hub_command") or "").strip(),
         "path": str(path),
     }
 
@@ -270,6 +273,7 @@ def write_settings(
     project_root: str | None = None,
     max_rework_rounds: Any = None,
     max_concurrent_tasks: Any = None,
+    hub_command: Any = None,
 ) -> dict[str, Any]:
     current = read_settings(project_root)
     rework = (
@@ -280,9 +284,17 @@ def write_settings(
         current["max_concurrent_tasks"] if max_concurrent_tasks is None
         else _clamp_int(max_concurrent_tasks, MAX_CONCURRENT_MIN, MAX_CONCURRENT_MAX, current["max_concurrent_tasks"])
     )
+    hub_cmd = (
+        current["hub_command"] if hub_command is None
+        else str(hub_command or "").strip()
+    )
     path = _settings_config_path(project_root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    data = {"max_rework_rounds": rework, "max_concurrent_tasks": concurrent}
+    data = {
+        "max_rework_rounds": rework,
+        "max_concurrent_tasks": concurrent,
+        "hub_command": hub_cmd,
+    }
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     return {**data, "path": str(path)}
 
@@ -509,6 +521,10 @@ def _normalize_workflow_step(
         # agent, in the same working tree. Its real exit code overrides the
         # agent's self-reported `done` (a failing gate the agent can't fake).
         "verify": str(step.get("verify", "") or "").strip(),
+        # command: an explicit runner CLI for this step. When set, dispatch runs
+        # it directly instead of resolving the step's role to a team member's
+        # command — the step binds itself to a CLI.
+        "command": str(step.get("command", "") or "").strip(),
         "x": _coord("x", 40 + index * 300),
         "y": _coord("y", _DEFAULT_STEP_MID_Y),
     }
@@ -1124,15 +1140,11 @@ def rank_assignment_candidates(
         ),
         reverse=True,
     )
-    required_followups = []
-    if risk == "high" or importance == "critical":
-        required_followups.extend(["reviewer", "tester"])
     return {
         "role_id": required_role,
         "required_expertise_level": required_expertise,
         "candidates": candidates,
         "selected": candidates[0] if candidates else None,
-        "required_followups": sorted(set(required_followups)),
     }
 
 
@@ -1565,8 +1577,8 @@ def _validate_goal_auto_runners(
                 missing.append(f"{step['id']} ({step['role_id']}): no enabled member")
             continue
         member = _member_named(members, assignee) or {"agent_name": assignee}
-        if not _runner_command_for(member):
-            missing.append(f"{step['id']} ({assignee}): no runner_command/default")
+        if not (_step_command(step) or _runner_command_for(member)):
+            missing.append(f"{step['id']} ({assignee}): no step command or runner_command")
     if missing:
         raise InvalidInputError(
             "goal cannot auto-run until runner commands are configured: "
@@ -2288,7 +2300,7 @@ def _dispatch_step(
         store.update_task_step_details(
             task_id, step_inputs=step_inputs, result_summary="", artifacts=[]
         )
-    command = _runner_command_for(member)
+    command = _step_command(step) or _runner_command_for(member)
     if command:
         return store.create_run_job(
             task_id,
@@ -2827,6 +2839,13 @@ _DEFAULT_RUNNER_COMMANDS = {
     # explicitly denied (its headless-autonomy flag).
     "opencode": 'opencode run --auto "$(cat)"',
 }
+
+
+def _step_command(step: dict[str, Any]) -> str:
+    """Explicit per-step runner command. When set it drives execution directly,
+    so a workflow can bind a step to a CLI without going through team lookup.
+    Empty means fall back to the assigned member's runner command."""
+    return str(step.get("command") or "").strip()
 
 
 def _runner_command_for(member: dict[str, Any]) -> str:
@@ -3481,6 +3500,28 @@ def _read_run_output_tail(log_dir: str | None, tail_bytes: int = 4000) -> str:
     return "\n".join(parts)
 
 
+def _hub_command(
+    project_root: str | None, members: list[dict[str, Any]] | None = None
+) -> str:
+    """Runner command for hub-supervision CLI calls (timeout KILL/CONTINUE).
+    Prefers settings.hub_command so supervision does not depend on a team
+    member; falls back to an enabled hub team member's runner command."""
+    configured = read_settings(project_root).get("hub_command", "").strip()
+    if configured:
+        return configured
+    if members is None:
+        try:
+            members = read_team_config(project_root)["members"]
+        except Exception:
+            members = []
+    hub = next(
+        (m for m in members
+         if m.get("role_id") == "hub" and m.get("enabled", True) and _runner_command_for(m)),
+        None,
+    )
+    return _runner_command_for(hub) if hub else ""
+
+
 def _hub_inspect_batch(
     store: Store, project_root: str | None, candidates: list[dict[str, Any]]
 ) -> dict[int, str]:
@@ -3488,18 +3529,9 @@ def _hub_inspect_batch(
     Returns {run_id: "kill"|"continue"}; anything not clearly marked KILL by the
     hub stays "continue" so a healthy step is never killed on doubt."""
     decisions = {c["run_id"]: "continue" for c in candidates}
-    try:
-        members = read_team_config(project_root)["members"]
-    except Exception:
+    command = _hub_command(project_root)
+    if not command:
         return decisions
-    hub = next(
-        (m for m in members
-         if m.get("role_id") == "hub" and m.get("enabled", True) and _runner_command_for(m)),
-        None,
-    )
-    if not hub:
-        return decisions
-    command = _runner_command_for(hub)
     lines = []
     for i, c in enumerate(candidates, 1):
         out = _tail(c.get("output") or "", 500) or "(长时间无输出)"
@@ -4074,7 +4106,7 @@ def run_step_worker(
         card = store.find_open_step_card(task_id, step["id"])
         if card:
             run_task_id = card["id"]
-    command = _runner_command_for(member)
+    command = _step_command(step) or _runner_command_for(member)
     run = store.create_task_run(
         run_task_id, worker=assignee, command=command, workflow_step=step["id"]
     )
@@ -5674,6 +5706,7 @@ def create_server(
             current_project.get("project_root"),
             data.get("max_rework_rounds"),
             data.get("max_concurrent_tasks"),
+            data.get("hub_command"),
         )
         return _json(request, {"success": True, **settings})
 
@@ -5952,27 +5985,6 @@ def create_server(
         if task is None:
             return _json_error("task not found", 404, request)
         return _json(request, {"task": task})
-
-    @route("/api/tasks/{task_id:int}/assignment-candidates", methods=["GET"])
-    async def api_task_assignment_candidates(request: Request) -> JSONResponse:
-        if forbidden := _forbid_non_local(request):
-            return forbidden
-        task_id = int(request.path_params["task_id"])
-        task = await _to_thread(store.get_task, task_id)
-        if task is None:
-            return _json_error("task not found", 404, request)
-        try:
-            team = await _to_thread(read_team_config, current_project.get("project_root"))
-        except InvalidInputError as exc:
-            return _json_error(str(exc), request=request)
-        active_counts = await _to_thread(store.active_task_counts)
-        ranked = rank_assignment_candidates(
-            task,
-            team["members"],
-            active_counts,
-            request.query_params.get("role") or None,
-        )
-        return _json(request, {"task": task, **ranked})
 
     @route("/api/tasks/{task_id:int}/workflow", methods=["GET"])
     async def api_task_workflow_state(request: Request) -> JSONResponse:

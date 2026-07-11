@@ -766,7 +766,6 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual("implementer", ranked["role_id"])
         self.assertEqual(5, ranked["required_expertise_level"])
         self.assertEqual("codex", ranked["selected"]["agent_name"])
-        self.assertEqual(["reviewer", "tester"], ranked["required_followups"])
         self.assertEqual([], ranked["selected"]["missing_capabilities"])
         self.assertNotIn(
             "claude-code", [candidate["agent_name"] for candidate in ranked["candidates"]]
