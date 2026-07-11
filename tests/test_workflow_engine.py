@@ -52,6 +52,24 @@ BINDINGS = [
 ]
 
 
+def _with_default_agents(steps):
+    assignment_agents = {
+        "hub": "hub-agent",
+        "implementer": "codex",
+        "reviewer": "rev",
+        "tester": "qa",
+        "architect": "arch",
+    }
+    return [
+        {
+            **step,
+            "agents": step.get("agents")
+            or [assignment_agents.get(step.get("assignment"), "codex")],
+        }
+        for step in steps
+    ]
+
+
 class EngineHarness:
     def __init__(self, tmp, steps=None, edges=None, bindings=None):
         self.root = tmp
@@ -64,20 +82,16 @@ class EngineHarness:
         for step in (steps or LINEAR_STEPS):
             step = dict(step)
             assignment = step.get("assignment", "")
-            step.setdefault("agent", assignment_agent.get(assignment, ""))
+            if not step.get("agents"):
+                step["agents"] = [assignment_agent.get(assignment) or "codex"]
             if "command" not in step and assignment_cmd.get(assignment):
                 step["command"] = assignment_cmd[assignment]
             compiled.append(step)
         server.write_workflow_config(compiled, tmp, edges or LINEAR_EDGES)
-        # A hub member's runner_command now lives in settings (hub supervision is
-        # bindings-independent); mirror it so bindings-based fixtures keep working.
-        hub_cmd = next(
-            (m.get("runner_command", "") for m in bindings
-             if m["assignment"] == "hub" and m.get("runner_command")),
-            "",
-        )
-        if hub_cmd:
-            server.write_settings(tmp, hub_command=hub_cmd)
+        # Hub supervision derives from the Decompose step's first Agent. A fixture
+        # that flags a decompose step and gives that step's `hub` assignment a
+        # runner_command (via _hub_bindings + ENTRY_DECOMPOSE_STEPS) thus wires the
+        # hub command through the step's per-agent command — no settings knob.
         self.store = Store(Path(tmp) / "test.db")
         for member in bindings:
             self.store.register_agent(member["agent_name"], member["assignment"])
@@ -199,7 +213,7 @@ class WorkflowEngineTests(unittest.TestCase):
 
             steps = [dict(step) for step in LINEAR_STEPS]
             steps[1]["task_status"] = "in_progress"
-            server.write_workflow_config(steps, tmp, LINEAR_EDGES)
+            server.write_workflow_config(_with_default_agents(steps), tmp, LINEAR_EDGES)
 
             self.assertEqual("assigned", h.state(task_id)["status"])
             projected = server._project_workflow_task_status(
@@ -314,7 +328,7 @@ class WorkflowEngineTests(unittest.TestCase):
             h.complete("hub-agent", sub["id"], "intake", "done")
             steps = [dict(s) for s in LINEAR_STEPS]
             steps[1]["task_status"] = "in_progress"
-            server.write_workflow_config(steps, tmp, LINEAR_EDGES)
+            server.write_workflow_config(_with_default_agents(steps), tmp, LINEAR_EDGES)
             stored = h.task(sub["id"])["task_status"]
             self.assertEqual("assigned", stored)
             [projected] = server.goals_summary(h.store, tmp)[0]["subtasks"]
@@ -605,13 +619,30 @@ class WorkflowEngineTests(unittest.TestCase):
 
 
 class StepTimeoutTests(unittest.TestCase):
-    def test_hub_command_from_settings(self):
+    def test_hub_command_from_decompose_step_first_agent(self):
         with TemporaryDirectory() as tmp:
-            # Unset -> supervision disabled (empty command).
+            # No decompose step -> supervision disabled (empty command).
+            server.write_workflow_config(
+                [dict(s) for s in LINEAR_STEPS], tmp, LINEAR_EDGES
+            )
             self.assertEqual("", server._hub_command(tmp))
-            saved = server.write_settings(tmp, hub_command="my-hub")
-            self.assertEqual("my-hub", saved["hub_command"])
-            self.assertEqual("my-hub", server.read_settings(tmp)["hub_command"])
+            # Flag intake as the decompose step with a first Agent -> its built-in
+            # command supervises.
+            flagged = [
+                {**s, **({"decompose": True, "agents": ["codex"]}
+                         if s["id"] == "intake" else {})}
+                for s in LINEAR_STEPS
+            ]
+            server.write_workflow_config(flagged, tmp, LINEAR_EDGES)
+            self.assertIn("codex exec", server._hub_command(tmp))
+            # A per-agent command on the decompose step's first Agent wins.
+            custom = [
+                {**s, **({"decompose": True, "agents": ["codex"],
+                          "agent_commands": {"codex": "my-hub"}}
+                         if s["id"] == "intake" else {})}
+                for s in LINEAR_STEPS
+            ]
+            server.write_workflow_config(custom, tmp, LINEAR_EDGES)
             self.assertEqual("my-hub", server._hub_command(tmp))
 
     def _timed_steps(self, timeout=30):
@@ -817,8 +848,19 @@ class StepCardTests(unittest.TestCase):
     def test_goal_runner_preflight_rejects_missing_command(self):
         with TemporaryDirectory() as tmp:
             h = EngineHarness(tmp)  # fixture agents have no built-in commands
-            with self.assertRaisesRegex(InvalidInputError, "no command"):
+            with self.assertRaisesRegex(InvalidInputError, r"\(rev\): no command"):
                 server._validate_goal_auto_runners(h.store, tmp, "Goal", "Build it")
+
+    def test_goal_start_rejects_step_without_agent(self):
+        # Steps default empty; the goal-start preflight blocks until each step
+        # has an Agent, telling the user to set them on the Workflow page.
+        with TemporaryDirectory() as tmp:
+            server.write_workflow_config(
+                server.default_workflow_steps(), tmp, server.default_workflow_edges()
+            )
+            store = Store(Path(tmp) / "gate.db")
+            with self.assertRaisesRegex(InvalidInputError, "no agent selected"):
+                server._validate_goal_auto_runners(store, tmp, "Goal", "Build it")
 
     def test_goal_intake_invalid_json_blocks_goal(self):
         with TemporaryDirectory() as tmp:
@@ -947,10 +989,10 @@ class StepCardTests(unittest.TestCase):
             with self.assertRaises(server.InvalidInputError):
                 server._parse_goal_subtasks(bad)
 
-    def test_parse_rejects_agent_outside_server_pool(self):
+    def test_parse_rejects_task_level_agent(self):
         payload = '{"tasks":[{"title":"A","content":"a","agent":"unknown"}]}'
-        with self.assertRaisesRegex(server.InvalidInputError, "allowed agent pool"):
-            server._parse_goal_subtasks(payload, ["codex", "gemini"])
+        with self.assertRaisesRegex(server.InvalidInputError, "must not set agent"):
+            server._parse_goal_subtasks(payload)
 
     def test_dependent_subtask_is_held_then_released_on_prereq_close(self):
         with TemporaryDirectory() as tmp:
@@ -1308,7 +1350,7 @@ class AutoRunnerTests(unittest.TestCase):
     def test_step_agent_binds_directly_over_bindings_ranking(self):
         # A step naming its own agent dispatches to it directly.
         steps = [
-            {**s, **({"agent": "my-bot", "command": "cli"} if s["id"] == "implement" else {})}
+            {**s, **({"agents": ["my-bot"], "command": "cli"} if s["id"] == "implement" else {})}
             for s in LINEAR_STEPS
         ]
         with TemporaryDirectory() as tmp:
@@ -1729,14 +1771,16 @@ class HubInspectTests(unittest.TestCase):
     def test_batch_parses_per_run_decisions(self):
         with TemporaryDirectory() as tmp:
             h = EngineHarness(
-                tmp, bindings=self._hub_bindings("printf 'DECISION 1: KILL\\nDECISION 2: CONTINUE\\n'"))
+                tmp, steps=ENTRY_DECOMPOSE_STEPS,
+                bindings=self._hub_bindings("printf 'DECISION 1: KILL\\nDECISION 2: CONTINUE\\n'"))
             d = server._hub_inspect_batch(h.store, tmp, self._cands())
             self.assertEqual("kill", d[11])
             self.assertEqual("continue", d[22])
 
     def test_batch_unclear_defaults_continue(self):
         with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp, bindings=self._hub_bindings("echo idk"))
+            h = EngineHarness(tmp, steps=ENTRY_DECOMPOSE_STEPS,
+                              bindings=self._hub_bindings("echo idk"))
             self.assertEqual({11: "continue", 22: "continue"},
                              server._hub_inspect_batch(h.store, tmp, self._cands()))
 
@@ -1748,7 +1792,8 @@ class HubInspectTests(unittest.TestCase):
 
     def test_sweep_flags_stuck_run_instead_of_killing_pid(self):
         with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp, bindings=self._hub_bindings("echo 'DECISION 1: KILL'"))
+            h = EngineHarness(tmp, steps=ENTRY_DECOMPOSE_STEPS,
+                              bindings=self._hub_bindings("echo 'DECISION 1: KILL'"))
             tid = h.create_task()
             run = h.store.create_task_run(
                 tid, worker="codex", command="x", workflow_step="implement")
@@ -1769,7 +1814,8 @@ class HubInspectTests(unittest.TestCase):
 
     def test_sweep_kill_blocks_the_workflow_task(self):
         with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp, bindings=self._hub_bindings("echo 'DECISION 1: KILL'"))
+            h = EngineHarness(tmp, steps=ENTRY_DECOMPOSE_STEPS,
+                              bindings=self._hub_bindings("echo 'DECISION 1: KILL'"))
             tid = h.create_task()
             h.start(tid)
             h.complete("hub-agent", tid, "intake", "done")  # implement now active (codex)
@@ -1797,7 +1843,8 @@ class HubInspectTests(unittest.TestCase):
         # A run already flagged for kill isn't re-inspected: no second hub call,
         # and it is not returned as freshly flagged.
         with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp, bindings=self._hub_bindings("echo 'DECISION 1: KILL'"))
+            h = EngineHarness(tmp, steps=ENTRY_DECOMPOSE_STEPS,
+                              bindings=self._hub_bindings("echo 'DECISION 1: KILL'"))
             tid = h.create_task()
             run = h.store.create_task_run(
                 tid, worker="codex", command="x", workflow_step="implement")
@@ -2242,12 +2289,14 @@ class DecomposeStepTests(unittest.TestCase):
 
     def test_decompose_step_id_requires_explicit_flag(self):
         with TemporaryDirectory() as tmp:
-            server.write_workflow_config(self.STEPS, tmp, self.EDGES)
+            server.write_workflow_config(_with_default_agents(self.STEPS), tmp, self.EDGES)
             cfg = server.read_workflow_config(tmp)
             back = server._workflow_graph(cfg)
             self.assertEqual("plan", server._root_goal_decompose_step_id(cfg, back))
         with TemporaryDirectory() as tmp:  # no flag -> goal owns the whole flow
-            server.write_workflow_config(LINEAR_STEPS, tmp, LINEAR_EDGES)
+            server.write_workflow_config(
+                _with_default_agents(LINEAR_STEPS), tmp, LINEAR_EDGES
+            )
             cfg = server.read_workflow_config(tmp)
             back = server._workflow_graph(cfg)
             self.assertIsNone(server._root_goal_decompose_step_id(cfg, back))
@@ -2373,92 +2422,106 @@ class DecomposeStepTests(unittest.TestCase):
 
 
 class SubtaskAgentTests(unittest.TestCase):
-    def test_command_for_agent_resolves_builtin_override_and_pattern(self):
-        with TemporaryDirectory() as tmp:
-            # built-in table + hermes-<profile> pattern
-            self.assertIn("hermes", server._command_for_agent("hermes"))
-            self.assertIn("--profile manager", server._command_for_agent("hermes-manager"))
-            self.assertEqual("", server._command_for_agent("nope"))
-            self.assertEqual("", server._command_for_agent(""))
-            # settings.agent_commands override wins
-            server.write_settings(tmp, agent_commands={"codex": "codex-custom"})
-            self.assertEqual("codex-custom", server._command_for_agent("codex", tmp))
+    def test_command_for_agent_resolves_builtin_and_pattern(self):
+        # built-in table + hermes-<profile> pattern; no settings override anymore.
+        self.assertIn("hermes", server._command_for_agent("hermes"))
+        self.assertIn("--profile manager", server._command_for_agent("hermes-manager"))
+        self.assertEqual("", server._command_for_agent("nope"))
+        self.assertEqual("", server._command_for_agent(""))
 
-    def test_decompose_assigns_agent_by_content_then_round_robin(self):
-        with TemporaryDirectory() as tmp:
-            server.write_workflow_config(
-                server.default_workflow_steps(), tmp, server.default_workflow_edges()
-            )
-            server.write_settings(tmp, subtask_agents=["codex", "hermes"])
-            store = Store(Path(tmp) / "t.db")
-            store.register_agent("hub", "h")
-            store.send_message("hub", "hub", "goal", kind="task", title="G")
-            goal = store.list_tasks()[0]
-            store.update_task_metadata(goal["id"], is_goal=True)
-            goal = store.get_task(goal["id"])
-            subtasks = [
-                {"title": "A", "content": "a", "deps": [], "agent": "claude-code"},
-                {"title": "B", "content": "b", "deps": [], "agent": ""},
-                {"title": "C", "content": "c", "deps": [], "agent": ""},
-            ]
-            with mock.patch.object(
-                server, "_dispatch_business_subtask", return_value={"dispatched": []}
-            ):
-                server._start_goal_business_subtasks(store, tmp, goal, "hub", subtasks)
-            subs = sorted(
-                (t for t in store.list_tasks(status="all")
-                 if t.get("parent_task_id") == goal["id"] and t.get("source_message_id")),
-                key=lambda t: t["id"],
-            )
-            # content tag kept; untagged round-robin over the pool
-            self.assertEqual(["claude-code", "codex", "hermes"], [t["agent"] for t in subs])
+    def test_step_agent_command_prefers_per_agent_override(self):
+        # A step's per-agent command wins over the agent's built-in CLI; a blank
+        # (or absent) entry falls back to the built-in.
+        step = {"id": "impl", "agents": ["codex", "my-bot"],
+                "agent_commands": {"my-bot": "my-bot --run \"$(cat)\""}}
+        self.assertEqual('my-bot --run "$(cat)"', server._step_agent_command(step, "my-bot"))
+        self.assertIn("codex exec", server._step_agent_command(step, "codex"))
+        # An agent with no per-agent command and no built-in resolves to empty.
+        self.assertEqual("", server._step_agent_command(step, "ghost"))
 
-    def test_multi_agent_step_forms_subtask_pool(self):
+    def test_step_command_migrates_onto_each_agent(self):
+        # A legacy step-level `command` normalizes onto every agent so pre-per-
+        # agent configs keep running (implement keeps its multiple agents).
+        with TemporaryDirectory() as tmp:
+            saved = server.write_workflow_config(
+                [{"id": "implement", "name": "Impl",
+                  "agents": ["codex", "gemini"], "command": "shared-cli"}],
+                tmp, [],
+            )
+            step = saved["steps"][0]
+            self.assertNotIn("command", step)
+            self.assertEqual(
+                {"codex": "shared-cli", "gemini": "shared-cli"},
+                step["agent_commands"],
+            )
+
+    def test_each_step_round_robins_its_own_agents(self):
         with TemporaryDirectory() as tmp:
             steps = [dict(s) for s in server.default_workflow_steps()]
             for s in steps:
                 if s["id"] == "implement":
-                    s["agents"] = ["claude-code", "codex", "hermes"]
+                    s["agents"] = ["codex", "hermes"]
                 if s["id"] == "review":
                     s["agents"] = ["gemini", "opencode"]
             server.write_workflow_config(steps, tmp, server.default_workflow_edges())
-            # Only the direct implementation successor contributes. Review's
-            # own multi-agent selection must not leak into implementation.
-            self.assertEqual(["claude-code", "codex", "hermes"], server._subtask_agent_pool(tmp))
             loaded = {s["id"]: s for s in server.read_workflow_config(tmp)["steps"]}
-            self.assertEqual(["claude-code", "codex", "hermes"], loaded["implement"]["agents"])
-            self.assertEqual(["gemini", "opencode"], loaded["review"]["agents"])
-        # cap at 3, dedupe, legacy single `agent` -> list
+            store = Store(Path(tmp) / "rotation.db")
+            impl = loaded["implement"]
+            # First distinct task -> agents[0].
+            self.assertEqual(
+                "codex", server._step_round_robin_assignee(store, impl, [])
+            )
+            store.record_task_transition(1, "", "implement", "workflow", "dispatched", "codex")
+            # Second distinct task -> agents[1].
+            self.assertEqual(
+                "hermes", server._step_round_robin_assignee(store, impl, [])
+            )
+            store.record_task_transition(2, "", "implement", "workflow", "dispatched", "hermes")
+            # Third distinct task wraps back to agents[0].
+            self.assertEqual(
+                "codex", server._step_round_robin_assignee(store, impl, [])
+            )
+            # Rework of task 1 returns to its original Agent, not the next in
+            # rotation, and does not advance the cursor for later tasks.
+            t1 = store.list_task_transitions(1)
+            self.assertEqual("codex", server._step_round_robin_assignee(store, impl, t1))
+            store.record_task_transition(1, "", "implement", "workflow", "dispatched", "codex")
+            self.assertEqual(
+                "codex", server._step_round_robin_assignee(store, impl, []),
+                "rework must not skew distinct-task round-robin",
+            )
+            # A different step rotates over its own Agents independently.
+            self.assertEqual(
+                "gemini", server._step_round_robin_assignee(store, loaded["review"], [])
+            )
+
+    def test_agent_list_normalization_caps_and_dedupes(self):
         self.assertEqual(3, len(server._normalize_agents({"agents": ["a", "b", "c", "d"]})))
         self.assertEqual(["a", "b"], server._normalize_agents({"agents": ["a", "b", "a"]}))
+        # Legacy single `agent` string migrates into the list.
         self.assertEqual(["x"], server._normalize_agents({"agent": "x"}))
 
-    def test_subtask_agent_only_owns_implementation_entry(self):
+    def test_only_impl_review_test_allow_multiple_agents(self):
+        # Every step but implement/review/test is capped to a single Agent; its
+        # per-agent commands are pruned to that surviving Agent.
         with TemporaryDirectory() as tmp:
-            steps = [dict(step) for step in server.default_workflow_steps()]
-            for step in steps:
-                if step["id"] == "implement":
-                    step["agents"] = ["hermes", "codex"]
-                elif step["id"] == "review":
-                    step["agents"] = ["gemini"]
-            server.write_workflow_config(steps, tmp, server.default_workflow_edges())
-            loaded = {
-                step["id"]: step for step in server.read_workflow_config(tmp)["steps"]
-            }
-            task = {"id": 1, "parent_task_id": 99, "agent": "hermes"}
-
-            self.assertEqual(
-                "hermes", server._task_step_assignee(task, loaded["implement"], tmp)
-            )
-            self.assertIn(
-                "hermes", server._task_step_command(task, loaded["implement"], tmp)
-            )
-            self.assertEqual(
-                "gemini", server._task_step_assignee(task, loaded["review"], tmp)
-            )
-            self.assertIn(
-                "gemini", server._task_step_command(task, loaded["review"], tmp)
-            )
+            steps = [
+                {"id": "intake", "name": "In",
+                 "agents": ["codex", "gemini"],
+                 "agent_commands": {"codex": "c1", "gemini": "c2"}},
+                {"id": "implement", "name": "Impl", "agents": ["codex", "gemini", "hermes"]},
+                {"id": "review", "name": "Rev", "agents": ["codex", "gemini"]},
+                {"id": "test", "name": "Test", "agents": ["codex", "gemini"]},
+                {"id": "integrate", "name": "Int", "agents": ["codex", "gemini"]},
+            ]
+            saved = server.write_workflow_config(steps, tmp, [])
+            by = {s["id"]: s for s in saved["steps"]}
+            self.assertEqual(["codex"], by["intake"]["agents"])
+            self.assertEqual({"codex": "c1"}, by["intake"]["agent_commands"])
+            self.assertEqual(["codex"], by["integrate"]["agents"])
+            self.assertEqual(["codex", "gemini", "hermes"], by["implement"]["agents"])
+            self.assertEqual(["codex", "gemini"], by["review"]["agents"])
+            self.assertEqual(["codex", "gemini"], by["test"]["agents"])
 
 
 if __name__ == "__main__":

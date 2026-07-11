@@ -13,6 +13,14 @@ import orbit.server as server
 from orbit.store import Store
 
 
+def _write_workflow_config(steps, *args, **kwargs):
+    configured = [
+        {**step, "agents": step.get("agents") or ["codex"]}
+        for step in steps
+    ]
+    return server.write_workflow_config(configured, *args, **kwargs)
+
+
 def _init_repo(root: Path) -> None:
     env = {
         **os.environ,
@@ -123,7 +131,7 @@ class WorkflowSchemaTests(unittest.TestCase):
 
     def test_default_workflow_roundtrips_flags(self):
         with TemporaryDirectory() as tmp:
-            server.write_workflow_config(
+            _write_workflow_config(
                 server.default_workflow_steps(), tmp, server.default_workflow_edges()
             )
             loaded = {s["id"]: s for s in server.read_workflow_config(tmp)["steps"]}
@@ -168,7 +176,7 @@ class WorkflowSchemaTests(unittest.TestCase):
 
     def test_step_prompt_roundtrips_and_rejects_non_string(self):
         with TemporaryDirectory() as tmp:
-            server.write_workflow_config(
+            _write_workflow_config(
                 [
                     {"id": "a", "name": "A", "prompt": "Triage briefly."},
                     {"id": "b", "name": "B"},
@@ -237,7 +245,7 @@ class StepSeparationTests(unittest.TestCase):
             by = {s["id"]: s for s in steps}
             # Jam integrate on top of test; normalization must separate them.
             by["integrate"]["x"], by["integrate"]["y"] = by["test"]["x"] + 20, by["test"]["y"]
-            saved = server.write_workflow_config(
+            saved = _write_workflow_config(
                 steps, tmp, server.default_workflow_edges()
             )
             xs = {s["id"]: s["x"] for s in saved["steps"]}
@@ -964,7 +972,7 @@ class TokenBudgetConfigTests(unittest.TestCase):
     def test_workflow_config_has_no_goal_gates(self):
         # goal_verify and the token budget are per-goal now — not in workflow config.
         with TemporaryDirectory() as tmp:
-            server.write_workflow_config(
+            _write_workflow_config(
                 server.default_workflow_steps(), tmp, server.default_workflow_edges()
             )
             cfg = server.read_workflow_config(tmp)

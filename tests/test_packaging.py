@@ -7,6 +7,14 @@ from tempfile import TemporaryDirectory
 from unittest import mock
 
 
+def _write_workflow_config(server, steps, *args, **kwargs):
+    configured = [
+        {**step, "agents": step.get("agents") or ["codex"]}
+        for step in steps
+    ]
+    return server.write_workflow_config(configured, *args, **kwargs)
+
+
 class PackagingTests(unittest.TestCase):
     def test_init_project_bootstraps_everything_and_is_idempotent(self):
         import json
@@ -133,10 +141,18 @@ class PackagingTests(unittest.TestCase):
         self.assertNotIn("function createTaskRun(taskId)", html)
         self.assertIn("function renderTaskRuns()", html)
         self.assertIn("function renderWorkflow()", html)
-        # Steps assign their own Agent and command directly.
+        # Steps assign their own Agent, with a per-agent command under each row.
         self.assertIn('id="addStepAgents"', html)
-        self.assertIn('id="addStepCommand"', html)
+        self.assertIn("step-agent-cmd", html)
+        self.assertIn("function selectedAgentCommands()", html)
         self.assertNotIn('id="setDefaultCommand"', html)
+        self.assertNotIn('id="setSubtaskAgents"', html)
+        # The global agent-command overrides setting is gone (moved onto steps).
+        self.assertNotIn('id="setAgentCommands"', html)
+        self.assertNotIn('id="addStepCommand"', html)
+        # Steps default to no Agent; a blank option makes "unassigned" selectable.
+        self.assertIn("modal.addStep.agentDefault", html)
+        self.assertNotIn("modal.addStep.agentRequired", html)
         # The Add-step toolbar tool opens the modal (add); double-click opens it
         # (edit). No standalone Add-step button in the pane header.
         self.assertIn("function saveEditStep()", html)
@@ -313,7 +329,7 @@ class PackagingTests(unittest.TestCase):
 
         with TemporaryDirectory() as tmp:
             default = server.read_workflow_config(tmp)
-            saved = server.write_workflow_config(
+            saved = _write_workflow_config(server,
                 [
                     {
                         "id": "plan",
@@ -363,10 +379,24 @@ class PackagingTests(unittest.TestCase):
             {"id": "c", "name": "C", "task_status": "in_progress"},
         ]
         with TemporaryDirectory() as tmp:
-            saved = server.write_workflow_config(steps, tmp)
+            saved = _write_workflow_config(server, steps, tmp)
             self.assertEqual(server.default_workflow_statuses(), saved["statuses"])
             by_id = {s["id"]: s for s in saved["steps"]}
             self.assertNotIn("task_status", by_id["b"])
+
+    def test_workflow_allows_step_without_agent(self):
+        # Steps default empty; the agent gate is deferred to goal start, so a
+        # workflow with no Agents saves and round-trips cleanly.
+        import orbit.server as server
+
+        with TemporaryDirectory() as tmp:
+            saved = server.write_workflow_config(
+                [{"id": "a", "name": "A", "agents": []}], tmp, []
+            )
+            self.assertEqual([], saved["steps"][0]["agents"])
+            self.assertEqual(
+                [], server.read_workflow_config(tmp)["steps"][0]["agents"]
+            )
 
     def test_workflow_reports_graph_warnings(self):
         import orbit.server as server
@@ -377,10 +407,10 @@ class PackagingTests(unittest.TestCase):
             {"id": "c", "name": "C"},
         ]
         with TemporaryDirectory() as tmp:
-            connected = server.write_workflow_config(
+            connected = _write_workflow_config(server,
                 steps, tmp, [{"from": "a", "to": "b"}, {"from": "b", "to": "c"}]
             )
-            orphaned = server.write_workflow_config(
+            orphaned = _write_workflow_config(server,
                 steps, tmp, [{"from": "a", "to": "b"}]
             )
 
@@ -400,7 +430,7 @@ class PackagingTests(unittest.TestCase):
         ]
         # b <-> c form a cycle with no entry from a's component.
         with TemporaryDirectory() as tmp:
-            saved = server.write_workflow_config(
+            saved = _write_workflow_config(server,
                 steps, tmp, [{"from": "b", "to": "c"}, {"from": "c", "to": "b"}]
             )
 
@@ -411,7 +441,7 @@ class PackagingTests(unittest.TestCase):
         import orbit.server as server
 
         with TemporaryDirectory() as tmp:
-            saved = server.write_workflow_config(
+            saved = _write_workflow_config(server,
                 [
                     {"id": "impl", "name": "Impl", "required": False},
                     {"id": "split", "name": "Split", "decompose": True, "required": False},
@@ -463,7 +493,7 @@ class PackagingTests(unittest.TestCase):
         import orbit.server as server
 
         with TemporaryDirectory() as tmp:
-            saved = server.write_workflow_config(
+            saved = _write_workflow_config(server,
                 [
                     {"id": "a", "name": "A", "x": 100, "y": 50},
                     {"id": "b", "name": "B", "x": 400, "y": 200},
@@ -489,7 +519,7 @@ class PackagingTests(unittest.TestCase):
             {"id": "c", "name": "C"},
         ]
         with TemporaryDirectory() as tmp:
-            saved = server.write_workflow_config(
+            saved = _write_workflow_config(server,
                 steps,
                 tmp,
                 [
@@ -500,7 +530,7 @@ class PackagingTests(unittest.TestCase):
             )
             self.assertEqual([{"from": "a", "to": "b"}], saved["edges"])
             with self.assertRaisesRegex(InvalidInputError, "unknown step"):
-                server.write_workflow_config(steps, tmp, [{"from": "a", "to": "z"}])
+                _write_workflow_config(server, steps, tmp, [{"from": "a", "to": "z"}])
 
     def test_legacy_workflow_without_edges_gets_sequential_chain(self):
         import orbit.server as server
@@ -536,7 +566,7 @@ class PackagingTests(unittest.TestCase):
             {"from": "review", "to": "implement", "rework": True},
         ]
         with TemporaryDirectory() as tmp:
-            saved = server.write_workflow_config(steps, tmp, edges=edges)
+            saved = _write_workflow_config(server, steps, tmp, edges=edges)
             loaded = server.read_workflow_config(tmp)
 
         self.assertEqual(saved, loaded)

@@ -1365,21 +1365,6 @@
           <input id="setMaxConcurrent" type="number" min="1" max="6" step="1" style="width:120px;">
           <span class="meta" style="font-size:11px;" data-i18n="settings.maxConcurrentHint">How many workflow steps run at the same time across all runners.</span>
         </label>
-        <label style="display:flex; flex-direction:column; gap:5px; font-size:13px;">
-          <span data-i18n="settings.hubCommand">Hub supervision command</span>
-          <input id="setHubCommand" type="text" placeholder="optional — CLI used to judge stuck steps" style="width:100%;">
-          <span class="meta" style="font-size:11px;" data-i18n="settings.hubCommandHint">Used to inspect long-silent steps and decide kill/continue. Blank disables supervision.</span>
-        </label>
-        <label style="display:flex; flex-direction:column; gap:5px; font-size:13px;">
-          <span data-i18n="settings.subtaskAgents">Subtask agent pool (comma-separated)</span>
-          <input id="setSubtaskAgents" type="text" placeholder="e.g. claude-code, codex, hermes" style="width:100%;">
-          <span class="meta" style="font-size:11px;" data-i18n="settings.subtaskAgentsHint">Decompose rotates these CLIs across subtasks it didn't tag with an agent, so different agents share the load.</span>
-        </label>
-        <label style="display:flex; flex-direction:column; gap:5px; font-size:13px;">
-          <span data-i18n="settings.agentCommands">Agent command overrides (JSON)</span>
-          <textarea id="setAgentCommands" rows="4" placeholder='{"codex": "codex exec --full-auto \"$(cat)\""}' style="width:100%;resize:vertical;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;"></textarea>
-          <span class="meta" style="font-size:11px;" data-i18n="settings.agentCommandsHint">Map of agent name → full runner command; overrides the built-in table for known CLIs.</span>
-        </label>
         <div><button id="saveSettings" class="primary" type="button" data-i18n="settings.save">Save</button></div>
       </div>
     </div>
@@ -1404,9 +1389,8 @@
           <button type="button" id="addStepAgentAdd" title="Add another agent" data-i18n-title="modal.addStep.agentAdd" style="border:1px dashed var(--line);background:none;cursor:pointer;color:var(--accent);border-radius:6px;padding:0 9px;font-size:15px;line-height:1.5;">＋</button>
         </div>
         <div id="addStepAgents" style="display:flex;flex-direction:column;gap:5px;padding:6px 0;"></div>
-        <div class="meta" data-i18n="modal.addStep.agentHint">The first Agent runs this step. Multiple Agents on the step immediately after Decompose are distributed across implementation tasks.</div>
+        <div class="meta" data-i18n="modal.addStep.agentHint">Steps start unassigned; an Agent's command is blank for its built-in CLI. Implement / Review / Test may list up to 3 Agents (dispatches round-robin across them); every other step takes one. A goal won't start until every step has an Agent.</div>
       </div>
-      <label><div class="meta" data-i18n="modal.addStep.command">Command (optional)</div><input id="addStepCommand" type="text" placeholder="runner CLI — blank uses the selected Agent's built-in command" data-i18n-ph="modal.addStep.commandPh"></label>
       <label id="addStepRequiredField" class="modal-check"><input id="addStepRequired" type="checkbox"><span class="meta" data-i18n="modal.addStep.required">Required (a step the flow must include)</span></label>
       <label><div class="meta" data-i18n="modal.addStep.prompt">Step prompt</div><textarea id="addStepPrompt" rows="7" data-i18n-ph="modal.addStep.promptPh" placeholder="Additional instructions for this step" style="width:100%;resize:vertical;"></textarea><div class="meta" data-i18n="modal.addStep.promptHint">Appended to the generated step instructions; the engine output protocol still takes priority.</div></label>
       <div class="modal-actions">
@@ -1470,13 +1454,6 @@
         "settings.maxReworkHint": "How many times a step may loop back before the engine blocks the task for the hub.",
         "settings.maxConcurrent": "Max concurrent tasks (1–6)",
         "settings.maxConcurrentHint": "How many workflow steps run at the same time across all runners.",
-        "settings.hubCommand": "Hub supervision command",
-        "settings.hubCommandHint": "Used to inspect long-silent steps and decide kill/continue. Blank disables supervision.",
-        "settings.subtaskAgents": "Subtask agent pool (comma-separated)",
-        "settings.subtaskAgentsHint": "Decompose rotates these CLIs across subtasks it didn't tag with an agent, so different agents share the load.",
-        "settings.agentCommands": "Agent command overrides (JSON)",
-        "settings.agentCommandsHint": "Map of agent name → full runner command; overrides the built-in table for known CLIs.",
-        "settings.agentCommandsInvalid": "Agent command overrides must be valid JSON.",
         "settings.save": "Save",
         "settings.saved": "Settings saved",
         "lang.label": "Language",
@@ -1506,11 +1483,11 @@
         "action.close": "Close",
         "modal.addStep.title": "Add workflow step", "modal.addStep.editTitle": "Edit step",
         "modal.addStep.name": "Name", "modal.addStep.namePh": "Step name",
-        "modal.addStep.agent": "Agents", "modal.addStep.agentPh": "e.g. claude-code — blank uses the step id",
-        "modal.addStep.agentDefault": "— use the step id —", "modal.addStep.agentMissing": "(not installed)",
+        "modal.addStep.agent": "Agents", "modal.addStep.agentMissing": "(not installed)",
+        "modal.addStep.agentDefault": "— no agent —",
         "modal.addStep.agentAdd": "Add another agent", "modal.addStep.agentRemove": "Remove",
-        "modal.addStep.agentHint": "The first Agent runs this step. Multiple Agents on the step immediately after Decompose are distributed across implementation tasks.",
-        "modal.addStep.command": "Command (optional)", "modal.addStep.commandPh": "runner CLI — blank uses the selected Agent's built-in command",
+        "modal.addStep.agentHint": "Steps start unassigned; an Agent's command is blank for its built-in CLI. Implement / Review / Test may list up to 3 Agents (dispatches round-robin across them); every other step takes one. A goal won't start until every step has an Agent.",
+        "modal.addStep.agentCmdPh": "command — blank uses the built-in CLI",
         "modal.addStep.required": "Required (a step the flow must include)",
         "modal.addStep.prompt": "Step prompt", "modal.addStep.promptPh": "Additional instructions for this step",
         "modal.addStep.promptHint": "Appended to the generated instructions; engine safety contracts and the output protocol still take priority.",
@@ -1595,13 +1572,6 @@
         "settings.maxReworkHint": "一个步骤最多返工多少次后，引擎将任务打回给 hub 阻塞。",
         "settings.maxConcurrent": "最大同时任务数 (1–6)",
         "settings.maxConcurrentHint": "所有 runner 加起来同时运行多少个工作流步骤。",
-        "settings.hubCommand": "Hub 监督命令",
-        "settings.hubCommandHint": "用于巡检长时间无输出的步骤并裁决 kill/continue；留空则关闭监督。",
-        "settings.subtaskAgents": "子任务 agent 池（逗号分隔）",
-        "settings.subtaskAgentsHint": "decompose 把这些 CLI 轮流分给它没标 agent 的子任务，让不同 agent 分担。",
-        "settings.agentCommands": "Agent 命令覆盖（JSON）",
-        "settings.agentCommandsHint": "agent 名 → 完整 runner 命令的映射；覆盖已知 CLI 的内置表。",
-        "settings.agentCommandsInvalid": "Agent 命令覆盖必须是合法 JSON。",
         "settings.save": "保存",
         "settings.saved": "设置已保存",
         "lang.label": "语言",
@@ -1631,11 +1601,11 @@
         "action.close": "关闭",
         "modal.addStep.title": "添加工作流步骤", "modal.addStep.editTitle": "编辑步骤",
         "modal.addStep.name": "名称", "modal.addStep.namePh": "步骤名称",
-        "modal.addStep.agent": "Agent", "modal.addStep.agentPh": "如 claude-code —— 留空用步骤 id",
-        "modal.addStep.agentDefault": "—— 用步骤 id ——", "modal.addStep.agentMissing": "(未安装)",
+        "modal.addStep.agent": "Agent", "modal.addStep.agentMissing": "(未安装)",
+        "modal.addStep.agentDefault": "—— 不指定 Agent ——",
         "modal.addStep.agentAdd": "加一个 agent", "modal.addStep.agentRemove": "移除",
-        "modal.addStep.agentHint": "第一个 Agent 执行本步骤；Decompose 后紧邻步骤配置多个 Agent 时，会分配到不同实现任务。",
-        "modal.addStep.command": "命令（可选）", "modal.addStep.commandPh": "runner CLI —— 留空使用所选 Agent 的内置命令",
+        "modal.addStep.agentHint": "步骤默认不指定 Agent；Agent 的命令留空则用内置 CLI。Implement / Review / Test 可配最多 3 个 Agent（轮流派发），其余步骤只能一个。所有步骤都设了 Agent 后 goal 才能启动。",
+        "modal.addStep.agentCmdPh": "命令 —— 留空用内置 CLI",
         "modal.addStep.required": "必选（流程必须包含的步骤）",
         "modal.addStep.prompt": "步骤 Prompt", "modal.addStep.promptPh": "该步骤的附加执行指令",
         "modal.addStep.promptHint": "追加到引擎生成的指令中；引擎安全契约和输出协议仍具有更高优先级。",
@@ -1789,42 +1759,23 @@
       try {
         const s = await api("/api/settings");
         const rework = $("setMaxRework"), concurrent = $("setMaxConcurrent");
-        const hubCmd = $("setHubCommand");
         if (rework && document.activeElement !== rework) rework.value = s.max_rework_rounds;
         if (concurrent && document.activeElement !== concurrent) concurrent.value = s.max_concurrent_tasks;
-        if (hubCmd && document.activeElement !== hubCmd) hubCmd.value = s.hub_command || "";
-        const pool = $("setSubtaskAgents"), acmds = $("setAgentCommands");
-        if (pool && document.activeElement !== pool) pool.value = (s.subtask_agents || []).join(", ");
-        if (acmds && document.activeElement !== acmds)
-          acmds.value = Object.keys(s.agent_commands || {}).length ? JSON.stringify(s.agent_commands, null, 2) : "";
       } catch (err) { /* offline project: leave inputs as-is */ }
     }
 
     async function saveSettings() {
-      const poolRaw = ($("setSubtaskAgents").value || "").split(",").map(s => s.trim()).filter(Boolean);
-      let agentCmds = {};
-      const acmdsRaw = ($("setAgentCommands").value || "").trim();
-      if (acmdsRaw) {
-        try { agentCmds = JSON.parse(acmdsRaw); }
-        catch (e) { showError(t("settings.agentCommandsInvalid")); return; }
-      }
       await run(async () => {
         const s = await api("/api/settings", {
           method: "POST",
           body: JSON.stringify({
             max_rework_rounds: parseInt($("setMaxRework").value, 10),
-            max_concurrent_tasks: parseInt($("setMaxConcurrent").value, 10),
-            hub_command: $("setHubCommand").value,
-            subtask_agents: poolRaw,
-            agent_commands: agentCmds
+            max_concurrent_tasks: parseInt($("setMaxConcurrent").value, 10)
           })
         });
         // Reflect the server's clamped values back into the inputs.
         $("setMaxRework").value = s.max_rework_rounds;
         $("setMaxConcurrent").value = s.max_concurrent_tasks;
-        $("setHubCommand").value = s.hub_command || "";
-        $("setSubtaskAgents").value = (s.subtask_agents || []).join(", ");
-        $("setAgentCommands").value = Object.keys(s.agent_commands || {}).length ? JSON.stringify(s.agent_commands, null, 2) : "";
         setStatus(t("settings.saved"));
       });
     }
@@ -2329,7 +2280,7 @@
       // a distinct dip depth (channel) and a distinct arrowhead height, so they
       // spread apart instead of overlapping — unlike a global index, this never
       // collides for returns sharing a target and holds beyond three of them.
-      const edgeSet = new Set(edges.map(e => e.from + " " + e.to));
+      const edgeSet = new Set(edges.map(e => e.from + "\u001f" + e.to));
       // No other node sits horizontally between a and b (in the same row band).
       const between = (a, b, rectA) => {
         const lo = Math.min(a.x, b.x), hi = Math.max(a.x, b.x);
@@ -2354,7 +2305,7 @@
         // double-headed arrow: draw it on the left→right half, skip the reverse.
         const sameRow = Math.abs((a.y + rectA.h / 2) - (b.y + rectB.h / 2)) < 80;
         if (sameRow
-            && edgeSet.has(edge.to + " " + edge.from)
+            && edgeSet.has(edge.to + "\u001f" + edge.from)
             && !between(a, b, rectA)) {
           if (a.x >= b.x) return "";  // reverse half — the forward half draws the pair
           const p1 = wfEdgeAnchor(a, rectA, "right");
@@ -2577,24 +2528,37 @@
     let wfStepModalMode = "add";
     let wfStepModalId = null;
 
-    // Agent options for a step: a blank "use step id" default, the installed
-    // CLI tools, plus an orphan entry if the step names an agent that isn't
+    // Agent options for a step: installed CLI tools, plus an orphan entry if
+    // the step names an agent that isn't
     // installed (legacy / hand-edited config) so it isn't silently dropped.
-    // The step's agent rows (one <select> each). First is the step's own
-    // assignee. On a direct successor of Decompose, 2-3 rows also spread those
-    // CLIs across implementation subtasks; later gates keep their own Agents.
-    let stepAgentRows = [""];
+    // The step's Agent rows (one <select> each). Dispatches rotate across the
+    // configured list independently for each step.
+    // Each row is {agent, command}: the Agent select plus its own shell command
+    // (blank = the Agent's built-in CLI).
+    let stepAgentRows = [{ agent: "", command: "" }];
 
-    // One dropdown per row: options are the installed CLIs minus the agents
-    // already picked in the other rows (no duplicates), a blank default, and the
-    // row's own value if it names an uninstalled/legacy agent. A ＋ adds a row
-    // (up to 3); an × removes one.
+    // Only these steps round-robin across Agents (＋ button, up to 3). Every
+    // other step — including any newly added one — takes a single Agent. Mirrors
+    // the server's _MULTI_AGENT_STEP_IDS.
+    const MULTI_AGENT_STEPS = new Set(["implement", "review", "test"]);
+    function currentStepAllowsMultiAgent() {
+      return wfStepModalMode === "edit" && MULTI_AGENT_STEPS.has(wfStepModalId);
+    }
+
+    // One row = an Agent dropdown (installed CLIs minus the agents already picked
+    // in the other rows, plus the row's own value if it names an uninstalled/
+    // legacy agent) over a per-Agent command input. A ＋ adds a row (up to 3); an
+    // × removes one. The command input updates the model without re-rendering so
+    // typing keeps focus; only the select and add/remove re-render.
     function renderAgentSelectors() {
       const installed = (state.tools || []).filter(tool => tool.installed);
-      if (!stepAgentRows.length) stepAgentRows = [""];
+      const multi = currentStepAllowsMultiAgent();
+      if (!multi && stepAgentRows.length > 1) stepAgentRows = stepAgentRows.slice(0, 1);
+      if (!stepAgentRows.length) stepAgentRows = [{ agent: "", command: "" }];
       const rows = stepAgentRows;
-      const rowsHtml = rows.map((val, i) => {
-        const chosen = new Set(rows.filter((v, j) => j !== i && v));
+      const rowsHtml = rows.map((row, i) => {
+        const val = row.agent;
+        const chosen = new Set(rows.filter((r, j) => j !== i && r.agent).map(r => r.agent));
         const avail = installed.filter(tool => !chosen.has(tool.agent_name));
         const known = installed.some(tool => tool.agent_name === val);
         const opts = [`<option value="" ${val ? "" : "selected"}>${t("modal.addStep.agentDefault")}</option>`]
@@ -2606,13 +2570,19 @@
         const rm = rows.length > 1
           ? `<button type="button" class="step-agent-rm" data-i="${i}" title="${t("modal.addStep.agentRemove")}" style="border:none;background:none;cursor:pointer;color:var(--muted);font-size:17px;line-height:1;padding:0 2px;">×</button>`
           : "";
-        return `<div style="display:flex;align-items:center;gap:6px;">
-          <select class="step-agent-sel" data-i="${i}" style="flex:1;">${opts.join("")}</select>${rm}
+        return `<div style="display:flex;flex-direction:column;gap:4px;">
+          <div style="display:flex;align-items:center;gap:6px;">
+            <select class="step-agent-sel" data-i="${i}" style="flex:1;">${opts.join("")}</select>${rm}
+          </div>
+          <input type="text" class="step-agent-cmd" data-i="${i}" value="${escapeHtml(row.command || "")}" placeholder="${t("modal.addStep.agentCmdPh")}" style="width:100%;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;">
         </div>`;
       }).join("");
       $("addStepAgents").innerHTML = rowsHtml;
       document.querySelectorAll("#addStepAgents .step-agent-sel").forEach(sel => {
-        sel.addEventListener("change", () => { stepAgentRows[+sel.dataset.i] = sel.value; renderAgentSelectors(); });
+        sel.addEventListener("change", () => { stepAgentRows[+sel.dataset.i].agent = sel.value; renderAgentSelectors(); });
+      });
+      document.querySelectorAll("#addStepAgents .step-agent-cmd").forEach(inp => {
+        inp.addEventListener("input", () => { stepAgentRows[+inp.dataset.i].command = inp.value; });
       });
       document.querySelectorAll("#addStepAgents .step-agent-rm").forEach(btn => {
         btn.addEventListener("click", () => {
@@ -2620,21 +2590,34 @@
           renderAgentSelectors();
         });
       });
-      // The ＋ lives in the Agents title row (static markup); hide it at 3 rows.
+      // The ＋ lives in the Agents title row (static markup). Only multi-agent
+      // steps show it, and only below 3 rows.
       const addBtn = $("addStepAgentAdd");
-      if (addBtn) addBtn.style.display = rows.length < 3 ? "" : "none";
+      if (addBtn) addBtn.style.display = (multi && rows.length < 3) ? "" : "none";
     }
 
-    function setStepAgents(agents) {
-      stepAgentRows = (agents || []).slice(0, 3);
-      if (!stepAgentRows.length) stepAgentRows = [""];
+    function setStepAgents(agents, agentCommands) {
+      const cap = currentStepAllowsMultiAgent() ? 3 : 1;
+      const cmds = agentCommands || {};
+      stepAgentRows = (agents || []).slice(0, cap).map(a => ({ agent: a, command: String(cmds[a] || "") }));
+      if (!stepAgentRows.length) stepAgentRows = [{ agent: "", command: "" }];
       renderAgentSelectors();
     }
 
     function selectedStepAgents() {
       const out = [];
-      for (const v of stepAgentRows) { if (v && !out.includes(v)) out.push(v); }
+      for (const r of stepAgentRows) { if (r.agent && !out.includes(r.agent)) out.push(r.agent); }
       return out.slice(0, 3);
+    }
+
+    // {agent: command} for rows that name both an agent and a non-blank command.
+    function selectedAgentCommands() {
+      const map = {};
+      for (const r of stepAgentRows) {
+        const cmd = (r.command || "").trim();
+        if (r.agent && cmd && !(r.agent in map)) map[r.agent] = cmd;
+      }
+      return map;
     }
 
     function openAddStepModal() {
@@ -2648,7 +2631,6 @@
       $("addStepPrompt").value = "";
       $("addStepPrompt").placeholder = t("modal.addStep.promptPh");
       setStepAgents([]);
-      $("addStepCommand").value = "";
       $("addStepRequired").checked = false;
       $("addStepRequired").disabled = false;
       $("addStepModalBackdrop").classList.add("open");
@@ -2666,8 +2648,7 @@
       $("addStepName").value = step.name || "";
       $("addStepPrompt").value = step.prompt || "";
       $("addStepPrompt").placeholder = t("modal.addStep.promptPh");
-      setStepAgents(step.agents || []);
-      $("addStepCommand").value = step.command || "";
+      setStepAgents(step.agents || [], step.agent_commands || {});
       $("addStepRequired").checked = !!step.required;
       $("addStepRequired").disabled = !!step.required_locked;
       $("addStepModalBackdrop").classList.add("open");
@@ -2686,7 +2667,7 @@
     async function confirmAddStep() {
       const name = ($("addStepName").value || "").trim() || t("wf.step");
       const agents = selectedStepAgents();
-      const command = ($("addStepCommand").value || "").trim();
+      const agent_commands = selectedAgentCommands();
       const required = $("addStepRequired").checked;
       const prompt = ($("addStepPrompt").value || "").trim();
       const steps = state.workflow.steps || [];
@@ -2695,7 +2676,7 @@
       // "code_review"); fall back to a timestamp suffix on collisions.
       let newId = name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "step";
       if (steps.some(s => s.id === newId)) newId = `${newId}_${Date.now().toString(36)}`;
-      const newStep = { id: newId, name, agents, command, required, prompt, x: 40, y: 60 };
+      const newStep = { id: newId, name, agents, agent_commands, required, prompt, x: 40, y: 60 };
       state.workflow.steps = [...steps, newStep];
       closeAddStepModal();
       await run(async () => {
@@ -2711,7 +2692,7 @@
       if (!step) { closeAddStepModal(); return; }
       step.name = ($("addStepName").value || "").trim() || step.name || t("wf.step");
       step.agents = selectedStepAgents();
-      step.command = ($("addStepCommand").value || "").trim();
+      step.agent_commands = selectedAgentCommands();
       step.prompt = ($("addStepPrompt").value || "").trim();
       if (!step.required_locked) step.required = $("addStepRequired").checked;
       closeAddStepModal();
@@ -3545,7 +3526,12 @@
     $("addStepCancel").addEventListener("click", closeAddStepModal);
     $("addStepConfirm").addEventListener("click", confirmStep);
     $("addStepDelete").addEventListener("click", deleteStepFromModal);
-    $("addStepAgentAdd").addEventListener("click", () => { if (stepAgentRows.length < 3) { stepAgentRows.push(""); renderAgentSelectors(); } });
+    $("addStepAgentAdd").addEventListener("click", () => {
+      if (currentStepAllowsMultiAgent() && stepAgentRows.length < 3) {
+        stepAgentRows.push({ agent: "", command: "" });
+        renderAgentSelectors();
+      }
+    });
     $("addStepName").addEventListener("keydown", (e) => {
       if (e.key === "Enter") confirmStep();
       else if (e.key === "Escape") closeAddStepModal();

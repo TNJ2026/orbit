@@ -194,7 +194,7 @@ Start a goal; the engine splits it into business subtasks that run through the w
 
 ### Step Agents & constraints
 
-Each workflow step owns its Agent selection and editable prompt. If the direct successor of Decompose has multiple Agents, Orbit distributes implementation tasks across them. Decompose may select one of that server-enforced pool for a specific task. Later Review/Test/Integrate steps always return to their own configured Agents, preserving independent gates.
+Each workflow step starts with no Agent and owns its editable prompt — you assign Agents on the Workflow page. A goal will not start until every reachable step has at least one runnable Agent; the start preflight names any unset step. When a step has multiple Agents, Orbit rotates that step's dispatches across them using persistent per-step history (round-robin over distinct tasks). Rework returns a task to the same Agent that first ran the step, so an implementer keeps its own worktree instead of handing a half-done change to the next CLI. Agent selection is independent per step, so Review/Test/Integrate retain their own execution pools.
 
 Constraints:
 
