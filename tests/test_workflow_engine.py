@@ -370,6 +370,43 @@ class WorkflowEngineTests(unittest.TestCase):
             self.assertEqual(8, len(subs))
             self.assertNotEqual("stalled", h.task(goal_id)["task_status"])
 
+    def test_held_subtask_has_no_placeholder_assignee(self):
+        # A held subtask must not show the decompose actor as its owner: it has
+        # none until a step dispatches it. Only the dispatched sibling carries the
+        # round-robin agent.
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, steps=ENTRY_DECOMPOSE_STEPS, bindings=[
+                {"agent_name": "hub-agent", "assignment": "hub", "runner_command": "cat"},
+                {"agent_name": "codex", "assignment": "implementer", "runner_command": "cat"},
+                {"agent_name": "integrator", "assignment": "integrator", "runner_command": "cat"},
+                {"agent_name": "rev", "assignment": "reviewer", "runner_command": "cat"},
+            ])
+            goal_id = h.create_task(title="goal")
+            h.store.update_task_metadata(goal_id, is_goal=True)
+            h.start(goal_id)
+            step = next(
+                s for s in server.read_workflow_config(tmp)["steps"]
+                if s["id"] == "intake"
+            )
+            payload = ('{"tasks":[{"title":"A","content":"a"},'
+                       '{"title":"B","content":"b","depends_on":[1]}]}')
+            member = {"agent_name": "hub-agent",
+                      "runner_command": f"printf '%s' '{payload}'"}
+            server.run_step_worker(h.store, tmp, goal_id, step, member)
+            subs = sorted(
+                (t for t in h.store.list_tasks(status="all")
+                 if t.get("parent_task_id") == goal_id and t.get("source_message_id")),
+                key=lambda t: t["id"],
+            )
+            self.assertEqual(2, len(subs))
+            # A dispatched -> a real owner picked by its step's round-robin.
+            self.assertTrue(subs[0]["assignee"])
+            self.assertTrue(subs[0]["workflow_step"])
+            # B is held on [A] -> unassigned, NOT the decompose actor "hub-agent"
+            # (the placeholder send_message would otherwise leave behind).
+            self.assertEqual("", subs[1]["assignee"])
+            self.assertEqual("", subs[1]["workflow_step"])
+
     def test_optional_late_branch_does_not_redispatch_join_target(self):
         steps = [
             {"id": "a", "name": "A", "assignment": "hub", "task_status": "created", "required": True},

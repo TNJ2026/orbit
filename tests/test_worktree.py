@@ -385,6 +385,37 @@ class WorktreeLifecycleTests(unittest.TestCase):
             self.assertEqual(wt1, wt2)
             self.assertTrue(server._worktree_registered(root, wt1))
 
+    def test_design_artifacts_committed_reach_isolated_worktrees(self):
+        # Design docs written before decompose must be committed so the isolated
+        # subtask worktrees (branched off HEAD) actually contain them.
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _init_repo(root)
+            (root / "docs").mkdir()
+            (root / "docs" / "architecture.md").write_text("ARCH", encoding="utf-8")
+            # A user's unrelated in-progress edit that must NOT be swept in.
+            (root / "README.md").write_text("dirty", encoding="utf-8")
+
+            # Before committing: a fresh worktree off HEAD lacks the uncommitted doc.
+            wt_before = server._ensure_task_worktree(tmp, 1)
+            self.assertFalse((wt_before / "docs" / "architecture.md").exists())
+
+            self.assertTrue(server._commit_goal_design_artifacts(tmp))
+
+            # After committing: a new task's worktree contains the design doc.
+            wt_after = server._ensure_task_worktree(tmp, 2)
+            self.assertEqual(
+                "ARCH", (wt_after / "docs" / "architecture.md").read_text(encoding="utf-8")
+            )
+            # The unrelated README edit stayed uncommitted (only docs/ was staged).
+            status = subprocess.run(
+                ["git", "-C", str(root), "status", "--porcelain", "README.md"],
+                capture_output=True, text=True,
+            ).stdout
+            self.assertIn("README.md", status)
+            # Idempotent: nothing new to commit -> no-op.
+            self.assertFalse(server._commit_goal_design_artifacts(tmp))
+
     def test_remove_then_recreate(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)

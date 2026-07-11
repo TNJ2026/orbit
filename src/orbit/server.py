@@ -304,23 +304,28 @@ DEFAULT_STEP_PROMPTS = {
     ),
     "product_design": (
         "Define the target users, core scenarios, scope, priorities, constraints, non-goals, and "
-        "verifiable acceptance criteria. Reuse the Triage brief, keep the product definition "
-        "implementation-neutral, and persist a concise product artifact when useful."
+        "verifiable acceptance criteria. Reuse the Triage brief and keep the product definition "
+        "implementation-neutral. Write the result to `docs/product.md` — downstream steps and the "
+        "isolated implementers read it from there, so it must live on disk, not only in your reply."
     ),
     "ui_design": (
         "Turn the product definition into an implementable UI specification covering layout, "
         "components, states, interactions, responsive behavior, accessibility, and concrete "
-        "visual tokens. Follow existing interface patterns and record the durable spec when useful."
+        "visual tokens. Follow existing interface patterns. Write the spec to `docs/ui.md` — "
+        "downstream steps and the isolated implementers read it from there, so it must live on disk."
     ),
     "architecture": (
         "Define the simplest sound architecture for the approved product and UI design. Specify "
         "module boundaries, interfaces, data models, migrations, reuse decisions, risks, and "
-        "verification strategy without implementing the solution."
+        "verification strategy without implementing the solution. Write it to `docs/architecture.md` "
+        "— downstream steps and the isolated implementers read it from there, so it must live on disk."
     ),
     "decompose": (
-        "Use the upstream product, UI, and architecture artifacts to split the Goal into focused, "
-        "independently executable tasks aligned with ownership and module boundaries. Add dependencies "
-        "only when one task truly requires another task's merged result."
+        "Use the design docs in `docs/` (product, UI, architecture) to split the Goal into focused, "
+        "independently executable tasks aligned with ownership and module boundaries. In each task, "
+        "reference the relevant `docs/…` paths instead of restating the spec — the implementer reads "
+        "them from its worktree. Add dependencies only when one task truly requires another task's "
+        "merged result."
     ),
     "implement": (
         "Implement the assigned task against its acceptance criteria using existing project patterns. "
@@ -1427,6 +1432,11 @@ def _start_goal_business_subtasks(
         task = store.get_task_by_source_message(message_id)
         if not task:
             raise InvalidInputError(f"task not created for message: {message_id}")
+        # send_message stamps assignee = recipient (the decompose actor). A
+        # subtask has no real owner until a step dispatches it, so clear it —
+        # otherwise held subtasks show the decompose runner as if pre-assigned,
+        # and the implement round-robin only sets the true owner at dispatch.
+        store.set_task_workflow_state(task["id"], assignee="")
         created.append(task)
     # 2. Persist each subtask's prerequisite task ids. Agent selection belongs
     #    to each workflow step and is resolved when that step is dispatched.
@@ -1822,6 +1832,10 @@ def _complete_goal_intake_locked(
         goal["id"], workflow_step="", task_status="running"
     )
     _settle_step_card(store, goal, step["id"], "done")
+    # Persist the design docs to the base branch before any isolated subtask
+    # worktree is cut, so implementers actually find the docs/ paths the subtasks
+    # reference (worktrees branch off HEAD and can't see uncommitted files).
+    _commit_goal_design_artifacts(project_root)
     if target_steps is None:
         started = _start_goal_business_subtasks(store, project_root, goal, actor, subtasks)
     else:
@@ -3543,6 +3557,33 @@ def _worktree_registered(root: Path, wt_dir: Path) -> bool:
             except OSError:
                 continue
     return False
+
+
+def _commit_goal_design_artifacts(project_root: str | None) -> bool:
+    """Commit the design docs (docs/) to the base branch before isolated subtasks
+    dispatch. Isolated implement/review/test worktrees branch off HEAD, so design
+    files the design steps wrote must be committed first or the worktrees won't
+    contain them (see _ensure_task_worktree). Only `docs/` is staged, so a user's
+    unrelated in-progress work elsewhere in the tree is never swept in. No-op
+    without git, without a base commit, or with nothing new under docs/.
+    Returns True when it created a commit."""
+    if not _git_available():
+        return False
+    root = _project_root(project_root)
+    if not (root / "docs").exists():
+        return False
+    if _worktree_base_ref(root) is None:
+        return False  # unborn HEAD: nothing to add onto
+    try:
+        _git(root, "add", "docs")
+        # git diff --cached --quiet exits 1 when something is staged, 0 when not.
+        if _git(root, "diff", "--cached", "--quiet", "--", "docs").returncode == 0:
+            return False
+        ident = ["-c", "user.name=orbit", "-c", "user.email=orbit@localhost"]
+        cp = _git(root, *ident, "commit", "-m", "orbit: goal design artifacts")
+        return cp.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def _ensure_task_worktree(project_root: str | None, task_id: int) -> Path | None:
