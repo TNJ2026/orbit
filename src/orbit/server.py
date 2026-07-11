@@ -849,6 +849,9 @@ def goals_summary(
                     "title": step.get("title", ""),
                     "task_status": step["task_status"],
                     "assignee": step.get("assignee", ""),
+                    "step_inputs": step.get("step_inputs") or {},
+                    "result_summary": step.get("result_summary", ""),
+                    "artifacts": step.get("artifacts") or [],
                 }
                 for step in sorted(goal_steps, key=lambda item: item["id"])
             ],
@@ -1843,6 +1846,33 @@ def _effective_goal_verify(goal: dict[str, Any] | None, project_root: str | None
     return _detect_goal_verify(_project_root(project_root))
 
 
+def _finish_goal_workflow(
+    store: Store, project_root: str | None, goal: dict[str, Any]
+) -> str:
+    """Finish a non-decomposing goal after its terminal workflow step.
+
+    A goal with work items converges through _recompute_parent_goal_status.
+    A goal that owns the workflow directly has no child status change to trigger
+    that path, so it performs the equivalent verify-or-accept decision here.
+    Returns the persisted goal status.
+    """
+    own = str(goal.get("goal_verify") or "").strip()
+    goal_verify = own or _detect_goal_verify(_project_root(project_root))
+    if goal_verify:
+        if not store.has_pending_workflow_action(goal["id"], "goal_verify"):
+            note = "goal workflow completed; goal verification queued"
+            if not own:
+                note += f" (auto-detected: {goal_verify})"
+            store.create_workflow_action(goal["id"], "goal_verify", note=note)
+        status = "verifying"
+    else:
+        status = "accepted"
+    store.set_task_workflow_state(
+        goal["id"], workflow_step="", task_status=status
+    )
+    return status
+
+
 def _recompute_parent_goal_status(
     store: Store, task: dict[str, Any], project_root: str | None = None
 ) -> None:
@@ -1916,15 +1946,13 @@ def _materializes_step_cards(task: dict[str, Any]) -> bool:
 def _root_goal_decompose_step_id(
     cfg: dict[str, Any], back: set[tuple[str, str]]
 ) -> str | None:
-    """The step at which a root goal splits into business subtasks. Explicit when
-    a step is flagged `decompose: true` (the first such, in step order); otherwise
-    the workflow entry step — so a workflow with no flag splits at intake exactly
-    as before. None only for an empty workflow."""
+    """The explicitly configured step at which a root goal splits into work items.
+
+    No flag means no split: the goal itself traverses the complete workflow.
+    This keeps decomposition a workflow choice instead of an implicit property
+    of every goal."""
     flagged = [s["id"] for s in cfg["steps"] if s.get("decompose")]
-    if flagged:
-        return flagged[0]
-    entries = _workflow_entry_steps(cfg, back)
-    return entries[0] if entries else None
+    return flagged[0] if flagged else None
 
 
 def _is_root_goal_decompose_step(
@@ -1939,16 +1967,15 @@ def _is_root_goal_decompose_step(
 
 def _goal_status_for_step(project_root: str | None, step_id: str) -> str:
     """A root goal's own lifecycle status while it sits at `step_id`. A goal
-    traverses the pre-decompose steps (entry -> design -> decompose) before
-    splitting, so its status reflects that phase rather than the step's task
-    column (which would read as e.g. 'assigned' / 'reviewing' on the goal)."""
+    may traverse the whole workflow itself or split at an explicit decompose
+    step, so its status stays domain-neutral outside that boundary."""
     cfg = read_workflow_config(project_root)
     back = _workflow_graph(cfg)
     if step_id in set(_workflow_entry_steps(cfg, back)):
         return "new"
     if step_id == _root_goal_decompose_step_id(cfg, back):
         return "decomposing"
-    return "designing"
+    return "running"
 
 
 def _complete_goal_intake_locked(
@@ -1960,6 +1987,13 @@ def _complete_goal_intake_locked(
     result: str,
 ) -> dict[str, Any]:
     subtasks = _parse_goal_subtasks(result)
+    _record_step_result(store, goal, step["id"], result)
+    intake_card = store.find_open_step_card(goal["id"], step["id"])
+    if intake_card:
+        store.update_task_step_details(
+            intake_card["id"],
+            result_summary=f"Created {len(subtasks)} work item(s)",
+        )
     # Re-validate workflow/team/state before dispatching the business subtasks.
     # The goal passed this gate at creation, but team/workflow config can change
     # while intake is being worked; refuse to dispatch a batch that would only
@@ -1971,8 +2005,8 @@ def _complete_goal_intake_locked(
     # Resolve where the subtasks begin — and validate it — BEFORE the settle
     # below, so a failed precondition leaves the decompose step open for retry
     # instead of stranding the goal (settled + dropped out) with no subtasks.
-    #  - decompose at the entry step (default / no flag): subtasks run the whole
-    #    workflow from the entry, exactly as before (target_steps stays None).
+    #  - an explicitly flagged decompose at the entry: work items run the whole
+    #    workflow from the entry (target_steps stays None).
     #  - decompose at a later step (after goal-level design/architecture): subtasks
     #    begin at that step's forward successors, carrying the goal's decompose
     #    output forward, so the design steps run once on the goal, not per subtask.
@@ -2055,19 +2089,22 @@ def _upsert_step_card(
     parent: dict[str, Any],
     step: dict[str, Any],
     assignee: str,
-) -> None:
+    step_inputs: dict[str, Any],
+) -> dict[str, Any]:
     card = store.find_open_step_card(parent["id"], step["id"])
     if card:
         # Redispatch (rework loop / timeout reassign): reuse the open card.
         store.set_task_workflow_state(
             card["id"], task_status="assigned", assignee=assignee
         )
-        return
+        return store.update_task_step_details(
+            card["id"], step_inputs=step_inputs, result_summary="", artifacts=[]
+        ) or card
     # Title = step type + what THIS task is actually about (the parent task's
     # title), so each card reflects its own work — not the generic role duty.
     work = (parent.get("title") or "").strip()
     title = f"{step['name']} · {work[:60]}" if work else step["name"]
-    store.create_step_card(
+    return store.create_step_card(
         parent_task_id=parent["id"],
         workflow_step=step["id"],
         title=title,
@@ -2079,6 +2116,7 @@ def _upsert_step_card(
         assignee=assignee,
         status="assigned",
         role_required=step["role_id"],
+        step_inputs=step_inputs,
     )
 
 
@@ -2092,6 +2130,24 @@ def _settle_step_card(
         return
     status = "blocked" if outcome == "blocked" else "closed"
     store.set_task_workflow_state(card["id"], task_status=status)
+
+
+def _record_step_result(
+    store: Store,
+    task: dict[str, Any],
+    step_id: str,
+    result: str,
+) -> None:
+    """Attach structured output to the current step execution holder."""
+    holder_id = task["id"]
+    if _materializes_step_cards(task):
+        card = store.find_open_step_card(task["id"], step_id)
+        if card:
+            holder_id = card["id"]
+    summary, artifacts = _parse_step_output_metadata(result)
+    store.update_task_step_details(
+        holder_id, result_summary=summary, artifacts=artifacts
+    )
 
 
 def _dispatch_step(
@@ -2148,8 +2204,27 @@ def _dispatch_step(
         store.set_task_workflow_state(
             task_id, task_status="assigned", assignee=assignee
         )
+    step_inputs = {
+        "task": {
+            "id": task_id,
+            "title": task.get("title") or "",
+            "content": task.get("content") or "",
+        },
+        "step": {
+            "id": step["id"],
+            "name": step.get("name") or step["id"],
+            "role_id": step.get("role_id") or "",
+        },
+        "upstream_result": upstream_result or "",
+    }
     if _materializes_step_cards(task):
-        _upsert_step_card(store, project_root, task, step, assignee)
+        _upsert_step_card(
+            store, project_root, task, step, assignee, step_inputs
+        )
+    else:
+        store.update_task_step_details(
+            task_id, step_inputs=step_inputs, result_summary="", artifacts=[]
+        )
     command = _runner_command_for(member)
     if command:
         return store.create_run_job(
@@ -2531,6 +2606,7 @@ def _advance_workflow_task_locked(
             f"agent {agent} is not assigned to active step {step} "
             f"(assigned to {assigned_agent})"
         )
+    _record_step_result(store, task, step, result)
     store.cancel_pending_run_jobs(
         task_id,
         step,
@@ -2604,14 +2680,19 @@ def _advance_workflow_task_locked(
     if outcome == "done" and not targets:
         # Terminal step completed: the task leaves the workflow.
         store.record_task_transition(task_id, step, "", agent, "done", result)
-        store.set_task_workflow_state(
-            task_id, workflow_step="", task_status="closed"
-        )
         _settle_step_card(store, task, step, "done")
-        _recompute_parent_goal_status(store, task, project_root)
+        if task.get("is_goal"):
+            final_status = _finish_goal_workflow(store, project_root, task)
+        else:
+            final_status = "closed"
+            store.set_task_workflow_state(
+                task_id, workflow_step="", task_status=final_status
+            )
+            _recompute_parent_goal_status(store, task, project_root)
         return {
             "task_id": task_id, "step": step, "outcome": "done",
-            "closed": True, "dispatched": [], "notices": [],
+            "closed": True, "goal_status": final_status if task.get("is_goal") else None,
+            "dispatched": [], "notices": [],
         }
 
     _settle_step_card(store, task, step, outcome)
@@ -2700,6 +2781,12 @@ def _tail(text: str, limit: int) -> str:
 _VERDICT_RE = re.compile(
     r"WORKFLOW_OUTCOME\s*[:=]\s*(done|rework|blocked)", re.IGNORECASE
 )
+_RESULT_SUMMARY_RE = re.compile(
+    r"(?im)^RESULT_SUMMARY\s*:\s*(.+?)\s*$"
+)
+_ARTIFACTS_RE = re.compile(
+    r"(?im)^ARTIFACTS\s*:\s*(\[.*\])\s*$"
+)
 
 
 def _step_can_rework(cfg: dict[str, Any], back: set[tuple[str, str]], step_id: str) -> bool:
@@ -2716,6 +2803,42 @@ def _parse_runner_verdict(text: str) -> str | None:
     None if it did not emit one."""
     matches = _VERDICT_RE.findall(text or "")
     return matches[-1].lower() if matches else None
+
+
+def _parse_step_output_metadata(text: str) -> tuple[str, list[str]]:
+    """Extract the structured step-result protocol with a legacy fallback.
+
+    New runners emit one-line RESULT_SUMMARY and a JSON ARTIFACTS array. Older
+    runners remain useful: their output (minus protocol bookkeeping) becomes the
+    summary and their artifact list is empty.
+    """
+    text = (text or "").strip()
+    summaries = _RESULT_SUMMARY_RE.findall(text)
+    summary = summaries[-1].strip()[:20000] if summaries else ""
+    artifacts: list[str] = []
+    artifact_matches = _ARTIFACTS_RE.findall(text)
+    if artifact_matches:
+        try:
+            raw = json.loads(artifact_matches[-1])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            raw = []
+        if isinstance(raw, list):
+            for item in raw:
+                value = str(item).strip() if isinstance(item, str) else ""
+                if value and value not in artifacts:
+                    artifacts.append(value[:1000])
+                if len(artifacts) >= 100:
+                    break
+    if not summary:
+        legacy_lines = [
+            line for line in text.splitlines()
+            if not re.match(
+                r"(?i)^\s*(WORKFLOW_OUTCOME|TOKENS_USED|ARTIFACTS)\s*[:=]",
+                line,
+            )
+        ]
+        summary = _tail("\n".join(legacy_lines), 20000)
+    return summary, artifacts
 
 
 # CLI-native token-usage formats, tried before the self-reported sentinel.
@@ -2808,7 +2931,12 @@ def _build_step_prompt(
     final_instruction = (
         "只输出上述 JSON 对象。"
         if goal_contract
-        else "完成后在输出的最后打印一段简短总结：一行结论 + 产物文件路径。"
+        else (
+            "完成后在输出末尾提供结构化结果（每项单独一行）：\n"
+            "`RESULT_SUMMARY: <一行结论>`\n"
+            "`ARTIFACTS: [\"产物文件路径\", \"其他 URI 或引用\"]`\n"
+            "没有产物时输出 `ARTIFACTS: []`。"
+        )
     )
     if not goal_contract:
         final_instruction += (
@@ -4104,6 +4232,7 @@ def apply_run_outcome(
     task = store.get_task(task_id)
     if not task:
         return {"task_id": task_id, "step": step["id"], "error": f"unknown task: {task_id}"}
+    _record_step_result(store, task, step["id"], result)
     goal_intake = _is_root_goal_decompose_step(project_root, task, step)
     if outcome == "done" and goal_intake:
         try:
@@ -4543,12 +4672,13 @@ def _check_task_health_locked(
     """Bottom-line watchdog for the otherwise purely event-driven engine: scan
     non-terminal tasks and notify the hub about stuck states nothing else
     recovers — (A) a step whose runner died (orphaned/failed run, none running),
-    (B) a rework transition that never dispatched its target, and (C) a non-goal
-    task reading in_progress with no active step and no run in progress. Alerts
+    (B) a rework transition that never dispatched its target, and (C) a task or
+    directly-executing goal with no active step and no run in progress. Alerts
     are deduped via a `health_alert` transition so the hub is not re-pinged
     every cycle for the same unchanged problem."""
     members = read_team_config(project_root)["members"]
     cfg = read_workflow_config(project_root)
+    back = _workflow_graph(cfg)
     steps = {s["id"]: s for s in cfg["steps"]}
     alerts: list[dict[str, Any]] = []
     now = now or datetime.now(timezone.utc)
@@ -4681,15 +4811,17 @@ def _check_task_health_locked(
         if undispatched_rework:
             continue
 
-        # C. A non-goal task claims to be in progress but has no active step and
-        # no run in flight — orphaned (e.g. an advance recorded a step done but
-        # was killed before dispatching the next step). Recover it into a
-        # visible, re-runnable state instead of an invisible limbo: block it at
-        # the step the advance meant to reach (shows in the Blocked column and
-        # Re-run can target it), or close it if that step was terminal.
+        # C. A regular task, or a goal that owns its workflow because there is no
+        # decompose step, has no active step/run after an interrupted advance.
+        # Recover it into a visible state, or finish it if the terminal settle
+        # was recorded but the final status write was interrupted.
+        direct_goal = bool(
+            task.get("is_goal")
+            and _root_goal_decompose_step_id(cfg, back) is None
+        )
         if (
-            not task.get("is_goal")
-            and task.get("task_status") == "in_progress"
+            (not task.get("is_goal") or direct_goal)
+            and task.get("task_status") in {"in_progress", "new", "running"}
             and transitions
             and not active
             and not _task_has_running_run(store, task_id)
@@ -4705,7 +4837,9 @@ def _check_task_health_locked(
                     "orphaned: advance interrupted before dispatching this step",
                 )
                 store.set_task_workflow_state(
-                    task_id, workflow_step=stalled_step, task_status="blocked"
+                    task_id,
+                    workflow_step=stalled_step,
+                    task_status="stalled" if direct_goal else "blocked",
                 )
                 notice = _notify_hub(
                     store, members,
@@ -4715,13 +4849,19 @@ def _check_task_health_locked(
                 alerts.append({"task_id": task_id, "step": stalled_step,
                                "problem": "orphaned -> blocked", "notice": notice})
             else:
-                # No forward target left — the task really finished; close it.
-                store.set_task_workflow_state(
-                    task_id, workflow_step="", task_status="closed"
-                )
-                _recompute_parent_goal_status(store, task, project_root)
+                # No forward target left — the task really finished.
+                if direct_goal:
+                    _finish_goal_workflow(store, project_root, task)
+                else:
+                    store.set_task_workflow_state(
+                        task_id, workflow_step="", task_status="closed"
+                    )
+                    _recompute_parent_goal_status(store, task, project_root)
                 alerts.append({"task_id": task_id, "step": None,
-                               "problem": "orphaned -> closed", "notice": ""})
+                               "problem": (
+                                   "orphaned -> accepted" if direct_goal
+                                   else "orphaned -> closed"
+                               ), "notice": ""})
     return alerts
 
 

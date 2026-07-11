@@ -41,6 +41,10 @@ LINEAR_EDGES = [
     {"from": "review", "to": "accept"},
     {"from": "review", "to": "implement"},  # rework loop-back
 ]
+ENTRY_DECOMPOSE_STEPS = [
+    {**step, **({"decompose": True} if step["id"] == "intake" else {})}
+    for step in LINEAR_STEPS
+]
 TEAM = [
     {"agent_name": "hub-agent", "role_id": "hub"},
     {"agent_name": "codex", "role_id": "implementer"},
@@ -214,7 +218,7 @@ class WorkflowEngineTests(unittest.TestCase):
 
     def test_goals_summary_projects_subtask_status(self):
         with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp, team=[
+            h = EngineHarness(tmp, steps=ENTRY_DECOMPOSE_STEPS, team=[
                 {"agent_name": "hub-agent", "role_id": "hub", "runner_command": "cat"},
                 {"agent_name": "codex", "role_id": "implementer", "runner_command": "cat"},
                 {"agent_name": "integrator", "role_id": "integrator", "runner_command": "cat"},
@@ -806,7 +810,9 @@ class StepCardTests(unittest.TestCase):
 
     def test_goal_intake_creates_business_tasks_and_step_cards(self):
         with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp, team=self._team_with_runners())
+            h = EngineHarness(
+                tmp, steps=ENTRY_DECOMPOSE_STEPS, team=self._team_with_runners()
+            )
             goal_id = self._goal(h)
             h.start(goal_id)
 
@@ -864,7 +870,9 @@ class StepCardTests(unittest.TestCase):
 
     def test_goal_intake_invalid_json_blocks_goal(self):
         with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp, team=self._team_with_runners())
+            h = EngineHarness(
+                tmp, steps=ENTRY_DECOMPOSE_STEPS, team=self._team_with_runners()
+            )
             goal_id = self._goal(h)
             h.start(goal_id)
 
@@ -882,7 +890,9 @@ class StepCardTests(unittest.TestCase):
 
     def test_business_task_step_cards_settle_and_goal_waits_for_acceptance(self):
         with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp, team=self._team_with_runners())
+            h = EngineHarness(
+                tmp, steps=ENTRY_DECOMPOSE_STEPS, team=self._team_with_runners()
+            )
             goal_id = self._goal(h)
             goal = h.task(goal_id)
             [message_id] = h.store.send_message(
@@ -987,7 +997,9 @@ class StepCardTests(unittest.TestCase):
 
     def test_dependent_subtask_is_held_then_released_on_prereq_close(self):
         with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp, team=self._team_with_runners())
+            h = EngineHarness(
+                tmp, steps=ENTRY_DECOMPOSE_STEPS, team=self._team_with_runners()
+            )
             goal_id = self._goal(h)
             h.start(goal_id)
             report = server.run_step_worker(
@@ -1185,6 +1197,37 @@ class AutoRunnerTests(unittest.TestCase):
             # review dispatch message carries the runner's stdout as upstream result
             self.assertTrue(
                 any("done: docs/x.md" in c for _, c in h.inbox_senders("rev"))
+            )
+
+    def test_goal_step_persists_structured_inputs_result_and_artifacts(self):
+        with TemporaryDirectory() as tmp:
+            command = (
+                "printf 'RESULT_SUMMARY: Dataset collected\\n"
+                "ARTIFACTS: [\"data.csv\", \"notes.md\"]\\n"
+                "WORKFLOW_OUTCOME: done\\n'"
+            )
+            h = EngineHarness(tmp, team=self._team_with_runner(command))
+            goal_id = h.create_task(title="Research")
+            h.store.update_task_metadata(goal_id, is_goal=True)
+            h.start(goal_id)
+            h.complete("hub-agent", goal_id, "intake", "done", "research scope")
+
+            implement_card = next(
+                card for card in h.store.list_tasks_by_parent(goal_id)
+                if card["workflow_step"] == "implement"
+            )
+            self.assertEqual(
+                "research scope", implement_card["step_inputs"]["upstream_result"]
+            )
+
+            server.run_step_worker(
+                h.store, tmp, goal_id, self._implement_step(h),
+                self._member(h, "codex"),
+            )
+            implement_card = h.store.get_task(implement_card["id"])
+            self.assertEqual("Dataset collected", implement_card["result_summary"])
+            self.assertEqual(
+                ["data.csv", "notes.md"], implement_card["artifacts"]
             )
 
     def test_worker_streams_stdout_while_running(self):
@@ -1979,6 +2022,38 @@ class ActiveStepLedgerTests(unittest.TestCase):
 
 
 class TaskHealthCheckTests(unittest.TestCase):
+    def test_direct_goal_orphaned_between_steps_is_stalled(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            goal_id = h.create_task(title="research")
+            h.store.update_task_metadata(goal_id, is_goal=True)
+            h.start(goal_id)
+            h.store.record_task_transition(
+                goal_id, "intake", "implement", "hub-agent", "done", "scope"
+            )
+            h.store.set_task_workflow_state(goal_id, task_status="running")
+
+            alerts = server.check_task_health(h.store, tmp)
+
+            self.assertEqual("stalled", h.task(goal_id)["task_status"])
+            self.assertEqual("implement", h.task(goal_id)["workflow_step"])
+            self.assertEqual("orphaned -> blocked", alerts[0]["problem"])
+
+    def test_direct_goal_orphaned_after_terminal_is_accepted(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            goal_id = h.create_task(title="research")
+            h.store.update_task_metadata(goal_id, is_goal=True)
+            h.store.record_task_transition(
+                goal_id, "accept", "", "hub-agent", "done", "accepted"
+            )
+            h.store.set_task_workflow_state(goal_id, task_status="running")
+
+            alerts = server.check_task_health(h.store, tmp)
+
+            self.assertEqual("accepted", h.task(goal_id)["task_status"])
+            self.assertEqual("orphaned -> accepted", alerts[0]["problem"])
+
     def test_dead_runner_step_alerts_and_dedupes(self):
         with TemporaryDirectory() as tmp:
             h = EngineHarness(tmp)
@@ -2135,6 +2210,21 @@ class TaskHealthCheckTests(unittest.TestCase):
 
 
 class TokenStatsTests(unittest.TestCase):
+    def test_parse_structured_step_output_and_legacy_fallback(self):
+        summary, artifacts = server._parse_step_output_metadata(
+            "work details\nRESULT_SUMMARY: Review complete\n"
+            'ARTIFACTS: ["paper.md", "results.csv"]\n'
+            "WORKFLOW_OUTCOME: done\nTOKENS_USED: 100"
+        )
+        self.assertEqual("Review complete", summary)
+        self.assertEqual(["paper.md", "results.csv"], artifacts)
+        self.assertEqual(
+            ("legacy summary", []),
+            server._parse_step_output_metadata(
+                "legacy summary\nWORKFLOW_OUTCOME: done"
+            ),
+        )
+
     def test_parse_run_tokens_native_and_sentinel(self):
         self.assertEqual(114751, server._parse_run_tokens("", "tokens used\n114,751"))
         self.assertEqual(3200, server._parse_run_tokens("TOKENS_USED: 3,200", ""))
@@ -2217,17 +2307,61 @@ class DecomposeStepTests(unittest.TestCase):
         self.assertTrue(norm["required_locked"])
         self.assertFalse(norm["isolate"])          # runs at goal level, never isolated
 
-    def test_decompose_step_id_prefers_flag_else_entry(self):
+    def test_decompose_step_id_requires_explicit_flag(self):
         with TemporaryDirectory() as tmp:
             server.write_workflow_config(self.STEPS, tmp, self.EDGES)
             cfg = server.read_workflow_config(tmp)
             back = server._workflow_graph(cfg)
             self.assertEqual("plan", server._root_goal_decompose_step_id(cfg, back))
-        with TemporaryDirectory() as tmp:  # no flag -> entry step (back-compat)
+        with TemporaryDirectory() as tmp:  # no flag -> goal owns the whole flow
             server.write_workflow_config(LINEAR_STEPS, tmp, LINEAR_EDGES)
             cfg = server.read_workflow_config(tmp)
             back = server._workflow_graph(cfg)
-            self.assertEqual("intake", server._root_goal_decompose_step_id(cfg, back))
+            self.assertIsNone(server._root_goal_decompose_step_id(cfg, back))
+
+    def test_goal_without_decompose_runs_whole_workflow_without_subtasks(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            goal_id = h.create_task(title="Research goal")
+            h.store.update_task_metadata(goal_id, is_goal=True)
+
+            self.assertEqual(
+                [{"step": "intake", "assignee": "hub-agent"}],
+                h.start(goal_id)["dispatched"],
+            )
+            self.assertEqual("new", h.task(goal_id)["task_status"])
+            h.complete("hub-agent", goal_id, "intake", "done", "scope selected")
+            self.assertEqual("running", h.task(goal_id)["task_status"])
+            h.complete("codex", goal_id, "implement", "done", "research complete")
+            h.complete("rev", goal_id, "review", "done", "reviewed")
+            report = h.complete("hub-agent", goal_id, "accept", "done", "accepted")
+
+            self.assertTrue(report["closed"])
+            self.assertEqual("accepted", report["goal_status"])
+            self.assertEqual("accepted", h.task(goal_id)["task_status"])
+            self.assertEqual("", h.task(goal_id)["workflow_step"])
+            business = [
+                task for task in h.store.list_tasks(status="all")
+                if task.get("parent_task_id") == goal_id
+                and task.get("source_message_id") is not None
+            ]
+            self.assertEqual([], business)
+
+    def test_goal_without_decompose_runs_goal_verify_at_terminal(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            goal_id = h.create_task(title="Research goal")
+            h.store.update_task_metadata(goal_id, is_goal=True, goal_verify="true")
+            h.start(goal_id)
+            h.complete("hub-agent", goal_id, "intake", "done", "scope selected")
+            h.complete("codex", goal_id, "implement", "done", "research complete")
+            h.complete("rev", goal_id, "review", "done", "reviewed")
+            report = h.complete("hub-agent", goal_id, "accept", "done", "accepted")
+
+            self.assertEqual("verifying", report["goal_status"])
+            self.assertEqual("verifying", h.task(goal_id)["task_status"])
+            actions = h.store.list_workflow_actions("pending")
+            self.assertTrue(any(a["task_id"] == goal_id and a["action_type"] == "goal_verify" for a in actions))
 
     def test_subtasks_start_at_decompose_successor(self):
         with TemporaryDirectory() as tmp:

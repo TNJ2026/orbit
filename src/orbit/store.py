@@ -48,8 +48,9 @@ TASK_STATUSES = {
 # would silently score as the default there.
 
 # Goals (is_goal=1 rows) run a lifecycle of their own, decoupled from the
-# per-task/step statuses above: a goal traverses its design + decompose phase,
-# then rolls up its subtasks. A goal row is validated against THIS set, never
+# per-task/step statuses above: a goal either traverses the workflow itself or
+# reaches an explicit decompose step and then rolls up its work items. A goal
+# row is validated against THIS set, never
 # TASK_STATUSES, so a task state can never land on a goal
 # and a goal phase (e.g. "decomposing") can never land on a task. The server
 # owns the phase→status mapping; here we only police the vocabulary.
@@ -104,6 +105,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     risk              TEXT NOT NULL DEFAULT 'medium',
     required_capabilities TEXT NOT NULL DEFAULT '',
     exclusive_workspace INTEGER NOT NULL DEFAULT 1,
+    step_inputs       TEXT NOT NULL DEFAULT '{}',
+    result_summary    TEXT NOT NULL DEFAULT '',
+    artifacts         TEXT NOT NULL DEFAULT '[]',
     created_at        TEXT NOT NULL,
     updated_at        TEXT NOT NULL
 );
@@ -359,6 +363,39 @@ def _decode_depends_on(raw: str) -> list[int]:
     return out
 
 
+def _encode_step_inputs(value: dict[str, Any] | None) -> str:
+    return json.dumps(value or {}, ensure_ascii=False)
+
+
+def _decode_step_inputs(raw: str) -> dict[str, Any]:
+    try:
+        value = json.loads(raw or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _encode_artifacts(values: list[str] | None) -> str:
+    cleaned: list[str] = []
+    for value in values or []:
+        text = str(value).strip()
+        if text and text not in cleaned:
+            cleaned.append(text[:1000])
+        if len(cleaned) >= 100:
+            break
+    return json.dumps(cleaned, ensure_ascii=False)
+
+
+def _decode_artifacts(raw: str) -> list[str]:
+    try:
+        value = json.loads(raw or "[]")
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if isinstance(item, str)]
+
+
 class Store:
     def __init__(self, db_path: Path | str | None = None):
         if db_path is None:
@@ -433,6 +470,10 @@ class Store:
             # JSON list of prerequisite task ids a business subtask waits on; the
             # engine holds it until they all close. '' / '[]' = no dependency.
             "depends_on": "TEXT NOT NULL DEFAULT ''",
+            # Structured data for one materialized workflow-step execution.
+            "step_inputs": "TEXT NOT NULL DEFAULT '{}'",
+            "result_summary": "TEXT NOT NULL DEFAULT ''",
+            "artifacts": "TEXT NOT NULL DEFAULT '[]'",
         }
         for column, definition in task_defaults.items():
             if column not in task_columns:
@@ -784,7 +825,8 @@ class Store:
                            created_at, updated_at,
                            role_required, importance, size, risk,
                            required_capabilities, exclusive_workspace,
-                           workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify, depends_on
+                           workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify, depends_on,
+                           step_inputs, result_summary, artifacts
                     FROM tasks
                     {where}
                     ORDER BY id DESC
@@ -800,7 +842,8 @@ class Store:
                           assignee, assignee AS recipient, status AS task_status,
                           created_at, updated_at, role_required, importance, size,
                           risk, required_capabilities, exclusive_workspace,
-                          workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify, depends_on
+                          workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify, depends_on,
+                          step_inputs, result_summary, artifacts
                    FROM tasks
                    WHERE id = ?""",
                 (task_id,),
@@ -814,7 +857,8 @@ class Store:
                           assignee, assignee AS recipient, status AS task_status,
                           created_at, updated_at, role_required, importance, size,
                           risk, required_capabilities, exclusive_workspace,
-                          workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify, depends_on
+                          workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify, depends_on,
+                          step_inputs, result_summary, artifacts
                    FROM tasks
                    WHERE source_message_id = ?""",
                 (message_id,),
@@ -828,7 +872,8 @@ class Store:
                           assignee, assignee AS recipient, status AS task_status,
                           created_at, updated_at, role_required, importance, size,
                           risk, required_capabilities, exclusive_workspace,
-                          workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify, depends_on
+                          workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify, depends_on,
+                          step_inputs, result_summary, artifacts
                    FROM tasks
                    WHERE parent_task_id = ?
                    ORDER BY id DESC""",
@@ -844,7 +889,8 @@ class Store:
                           assignee, assignee AS recipient, status AS task_status,
                           created_at, updated_at, role_required, importance, size,
                           risk, required_capabilities, exclusive_workspace,
-                          workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify, depends_on
+                          workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify, depends_on,
+                          step_inputs, result_summary, artifacts
                    FROM tasks
                    WHERE is_goal = 1
                       OR parent_task_id IN (SELECT id FROM tasks WHERE is_goal = 1)
@@ -860,7 +906,8 @@ class Store:
                           assignee, assignee AS recipient, status AS task_status,
                           created_at, updated_at, role_required, importance, size,
                           risk, required_capabilities, exclusive_workspace,
-                          workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify, depends_on
+                          workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify, depends_on,
+                          step_inputs, result_summary, artifacts
                    FROM tasks
                    WHERE workflow_step != ''
                      AND status NOT IN ('blocked', 'closed')
@@ -879,7 +926,8 @@ class Store:
                           assignee, assignee AS recipient, status AS task_status,
                           created_at, updated_at, role_required, importance, size,
                           risk, required_capabilities, exclusive_workspace,
-                          workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify, depends_on
+                          workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify, depends_on,
+                          step_inputs, result_summary, artifacts
                    FROM tasks
                    WHERE status != 'closed'
                      AND NOT (status = 'accepted' AND is_goal = 1)
@@ -988,6 +1036,7 @@ class Store:
         assignee: str,
         status: str,
         role_required: str = "implementer",
+        step_inputs: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Materialize one workflow step of a goal as its own task card."""
         status = _validate_task_status(status) or "created"
@@ -1004,12 +1053,14 @@ class Store:
             cur = self._conn.execute(
                 """INSERT INTO tasks (
                        title, content, sender, assignee, status, role_required,
-                       parent_task_id, workflow_step, display_id, created_at, updated_at
+                       parent_task_id, workflow_step, display_id, step_inputs,
+                       created_at, updated_at
                    )
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     title, content, sender, assignee, status, role_required,
-                    parent_task_id, workflow_step, display_id, now, now,
+                    parent_task_id, workflow_step, display_id,
+                    _encode_step_inputs(step_inputs), now, now,
                 ),
             )
             self._conn.commit()
@@ -1027,6 +1078,42 @@ class Store:
                 (parent_task_id, workflow_step),
             ).fetchone()
         return self.get_task(row["id"]) if row else None
+
+    def update_task_step_details(
+        self,
+        task_id: int,
+        *,
+        step_inputs: dict[str, Any] | None = None,
+        result_summary: str | None = None,
+        artifacts: list[str] | None = None,
+    ) -> dict[str, Any] | None:
+        """Persist structured workflow-step data on a step card (or, for a
+        non-materialized workflow, directly on its task row)."""
+        updates: list[str] = []
+        params: list[Any] = []
+        if step_inputs is not None:
+            if not isinstance(step_inputs, dict):
+                raise InvalidInputError("step_inputs must be an object")
+            updates.append("step_inputs = ?")
+            params.append(_encode_step_inputs(step_inputs))
+        if result_summary is not None:
+            updates.append("result_summary = ?")
+            params.append(str(result_summary).strip()[:20000])
+        if artifacts is not None:
+            if not isinstance(artifacts, list):
+                raise InvalidInputError("artifacts must be a list")
+            updates.append("artifacts = ?")
+            params.append(_encode_artifacts(artifacts))
+        if not updates:
+            return self.get_task(task_id)
+        updates.append("updated_at = ?")
+        params.extend([_now(), task_id])
+        with self._lock:
+            cur = self._conn.execute(
+                f"UPDATE tasks SET {', '.join(updates)} WHERE id = ?", params
+            )
+            self._conn.commit()
+        return self.get_task(task_id) if cur.rowcount else None
 
     def set_task_workflow_state(
         self,
@@ -1866,4 +1953,6 @@ class Store:
         task["exclusive_workspace"] = bool(task.get("exclusive_workspace", 1))
         task["is_goal"] = bool(task.get("is_goal", 0))
         task["depends_on"] = _decode_depends_on(task.get("depends_on", ""))
+        task["step_inputs"] = _decode_step_inputs(task.get("step_inputs", ""))
+        task["artifacts"] = _decode_artifacts(task.get("artifacts", ""))
         return task

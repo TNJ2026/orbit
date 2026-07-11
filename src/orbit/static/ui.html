@@ -238,6 +238,19 @@
     }
     .phase-instance.actionable { cursor: pointer; }
     .phase-instance.actionable:hover { border-color: #9fc7b9; background: #f3f8f5; }
+    .structured-detail {
+      margin-top: 14px;
+      padding-top: 12px;
+      border-top: 1px solid var(--line);
+    }
+    .structured-detail-body {
+      margin-top: 6px;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      color: #2f383c;
+    }
+    .artifact-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
+    .artifact-list code { padding: 3px 6px; border-radius: 4px; background: #eef5f1; }
     /* Task details as a right slide-over drawer (overlay). */
     .drawer-backdrop {
       position: fixed;
@@ -1663,6 +1676,8 @@
         "tasks.singleFlow": "This goal is running as one flow; no Kanban is needed.",
         "tasks.instances": "{0} execution instance(s)", "tasks.instanceProgress": "{0}/{1} done",
         "tasks.phaseDetails": "Step details", "tasks.noInstance": "Not started",
+        "tasks.inputs": "Inputs", "tasks.upstream": "Upstream result",
+        "tasks.resultSummary": "Result summary", "tasks.artifacts": "Artifacts",
         "tasks.waiting": "Waiting", "tasks.skipped": "Skipped",
         "tasks.close": "×",
         "agents.title": "Agents", "agents.refresh": "Refresh",
@@ -1790,6 +1805,8 @@
         "tasks.singleFlow": "该 Goal 作为单一流程执行，无需显示看板。",
         "tasks.instances": "{0} 个执行实例", "tasks.instanceProgress": "已完成 {0}/{1}",
         "tasks.phaseDetails": "步骤详情", "tasks.noInstance": "尚未开始",
+        "tasks.inputs": "输入", "tasks.upstream": "上游结果",
+        "tasks.resultSummary": "结果摘要", "tasks.artifacts": "产物",
         "tasks.waiting": "等待中", "tasks.skipped": "已跳过",
         "tasks.close": "×",
         "agents.title": "Agents", "agents.refresh": "刷新",
@@ -3740,6 +3757,22 @@
           ${task.exclusive_workspace ? ` - ${t("task.exclusive")}` : ""}
         </div>
         <div class="task-detail-body">${escapeHtml(task.content)}</div>
+        ${task.step_inputs && Object.keys(task.step_inputs).length ? `
+          <div class="structured-detail">
+            <strong>${t("tasks.inputs")}</strong>
+            ${task.step_inputs.task ? `<div class="structured-detail-body">${escapeHtml(task.step_inputs.task.content || task.step_inputs.task.title || "")}</div>` : ""}
+            ${task.step_inputs.upstream_result ? `<div class="meta" style="margin-top:7px">${t("tasks.upstream")}</div><div class="structured-detail-body">${escapeHtml(task.step_inputs.upstream_result)}</div>` : ""}
+          </div>` : ""}
+        ${task.result_summary ? `
+          <div class="structured-detail">
+            <strong>${t("tasks.resultSummary")}</strong>
+            <div class="structured-detail-body">${escapeHtml(task.result_summary)}</div>
+          </div>` : ""}
+        ${(task.artifacts || []).length ? `
+          <div class="structured-detail">
+            <strong>${t("tasks.artifacts")}</strong>
+            <div class="artifact-list">${task.artifacts.map(item => `<code>${escapeHtml(item)}</code>`).join("")}</div>
+          </div>` : ""}
         ${(() => {
           const cards = (state.tasks || [])
             .filter(t0 => t0.parent_task_id === task.id && !t0.source_message_id)

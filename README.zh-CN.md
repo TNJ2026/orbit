@@ -141,15 +141,20 @@ orbit serve        # UI + 调度 + 内嵌 Runner，全在一个进程
 
 **job 生命周期：** `pending → running`（runner 领取）`→ finished`（runner 执行完、报告 outcome）`→ done`（scheduler 推进下一步）。
 
+每个步骤实例都会持久化结构化执行详情。Orbit 把任务、步骤元数据和上游结果记录为
+`step_inputs`，并要求 runner 在输出末尾给出 `RESULT_SUMMARY: ...` 与
+`ARTIFACTS: ["路径或 URI", ...]`，分别写入步骤卡的 `result_summary` 和
+`artifacts` API 字段。旧 runner 未输出该协议时，系统会把清理后的原输出作为结果摘要。
+
 ### 设计优先与 `decompose` 步
 
 goal 在哪一步拆成子任务，由打了 `decompose: true` 的那步决定。默认工作流把 `plan` 标为 decompose，所以 goal **自己**先跑一次设计步（`intake → product_design → ui_design → architecture → plan`），再由 `plan`（hub）**结合设计产出**输出子任务 JSON。每个子任务从拆解步的**后继步**（`implement` 起）开始并继承该产出——于是设计步在 goal 层**只跑一次**（而非每个子任务一遍），子任务按架构模块干净切分。
 
-想换拆解点，就在 `.orbit/workflow.json` 里给别的步打标记；**不打** `decompose` 标记时，goal 会退回在入口步（`intake`）拆，每个子任务重跑整条工作流——更简单，但设计变成按子任务重复。该标记只能改 JSON 配置（同 `isolate`/`integrate`）；decompose 步自动 required、从不隔离、且必须有后继步供子任务起跑。
+想换拆解点，就在 `.orbit/workflow.json` 里给别的步打标记。**不打** `decompose` 标记时，goal 不创建工作项，而是自己走完整条工作流；这适合学术研究、审批、出版等单主体流程。该标记只能改 JSON 配置（同 `isolate`/`integrate`）；decompose 步自动 required、从不隔离、且必须有后继步供工作项起跑。
 
 ### 目标收敛验证（goal_verify）最佳实践
 
-当一个目标（Goal）下的业务子任务全部自测通过并关闭后，orbit 会在主分支执行 `goal_verify` 命令，对整体成果进行客观验收。以下指南帮助正确配置、运行并排查这一流程。
+当一个目标（Goal）的工作项全部关闭，或无拆解的 goal 走到终点后，orbit 会在主分支执行 `goal_verify` 命令，对整体成果进行客观验收。以下指南帮助正确配置、运行并排查这一流程。
 
 #### 何时显式配置
 

@@ -141,15 +141,21 @@ orbit serve        # UI + Scheduler + embedded Runner, all in one process
 
 **Job lifecycle:** `pending → running` (runner claims) `→ finished` (runner done, reports outcome) `→ done` (scheduler advances to the next step).
 
+Each step instance persists structured execution details. Orbit records its task,
+step metadata, and upstream result as `step_inputs`; runners are prompted to end
+with `RESULT_SUMMARY: ...` and `ARTIFACTS: ["path-or-uri", ...]`. These become the
+step card's `result_summary` and `artifacts` API fields. Older runner output is
+kept compatible by falling back to the cleaned output as the result summary.
+
 ### Design-first & the `decompose` step
 
 Where a goal splits into subtasks is set by the step flagged `decompose: true`. The default workflow flags `plan`, so the goal itself runs the design steps once (`intake → product_design → ui_design → architecture → plan`), then `plan` (hub) emits the subtask JSON using the design output as context. Each subtask begins at the decompose step's successors (`implement` onward), inheriting that output — so the design steps run **once** on the goal, not per subtask, and subtasks partition cleanly by the architecture's modules.
 
-Move the split by flagging a different step in `.orbit/workflow.json`; with **no** `decompose` flag, a goal splits at the entry step instead (`intake`), and every subtask re-runs the whole workflow — simpler, but design then happens per subtask. The flag is config-only (edit the JSON, same as `isolate`/`integrate`); a decompose step is auto-required, never isolated, and must have a forward successor for its subtasks to start at.
+Move the split by flagging a different step in `.orbit/workflow.json`. With **no** `decompose` flag, the goal does not create work items: it traverses the complete workflow itself, which is useful for research, approval, publishing, and other single-subject processes. The flag is config-only (edit the JSON, same as `isolate`/`integrate`); a decompose step is auto-required, never isolated, and must have a forward successor for its work items to start at.
 
 ### Goal convergence check (goal_verify)
 
-Once all of a goal's business subtasks self-test and close, orbit runs the `goal_verify` command on the integrated main tree to accept the whole result objectively.
+Once all of a goal's work items close—or a non-decomposing goal reaches its terminal step—orbit runs the `goal_verify` command on the resulting main tree to accept the whole result objectively.
 
 - **Set per goal**: type the command in the **Goal verify command** box on the Goals page when you start a goal — it applies to that goal only. Leave it empty to auto-detect (see below).
 - **Auto-detected when empty**: with no command set, orbit infers a common test command from project markers (`npm test`, `cargo test`, `python -m unittest discover -s tests`, …). Good for a quick try.

@@ -173,6 +173,28 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(["python", "sqlite"], updated["required_capabilities"])
         self.assertFalse(updated["exclusive_workspace"])
 
+    def test_step_card_structured_details_round_trip(self):
+        store = self.make_store()
+        self.register_pair(store)
+        store.send_message("a", "b", "research", kind="task", title="Goal")
+        [parent] = store.list_tasks()
+        card = store.create_step_card(
+            parent["id"], "review", "Review", "review the work",
+            "a", "b", "assigned", step_inputs={
+                "task": {"id": parent["id"], "title": "Goal"},
+                "upstream_result": "draft.md",
+            },
+        )
+        updated = store.update_task_step_details(
+            card["id"],
+            result_summary="Review passed",
+            artifacts=["draft.md", "report.json", "draft.md"],
+        )
+
+        self.assertEqual("draft.md", updated["step_inputs"]["upstream_result"])
+        self.assertEqual("Review passed", updated["result_summary"])
+        self.assertEqual(["draft.md", "report.json"], updated["artifacts"])
+
     def test_task_metadata_rejects_off_list_values(self):
         store = self.make_store()
         self.register_pair(store)
@@ -388,6 +410,13 @@ class StoreTests(unittest.TestCase):
             }
             self.assertIn("leased_until", columns)
             self.assertIn("task_status", columns)
+            task_columns = {
+                row["name"]
+                for row in store._conn.execute("PRAGMA table_info(tasks)").fetchall()
+            }
+            self.assertTrue(
+                {"step_inputs", "result_summary", "artifacts"} <= task_columns
+            )
             store.close()
 
     def test_old_task_messages_are_backfilled_into_task_engine(self):

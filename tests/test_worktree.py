@@ -34,10 +34,10 @@ class GoalStatusDecoupleTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             self.assertEqual("new", server._goal_status_for_step(tmp, "intake"))
             self.assertEqual(
-                "designing", server._goal_status_for_step(tmp, "product_design")
+                "running", server._goal_status_for_step(tmp, "product_design")
             )
             self.assertEqual(
-                "designing", server._goal_status_for_step(tmp, "architecture")
+                "running", server._goal_status_for_step(tmp, "architecture")
             )
             self.assertEqual("decomposing", server._goal_status_for_step(tmp, "plan"))
 
