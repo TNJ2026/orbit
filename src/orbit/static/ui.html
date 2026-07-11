@@ -1580,7 +1580,7 @@
     <div class="modal" role="dialog" aria-modal="true" aria-labelledby="addStepModalTitle">
       <div id="addStepModalTitle" class="modal-title" data-i18n="modal.addStep.title">Add workflow step</div>
       <label><div class="meta" data-i18n="modal.addStep.name">Name</div><input id="addStepName" type="text" placeholder="Step name" data-i18n-ph="modal.addStep.namePh"></label>
-      <label><div class="meta" data-i18n="modal.addStep.agent">Agent (optional)</div><input id="addStepAgent" type="text" placeholder="e.g. claude-code — blank uses the step id" data-i18n-ph="modal.addStep.agentPh"></label>
+      <label><div class="meta" data-i18n="modal.addStep.agent">Agent (optional)</div><select id="addStepAgent"></select></label>
       <label><div class="meta" data-i18n="modal.addStep.command">Command (optional)</div><input id="addStepCommand" type="text" placeholder="runner CLI — blank uses the default command" data-i18n-ph="modal.addStep.commandPh"></label>
       <label id="addStepRequiredField" class="modal-check"><input id="addStepRequired" type="checkbox"><span class="meta" data-i18n="modal.addStep.required">Required (a step the flow must include)</span></label>
       <label><div class="meta" data-i18n="modal.addStep.prompt">Step prompt</div><textarea id="addStepPrompt" rows="7" data-i18n-ph="modal.addStep.promptPh" placeholder="Additional instructions for this step" style="width:100%;resize:vertical;"></textarea><div class="meta" data-i18n="modal.addStep.promptHint">Appended to the generated step instructions; the engine output protocol still takes priority.</div></label>
@@ -1683,6 +1683,7 @@
         "modal.addStep.title": "Add workflow step", "modal.addStep.editTitle": "Edit step",
         "modal.addStep.name": "Name", "modal.addStep.namePh": "Step name",
         "modal.addStep.agent": "Agent (optional)", "modal.addStep.agentPh": "e.g. claude-code — blank uses the step id",
+        "modal.addStep.agentDefault": "— use the step id —", "modal.addStep.agentMissing": "(not installed)",
         "modal.addStep.command": "Command (optional)", "modal.addStep.commandPh": "runner CLI — blank uses the default command",
         "modal.addStep.required": "Required (a step the flow must include)",
         "modal.addStep.prompt": "Step prompt", "modal.addStep.promptPh": "Additional instructions for this step",
@@ -1821,6 +1822,7 @@
         "modal.addStep.title": "添加工作流步骤", "modal.addStep.editTitle": "编辑步骤",
         "modal.addStep.name": "名称", "modal.addStep.namePh": "步骤名称",
         "modal.addStep.agent": "Agent（可选）", "modal.addStep.agentPh": "如 claude-code —— 留空用步骤 id",
+        "modal.addStep.agentDefault": "—— 用步骤 id ——", "modal.addStep.agentMissing": "(未安装)",
         "modal.addStep.command": "命令（可选）", "modal.addStep.commandPh": "runner CLI —— 留空用默认命令",
         "modal.addStep.required": "必选（流程必须包含的步骤）",
         "modal.addStep.prompt": "步骤 Prompt", "modal.addStep.promptPh": "该步骤的附加执行指令",
@@ -2768,6 +2770,23 @@
     let wfStepModalMode = "add";
     let wfStepModalId = null;
 
+    // Agent options for a step: a blank "use step id" default, the installed
+    // CLI tools, plus an orphan entry if the step names an agent that isn't
+    // installed (legacy / hand-edited config) so it isn't silently dropped.
+    function agentOptionsHtml(selected) {
+      const installed = (state.tools || []).filter(tool => tool.installed);
+      const known = installed.some(tool => tool.agent_name === selected);
+      const blank = `<option value="" ${selected ? "" : "selected"}>${t("modal.addStep.agentDefault")}</option>`;
+      const orphan = selected && !known
+        ? `<option value="${escapeHtml(selected)}" selected>${escapeHtml(selected)} ${t("modal.addStep.agentMissing")}</option>`
+        : "";
+      const opts = installed.map(tool => {
+        const label = tool.profile_name ? "Hermes" : tool.name;
+        return `<option value="${escapeHtml(tool.agent_name)}" ${selected === tool.agent_name ? "selected" : ""}>${escapeHtml(tool.agent_name)} — ${escapeHtml(label)}</option>`;
+      }).join("");
+      return blank + orphan + opts;
+    }
+
     function openAddStepModal() {
       wfStepModalMode = "add";
       wfStepModalId = null;
@@ -2778,7 +2797,7 @@
       $("addStepName").placeholder = t("modal.addStep.namePh");
       $("addStepPrompt").value = "";
       $("addStepPrompt").placeholder = t("modal.addStep.promptPh");
-      $("addStepAgent").value = "";
+      $("addStepAgent").innerHTML = agentOptionsHtml("");
       $("addStepCommand").value = "";
       $("addStepRequired").checked = false;
       $("addStepRequired").disabled = false;
@@ -2797,7 +2816,7 @@
       $("addStepName").value = step.name || "";
       $("addStepPrompt").value = step.prompt || "";
       $("addStepPrompt").placeholder = t("modal.addStep.promptPh");
-      $("addStepAgent").value = step.agent || "";
+      $("addStepAgent").innerHTML = agentOptionsHtml(step.agent || "");
       $("addStepCommand").value = step.command || "";
       $("addStepRequired").checked = !!step.required;
       $("addStepRequired").disabled = !!step.required_locked;
