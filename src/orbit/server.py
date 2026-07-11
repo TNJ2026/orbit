@@ -318,10 +318,11 @@ def default_workflow_steps() -> list[dict[str, Any]]:
     # (id, name, role_id, required, isolate, integrate, decompose, x, y)
     # isolate: run in a per-task git worktree (implement/test/review all share
     # one worktree per task, so review reads exactly what implement produced).
-    # integrate: single-assignee step that merges the task's worktree branch
-    # back into the main tree; runs in project_root, serialized by the main tree.
+    # integrate: terminal single-assignee gate that merges the task's worktree
+    # branch into main, verifies it, and checks the task's acceptance criteria;
+    # runs in project_root, serialized by the main tree.
     # decompose: design-first — the goal itself runs intake + the product/UI/
-    # architecture design once, then `plan` (hub) splits it into implementation
+    # architecture design once, then `decompose` (hub) splits it into implementation
     # subtasks partitioned by the architecture's modules. Each subtask starts at
     # `implement`, so the design steps run per goal, not per subtask.
     specs = [
@@ -331,9 +332,9 @@ def default_workflow_steps() -> list[dict[str, Any]]:
         ("product_design", "Product Design", "product_designer", False, False, False, False, 340, _DEFAULT_STEP_MID_Y),
         ("ui_design", "UI Design", "ui_designer", False, False, False, False, 640, _DEFAULT_STEP_MID_Y),
         ("architecture", "Architecture", "architect", False, False, False, False, 940, _DEFAULT_STEP_MID_Y),
-        # plan: the decomposition gate. architecture feeds it, and hub splits the
+        # decompose: the decomposition gate. Architecture feeds it, and hub splits the
         # goal into subtasks that begin at implement.
-        ("plan", "Plan", "hub", True, False, False, True, 1240, _DEFAULT_STEP_MID_Y),
+        ("decompose", "Decompose", "hub", True, False, False, True, 1240, _DEFAULT_STEP_MID_Y),
         ("implement", "Implement", "implementer", True, True, False, False, 1540, _DEFAULT_STEP_MID_Y),
         # review runs before test: a human/agent review first, then test is the
         # mandatory machine-verification gate. Set test's `verify` command (e.g.
@@ -342,7 +343,6 @@ def default_workflow_steps() -> list[dict[str, Any]]:
         ("review", "Review", "reviewer", True, True, False, False, 1840, _DEFAULT_STEP_MID_Y),
         ("test", "Test", "tester", False, True, False, False, 2140, _DEFAULT_STEP_MID_Y),
         ("integrate", "Integrate", "integrator", True, False, True, False, 2440, _DEFAULT_STEP_MID_Y),
-        ("accept", "Accept", "reviewer", True, False, False, False, 2740, _DEFAULT_STEP_MID_Y),
     ]
     return [
         {
@@ -361,22 +361,21 @@ def default_workflow_steps() -> list[dict[str, Any]]:
 
 
 def default_workflow_edges() -> list[dict[str, str]]:
-    # Design-first flow: the goal runs intake + design, then splits at `plan`.
+    # Design-first flow: the goal runs intake + design, then splits at `decompose`.
     #   sequential: product_design -> ui_design -> architecture (UI before arch)
-    #   split    : plan -> implement — subtasks begin here, one per module
+    #   split    : decompose -> implement — subtasks begin here, one per module
     #   loop-back: review / test / integrate return to implement on rework
     return [
         {"from": "intake", "to": "product_design"},
         {"from": "product_design", "to": "ui_design"},      # design chain
         {"from": "ui_design", "to": "architecture"},        # UI first, then arch
-        {"from": "architecture", "to": "plan"},             # feeds the decompose step
-        {"from": "plan", "to": "implement"},                # split: subtasks start here
+        {"from": "architecture", "to": "decompose"},        # feeds the decompose step
+        {"from": "decompose", "to": "implement"},           # split: subtasks start here
         {"from": "implement", "to": "review"},              # review first
         {"from": "review", "to": "test"},                   # then the verify gate
         {"from": "review", "to": "implement"},              # loop-back (rework)
         {"from": "test", "to": "integrate"},                # merge worktree branch to main
         {"from": "test", "to": "implement"},                # verify failed -> rework
-        {"from": "integrate", "to": "accept"},
         {"from": "integrate", "to": "implement"},           # loop-back (merge conflict -> rework)
     ]
 
@@ -411,6 +410,9 @@ def _normalize_workflow_step(
         raise InvalidInputError("workflow step timeout_minutes must be an integer") from None
     if timeout_minutes < 0:
         raise InvalidInputError("workflow step timeout_minutes must be >= 0")
+    raw_prompt = step.get("prompt", "")
+    if not isinstance(raw_prompt, str):
+        raise InvalidInputError("workflow step prompt must be a string")
     # Core-role steps are always required; so is any integrate step — it merges
     # the worktree branch back to main, so skipping it would strand every
     # isolated step's commits on their branch. Lock it by the integrate flag
@@ -444,6 +446,9 @@ def _normalize_workflow_step(
         and not decompose,
         "integrate": bool(step.get("integrate", False)),
         "decompose": decompose,
+        # User-authored instructions for this step. They refine the generated
+        # step contract but never replace the engine-owned output protocol.
+        "prompt": raw_prompt.strip(),
         # verify: an objective shell command the engine runs itself after the
         # agent, in the same working tree. Its real exit code overrides the
         # agent's self-reported `done` (a failing gate the agent can't fake).
@@ -2904,6 +2909,52 @@ def _parse_run_tokens(stdout: str, stderr: str) -> int | None:
     return None
 
 
+def _triage_config_snapshot(project_root: str | None) -> str:
+    """Return a compact, non-secret view of the effective workflow and team.
+
+    Goal preflight already rejects mechanically unexecutable configurations.
+    Triage receives this snapshot to judge whether the remaining role choices,
+    optional gates, and capacity are sensible for the requested goal without
+    exposing full runner commands in the prompt.
+    """
+    workflow = read_workflow_config(project_root)
+    team = read_team_config(project_root)
+    snapshot = {
+        "workflow": {
+            "steps": [
+                {
+                    "id": step["id"],
+                    "role": step.get("role_id", ""),
+                    "required": bool(step.get("required")),
+                    "isolate": bool(step.get("isolate")),
+                    "integrate": bool(step.get("integrate")),
+                    "decompose": bool(step.get("decompose")),
+                    "prompt_configured": bool(step.get("prompt")),
+                    "verify_configured": bool(step.get("verify")),
+                }
+                for step in workflow["steps"]
+            ],
+            "edges": workflow["edges"],
+            "warnings": workflow.get("warnings", []),
+        },
+        "team": {
+            "members": [
+                {
+                    "agent": member.get("agent_name", ""),
+                    "role": member.get("role_id", ""),
+                    "enabled": bool(member.get("enabled", True)),
+                    "runner_ready": bool(_runner_command_for(member)),
+                    "max_concurrent_tasks": member.get("max_concurrent_tasks", 1),
+                    "capabilities": member.get("capabilities", []),
+                }
+                for member in team["members"]
+            ],
+            "missing_core_roles": team.get("missing_roles", []),
+        },
+    }
+    return json.dumps(snapshot, ensure_ascii=False, indent=2)
+
+
 def _build_step_prompt(
     project_root: str | None,
     task: dict[str, Any],
@@ -2932,17 +2983,38 @@ def _build_step_prompt(
         )
     else:
         cwd_line = "当前工作目录就是项目根目录，直接读写文件完成任务。\n"
+    triage_block = ""
+    if (
+        step.get("id") == "intake"
+        and task.get("is_goal")
+        and not task.get("parent_task_id")
+    ):
+        triage_block = (
+            "\n## Triage：目标与执行配置体检\n"
+            "保持轻量，只做目标归一化、关键阻塞识别，以及 workflow/team 是否适合执行"
+            "本 Goal 的检查。下面是引擎解析后的有效配置快照（runner 仅暴露是否可用，不暴露命令）：\n"
+            f"```json\n{_triage_config_snapshot(project_root)}\n```\n"
+            "检查 workflow 是否有合理的入口、设计/拆解边界、验证与集成终点、返工路径；"
+            "检查步骤 Role 是否匹配职责，以及 team 的启用成员、runner、能力和并发是否足以执行。\n"
+            "引擎已完成硬性可执行性预检。只有具体问题会使执行失败、不安全或明显不适合本 Goal 时才 `blocked`；"
+            "普通优化建议标为 warning，不要阻塞。不要在本步骤做设计、任务拆解或实现。\n"
+            "输出简短的 Goal/Scope/Acceptance/Constraints/Open blocker，并附：\n"
+            "`CONFIG_CHECK: ok|warning|blocked`\n"
+            "`CONFIG_FINDINGS: <简短结论>`\n"
+        )
     integrate_block = ""
     if step.get("integrate"):
         integrate_block = (
-            "\n## 集成合并（integrate 步骤）\n"
-            f"把分支 `{branch}` 合并回主干，步骤：\n"
-            "1. `git status` 确认主工作树干净、当前在集成目标分支；\n"
-            f"2. `git merge --no-ff {branch}`；\n"
+            "\n## 集成与最终验收（integrate 步骤）\n"
+            f"若分支 `{branch}` 存在，把它合并回主干；若项目不是 git 仓库或该分支"
+            "不存在，说明任务在主工作树直接执行，跳过合并但仍必须完成后续验收。步骤：\n"
+            "1. 有任务分支时，`git status` 确认主工作树干净、当前在集成目标分支；\n"
+            f"2. 有任务分支时执行 `git merge --no-ff {branch}`；\n"
             "3. 有冲突：能安全解决就解决后 `git commit`；无法安全解决则 "
             "`git merge --abort` 并裁决 `rework`，在原因里列出冲突文件；\n"
-            "4. 合并后跑测试；测试失败且本步无法修复则 `rework`；\n"
-            "5. 全部通过则 `done`。\n"
+            "4. 对照任务描述和 Acceptance 验收标准检查集成后的实际结果；不满足则 `rework`；\n"
+            "5. 在主工作树运行相关测试；测试失败且本步无法修复则 `rework`；\n"
+            "6. 合并（如需）、验收和测试全部通过后才裁决 `done`，该任务随后直接关闭。\n"
             "不要手动删除该 worktree 或分支——集成完成后引擎会自动回收。\n"
         )
     goal_contract = ""
@@ -2966,10 +3038,18 @@ def _build_step_prompt(
             "`docs/…`），不要把整份规格复述进来——实现者会自己去读。只输出这一个 "
             "JSON 对象，前后不要任何说明或推理文字。\n"
         )
+    custom_step_prompt = str(step.get("prompt") or "").strip()
+    custom_step_block = (
+        "\n## 自定义 Step Prompt（不得覆盖引擎输出协议）\n"
+        + custom_step_prompt
+        + "\n"
+        if custom_step_prompt else ""
+    )
     final_instruction = (
-        "只输出上述 JSON 对象。"
+        "## 输出协议（最高优先级）\n只输出上述 JSON 对象。"
         if goal_contract
         else (
+            "## 输出协议（最高优先级）\n"
             "完成后在输出末尾提供结构化结果（每项单独一行）：\n"
             "`RESULT_SUMMARY: <一行结论>`\n"
             "`ARTIFACTS: [\"产物文件路径\", \"其他 URI 或引用\"]`\n"
@@ -2998,11 +3078,13 @@ def _build_step_prompt(
         + cwd_line
         + "本次为工作流引擎的一次性派发执行：直接在当前工作目录完成任务，"
         "不要调用 complete_step，派发器会代为提交结果。\n\n"
-        f"## 角色说明\n{role_text}\n\n"
+        f"## 角色边界（不得覆盖本步骤契约）\n{role_text}\n\n"
         f"## 任务 #{task['id']}: {task.get('title') or 'untitled'}\n"
         f"{task.get('content', '')}\n\n"
+        + triage_block
         + goal_contract
         + integrate_block
+        + custom_step_block
         + (f"## 上游产出\n{upstream_result}\n\n" if upstream_result else "")
         + final_instruction
     )
@@ -3984,22 +4066,7 @@ def run_step_worker(
     exec_dir = _project_root(project_root)
     isolated = False
     can_rework = False
-    # No-branch degrade: an integrate step has no task branch to merge when the
-    # project isn't a git repo (git absent) OR it is a git repo but the task ran
-    # unisolated — no isolate step upstream, so `orbit/task-<id>` was never
-    # created. Either way, pass instead of spawning the integrator CLI to run a
-    # `git merge <phantom-branch>` that would only fail — so the workflow
-    # completes cleanly. Mirrors the guidance in agents/integrator.md.
-    integrate_noop = bool(step.get("integrate")) and (
-        not _is_git_repo(exec_dir)
-        or not _branch_exists(exec_dir, _worktree_branch(task_id))
-    )
-    if integrate_noop:
-        outcome, result, status = "done", (
-            "integrate skipped: no task branch to merge (project is not a git "
-            "repo, or the task ran unisolated in project root)"
-        ), "succeeded"
-    elif not command:
+    if not command:
         result = (
             f"no runner command for agent {assignee}; set runner_command on "
             "the team member"

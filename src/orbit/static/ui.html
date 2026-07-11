@@ -1603,6 +1603,7 @@
       <label><div class="meta" data-i18n="modal.addStep.name">Name</div><input id="addStepName" type="text" placeholder="Step name" data-i18n-ph="modal.addStep.namePh"></label>
       <label id="addStepRoleField"><div class="meta" data-i18n="modal.addStep.role">Role</div><select id="addStepRole"></select></label>
       <label id="addStepRequiredField" class="modal-check"><input id="addStepRequired" type="checkbox"><span class="meta" data-i18n="modal.addStep.required">Required (a step the flow must include)</span></label>
+      <label><div class="meta" data-i18n="modal.addStep.prompt">Step prompt</div><textarea id="addStepPrompt" rows="7" data-i18n-ph="modal.addStep.promptPh" placeholder="Additional instructions for this step" style="width:100%;resize:vertical;"></textarea><div class="meta" data-i18n="modal.addStep.promptHint">Appended to the generated step instructions; the engine output protocol still takes priority.</div></label>
       <div class="modal-actions">
         <button id="addStepDelete" type="button" class="danger" style="margin-right: auto; display: none;" data-i18n="modal.addStep.delete">Delete</button>
         <button id="addStepCancel" type="button" data-i18n="modal.addStep.cancel">Cancel</button>
@@ -1699,6 +1700,8 @@
         "modal.addStep.name": "Name", "modal.addStep.namePh": "Step name",
         "modal.addStep.role": "Role",
         "modal.addStep.required": "Required (a step the flow must include)",
+        "modal.addStep.prompt": "Step prompt", "modal.addStep.promptPh": "Additional instructions for this step",
+        "modal.addStep.promptHint": "Appended to the generated step instructions; the engine output protocol still takes priority.",
         "modal.addStep.delete": "Delete", "modal.addStep.cancel": "Cancel",
         "modal.addStep.add": "Add", "modal.addStep.save": "Save",
         "status.offline": "offline",
@@ -1830,6 +1833,8 @@
         "modal.addStep.name": "名称", "modal.addStep.namePh": "步骤名称",
         "modal.addStep.role": "角色",
         "modal.addStep.required": "必选（流程必须包含的步骤）",
+        "modal.addStep.prompt": "步骤 Prompt", "modal.addStep.promptPh": "该步骤的附加执行指令",
+        "modal.addStep.promptHint": "追加到引擎生成的步骤指令中；引擎输出协议仍具有最高优先级。",
         "modal.addStep.delete": "删除", "modal.addStep.cancel": "取消",
         "modal.addStep.add": "添加", "modal.addStep.save": "保存",
         "status.offline": "离线",
@@ -3021,6 +3026,8 @@
       $("addStepDelete").style.display = "none";
       $("addStepName").value = "";
       $("addStepName").placeholder = t("modal.addStep.namePh");
+      $("addStepPrompt").value = "";
+      $("addStepPrompt").placeholder = t("modal.addStep.promptPh");
       $("addStepRole").innerHTML = roleOptionsHtml((state.roles[0] || {}).id || "");
       $("addStepRequired").checked = false;
       $("addStepRequired").disabled = false;
@@ -3037,6 +3044,8 @@
       $("addStepConfirm").textContent = t("modal.addStep.save");
       $("addStepDelete").style.display = step.required_locked ? "none" : "";
       $("addStepName").value = step.name || "";
+      $("addStepPrompt").value = step.prompt || "";
+      $("addStepPrompt").placeholder = t("modal.addStep.promptPh");
       $("addStepRole").innerHTML = roleOptionsHtml(step.role_id || "");
       $("addStepRequired").checked = !!step.required;
       $("addStepRequired").disabled = !!step.required_locked;
@@ -3057,13 +3066,14 @@
       const name = ($("addStepName").value || "").trim() || t("wf.step");
       const roleId = $("addStepRole").value || (state.roles[0] || {}).id || "hub";
       const required = $("addStepRequired").checked;
+      const prompt = ($("addStepPrompt").value || "").trim();
       const steps = state.workflow.steps || [];
       // Seed coordinates only; saveWorkflow re-lays-out the graph with dagre.
       // Slugify the name into a stable step id (e.g. "Code Review" →
       // "code_review"); fall back to a timestamp suffix on collisions.
       let newId = name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "step";
       if (steps.some(s => s.id === newId)) newId = `${newId}_${Date.now().toString(36)}`;
-      const newStep = { id: newId, name, role_id: roleId, required, x: 40, y: 60 };
+      const newStep = { id: newId, name, role_id: roleId, required, prompt, x: 40, y: 60 };
       state.workflow.steps = [...steps, newStep];
       closeAddStepModal();
       await run(async () => {
@@ -3079,6 +3089,7 @@
       if (!step) { closeAddStepModal(); return; }
       step.name = ($("addStepName").value || "").trim() || step.name || t("wf.step");
       step.role_id = $("addStepRole").value || step.role_id;
+      step.prompt = ($("addStepPrompt").value || "").trim();
       if (!step.required_locked) step.required = $("addStepRequired").checked;
       closeAddStepModal();
       await run(async () => {
@@ -3315,9 +3326,16 @@
           const icon = status === "closed" ? "✓" : status === "blocked" ? "!"
             : status === "in_progress" ? "●" : "○";
           const statusLabel = status === "waiting" ? t("tasks.waiting") : stLabel(status);
-          const oneCard = instances.length === 1 ? instances[0].card : null;
-          const action = oneCard
-            ? ` onclick="showTaskDetails(${oneCard.id})" tabindex="0" role="button"`
+          const oneInstance = instances.length === 1 ? instances[0] : null;
+          const oneCard = oneInstance ? oneInstance.card : null;
+          // A per-work-item phase with one instance represents that work item,
+          // not its materialized workflow-step card. Open the task so the
+          // drawer starts with its brief and complete step history. Goal-owned
+          // phases still open their one step card as before.
+          const detailTask = oneInstance && oneInstance.owner.id !== goal.id
+            ? oneInstance.owner : oneCard;
+          const action = detailTask
+            ? ` onclick="showTaskDetails(${detailTask.id})" tabindex="0" role="button"`
             : ` onclick="showPhaseDetails('${phase.id}')" tabindex="0" role="button"`;
           const assignee = oneCard && oneCard.assignee ? ` · ${escapeHtml(oneCard.assignee)}` : "";
           const counts = summary.total > 1

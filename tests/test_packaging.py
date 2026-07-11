@@ -130,6 +130,25 @@ class PackagingTests(unittest.TestCase):
         ):
             self.assertIn(required, names)
 
+    def test_role_prompts_are_compact_boundaries_not_step_protocols(self):
+        templates = resources.files("orbit") / "role_templates"
+        roles = [
+            entry for entry in templates.iterdir()
+            if entry.name.endswith(".md") and not entry.name.startswith("_")
+        ]
+        self.assertTrue(roles)
+        for role in roles:
+            text = role.read_text(encoding="utf-8")
+            with self.subTest(role=role.name):
+                for heading in (
+                    "## Mission", "## Responsibilities", "## Boundaries", "## Judgment"
+                ):
+                    self.assertIn(heading, text)
+                self.assertLessEqual(len(text.split()), 110)
+                self.assertNotIn("WORKFLOW_OUTCOME", text)
+                self.assertNotIn("TOKENS_USED", text)
+                self.assertNotIn("complete_step", text)
+
     def test_ui_asset_is_present_and_loadable(self):
         html = (
             resources.files("orbit")
@@ -192,6 +211,8 @@ class PackagingTests(unittest.TestCase):
         self.assertIn('data-action="add-step"', html)
         self.assertNotIn('id="addWorkflowStep"', html)
         self.assertIn('id="addStepModalBackdrop"', html)
+        self.assertIn('id="addStepPrompt"', html)
+        self.assertIn('step.prompt = ($("addStepPrompt").value || "").trim()', html)
         self.assertNotIn('id="workflowStatuses"', html)
         self.assertIn("function workflowStatusList()", html)
         self.assertIn("function taskBoardColumns(tasks)", html)
@@ -200,6 +221,10 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("function goalFlowHtml(goal)", html)
         self.assertIn("function phaseInstances(goal, phase)", html)
         self.assertIn("function showPhaseDetails(stepId)", html)
+        # A workflow phase backed by one subtask opens the task, not its first
+        # materialized step card (notably the Implement card).
+        self.assertIn("oneInstance.owner.id !== goal.id", html)
+        self.assertIn("showTaskDetails(${detailTask.id})", html)
         self.assertIn("if (visibleTasks.length < 2)", html)
         self.assertIn("task.step_inputs", html)
         self.assertIn("task.result_summary", html)
@@ -610,14 +635,14 @@ class PackagingTests(unittest.TestCase):
             self.assertIn(e["to"], ids)
         out_of = lambda n: [e["to"] for e in edges if e["from"] == n]
         into = lambda n: [e["from"] for e in edges if e["to"] == n]
-        # sequential design chain: product -> ui -> architecture -> plan
+        # sequential design chain: product -> ui -> architecture -> decompose
         self.assertEqual(["ui_design"], out_of("product_design"))
         self.assertEqual(["architecture"], out_of("ui_design"))
-        self.assertEqual(["plan"], out_of("architecture"))
-        # architecture is plan's only forward predecessor
-        self.assertEqual(["architecture"], into("plan"))
+        self.assertEqual(["decompose"], out_of("architecture"))
+        # architecture is decompose's only forward predecessor
+        self.assertEqual(["architecture"], into("decompose"))
         # split: subtasks begin at implement, one per module
-        self.assertIn("implement", out_of("plan"))
+        self.assertIn("implement", out_of("decompose"))
         # loop-back: review returns to implement
         self.assertIn("implement", out_of("review"))
         # config round-trips through write/read with the branching edges intact

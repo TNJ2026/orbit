@@ -39,7 +39,7 @@ class GoalStatusDecoupleTests(unittest.TestCase):
             self.assertEqual(
                 "running", server._goal_status_for_step(tmp, "architecture")
             )
-            self.assertEqual("decomposing", server._goal_status_for_step(tmp, "plan"))
+            self.assertEqual("decomposing", server._goal_status_for_step(tmp, "decompose"))
 
     def test_goal_status_validation_maps_task_statuses(self):
         from orbit.store import GOAL_STATUSES, InvalidInputError, _validate_goal_status
@@ -100,22 +100,27 @@ class WorkflowSchemaTests(unittest.TestCase):
 
         pairs = {(e["from"], e["to"]) for e in server.default_workflow_edges()}
         self.assertIn(("test", "integrate"), pairs)  # review -> test -> integrate
-        self.assertIn(("integrate", "accept"), pairs)
         self.assertIn(("integrate", "implement"), pairs)  # merge-conflict rework
+        self.assertNotIn("accept", steps)
+        # Rework edges do not count as the forward path: integrate is terminal.
+        cfg = {"steps": list(steps.values()), "edges": server.default_workflow_edges()}
+        back = server._workflow_graph(cfg)
+        self.assertIn("integrate", server._workflow_terminal_steps(cfg, back))
 
     def test_default_workflow_is_design_first(self):
         steps = {s["id"]: s for s in server.default_workflow_steps()}
-        # design-first: the goal splits at `plan` (after the design steps), not intake
-        self.assertTrue(steps["plan"]["decompose"])
-        self.assertEqual("hub", steps["plan"]["role_id"])
-        self.assertFalse(steps["plan"]["isolate"])
+        # design-first: the goal splits at `decompose` after the design steps.
+        self.assertTrue(steps["decompose"]["decompose"])
+        self.assertEqual("Decompose", steps["decompose"]["name"])
+        self.assertEqual("hub", steps["decompose"]["role_id"])
+        self.assertFalse(steps["decompose"]["isolate"])
         with TemporaryDirectory() as tmp:
             cfg = server.read_workflow_config(tmp)
             back = server._workflow_graph(cfg)
-            self.assertEqual("plan", server._root_goal_decompose_step_id(cfg, back))
-        # only `plan` is a decompose step
+            self.assertEqual("decompose", server._root_goal_decompose_step_id(cfg, back))
+        # only `decompose` is a decompose step
         self.assertEqual(
-            ["plan"], [sid for sid, s in steps.items() if s["decompose"]]
+            ["decompose"], [sid for sid, s in steps.items() if s["decompose"]]
         )
 
     def test_default_workflow_roundtrips_flags(self):
@@ -130,14 +135,37 @@ class WorkflowSchemaTests(unittest.TestCase):
 
     def test_verify_field_roundtrips(self):
         norm = server._normalize_workflow_step(
-            {"id": "test", "name": "Test", "role_id": "tester", "verify": "  pytest -q  "},
+            {
+                "id": "test", "name": "Test", "role_id": "tester",
+                "verify": "  pytest -q  ", "prompt": "  Focus on regressions.  ",
+            },
             0,
         )
         self.assertEqual("pytest -q", norm["verify"])
+        self.assertEqual("Focus on regressions.", norm["prompt"])
         blank = server._normalize_workflow_step(
             {"id": "impl", "name": "Impl", "role_id": "implementer"}, 0
         )
         self.assertEqual("", blank["verify"])
+        self.assertEqual("", blank["prompt"])
+
+    def test_step_prompt_roundtrips_and_rejects_non_string(self):
+        with TemporaryDirectory() as tmp:
+            server.write_workflow_config(
+                [
+                    {"id": "a", "name": "A", "role_id": "hub", "prompt": "Triage briefly."},
+                    {"id": "b", "name": "B", "role_id": "implementer"},
+                    {"id": "c", "name": "C", "role_id": "reviewer"},
+                ],
+                tmp,
+                [{"from": "a", "to": "b"}, {"from": "b", "to": "c"}],
+            )
+            loaded = server.read_workflow_config(tmp)["steps"]
+        self.assertEqual("Triage briefly.", loaded[0]["prompt"])
+        with self.assertRaisesRegex(server.InvalidInputError, "prompt must be a string"):
+            server._normalize_workflow_step(
+                {"id": "x", "name": "X", "role_id": "hub", "prompt": ["bad"]}, 0
+            )
 
     def test_default_test_is_optional_gate_with_rework_edge(self):
         steps = {s["id"]: s for s in server.default_workflow_steps()}
@@ -213,6 +241,8 @@ class StepPromptTests(unittest.TestCase):
             )
         self.assertIn("orbit/task-42", p)
         self.assertIn("git merge", p)
+        self.assertIn("Acceptance", p)
+        self.assertIn("直接关闭", p)
 
     def test_isolated_prompt_mentions_worktree_branch(self):
         with TemporaryDirectory() as tmp:
@@ -233,6 +263,56 @@ class StepPromptTests(unittest.TestCase):
             )
         self.assertIn("项目根目录", p)
         self.assertNotIn("worktree", p)
+
+    def test_triage_prompt_contains_effective_config_snapshot(self):
+        goal = {**self.TASK, "is_goal": 1}
+        with TemporaryDirectory() as tmp:
+            p = server._build_step_prompt(
+                tmp, goal,
+                {"id": "intake", "name": "Triage", "role_id": "hub"},
+                "", can_rework=False, isolated=False,
+            )
+        self.assertIn("Triage：目标与执行配置体检", p)
+        self.assertIn('"workflow"', p)
+        self.assertIn('"team"', p)
+        self.assertIn('"missing_core_roles"', p)
+        self.assertIn("runner 仅暴露是否可用", p)
+        self.assertIn("CONFIG_CHECK: ok|warning|blocked", p)
+        self.assertIn("不要在本步骤做设计、任务拆解或实现", p)
+
+    def test_decompose_step_contract_is_the_only_output_contract(self):
+        goal = {**self.TASK, "is_goal": 1}
+        with TemporaryDirectory() as tmp:
+            step = next(
+                item for item in server.read_workflow_config(tmp)["steps"]
+                if item["id"] == "decompose"
+            )
+            p = server._build_step_prompt(
+                tmp, goal, step, "architecture ready",
+                can_rework=False, isolated=False,
+            )
+        self.assertEqual(1, p.count("## Goal 拆分输出格式"))
+        self.assertIn("## 输出协议（最高优先级）", p)
+        self.assertIn("只输出上述 JSON 对象", p)
+        self.assertNotIn("WORKFLOW_OUTCOME", p)
+        self.assertNotIn("TOKENS_USED", p)
+
+    def test_custom_step_prompt_is_injected_before_engine_output_protocol(self):
+        with TemporaryDirectory() as tmp:
+            p = server._build_step_prompt(
+                tmp, self.TASK,
+                {
+                    "id": "implement", "name": "Implement", "role_id": "implementer",
+                    "prompt": "Use the repository service abstraction.",
+                },
+                "", can_rework=True, isolated=True,
+            )
+        self.assertIn("## 自定义 Step Prompt", p)
+        self.assertIn("Use the repository service abstraction.", p)
+        self.assertLess(
+            p.index("Use the repository service abstraction."),
+            p.index("## 输出协议（最高优先级）"),
+        )
 
 
 class WorktreeLifecycleTests(unittest.TestCase):
@@ -362,9 +442,9 @@ class GitProvisioningTests(unittest.TestCase):
             w = server._workflow_graph_warnings(steps, edges)
         self.assertFalse(any("git is not installed" in x for x in w), w)
 
-    def test_integrate_noops_in_non_git_project(self):
-        # A non-git project can't have a task branch; integrate must pass the step
-        # (done) instead of dispatching the hub CLI to run `git merge` and fail.
+    def test_integrate_still_validates_in_non_git_project(self):
+        # With no separate Accept step, Integrate must still run its agent when
+        # there is no branch so the task's acceptance criteria are checked.
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             store = Store(root / ".orbit" / "messages.db")
@@ -375,20 +455,21 @@ class GitProvisioningTests(unittest.TestCase):
                 "id": "integrate", "name": "Integrate", "role_id": "hub",
                 "isolate": False, "integrate": True, "task_status": "in_progress",
             }
-            # runner_command would fail if ever spawned; the no-op must skip it.
-            member = {"agent_name": "hub", "runner_command": "false"}
+            member = {
+                "agent_name": "hub",
+                "runner_command": "printf 'acceptance checked\\nWORKFLOW_OUTCOME: done\\n'",
+            }
             res = server.run_step_worker(
                 store, str(root), task_id, step, member,
                 upstream_result="", advance=False,
             )
             self.assertEqual("done", res["outcome"])
-            self.assertIn("no task branch to merge", res["result"])
+            self.assertIn("acceptance checked", res["result"])
             store.close()
 
-    def test_integrate_noops_when_task_branch_missing_in_git_repo(self):
-        # A git repo whose task ran unisolated has no orbit/task-<id> branch;
-        # integrate must pass (done) instead of dispatching a `git merge` of a
-        # phantom branch that would fail.
+    def test_integrate_still_validates_when_task_branch_is_missing(self):
+        # A task may have run unisolated. The Integrate agent skips the merge,
+        # but it still owns final acceptance and therefore must be dispatched.
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             _init_repo(root)
@@ -403,13 +484,16 @@ class GitProvisioningTests(unittest.TestCase):
                 "id": "integrate", "name": "Integrate", "role_id": "hub",
                 "isolate": False, "integrate": True, "task_status": "in_progress",
             }
-            member = {"agent_name": "hub", "runner_command": "false"}
+            member = {
+                "agent_name": "hub",
+                "runner_command": "printf 'acceptance checked\\nWORKFLOW_OUTCOME: done\\n'",
+            }
             res = server.run_step_worker(
                 store, str(root), task_id, step, member,
                 upstream_result="", advance=False,
             )
             self.assertEqual("done", res["outcome"])
-            self.assertIn("no task branch to merge", res["result"])
+            self.assertIn("acceptance checked", res["result"])
             store.close()
 
 

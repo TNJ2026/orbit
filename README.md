@@ -127,7 +127,7 @@ The workflow engine is logically three layers — **Scheduler** (decides the nex
 | **Scheduler** (thread inside serve) | Enqueues "run this step" into `run_jobs`; single-point-consumes finished jobs and advances the workflow (dispatch / rework / accept); runs timeout / health backstops |
 | **Runner / Worker** | Claims jobs from `run_jobs` (with lease + heartbeat), executes each agent's CLI, streams stdout/stderr, parses the outcome, and writes the result back to the job |
 
-Default workflow (design-first): `intake(hub) → product_design → ui_design → architecture → plan(hub) → implement → review → test → integrate(integrator) → accept(reviewer)`. The design steps run sequentially (UI first, then architecture); the goal runs them once, then `plan` splits it into implementation subtasks (one per module) that each begin at `implement`. After `implement` comes `review`, then `test` (the machine gate — it can carry a `verify` command); both `review` and `test` have loop-back edges to `implement` on rework. The runner hands the step prompt to an agent CLI headlessly; the agent reports by printing `WORKFLOW_OUTCOME: done|rework|blocked` at the end (see `agents/_protocol.md`).
+Default workflow (design-first): `intake(hub) → product_design → ui_design → architecture → decompose(hub) → implement → review → test → integrate(integrator)`. The design steps run sequentially (UI first, then architecture); the goal runs them once, then `decompose` splits it into implementation subtasks (one per module) that each begin at `implement`. After `implement` comes `review`, then `test` (the machine gate — it can carry a `verify` command). `review`, `test`, and `integrate` can loop back to `implement` on rework. Integrate is the terminal per-task gate: it merges the task branch when present, checks the acceptance criteria, verifies main, and closes the task on `done`. The runner hands the step prompt to an agent CLI headlessly; the agent reports by printing `WORKFLOW_OUTCOME: done|rework|blocked` at the end (see `agents/_protocol.md`).
 
 ### Default: single process
 
@@ -149,7 +149,7 @@ kept compatible by falling back to the cleaned output as the result summary.
 
 ### Design-first & the `decompose` step
 
-Where a goal splits into subtasks is set by the step flagged `decompose: true`. The default workflow flags `plan`, so the goal itself runs the design steps once (`intake → product_design → ui_design → architecture → plan`), then `plan` (hub) emits the subtask JSON using the design output as context. Each subtask begins at the decompose step's successors (`implement` onward), inheriting that output — so the design steps run **once** on the goal, not per subtask, and subtasks partition cleanly by the architecture's modules.
+Where a goal splits into subtasks is set by the step flagged `decompose: true`. The default workflow uses the `decompose` step, so the goal itself runs the design steps once (`intake → product_design → ui_design → architecture → decompose`), then `decompose` (hub) emits the subtask JSON using the design output as context. Each subtask begins at the decompose step's successors (`implement` onward), inheriting that output — so the design steps run **once** on the goal, not per subtask, and subtasks partition cleanly by the architecture's modules.
 
 Move the split by flagging a different step in `.orbit/workflow.json`. With **no** `decompose` flag, the goal does not create work items: it traverses the complete workflow itself, which is useful for research, approval, publishing, and other single-subject processes. The flag is config-only (edit the JSON, same as `isolate`/`integrate`); a decompose step is auto-required, never isolated, and must have a forward successor for its work items to start at.
 
@@ -195,7 +195,8 @@ Give `hub` a goal; the engine splits it into business subtasks that run through 
 
 Roles in the default workflow (see `agents/`):
 
-- `hub`: orchestrator. Splits the goal, integrates/merges, does final acceptance; no big implementation or review work.
+- `hub`: orchestrator. Splits the goal and arbitrates cross-role decisions; no big implementation or review work.
+- `integrator`: merges task branches, performs final per-task acceptance, and verifies the integrated main before closing each task.
 - `implementer`: makes the code change and self-tests.
 - `reviewer`: hunts bugs, test gaps, design risk; reviews only, doesn't edit code.
 - `tester`: designs and runs tests, reproduces failures, reports coverage risk.

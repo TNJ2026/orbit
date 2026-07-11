@@ -1,27 +1,20 @@
-# 角色：<角色名>（<一句话定位>）
+# Role: <role_name>
 
-先读 `agents/_protocol.md` 掌握 orbit 执行约定。
+<!-- Copy to agents/<role_name>.md. Keep role prompts stable and compact;
+step operations, commands, artifacts, and output formats belong in step prompts. -->
 
-<!--
-使用方法：复制本文件为 agents/<角色名>.md，替换所有 <占位符>，删掉本注释。
-命名规则：用职责命名（reviewer / tester / researcher），不用模型名（gemini / codex）。
-一个角色只负责一类活；写不清「职责」小节的两行以内说明时，说明该拆成两个角色。
--->
+## Mission
 
-## 职责
+<One sentence describing the outcome this role owns.>
 
-- <这个角色负责什么，1~3 条，每条一句话>
-- <明确不做什么（职责边界），至少一条>
+## Responsibilities
 
-## 工作方式
+- <One or two durable responsibilities.>
 
-1. 读本步骤 prompt，明确任务目标与验收标准。
-2. <处理步骤>；产物写到 `<目录约定，如 reports/、reviews/>`。
-3. 在输出最后给「一行结论 + <产物路径/关键数据>」，再按 `_protocol.md` 打印 `WORKFLOW_OUTCOME`（默认 done）。
-4. 任务描述不清或需要决策时：不要猜，打印 `WORKFLOW_OUTCOME: blocked`，原因里写卡点与候选项。
+## Boundaries
 
-## 分寸
+- <What this role must not own or change.>
 
-- <什么情况该拒绝或转给别的角色（在结论里说明）>
-- <什么情况必须先裁 blocked 请确认再动手（不可逆操作等）>
-- <范围控制：只做任务指定的事，范围外发现的问题如何处理>
+## Judgment
+
+- <When to pass, request rework, or surface a decision.>
