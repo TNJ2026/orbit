@@ -140,9 +140,10 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("/api/tasks/${taskId}/rerun", html)
         self.assertIn("function reimplementTask(taskId)", html)
         self.assertIn("/api/tasks/${taskId}/reimplement", html)
-        self.assertIn("function goalBudgetAlertHtml(goal)", html)
+        self.assertIn("function goalBudgetAlertHtml(goal, inputId", html)
         self.assertIn("goal.budgetExceeded", html)
-        self.assertIn("function resumeGoalBudget(goalId)", html)
+        self.assertIn("function resumeGoalBudget(goalId, inputId", html)
+        self.assertIn("executionGoalBudgetResume-${goal.id}", html)
         self.assertIn("/api/goals/${goalId}/resume-budget", html)
         self.assertNotIn("function createTaskRun(taskId)", html)
         self.assertIn("function renderTaskRuns()", html)
@@ -156,8 +157,9 @@ class PackagingTests(unittest.TestCase):
         # The global agent-command overrides setting is gone (moved onto steps).
         self.assertNotIn('id="setAgentCommands"', html)
         self.assertNotIn('id="addStepCommand"', html)
-        # Steps default to no Agent; a blank option makes "unassigned" selectable.
-        self.assertIn("modal.addStep.agentDefault", html)
+        # Agent dropdowns list only available agents; they cannot be cleared to
+        # an explicit "no agent" option in the step editor.
+        self.assertNotIn("modal.addStep.agentDefault", html)
         self.assertNotIn("modal.addStep.agentRequired", html)
         # The Add-step toolbar tool opens the modal (add); double-click opens it
         # (edit). No standalone Add-step button in the pane header.
@@ -172,6 +174,7 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("function workflowStatusList()", html)
         self.assertIn("function taskBoardColumns(tasks)", html)
         self.assertIn("function goalStepsHtml(goal)", html)
+        self.assertIn('const icon = sub.task_status === "closed" ? "✓ " : "";', html)
         self.assertIn("function currentBoardGoal()", html)
         self.assertIn("function goalFlowHtml(goal)", html)
         self.assertIn("function phaseInstances(goal, phase)", html)
