@@ -1919,8 +1919,16 @@ def _upsert_step_card(
     step_inputs: dict[str, Any],
 ) -> dict[str, Any]:
     card = store.find_open_step_card(parent["id"], step["id"])
+    if card and str(card.get("task_status")) == "blocked":
+        # A blocked card is a settled attempt. Re-dispatching after a block (manual
+        # re-run / auto-recovery) must open a FRESH card, not reuse the stale one —
+        # otherwise the retry lands on the blocked card's old board position (before
+        # any implement cards that ran since) instead of after them. Close it so the
+        # retry sequences cleanly and find_open_step_card won't resurface it later.
+        store.set_task_workflow_state(card["id"], task_status="closed")
+        card = None
     if card:
-        # Redispatch (rework loop / timeout reassign): reuse the open card.
+        # Redispatch (rework loop / timeout reassign): reuse the still-open card.
         store.set_task_workflow_state(
             card["id"], task_status="assigned", assignee=assignee
         )

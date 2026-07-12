@@ -1007,6 +1007,47 @@ class StepCardTests(unittest.TestCase):
             self.assertEqual([], leftovers)
             self.assertEqual("accepted", h.task(goal_id)["task_status"])
 
+    def test_rerun_after_block_opens_fresh_step_card(self):
+        # A blocked step card is a settled attempt. Re-dispatching the step must
+        # open a NEW card and close the blocked one, so the retry sequences after
+        # later cards instead of reusing the stale card's old board position.
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(
+                tmp, steps=ENTRY_DECOMPOSE_STEPS, bindings=self._bindings_with_runners()
+            )
+            goal = h.task(self._goal(h))
+            [mid] = h.store.send_message(
+                "hub-agent", "hub-agent", "Build",
+                reply_to=goal["source_message_id"], kind="task", title="X",
+            )
+            sub = next(t for t in h.store.list_tasks(status="all")
+                       if t["source_message_id"] == mid)
+            h.start(sub["id"])
+            h.complete("hub-agent", sub["id"], "intake", "done")   # -> implement card
+
+            def impl_cards():
+                return sorted(
+                    (t for t in h.store.list_tasks()
+                     if t.get("parent_task_id") == sub["id"]
+                     and t.get("source_message_id") is None
+                     and t["workflow_step"] == "implement"),
+                    key=lambda t: t["id"],
+                )
+            self.assertEqual(1, len(impl_cards()))
+
+            # implement blocks -> its card is blocked (settled).
+            h.complete("codex", sub["id"], "implement", "blocked", "stuck")
+            blocked_id = impl_cards()[0]["id"]
+            self.assertEqual("blocked", h.task(blocked_id)["task_status"])
+
+            # Re-run implement -> a fresh card opens; the blocked one is closed.
+            server.rerun_workflow_step(h.store, tmp, sub["id"], "codex", step="implement")
+            cards = impl_cards()
+            self.assertEqual(2, len(cards))
+            self.assertEqual("closed", h.task(blocked_id)["task_status"])
+            self.assertEqual("assigned", cards[-1]["task_status"])
+            self.assertNotEqual(blocked_id, cards[-1]["id"])
+
     def test_blocked_reason_for_step_card_uses_parent_transition(self):
         with TemporaryDirectory() as tmp:
             h = EngineHarness(tmp, bindings=self._bindings_with_runners())
