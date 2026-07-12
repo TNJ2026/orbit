@@ -2596,6 +2596,99 @@ class TokenStatsTests(unittest.TestCase):
                 else:
                     os.environ["GEMINI_CLI_HOME"] = old_home
 
+    def test_hermes_run_tokens_from_state_db(self):
+        import os
+        import sqlite3
+
+        with TemporaryDirectory() as home, TemporaryDirectory() as ws:
+            ws_real = os.path.realpath(ws)
+            started = 1_783_000_000.5  # unix seconds
+            db = Path(home) / "state.db"
+            conn = sqlite3.connect(db)
+            conn.execute(
+                "CREATE TABLE sessions (id TEXT PRIMARY KEY, started_at REAL, cwd TEXT, "
+                "input_tokens INT, output_tokens INT, cache_read_tokens INT, "
+                "cache_write_tokens INT, reasoning_tokens INT)"
+            )
+            # matching session in this worktree: 100+20+300+5+40 = 465
+            conn.execute("INSERT INTO sessions VALUES ('a', ?, ?, 100, 20, 300, 5, 40)",
+                         (started, ws_real))
+            # a second matching session adds on: 1+2+3+4+5 = 15  -> total 480
+            conn.execute("INSERT INTO sessions VALUES ('b', ?, ?, 1, 2, 3, 4, 5)",
+                         (started + 1, ws_real))
+            # a different workspace -> never counted
+            conn.execute("INSERT INTO sessions VALUES ('c', ?, '/other/ws', 9, 9, 9, 9, 9)",
+                         (started,))
+            # old row with no cwd -> never counted
+            conn.execute("INSERT INTO sessions VALUES ('d', ?, NULL, 7, 7, 7, 7, 7)",
+                         (started,))
+            conn.commit()
+            conn.close()
+
+            start_ms = int(started * 1000)
+            old = os.environ.get("HERMES_HOME")
+            os.environ["HERMES_HOME"] = home
+            try:
+                self.assertEqual(
+                    480, server._hermes_run_tokens(ws, start_ms - 2000, start_ms + 2000))
+                self.assertIsNone(
+                    server._hermes_run_tokens(ws, start_ms + 60_000, start_ms + 120_000))
+                self.assertIsNone(
+                    server._hermes_run_tokens("/nope/elsewhere", start_ms - 2000, start_ms + 2000))
+            finally:
+                if old is None:
+                    os.environ.pop("HERMES_HOME", None)
+                else:
+                    os.environ["HERMES_HOME"] = old
+
+    def test_opencode_run_tokens_from_message_db(self):
+        import json as _json
+        import os
+        import sqlite3
+
+        with TemporaryDirectory() as data_home, TemporaryDirectory() as ws:
+            ws_real = os.path.realpath(ws)
+            created = 1_783_000_000_000  # ms
+            oc_dir = Path(data_home) / "opencode"
+            oc_dir.mkdir(parents=True)
+            db = oc_dir / "opencode.db"
+            conn = sqlite3.connect(db)
+            conn.execute("CREATE TABLE message (id TEXT PRIMARY KEY, time_created INT, data TEXT)")
+
+            def msg(mid, ts, cwd, inp, out, reason, cread, cwrite, role="assistant"):
+                data = {
+                    "role": role,
+                    "path": {"cwd": cwd, "root": "/"},
+                    "time": {"created": ts},
+                    "tokens": {"input": inp, "output": out, "reasoning": reason,
+                               "cache": {"read": cread, "write": cwrite}},
+                }
+                conn.execute("INSERT INTO message VALUES (?, ?, ?)", (mid, ts, _json.dumps(data)))
+
+            # two assistant messages in this workspace: (10+2+3+4+1)=20 + (5+5+0+0+0)=10 -> 30
+            msg("m1", created, ws_real, 10, 2, 3, 4, 1)
+            msg("m2", created + 500, ws_real, 5, 5, 0, 0, 0)
+            # a user message (ignored) and a different-workspace assistant (ignored)
+            msg("m3", created, ws_real, 99, 99, 99, 99, 99, role="user")
+            msg("m4", created, "/other/ws", 9, 9, 9, 9, 9)
+            conn.commit()
+            conn.close()
+
+            old = os.environ.get("XDG_DATA_HOME")
+            os.environ["XDG_DATA_HOME"] = data_home
+            try:
+                self.assertEqual(
+                    30, server._opencode_run_tokens(ws, created - 2000, created + 2000))
+                self.assertIsNone(
+                    server._opencode_run_tokens(ws, created + 1_000_000, created + 1_002_000))
+                self.assertIsNone(
+                    server._opencode_run_tokens("/nope/elsewhere", created - 2000, created + 2000))
+            finally:
+                if old is None:
+                    os.environ.pop("XDG_DATA_HOME", None)
+                else:
+                    os.environ["XDG_DATA_HOME"] = old
+
     def test_step_prompt_asks_for_tokens(self):
         with TemporaryDirectory() as tmp:
             EngineHarness(tmp)

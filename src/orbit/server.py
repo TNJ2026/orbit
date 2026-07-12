@@ -3160,8 +3160,10 @@ def _normalize_agent_output(stdout: str, stderr: str) -> tuple[str, int | None]:
 # — robust across CLI versions and concurrency-safe for isolated steps (unique
 # worktree path per task). The usage field numbers are version-fragile; any
 # failure degrades to None so the self-report sentinel takes over.
-_ANTIGRAVITY_CORRELATION_BUFFER_MS = 10_000
+_LOCAL_STORE_CORRELATION_BUFFER_MS = 10_000
 _AGY_COMMAND_RE = re.compile(r"(?:^|[\s/;&|(])agy(?:\s|$)")
+_HERMES_COMMAND_RE = re.compile(r"(?:^|[\s/;&|(])hermes(?:\s|$)")
+_OPENCODE_COMMAND_RE = re.compile(r"(?:^|[\s/;&|(])opencode(?:\s|$)")
 
 
 def _pb_read_varint(buf: bytes, pos: int) -> tuple[int, int | None]:
@@ -3318,8 +3320,8 @@ def _antigravity_run_tokens(
         workspace_bytes = os.path.realpath(str(exec_dir)).encode("utf-8")
     except OSError:
         return None
-    lo = start_ms - _ANTIGRAVITY_CORRELATION_BUFFER_MS
-    hi = end_ms + _ANTIGRAVITY_CORRELATION_BUFFER_MS
+    lo = start_ms - _LOCAL_STORE_CORRELATION_BUFFER_MS
+    hi = end_ms + _LOCAL_STORE_CORRELATION_BUFFER_MS
     # Only attribute conversations that record this run's workspace path (the CLI
     # writes its cwd into a tool step). This is concurrency-safe — a unique
     # worktree path never collides. A run that recorded no cwd (e.g. a pure reply
@@ -3351,6 +3353,155 @@ def _antigravity_run_tokens(
                 seen.add(resp_id)
             total += tokens
     return total if matched else None
+
+
+# --- Hermes CLI token accounting --------------------------------------------
+# Hermes (`hermes`) prints no usage but records every session in a plain SQLite
+# db at `$HERMES_HOME/state.db` (default ~/.hermes). The `sessions` table carries
+# per-session token columns and a `cwd` column holding the process working dir
+# (the orbit worktree), so a run is correlated by cwd + a wall-clock window on
+# `started_at` (unix seconds). Concurrency-safe — each task has a unique worktree
+# path. Older rows predate the cwd column (NULL) and degrade to self-report.
+_HERMES_TOKEN_COLUMNS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "reasoning_tokens",
+)
+
+
+def _hermes_state_db() -> Path:
+    home = os.environ.get("HERMES_HOME") or os.path.join(os.path.expanduser("~"), ".hermes")
+    return Path(home) / "state.db"
+
+
+def _hermes_run_tokens(exec_dir: str | Path, start_ms: int, end_ms: int) -> int | None:
+    """Sum tokens across hermes sessions whose cwd == exec_dir and whose
+    started_at falls in [start_ms, end_ms]. None when the db is absent, the cwd
+    column is missing (old schema), or nothing matches."""
+    db = _hermes_state_db()
+    if not db.is_file():
+        return None
+    try:
+        workspace = os.path.realpath(str(exec_dir))
+    except OSError:
+        return None
+    lo = (start_ms - _LOCAL_STORE_CORRELATION_BUFFER_MS) / 1000.0
+    hi = (end_ms + _LOCAL_STORE_CORRELATION_BUFFER_MS) / 1000.0
+    cols = ", ".join(f"COALESCE({c}, 0)" for c in _HERMES_TOKEN_COLUMNS)
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=1.0)
+    except sqlite3.Error:
+        return None
+    try:
+        total = 0
+        for row in conn.execute(
+            f"SELECT started_at, {cols} FROM sessions WHERE cwd = ? OR cwd = ?",
+            (workspace, str(exec_dir)),
+        ):
+            started_at = row[0]
+            if not isinstance(started_at, (int, float)):
+                continue
+            # started_at is unix seconds (float); tolerate ms just in case.
+            secs = started_at / 1000.0 if started_at > 1e12 else started_at
+            if not lo <= secs <= hi:
+                continue
+            total += sum(max(0, int(v or 0)) for v in row[1:])
+        return total if total > 0 else None
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+
+
+# --- OpenCode CLI token accounting ------------------------------------------
+# OpenCode (`opencode`) 1.2+ stores each message as JSON in the `message` table
+# of `$XDG_DATA_HOME/opencode/opencode.db` (default ~/.local/share). An assistant
+# message carries `path.cwd`/`path.root` (the workspace), a `tokens` breakdown,
+# and `time.created` (ms), so a run is correlated by workspace path + a wall-clock
+# window and deduped by message id. Legacy (<1.2) JSON storage is not read and
+# degrades to self-report.
+def _opencode_db() -> Path:
+    data_home = os.environ.get("XDG_DATA_HOME") or os.path.join(
+        os.path.expanduser("~"), ".local", "share"
+    )
+    return Path(data_home) / "opencode" / "opencode.db"
+
+
+def _opencode_message_tokens(tokens: Any) -> int:
+    if not isinstance(tokens, dict):
+        return 0
+    cache = tokens.get("cache") if isinstance(tokens.get("cache"), dict) else {}
+    fields = (
+        tokens.get("input"),
+        tokens.get("output"),
+        tokens.get("reasoning"),
+        cache.get("read"),
+        cache.get("write"),
+    )
+    return sum(max(0, int(v)) for v in fields if isinstance(v, (int, float)))
+
+
+def _opencode_run_tokens(exec_dir: str | Path, start_ms: int, end_ms: int) -> int | None:
+    """Sum tokens across opencode assistant messages whose workspace path matches
+    exec_dir and whose time.created falls in [start_ms, end_ms], deduped by message
+    id. None when the db is absent or nothing matches."""
+    db = _opencode_db()
+    if not db.is_file():
+        return None
+    try:
+        workspace = os.path.realpath(str(exec_dir))
+    except OSError:
+        return None
+    raw = str(exec_dir)
+    lo = start_ms - _LOCAL_STORE_CORRELATION_BUFFER_MS
+    hi = end_ms + _LOCAL_STORE_CORRELATION_BUFFER_MS
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=1.0)
+    except sqlite3.Error:
+        return None
+    try:
+        total, seen = 0, set()
+        for msg_id, data_json in conn.execute(
+            "SELECT id, data FROM message WHERE time_created BETWEEN ? AND ?",
+            (lo, hi),
+        ):
+            try:
+                data = json.loads(data_json)
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(data, dict) or data.get("role") != "assistant":
+                continue
+            path = data.get("path") if isinstance(data.get("path"), dict) else {}
+            if workspace not in (path.get("cwd"), path.get("root")) and raw not in (
+                path.get("cwd"),
+                path.get("root"),
+            ):
+                continue
+            created = (data.get("time") or {}).get("created")
+            if not isinstance(created, (int, float)) or not lo <= created <= hi:
+                continue
+            key = data.get("id") or msg_id
+            if key in seen:
+                continue
+            seen.add(key)
+            total += _opencode_message_tokens(data.get("tokens"))
+        return total if total > 0 else None
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+
+
+# CLIs that print no usage but persist an accurate count to a local store. Each
+# entry maps a command matcher to a reader that recovers the count by workspace
+# path + wall-clock window; the first matching reader wins.
+_LOCAL_STORE_TOKEN_READERS = (
+    (_AGY_COMMAND_RE, _antigravity_run_tokens),
+    (_HERMES_COMMAND_RE, _hermes_run_tokens),
+    (_OPENCODE_COMMAND_RE, _opencode_run_tokens),
+)
 
 
 def _triage_config_snapshot(project_root: str | None) -> str:
@@ -4756,16 +4907,19 @@ def run_step_worker(
     # Prefer the count decoded from structured output (accurate); the plain-text
     # path already resolved to the regex-based count inside _normalize_agent_output.
     tokens = native_tokens if native_tokens is not None else _parse_run_tokens(stdout, stderr)
-    # Antigravity prints no usage; recover an accurate count from its conversation
-    # db (correlated by this run's worktree + wall-clock window). Best-effort — a
-    # failure leaves whatever the self-report sentinel produced.
-    if tokens is None and _AGY_COMMAND_RE.search(command or ""):
-        try:
-            tokens = _antigravity_run_tokens(
-                exec_dir, run_started_ms, int(time.time() * 1000)
-            )
-        except Exception:
-            tokens = None
+    # Some CLIs (antigravity, hermes, opencode) print no usage but persist an
+    # accurate count to a local store; recover it by correlating this run's
+    # worktree + wall-clock window. Best-effort — a failure leaves whatever the
+    # self-report sentinel produced.
+    if tokens is None and command:
+        for matcher, reader in _LOCAL_STORE_TOKEN_READERS:
+            if not matcher.search(command):
+                continue
+            try:
+                tokens = reader(exec_dir, run_started_ms, int(time.time() * 1000))
+            except Exception:
+                tokens = None
+            break
     if run:
         try:
             # Store the decoded text (a structured-output agent's stdout is a JSON
