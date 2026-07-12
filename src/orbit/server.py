@@ -5454,6 +5454,20 @@ def create_server(
             store, current_project.get("project_root"), task_id
         )
 
+    def _engine_health_check() -> dict:
+        # The same watchdog the background loop runs, on demand: re-dispatch dead
+        # runners, recover interrupted advances, and alert the hub on anything it
+        # can't auto-recover. Also flags active steps past their timeout.
+        root = current_project.get("project_root")
+        recovered = check_task_health(store, root)
+        timeouts = check_workflow_step_timeouts(store, root)
+        return {
+            "recovered": recovered,
+            "timeouts": timeouts,
+            "recovered_count": len(recovered),
+            "timeout_count": len(timeouts),
+        }
+
     @route("/", methods=["GET"])
     async def index(_: Request) -> RedirectResponse:
         return RedirectResponse("/ui")
@@ -6003,6 +6017,17 @@ def create_server(
         except Exception as exc:
             traceback.print_exc()
             return _json_error(f"force-close failed: {exc!r}", 500, request)
+        return _json(request, result)
+
+    @route("/api/health-check", methods=["POST"])
+    async def api_health_check(request: Request) -> JSONResponse:
+        if forbidden := _forbid_non_local(request):
+            return forbidden
+        try:
+            result = await _to_thread(_engine_health_check)
+        except Exception as exc:
+            traceback.print_exc()
+            return _json_error(f"health check failed: {exc!r}", 500, request)
         return _json(request, result)
 
     @route("/api/tasks/{task_id:int}/runs", methods=["GET"])

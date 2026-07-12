@@ -1325,7 +1325,10 @@
           <h2 data-i18n="tasks.title">Goal Execution</h2>
           <div id="tasksGoalBar"></div>
         </div>
-        <button id="refreshTasks" data-i18n="tasks.refresh">Refresh</button>
+        <div class="row" style="gap: 6px;">
+          <button id="healthCheck" type="button" data-i18n="tasks.healthCheck" data-i18n-title="tasks.healthCheckHint" title="Re-dispatch dead runners and recover interrupted advances; alert the hub on anything it can't auto-fix.">Check &amp; recover</button>
+          <button id="refreshTasks" data-i18n="tasks.refresh">Refresh</button>
+        </div>
       </div>
       <div id="tasksLayout" class="tasks-layout">
         <div id="tasksList" class="tasks-list"></div>
@@ -1475,6 +1478,10 @@
         "goal.verifyPh": "e.g. python -m pytest",
         "goals.start": "▶ Start Goal",
         "tasks.title": "Goal Execution", "tasks.refresh": "Refresh", "tasks.noSelected": "No task selected.",
+        "tasks.healthCheck": "Check & recover",
+        "tasks.healthCheckHint": "Re-dispatch dead runners and recover interrupted advances; alert the hub on anything it can't auto-fix.",
+        "tasks.healthFound": "Recovered {0}; flagged {1} timed-out step(s)",
+        "tasks.healthClean": "No stuck steps found — nothing to recover",
         "tasks.workflow": "Goal workflow", "tasks.work": "Work items",
         "tasks.noGoal": "No goals yet. Start one from the Goals page.",
         "tasks.noActiveGoal": "Latest goal",
@@ -1605,6 +1612,10 @@
         "goal.verifyPh": "如 python -m pytest",
         "goals.start": "▶ 开始目标",
         "tasks.title": "Goal 执行", "tasks.refresh": "刷新", "tasks.noSelected": "未选择任务。",
+        "tasks.healthCheck": "检查并恢复",
+        "tasks.healthCheckHint": "重派死掉的 runner、恢复中断的推进；无法自动修复的通知 hub。",
+        "tasks.healthFound": "已恢复 {0} 个；标记 {1} 个超时步骤",
+        "tasks.healthClean": "未发现卡住的步骤 —— 无需恢复",
         "tasks.workflow": "Goal 流程", "tasks.work": "工作项",
         "tasks.noGoal": "暂无 Goal，请先在 Goals 页面启动一个。",
         "tasks.noActiveGoal": "最近 Goal",
@@ -3108,6 +3119,23 @@
       });
     }
 
+    async function runHealthCheck() {
+      const btn = $("healthCheck");
+      if (btn) btn.disabled = true;
+      try {
+        await run(async () => {
+          const data = await api("/api/health-check", { method: "POST", body: JSON.stringify({}) });
+          const recovered = data.recovered_count || 0, timeouts = data.timeout_count || 0;
+          setStatus((recovered || timeouts)
+            ? t("tasks.healthFound", recovered, timeouts)
+            : t("tasks.healthClean"));
+          await loadTasks();
+        });
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    }
+
     async function loadRunFile(runId, fileKey) {
       const data = await api(`/api/task-runs/${runId}/files/${fileKey}?tail=65536`);
       state.selectedRunId = runId;
@@ -3647,6 +3675,7 @@
     wireRefresh("refreshTools", async () => { await loadProjects(); await loadStatus(); await loadTools(); });
     wireRefresh("refreshWorkflow", async () => { await loadTasks(); await loadWorkflow(); });
     wireRefresh("refreshTasks", loadTasks);
+    $("healthCheck").addEventListener("click", runHealthCheck);
     wireRefresh("refreshGoals", loadGoals);
     $("addStepCancel").addEventListener("click", closeAddStepModal);
     $("addStepConfirm").addEventListener("click", confirmStep);
