@@ -1602,6 +1602,41 @@ class RerunTests(unittest.TestCase):
             h.complete("codex", tid, "implement", "done")     # -> review must dispatch (#2)
             self.assertEqual(2, len(review_dispatches()))
 
+    def test_skip_step_advances_to_forward_successor(self):
+        # Skipping a gate records it `skipped` (join treats that like done) and
+        # dispatches its forward successor — breaks an impl<->review loop.
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, bindings=self._bindings())
+            tid = h.create_task()
+            h.start(tid)
+            h.complete("hub-agent", tid, "intake", "done")   # -> implement dispatched
+            h.complete("codex", tid, "implement", "done")     # -> review dispatched
+
+            res = server.skip_workflow_step(h.store, tmp, tid, step="review")
+            self.assertEqual("review", res["step"])
+            self.assertIn("accept", res["skipped_to"])
+
+            trs = h.store.list_task_transitions(tid)
+            self.assertTrue(any(
+                t["from_step"] == "review" and t["to_step"] == "accept"
+                and t["outcome"] == "skipped" for t in trs))
+            self.assertTrue(any(
+                t["to_step"] == "accept" and t["outcome"] == "dispatched" for t in trs))
+            # review is no longer active; accept is.
+            self.assertNotIn("review", server._active_steps(trs))
+            self.assertIn("accept", server._active_steps(trs))
+
+    def test_skip_refuses_terminal_step_with_no_successor(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, bindings=self._bindings())
+            tid = h.create_task()
+            h.start(tid)
+            h.complete("hub-agent", tid, "intake", "done")
+            h.complete("codex", tid, "implement", "done")
+            h.complete("rev", tid, "review", "done")          # -> accept (terminal)
+            with self.assertRaisesRegex(InvalidInputError, "no forward step"):
+                server.skip_workflow_step(h.store, tmp, tid, step="accept")
+
     def test_rerun_blocked_step_dispatches_to_chosen_agent(self):
         with TemporaryDirectory() as tmp:
             h = EngineHarness(tmp, bindings=self._bindings())

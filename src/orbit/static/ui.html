@@ -1566,6 +1566,10 @@
         "task.reimplementHint": "Re-run Implement with a chosen agent. The latest review feedback will be included; the rework limit stays unchanged.",
         "task.reimplementBtn": "Re-implement", "task.reviewBtn": "Re-run review",
         "task.reimplement": "Re-implementing #{0} with {1}{2}",
+        "task.skipHint": "Skip this gate and move on — accepts the current work and advances to the next step (not for Integrate/Decompose).",
+        "task.skipBtn": "Skip step",
+        "task.skipConfirm": "Skip this step and advance to the next one? The current work is accepted as-is.",
+        "task.skipped": "Skipped {0} → {1}",
         "task.runsPerStep": "Runs are shown per step above — expand a step to see them.",
         "task.noRuns": "No runs recorded.", "task.unknownWorker": "unknown worker",
         "task.exit": "exit {0}", "task.id": "(id {0})",
@@ -1691,6 +1695,10 @@
         "task.reimplementHint": "用指定 agent 重跑实现步骤；会附带最近的 review 反馈，且不会修改返工上限。",
         "task.reimplementBtn": "重新实现", "task.reviewBtn": "重新审查",
         "task.reimplement": "正用 {1} 重新实现 #{0}{2}",
+        "task.skipHint": "跳过此门禁直接推进——接受当前产出并进入下一步（integrate/decompose 不可跳）。",
+        "task.skipBtn": "跳过步骤",
+        "task.skipConfirm": "跳过此步骤并进入下一步？当前产出按现状接受。",
+        "task.skipped": "已跳过 {0} → {1}",
         "task.runsPerStep": "运行记录按上方步骤展示 — 展开步骤即可查看。",
         "task.noRuns": "暂无运行记录。", "task.unknownWorker": "未知 worker",
         "task.exit": "退出码 {0}", "task.id": "(id {0})",
@@ -3079,6 +3087,19 @@
       });
     }
 
+    async function skipTask(taskId) {
+      if (!confirm(t("task.skipConfirm"))) return;
+      await run(async () => {
+        const data = await api(`/api/tasks/${taskId}/skip`, {
+          method: "POST",
+          body: JSON.stringify({})
+        });
+        setStatus(t("task.skipped", data.step, (data.skipped_to || []).join(", ")));
+        await loadTasks();
+        await loadTaskRuns(taskId);
+      });
+    }
+
     async function loadRunFile(runId, fileKey) {
       const data = await api(`/api/task-runs/${runId}/files/${fileKey}?tail=65536`);
       state.selectedRunId = runId;
@@ -3505,7 +3526,13 @@
               </select>
               <button type="button" class="primary" onclick="rerunTask(${task.id})">${t("task.rerunBtn")}</button>
             </div>
-          </div>` : ""}` : ""}
+          </div>` : ""}
+          <div class="rerun-box">
+            <div class="meta">${t("task.skipHint")}</div>
+            <div class="row" style="margin-top: 4px;">
+              <button type="button" onclick="skipTask(${task.id})">${t("task.skipBtn")}</button>
+            </div>
+          </div>` : ""}
           ${hasStepCards
             ? `<div class="meta">${t("task.runsPerStep")}</div>`
             : renderTaskRuns()}

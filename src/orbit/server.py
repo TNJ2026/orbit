@@ -1104,11 +1104,11 @@ def _main_workflow_reachable_steps(
 
 
 # Outcomes that close out one dispatch of a step: the agent finished it
-# (done/rework) or the engine took it away (reassigned on timeout). `blocked` is
-# deliberately excluded so a blocked step stays "active" and can be recovered by
-# completing it directly (see _running_steps for the dispatch-guard variant that
-# does treat blocked as finished).
-_STEP_FINISHING_OUTCOMES = ("done", "rework", "reassigned")
+# (done/rework), the engine took it away (reassigned on timeout), or it was
+# manually skipped. `blocked` is deliberately excluded so a blocked step stays
+# "active" and can be recovered by completing it directly (see _running_steps for
+# the dispatch-guard variant that does treat blocked as finished).
+_STEP_FINISHING_OUTCOMES = ("done", "rework", "reassigned", "skipped")
 
 
 def _last_dispatch_and_finish(
@@ -1149,7 +1149,7 @@ def _running_steps(transitions: list[dict[str, Any]]) -> list[str]:
     for t in transitions:
         if t["outcome"] == "dispatched":
             last_dispatch[t["to_step"]] = t["id"]
-        elif t["from_step"] and t["outcome"] in ("done", "rework", "reassigned", "blocked"):
+        elif t["from_step"] and t["outcome"] in ("done", "rework", "reassigned", "blocked", "skipped"):
             last_finish[t["from_step"]] = t["id"]
     return [
         step for step, did in last_dispatch.items()
@@ -1254,7 +1254,7 @@ def _latest_inbound_completion_id(
     treating an earlier cycle's dispatch as current."""
     return max(
         (t["id"] for t in transitions
-         if t["to_step"] == step and t["outcome"] in ("done", "rework")),
+         if t["to_step"] == step and t["outcome"] in ("done", "rework", "skipped")),
         default=0,
     )
 
@@ -2255,6 +2255,109 @@ def rerun_workflow_step(
             "runner_command": rerun_command,
             "queued_job_id": job["id"] if job else None,
             "reran": True,
+        }
+
+
+def skip_workflow_step(
+    store: Store,
+    project_root: str | None,
+    task_id: int,
+    step: str | None = None,
+    actor: str = WORKFLOW_ENGINE_AGENT,
+) -> dict[str, Any]:
+    """Skip an unproductive gate and advance the task past it.
+
+    Records the step as `skipped` — which the join gate already treats like
+    `done` — settles its card, and dispatches the step's forward successor with
+    the last real upstream result (a skip produces no result of its own). Refuses
+    structural steps (integrate/decompose) and any step with no forward successor.
+    Meant to break an impl<->review rework loop by accepting the current
+    implementation and moving on, without editing the workflow."""
+    with _WORKFLOW_ENGINE_LOCK:
+        task = store.get_task(task_id)
+        if not task:
+            raise InvalidInputError(f"unknown task: {task_id}")
+        transitions = store.list_task_transitions(task_id)
+        if not transitions:
+            # The board shows step cards; a card has no transitions of its own,
+            # so redirect a skip on a card to its parent workflow task.
+            parent_id = task.get("parent_task_id")
+            parent = store.get_task(parent_id) if parent_id else None
+            if parent and store.list_task_transitions(parent_id):
+                if not (step or "").strip():
+                    step = task.get("workflow_step") or ""
+                task, task_id = parent, parent_id
+                transitions = store.list_task_transitions(parent_id)
+            else:
+                raise InvalidInputError(
+                    f"task {task_id} has not entered the workflow yet; start it first"
+                )
+        cfg = read_workflow_config(project_root)
+        steps = {s["id"]: s for s in cfg["steps"]}
+        back = _workflow_graph(cfg)
+        step_id = (step or "").strip()
+        if not step_id:
+            # Prefer the most recently blocked step; fall back to the active one.
+            blocked = [t for t in transitions if t["outcome"] == "blocked"]
+            if blocked:
+                last = blocked[-1]
+                step_id = last["to_step"] or last["from_step"]
+            else:
+                active = _active_steps(transitions)
+                step_id = active[-1] if active else ""
+        if step_id not in steps:
+            raise InvalidInputError(
+                f"cannot determine a workflow step to skip for task {task_id}"
+                + (f" (unknown step {step_id!r})" if step_id else "")
+            )
+        step_def = steps[step_id]
+        forward = [
+            e["to"] for e in cfg["edges"]
+            if e["from"] == step_id and (e["from"], e["to"]) not in back
+        ]
+        if not forward:
+            raise InvalidInputError(f"step {step_id!r} has no forward step to skip to")
+        if step_def.get("integrate") or step_def.get("decompose"):
+            raise InvalidInputError(
+                f"step {step_id!r} is structural (integrate/decompose) and cannot be skipped"
+            )
+        # Never skip past an in-flight runner — wait for it (or block) first.
+        run_holder_id = task_id
+        if _materializes_step_cards(task):
+            card = store.find_open_step_card(task_id, step_id)
+            if card:
+                run_holder_id = card["id"]
+        runs = store.list_task_runs(run_holder_id, limit=1)
+        if runs and runs[0].get("status") == "running":
+            raise InvalidInputError(
+                f"a run is still in progress for step {step_id!r}; wait for it to "
+                "finish before skipping"
+            )
+        # Carry the last real upstream (e.g. the implement output) forward so the
+        # next step keeps its context.
+        upstream = [
+            t for t in transitions
+            if t["outcome"] == "done" and t["to_step"] == step_id
+        ]
+        upstream_result = (
+            _structured_upstream(upstream[-1].get("note", "")) if upstream else ""
+        )
+        note = f"step '{step_id}' skipped by {actor}"
+        _record_step_result(store, task, step_id, note)
+        store.cancel_pending_run_jobs(task_id, step_id, note)
+        for target in forward:
+            store.record_task_transition(task_id, step_id, target, actor, "skipped", note)
+        _settle_step_card(store, task, step_id, "skipped")
+        dispatched, notices = _dispatch_targets(
+            store, project_root, task, forward, cfg, back, upstream_result
+        )
+        return {
+            "task_id": task_id,
+            "step": step_id,
+            "skipped_to": forward,
+            "dispatched": dispatched,
+            "notices": notices,
+            "skipped": True,
         }
 
 
@@ -5336,6 +5439,12 @@ def create_server(
             store, current_project.get("project_root"), task_id, agent
         )
 
+    def _engine_skip(task_id: int, step: str) -> dict:
+        return skip_workflow_step(
+            store, current_project.get("project_root"), task_id, step or None,
+            actor=HUB_NOTIFY_AGENT,
+        )
+
     def _engine_resume_goal_budget(goal_id: int, token_budget: Any) -> dict:
         return resume_goal_after_budget_increase(
             store, current_project.get("project_root"), goal_id, token_budget
@@ -5865,6 +5974,21 @@ def create_server(
         except Exception as exc:
             traceback.print_exc()
             return _json_error(f"re-implement failed: {exc!r}", 500, request)
+        return _json(request, result)
+
+    @route("/api/tasks/{task_id:int}/skip", methods=["POST"])
+    async def api_task_skip(request: Request) -> JSONResponse:
+        if forbidden := _forbid_non_local(request):
+            return forbidden
+        task_id = int(request.path_params["task_id"])
+        data = await _read_json(request)
+        try:
+            result = await _to_thread(_engine_skip, task_id, str(data.get("step") or ""))
+        except (InvalidInputError, UnknownAgentError) as exc:
+            return _json_error(str(exc), request=request)
+        except Exception as exc:
+            traceback.print_exc()
+            return _json_error(f"skip failed: {exc!r}", 500, request)
         return _json(request, result)
 
     @route("/api/tasks/{task_id:int}/force-close", methods=["POST"])
