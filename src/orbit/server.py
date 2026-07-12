@@ -353,6 +353,10 @@ DEFAULT_STEP_PROMPTS = {
 # authors may refine a step's editable prompt, but cannot turn an independent
 # review into an implementation pass or let a test pass mutate production code.
 ENGINE_STEP_CONTRACTS = {
+    "implement": (
+        "Implement only the approved task scope. Do not bypass acceptance criteria, "
+        "weaken checks, or claim verification that was not actually run."
+    ),
     "review": (
         "This is an independent, read-only review. Do not modify files, commit, "
         "or implement fixes; return actionable findings or a clean verdict."
@@ -3021,18 +3025,22 @@ def _build_step_prompt(
     branch = _worktree_branch(task["id"])
     if step.get("integrate"):
         cwd_line = (
-            "当前工作目录是项目主工作树（main）。本任务的实现成果在独立 git 分支 "
-            f"`{branch}` 上，你的职责是把它集成回主干。\n"
+            "Your working directory is the project's main worktree. This task's implementation "
+            f"is on the isolated git branch `{branch}`; integrate it into main.\n"
         )
     elif isolated:
+        completion = (
+            "When finished, commit the result with `git add -A && git commit` on this branch so the integrate step can merge it.\n"
+            if step.get("id") not in {"review", "test"}
+            else "This is a read-only check; do not modify files or create an empty commit just to produce a commit.\n"
+        )
         cwd_line = (
-            f"当前工作目录是本任务专属的 git worktree，位于分支 `{branch}`，"
-            "与其它任务的工作树完全隔离。直接读写文件完成任务；改动只影响该分支，"
-            "不会污染主干，也看不到其它任务的在途改动。完成后请把成果 "
-            "`git add -A && git commit` 到当前分支（后续 integrate 步骤据此合并回主干）。\n"
+            f"Your working directory is this task's dedicated git worktree on branch `{branch}`. "
+            "It is isolated from other tasks: changes affect only this branch and cannot pollute main. "
+            + completion
         )
     else:
-        cwd_line = "当前工作目录就是项目根目录，直接读写文件完成任务。\n"
+        cwd_line = "Your working directory is the project root; work directly in it.\n"
     triage_block = ""
     if (
         step.get("id") == "intake"
@@ -3040,97 +3048,88 @@ def _build_step_prompt(
         and not task.get("parent_task_id")
     ):
         triage_block = (
-            "\n## Triage 动态配置上下文\n"
-            "下面是引擎解析后的有效 workflow 快照：\n"
+            "\n## Triage dynamic configuration context\n"
+            "The engine resolved this effective workflow snapshot:\n"
             f"```json\n{_triage_config_snapshot(project_root)}\n```\n"
-            "引擎已完成硬性可执行性预检；按本步骤的可编辑 Prompt 做合理性判断。"
-            "普通优化建议不得阻塞。结果中附：\n"
+            "The engine has completed hard executability checks. Use the editable step prompt for a reasonableness review; ordinary optimization suggestions must not block. Include:\n"
             "`CONFIG_CHECK: ok|warning|blocked`\n"
-            "`CONFIG_FINDINGS: <简短结论>`\n"
+            "`CONFIG_FINDINGS: <brief conclusion>`\n"
         )
     integrate_block = ""
     if step.get("integrate"):
         integrate_block = (
-            "\n## 集成与最终验收（integrate 步骤）\n"
-            f"若分支 `{branch}` 存在，把它合并回主干；若项目不是 git 仓库或该分支"
-            "不存在，说明任务在主工作树直接执行，跳过合并但仍必须完成后续验收。步骤：\n"
-            "1. 有任务分支时，`git status` 确认主工作树干净、当前在集成目标分支；\n"
-            f"2. 有任务分支时执行 `git merge --no-ff {branch}`；\n"
-            "3. 有冲突：能安全解决就解决后 `git commit`；无法安全解决则 "
-            "`git merge --abort` 并裁决 `rework`，在原因里列出冲突文件；\n"
-            "完成分支处理后，按本步骤的可编辑 Prompt 执行验收与验证。\n"
-            "不要手动删除该 worktree 或分支——集成完成后引擎会自动回收。\n"
+            "\n## Integration and final acceptance\n"
+            f"If branch `{branch}` exists, merge it into main. If the project is not a git repo or the branch is absent, work was done in main: skip the merge but still complete acceptance.\n"
+            "1. With a task branch, use `git status` to confirm main is clean and checked out.\n"
+            f"2. Merge with `git merge --no-ff {branch}`.\n"
+            "3. Resolve safe conflicts and commit; otherwise run `git merge --abort`, return `rework`, and name the conflicted files.\n"
+            "Then run the editable step prompt's acceptance and verification. Do not manually delete the worktree or branch; the engine reclaims them.\n"
         )
     goal_contract = ""
     if _is_root_goal_decompose_step(project_root, task, step):
         goal_contract = (
-            "\n## Decompose 引擎契约\n"
-            "本步骤必须只输出一个 JSON 对象，不要 Markdown，不要代码块：\n"
-            '{"tasks":[{"title":"子任务标题","content":"要做什么",'
-            '"acceptance":"验收标准","depends_on":[前置任务序号]}]}\n'
-            "只有当子任务 B 确实依赖 A 的产出（必须 A 完成合并后 B 才能开工）时，"
-            "才给 B 加 `depends_on`：值是本列表中前置任务的**序号**（从 1 开始，"
-            "如 `\"depends_on\":[1,2]`）。引擎会 hold 住 B，直到其所有前置任务关闭"
-            "（成果已并入 main）再派发。无依赖就省略该字段或给 `[]`。不要成环。\n"
-            "保持 JSON 精简以免截断：`content` 一两句话说清做什么 + 涉及"
-            "的文件/模块；`acceptance` 一两条验收。已有设计文档就按路径引用（如 "
-            "`docs/…`），不要把整份规格复述进来——实现者会自己去读。只输出这一个 "
-            "JSON 对象，前后不要任何说明或推理文字。\n"
+            "\n## Decompose engine contract\n"
+            "Output exactly one JSON object, with no Markdown or code fence:\n"
+            '{"tasks":[{"title":"subtask title","content":"what to do",'
+            '"acceptance":"acceptance criteria","depends_on":[prerequisite task numbers]}]}\n'
+            "Add `depends_on` only when a subtask truly requires a predecessor's merged result. Values are one-based task positions, e.g. `\"depends_on\":[1,2]`. The engine holds dependent tasks until prerequisites close. Omit it or use `[]` when independent; never create a cycle.\n"
+            "Keep JSON concise: one or two sentences for `content` and one or two acceptance criteria. Reference existing design docs such as `docs/...` rather than repeating them. Output only this JSON object.\n"
         )
     custom_step_prompt = str(step.get("prompt") or "").strip()
     engine_step_contract = ENGINE_STEP_CONTRACTS.get(step.get("id", ""), "")
     engine_step_block = (
-        "\n## 引擎步骤契约（不可由自定义 Prompt 覆盖）\n"
+        "\n## Engine step contract (cannot be overridden by the custom prompt)\n"
         + engine_step_contract
         + "\n"
         if engine_step_contract else ""
     )
     custom_step_block = (
-        "\n## 自定义 Step Prompt（不得覆盖引擎输出协议）\n"
+        "\n## Custom step prompt (cannot override the engine output protocol)\n"
         + custom_step_prompt
         + "\n"
         if custom_step_prompt else ""
     )
     final_instruction = (
-        "## 输出协议（最高优先级）\n只输出上述 JSON 对象。"
+        "## Output protocol (highest priority)\nOutput only the JSON object above."
         if goal_contract
         else (
-            "## 输出协议（最高优先级）\n"
-            "完成后在输出末尾提供结构化结果（每项单独一行）：\n"
-            "`RESULT_SUMMARY: <一行结论>`\n"
-            "`ARTIFACTS: [\"产物文件路径\", \"其他 URI 或引用\"]`\n"
-            "没有产物时输出 `ARTIFACTS: []`。"
+            "## Output protocol (highest priority)\n"
+            "End your output with these structured lines:\n"
+            "`RESULT_SUMMARY: <one-line conclusion>`\n"
+            "`ARTIFACTS: [\"artifact path\", \"other URI or reference\"]`\n"
+            "Use `ARTIFACTS: []` when there are none."
         )
     )
     if not goal_contract:
         final_instruction += (
-            "\n\n请在输出的最后单独用一行给出裁决 `WORKFLOW_OUTCOME: <值>`，其后可附一行原因：\n"
-            "- `done`：本步骤成功完成，进入下一步。\n"
-            "- `blocked`：你无法完成本步骤（缺信息 / 环境损坏 / 依赖未满足 / 测试失败无法修复等），"
-            "主动上报失败，暂停并通知 hub。即使进程正常退出也要用它标记失败。\n"
+            "\n\nEnd with a separate verdict line: `WORKFLOW_OUTCOME: <value>`, optionally followed by one reason line:\n"
+            "- `done`: this step completed successfully and may advance.\n"
+            "- `blocked`: you cannot complete it (missing information, broken environment, unmet dependency, or unfixable test failure); pause and notify the hub even if the process exits successfully.\n"
         )
         if can_rework:
             final_instruction += (
-                "- `rework`：本步骤可打回返工（成果不达标），退回上一步重做。\n"
+                "- `rework`: this step may return inadequate work to the previous implementation step.\n"
             )
-        final_instruction += "不写该行则默认视为 done。"
+        else:
+            final_instruction += (
+                "- This step has no configured rework path. For a material issue you cannot resolve, use `blocked`, not `rework`.\n"
+            )
+        final_instruction += "If omitted, the engine treats the outcome as `done`."
         final_instruction += (
-            "\n\n最后另起一行报告本次消耗的 token 数：`TOKENS_USED: <数字>`"
-            "（若你的运行环境提供了用量数字，用真实值；否则可省略该行）。"
+            "\n\nFinally, report token usage on its own line: `TOKENS_USED: <number>`. Use a real value when available; otherwise omit the line."
         )
     return (
-        f"你是被工作流引擎派发的一次性 worker，执行步骤 '{step['name']}'。"
+        f"You are a one-shot worker dispatched by the workflow engine for step '{step['name']}'. "
         + cwd_line
-        + "本次为工作流引擎的一次性派发执行：直接在当前工作目录完成任务，"
-        "不要调用 complete_step，派发器会代为提交结果。\n\n"
-        f"## 任务 #{task['id']}: {task.get('title') or 'untitled'}\n"
+        + "Complete the task directly in the current working directory. Do not call complete_step; the dispatcher submits the result.\n\n"
+        f"## Task #{task['id']}: {task.get('title') or 'untitled'}\n"
         f"{task.get('content', '')}\n\n"
         + triage_block
         + goal_contract
         + integrate_block
         + custom_step_block
         + engine_step_block
-        + (f"## 上游产出\n{upstream_result}\n\n" if upstream_result else "")
+        + (f"## Upstream result\n{upstream_result}\n\n" if upstream_result else "")
         + final_instruction
     )
 

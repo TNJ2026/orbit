@@ -1401,7 +1401,7 @@
         <div id="addStepAgents" style="display:flex;flex-direction:column;gap:5px;padding:6px 0;"></div>
       </div>
       <label id="addStepRequiredField" class="modal-check"><input id="addStepRequired" type="checkbox"><span class="meta" data-i18n="modal.addStep.required">Required (a step the flow must include)</span></label>
-      <label><div class="meta" data-i18n="modal.addStep.prompt">Step prompt</div><textarea id="addStepPrompt" rows="7" data-i18n-ph="modal.addStep.promptPh" placeholder="Additional instructions for this step" style="width:100%;resize:vertical;"></textarea><div class="meta" data-i18n="modal.addStep.promptHint">Appended to the generated step instructions; the engine output protocol still takes priority.</div></label>
+      <label><div class="meta" data-i18n="modal.addStep.prompt">Step prompt</div><textarea id="addStepPrompt" rows="7" data-i18n-ph="modal.addStep.promptPh" placeholder="Additional instructions for this step" style="width:100%;resize:vertical;"></textarea><div class="meta" data-i18n="modal.addStep.promptHint">Keep this prompt meaningful for the step. It may be empty, but then the worker relies on task context and engine contracts.</div></label>
       <div class="modal-actions">
         <button id="addStepDelete" type="button" class="danger" style="margin-right: auto; display: none;" data-i18n="modal.addStep.delete">Delete</button>
         <button id="addStepCancel" type="button" data-i18n="modal.addStep.cancel">Cancel</button>
@@ -1498,7 +1498,7 @@
         "modal.addStep.agentCmdPh": "command — blank uses the built-in CLI",
         "modal.addStep.required": "Required (a step the flow must include)",
         "modal.addStep.prompt": "Step prompt", "modal.addStep.promptPh": "Additional instructions for this step",
-        "modal.addStep.promptHint": "Appended to the generated instructions; engine safety contracts and the output protocol still take priority.",
+        "modal.addStep.promptHint": "Keep this prompt meaningful for the step. It may be empty, but then the worker relies on task context and engine contracts. Engine safety contracts and the output protocol still take priority.",
         "modal.addStep.delete": "Delete", "modal.addStep.cancel": "Cancel",
         "modal.addStep.add": "Add", "modal.addStep.save": "Save",
         "status.offline": "offline",
@@ -1627,7 +1627,7 @@
         "modal.addStep.agentCmdPh": "命令 —— 留空用内置 CLI",
         "modal.addStep.required": "必选（流程必须包含的步骤）",
         "modal.addStep.prompt": "步骤 Prompt", "modal.addStep.promptPh": "该步骤的附加执行指令",
-        "modal.addStep.promptHint": "追加到引擎生成的指令中；引擎安全契约和输出协议仍具有更高优先级。",
+        "modal.addStep.promptHint": "请确认该步骤仍有合理、足够的执行指引。可以留空，但 worker 将只能依赖任务上下文和引擎契约；引擎安全契约与输出协议仍具有更高优先级。",
         "modal.addStep.delete": "删除", "modal.addStep.cancel": "取消",
         "modal.addStep.add": "添加", "modal.addStep.save": "保存",
         "status.offline": "离线",
@@ -2995,7 +2995,11 @@
                       ${task.is_goal ? `<span class="badge wf-step-badge">${t("task.goal")}</span>` : ""}
                       ${task.parent_task_id ? `<span class="badge" title="${escapeHtml(t("task.subtaskTitle", task.parent_task_id))}">${t("task.subtask", task.parent_task_id)}</span>` : ""}
                       ${task.workflow_step ? `<span class="badge wf-step-badge">${t("task.step", escapeHtml(workflowStepName(task.workflow_step)))}</span>` : ""}
-                      ${(task.depends_on && task.depends_on.length && !task.workflow_step) ? `<span class="badge" title="${escapeHtml(t("task.waitingTitle"))}" style="color: var(--warn); border-color: var(--warn);">${t("task.waiting", task.depends_on.map(id => "#" + id).join(" "))}</span>` : ""}
+                      ${(task.depends_on && task.depends_on.length) ? (
+                        (task.task_status || task.status) === "created"
+                          ? `<span class="badge" title="${escapeHtml(t("task.waitingTitle"))}" style="color: var(--warn); border-color: var(--warn);">${t("task.waiting", task.depends_on.map(id => "#" + id).join(" "))}</span>`
+                          : `<span class="badge" title="${escapeHtml(t("task.dependsOnTitle"))}">${t("task.dependsOn", task.depends_on.map(id => "#" + id).join(" "))}</span>`
+                      ) : ""}
                     </div>` : ""}
                     <div class="kanban-card-meta">
                       <span>${escapeHtml(task.sender)} ➜ ${escapeHtml(task.recipient)}</span>

@@ -291,7 +291,7 @@ class StepPromptTests(unittest.TestCase):
                 {"id": "intake", "name": "Triage"},
                 "", can_rework=False, isolated=False,
             )
-        self.assertIn("项目根目录", p)
+        self.assertIn("project root", p)
         self.assertNotIn("worktree", p)
 
     def test_review_and_test_keep_non_editable_safety_contracts(self):
@@ -309,8 +309,25 @@ class StepPromptTests(unittest.TestCase):
                     can_rework=True,
                     isolated=True,
                 )
-                self.assertIn("引擎步骤契约", p)
+                self.assertIn("Engine step contract", p)
                 self.assertIn(phrase, p)
+                self.assertIn("do not modify files or create an empty commit", p)
+
+    def test_implement_contract_and_rework_availability_are_explicit(self):
+        with TemporaryDirectory() as tmp:
+            implement = server._build_step_prompt(
+                tmp, self.TASK,
+                {"id": "implement", "name": "Implement", "prompt": ""},
+                "", can_rework=True, isolated=True,
+            )
+            review = server._build_step_prompt(
+                tmp, self.TASK,
+                {"id": "review", "name": "Review", "prompt": ""},
+                "", can_rework=False, isolated=True,
+            )
+        self.assertIn("Do not bypass acceptance criteria", implement)
+        self.assertIn("`rework`: this step may return", implement)
+        self.assertIn("use `blocked`, not `rework`", review)
 
     def test_triage_prompt_contains_effective_config_snapshot(self):
         goal = {**self.TASK, "is_goal": 1}
@@ -322,9 +339,9 @@ class StepPromptTests(unittest.TestCase):
                 tmp, goal, step,
                 "", can_rework=False, isolated=False,
             )
-        self.assertIn("Triage 动态配置上下文", p)
+        self.assertIn("Triage dynamic configuration context", p)
         self.assertIn('"workflow"', p)
-        self.assertIn("引擎解析后的有效 workflow 快照", p)
+        self.assertIn("effective workflow snapshot", p)
         self.assertIn("CONFIG_CHECK: ok|warning|blocked", p)
         self.assertIn(server.DEFAULT_STEP_PROMPTS["intake"], p)
 
@@ -339,9 +356,9 @@ class StepPromptTests(unittest.TestCase):
                 tmp, goal, step, "architecture ready",
                 can_rework=False, isolated=False,
             )
-        self.assertEqual(1, p.count("## Decompose 引擎契约"))
-        self.assertIn("## 输出协议（最高优先级）", p)
-        self.assertIn("只输出上述 JSON 对象", p)
+        self.assertEqual(1, p.count("## Decompose engine contract"))
+        self.assertIn("## Output protocol (highest priority)", p)
+        self.assertIn("Output only the JSON object above", p)
         self.assertNotIn("WORKFLOW_OUTCOME", p)
         self.assertNotIn("TOKENS_USED", p)
 
@@ -355,11 +372,11 @@ class StepPromptTests(unittest.TestCase):
                 },
                 "", can_rework=True, isolated=True,
             )
-        self.assertIn("## 自定义 Step Prompt", p)
+        self.assertIn("## Custom step prompt", p)
         self.assertIn("Use the repository service abstraction.", p)
         self.assertLess(
             p.index("Use the repository service abstraction."),
-            p.index("## 输出协议（最高优先级）"),
+            p.index("## Output protocol (highest priority)"),
         )
 
 
