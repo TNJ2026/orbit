@@ -2466,11 +2466,65 @@ class TokenStatsTests(unittest.TestCase):
     def test_parse_run_tokens_native_and_sentinel(self):
         self.assertEqual(114751, server._parse_run_tokens("", "tokens used\n114,751"))
         self.assertEqual(3200, server._parse_run_tokens("TOKENS_USED: 3,200", ""))
+        self.assertEqual(875, server._parse_run_tokens('{"tasks": [], "tokens_used": 875}', ""))
         # an accurate native count wins over the self-reported sentinel
         self.assertEqual(
             114751, server._parse_run_tokens("TOKENS_USED: 5", "tokens used\n114,751")
         )
         self.assertIsNone(server._parse_run_tokens("no usage here", "nothing"))
+
+    def test_normalize_agent_output_claude_json_extracts_text_and_tokens(self):
+        events = [
+            {"type": "system", "subtype": "init"},
+            {"type": "assistant", "message": {
+                "content": [{"type": "text", "text": "Working..."}],
+                "usage": {"input_tokens": 100, "output_tokens": 50}}},
+            {"type": "result", "subtype": "success",
+             "result": "Done.\nWORKFLOW_OUTCOME: done",
+             "usage": {"input_tokens": 100, "output_tokens": 50,
+                       "cache_read_input_tokens": 10}},
+        ]
+        stdout = "\n".join(json.dumps(e) for e in events)
+        text, tokens = server._normalize_agent_output(stdout, "")
+        self.assertEqual("Done.\nWORKFLOW_OUTCOME: done", text)   # decoded, not JSON
+        self.assertEqual(160, tokens)                             # 100+50+10, result usage wins
+        self.assertEqual("done", server._parse_runner_verdict(text))  # verdict parses
+
+    def test_normalize_agent_output_single_json_object(self):
+        obj = {"type": "result", "result": "hi", "usage": {"output_tokens": 7}}
+        text, tokens = server._normalize_agent_output(json.dumps(obj), "")
+        self.assertEqual("hi", text)
+        self.assertEqual(7, tokens)
+
+    def test_normalize_agent_output_gemini_json_sums_model_tokens(self):
+        # gemini -o json: reply in `response`, per-model usage under stats.models;
+        # a run can use several models, so tokens sum each model's tokens.total.
+        # A `YOLO mode…` preamble line before the object must be tolerated.
+        sample = {
+            "session_id": "x",
+            "response": "did it\nWORKFLOW_OUTCOME: done",
+            "stats": {"models": {
+                "flash-lite": {"tokens": {"input": 1261, "total": 1444}},
+                "flash": {"tokens": {"input": 12340, "total": 12609}},
+            }},
+        }
+        stdout = "YOLO mode is enabled.\n" + json.dumps(sample)
+        text, tokens = server._normalize_agent_output(stdout, "")
+        self.assertEqual("did it\nWORKFLOW_OUTCOME: done", text)
+        self.assertEqual(14053, tokens)                          # 1444 + 12609
+        self.assertEqual("done", server._parse_runner_verdict(text))
+        # claude's decoder must not claim gemini's shape.
+        self.assertIsNone(server._parse_claude_json_output(stdout))
+
+    def test_normalize_agent_output_passthrough_text_and_non_claude_json(self):
+        # Plain text passes through; tokens come from the existing native regex.
+        text, tokens = server._normalize_agent_output("summary\ntokens used\n1,234", "")
+        self.assertEqual("summary\ntokens used\n1,234", text)
+        self.assertEqual(1234, tokens)
+        # A decompose-style JSON object (no `type` envelope) is NOT mis-claimed.
+        dj = '{"tasks": [{"title": "A", "content": "a"}]}'
+        self.assertIsNone(server._parse_claude_json_output(dj))
+        self.assertEqual(dj, server._normalize_agent_output(dj, "")[0])
 
     def test_step_prompt_asks_for_tokens(self):
         with TemporaryDirectory() as tmp:

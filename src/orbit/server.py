@@ -2870,9 +2870,9 @@ def _step_round_robin_assignee(
 # (sub)task name an agent by id and have orbit run the right CLI. Override per
 # step via a step's per-agent command (step.agent_commands).
 _AGENT_RUNNER_COMMANDS = {
-    "claude-code": "claude -p --dangerously-skip-permissions",
+    "claude-code": "claude -p --output-format stream-json --verbose --dangerously-skip-permissions",
     "codex": 'codex exec --dangerously-bypass-approvals-and-sandbox "$(cat)"',
-    "gemini": 'gemini --yolo -p "$(cat)"',
+    "gemini": 'gemini -o json --yolo -p "$(cat)"',
     "antigravity": 'agy --dangerously-skip-permissions --print "$(cat)"',
     "hermes": 'hermes --yolo -z "$(cat)"',
     "opencode": 'opencode run --auto "$(cat)"',
@@ -2997,6 +2997,9 @@ _NATIVE_TOKEN_PATTERNS = [
 # Universal fallback: the prompt asks every runner to print this. Approximate
 # (the model estimates its own usage) — only used when no native count exists.
 _SELF_REPORT_TOKEN_RE = re.compile(r"TOKENS_USED\s*[:=]\s*([\d,]+)", re.IGNORECASE)
+# Decompose must emit one strict JSON object, so its optional self-report lives
+# inside that object rather than on a separate TOKENS_USED line.
+_DECOMPOSE_TOKEN_RE = re.compile(r'"tokens_used"\s*:\s*"?([\d,]+)"?', re.IGNORECASE)
 
 
 def _parse_run_tokens(stdout: str, stderr: str) -> int | None:
@@ -3011,7 +3014,134 @@ def _parse_run_tokens(stdout: str, stderr: str) -> int | None:
     matches = _SELF_REPORT_TOKEN_RE.findall(text)
     if matches:
         return int(matches[-1].replace(",", ""))
+    matches = _DECOMPOSE_TOKEN_RE.findall(text)
+    if matches:
+        return int(matches[-1].replace(",", ""))
     return None
+
+
+# Usage-object fields an agent's structured output may carry; summed for the
+# run's token count (input + output + both cache tiers = tokens actually touched).
+_USAGE_TOKEN_FIELDS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+)
+
+
+def _sum_usage_tokens(usage: Any) -> int | None:
+    """Sum the known token fields of a usage object (e.g. claude's `usage`).
+    Returns None when the object carries no recognizable integer token field."""
+    if not isinstance(usage, dict):
+        return None
+    vals = [usage[f] for f in _USAGE_TOKEN_FIELDS if isinstance(usage.get(f), int)]
+    return sum(vals) if vals else None
+
+
+def _parse_claude_json_output(stdout: str) -> tuple[str, int | None] | None:
+    """Parse claude's `--output-format [stream-]json` output into (text, tokens).
+
+    Handles both the line-delimited event stream (`stream-json`, needs
+    `--verbose`) and a single final object (`json`). Returns None when the output
+    is not recognizably claude JSON, so plain-text agents fall through untouched.
+    Prefers the terminal `result` event's text and cumulative `usage`; falls back
+    to concatenating assistant text and summing per-turn usage."""
+    raw = stdout or ""
+    candidates = [ln for ln in raw.splitlines() if ln.lstrip().startswith("{")]
+    if not candidates and raw.lstrip().startswith("{"):
+        candidates = [raw]
+    events: list[dict[str, Any]] = []
+    for line in candidates:
+        try:
+            obj = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(obj, dict):
+            events.append(obj)
+    # Require the claude-shaped envelope (typed events) to avoid mis-claiming a
+    # decompose `{"tasks":...}` object or any other plain JSON as claude output.
+    if not events or not any(e.get("type") for e in events):
+        return None
+    text: str | None = None
+    tokens: int | None = None
+    for e in events:
+        if e.get("type") == "result":
+            if isinstance(e.get("result"), str):
+                text = e["result"]
+            tokens = _sum_usage_tokens(e.get("usage"))
+    if text is None:
+        parts: list[str] = []
+        for e in events:
+            if e.get("type") != "assistant":
+                continue
+            for block in ((e.get("message") or {}).get("content") or []):
+                if isinstance(block, dict) and block.get("type") == "text":
+                    parts.append(str(block.get("text") or ""))
+        text = "\n".join(parts).strip()
+    if tokens is None:
+        total, seen = 0, False
+        for e in events:
+            if e.get("type") != "assistant":
+                continue
+            t = _sum_usage_tokens((e.get("message") or {}).get("usage"))
+            if t is not None:
+                total, seen = total + t, True
+        tokens = total if seen else None
+    return text, tokens
+
+
+def _parse_gemini_json_output(stdout: str) -> tuple[str, int | None] | None:
+    """Parse gemini's `-o json` output into (text, tokens).
+
+    gemini emits one object — sometimes after a `YOLO mode…` preamble line — with
+    the reply in `response` and per-model usage under `stats.models.<name>.tokens`.
+    A run can use several models (e.g. a utility router + the main model), so the
+    token count sums each model's `tokens.total`. Returns None for anything that
+    isn't recognizably this shape, so other agents' output falls through."""
+    raw = (stdout or "").strip()
+    start, end = raw.find("{"), raw.rfind("}")
+    if start < 0 or end <= start:
+        return None
+    try:
+        obj = json.loads(raw[start:end + 1])
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(obj, dict) or "response" not in obj or not isinstance(obj.get("stats"), dict):
+        return None
+    text = str(obj.get("response") or "")
+    models = obj["stats"].get("models")
+    total, seen = 0, False
+    if isinstance(models, dict):
+        for model in models.values():
+            t = ((model or {}).get("tokens") or {}).get("total")
+            if isinstance(t, int):
+                total, seen = total + t, True
+    return text, (total if seen else None)
+
+
+# Structured-output decoders, tried in order. Each returns (text, tokens) when it
+# recognizes its agent's format, else None. Add a CLI here to teach the engine its
+# native token count and how to pull the human text out of its JSON envelope.
+_AGENT_OUTPUT_PARSERS = (_parse_claude_json_output, _parse_gemini_json_output)
+
+
+def _normalize_agent_output(stdout: str, stderr: str) -> tuple[str, int | None]:
+    """Normalize one agent run to (text, tokens), independent of which CLI ran it.
+
+    A structured-output agent (claude / gemini JSON) is decoded to its reply text
+    plus a native token count; any plain-text agent passes through unchanged, with
+    tokens parsed by the existing native/self-report regexes. The returned text is
+    what the engine uses for the result summary and the WORKFLOW_OUTCOME verdict,
+    so a JSON envelope never breaks verdict parsing."""
+    for parser in _AGENT_OUTPUT_PARSERS:
+        parsed = parser(stdout)
+        if parsed is not None:
+            text, tokens = parsed
+            if tokens is None:
+                tokens = _parse_run_tokens(text or "", stderr)
+            return (text if text else stdout), tokens
+    return stdout, _parse_run_tokens(stdout, stderr)
 
 
 def _triage_config_snapshot(project_root: str | None) -> str:
@@ -3106,8 +3236,10 @@ def _build_step_prompt(
             "\n## Decompose engine contract\n"
             "Output exactly one JSON object, with no Markdown or code fence:\n"
             '{"tasks":[{"title":"subtask title","content":"what to do",'
-            '"acceptance":"acceptance criteria","depends_on":[prerequisite task numbers]}]}\n'
+            '"acceptance":"acceptance criteria","depends_on":[prerequisite task numbers]}],'
+            '"tokens_used":123}\n'
             "Add `depends_on` only when a subtask truly requires a predecessor's merged result. Values are one-based task positions, e.g. `\"depends_on\":[1,2]`. The engine holds dependent tasks until prerequisites close. Omit it or use `[]` when independent; never create a cycle.\n"
+            "Include the optional integer `tokens_used` when a real token count is available; otherwise omit it.\n"
             "Keep JSON concise: one or two sentences for `content` and one or two acceptance criteria. Reference existing design docs such as `docs/...` rather than repeating them. Output only this JSON object.\n"
         )
     custom_step_prompt = str(step.get("prompt") or "").strip()
@@ -4172,6 +4304,9 @@ def run_step_worker(
 
     outcome, result, status, exit_code = "blocked", "", "failed", None
     stdout, stderr = "", ""
+    # Normalized (structured-output-decoded) text + native token count; recomputed
+    # from the real output below, defaulted here for the no-output/exception paths.
+    output_text, native_tokens = "", None
     # The goal-intake (Decompose) step emits one JSON object the engine parses
     # into subtasks. Its result must stay whole — see the exit-0 branch below.
     goal_intake = _is_root_goal_decompose_step(project_root, task, step)
@@ -4310,6 +4445,11 @@ def run_step_worker(
                 stderr_thread.join(timeout=1)
             stdout = "".join(stdout_chunks)
             stderr = "".join(stderr_chunks)
+            # Decode a structured-output agent (e.g. claude --output-format
+            # stream-json) to plain text + native tokens; text agents pass through.
+            # Result/verdict parse the decoded text, so a JSON envelope is
+            # transparent; the raw stdout is still what's written to stdout.log.
+            output_text, native_tokens = _normalize_agent_output(stdout, stderr)
             if status == "timeout":
                 pass
             elif exit_code == 0:
@@ -4318,19 +4458,19 @@ def run_step_worker(
                 # opening `{"tasks":[` and break the parse). Every other step's
                 # result is a human summary, so the tail cap is fine there.
                 result = (
-                    (stdout.strip() if goal_intake else _tail(stdout, 4000))
+                    (output_text.strip() if goal_intake else _tail(output_text, 4000))
                     or "runner finished with no output"
                 )
                 # A clean exit defaults to done, but the runner can override via
                 # a `WORKFLOW_OUTCOME:` line: any step may self-report `blocked`
                 # (it ran but the work failed / is stuck); a rework-capable step
                 # (e.g. review) may send the task back with `rework`.
-                verdict = _parse_runner_verdict(stdout)
+                verdict = _parse_runner_verdict(output_text)
                 if verdict == "blocked":
                     outcome, status = "blocked", "failed"
                 elif verdict == "rework" and can_rework:
                     outcome, status = "rework", "succeeded"
-                elif not stdout.strip():
+                elif not output_text.strip():
                     # Clean exit but zero output: the runner ignored the
                     # "print a summary + WORKFLOW_OUTCOME" contract — a silent CLI
                     # failure (e.g. an agent that errored out) lands here. Don't
@@ -4400,10 +4540,16 @@ def run_step_worker(
                 f"--- verify 输出（末尾） ---\n{_tail(v_out, 3000)}\n\n"
                 f"--- agent 自报产出 ---\n{result}"
             )
-    tokens = _parse_run_tokens(stdout, stderr)
+    # Prefer the count decoded from structured output (accurate); the plain-text
+    # path already resolved to the regex-based count inside _normalize_agent_output.
+    tokens = native_tokens if native_tokens is not None else _parse_run_tokens(stdout, stderr)
     if run:
         try:
-            _write_run_file(run, "stdout", stdout)
+            # Store the decoded text (a structured-output agent's stdout is a JSON
+            # envelope; output_text == stdout for plain-text agents), so the stdout
+            # panel shows the readable reply, not raw JSON. Its usage is preserved
+            # in the token count. stderr is written verbatim.
+            _write_run_file(run, "stdout", output_text)
             _write_run_file(run, "stderr", stderr)
             if outcome == "done":
                 _write_run_file(run, "result", result)

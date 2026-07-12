@@ -361,6 +361,7 @@ class StepPromptTests(unittest.TestCase):
         self.assertIn("Output only the JSON object above", p)
         self.assertNotIn("WORKFLOW_OUTCOME", p)
         self.assertNotIn("TOKENS_USED", p)
+        self.assertIn('"tokens_used":123', p)
 
     def test_custom_step_prompt_is_injected_before_engine_output_protocol(self):
         with TemporaryDirectory() as tmp:
