@@ -11,6 +11,7 @@ import re
 import shlex
 import shutil
 import signal
+import sqlite3
 import struct
 import subprocess
 import sys
@@ -3144,6 +3145,214 @@ def _normalize_agent_output(stdout: str, stderr: str) -> tuple[str, int | None]:
     return stdout, _parse_run_tokens(stdout, stderr)
 
 
+# --- Antigravity CLI token accounting ---------------------------------------
+# The antigravity CLI (`agy`) prints only plain text and exposes no usage, but it
+# stores each conversation as a SQLite db under
+# `$GEMINI_CLI_HOME/antigravity-cli/conversations/<uuid>.db` (default ~/.gemini).
+# Usage lives in the `gen_metadata` protobuf blobs with NO .proto, so — following
+# github.com/junhoyeo/tokscale's reverse-engineering — a tiny wire reader pulls:
+#   gen_metadata.#1 = chatModel; .#4 = usage:
+#     #1 fixed system-prompt tokens, #2 new input, #5 cacheRead, #9 output,
+#     #10 thinking, #11 responseId (dedup)  -> total = #1+#2+#5+#9+#10
+#   trajectory_metadata_blob.#2 = {#1 seconds, #2 nanos} created-at.
+# Correlation to an orbit run is by SUBSTRING of the run's exec_dir path in the
+# conversation's step blobs (the CLI records its cwd there) + a wall-clock window
+# — robust across CLI versions and concurrency-safe for isolated steps (unique
+# worktree path per task). The usage field numbers are version-fragile; any
+# failure degrades to None so the self-report sentinel takes over.
+_ANTIGRAVITY_CORRELATION_BUFFER_MS = 10_000
+_AGY_COMMAND_RE = re.compile(r"(?:^|[\s/;&|(])agy(?:\s|$)")
+
+
+def _pb_read_varint(buf: bytes, pos: int) -> tuple[int, int | None]:
+    result = shift = 0
+    n = len(buf)
+    while pos < n:
+        byte = buf[pos]
+        pos += 1
+        result |= (byte & 0x7F) << shift
+        if not byte & 0x80:
+            return result, pos
+        shift += 7
+        if shift > 63:
+            break
+    return 0, None
+
+
+def _pb_iter_fields(buf: bytes):
+    pos, n = 0, len(buf)
+    while pos < n:
+        tag, pos = _pb_read_varint(buf, pos)
+        if pos is None:
+            return
+        field, wire = tag >> 3, tag & 7
+        if wire == 0:  # varint
+            val, pos = _pb_read_varint(buf, pos)
+            if pos is None:
+                return
+            yield field, wire, val
+        elif wire == 2:  # length-delimited
+            length, pos = _pb_read_varint(buf, pos)
+            if pos is None or pos + length > n:
+                return
+            yield field, wire, buf[pos:pos + length]
+            pos += length
+        elif wire == 1:  # 64-bit
+            if pos + 8 > n:
+                return
+            yield field, wire, buf[pos:pos + 8]
+            pos += 8
+        elif wire == 5:  # 32-bit
+            if pos + 4 > n:
+                return
+            yield field, wire, buf[pos:pos + 4]
+            pos += 4
+        else:  # unknown wire type — can't safely skip, stop
+            return
+
+
+def _pb_message_field(buf: bytes, field_num: int) -> bytes | None:
+    for field, wire, val in _pb_iter_fields(buf):
+        if field == field_num and wire == 2:
+            return val
+    return None
+
+
+def _pb_varint_field(buf: bytes, field_num: int) -> int | None:
+    for field, wire, val in _pb_iter_fields(buf):
+        if field == field_num and wire == 0:
+            return val
+    return None
+
+
+def _pb_string_field(buf: bytes, field_num: int) -> str | None:
+    val = _pb_message_field(buf, field_num)
+    return val.decode("utf-8", "replace") if val is not None else None
+
+
+def _pb_timestamp_ms(ts: bytes) -> int | None:
+    seconds = _pb_varint_field(ts, 1)
+    if seconds is None:
+        return None
+    nanos = _pb_varint_field(ts, 2) or 0
+    if not 0 <= nanos <= 999_999_999:
+        return None
+    return int(seconds) * 1000 + nanos // 1_000_000
+
+
+def _antigravity_gen_tokens(blob: bytes) -> tuple[str | None, int] | None:
+    """(responseId|None, total tokens) for one gen_metadata generation, or None."""
+    chat = _pb_message_field(blob, 1)
+    if chat is None:
+        return None
+    usage = _pb_message_field(chat, 4)
+    if usage is None:
+        return None
+    total = sum(
+        max(0, _pb_varint_field(usage, f) or 0) for f in (1, 2, 5, 9, 10)
+    )
+    if total <= 0:
+        return None
+    resp_id = _pb_string_field(usage, 11)
+    return (resp_id or None), total
+
+
+def _antigravity_conversations_dir() -> Path:
+    home = os.environ.get("GEMINI_CLI_HOME") or os.path.join(os.path.expanduser("~"), ".gemini")
+    return Path(home) / "antigravity-cli" / "conversations"
+
+
+def _antigravity_conversation_usage(
+    db_path: Path, workspace_bytes: bytes | None
+) -> tuple[int | None, list[tuple[str | None, int]], bool]:
+    """(created_ms, [(responseId, tokens), ...], mentions_workspace) for one db.
+    mentions_workspace is whether workspace_bytes appears in a step blob (the CLI
+    records its cwd there); True when workspace_bytes is None (no filter)."""
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=1.0)
+    except sqlite3.Error:
+        return None, [], False
+    try:
+        created_ms = None
+        row = conn.execute(
+            "SELECT data FROM trajectory_metadata_blob LIMIT 1"
+        ).fetchone()
+        if row and row[0]:
+            ts = _pb_message_field(row[0], 2)
+            if ts is not None:
+                created_ms = _pb_timestamp_ms(ts)
+        rows: list[tuple[str | None, int]] = []
+        for (data,) in conn.execute("SELECT data FROM gen_metadata ORDER BY idx"):
+            if not data:
+                continue
+            parsed = _antigravity_gen_tokens(data)
+            if parsed is not None:
+                rows.append(parsed)
+        mentions = True
+        if workspace_bytes is not None:
+            mentions = False
+            for step_payload, metadata in conn.execute(
+                "SELECT step_payload, metadata FROM steps"
+            ):
+                if (step_payload and workspace_bytes in step_payload) or (
+                    metadata and workspace_bytes in metadata
+                ):
+                    mentions = True
+                    break
+        return created_ms, rows, mentions
+    except sqlite3.Error:
+        return None, [], False
+    finally:
+        conn.close()
+
+
+def _antigravity_run_tokens(
+    exec_dir: str | Path, start_ms: int, end_ms: int
+) -> int | None:
+    """Sum tokens across antigravity conversations that ran in `exec_dir` within
+    [start_ms, end_ms]. None when the dir is absent or nothing matches."""
+    convs = _antigravity_conversations_dir()
+    if not convs.is_dir():
+        return None
+    try:
+        workspace_bytes = os.path.realpath(str(exec_dir)).encode("utf-8")
+    except OSError:
+        return None
+    lo = start_ms - _ANTIGRAVITY_CORRELATION_BUFFER_MS
+    hi = end_ms + _ANTIGRAVITY_CORRELATION_BUFFER_MS
+    # Only attribute conversations that record this run's workspace path (the CLI
+    # writes its cwd into a tool step). This is concurrency-safe — a unique
+    # worktree path never collides. A run that recorded no cwd (e.g. a pure reply
+    # with no tool use) yields no match and falls back to the self-report count,
+    # which is safer than time-uniqueness attribution that could pick the wrong
+    # concurrent conversation.
+    total, seen, matched = 0, set(), False
+    for db in convs.glob("*.db"):
+        try:
+            mtime_ms = int(db.stat().st_mtime * 1000)
+        except OSError:
+            continue
+        if mtime_ms < lo:  # finished before the window — cheap skip
+            continue
+        try:
+            created_ms, rows, mentions = _antigravity_conversation_usage(db, workspace_bytes)
+        except Exception:
+            continue
+        if not mentions or not rows:
+            continue
+        stamp = created_ms if created_ms is not None else mtime_ms
+        if not lo <= stamp <= hi:
+            continue
+        matched = True
+        for resp_id, tokens in rows:
+            if resp_id is not None:
+                if resp_id in seen:
+                    continue
+                seen.add(resp_id)
+            total += tokens
+    return total if matched else None
+
+
 def _triage_config_snapshot(project_root: str | None) -> str:
     """Return a compact, non-secret view of the effective workflow.
 
@@ -4307,6 +4516,9 @@ def run_step_worker(
     # Normalized (structured-output-decoded) text + native token count; recomputed
     # from the real output below, defaulted here for the no-output/exception paths.
     output_text, native_tokens = "", None
+    # Wall-clock window of the actual subprocess, used to correlate an antigravity
+    # run to its conversation db (re-stamped right before Popen).
+    run_started_ms = int(time.time() * 1000)
     # The goal-intake (Decompose) step emits one JSON object the engine parses
     # into subtasks. Its result must stay whole — see the exit-0 branch below.
     goal_intake = _is_root_goal_decompose_step(project_root, task, step)
@@ -4358,6 +4570,7 @@ def run_step_worker(
                 )
             except (InvalidInputError, OSError):
                 pass
+        run_started_ms = int(time.time() * 1000)
         try:
             proc = subprocess.Popen(
                 command,
@@ -4543,6 +4756,16 @@ def run_step_worker(
     # Prefer the count decoded from structured output (accurate); the plain-text
     # path already resolved to the regex-based count inside _normalize_agent_output.
     tokens = native_tokens if native_tokens is not None else _parse_run_tokens(stdout, stderr)
+    # Antigravity prints no usage; recover an accurate count from its conversation
+    # db (correlated by this run's worktree + wall-clock window). Best-effort — a
+    # failure leaves whatever the self-report sentinel produced.
+    if tokens is None and _AGY_COMMAND_RE.search(command or ""):
+        try:
+            tokens = _antigravity_run_tokens(
+                exec_dir, run_started_ms, int(time.time() * 1000)
+            )
+        except Exception:
+            tokens = None
     if run:
         try:
             # Store the decoded text (a structured-output agent's stdout is a JSON

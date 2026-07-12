@@ -2526,6 +2526,76 @@ class TokenStatsTests(unittest.TestCase):
         self.assertIsNone(server._parse_claude_json_output(dj))
         self.assertEqual(dj, server._normalize_agent_output(dj, "")[0])
 
+    def test_antigravity_run_tokens_from_conversation_db(self):
+        import os
+        import sqlite3
+
+        def varint(n):
+            out = bytearray()
+            while True:
+                b = n & 0x7F
+                n >>= 7
+                out.append(b | 0x80 if n else b)
+                if not n:
+                    return bytes(out)
+
+        def fv(field, val):        # varint field
+            return varint(field << 3) + varint(val)
+
+        def fl(field, data):       # length-delimited field
+            return varint((field << 3) | 2) + varint(len(data)) + data
+
+        def gen_blob(resp_id, sys_t, inp, cache, out, think):
+            usage = (fv(1, sys_t) + fv(2, inp) + fv(5, cache) + fv(9, out)
+                     + fv(10, think) + fl(11, resp_id.encode()))
+            return fl(1, fl(4, usage))   # gen_metadata.#1 (chatModel) -> .#4 (usage)
+
+        def traj_blob(secs):
+            return fl(2, fv(1, secs) + fv(2, 0))   # trajectory.#2 = created-at
+
+        with TemporaryDirectory() as home, TemporaryDirectory() as ws:
+            convs = Path(home) / "antigravity-cli" / "conversations"
+            convs.mkdir(parents=True)
+            created_ms = 1_700_000_000_000
+            ws_real = os.path.realpath(ws)
+            db = convs / "c.db"
+            conn = sqlite3.connect(db)
+            conn.execute("CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)")
+            conn.execute("CREATE TABLE trajectory_metadata_blob (id TEXT PRIMARY KEY, data BLOB)")
+            conn.execute("CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_payload BLOB, metadata BLOB)")
+            # two generations sharing a responseId (dedup) + one distinct one.
+            conn.execute("INSERT INTO gen_metadata VALUES (0, ?)",
+                         (gen_blob("r1", 1132, 500, 100, 200, 50),))   # total 1982
+            conn.execute("INSERT INTO gen_metadata VALUES (1, ?)",
+                         (gen_blob("r1", 1132, 500, 100, 200, 50),))   # dup r1 -> ignored
+            conn.execute("INSERT INTO gen_metadata VALUES (2, ?)",
+                         (gen_blob("r2", 0, 10, 0, 20, 0),))           # total 30
+            conn.execute("INSERT INTO trajectory_metadata_blob VALUES ('main', ?)",
+                         (traj_blob(created_ms // 1000),))
+            # the CLI records its cwd in a step blob — how orbit correlates.
+            conn.execute("INSERT INTO steps VALUES (0, ?, NULL)",
+                         (f'{{"Cwd":"{ws_real}","x":1}}'.encode(),))
+            conn.commit()
+            conn.close()
+
+            old_home = os.environ.get("GEMINI_CLI_HOME")
+            os.environ["GEMINI_CLI_HOME"] = home
+            try:
+                # matching workspace + window -> 1982 + 30 (r1 counted once).
+                self.assertEqual(
+                    2012, server._antigravity_run_tokens(ws, created_ms - 1000, created_ms + 1000))
+                # out of the time window -> no match.
+                self.assertIsNone(
+                    server._antigravity_run_tokens(ws, created_ms + 60_000, created_ms + 120_000))
+                # different workspace -> no match.
+                self.assertIsNone(
+                    server._antigravity_run_tokens("/nope/elsewhere", created_ms - 1000, created_ms + 1000))
+            finally:
+                if old_home is None:
+                    os.environ.pop("GEMINI_CLI_HOME", None)
+                else:
+                    os.environ["GEMINI_CLI_HOME"] = old_home
+
     def test_step_prompt_asks_for_tokens(self):
         with TemporaryDirectory() as tmp:
             EngineHarness(tmp)
