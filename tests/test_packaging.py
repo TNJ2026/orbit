@@ -189,7 +189,8 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("function renderWorkflow()", html)
         # Steps assign their own Agent, with a per-agent command under each row.
         self.assertIn('id="addStepAgents"', html)
-        self.assertIn("step-agent-cmd", html)
+        self.assertIn('<textarea class="step-agent-cmd"', html)
+        self.assertIn('rows="2"', html)
         self.assertIn("const commandPlaceholder = builtIn", html)
         self.assertNotIn('<code>${escapeHtml(builtIn)}</code>', html)
         self.assertIn("function selectedAgentCommands()", html)

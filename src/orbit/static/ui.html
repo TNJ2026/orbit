@@ -2649,7 +2649,7 @@
           <div style="display:flex;align-items:center;gap:6px;">
             <select class="step-agent-sel" data-i="${i}" style="flex:1;">${opts.join("")}</select>${rm}
           </div>
-          <input type="text" class="step-agent-cmd" data-i="${i}" value="${escapeHtml(row.command || "")}" placeholder="${escapeHtml(commandPlaceholder)}" style="width:100%;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;">
+          <textarea class="step-agent-cmd" data-i="${i}" rows="2" placeholder="${escapeHtml(commandPlaceholder)}" title="${escapeHtml(commandPlaceholder)}" style="width:100%;resize:vertical;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;">${escapeHtml(row.command || "")}</textarea>
         </div>`;
       }).join("");
       $("addStepAgents").innerHTML = rowsHtml;
