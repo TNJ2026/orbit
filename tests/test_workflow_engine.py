@@ -2201,6 +2201,31 @@ class ActiveStepLedgerTests(unittest.TestCase):
     def _tx(self, h, tid, from_step, to_step, outcome, note=""):
         h.store.record_task_transition(tid, from_step, to_step, "codex", outcome, note)
 
+    def test_step_outcome_classification_invariants(self):
+        # Locks the blocked/skipped/active semantics three bugs relied on this
+        # session. A self-reported `blocked` is settled-but-recoverable: still
+        # "active" (completable to recover) yet NOT "running" (its runner exited).
+        # done/rework/reassigned/skipped finish the step for BOTH. Any new outcome
+        # must be classified in both sets or this fails.
+        def trs(*settling):
+            out = [{"id": 1, "from_step": "", "to_step": "s",
+                    "outcome": "dispatched", "note": "a"}]
+            for i, o in enumerate(settling, start=2):
+                out.append({"id": i, "from_step": "s", "to_step": "s",
+                            "outcome": o, "note": ""})
+            return out
+
+        # A bare dispatch (no settling) is both active and running.
+        self.assertIn("s", server._active_steps(trs()))
+        self.assertIn("s", server._running_steps(trs()))
+        # blocked: active (recoverable) but not running.
+        self.assertIn("s", server._active_steps(trs("blocked")))
+        self.assertNotIn("s", server._running_steps(trs("blocked")))
+        # done/rework/reassigned/skipped: finished for both.
+        for o in ("done", "rework", "reassigned", "skipped"):
+            self.assertNotIn("s", server._active_steps(trs(o)), o)
+            self.assertNotIn("s", server._running_steps(trs(o)), o)
+
     def test_killed_runner_extra_dispatch_does_not_phantom_activate(self):
         # A dispatch whose runner was killed (no finishing transition) followed
         # by a re-dispatch that DID finish must not leave the step active.

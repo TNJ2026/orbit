@@ -96,6 +96,45 @@ class PackagingTests(unittest.TestCase):
         }
         self.assertEqual(set(), module_funcs & inner_funcs)
 
+    def test_health_check_api_runs_and_returns_recovery_counts(self):
+        import asyncio
+        import json
+
+        import orbit.server as server
+        from starlette.requests import Request
+
+        with TemporaryDirectory() as tmp:
+            app = server.create_server(
+                db_path=str(Path(tmp) / "orbit.db"),
+                project={"project_root": tmp},
+                run_worker=False,
+            )
+            endpoint = next(
+                route.endpoint
+                for route in app.routes
+                if route.path == "/api/health-check"
+            )
+            request = Request({
+                "type": "http",
+                "method": "POST",
+                "path": "/api/health-check",
+                "headers": [(b"host", b"127.0.0.1")],
+                "client": ("127.0.0.1", 12345),
+                "scheme": "http",
+                "server": ("127.0.0.1", 8848),
+            })
+            response = asyncio.run(endpoint(request))
+            body = json.loads(response.body)
+            self.assertEqual(200, response.status_code)
+            self.assertEqual(0, body["recovered_count"])
+            self.assertEqual(0, body["timeout_count"])
+            status_endpoint = next(
+                route.endpoint for route in app.routes if route.path == "/api/status"
+            )
+            status_response = asyncio.run(status_endpoint(request))
+            status_body = json.loads(status_response.body)
+            self.assertEqual({}, status_body["background_errors"])
+
     def test_ui_asset_is_present_and_loadable(self):
         html = (
             resources.files("orbit")

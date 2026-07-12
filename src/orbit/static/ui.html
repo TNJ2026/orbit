@@ -3553,7 +3553,7 @@
               <button type="button" class="primary" onclick="reimplementTask(${task.id})">${t("task.reimplementBtn")}</button>
             </div>
           </div>` : ""}
-          ${!reworkLimited ? `<div class="rerun-box">
+          <div class="rerun-box">
             <div class="meta">${t("task.rerunHint")}</div>
             <div class="row" style="gap: 6px; margin-top: 4px;">
               <select id="rerunAgentSelect" onchange="state.rerunAgent = this.value">
@@ -3563,7 +3563,7 @@
               </select>
               <button type="button" class="primary" onclick="rerunTask(${task.id})">${t("task.rerunBtn")}</button>
             </div>
-          </div>` : ""}
+          </div>
           <div class="rerun-box">
             <div class="meta">${t("task.skipHint")}</div>
             <div class="row" style="margin-top: 4px;">

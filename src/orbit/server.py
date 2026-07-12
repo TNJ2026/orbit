@@ -5,6 +5,7 @@ from __future__ import annotations
 import atexit
 import ipaddress
 import json
+import logging
 import os
 import re
 import shlex
@@ -24,7 +25,6 @@ from urllib.parse import urlparse
 
 import anyio
 
-import uvicorn
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
@@ -42,7 +42,11 @@ from .store import (
 )
 
 MAX_LEASE_SECONDS = 3600
-_WORKFLOW_ENGINE_LOCK = threading.Lock()
+# Reentrant: high-level recovery ops (reimplement / resume-after-budget) hold it
+# across their reads AND the rerun/reimplement they delegate to, which re-acquire
+# it — so the read-decide-dispatch is one atomic critical section, not a TOCTOU gap.
+_WORKFLOW_ENGINE_LOCK = threading.RLock()
+_LOG = logging.getLogger(__name__)
 
 # The HTTP API is a local-only control surface: agents act on what lands in
 # their inboxes, so a forged request is a prompt-injection channel. Defense is
@@ -2338,11 +2342,13 @@ def skip_workflow_step(
                 "finish before skipping"
             )
         # Carry the last real upstream (e.g. the implement output) forward so the
-        # next step keeps its context.
+        # next step keeps its context. Prefer a completion recorded INTO the
+        # skipped step; if it never completed (only blocked/reworked), fall back to
+        # this task's most recent `done` output so the next step isn't left blind.
         upstream = [
             t for t in transitions
             if t["outcome"] == "done" and t["to_step"] == step_id
-        ]
+        ] or [t for t in transitions if t["outcome"] == "done"]
         upstream_result = (
             _structured_upstream(upstream[-1].get("note", "")) if upstream else ""
         )
@@ -2366,6 +2372,15 @@ def skip_workflow_step(
 
 
 def reimplement_workflow_task(
+    store: Store, project_root: str | None, task_id: int, agent: str,
+) -> dict[str, Any]:
+    # Hold the engine lock across the reads AND the rerun it delegates to (the
+    # RLock lets rerun re-acquire) so the state it inspects can't shift under it.
+    with _WORKFLOW_ENGINE_LOCK:
+        return _reimplement_workflow_task_locked(store, project_root, task_id, agent)
+
+
+def _reimplement_workflow_task_locked(
     store: Store,
     project_root: str | None,
     task_id: int,
@@ -2433,6 +2448,18 @@ def resume_goal_after_budget_increase(
     store: Store, project_root: str | None, goal_id: int, token_budget: Any
 ) -> dict[str, Any]:
     """Raise a frozen goal's budget and resume its latest blocked dispatch."""
+    # One atomic critical section: pick the frozen step and dispatch it without a
+    # concurrent advance moving the task in between (RLock — the delegated
+    # rerun/reimplement re-acquire it).
+    with _WORKFLOW_ENGINE_LOCK:
+        return _resume_goal_after_budget_increase_locked(
+            store, project_root, goal_id, token_budget
+        )
+
+
+def _resume_goal_after_budget_increase_locked(
+    store: Store, project_root: str | None, goal_id: int, token_budget: Any
+) -> dict[str, Any]:
     goal = store.get_task(goal_id)
     if not goal or not goal.get("is_goal"):
         raise InvalidInputError(f"unknown goal: {goal_id}")
@@ -4504,8 +4531,8 @@ def run_queued_job(
             )
             return {"job_id": job["id"], "status": "failed", "error": "task missing"}
         cfg = read_workflow_config(project_root)
-        steps = {s["id"]: s for s in cfg["steps"]}
-        step = steps.get(job["step"])
+        step_map = {s["id"]: s for s in cfg["steps"]}
+        step = step_map.get(job["step"])
         if not step:
             store.finish_run_job(
                 job["id"], "failed", f"unknown step {job['step']}",
@@ -5264,6 +5291,26 @@ def create_server(
     worker_concurrency: int = 5,
 ) -> Starlette:
     store = Store(db_path)
+    background_error_lock = threading.Lock()
+    background_errors: dict[str, dict[str, str | int]] = {}
+
+    def _record_background_error(component: str, exc: Exception) -> None:
+        # Daemon loops must survive an individual failed pass, but hiding the
+        # exception turns a stalled workflow into an opaque failure. Keep a
+        # compact, inspectable summary as well as the full server log.
+        _LOG.exception("background %s pass failed", component)
+        with background_error_lock:
+            previous = background_errors.get(component, {})
+            background_errors[component] = {
+                "count": int(previous.get("count", 0)) + 1,
+                "last_failed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "last_error": f"{type(exc).__name__}: {exc}",
+            }
+
+    def _background_error_snapshot() -> dict[str, dict[str, str | int]]:
+        with background_error_lock:
+            return {component: dict(error) for component, error in background_errors.items()}
+
     # uvicorn.run() blocks until the process dies (Ctrl-C included), so a plain
     # atexit hook is the reliable place to checkpoint the WAL and close the
     # connection cleanly.
@@ -5293,8 +5340,8 @@ def create_server(
             ):
                 try:
                     check(store, root)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    _record_background_error(check.__name__, exc)
 
     current_project = project or {
         "id": "",
@@ -5313,8 +5360,8 @@ def create_server(
             root = current_project.get("project_root")
             try:
                 scheduler_tick(store, root)
-            except Exception:
-                pass
+            except Exception as exc:
+                _record_background_error("scheduler", exc)
 
     def _hub_sweep() -> None:
         # Separate thread: a hub inspection can take up to HUB_INSPECT_TIMEOUT, so
@@ -5323,8 +5370,8 @@ def create_server(
             time.sleep(HUB_SWEEP_POLL_SECONDS)
             try:
                 hub_inspect_sweep(store, current_project.get("project_root"))
-            except Exception:
-                pass
+            except Exception as exc:
+                _record_background_error("hub_inspect", exc)
 
     def _goal_verify_sweep() -> None:
         # Separate thread: a goal-verify suite can run for minutes, so it must
@@ -5334,8 +5381,8 @@ def create_server(
             time.sleep(GOAL_VERIFY_POLL_SECONDS)
             try:
                 goal_verify_sweep(store, current_project.get("project_root"))
-            except Exception:
-                pass
+            except Exception as exc:
+                _record_background_error("goal_verify", exc)
 
     def _embedded_runner() -> None:
         # Convenience: run a worker in-process so `orbit serve` executes goals
@@ -5513,6 +5560,7 @@ def create_server(
                 "version": __version__,
                 "db_path": str(store.db_path),
                 "project": {**current_project, "db_path": str(store.db_path)},
+                "background_errors": _background_error_snapshot(),
             },
         )
 

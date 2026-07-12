@@ -42,7 +42,7 @@ def init_project(project_root: Path) -> dict[str, list[str]]:
         )
         _mark(workflow_path, True)
 
-    # 3. Keep runtime task logs and per-task worktree checkouts out of git.
+    # 2. Keep runtime task logs and per-task worktree checkouts out of git.
     gitignore = project_root / ".gitignore"
     existing = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
     wanted = [f"{state_dir.name}/tasks/", f"{state_dir.name}/worktrees/"]
