@@ -1535,6 +1535,32 @@ class RerunTests(unittest.TestCase):
             m["runner_command"] = "cat"
         return bindings
 
+    def test_upstream_rerun_redispatches_settled_downstream(self):
+        # Regression: after a downstream step settled (e.g. review blocked on a
+        # rate limit) and the upstream was manually re-run and completed again,
+        # the downstream must dispatch afresh. The earlier (settled) dispatch of
+        # that step from the prior cycle must not suppress the new one.
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, bindings=self._bindings())
+            tid = h.create_task()
+            h.start(tid)
+            h.complete("hub-agent", tid, "intake", "done")   # -> implement dispatched
+            h.complete("codex", tid, "implement", "done")     # -> review dispatched (#1)
+
+            def review_dispatches():
+                return [t for t in h.store.list_task_transitions(tid)
+                        if t["to_step"] == "review" and t["outcome"] == "dispatched"]
+            self.assertEqual(1, len(review_dispatches()))
+
+            # Review settles as blocked (its CLI hit a session limit).
+            h.complete("rev", tid, "review", "blocked", "session limit")
+            self.assertEqual("blocked", h.task(tid)["task_status"])
+
+            # Recover by re-running implement (records no rework), then complete it.
+            server.rerun_workflow_step(h.store, tmp, tid, "codex", step="implement")
+            h.complete("codex", tid, "implement", "done")     # -> review must dispatch (#2)
+            self.assertEqual(2, len(review_dispatches()))
+
     def test_rerun_blocked_step_dispatches_to_chosen_agent(self):
         with TemporaryDirectory() as tmp:
             h = EngineHarness(tmp, bindings=self._bindings())
@@ -2126,7 +2152,7 @@ class ActiveStepLedgerTests(unittest.TestCase):
 
 
 class TaskHealthCheckTests(unittest.TestCase):
-    def test_direct_goal_orphaned_between_steps_is_stalled(self):
+    def test_direct_goal_orphaned_between_steps_is_recovered(self):
         with TemporaryDirectory() as tmp:
             h = EngineHarness(tmp)
             goal_id = h.create_task(title="research")
@@ -2139,13 +2165,13 @@ class TaskHealthCheckTests(unittest.TestCase):
 
             alerts = server.check_task_health(h.store, tmp)
 
-            self.assertEqual("stalled", h.task(goal_id)["task_status"])
-            self.assertEqual("implement", h.task(goal_id)["workflow_step"])
-            self.assertEqual("orphaned -> blocked", alerts[0]["problem"])
+            self.assertEqual("running", h.task(goal_id)["task_status"])
+            self.assertEqual([], alerts)
+            self.assertEqual("implement", h.store.list_run_jobs("all", 1)[0]["step"])
 
     def test_direct_goal_orphaned_after_terminal_is_accepted(self):
         with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp)
+            h = EngineHarness(tmp, bindings=[{**m, "runner_command": "cat"} for m in BINDINGS])
             goal_id = h.create_task(title="research")
             h.store.update_task_metadata(goal_id, is_goal=True)
             h.store.record_task_transition(
@@ -2158,9 +2184,9 @@ class TaskHealthCheckTests(unittest.TestCase):
             self.assertEqual("accepted", h.task(goal_id)["task_status"])
             self.assertEqual("orphaned -> accepted", alerts[0]["problem"])
 
-    def test_dead_runner_step_alerts_and_dedupes(self):
+    def test_dead_runner_step_is_auto_recovered(self):
         with TemporaryDirectory() as tmp:
-            h = EngineHarness(tmp)
+            h = EngineHarness(tmp, bindings=[{**m, "runner_command": "cat"} for m in BINDINGS])
             tid = h.create_task()
             h.start(tid)  # intake active, dispatched to hub-agent
             run = h.store.create_task_run(tid, worker="hub-agent", status="running")
@@ -2170,14 +2196,11 @@ class TaskHealthCheckTests(unittest.TestCase):
             h.store._conn.commit()
 
             alerts = server.check_task_health(h.store, tmp)
-            self.assertEqual(1, len(alerts))
-            self.assertEqual("dead runner", alerts[0]["problem"])
-            self.assertEqual("intake", alerts[0]["step"])
-            self.assertTrue(any(str(tid) in c for _, c in h.inbox_senders("hub-agent")))
-            # same unchanged problem is not re-alerted
+            self.assertEqual([], alerts)
+            self.assertEqual("intake", h.store.list_run_jobs("all", 1)[0]["step"])
             self.assertEqual([], server.check_task_health(h.store, tmp))
 
-    def test_orphaned_with_undispatched_next_step_is_blocked(self):
+    def test_orphaned_with_undispatched_next_step_is_recovered(self):
         # intake done -> implement should have been dispatched but was not
         # (advance interrupted). Recover to blocked at implement, visible/rerunnable.
         with TemporaryDirectory() as tmp:
@@ -2188,12 +2211,9 @@ class TaskHealthCheckTests(unittest.TestCase):
             h.store.set_task_workflow_state(tid, task_status="in_progress")
 
             alerts = server.check_task_health(h.store, tmp)
-            self.assertEqual(1, len(alerts))
-            self.assertEqual("orphaned -> blocked", alerts[0]["problem"])
-            self.assertEqual("implement", alerts[0]["step"])
-            self.assertEqual("blocked", h.task(tid)["task_status"])
-            self.assertEqual("implement", h.task(tid)["workflow_step"])
-            # now blocked -> no longer matches, not re-processed
+            self.assertEqual([], alerts)
+            self.assertEqual("assigned", h.task(tid)["task_status"])
+            self.assertEqual("implement", h.store.list_run_jobs("all", 1)[0]["step"])
             self.assertEqual([], server.check_task_health(h.store, tmp))
 
     def test_orphaned_after_terminal_done_is_closed(self):
@@ -2208,7 +2228,7 @@ class TaskHealthCheckTests(unittest.TestCase):
             self.assertEqual("orphaned -> closed", alerts[0]["problem"])
             self.assertEqual("closed", h.task(tid)["task_status"])
 
-    def test_undispatched_rework_alerts_and_dedupes(self):
+    def test_undispatched_rework_is_auto_recovered(self):
         with TemporaryDirectory() as tmp:
             h = EngineHarness(tmp)
             tid = h.create_task()
@@ -2221,9 +2241,8 @@ class TaskHealthCheckTests(unittest.TestCase):
             )
 
             alerts = server.check_task_health(h.store, tmp)
-            self.assertEqual(1, len(alerts))
-            self.assertEqual("undispatched rework", alerts[0]["problem"])
-            self.assertEqual("implement", alerts[0]["step"])
+            self.assertEqual([], alerts)
+            self.assertEqual("implement", h.store.list_run_jobs("all", 1)[0]["step"])
             self.assertEqual([], server.check_task_health(h.store, tmp))
 
     def test_stale_pending_dispatch_action_alerts_and_dedupes(self):

@@ -3495,7 +3495,7 @@
               <button type="button" class="primary" onclick="reimplementTask(${task.id})">${t("task.reimplementBtn")}</button>
             </div>
           </div>` : ""}
-          <div class="rerun-box">
+          ${!reworkLimited ? `<div class="rerun-box">
             <div class="meta">${t("task.rerunHint")}</div>
             <div class="row" style="gap: 6px; margin-top: 4px;">
               <select id="rerunAgentSelect" onchange="state.rerunAgent = this.value">
@@ -3503,9 +3503,9 @@
                   ? rerunAgents.map(name => `<option value="${escapeHtml(name)}"${name === defaultRerunAgent ? " selected" : ""}>${escapeHtml(name)}</option>`).join("")
                   : `<option value="">${t("task.noAgents")}</option>`}
               </select>
-              <button type="button" class="primary" onclick="rerunTask(${task.id})">${reworkLimited ? t("task.reviewBtn") : t("task.rerunBtn")}</button>
+              <button type="button" class="primary" onclick="rerunTask(${task.id})">${t("task.rerunBtn")}</button>
             </div>
-          </div>` : ""}
+          </div>` : ""}` : ""}
           ${hasStepCards
             ? `<div class="meta">${t("task.runsPerStep")}</div>`
             : renderTaskRuns()}

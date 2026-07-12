@@ -1384,6 +1384,18 @@ class Store:
             ).fetchone()
         return dict(row) if row else None
 
+    def has_open_run_job(self, task_id: int, step: str) -> bool:
+        """Whether a dispatched step still has work queued or being applied."""
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT 1 FROM run_jobs
+                   WHERE task_id = ? AND step = ?
+                     AND status IN ('pending', 'running', 'finished', 'applying')
+                   LIMIT 1""",
+                (task_id, (step or "").strip()),
+            ).fetchone()
+        return row is not None
+
     def claim_next_run_job(
         self,
         runner_name: str,

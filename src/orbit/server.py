@@ -1104,7 +1104,10 @@ def _main_workflow_reachable_steps(
 
 
 # Outcomes that close out one dispatch of a step: the agent finished it
-# (done/rework) or the engine took it away (reassigned on timeout).
+# (done/rework) or the engine took it away (reassigned on timeout). `blocked` is
+# deliberately excluded so a blocked step stays "active" and can be recovered by
+# completing it directly (see _running_steps for the dispatch-guard variant that
+# does treat blocked as finished).
 _STEP_FINISHING_OUTCOMES = ("done", "rework", "reassigned")
 
 
@@ -1130,6 +1133,26 @@ def _active_steps(transitions: list[dict[str, Any]]) -> list[str]:
     last_dispatch, last_finish = _last_dispatch_and_finish(transitions)
     return [
         step for step, (did, _) in last_dispatch.items()
+        if did > last_finish.get(step, 0)
+    ]
+
+
+def _running_steps(transitions: list[dict[str, Any]]) -> list[str]:
+    """Steps whose runner is still executing. Like _active_steps, but a self-
+    reported `blocked` (from_step set) also ends the run: a blocked step's runner
+    has exited, so it is not running even though it stays "active" (recoverable by
+    completing it). Used by the dispatch guard so a settled-blocked downstream
+    step doesn't read as running and suppress a fresh upstream completion — while
+    the recovery path (_active_steps) still lets a blocked step be completed."""
+    last_dispatch: dict[str, int] = {}
+    last_finish: dict[str, int] = {}
+    for t in transitions:
+        if t["outcome"] == "dispatched":
+            last_dispatch[t["to_step"]] = t["id"]
+        elif t["from_step"] and t["outcome"] in ("done", "rework", "reassigned", "blocked"):
+            last_finish[t["from_step"]] = t["id"]
+    return [
+        step for step, did in last_dispatch.items()
         if did > last_finish.get(step, 0)
     ]
 
@@ -1208,10 +1231,6 @@ def _active_step_assignees(transitions: list[dict[str, Any]]) -> dict[str, str]:
     }
 
 
-def _latest_rework_transition_id(transitions: list[dict[str, Any]]) -> int:
-    return max((t["id"] for t in transitions if t["outcome"] == "rework"), default=0)
-
-
 def _dispatched_since(
     transitions: list[dict[str, Any]], step: str, transition_id: int
 ) -> bool:
@@ -1220,6 +1239,23 @@ def _dispatched_since(
         and t["outcome"] == "dispatched"
         and t["to_step"] == step
         for t in transitions
+    )
+
+
+def _latest_inbound_completion_id(
+    transitions: list[dict[str, Any]], step: str
+) -> int:
+    """Id of the most recent transition that (re)entered `step`: a forward `done`
+    into it or a `rework` back into it. This marks the start of the step's current
+    dispatch cycle. Keying the "already dispatched this pass" guard off it (rather
+    than off the last rework anywhere) means a manual re-run or a rework-limit
+    recovery that re-ran the upstream — neither of which records a `rework` — still
+    lets the freshly-completed upstream re-dispatch this step instead of the guard
+    treating an earlier cycle's dispatch as current."""
+    return max(
+        (t["id"] for t in transitions
+         if t["to_step"] == step and t["outcome"] in ("done", "rework")),
+        default=0,
     )
 
 
@@ -2055,10 +2091,12 @@ def _dispatch_targets(
             break
         target = queue.pop(0)
         transitions = store.list_task_transitions(task_id)
-        if target in _active_steps(transitions):
-            continue  # already running this step
-        if _dispatched_since(transitions, target, _latest_rework_transition_id(transitions)):
-            continue  # already ran in this workflow pass
+        if target in _running_steps(transitions):
+            continue  # a runner is still executing this step
+        if _dispatched_since(
+            transitions, target, _latest_inbound_completion_id(transitions, target)
+        ):
+            continue  # already dispatched for this target's current cycle
         if not _join_ready(target, cfg, back, steps, transitions):
             notices.append(f"step {target} is waiting for other required branches")
             continue
@@ -4627,6 +4665,7 @@ def _check_workflow_step_timeouts_locked(
 # Runs left in these states mean a runner is gone, not working.
 _RUN_DEAD_STATUSES = ("orphaned", "failed")
 _PENDING_WORKFLOW_ACTION_STALE_SECONDS = 30
+AUTO_RECOVERY_MAX_ATTEMPTS = 2
 
 
 def _latest_run_for_step(
@@ -4669,6 +4708,58 @@ def _is_stale_timestamp(value: str, now: datetime, seconds: int) -> bool:
     except (TypeError, ValueError):
         return True
     return (now - created_at).total_seconds() >= seconds
+
+
+def _auto_recover_step_locked(
+    store: Store, project_root: str | None, task: dict[str, Any],
+    step: dict[str, Any], assignee: str, upstream_result: str, reason: str,
+) -> dict[str, Any]:
+    """Idempotently re-dispatch a deterministic missing-step failure.
+
+    Recovery attempts are persisted as workflow actions.  After two attempts we
+    stop retrying and send one structured Hub escalation instead of looping.
+    """
+    task_id, step_id = int(task["id"]), step["id"]
+    if store.has_open_run_job(task_id, step_id):
+        return {"action": "already_queued"}
+    actions = [
+        a for a in store.list_workflow_actions("all", 500)
+        if a["task_id"] == task_id and a["action_type"] == "recover_step"
+        and a["step"] == step_id and a["note"].startswith(reason)
+    ]
+    if len(actions) >= AUTO_RECOVERY_MAX_ATTEMPTS:
+        if not any(
+            a["task_id"] == task_id and a["action_type"] == "recovery_escalation"
+            and a["step"] == step_id for a in store.list_workflow_actions("all", 500)
+        ):
+            action = store.create_workflow_action(
+                task_id, "recovery_escalation", step_id, assignee,
+                note=f"{reason}; automatic recovery limit reached",
+            )
+            notice = _notify_hub(
+                store,
+                f"Task #{task_id} step '{step_id}' could not be auto-recovered "
+                f"after {AUTO_RECOVERY_MAX_ATTEMPTS} attempts ({reason}). "
+                "Choose reassign, rework, budget change, or force-end.",
+            )
+            if action:
+                store.finish_workflow_action(action["id"], "alerted", "hub escalated")
+            return {"action": "escalated", "notice": notice}
+        return {"action": "escalated"}
+    action = store.create_workflow_action(
+        task_id, "recover_step", step_id, assignee, note=reason,
+    )
+    job = _dispatch_step(
+        store, project_root, task, step,
+        {"agent_name": assignee, "runner_command": _step_agent_command(step, assignee)},
+        upstream_result,
+    )
+    if action:
+        store.finish_workflow_action(
+            action["id"], "done" if job else "failed",
+            f"recovery {'queued' if job else 'could not dispatch'}",
+        )
+    return {"action": "recovered" if job else "dispatch_failed", "job_id": job and job["id"]}
 
 
 def check_task_health(
@@ -4746,24 +4837,12 @@ def _check_task_health_locked(
             # run just has not been recorded yet — so hold off.
             if not _run_is_after(run, last_dispatch):
                 continue
-            if any(
-                t["outcome"] == "health_alert" and t["to_step"] == step_id
-                and t["id"] > last_dispatch["id"]
-                for t in transitions
-            ):
-                continue  # already alerted for this dispatch
-            store.record_task_transition(
-                task_id, step_id, step_id, WORKFLOW_ENGINE_AGENT, "health_alert",
-                f"step '{step_id}' stalled: {assignee} runner is dead, nothing running",
+            recovered = _auto_recover_step_locked(
+                store, project_root, task, steps[step_id], assignee, "", "dead runner"
             )
-            notice = _notify_hub(
-                store,
-                f"Task #{task_id} step '{step_id}' looks stuck: the {assignee} runner "
-                "died and nothing is running. Re-run it (pick an agent) or "
-                "complete_step as hub.",
-            )
-            alerts.append({"task_id": task_id, "step": step_id,
-                           "problem": "dead runner", "notice": notice})
+            if recovered["action"] == "escalated":
+                alerts.append({"task_id": task_id, "step": step_id,
+                               "problem": "dead runner", **recovered})
 
         # B. advance_workflow_task records rework before dispatching the target.
         # If the server dies in that small window, the old step is settled but
@@ -4783,36 +4862,19 @@ def _check_task_health_locked(
                     and t["to_step"] == target
                     for t in transitions
                 )
-                alerted = any(
-                    t["id"] > last_rework["id"]
-                    and t["outcome"] == "health_alert"
-                    and t["from_step"] == last_rework["from_step"]
-                    and t["to_step"] == target
-                    for t in transitions
-                )
                 undispatched_rework = not dispatched
-                if not dispatched and not alerted:
-                    store.record_task_transition(
-                        task_id,
-                        last_rework["from_step"],
-                        target,
-                        WORKFLOW_ENGINE_AGENT,
-                        "health_alert",
-                        f"rework to '{target}' was recorded but never dispatched",
+                if not dispatched:
+                    recovered = _auto_recover_step_locked(
+                        store, project_root, task, steps[target],
+                        _step_round_robin_assignee(store, steps[target], transitions),
+                        _structured_upstream(last_rework.get("note", "")),
+                        "undispatched rework",
                     )
-                    notice = _notify_hub(
-                        store,
-                        f"Task #{task_id} recorded rework from "
-                        f"'{last_rework['from_step']}' to '{target}', but the "
-                        "target step was never dispatched and nothing is running. "
-                        "Re-run it or complete_step as hub.",
-                    )
-                    alerts.append({
-                        "task_id": task_id,
-                        "step": target,
-                        "problem": "undispatched rework",
-                        "notice": notice,
-                    })
+                    if recovered["action"] == "recovered":
+                        undispatched_rework = False
+                    elif recovered["action"] == "escalated":
+                        alerts.append({"task_id": task_id, "step": target,
+                                       "problem": "undispatched rework", **recovered})
 
         # The rework recovery branch above owns this state, including after its
         # alert has been deduplicated. Do not also classify the same gap as a
@@ -4851,22 +4913,15 @@ def _check_task_health_locked(
             )
             stalled_step = (last_settle or {}).get("to_step", "")
             if stalled_step and stalled_step in steps:
-                store.record_task_transition(
-                    task_id, "", stalled_step, WORKFLOW_ENGINE_AGENT, "blocked",
-                    "orphaned: advance interrupted before dispatching this step",
+                recovered = _auto_recover_step_locked(
+                    store, project_root, task, steps[stalled_step],
+                    _step_round_robin_assignee(store, steps[stalled_step], transitions),
+                    _structured_upstream((last_settle or {}).get("note", "")),
+                    "advance interrupted before dispatch",
                 )
-                store.set_task_workflow_state(
-                    task_id,
-                    workflow_step=stalled_step,
-                    task_status="stalled" if direct_goal else "blocked",
-                )
-                notice = _notify_hub(
-                    store,
-                    f"Task #{task_id} was orphaned (advance interrupted at "
-                    f"'{stalled_step}'); marked blocked. Re-run it or close it.",
-                )
-                alerts.append({"task_id": task_id, "step": stalled_step,
-                               "problem": "orphaned -> blocked", "notice": notice})
+                if recovered["action"] == "escalated":
+                    alerts.append({"task_id": task_id, "step": stalled_step,
+                                   "problem": "orphaned -> escalation", **recovered})
             else:
                 # No forward target left — the task really finished.
                 if direct_goal:
