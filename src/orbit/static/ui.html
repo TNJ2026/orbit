@@ -1504,7 +1504,7 @@
         "action.close": "Close",
         "modal.addStep.title": "Add workflow step", "modal.addStep.editTitle": "Edit step",
         "modal.addStep.name": "Name", "modal.addStep.namePh": "Step name",
-        "modal.addStep.agent": "Agents", "modal.addStep.agentMissing": "(not installed)",
+        "modal.addStep.agent": "Agents", "modal.addStep.agentUnset": "— no agent selected —", "modal.addStep.agentMissing": "(not installed)",
         "modal.addStep.agentAdd": "Add another agent", "modal.addStep.agentRemove": "Remove",
         "modal.addStep.agentCmdPh": "command — blank uses the built-in CLI",
         "modal.addStep.agentBuiltin": "Built-in command when blank:",
@@ -1642,7 +1642,7 @@
         "action.close": "关闭",
         "modal.addStep.title": "添加工作流步骤", "modal.addStep.editTitle": "编辑步骤",
         "modal.addStep.name": "名称", "modal.addStep.namePh": "步骤名称",
-        "modal.addStep.agent": "Agent", "modal.addStep.agentMissing": "(未安装)",
+        "modal.addStep.agent": "Agent", "modal.addStep.agentUnset": "—— 未设置 Agent ——", "modal.addStep.agentMissing": "(未安装)",
         "modal.addStep.agentAdd": "加一个 agent", "modal.addStep.agentRemove": "移除",
         "modal.addStep.agentCmdPh": "命令 —— 留空用内置 CLI",
         "modal.addStep.agentBuiltin": "留空时的内置命令：",
@@ -2631,10 +2631,12 @@
         const chosen = new Set(rows.filter((r, j) => j !== i && r.agent).map(r => r.agent));
         const avail = installed.filter(tool => !chosen.has(tool.agent_name));
         const known = installed.some(tool => tool.agent_name === val);
-        const opts = avail.map(tool => {
+        const opts = (val ? [] : [
+          `<option value="" selected disabled>${t("modal.addStep.agentUnset")}</option>`
+        ]).concat(avail.map(tool => {
             const label = tool.profile_name ? "Hermes" : tool.name;
             return `<option value="${escapeHtml(tool.agent_name)}" ${val === tool.agent_name ? "selected" : ""}>${escapeHtml(tool.agent_name)} — ${escapeHtml(label)}</option>`;
-          });
+          }));
         if (val && !known) opts.push(`<option value="${escapeHtml(val)}" selected>${escapeHtml(val)} ${t("modal.addStep.agentMissing")}</option>`);
         const rm = rows.length > 1
           ? `<button type="button" class="step-agent-rm" data-i="${i}" title="${t("modal.addStep.agentRemove")}" style="border:none;background:none;cursor:pointer;color:var(--muted);font-size:17px;line-height:1;padding:0 2px;">×</button>`
@@ -2706,6 +2708,7 @@
       setStepAgents([]);
       $("addStepRequired").checked = false;
       $("addStepRequired").disabled = false;
+      $("addStepRequiredField").style.display = "none";
       $("addStepModalBackdrop").classList.add("open");
       $("addStepName").focus();
     }
@@ -2724,6 +2727,9 @@
       setStepAgents(step.agents || [], step.agent_commands || {});
       $("addStepRequired").checked = !!step.required;
       $("addStepRequired").disabled = !!step.required_locked;
+      // Optional steps stay optional in the visual editor; do not show a
+      // Required control that would imply they should be part of every flow.
+      $("addStepRequiredField").style.display = step.required ? "" : "none";
       $("addStepModalBackdrop").classList.add("open");
       $("addStepName").focus();
     }

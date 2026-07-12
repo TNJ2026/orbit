@@ -198,9 +198,11 @@ class PackagingTests(unittest.TestCase):
         # The global agent-command overrides setting is gone (moved onto steps).
         self.assertNotIn('id="setAgentCommands"', html)
         self.assertNotIn('id="addStepCommand"', html)
-        # Agent dropdowns list only available agents; they cannot be cleared to
-        # an explicit "no agent" option in the step editor.
+        # Empty Agent rows render a disabled prompt instead of defaulting to the
+        # first installed Agent.
         self.assertNotIn("modal.addStep.agentDefault", html)
+        self.assertIn("modal.addStep.agentUnset", html)
+        self.assertIn('<option value="" selected disabled>${t("modal.addStep.agentUnset")}</option>', html)
         self.assertNotIn("modal.addStep.agentRequired", html)
         # The Add-step toolbar tool opens the modal (add); double-click opens it
         # (edit). No standalone Add-step button in the pane header.
@@ -210,6 +212,8 @@ class PackagingTests(unittest.TestCase):
         self.assertNotIn('id="addWorkflowStep"', html)
         self.assertIn('id="addStepModalBackdrop"', html)
         self.assertIn('id="addStepPrompt"', html)
+        self.assertIn('id="addStepRequiredField"', html)
+        self.assertIn('style.display = step.required ? "" : "none"', html)
         self.assertIn('step.prompt = ($("addStepPrompt").value || "").trim()', html)
         self.assertNotIn('id="workflowStatuses"', html)
         self.assertIn("function workflowStatusList()", html)
