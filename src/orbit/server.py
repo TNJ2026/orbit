@@ -5530,6 +5530,7 @@ def create_server(
             agent = registered.get(tool["agent_name"])
             tool["registered"] = agent is not None
             tool["last_seen"] = agent["last_seen"] if agent else None
+            tool["built_in_command"] = _command_for_agent(tool["agent_name"])
         return _json(request, {"tools": tools})
 
     @route("/api/workflow", methods=["GET"])

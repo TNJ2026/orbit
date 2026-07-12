@@ -1496,6 +1496,7 @@
         "modal.addStep.agentDefault": "— no agent —",
         "modal.addStep.agentAdd": "Add another agent", "modal.addStep.agentRemove": "Remove",
         "modal.addStep.agentCmdPh": "command — blank uses the built-in CLI",
+        "modal.addStep.agentBuiltin": "Built-in command when blank:",
         "modal.addStep.required": "Required (a step the flow must include)",
         "modal.addStep.prompt": "Step prompt", "modal.addStep.promptPh": "Additional instructions for this step",
         "modal.addStep.promptHint": "Keep this prompt meaningful for the step. It may be empty, but then the worker relies on task context and engine contracts. Engine safety contracts and the output protocol still take priority.",
@@ -1527,6 +1528,7 @@
         "task.fallback": "Task", "task.fallbackId": "#{0} Task", "task.goal": "🎯 goal", "task.subtask": "↳ #{0}", "task.step": "⚙ {0}",
         "task.subtaskTitle": "subtask of goal #{0}",
         "task.waiting": "⏳ waiting {0}", "task.waitingTitle": "held until its prerequisite tasks close (their work is merged to main)",
+        "task.dependsOn": "depends on {0}", "task.dependsOnTitle": "built on the merged result of these prerequisite tasks",
         "task.noTasks": "No tasks", "task.pickAgent": "Pick an agent to re-run with",
         "task.loadFailed": "Failed to load task #{0}: {1}",
         "task.rerun": "Re-running #{0} step \"{1}\" with {2}{3}", "task.rerunQueued": " (job #{0} queued)",
@@ -1625,6 +1627,7 @@
         "modal.addStep.agentDefault": "—— 不指定 Agent ——",
         "modal.addStep.agentAdd": "加一个 agent", "modal.addStep.agentRemove": "移除",
         "modal.addStep.agentCmdPh": "命令 —— 留空用内置 CLI",
+        "modal.addStep.agentBuiltin": "留空时的内置命令：",
         "modal.addStep.required": "必选（流程必须包含的步骤）",
         "modal.addStep.prompt": "步骤 Prompt", "modal.addStep.promptPh": "该步骤的附加执行指令",
         "modal.addStep.promptHint": "请确认该步骤仍有合理、足够的执行指引。可以留空，但 worker 将只能依赖任务上下文和引擎契约；引擎安全契约与输出协议仍具有更高优先级。",
@@ -1656,6 +1659,7 @@
         "task.fallback": "任务", "task.fallbackId": "#{0} 任务", "task.goal": "🎯 目标", "task.subtask": "↳ #{0}", "task.step": "⚙ {0}",
         "task.subtaskTitle": "目标 #{0} 的子任务",
         "task.waiting": "⏳ 等待 {0}", "task.waitingTitle": "前置任务全部关闭（成果并入 main）后才开工",
+        "task.dependsOn": "依赖 {0}", "task.dependsOnTitle": "基于这些前置任务已合并的成果构建",
         "task.noTasks": "暂无任务", "task.pickAgent": "请选择一个 agent 重新运行",
         "task.loadFailed": "加载任务 #{0} 失败: {1}",
         "task.rerun": "用 {2} 重新运行 #{0} 步骤 \"{1}\"{3}", "task.rerunQueued": "（任务 #{0} 已排队）",
@@ -2601,11 +2605,13 @@
         const rm = rows.length > 1
           ? `<button type="button" class="step-agent-rm" data-i="${i}" title="${t("modal.addStep.agentRemove")}" style="border:none;background:none;cursor:pointer;color:var(--muted);font-size:17px;line-height:1;padding:0 2px;">×</button>`
           : "";
+        const builtIn = ((state.tools || []).find(tool => tool.agent_name === val) || {}).built_in_command || "";
         return `<div style="display:flex;flex-direction:column;gap:4px;">
           <div style="display:flex;align-items:center;gap:6px;">
             <select class="step-agent-sel" data-i="${i}" style="flex:1;">${opts.join("")}</select>${rm}
           </div>
           <input type="text" class="step-agent-cmd" data-i="${i}" value="${escapeHtml(row.command || "")}" placeholder="${t("modal.addStep.agentCmdPh")}" style="width:100%;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;">
+          ${builtIn ? `<div class="meta">${t("modal.addStep.agentBuiltin")} <code>${escapeHtml(builtIn)}</code></div>` : ""}
         </div>`;
       }).join("");
       $("addStepAgents").innerHTML = rowsHtml;
