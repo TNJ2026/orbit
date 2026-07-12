@@ -1616,6 +1616,31 @@ class RerunTests(unittest.TestCase):
             self.assertEqual("running", h.store.get_task_run(stale["id"])["status"])
             self.assertEqual("pending", h.store.get_run_job(result["queued_job_id"])["status"])
 
+    def test_reimplement_after_rework_cap_carries_latest_review_feedback(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, bindings=self._bindings())
+            task_id = h.create_task()
+            h.start(task_id)
+            h.complete("hub-agent", task_id, "intake", "done")
+            for _ in range(server.MAX_REWORK_ROUNDS):
+                h.complete("codex", task_id, "implement", "done")
+                h.complete("rev", task_id, "review", "rework", "needs revision")
+            h.complete("codex", task_id, "implement", "done")
+            h.complete("rev", task_id, "review", "rework", "keyboard placement missing")
+            self.assertEqual("blocked", h.task(task_id)["task_status"])
+
+            result = server.reimplement_workflow_task(
+                h.store, tmp, task_id, "codex"
+            )
+
+            self.assertEqual("implement", result["step"])
+            self.assertEqual("codex", result["assignee"])
+            job = h.store.get_run_job(result["queued_job_id"])
+            self.assertEqual("implement", job["step"])
+            self.assertIn("Latest review feedback", job["upstream_result"])
+            self.assertIn("keyboard placement missing", job["upstream_result"])
+            self.assertEqual("assigned", h.task(task_id)["task_status"])
+
 
 class MarkTaskRunningTests(unittest.TestCase):
     def _set_status(self, store, task_id, status):

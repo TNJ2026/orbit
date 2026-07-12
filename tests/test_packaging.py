@@ -138,6 +138,8 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("/api/task-runs/${runId}/files/${fileKey}?tail=65536", html)
         self.assertIn("function rerunTask(taskId)", html)
         self.assertIn("/api/tasks/${taskId}/rerun", html)
+        self.assertIn("function reimplementTask(taskId)", html)
+        self.assertIn("/api/tasks/${taskId}/reimplement", html)
         self.assertNotIn("function createTaskRun(taskId)", html)
         self.assertIn("function renderTaskRuns()", html)
         self.assertIn("function renderWorkflow()", html)

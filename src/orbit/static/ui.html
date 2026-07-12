@@ -1548,6 +1548,10 @@
         "task.open": "open ↗", "task.runs": "Runs",
         "task.rerunHint": "Re-run this step with a chosen agent (model):",
         "task.noAgents": "No agents available", "task.rerunBtn": "Re-run",
+        "task.reimplementTitle": "Continue with a new implementation",
+        "task.reimplementHint": "Re-run Implement with a chosen agent. The latest review feedback will be included; the rework limit stays unchanged.",
+        "task.reimplementBtn": "Re-implement", "task.reviewBtn": "Re-run review",
+        "task.reimplement": "Re-implementing #{0} with {1}{2}",
         "task.runsPerStep": "Runs are shown per step above — expand a step to see them.",
         "task.noRuns": "No runs recorded.", "task.unknownWorker": "unknown worker",
         "task.exit": "exit {0}", "task.id": "(id {0})",
@@ -1665,6 +1669,10 @@
         "task.open": "打开 ↗", "task.runs": "运行记录",
         "task.rerunHint": "用指定 agent（模型）重新运行此步骤：",
         "task.noAgents": "无可用 agent", "task.rerunBtn": "重新运行",
+        "task.reimplementTitle": "更换 agent 继续实现",
+        "task.reimplementHint": "用指定 agent 重跑实现步骤；会附带最近的 review 反馈，且不会修改返工上限。",
+        "task.reimplementBtn": "重新实现", "task.reviewBtn": "重新审查",
+        "task.reimplement": "正用 {1} 重新实现 #{0}{2}",
         "task.runsPerStep": "运行记录按上方步骤展示 — 展开步骤即可查看。",
         "task.noRuns": "暂无运行记录。", "task.unknownWorker": "未知 worker",
         "task.exit": "退出码 {0}", "task.id": "(id {0})",
@@ -3034,6 +3042,25 @@
       });
     }
 
+    async function reimplementTask(taskId) {
+      const select = $("reimplementAgentSelect");
+      const agent = select ? select.value : "";
+      if (!agent) {
+        setStatus(t("task.pickAgent"), true);
+        return;
+      }
+      await run(async () => {
+        const data = await api(`/api/tasks/${taskId}/reimplement`, {
+          method: "POST",
+          body: JSON.stringify({ agent })
+        });
+        state.rerunAgent = null;
+        setStatus(t("task.reimplement", taskId, data.assignee, data.queued_job_id ? t("task.rerunQueued", data.queued_job_id) : ""));
+        await loadTasks();
+        await loadTaskRuns(taskId);
+      });
+    }
+
     async function loadRunFile(runId, fileKey) {
       const data = await api(`/api/task-runs/${runId}/files/${fileKey}?tail=65536`);
       state.selectedRunId = runId;
@@ -3310,6 +3337,8 @@
       const showRerun =
         task.task_status === "blocked" ||
         (latestRun && (latestRun.status === "failed" || latestRun.status === "orphaned"));
+      const reworkLimited = task.task_status === "blocked" &&
+        /^rework limit reached\b/i.test(task.blocked_reason || "");
       // Tasks that materialize step cards keep their runs on the cards, not the
       // task itself — those are surfaced per step above, so the bottom Runs list
       // (which would be empty or duplicate the expanded step) is suppressed.
@@ -3403,6 +3432,19 @@
             <strong>${t("task.runs")}</strong>
           </div>
           ${showRerun ? `
+          ${reworkLimited ? `
+          <div class="rerun-box">
+            <strong>${t("task.reimplementTitle")}</strong>
+            <div class="meta">${t("task.reimplementHint")}</div>
+            <div class="row" style="gap: 6px; margin-top: 4px;">
+              <select id="reimplementAgentSelect" onchange="state.rerunAgent = this.value">
+                ${rerunAgents.length
+                  ? rerunAgents.map(name => `<option value="${escapeHtml(name)}"${name === defaultRerunAgent ? " selected" : ""}>${escapeHtml(name)}</option>`).join("")
+                  : `<option value="">${t("task.noAgents")}</option>`}
+              </select>
+              <button type="button" class="primary" onclick="reimplementTask(${task.id})">${t("task.reimplementBtn")}</button>
+            </div>
+          </div>` : ""}
           <div class="rerun-box">
             <div class="meta">${t("task.rerunHint")}</div>
             <div class="row" style="gap: 6px; margin-top: 4px;">
@@ -3411,7 +3453,7 @@
                   ? rerunAgents.map(name => `<option value="${escapeHtml(name)}"${name === defaultRerunAgent ? " selected" : ""}>${escapeHtml(name)}</option>`).join("")
                   : `<option value="">${t("task.noAgents")}</option>`}
               </select>
-              <button type="button" class="primary" onclick="rerunTask(${task.id})">${t("task.rerunBtn")}</button>
+              <button type="button" class="primary" onclick="rerunTask(${task.id})">${reworkLimited ? t("task.reviewBtn") : t("task.rerunBtn")}</button>
             </div>
           </div>` : ""}
           ${hasStepCards

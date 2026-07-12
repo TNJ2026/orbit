@@ -2103,6 +2103,7 @@ def rerun_workflow_step(
     task_id: int,
     agent: str,
     step: str | None = None,
+    context: str = "",
 ) -> dict[str, Any]:
     """Re-run a blocked (or active) workflow step with a chosen agent.
 
@@ -2190,6 +2191,10 @@ def rerun_workflow_step(
         upstream_result = (
             _structured_upstream(upstream[-1].get("note", "")) if upstream else ""
         )
+        if context.strip():
+            upstream_result = "\n\n".join(
+                part for part in (upstream_result, context.strip()) if part
+            )
         job = _dispatch_step(
             store, project_root, task, step_def, member, upstream_result
         )
@@ -2201,6 +2206,58 @@ def rerun_workflow_step(
             "queued_job_id": job["id"] if job else None,
             "reran": True,
         }
+
+
+def reimplement_workflow_task(
+    store: Store,
+    project_root: str | None,
+    task_id: int,
+    agent: str,
+) -> dict[str, Any]:
+    """Resume a task stopped by the rework cap at ``implement``.
+
+    This is intentionally distinct from retrying the blocked reviewer.  It
+    sends the most recent rework verdict to the chosen implementer, so a human
+    can change models and continue without raising the project's rework limit
+    or losing the review trail.
+    """
+    task = store.get_task(task_id)
+    if not task:
+        raise InvalidInputError(f"unknown task: {task_id}")
+    transitions = store.list_task_transitions(task_id)
+    if not transitions and task.get("parent_task_id"):
+        parent = store.get_task(task["parent_task_id"])
+        if parent:
+            task, task_id = parent, parent["id"]
+            transitions = store.list_task_transitions(task_id)
+    if task.get("task_status") != "blocked":
+        raise InvalidInputError("re-implement is only available for blocked tasks")
+    blocked = next(
+        (t for t in reversed(transitions) if t["outcome"] == "blocked"), None
+    )
+    if not blocked or not (blocked.get("note") or "").startswith("rework limit reached"):
+        raise InvalidInputError("task is not blocked by the rework limit")
+    # At the cap the engine records the rejected review as the detail after
+    # the semicolon on the blocking transition (rather than a separate rework
+    # transition), so prefer that most recent verdict.
+    feedback_text = (blocked.get("note") or "").partition("; ")[2].strip()
+    if not feedback_text:
+        feedback = next(
+            (
+                t for t in reversed(transitions)
+                if t["outcome"] == "rework" and t.get("to_step") == "implement"
+            ),
+            None,
+        )
+        feedback_text = (feedback or {}).get("note", "").strip()
+    if not feedback_text:
+        raise InvalidInputError("no review feedback is available to re-implement")
+    context = "Latest review feedback to resolve before requesting review again:\n" + _tail(
+        feedback_text, 20_000
+    )
+    return rerun_workflow_step(
+        store, project_root, task_id, agent, step="implement", context=context
+    )
 
 
 def force_close_goal(
@@ -5138,6 +5195,11 @@ def create_server(
             store, current_project.get("project_root"), task_id, agent, step or None
         )
 
+    def _engine_reimplement(task_id: int, agent: str) -> dict:
+        return reimplement_workflow_task(
+            store, current_project.get("project_root"), task_id, agent
+        )
+
     def _engine_force_close(task_id: int) -> dict:
         return force_close_goal(
             store, current_project.get("project_root"), task_id
@@ -5627,6 +5689,24 @@ def create_server(
         except Exception as exc:
             traceback.print_exc()
             return _json_error(f"re-run failed: {exc!r}", 500, request)
+        return _json(request, result)
+
+    @route("/api/tasks/{task_id:int}/reimplement", methods=["POST"])
+    async def api_task_reimplement(request: Request) -> JSONResponse:
+        if forbidden := _forbid_non_local(request):
+            return forbidden
+        task_id = int(request.path_params["task_id"])
+        data = await _read_json(request)
+        agent = str(data.get("agent") or "").strip()
+        if not agent:
+            return _json_error("agent is required", request=request)
+        try:
+            result = await _to_thread(_engine_reimplement, task_id, agent)
+        except (InvalidInputError, UnknownAgentError) as exc:
+            return _json_error(str(exc), request=request)
+        except Exception as exc:
+            traceback.print_exc()
+            return _json_error(f"re-implement failed: {exc!r}", 500, request)
         return _json(request, result)
 
     @route("/api/tasks/{task_id:int}/force-close", methods=["POST"])
