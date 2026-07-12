@@ -2640,12 +2640,14 @@
           ? `<button type="button" class="step-agent-rm" data-i="${i}" title="${t("modal.addStep.agentRemove")}" style="border:none;background:none;cursor:pointer;color:var(--muted);font-size:17px;line-height:1;padding:0 2px;">×</button>`
           : "";
         const builtIn = ((state.tools || []).find(tool => tool.agent_name === val) || {}).built_in_command || "";
+        const commandPlaceholder = builtIn
+          ? `${t("modal.addStep.agentBuiltin")} ${builtIn}`
+          : t("modal.addStep.agentCmdPh");
         return `<div style="display:flex;flex-direction:column;gap:4px;">
           <div style="display:flex;align-items:center;gap:6px;">
             <select class="step-agent-sel" data-i="${i}" style="flex:1;">${opts.join("")}</select>${rm}
           </div>
-          <input type="text" class="step-agent-cmd" data-i="${i}" value="${escapeHtml(row.command || "")}" placeholder="${t("modal.addStep.agentCmdPh")}" style="width:100%;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;">
-          ${builtIn ? `<div class="meta">${t("modal.addStep.agentBuiltin")} <code>${escapeHtml(builtIn)}</code></div>` : ""}
+          <input type="text" class="step-agent-cmd" data-i="${i}" value="${escapeHtml(row.command || "")}" placeholder="${escapeHtml(commandPlaceholder)}" style="width:100%;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;">
         </div>`;
       }).join("");
       $("addStepAgents").innerHTML = rowsHtml;

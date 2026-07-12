@@ -190,6 +190,8 @@ class PackagingTests(unittest.TestCase):
         # Steps assign their own Agent, with a per-agent command under each row.
         self.assertIn('id="addStepAgents"', html)
         self.assertIn("step-agent-cmd", html)
+        self.assertIn("const commandPlaceholder = builtIn", html)
+        self.assertNotIn('<code>${escapeHtml(builtIn)}</code>', html)
         self.assertIn("function selectedAgentCommands()", html)
         self.assertNotIn('id="setDefaultCommand"', html)
         self.assertNotIn('id="setSubtaskAgents"', html)
