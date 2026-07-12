@@ -1641,6 +1641,35 @@ class RerunTests(unittest.TestCase):
             self.assertIn("keyboard placement missing", job["upstream_result"])
             self.assertEqual("assigned", h.task(task_id)["task_status"])
 
+    def test_budget_resume_updates_goal_and_redispatches_frozen_step(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, bindings=self._bindings())
+            goal_id = h.create_task(title="budgeted goal")
+            task_id = h.create_task(title="frozen subtask")
+            h.store.update_task_metadata(goal_id, is_goal=True, token_budget=500)
+            h.store._conn.execute(
+                "UPDATE tasks SET parent_task_id = ?, status = 'blocked', workflow_step = 'implement' WHERE id = ?",
+                (goal_id, task_id),
+            )
+            h.store.set_task_workflow_state(goal_id, task_status="stalled")
+            h.store.record_task_transition(
+                task_id, "", "implement", "workflow", "blocked",
+                "goal token budget exceeded; dispatch frozen",
+            )
+            run = h.store.create_task_run(task_id, worker="codex", status="running")
+            h.store.finish_task_run(run["id"], "succeeded", 0, 600)
+
+            result = server.resume_goal_after_budget_increase(
+                h.store, tmp, goal_id, 1_000
+            )
+
+            self.assertEqual(goal_id, result["goal_id"])
+            self.assertEqual("implement", result["step"])
+            self.assertEqual(1_000, h.task(goal_id)["token_budget"])
+            self.assertEqual("running", h.task(goal_id)["task_status"])
+            self.assertEqual("assigned", h.task(task_id)["task_status"])
+            self.assertEqual("implement", h.store.get_run_job(result["queued_job_id"])["step"])
+
 
 class MarkTaskRunningTests(unittest.TestCase):
     def _set_status(self, store, task_id, status):

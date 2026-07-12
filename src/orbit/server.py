@@ -2239,12 +2239,24 @@ def reimplement_workflow_task(
     blocked = next(
         (t for t in reversed(transitions) if t["outcome"] == "blocked"), None
     )
-    if not blocked or not (blocked.get("note") or "").startswith("rework limit reached"):
+    rework_cap = next(
+        (
+            t for t in reversed(transitions)
+            if t["outcome"] == "blocked"
+            and (t.get("note") or "").startswith("rework limit reached")
+        ),
+        None,
+    )
+    latest_note = (blocked or {}).get("note") or ""
+    if not rework_cap or not (
+        latest_note.startswith("rework limit reached")
+        or latest_note.startswith("goal token budget exceeded")
+    ):
         raise InvalidInputError("task is not blocked by the rework limit")
     # At the cap the engine records the rejected review as the detail after
     # the semicolon on the blocking transition (rather than a separate rework
     # transition), so prefer that most recent verdict.
-    feedback_text = (blocked.get("note") or "").partition("; ")[2].strip()
+    feedback_text = (rework_cap.get("note") or "").partition("; ")[2].strip()
     if not feedback_text:
         feedback = next(
             (
@@ -2262,6 +2274,63 @@ def reimplement_workflow_task(
     return rerun_workflow_step(
         store, project_root, task_id, agent, step="implement", context=context
     )
+
+
+def resume_goal_after_budget_increase(
+    store: Store, project_root: str | None, goal_id: int, token_budget: Any
+) -> dict[str, Any]:
+    """Raise a frozen goal's budget and resume its latest blocked dispatch."""
+    goal = store.get_task(goal_id)
+    if not goal or not goal.get("is_goal"):
+        raise InvalidInputError(f"unknown goal: {goal_id}")
+    budget = _coerce_token_budget(token_budget)
+    total = store.sum_goal_tokens(goal_id)
+    if budget and budget <= total:
+        raise InvalidInputError(
+            f"new token budget must exceed current usage ({total}), or be 0 for unlimited"
+        )
+
+    descendants: list[dict[str, Any]] = []
+    pending = [goal]
+    while pending:
+        current = pending.pop()
+        descendants.append(current)
+        pending.extend(store.list_tasks_by_parent(current["id"]))
+    frozen: tuple[int, dict[str, Any], dict[str, Any]] | None = None
+    for task in descendants:
+        for transition in store.list_task_transitions(task["id"]):
+            if (
+                transition["outcome"] == "blocked"
+                and (transition.get("note") or "").startswith("goal token budget exceeded")
+            ):
+                candidate = (int(transition["id"]), task, transition)
+                if frozen is None or candidate[0] > frozen[0]:
+                    frozen = candidate
+    if frozen is None:
+        raise InvalidInputError("no budget-frozen workflow step is available to resume")
+
+    _, task, transition = frozen
+    step_id = transition.get("to_step") or transition.get("from_step")
+    cfg = read_workflow_config(project_root)
+    steps = {step["id"]: step for step in cfg["steps"]}
+    step = steps.get(step_id)
+    if not step:
+        raise InvalidInputError(f"frozen step {step_id!r} is no longer in the workflow")
+    transitions = store.list_task_transitions(task["id"])
+    agent = _step_round_robin_assignee(store, step, transitions)
+    store.update_task_metadata(goal_id, token_budget=budget)
+    if step_id == "implement" and any(
+        t["outcome"] == "blocked"
+        and (t.get("note") or "").startswith("rework limit reached")
+        for t in transitions
+    ):
+        resumed = reimplement_workflow_task(store, project_root, task["id"], agent)
+    else:
+        resumed = rerun_workflow_step(
+            store, project_root, task["id"], agent, step=step_id
+        )
+    store.set_task_workflow_state(goal_id, task_status="running")
+    return {**resumed, "goal_id": goal_id, "token_budget": budget, "tokens_total": total}
 
 
 def force_close_goal(
@@ -5204,6 +5273,11 @@ def create_server(
             store, current_project.get("project_root"), task_id, agent
         )
 
+    def _engine_resume_goal_budget(goal_id: int, token_budget: Any) -> dict:
+        return resume_goal_after_budget_increase(
+            store, current_project.get("project_root"), goal_id, token_budget
+        )
+
     def _engine_force_close(task_id: int) -> dict:
         return force_close_goal(
             store, current_project.get("project_root"), task_id
@@ -5514,6 +5588,23 @@ def create_server(
         except Exception as exc:
             traceback.print_exc()
             return _json_error(f"goal creation failed: {exc!r}", 500, request)
+        return _json(request, result)
+
+    @route("/api/goals/{goal_id:int}/resume-budget", methods=["POST"])
+    async def api_resume_goal_budget(request: Request) -> JSONResponse:
+        if forbidden := _forbid_non_local(request):
+            return forbidden
+        goal_id = int(request.path_params["goal_id"])
+        data = await _read_json(request)
+        try:
+            result = await _to_thread(
+                _engine_resume_goal_budget, goal_id, data.get("token_budget")
+            )
+        except (InvalidInputError, UnknownAgentError) as exc:
+            return _json_error(str(exc), request=request)
+        except Exception as exc:
+            traceback.print_exc()
+            return _json_error(f"goal budget resume failed: {exc!r}", 500, request)
         return _json(request, result)
 
     @route("/api/messages", methods=["POST"])

@@ -1537,6 +1537,9 @@
         "goal.tokensTitle": "Tokens consumed across this goal's runs (only counts runners that report usage)",
         "goal.budgetChip": "budget {0}M", "goal.budgetChipTitle": "This goal's hard token ceiling (millions); dispatch freezes once used tokens exceed it",
         "goal.budgetExceeded": "Token budget exceeded — dispatch is frozen. Used {0}; budget {1}; over by {2}. Increase the goal budget or set it to 0 (unlimited), then re-run the blocked step.",
+        "goal.budgetResumeLabel": "New budget (M)", "goal.budgetResumeBtn": "Resume execution",
+        "goal.budgetInvalid": "Enter a non-negative token budget.",
+        "goal.budgetResumed": "Goal #{0} budget updated; resumed step \"{1}\" with {2}",
         "goal.done": "{0}/{1} done", "goal.blocked": "{0} blocked", "goal.tokens": "🔢 {0} tokens",
         "goal.stepProgress": "⚙ {0}% steps",
         "goal.stepProgressTitle": "Step progress: settled step cells (work items × workflow steps) over the whole grid; rework can move it backwards",
@@ -1659,6 +1662,9 @@
         "goal.tokensTitle": "该目标所有运行消耗的 tokens（仅统计上报用量的 runner）",
         "goal.budgetChip": "预算 {0}M", "goal.budgetChipTitle": "本目标的 token 硬上限（百万）；用量超出后冻结派发",
         "goal.budgetExceeded": "Token 预算已超限，后续派发已冻结。已用 {0}；预算 {1}；超出 {2}。请提高目标预算或设为 0（不限额），然后重新运行被阻塞的步骤。",
+        "goal.budgetResumeLabel": "新预算（M）", "goal.budgetResumeBtn": "恢复执行",
+        "goal.budgetInvalid": "请输入非负的 token 预算。",
+        "goal.budgetResumed": "目标 #{0} 的预算已更新；已用 {2} 恢复步骤“{1}”。",
         "goal.done": "{0}/{1} 已完成", "goal.blocked": "{0} 已阻塞", "goal.tokens": "🔢 {0} tokens",
         "goal.stepProgress": "⚙ 步骤进度 {0}%",
         "goal.stepProgressTitle": "步骤进度：已完成的步骤格（工作项 × 工作流步骤）占整个矩阵的比例；返工会使其回退",
@@ -3130,6 +3136,24 @@
       renderTasks();  // the current goal drives the single-goal execution board
     }
 
+    async function resumeGoalBudget(goalId) {
+      const input = $(`goalBudgetResume-${goalId}`);
+      const millions = input ? Number(input.value) : NaN;
+      if (!Number.isFinite(millions) || millions < 0) {
+        setStatus(t("goal.budgetInvalid"), true);
+        return;
+      }
+      await run(async () => {
+        const data = await api(`/api/goals/${goalId}/resume-budget`, {
+          method: "POST",
+          body: JSON.stringify({ token_budget: Math.round(millions * 1e6) })
+        });
+        setStatus(t("goal.budgetResumed", goalId, data.step, data.assignee));
+        await loadGoals();
+        await loadTasks();
+      });
+    }
+
     function goalProgressHtml(goal) {
       const tokens = goal.tokens_total
         ? ` · <span class="meta" title="${escapeHtml(t("goal.tokensTitle"))}">🔢 ${goal.tokens_total.toLocaleString()} tokens</span>`
@@ -3170,7 +3194,15 @@
 
     function goalBudgetAlertHtml(goal) {
       if (!goal.budget_exceeded) return "";
-      return `<div class="goal-budget-alert" role="alert"><strong>⚠ ${escapeHtml(t("goal.budgetExceeded", goal.tokens_total.toLocaleString(), goal.token_budget.toLocaleString(), goal.budget_overage.toLocaleString()))}</strong></div>`;
+      const minimum = Math.ceil(goal.tokens_total / 1e6);
+      return `<div class="goal-budget-alert" role="alert">
+        <strong>⚠ ${escapeHtml(t("goal.budgetExceeded", goal.tokens_total.toLocaleString(), goal.token_budget.toLocaleString(), goal.budget_overage.toLocaleString()))}</strong>
+        <div class="row" style="gap: 6px; margin-top: 8px;">
+          <label class="meta" for="goalBudgetResume-${goal.id}">${escapeHtml(t("goal.budgetResumeLabel"))}</label>
+          <input id="goalBudgetResume-${goal.id}" type="number" min="0" step="1" value="${minimum}" style="width:90px;">
+          <button type="button" class="primary" onclick="event.stopPropagation(); resumeGoalBudget(${goal.id})">${escapeHtml(t("goal.budgetResumeBtn"))}</button>
+        </div>
+      </div>`;
     }
 
     function workflowStepName(stepId, fallback) {

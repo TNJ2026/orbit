@@ -142,6 +142,8 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("/api/tasks/${taskId}/reimplement", html)
         self.assertIn("function goalBudgetAlertHtml(goal)", html)
         self.assertIn("goal.budgetExceeded", html)
+        self.assertIn("function resumeGoalBudget(goalId)", html)
+        self.assertIn("/api/goals/${goalId}/resume-budget", html)
         self.assertNotIn("function createTaskRun(taskId)", html)
         self.assertIn("function renderTaskRuns()", html)
         self.assertIn("function renderWorkflow()", html)
