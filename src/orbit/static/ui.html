@@ -574,6 +574,16 @@
       cursor: pointer;
     }
     .goal-card:hover { background: #f4f7f5; }
+    .goal-budget-alert {
+      margin-top: 9px;
+      padding: 8px 10px;
+      border: 1px solid #df8b7b;
+      border-radius: 6px;
+      background: #fff0ed;
+      color: #8d2c22;
+      font-size: 12px;
+      line-height: 1.4;
+    }
     .goal-analyzing {
       display: inline-flex;
       align-items: center;
@@ -1526,6 +1536,7 @@
         "goal.phases": "Goal phases",
         "goal.tokensTitle": "Tokens consumed across this goal's runs (only counts runners that report usage)",
         "goal.budgetChip": "budget {0}M", "goal.budgetChipTitle": "This goal's hard token ceiling (millions); dispatch freezes once used tokens exceed it",
+        "goal.budgetExceeded": "Token budget exceeded — dispatch is frozen. Used {0}; budget {1}; over by {2}. Increase the goal budget or set it to 0 (unlimited), then re-run the blocked step.",
         "goal.done": "{0}/{1} done", "goal.blocked": "{0} blocked", "goal.tokens": "🔢 {0} tokens",
         "goal.stepProgress": "⚙ {0}% steps",
         "goal.stepProgressTitle": "Step progress: settled step cells (work items × workflow steps) over the whole grid; rework can move it backwards",
@@ -1647,6 +1658,7 @@
         "goal.phases": "目标阶段",
         "goal.tokensTitle": "该目标所有运行消耗的 tokens（仅统计上报用量的 runner）",
         "goal.budgetChip": "预算 {0}M", "goal.budgetChipTitle": "本目标的 token 硬上限（百万）；用量超出后冻结派发",
+        "goal.budgetExceeded": "Token 预算已超限，后续派发已冻结。已用 {0}；预算 {1}；超出 {2}。请提高目标预算或设为 0（不限额），然后重新运行被阻塞的步骤。",
         "goal.done": "{0}/{1} 已完成", "goal.blocked": "{0} 已阻塞", "goal.tokens": "🔢 {0} tokens",
         "goal.stepProgress": "⚙ 步骤进度 {0}%",
         "goal.stepProgressTitle": "步骤进度：已完成的步骤格（工作项 × 工作流步骤）占整个矩阵的比例；返工会使其回退",
@@ -3156,6 +3168,11 @@
         <div class="goal-progress"><div class="goal-progress-fill" style="width: ${sp ? sp.pct : pct}%"></div></div>`;
     }
 
+    function goalBudgetAlertHtml(goal) {
+      if (!goal.budget_exceeded) return "";
+      return `<div class="goal-budget-alert" role="alert"><strong>⚠ ${escapeHtml(t("goal.budgetExceeded", goal.tokens_total.toLocaleString(), goal.token_budget.toLocaleString(), goal.budget_overage.toLocaleString()))}</strong></div>`;
+    }
+
     function workflowStepName(stepId, fallback) {
       const step = (state.workflow.steps || []).find(item => item.id === stepId);
       return (step && step.name) || fallback || stepId;
@@ -3195,6 +3212,7 @@
           </div>
           ${goal.workflow_step ? `<div class="meta">⚙ ${escapeHtml(workflowStepName(goal.workflow_step))} · ${escapeHtml(goal.assignee || "")}</div>` : ""}
           ${goalProgressHtml(goal)}
+          ${goalBudgetAlertHtml(goal)}
           ${goalStepsHtml(goal)}
           ${goal.subtasks.length ? `
             <div class="goal-subtasks">

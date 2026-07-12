@@ -2344,6 +2344,23 @@ class TokenStatsTests(unittest.TestCase):
             h.store.finish_task_run(r2["id"], "succeeded", 0, 250)
             goals = {x["id"]: x for x in server.goals_summary(h.store)}
             self.assertEqual(1250, goals[g]["tokens_total"])
+            self.assertFalse(goals[g]["budget_exceeded"])
+            self.assertEqual(0, goals[g]["budget_overage"])
+
+    def test_goal_summary_marks_exceeded_token_budget(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            goal_id = h.create_task(title="budgeted goal")
+            h.store.update_task_metadata(
+                goal_id, is_goal=True, token_budget=1_000
+            )
+            run = h.store.create_task_run(goal_id, worker="codex", status="running")
+            h.store.finish_task_run(run["id"], "succeeded", 0, 1_250)
+
+            [goal] = server.goals_summary(h.store)
+
+            self.assertTrue(goal["budget_exceeded"])
+            self.assertEqual(250, goal["budget_overage"])
 
 
 class DecomposeStepTests(unittest.TestCase):

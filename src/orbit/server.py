@@ -836,6 +836,8 @@ def goals_summary(
     for task in tasks:
         if not task.get("is_goal"):
             continue
+        tokens_total = store.sum_goal_tokens(task["id"])
+        token_budget = _coerce_token_budget(task.get("token_budget"))
         subs = [
             child for child in children.get(task["id"], [])
             if child.get("source_message_id") is not None
@@ -849,7 +851,9 @@ def goals_summary(
             "subtask_total": len(subs),
             "subtask_closed": sum(1 for s in subs if s["task_status"] == "closed"),
             "subtask_blocked": sum(1 for s in subs if s["task_status"] == "blocked"),
-            "tokens_total": store.sum_goal_tokens(task["id"]),
+            "tokens_total": tokens_total,
+            "budget_exceeded": bool(token_budget and tokens_total > token_budget),
+            "budget_overage": max(0, tokens_total - token_budget) if token_budget else 0,
             "steps": [
                 {
                     "id": step["id"],
