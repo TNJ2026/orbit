@@ -1349,7 +1349,8 @@
     <div id="workflowPage" class="page workflow-page">
       <div class="pane-head">
         <h2 data-i18n="workflow.title">Workflow</h2>
-        <div class="row">
+        <div class="row" style="gap: 6px;">
+          <button id="resetWorkflow" type="button" data-i18n="workflow.reset" data-i18n-title="workflow.resetHint" title="Overwrite this project's workflow with the default flow, with no Agents set on any step.">Restore defaults</button>
           <button id="refreshWorkflow" type="button" data-i18n="workflow.refresh">Refresh</button>
         </div>
       </div>
@@ -1495,6 +1496,10 @@
         "tasks.close": "×",
         "agents.title": "Agents", "agents.refresh": "Refresh",
         "workflow.title": "Workflow", "workflow.refresh": "Refresh",
+        "workflow.reset": "Restore defaults",
+        "workflow.resetHint": "Overwrite this project's workflow with the default flow, with no Agents set on any step. Does not touch other projects or the packaged template.",
+        "workflow.resetConfirm": "Reset this project's workflow to the default flow? All step Agents, commands, prompts, and edits are discarded (other projects are unaffected).",
+        "workflow.resetDone": "Workflow reset to defaults — assign Agents before starting a goal",
         "error.title": "⚠ Error", "error.ok": "OK",
         "action.close": "Close",
         "modal.addStep.title": "Add workflow step", "modal.addStep.editTitle": "Edit step",
@@ -1629,6 +1634,10 @@
         "tasks.close": "×",
         "agents.title": "Agents", "agents.refresh": "刷新",
         "workflow.title": "工作流", "workflow.refresh": "刷新",
+        "workflow.reset": "恢复默认",
+        "workflow.resetHint": "把本项目的工作流覆盖为默认流程，且所有步骤都不设 Agent。不影响其它项目或打包模版。",
+        "workflow.resetConfirm": "把本项目工作流重置为默认流程？所有步骤的 Agent、命令、Prompt 和改动都会丢弃（其它项目不受影响）。",
+        "workflow.resetDone": "工作流已重置为默认 —— 启动 goal 前请先分配 Agent",
         "error.title": "⚠ 错误", "error.ok": "确定",
         "action.close": "关闭",
         "modal.addStep.title": "添加工作流步骤", "modal.addStep.editTitle": "编辑步骤",
@@ -2565,6 +2574,23 @@
       };
       renderWorkflow();
       await loadTasks();
+    }
+
+    async function resetWorkflow() {
+      if (!confirm(t("workflow.resetConfirm"))) return;
+      await run(async () => {
+        const data = await api("/api/workflow/reset", { method: "POST", body: JSON.stringify({}) });
+        state.workflow = {
+          steps: data.steps || [],
+          statuses: data.statuses || [],
+          edges: data.edges || [],
+          path: data.path || "",
+          warnings: data.warnings || [],
+        };
+        renderWorkflow();
+        await loadTasks();
+        setStatus(t("workflow.resetDone"));
+      });
     }
 
     // The step modal serves both adding a new step (the Add-step toolbar tool)
@@ -3674,6 +3700,7 @@
     }
     wireRefresh("refreshTools", async () => { await loadProjects(); await loadStatus(); await loadTools(); });
     wireRefresh("refreshWorkflow", async () => { await loadTasks(); await loadWorkflow(); });
+    $("resetWorkflow").addEventListener("click", resetWorkflow);
     wireRefresh("refreshTasks", loadTasks);
     $("healthCheck").addEventListener("click", runHealthCheck);
     wireRefresh("refreshGoals", loadGoals);

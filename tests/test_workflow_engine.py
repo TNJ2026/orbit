@@ -554,6 +554,20 @@ class WorkflowEngineTests(unittest.TestCase):
             h.complete("hub-agent", task_id, "intake", "blocked", "waiting")
             self.assertIsNone(server.workflow_locked_reason(h.store))
 
+    def test_workflow_config_stays_locked_for_blocked_goal(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            goal_id = h.create_task(title="blocked goal")
+            h.store.update_task_metadata(goal_id, is_goal=True)
+            h.start(goal_id)
+
+            self.assertIn(f"#{goal_id}", server.workflow_locked_reason(h.store))
+            h.complete("hub-agent", goal_id, "intake", "blocked", "waiting")
+            self.assertIn(f"#{goal_id}", server.workflow_locked_reason(h.store))
+
+            server.force_close_goal(h.store, tmp, goal_id)
+            self.assertIsNone(server.workflow_locked_reason(h.store))
+
     def test_only_one_goal_can_run_at_a_time(self):
         with TemporaryDirectory() as tmp:
             h = EngineHarness(tmp)

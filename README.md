@@ -276,9 +276,16 @@ All are local-only APIs. Background-loop failures are logged and summarized in
 `GET /api/status` under `background_errors` (failure count, latest time, and
 error summary).
 
+Workflow edits, including **Restore defaults**, are locked from the moment a
+Goal starts until it reaches `accepted`/`closed` (including blocked or stalled
+Goals). Finish or Force End the Goal before changing its graph, so recovery
+actions always retain the step definitions they need.
+
 ### Design-first & the `decompose` step
 
 Where a goal splits into subtasks is set by the step flagged `decompose: true`. The default workflow uses the `decompose` step, so the goal itself runs the design steps once (`intake → product_design → ui_design → architecture → decompose`), then Decompose emits the subtask JSON using the design output as context. Each subtask begins at the decompose step's successors (`implement` onward), inheriting that output — so the design steps run **once** on the goal, not per subtask, and subtasks partition cleanly by the architecture's modules.
+
+**Decompose does not necessarily produce multiple tasks.** It always emits **at least one** subtask (an empty task list blocks the step), but the split count is the agent's judgment: a small or cohesive goal can come back as a **single** subtask — that is still a work item that runs the `implement`-onward steps, just with no parallelism. So keeping the `decompose` step means every goal gets ≥1 subtask (and at minimum the extra Decompose LLM call), whether or not the work actually splits. To run a goal with **no** subtasks at all — the goal itself traverses the whole workflow — remove the `decompose` flag (below), don't rely on Decompose to "not split".
 
 Move the split by flagging a different step in `.orbit/workflow.json`. With **no** `decompose` flag, the goal does not create work items: it traverses the complete workflow itself, which is useful for research, approval, publishing, and other single-subject processes. The flag is config-only (edit the JSON, same as `isolate`/`integrate`); a decompose step is auto-required, never isolated, and must have a forward successor for its work items to start at.
 

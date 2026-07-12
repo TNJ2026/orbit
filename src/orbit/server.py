@@ -925,6 +925,14 @@ def active_goal_conflict_reason(
 
 
 def workflow_locked_reason(store: Store) -> str | None:
+    # A blocked/stalled goal can still be resumed, re-run, or re-implemented.
+    # Changing its graph underneath it would strand transitions that reference
+    # the old steps, so workflow writes stay locked until the goal is terminal.
+    if goal_reason := active_goal_conflict_reason(store):
+        return (
+            "workflow config is locked while a goal is active; finish or force-end "
+            f"it before editing the workflow ({goal_reason})"
+        )
     busy = _active_workflow_task_ids(store)
     if not busy:
         return None
@@ -5624,6 +5632,24 @@ def create_server(
             )
         except InvalidInputError as exc:
             return _json_error(str(exc), request=request)
+        return _json(request, {"success": True, **workflow})
+
+    @route("/api/workflow/reset", methods=["POST"])
+    async def api_reset_workflow(request: Request) -> JSONResponse:
+        # Overwrite the project's workflow with the packaged default flow, with no
+        # Agents on any step (the default already carries none). The template in
+        # code is untouched — this only rewrites this project's .orbit/workflow.json.
+        if forbidden := _forbid_non_local(request):
+            return forbidden
+        locked = await _to_thread(workflow_locked_reason, store)
+        if locked:
+            return _json_error(locked, 409, request)
+        workflow = await _to_thread(
+            write_workflow_config,
+            default_workflow_steps(),
+            current_project.get("project_root"),
+            default_workflow_edges(),
+        )
         return _json(request, {"success": True, **workflow})
 
     @route("/api/settings", methods=["GET"])

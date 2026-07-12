@@ -265,9 +265,15 @@ POST /api/health-check                  {}
 这些 API 只接受本机请求。后台循环失败会记录到服务日志，`GET /api/status` 的
 `background_errors` 会给出失败次数、最近时间和错误摘要。
 
+Goal 一旦启动，到达 `accepted`/`closed` 前（包括 `blocked` 或 `stalled`）都不能
+编辑工作流，也不能使用**恢复默认**。请先完成或 Force End 该 Goal，再修改流程图；这样
+恢复操作始终能找到原先步骤的定义。
+
 ### 设计优先与 `decompose` 步
 
 goal 在哪一步拆成子任务，由打了 `decompose: true` 的步骤决定。默认由 `decompose` 结合上游设计产出生成子任务 JSON；每个子任务从其后继步骤（`implement` 起）开始并继承该产出，因此设计步骤在 goal 层只执行一次。
+
+**Decompose 不一定拆出多个任务。** 它**至少产 1 个**子任务（空任务列表会让该步 blocked），但拆几个由 agent 判断:小的或单一整体的 goal 可能只回一个子任务——那仍是一个走 `implement` 及之后步骤的工作项,只是没有并行。所以只要保留 decompose 步,每个 goal 都会至少得到 1 个子任务(以及至少多一次 Decompose LLM 调用),不管活到底拆没拆。想让 goal **完全不产子任务**(goal 自己走完整流程),要去掉 `decompose` 标记(见下),别指望 Decompose「不拆」。
 
 想换拆解点，就在 `.orbit/workflow.json` 里给别的步打标记。**不打** `decompose` 标记时，goal 不创建工作项，而是自己走完整条工作流；这适合学术研究、审批、出版等单主体流程。该标记只能改 JSON 配置（同 `isolate`/`integrate`）；decompose 步自动 required、从不隔离、且必须有后继步供工作项起跑。
 
