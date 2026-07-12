@@ -145,6 +145,31 @@ orbit serve        # UI + 调度 + 内嵌 Runner，全在一个进程
 `ARTIFACTS: ["路径或 URI", ...]`，分别写入步骤卡的 `result_summary` 和
 `artifacts` API 字段。旧 runner 未输出该协议时，系统会把清理后的原输出作为结果摘要。
 
+### 卡住的工作流如何恢复
+
+在任务的 **Goal Execution** 页面可用以下操作恢复阻塞步骤，无需修改工作流图：
+
+- **Re-implement（重新实现）**：任务因达到返工上限而阻塞时使用。选择一个
+  implementer 后，Orbit 会把最新 review 反馈交给它，并重新派发 `implement`；不会
+  提高或重置项目的返工上限。
+- **Skip step（跳过步骤）**：接受当前产出并沿正常的前向边进入下一步骤。适合无法继续
+  的非结构性 review/test 门禁。运行中的步骤不能跳过；`integrate`、`decompose` 和
+  没有后继的终止步骤也不能跳过。
+- **Check & recover（检查并恢复）**：立即运行 watchdog，重新派发因 runner 死亡或
+  推进中断而遗留的工作；对于超过超时阈值、需要人工处理的步骤会通知 hub。watchdog
+  本身也会后台定期运行；该操作适合刚重启服务后或排查卡住任务时使用。
+
+脚本可调用对应的本机 JSON API：
+
+```text
+POST /api/tasks/{task_id}/reimplement   {"agent": "codex"}
+POST /api/tasks/{task_id}/skip          {"step": "review"}  # step 可省略
+POST /api/health-check                  {}
+```
+
+这些 API 只接受本机请求。后台循环失败会记录到服务日志，`GET /api/status` 的
+`background_errors` 会给出失败次数、最近时间和错误摘要。
+
 ### 设计优先与 `decompose` 步
 
 goal 在哪一步拆成子任务，由打了 `decompose: true` 的步骤决定。默认由 `decompose` 结合上游设计产出生成子任务 JSON；每个子任务从其后继步骤（`implement` 起）开始并继承该产出，因此设计步骤在 goal 层只执行一次。

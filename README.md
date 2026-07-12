@@ -148,6 +148,37 @@ with `RESULT_SUMMARY: ...` and `ARTIFACTS: ["path-or-uri", ...]`. These become t
 step card's `result_summary` and `artifacts` API fields. Older runner output is
 kept compatible by falling back to the cleaned output as the result summary.
 
+### Recovering a stalled workflow
+
+Use the controls in a task's **Goal Execution** view to recover a blocked step
+without changing the workflow graph:
+
+- **Re-implement** is for a task stopped because it reached the rework limit.
+  Choose an implementer and Orbit sends that agent the latest review feedback,
+  then re-runs `implement`. It does not raise or reset the project's rework
+  limit.
+- **Skip step** accepts the current output and advances to the step's normal
+  forward successor. It is useful when a non-structural review/test gate cannot
+  make progress. A running step cannot be skipped; `integrate`, `decompose`,
+  and terminal steps cannot be skipped.
+- **Check & recover** runs the watchdog immediately. It re-dispatches work left
+  by a dead runner or an interrupted advance, and notifies the hub about steps
+  past their timeout that require human intervention. The same watchdog runs in
+  the background, but this control is useful right after a restart or while
+  investigating a stuck task.
+
+For local automation, the corresponding JSON endpoints are:
+
+```text
+POST /api/tasks/{task_id}/reimplement   {"agent": "codex"}
+POST /api/tasks/{task_id}/skip          {"step": "review"}  # step is optional
+POST /api/health-check                  {}
+```
+
+All are local-only APIs. Background-loop failures are logged and summarized in
+`GET /api/status` under `background_errors` (failure count, latest time, and
+error summary).
+
 ### Design-first & the `decompose` step
 
 Where a goal splits into subtasks is set by the step flagged `decompose: true`. The default workflow uses the `decompose` step, so the goal itself runs the design steps once (`intake → product_design → ui_design → architecture → decompose`), then Decompose emits the subtask JSON using the design output as context. Each subtask begins at the decompose step's successors (`implement` onward), inheriting that output — so the design steps run **once** on the goal, not per subtask, and subtasks partition cleanly by the architecture's modules.
