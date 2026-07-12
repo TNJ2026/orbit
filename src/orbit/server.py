@@ -3166,6 +3166,25 @@ _HERMES_COMMAND_RE = re.compile(r"(?:^|[\s/;&|(])hermes(?:\s|$)")
 _OPENCODE_COMMAND_RE = re.compile(r"(?:^|[\s/;&|(])opencode(?:\s|$)")
 
 
+def _sqlite_ro_uri(db_path: Path) -> str:
+    """Read-only SQLite URI for a path, valid on every platform. Path.as_uri()
+    yields `file:///C:/...` on Windows (a bare `file:C:\\...` is not a valid URI)
+    and `file:///...` on POSIX."""
+    return f"{db_path.as_uri()}?mode=ro"
+
+
+def _path_match_keys(exec_dir: str | Path) -> set[str]:
+    """Normalized keys for correlating a run's workspace to a stored cwd. Uses
+    os.path.normcase, so matching is case-insensitive and separator-normalized on
+    Windows and an exact identity on POSIX."""
+    raw = str(exec_dir)
+    try:
+        real = os.path.realpath(raw)
+    except OSError:
+        real = raw
+    return {os.path.normcase(real), os.path.normcase(raw)}
+
+
 def _pb_read_varint(buf: bytes, pos: int) -> tuple[int, int | None]:
     result = shift = 0
     n = len(buf)
@@ -3265,13 +3284,13 @@ def _antigravity_conversations_dir() -> Path:
 
 
 def _antigravity_conversation_usage(
-    db_path: Path, workspace_bytes: bytes | None
+    db_path: Path, workspace_keys: set[str] | None
 ) -> tuple[int | None, list[tuple[str | None, int]], bool]:
     """(created_ms, [(responseId, tokens), ...], mentions_workspace) for one db.
-    mentions_workspace is whether workspace_bytes appears in a step blob (the CLI
-    records its cwd there); True when workspace_bytes is None (no filter)."""
+    mentions_workspace is whether one of workspace_keys appears in a step blob (the
+    CLI records its cwd there); True when workspace_keys is None (no filter)."""
     try:
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=1.0)
+        conn = sqlite3.connect(_sqlite_ro_uri(db_path), uri=True, timeout=1.0)
     except sqlite3.Error:
         return None, [], False
     try:
@@ -3291,15 +3310,19 @@ def _antigravity_conversation_usage(
             if parsed is not None:
                 rows.append(parsed)
         mentions = True
-        if workspace_bytes is not None:
+        if workspace_keys is not None:
             mentions = False
             for step_payload, metadata in conn.execute(
                 "SELECT step_payload, metadata FROM steps"
             ):
-                if (step_payload and workspace_bytes in step_payload) or (
-                    metadata and workspace_bytes in metadata
-                ):
-                    mentions = True
+                for blob in (step_payload, metadata):
+                    if not blob:
+                        continue
+                    hay = os.path.normcase(blob.decode("utf-8", "replace"))
+                    if any(key in hay for key in workspace_keys):
+                        mentions = True
+                        break
+                if mentions:
                     break
         return created_ms, rows, mentions
     except sqlite3.Error:
@@ -3316,10 +3339,7 @@ def _antigravity_run_tokens(
     convs = _antigravity_conversations_dir()
     if not convs.is_dir():
         return None
-    try:
-        workspace_bytes = os.path.realpath(str(exec_dir)).encode("utf-8")
-    except OSError:
-        return None
+    workspace_keys = _path_match_keys(exec_dir)
     lo = start_ms - _LOCAL_STORE_CORRELATION_BUFFER_MS
     hi = end_ms + _LOCAL_STORE_CORRELATION_BUFFER_MS
     # Only attribute conversations that record this run's workspace path (the CLI
@@ -3337,7 +3357,7 @@ def _antigravity_run_tokens(
         if mtime_ms < lo:  # finished before the window — cheap skip
             continue
         try:
-            created_ms, rows, mentions = _antigravity_conversation_usage(db, workspace_bytes)
+            created_ms, rows, mentions = _antigravity_conversation_usage(db, workspace_keys)
         except Exception:
             continue
         if not mentions or not rows:
@@ -3383,31 +3403,29 @@ def _hermes_run_tokens(exec_dir: str | Path, start_ms: int, end_ms: int) -> int 
     db = _hermes_state_db()
     if not db.is_file():
         return None
-    try:
-        workspace = os.path.realpath(str(exec_dir))
-    except OSError:
-        return None
+    keys = _path_match_keys(exec_dir)
     lo = (start_ms - _LOCAL_STORE_CORRELATION_BUFFER_MS) / 1000.0
     hi = (end_ms + _LOCAL_STORE_CORRELATION_BUFFER_MS) / 1000.0
     cols = ", ".join(f"COALESCE({c}, 0)" for c in _HERMES_TOKEN_COLUMNS)
     try:
-        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=1.0)
+        conn = sqlite3.connect(_sqlite_ro_uri(db), uri=True, timeout=1.0)
     except sqlite3.Error:
         return None
     try:
         total = 0
         for row in conn.execute(
-            f"SELECT started_at, {cols} FROM sessions WHERE cwd = ? OR cwd = ?",
-            (workspace, str(exec_dir)),
+            f"SELECT started_at, cwd, {cols} FROM sessions WHERE cwd IS NOT NULL AND cwd != ''"
         ):
-            started_at = row[0]
+            started_at, cwd = row[0], row[1]
             if not isinstance(started_at, (int, float)):
                 continue
             # started_at is unix seconds (float); tolerate ms just in case.
             secs = started_at / 1000.0 if started_at > 1e12 else started_at
             if not lo <= secs <= hi:
                 continue
-            total += sum(max(0, int(v or 0)) for v in row[1:])
+            if os.path.normcase(str(cwd)) not in keys:
+                continue
+            total += sum(max(0, int(v or 0)) for v in row[2:])
         return total if total > 0 else None
     except sqlite3.Error:
         return None
@@ -3450,15 +3468,11 @@ def _opencode_run_tokens(exec_dir: str | Path, start_ms: int, end_ms: int) -> in
     db = _opencode_db()
     if not db.is_file():
         return None
-    try:
-        workspace = os.path.realpath(str(exec_dir))
-    except OSError:
-        return None
-    raw = str(exec_dir)
+    keys = _path_match_keys(exec_dir)
     lo = start_ms - _LOCAL_STORE_CORRELATION_BUFFER_MS
     hi = end_ms + _LOCAL_STORE_CORRELATION_BUFFER_MS
     try:
-        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=1.0)
+        conn = sqlite3.connect(_sqlite_ro_uri(db), uri=True, timeout=1.0)
     except sqlite3.Error:
         return None
     try:
@@ -3474,9 +3488,9 @@ def _opencode_run_tokens(exec_dir: str | Path, start_ms: int, end_ms: int) -> in
             if not isinstance(data, dict) or data.get("role") != "assistant":
                 continue
             path = data.get("path") if isinstance(data.get("path"), dict) else {}
-            if workspace not in (path.get("cwd"), path.get("root")) and raw not in (
-                path.get("cwd"),
-                path.get("root"),
+            if not any(
+                isinstance(cand, str) and os.path.normcase(cand) in keys
+                for cand in (path.get("cwd"), path.get("root"))
             ):
                 continue
             created = (data.get("time") or {}).get("created")

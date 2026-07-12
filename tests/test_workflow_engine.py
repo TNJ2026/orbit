@@ -2689,6 +2689,24 @@ class TokenStatsTests(unittest.TestCase):
                 else:
                     os.environ["XDG_DATA_HOME"] = old
 
+    def test_sqlite_ro_uri_and_path_match_keys(self):
+        import os
+        import sqlite3
+        from pathlib import Path
+
+        # A path with a space round-trips through the URI (percent-encoded) and
+        # opens read-only, on every platform.
+        with TemporaryDirectory() as d:
+            db = Path(d) / "a b.db"
+            sqlite3.connect(db).close()
+            uri = server._sqlite_ro_uri(db)
+            self.assertTrue(uri.startswith("file://") and uri.endswith("?mode=ro"))
+            sqlite3.connect(uri, uri=True).close()  # must not raise
+
+        # Match keys are normcased (identity on POSIX) and include the raw dir.
+        keys = server._path_match_keys("/tmp/Some/Dir")
+        self.assertIn(os.path.normcase("/tmp/Some/Dir"), keys)
+
     def test_step_prompt_asks_for_tokens(self):
         with TemporaryDirectory() as tmp:
             EngineHarness(tmp)
