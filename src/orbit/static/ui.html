@@ -3523,9 +3523,9 @@
       const reworkLimited = task.task_status === "blocked" &&
         /^rework limit reached\b/i.test(task.blocked_reason || "");
       const approvalStep = (state.workflow.steps || []).find(step =>
-        step.id === task.workflow_step && step.approval
+        step.id === task.workflow_step && step.approval_required
       );
-      const awaitingApproval = !!approvalStep && !["closed", "accepted"].includes(task.task_status);
+      const awaitingApproval = !!approvalStep && task.task_status === "blocked";
       // Tasks that materialize step cards keep their runs on the cards, not the
       // task itself — those are surfaced per step above, so the bottom Runs list
       // (which would be empty or duplicate the expanded step) is suppressed.

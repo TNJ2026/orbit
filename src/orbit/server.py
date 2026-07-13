@@ -995,7 +995,7 @@ WORKFLOW_ENGINE_AGENT = "workflow"
 # In-app recipient for engine blocker/timeout notices. A human or supervising
 # agent registered under this name sees them; if none is, the notice is dropped.
 HUB_NOTIFY_AGENT = "hub"
-WORKFLOW_OUTCOMES = {"done", "rework", "blocked"}
+WORKFLOW_OUTCOMES = {"done", "rework", "blocked", "approval"}
 # How many times a loop-back (rework) target may be re-entered before the engine
 # stops looping and blocks the task for the hub. Prevents review/implement
 # rework from spinning forever when feedback is not being resolved.
@@ -1197,7 +1197,7 @@ def _running_steps(transitions: list[dict[str, Any]]) -> list[str]:
     for t in transitions:
         if t["outcome"] == "dispatched":
             last_dispatch[t["to_step"]] = t["id"]
-        elif t["from_step"] and t["outcome"] in ("done", "rework", "reassigned", "blocked", "skipped"):
+        elif t["from_step"] and t["outcome"] in ("done", "rework", "reassigned", "blocked", "skipped", "approval"):
             last_finish[t["from_step"]] = t["id"]
     return [
         step for step, did in last_dispatch.items()
@@ -2731,6 +2731,23 @@ def _advance_workflow_task_locked(
         e["to"] for e in cfg["edges"]
         if e["from"] == step and (e["from"], e["to"]) in back
     ]
+
+    # Approval is a state of this completed step, not another node in the
+    # graph. The runner has finished, but the step remains active so the hub can
+    # later submit `done` (continue) or `rework` (use its loop-back edge).
+    if outcome == "done" and steps[step].get("approval_required") and agent != HUB_NOTIFY_AGENT:
+        store.record_task_transition(task_id, step, step, agent, "approval", result)
+        store.set_task_workflow_state(task_id, task_status="blocked")
+        _recompute_parent_goal_status(store, task, project_root)
+        return {
+            "task_id": task_id, "step": step, "outcome": "approval",
+            "dispatched": [], "notices": [], "awaiting_approval": True,
+        }
+
+    if outcome == "approval":
+        raise InvalidInputError("approval is an engine-managed step state")
+    if agent == HUB_NOTIFY_AGENT and task.get("task_status") == "blocked":
+        store.set_task_workflow_state(task_id, task_status="in_progress")
 
     if outcome == "blocked":
         store.record_task_transition(task_id, step, step, agent, "blocked", result)
