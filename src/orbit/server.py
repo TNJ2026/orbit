@@ -392,18 +392,17 @@ def default_workflow_steps() -> list[dict[str, Any]]:
         ("product_design", "Product Design", False, False, False, False, False, 340, _DEFAULT_STEP_MID_Y),
         ("ui_design", "UI Design", False, False, False, False, False, 640, _DEFAULT_STEP_MID_Y),
         ("architecture", "Architecture", False, False, False, False, False, 940, _DEFAULT_STEP_MID_Y),
-        ("approval", "Approval", True, False, False, False, True, 1240, _DEFAULT_STEP_MID_Y),
         # decompose: the decomposition gate. Architecture feeds it, and this step
         # splits the goal into subtasks that begin at implement.
-        ("decompose", "Decompose", True, False, False, True, False, 1540, _DEFAULT_STEP_MID_Y),
-        ("implement", "Implement", True, True, False, False, False, 1840, _DEFAULT_STEP_MID_Y),
+        ("decompose", "Decompose", True, False, False, True, False, 1240, _DEFAULT_STEP_MID_Y),
+        ("implement", "Implement", True, True, False, False, False, 1540, _DEFAULT_STEP_MID_Y),
         # review runs before test: a human/agent review first, then test is the
         # mandatory machine-verification gate. Set test's `verify` command (e.g.
         # the project's test suite) so a failing run objectively sends the task
         # back to implement instead of trusting a self-report.
-        ("review", "Review", True, True, False, False, False, 2140, _DEFAULT_STEP_MID_Y),
-        ("test", "Test", False, True, False, False, False, 2440, _DEFAULT_STEP_MID_Y),
-        ("integrate", "Integrate", True, False, True, False, False, 2740, _DEFAULT_STEP_MID_Y),
+        ("review", "Review", True, True, False, False, False, 1840, _DEFAULT_STEP_MID_Y),
+        ("test", "Test", False, True, False, False, False, 2140, _DEFAULT_STEP_MID_Y),
+        ("integrate", "Integrate", True, False, True, False, False, 2440, _DEFAULT_STEP_MID_Y),
     ]
     return [
         {
@@ -435,9 +434,7 @@ def default_workflow_edges() -> list[dict[str, str]]:
         {"from": "intake", "to": "product_design"},
         {"from": "product_design", "to": "ui_design"},      # design chain
         {"from": "ui_design", "to": "architecture"},        # UI first, then arch
-        {"from": "architecture", "to": "approval"},         # human design sign-off
-        {"from": "approval", "to": "decompose"},             # approved -> split work
-        {"from": "approval", "to": "architecture", "rework": True},
+        {"from": "architecture", "to": "decompose"},        # design -> split work
         {"from": "decompose", "to": "implement"},           # split: subtasks start here
         {"from": "implement", "to": "review"},              # review first
         {"from": "review", "to": "test"},                   # then the verify gate
@@ -451,6 +448,7 @@ def default_workflow_edges() -> list[dict[str, str]]:
 # Only these steps may list more than one Agent (round-robin). Every other step
 # takes a single Agent, so the UI hides their add-Agent (+) button.
 _MULTI_AGENT_STEP_IDS = {"implement", "review", "test"}
+_APPROVAL_CAPABLE_STEP_IDS = {"product_design", "ui_design", "architecture", "decompose"}
 
 
 def _normalize_agents(step: dict[str, Any]) -> list[str]:
@@ -565,6 +563,10 @@ def _normalize_workflow_step(
         "integrate": bool(step.get("integrate", False)),
         "decompose": decompose,
         "approval": approval,
+        # Human approval belongs to the preceding step's completion state, never
+        # to a separate workflow node. Only the design/decompose stages expose it.
+        "approval_required": bool(step.get("approval_required", False))
+        if step_id in _APPROVAL_CAPABLE_STEP_IDS else False,
         # User-authored instructions for this step. They refine the generated
         # step contract but never replace the engine-owned output protocol.
         "prompt": raw_prompt.strip(),

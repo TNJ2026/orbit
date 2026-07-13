@@ -141,9 +141,11 @@ class WorkflowSchemaTests(unittest.TestCase):
 
     def test_default_step_prompts_are_populated_and_clearable(self):
         steps = server.default_workflow_steps()
-        self.assertEqual(
-            {step["id"] for step in steps}, set(server.DEFAULT_STEP_PROMPTS)
+        self.assertTrue(
+            {step["id"] for step in steps}.issubset(server.DEFAULT_STEP_PROMPTS)
         )
+        self.assertNotIn("approval", {step["id"] for step in steps})
+        self.assertTrue(all(not step.get("approval_required") for step in steps))
         self.assertTrue(all(step["prompt"].strip() for step in steps))
         inherited = server._normalize_workflow_step(
             {"id": "implement", "name": "Implement"}, 0

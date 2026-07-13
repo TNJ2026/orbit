@@ -1405,6 +1405,7 @@
         <div id="addStepAgents" style="display:flex;flex-direction:column;gap:5px;padding:6px 0;"></div>
       </div>
       <label id="addStepRequiredField" class="modal-check"><input id="addStepRequired" type="checkbox"><span class="meta" data-i18n="modal.addStep.required">Required (a step the flow must include)</span></label>
+      <label id="addStepApprovalField" class="modal-check" style="display:none"><input id="addStepApproval" type="checkbox"><span class="meta">完成后需要人工审核</span></label>
       <label><div class="meta" data-i18n="modal.addStep.prompt">Step prompt</div><textarea id="addStepPrompt" rows="7" data-i18n-ph="modal.addStep.promptPh" placeholder="Additional instructions for this step" style="width:100%;resize:vertical;"></textarea><div class="meta" data-i18n="modal.addStep.promptHint">Keep this prompt meaningful for the step. It may be empty, but then the worker relies on task context and engine contracts.</div></label>
       <div class="modal-actions">
         <button id="addStepDelete" type="button" class="danger" style="margin-right: auto; display: none;" data-i18n="modal.addStep.delete">Delete</button>
@@ -2615,6 +2616,7 @@
     // other step — including any newly added one — takes a single Agent. Mirrors
     // the server's _MULTI_AGENT_STEP_IDS.
     const MULTI_AGENT_STEPS = new Set(["implement", "review", "test"]);
+    const APPROVAL_CAPABLE_STEPS = new Set(["product_design", "ui_design", "architecture", "decompose"]);
     function currentStepAllowsMultiAgent() {
       return wfStepModalMode === "edit" && MULTI_AGENT_STEPS.has(wfStepModalId);
     }
@@ -2713,6 +2715,8 @@
       $("addStepRequired").checked = false;
       $("addStepRequired").disabled = false;
       $("addStepRequiredField").style.display = "none";
+      $("addStepApproval").checked = false;
+      $("addStepApprovalField").style.display = "none";
       $("addStepModalBackdrop").classList.add("open");
       $("addStepName").focus();
     }
@@ -2734,6 +2738,8 @@
       // Optional steps stay optional in the visual editor; do not show a
       // Required control that would imply they should be part of every flow.
       $("addStepRequiredField").style.display = step.required ? "" : "none";
+      $("addStepApproval").checked = !!step.approval_required;
+      $("addStepApprovalField").style.display = APPROVAL_CAPABLE_STEPS.has(step.id) ? "" : "none";
       $("addStepModalBackdrop").classList.add("open");
       $("addStepName").focus();
     }
@@ -2777,6 +2783,7 @@
       step.agents = selectedStepAgents();
       step.agent_commands = selectedAgentCommands();
       step.prompt = ($("addStepPrompt").value || "").trim();
+      step.approval_required = APPROVAL_CAPABLE_STEPS.has(step.id) && $("addStepApproval").checked;
       if (!step.required_locked) step.required = $("addStepRequired").checked;
       closeAddStepModal();
       await run(async () => {
