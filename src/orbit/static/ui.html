@@ -3559,10 +3559,12 @@
           </div>` : ""}
         ${awaitingApproval ? `<div class="rerun-box">
           <div class="meta">${t("task.approveHint")}</div>
-          <textarea id="approvalChanges-${task.parent_task_id || task.id}" rows="3" placeholder="${escapeHtml(t("task.requestChangesPrompt"))}" style="width:100%;resize:vertical;margin-top:8px"></textarea>
           <div class="row" style="margin-top: 4px;">
             <button type="button" class="primary" onclick="approveWorkflowStep(${task.parent_task_id || task.id}, '${escapeHtml(approvalStep.id)}')">${t("task.approveBtn")}</button>
-            <button type="button" onclick="requestApprovalChanges(${task.parent_task_id || task.id}, '${escapeHtml(approvalStep.id)}', 'approvalChanges-${task.parent_task_id || task.id}')">${t("task.requestChangesBtn")}</button>
+          </div>
+          <textarea id="approvalChanges-${task.parent_task_id || task.id}" rows="3" placeholder="${escapeHtml(t("task.requestChangesPrompt"))}" style="width:100%;resize:vertical;margin-top:10px" oninput="document.getElementById('approvalChangesSubmit-${task.parent_task_id || task.id}').disabled = !this.value.trim()"></textarea>
+          <div class="row" style="margin-top: 4px;">
+            <button id="approvalChangesSubmit-${task.parent_task_id || task.id}" type="button" disabled onclick="requestApprovalChanges(${task.parent_task_id || task.id}, '${escapeHtml(approvalStep.id)}', 'approvalChanges-${task.parent_task_id || task.id}')">${t("task.requestChangesBtn")}</button>
           </div>
         </div>` : ""}
         <div class="meta">
