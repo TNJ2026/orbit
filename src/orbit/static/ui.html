@@ -1537,6 +1537,7 @@
         "status.blocked": "Blocked", "status.stalled": "On Hold", "status.closed": "Done",
         "status.new": "New", "status.designing": "Designing", "status.decomposing": "Decomposing",
         "status.running": "Running", "status.verifying": "Verifying",
+        "status.approval": "Awaiting approval",
         "task.fallback": "Task", "task.fallbackId": "#{0} Task", "task.goal": "🎯 goal", "task.subtask": "↳ #{0}", "task.step": "⚙ {0}",
         "task.subtaskTitle": "subtask of goal #{0}",
         "task.waiting": "⏳ waiting {0}", "task.waitingTitle": "held until its prerequisite tasks close (their work is merged to main)",
@@ -1678,6 +1679,7 @@
         "status.blocked": "已阻塞", "status.stalled": "暂停", "status.closed": "完成",
         "status.new": "新建", "status.designing": "设计中", "status.decomposing": "拆解中",
         "status.running": "运行中", "status.verifying": "验证中",
+        "status.approval": "等待审核",
         "task.fallback": "任务", "task.fallbackId": "#{0} 任务", "task.goal": "🎯 目标", "task.subtask": "↳ #{0}", "task.step": "⚙ {0}",
         "task.subtaskTitle": "目标 #{0} 的子任务",
         "task.waiting": "⏳ 等待 {0}", "task.waitingTitle": "前置任务全部关闭（成果并入 main）后才开工",
@@ -2944,15 +2946,17 @@
           const instances = phaseInstances(goal, phase);
           const summary = phaseSummary(instances);
           const status = summary.status;
-          const tone = status === "closed" ? "done"
+          const awaitingApproval = !!phase.approval_required
+            && ["blocked", "stalled"].includes(goal.task_status);
+          const tone = awaitingApproval ? "blocked" : status === "closed" ? "done"
             : status === "blocked" ? "blocked"
             : ["in_progress", "assigned"].includes(status) ? "running" : "";
-          const icon = status === "closed" ? "✓" : status === "blocked" ? "!"
+          const icon = awaitingApproval ? "⏸" : status === "closed" ? "✓" : status === "blocked" ? "!"
             : status === "in_progress" ? "●" : "○";
-          const statusLabel = status === "waiting" ? t("tasks.waiting") : stLabel(status);
+          const statusLabel = awaitingApproval ? t("status.approval")
+            : status === "waiting" ? t("tasks.waiting") : stLabel(status);
           const oneInstance = instances.length === 1 ? instances[0] : null;
           const oneCard = oneInstance ? oneInstance.card : null;
-          const awaitingApproval = !!phase.approval_required && goal.task_status === "blocked";
           // A per-work-item phase with one instance represents that work item,
           // not its materialized workflow-step card. Open the task so the
           // drawer starts with its brief and complete step history. Goal-owned
@@ -3528,7 +3532,8 @@
       const approvalStep = (state.workflow.steps || []).find(step =>
         step.id === task.workflow_step && step.approval_required
       );
-      const awaitingApproval = !!approvalStep && task.task_status === "blocked";
+      const awaitingApproval = !!approvalStep
+        && ["blocked", "stalled"].includes(task.task_status);
       // Tasks that materialize step cards keep their runs on the cards, not the
       // task itself — those are surfaced per step above, so the bottom Runs list
       // (which would be empty or duplicate the expanded step) is suppressed.
