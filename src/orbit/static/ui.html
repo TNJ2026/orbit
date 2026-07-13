@@ -2619,6 +2619,7 @@
     // the server's _MULTI_AGENT_STEP_IDS.
     const MULTI_AGENT_STEPS = new Set(["implement", "review", "test"]);
     const APPROVAL_CAPABLE_STEPS = new Set(["product_design", "ui_design", "architecture", "decompose"]);
+    const NON_REMOVABLE_STEP_IDS = new Set(["implement", "review"]);
     function currentStepAllowsMultiAgent() {
       return wfStepModalMode === "edit" && MULTI_AGENT_STEPS.has(wfStepModalId);
     }
@@ -2730,7 +2731,8 @@
       wfStepModalId = id;
       $("addStepModalTitle").textContent = t("modal.addStep.editTitle");
       $("addStepConfirm").textContent = t("modal.addStep.save");
-      $("addStepDelete").style.display = step.required_locked ? "none" : "";
+      $("addStepDelete").style.display =
+        step.required_locked || NON_REMOVABLE_STEP_IDS.has(step.id) ? "none" : "";
       $("addStepName").value = step.name || "";
       $("addStepPrompt").value = step.prompt || "";
       $("addStepPrompt").placeholder = t("modal.addStep.promptPh");
@@ -2802,7 +2804,9 @@
 
     async function removeWorkflowStep(id) {
       const step = (state.workflow.steps || []).find(s => s.id === id);
-      if (step && step.required_locked) { setStatus(t("wf.coreNoRemove")); return; }
+      if (step && (step.required_locked || NON_REMOVABLE_STEP_IDS.has(step.id))) {
+        setStatus(t("wf.coreNoRemove")); return;
+      }
       state.workflow.steps = (state.workflow.steps || []).filter(s => s.id !== id);
       state.workflow.edges = (state.workflow.edges || []).filter(e => e.from !== id && e.to !== id);
       await run(async () => {
