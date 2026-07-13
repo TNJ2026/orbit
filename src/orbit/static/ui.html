@@ -2952,12 +2952,15 @@
           const statusLabel = status === "waiting" ? t("tasks.waiting") : stLabel(status);
           const oneInstance = instances.length === 1 ? instances[0] : null;
           const oneCard = oneInstance ? oneInstance.card : null;
+          const awaitingApproval = !!phase.approval_required && goal.task_status === "blocked";
           // A per-work-item phase with one instance represents that work item,
           // not its materialized workflow-step card. Open the task so the
           // drawer starts with its brief and complete step history. Goal-owned
           // phases still open their one step card as before.
-          const detailTask = oneInstance && oneInstance.owner.id !== goal.id
-            ? oneInstance.owner : oneCard;
+          const detailTask = awaitingApproval ? goal : (
+            oneInstance && oneInstance.owner.id !== goal.id
+              ? oneInstance.owner : oneCard
+          );
           const action = detailTask
             ? ` onclick="showTaskDetails(${detailTask.id})" tabindex="0" role="button"`
             : ` onclick="showPhaseDetails('${phase.id}')" tabindex="0" role="button"`;
@@ -2978,7 +2981,7 @@
       const total = goal.subtask_total || 0;
       const progress = total
         ? `${t("goal.done", goal.subtask_closed || 0, total)}${goal.subtask_blocked ? ` · ${t("goal.blocked", goal.subtask_blocked)}` : ""}`
-        : t("tasks.awaitingTasks");
+        : "";
       const sp = goalStepProgress(goal);
       const stepChip = sp
         ? ` · <span title="${escapeHtml(t("goal.stepProgressTitle"))}">${t("goal.stepProgress", sp.pct)}</span>`
@@ -2989,7 +2992,7 @@
         <div class="goal-execution-summary">
           <div style="min-width:0">
             <div class="goal-execution-title">🎯 #${goal.id} ${escapeHtml(goal.title || t("goal.fallback"))}</div>
-            <div class="meta">${escapeHtml(stLabel(goal.task_status))} · ${escapeHtml(progress)}${stepChip}</div>
+            <div class="meta">${escapeHtml(stLabel(goal.task_status))}${progress ? ` · ${escapeHtml(progress)}` : ""}${stepChip}</div>
           </div>
           ${historical}
         </div>
@@ -3030,9 +3033,9 @@
       }
       const visibleTasks = goalWorkItems(goal);
       if (visibleTasks.length < 2) {
-        const note = visibleTasks.length ? t("tasks.singleFlow") : t("tasks.awaitingTasks");
+        const note = visibleTasks.length ? t("tasks.singleFlow") : "";
         $("tasksList").innerHTML = `${goalExecutionHtml(goal)}
-          <div class="empty" style="padding:28px 16px">${escapeHtml(note)}</div>`;
+          ${note ? `<div class="empty" style="padding:28px 16px">${escapeHtml(note)}</div>` : ""}`;
         revealCurrentGoalStep(goal.id);
         return;
       }
