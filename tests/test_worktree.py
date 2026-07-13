@@ -539,6 +539,28 @@ class GitProvisioningTests(unittest.TestCase):
             w = server._workflow_graph_warnings(steps, edges)
         self.assertFalse(any("git is not installed" in x for x in w), w)
 
+    def test_rework_edges_do_not_remove_terminal_step_warning(self):
+        # A terminal step may have a conditional loop-back path for rework.  It
+        # remains a terminal on the normal forward route, including for older
+        # workflows that did not persist an explicit `rework` marker.
+        steps = [
+            {"id": "intake", "name": "Intake"},
+            {"id": "implement", "name": "Implement"},
+            {"id": "review", "name": "Review"},
+            {"id": "integrate", "name": "Integrate"},
+        ]
+        edges = [
+            {"from": "intake", "to": "implement"},
+            {"from": "implement", "to": "review"},
+            {"from": "review", "to": "integrate"},
+            {"from": "review", "to": "implement"},
+            {"from": "integrate", "to": "implement"},
+        ]
+        warnings = server._workflow_graph_warnings(steps, edges)
+        self.assertFalse(
+            any("no terminal step" in warning for warning in warnings), warnings
+        )
+
     def test_integrate_still_validates_in_non_git_project(self):
         # With no separate Accept step, Integrate must still run its agent when
         # there is no branch so the task's acceptance criteria are checked.

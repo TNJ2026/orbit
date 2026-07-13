@@ -633,30 +633,9 @@ def _workflow_graph_warnings(
             "git is not installed: isolate steps will run without a per-task "
             "worktree; integrate cannot merge a branch but will still run acceptance checks"
         )
-    # A decompose step is where a goal splits into subtasks; the subtasks begin at
-    # its forward successors, so it must have an outgoing step, and only one such
-    # step is used.
-    decompose_ids = [s["id"] for s in steps if s.get("decompose")]
-    if len(decompose_ids) > 1:
-        warnings.append(
-            "multiple decompose steps: only the first (" + decompose_ids[0]
-            + ") splits the goal"
-        )
-    if decompose_ids and not any(e["from"] == decompose_ids[0] for e in edges):
-        warnings.append(
-            f"decompose step '{decompose_ids[0]}' has no outgoing step: its "
-            "subtasks would have nowhere to start"
-        )
     ids = [step["id"] for step in steps]
     if len(ids) <= 1:
         return warnings
-    adj: dict[str, list[str]] = {}
-    radj: dict[str, list[str]] = {}
-    for edge in edges:
-        adj.setdefault(edge["from"], []).append(edge["to"])
-        radj.setdefault(edge["to"], []).append(edge["from"])
-    entries = [i for i in ids if i not in radj]
-    terminals = [i for i in ids if i not in adj]
 
     def _reach(seeds: list[str], graph: dict[str, list[str]]) -> set[str]:
         seen: set[str] = set()
@@ -668,6 +647,47 @@ def _workflow_graph_warnings(
             seen.add(node)
             stack.extend(graph.get(node, []))
         return seen
+
+    # Loop-back edges are conditional rework paths, not ordinary flow. They must
+    # not make an otherwise terminal step look non-terminal. For legacy configs
+    # with no explicit marker, retain only inferred loop-backs that belong to the
+    # component reachable from a genuine raw entry. A disconnected cycle is a
+    # malformed subgraph, not a valid rework path, and should still be warned.
+    raw_adj: dict[str, list[str]] = {}
+    raw_incoming: set[str] = set()
+    for edge in edges:
+        raw_adj.setdefault(edge["from"], []).append(edge["to"])
+        raw_incoming.add(edge["to"])
+    entries = [step_id for step_id in ids if step_id not in raw_incoming]
+    explicit_rework = any(edge.get("rework") for edge in edges)
+    back = _workflow_graph({"steps": steps, "edges": edges})
+    if not explicit_rework:
+        raw_reachable = _reach(entries, raw_adj)
+        back = {edge for edge in back if edge[0] in raw_reachable}
+    forward_edges = [edge for edge in edges if (edge["from"], edge["to"]) not in back]
+
+    # A decompose step is where a goal splits into subtasks; the subtasks begin at
+    # its forward successors, so it must have an outgoing step, and only one such
+    # step is used.
+    decompose_ids = [s["id"] for s in steps if s.get("decompose")]
+    if len(decompose_ids) > 1:
+        warnings.append(
+            "multiple decompose steps: only the first (" + decompose_ids[0]
+            + ") splits the goal"
+        )
+    if decompose_ids and not any(
+        e["from"] == decompose_ids[0] for e in forward_edges
+    ):
+        warnings.append(
+            f"decompose step '{decompose_ids[0]}' has no outgoing step: its "
+            "subtasks would have nowhere to start"
+        )
+    adj: dict[str, list[str]] = {}
+    radj: dict[str, list[str]] = {}
+    for edge in forward_edges:
+        adj.setdefault(edge["from"], []).append(edge["to"])
+        radj.setdefault(edge["to"], []).append(edge["from"])
+    terminals = [i for i in ids if i not in adj]
 
     if not entries:
         warnings.append("no entry step: every step has an incoming connection")
