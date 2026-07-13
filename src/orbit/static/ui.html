@@ -1581,6 +1581,8 @@
         "task.reimplement": "Re-implementing #{0} with {1}{2}",
         "task.skipHint": "Skip this gate and move on — accepts the current work and advances to the next step (not for Integrate/Decompose).",
         "task.skipBtn": "Skip step",
+        "task.approveBtn": "Approve & continue", "task.approveHint": "This step is waiting for human approval before the workflow continues.",
+        "task.requestChangesBtn": "Request changes", "task.requestChangesPrompt": "Describe the changes needed:",
         "task.skipConfirm": "Skip this step and advance to the next one? The current work is accepted as-is.",
         "task.skipped": "Skipped {0} → {1}",
         "task.runsPerStep": "Runs are shown per step above — expand a step to see them.",
@@ -1719,6 +1721,8 @@
         "task.reimplement": "正用 {1} 重新实现 #{0}{2}",
         "task.skipHint": "跳过此门禁直接推进——接受当前产出并进入下一步（integrate/decompose 不可跳）。",
         "task.skipBtn": "跳过步骤",
+        "task.approveBtn": "确认并继续", "task.approveHint": "此步骤等待人工确认后才会继续工作流。",
+        "task.requestChangesBtn": "打回修改", "task.requestChangesPrompt": "请输入需要修改的内容：",
         "task.skipConfirm": "跳过此步骤并进入下一步？当前产出按现状接受。",
         "task.skipped": "已跳过 {0} → {1}",
         "task.runsPerStep": "运行记录按上方步骤展示 — 展开步骤即可查看。",
@@ -3153,6 +3157,30 @@
       });
     }
 
+    async function approveWorkflowStep(taskId, step) {
+      await run(async () => {
+        await api(`/api/tasks/${taskId}/workflow/complete`, {
+          method: "POST",
+          body: JSON.stringify({ step, outcome: "done" })
+        });
+        await loadGoals();
+        await loadTasks();
+      });
+    }
+
+    async function requestApprovalChanges(taskId, step) {
+      const result = prompt(t("task.requestChangesPrompt"));
+      if (result === null) return;
+      await run(async () => {
+        await api(`/api/tasks/${taskId}/workflow/complete`, {
+          method: "POST",
+          body: JSON.stringify({ step, outcome: "rework", result })
+        });
+        await loadGoals();
+        await loadTasks();
+      });
+    }
+
     async function runHealthCheck() {
       const btn = $("healthCheck");
       if (btn) btn.disabled = true;
@@ -3481,11 +3509,18 @@
         (latestRun && (latestRun.status === "failed" || latestRun.status === "orphaned"));
       const reworkLimited = task.task_status === "blocked" &&
         /^rework limit reached\b/i.test(task.blocked_reason || "");
+      const approvalStep = (state.workflow.steps || []).find(step =>
+        step.id === task.workflow_step && step.approval
+      );
+      const awaitingApproval = !!approvalStep && !["closed", "accepted"].includes(task.task_status);
       // Tasks that materialize step cards keep their runs on the cards, not the
       // task itself — those are surfaced per step above, so the bottom Runs list
       // (which would be empty or duplicate the expanded step) is suppressed.
       const hasStepCards = (state.tasks || [])
         .some(t => t.parent_task_id === task.id && !t.source_message_id);
+      const decomposedTasks = task.is_goal ? (state.tasks || []).filter(t =>
+        t.parent_task_id === task.id && t.source_message_id
+      ) : [];
       $("taskDetailContent").innerHTML = `
         <div class="task-detail-title">
           <span>${escapeHtml(task.title || t("task.fallbackId", task.id))}</span>
@@ -3496,6 +3531,13 @@
             <strong>${t("task.blockedReason")}</strong>
             <div class="blocked-reason-body">${escapeHtml(task.blocked_reason || t("task.noReason"))}</div>
           </div>` : ""}
+        ${awaitingApproval ? `<div class="rerun-box">
+          <div class="meta">${t("task.approveHint")}</div>
+          <div class="row" style="margin-top: 4px;">
+            <button type="button" class="primary" onclick="approveWorkflowStep(${task.parent_task_id || task.id}, '${escapeHtml(approvalStep.id)}')">${t("task.approveBtn")}</button>
+            <button type="button" onclick="requestApprovalChanges(${task.parent_task_id || task.id}, '${escapeHtml(approvalStep.id)}')">${t("task.requestChangesBtn")}</button>
+          </div>
+        </div>` : ""}
         <div class="meta">
           #${escapeHtml(task.display_id || String(task.id))}${task.display_id ? ` ${t("task.id", task.id)}` : ""} ${escapeHtml(task.sender)} to ${escapeHtml(task.recipient)}
           ${task.created_at ? ` - ${fmtTime(task.created_at)}` : ""}
@@ -3513,6 +3555,13 @@
           ${task.exclusive_workspace ? ` - ${t("task.exclusive")}` : ""}
         </div>
         <div class="task-detail-body">${escapeHtml(task.content)}</div>
+        ${decomposedTasks.length ? `<div class="structured-detail">
+          <strong>Decompose · ${decomposedTasks.length} work item${decomposedTasks.length === 1 ? "" : "s"}</strong>
+          <div class="phase-instance-list">${decomposedTasks.map(item => `<div class="phase-instance actionable" onclick="showTaskDetails(${item.id})" tabindex="0" role="button">
+            <div style="min-width:0"><div style="font-weight:600">#${escapeHtml(item.display_id || String(item.id))} ${escapeHtml(item.title || "")}</div><div class="structured-detail-body">${linkifyDocs(item.content || "")}</div>${(item.depends_on || []).length ? `<div class="meta">depends on ${(item.depends_on || []).map(id => "#" + id).join(", ")}</div>` : ""}</div>
+            <span class="badge">${escapeHtml(stLabel(item.task_status))}</span>
+          </div>`).join("")}</div>
+        </div>` : ""}
         ${task.step_inputs && Object.keys(task.step_inputs).length ? `
           <div class="structured-detail">
             <strong>${t("tasks.inputs")}</strong>
@@ -3522,12 +3571,12 @@
         ${task.result_summary ? `
           <div class="structured-detail">
             <strong>${t("tasks.resultSummary")}</strong>
-            <div class="structured-detail-body">${escapeHtml(task.result_summary)}</div>
+            <div class="structured-detail-body">${linkifyDocs(task.result_summary)}</div>
           </div>` : ""}
         ${(task.artifacts || []).length ? `
           <div class="structured-detail">
             <strong>${t("tasks.artifacts")}</strong>
-            <div class="artifact-list">${task.artifacts.map(item => `<code>${escapeHtml(item)}</code>`).join("")}</div>
+            <div class="artifact-list">${task.artifacts.map(item => `<code>${linkifyDocs(item)}</code>`).join("")}</div>
           </div>` : ""}
         ${(() => {
           const cards = (state.tasks || [])
@@ -3643,6 +3692,12 @@
         }
       }
       return content;
+    }
+
+    function linkifyDocs(text) {
+      return escapeHtml(text || "").replace(/docs\/[A-Za-z0-9_.\/-]+\.md\b/g, path =>
+        `<a href="${escapeHtml(state.apiBase + "/api/project-file?path=" + encodeURIComponent(path))}" target="_blank" rel="noopener">${path}</a>`
+      );
     }
 
     function renderTaskRuns() {

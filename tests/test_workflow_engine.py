@@ -568,6 +568,23 @@ class WorkflowEngineTests(unittest.TestCase):
             server.force_close_goal(h.store, tmp, goal_id)
             self.assertIsNone(server.workflow_locked_reason(h.store))
 
+    def test_manual_approval_step_waits_for_hub_confirmation(self):
+        steps = [
+            {"id": "intake", "name": "Triage", "assignment": "hub", "required": True},
+            {"id": "approval", "name": "Approval", "approval": True, "required": True},
+            {"id": "implement", "name": "Implement", "assignment": "implementer", "required": True},
+        ]
+        edges = [{"from": "intake", "to": "approval"}, {"from": "approval", "to": "implement"}]
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, steps=steps, edges=edges)
+            task_id = h.create_task()
+            h.start(task_id)
+            advanced = h.complete("hub-agent", task_id, "intake", "done")
+            self.assertEqual([{"step": "approval", "assignee": "hub"}], advanced["dispatched"])
+            self.assertEqual([], h.store.list_run_jobs())
+            approved = h.complete("hub", task_id, "approval", "done")
+            self.assertEqual([{"step": "implement", "assignee": "codex"}], approved["dispatched"])
+
     def test_only_one_goal_can_run_at_a_time(self):
         with TemporaryDirectory() as tmp:
             h = EngineHarness(tmp)

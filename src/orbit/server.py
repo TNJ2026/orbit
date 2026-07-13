@@ -325,6 +325,7 @@ DEFAULT_STEP_PROMPTS = {
         "verification strategy without implementing the solution. Write it to `docs/architecture.md` "
         "— downstream steps and the isolated implementers read it from there, so it must live on disk."
     ),
+    "approval": "Wait for the human owner to approve the design before decomposition.",
     "decompose": (
         "Use the design docs in `docs/` (product, UI, architecture) to split the Goal into focused, "
         "independently executable tasks aligned with ownership and module boundaries. In each task, "
@@ -374,7 +375,7 @@ ENGINE_STEP_CONTRACTS = {
 
 
 def default_workflow_steps() -> list[dict[str, Any]]:
-    # (id, name, required, isolate, integrate, decompose, x, y)
+    # (id, name, required, isolate, integrate, decompose, approval, x, y)
     # isolate: run in a per-task git worktree (implement/test/review all share
     # one worktree per task, so review reads exactly what implement produced).
     # integrate: terminal single-assignee gate that merges the task's worktree
@@ -387,21 +388,22 @@ def default_workflow_steps() -> list[dict[str, Any]]:
     specs = [
         # Fully linear forward chain (design runs sequentially: UI then arch), so
         # every card sits on one row; rework edges loop back underneath.
-        ("intake", "Triage", True, False, False, False, 40, _DEFAULT_STEP_MID_Y),
-        ("product_design", "Product Design", False, False, False, False, 340, _DEFAULT_STEP_MID_Y),
-        ("ui_design", "UI Design", False, False, False, False, 640, _DEFAULT_STEP_MID_Y),
-        ("architecture", "Architecture", False, False, False, False, 940, _DEFAULT_STEP_MID_Y),
+        ("intake", "Triage", True, False, False, False, False, 40, _DEFAULT_STEP_MID_Y),
+        ("product_design", "Product Design", False, False, False, False, False, 340, _DEFAULT_STEP_MID_Y),
+        ("ui_design", "UI Design", False, False, False, False, False, 640, _DEFAULT_STEP_MID_Y),
+        ("architecture", "Architecture", False, False, False, False, False, 940, _DEFAULT_STEP_MID_Y),
+        ("approval", "Approval", True, False, False, False, True, 1240, _DEFAULT_STEP_MID_Y),
         # decompose: the decomposition gate. Architecture feeds it, and this step
         # splits the goal into subtasks that begin at implement.
-        ("decompose", "Decompose", True, False, False, True, 1240, _DEFAULT_STEP_MID_Y),
-        ("implement", "Implement", True, True, False, False, 1540, _DEFAULT_STEP_MID_Y),
+        ("decompose", "Decompose", True, False, False, True, False, 1540, _DEFAULT_STEP_MID_Y),
+        ("implement", "Implement", True, True, False, False, False, 1840, _DEFAULT_STEP_MID_Y),
         # review runs before test: a human/agent review first, then test is the
         # mandatory machine-verification gate. Set test's `verify` command (e.g.
         # the project's test suite) so a failing run objectively sends the task
         # back to implement instead of trusting a self-report.
-        ("review", "Review", True, True, False, False, 1840, _DEFAULT_STEP_MID_Y),
-        ("test", "Test", False, True, False, False, 2140, _DEFAULT_STEP_MID_Y),
-        ("integrate", "Integrate", True, False, True, False, 2440, _DEFAULT_STEP_MID_Y),
+        ("review", "Review", True, True, False, False, False, 2140, _DEFAULT_STEP_MID_Y),
+        ("test", "Test", False, True, False, False, False, 2440, _DEFAULT_STEP_MID_Y),
+        ("integrate", "Integrate", True, False, True, False, False, 2740, _DEFAULT_STEP_MID_Y),
     ]
     return [
         {
@@ -411,6 +413,7 @@ def default_workflow_steps() -> list[dict[str, Any]]:
             "isolate": isolate,
             "integrate": integrate,
             "decompose": decompose,
+            "approval": approval,
             # No default Agent: every step starts unassigned. The goal-start
             # preflight (_validate_goal_auto_runners) blocks until the user picks
             # an Agent per step, so nothing silently runs the wrong CLI.
@@ -419,7 +422,7 @@ def default_workflow_steps() -> list[dict[str, Any]]:
             "x": x,
             "y": y,
         }
-        for step_id, name, required, isolate, integrate, decompose, x, y in specs
+        for step_id, name, required, isolate, integrate, decompose, approval, x, y in specs
     ]
 
 
@@ -432,14 +435,16 @@ def default_workflow_edges() -> list[dict[str, str]]:
         {"from": "intake", "to": "product_design"},
         {"from": "product_design", "to": "ui_design"},      # design chain
         {"from": "ui_design", "to": "architecture"},        # UI first, then arch
-        {"from": "architecture", "to": "decompose"},        # feeds the decompose step
+        {"from": "architecture", "to": "approval"},         # human design sign-off
+        {"from": "approval", "to": "decompose"},             # approved -> split work
+        {"from": "approval", "to": "architecture", "rework": True},
         {"from": "decompose", "to": "implement"},           # split: subtasks start here
         {"from": "implement", "to": "review"},              # review first
         {"from": "review", "to": "test"},                   # then the verify gate
-        {"from": "review", "to": "implement"},              # loop-back (rework)
+        {"from": "review", "to": "implement", "rework": True},
         {"from": "test", "to": "integrate"},                # merge worktree branch to main
-        {"from": "test", "to": "implement"},                # verify failed -> rework
-        {"from": "integrate", "to": "implement"},           # loop-back (merge conflict -> rework)
+        {"from": "test", "to": "implement", "rework": True},
+        {"from": "integrate", "to": "implement", "rework": True},
     ]
 
 
@@ -524,10 +529,12 @@ def _normalize_workflow_step(
     # The Triage entry step (`intake`) is the goal's front door — always required
     # and locked so it can't be unchecked or removed.
     decompose = bool(step.get("decompose", False))
+    approval = bool(step.get("approval", False))
     required_locked = (
         step_id == "intake"
         or bool(step.get("integrate", False))
         or decompose
+        or approval
     )
     required = True if required_locked else bool(step.get("required", False))
 
@@ -553,9 +560,11 @@ def _normalize_workflow_step(
         # happen once, not per subtask.
         "isolate": bool(step.get("isolate", False))
         and not bool(step.get("integrate", False))
-        and not decompose,
+        and not decompose
+        and not approval,
         "integrate": bool(step.get("integrate", False)),
         "decompose": decompose,
+        "approval": approval,
         # User-authored instructions for this step. They refine the generated
         # step contract but never replace the engine-owned output protocol.
         "prompt": raw_prompt.strip(),
@@ -1343,6 +1352,8 @@ def _validate_goal_auto_runners(
         )
     missing: list[str] = []
     for step in _main_workflow_reachable_steps(cfg, back):
+        if step.get("approval"):
+            continue
         agents = step.get("agents") or []
         if not agents:
             missing.append(f"{step['id']}: no agent selected")
@@ -2126,7 +2137,7 @@ def _dispatch_targets(
             notices.append(f"step {target} is waiting for other required branches")
             continue
         step = steps[target]
-        assignee = _step_round_robin_assignee(store, step, transitions)
+        assignee = HUB_NOTIFY_AGENT if step.get("approval") else _step_round_robin_assignee(store, step, transitions)
         action = store.create_workflow_action(
             task_id,
             "dispatch_step",
@@ -6640,6 +6651,21 @@ def create_server(
             traceback.print_exc()
             return _json_error(f"health check failed: {exc!r}", 500, request)
         return _json(request, result)
+
+    @route("/api/project-file", methods=["GET"])
+    async def api_project_file(request: Request) -> Response:
+        if forbidden := _forbid_non_local(request):
+            return forbidden
+        raw_path = str(request.query_params.get("path") or "")
+        root = _project_root(current_project.get("project_root"))
+        path = (root / raw_path).resolve()
+        docs_root = (root / "docs").resolve()
+        if docs_root not in (path, *path.parents) or path.suffix.lower() != ".md":
+            return _json_error("only Markdown files under docs/ may be opened", 400, request)
+        try:
+            return Response(path.read_text(encoding="utf-8"), media_type="text/markdown")
+        except OSError as exc:
+            return _json_error(f"cannot read project file: {exc}", 404, request)
 
     @route("/api/tasks/{task_id:int}/runs", methods=["GET"])
     async def api_list_task_runs(request: Request) -> JSONResponse:

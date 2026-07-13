@@ -172,7 +172,7 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("/api/tasks/${goalId}/status", html)
         self.assertNotIn("function moveTask", html)
         self.assertNotIn("/api/tasks/${taskId}/workflow/start", html)
-        self.assertNotIn("/api/tasks/${taskId}/workflow/complete", html)
+        self.assertIn("/api/tasks/${taskId}/workflow/complete", html)
         self.assertIn("/api/tasks/${taskId}/runs?limit=10", html)
         self.assertIn("/api/task-runs/${runId}/files/${fileKey}?tail=65536", html)
         self.assertIn("function rerunTask(taskId)", html)
@@ -542,12 +542,14 @@ class PackagingTests(unittest.TestCase):
             self.assertIn(e["to"], ids)
         out_of = lambda n: [e["to"] for e in edges if e["from"] == n]
         into = lambda n: [e["from"] for e in edges if e["to"] == n]
-        # sequential design chain: product -> ui -> architecture -> decompose
+        # sequential design chain: product -> ui -> architecture -> approval -> decompose
         self.assertEqual(["ui_design"], out_of("product_design"))
         self.assertEqual(["architecture"], out_of("ui_design"))
-        self.assertEqual(["decompose"], out_of("architecture"))
-        # architecture is decompose's only forward predecessor
-        self.assertEqual(["architecture"], into("decompose"))
+        self.assertEqual(["approval"], out_of("architecture"))
+        self.assertIn("decompose", out_of("approval"))
+        self.assertIn("architecture", out_of("approval"))  # approval rework
+        # approval is decompose's only forward predecessor
+        self.assertEqual(["approval"], into("decompose"))
         # split: subtasks begin at implement, one per module
         self.assertIn("implement", out_of("decompose"))
         # loop-back: review returns to implement
