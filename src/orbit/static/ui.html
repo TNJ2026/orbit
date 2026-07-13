@@ -1405,7 +1405,7 @@
         <div id="addStepAgents" style="display:flex;flex-direction:column;gap:5px;padding:6px 0;"></div>
       </div>
       <label id="addStepRequiredField" class="modal-check"><input id="addStepRequired" type="checkbox"><span class="meta" data-i18n="modal.addStep.required">Required (a step the flow must include)</span></label>
-      <label id="addStepApprovalField" class="modal-check" style="display:none"><input id="addStepApproval" type="checkbox"><span class="meta">完成后需要人工审核</span></label>
+      <label id="addStepApprovalField" class="modal-check" style="display:none"><input id="addStepApproval" type="checkbox"><span class="meta" data-i18n="modal.addStep.approvalRequired">Require human approval after completion</span></label>
       <label><div class="meta" data-i18n="modal.addStep.prompt">Step prompt</div><textarea id="addStepPrompt" rows="7" data-i18n-ph="modal.addStep.promptPh" placeholder="Additional instructions for this step" style="width:100%;resize:vertical;"></textarea><div class="meta" data-i18n="modal.addStep.promptHint">Keep this prompt meaningful for the step. It may be empty, but then the worker relies on task context and engine contracts.</div></label>
       <div class="modal-actions">
         <button id="addStepDelete" type="button" class="danger" style="margin-right: auto; display: none;" data-i18n="modal.addStep.delete">Delete</button>
@@ -1585,6 +1585,7 @@
         "task.approveBtn": "Approve & continue", "task.approveHint": "This step is waiting for human approval before the workflow continues.",
         "task.requestChangesBtn": "Request changes", "task.requestChangesPrompt": "Describe the changes needed:",
         "task.skipConfirm": "Skip this step and advance to the next one? The current work is accepted as-is.",
+        "modal.addStep.approvalRequired": "Require human approval after completion",
         "task.skipped": "Skipped {0} → {1}",
         "task.runsPerStep": "Runs are shown per step above — expand a step to see them.",
         "task.noRuns": "No runs recorded.", "task.unknownWorker": "unknown worker",
@@ -1725,6 +1726,7 @@
         "task.approveBtn": "确认并继续", "task.approveHint": "此步骤等待人工确认后才会继续工作流。",
         "task.requestChangesBtn": "打回修改", "task.requestChangesPrompt": "请输入需要修改的内容：",
         "task.skipConfirm": "跳过此步骤并进入下一步？当前产出按现状接受。",
+        "modal.addStep.approvalRequired": "完成后需要人工审核",
         "task.skipped": "已跳过 {0} → {1}",
         "task.runsPerStep": "运行记录按上方步骤展示 — 展开步骤即可查看。",
         "task.noRuns": "暂无运行记录。", "task.unknownWorker": "未知 worker",
