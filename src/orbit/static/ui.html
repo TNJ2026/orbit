@@ -3188,9 +3188,14 @@
       });
     }
 
-    async function requestApprovalChanges(taskId, step) {
-      const result = prompt(t("task.requestChangesPrompt"));
-      if (result === null) return;
+    async function requestApprovalChanges(taskId, step, inputId) {
+      const input = $(inputId);
+      const result = (input && input.value || "").trim();
+      if (!result) {
+        if (input) input.focus();
+        setStatus(t("task.requestChangesPrompt"));
+        return;
+      }
       await run(async () => {
         await api(`/api/tasks/${taskId}/workflow/complete`, {
           method: "POST",
@@ -3554,9 +3559,10 @@
           </div>` : ""}
         ${awaitingApproval ? `<div class="rerun-box">
           <div class="meta">${t("task.approveHint")}</div>
+          <textarea id="approvalChanges-${task.parent_task_id || task.id}" rows="3" placeholder="${escapeHtml(t("task.requestChangesPrompt"))}" style="width:100%;resize:vertical;margin-top:8px"></textarea>
           <div class="row" style="margin-top: 4px;">
             <button type="button" class="primary" onclick="approveWorkflowStep(${task.parent_task_id || task.id}, '${escapeHtml(approvalStep.id)}')">${t("task.approveBtn")}</button>
-            <button type="button" onclick="requestApprovalChanges(${task.parent_task_id || task.id}, '${escapeHtml(approvalStep.id)}')">${t("task.requestChangesBtn")}</button>
+            <button type="button" onclick="requestApprovalChanges(${task.parent_task_id || task.id}, '${escapeHtml(approvalStep.id)}', 'approvalChanges-${task.parent_task_id || task.id}')">${t("task.requestChangesBtn")}</button>
           </div>
         </div>` : ""}
         <div class="meta">
