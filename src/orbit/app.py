@@ -326,6 +326,7 @@ def create_server(
                 data.get("steps", []),
                 current_project.get("project_root"),
                 data.get("edges"),
+                data.get("subflows"),
             )
         except InvalidInputError as exc:
             return _json_error(str(exc), request=request)

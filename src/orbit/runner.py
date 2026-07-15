@@ -36,7 +36,9 @@ from .settings import read_settings
 from .store import DEFAULT_LEASE_SECONDS, InvalidInputError, Store, UnknownAgentError
 from .token_usage import LOCAL_STORE_TOKEN_READERS as _LOCAL_STORE_TOKEN_READERS
 from .verification import run_step_verify as _run_step_verify
-from .workflow_config import _project_root, read_workflow_config
+from .workflow_config import (
+    _project_root, read_workflow_config, workflow_config_for_task,
+)
 from .workflow_engine import (
     _WORKFLOW_ENGINE_LOCK, _complete_goal_intake_locked, _is_root_goal_decompose_step,
     _materializes_step_cards, _parse_goal_subtasks, advance_workflow_task,
@@ -280,7 +282,8 @@ def run_step_worker(
             "an installed agent or set the step's command"
         )
     else:
-        _cfg = read_workflow_config(project_root)
+        # Per-task config: a subflow child's step lives in its own graph.
+        _cfg = workflow_config_for_task(project_root, task)
         can_rework = _step_can_rework(_cfg, _workflow_graph(_cfg), step["id"])
         # Isolated steps run in a per-task git worktree so concurrent
         # implementers of different tasks never share a working tree. Falls back
@@ -686,7 +689,15 @@ def run_queued_job(
                 runner_name=runner_name, current_status="running",
             )
             return {"job_id": job["id"], "status": "failed", "error": "task missing"}
-        cfg = read_workflow_config(project_root)
+        # Per-task config: a subflow child's job names a step of its own graph.
+        try:
+            cfg = workflow_config_for_task(project_root, task)
+        except InvalidInputError as exc:
+            store.finish_run_job(
+                job["id"], "failed", str(exc),
+                runner_name=runner_name, current_status="running",
+            )
+            return {"job_id": job["id"], "status": "failed", "error": str(exc)}
         step_map = {s["id"]: s for s in cfg["steps"]}
         step = step_map.get(job["step"])
         if not step:
@@ -883,7 +894,18 @@ def scheduler_tick(
         )
         if not job:
             break
+        # Per-task config: a subflow child's job names a step of its own graph,
+        # not the main workflow read above.
         step = steps.get(job["step"])
+        try:
+            job_task = store.get_task(int(job["task_id"]))
+            if job_task and str(job_task.get("workflow_ref") or "").strip():
+                job_cfg = workflow_config_for_task(project_root, job_task)
+                step = next(
+                    (s for s in job_cfg["steps"] if s["id"] == job["step"]), None
+                )
+        except InvalidInputError:
+            step = None
         if not step:
             store.finish_run_job(
                 job["id"], "failed", f"unknown step {job['step']}",

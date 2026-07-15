@@ -13,7 +13,10 @@ from .node_handlers import get_node_handler, workflow_node_schema
 from .store import InvalidInputError, project_state_dir
 from .workflow_data import resolve_path, validate_jsonlogic
 from .worktrees import git_available as _git_available
-from .workflow_graph import workflow_graph as _workflow_graph
+from .workflow_graph import (
+    workflow_execution_errors as _workflow_execution_errors,
+    workflow_graph as _workflow_graph,
+)
 
 _CONFIG_CACHE_LOCK = threading.Lock()
 _CONFIG_CACHE: dict[str, tuple[tuple[int, int] | None, dict[str, Any]]] = {}
@@ -484,7 +487,7 @@ def _normalize_workflow_step(
     explicit_type = str(step.get("type", "") or "").strip().lower()
     legacy_approval = bool(step.get("approval", False))
     node_type = "approval" if legacy_approval else (explicit_type or "action")
-    if node_type not in {"action", "approval", "decision", "join", "foreach", "end"}:
+    if node_type not in {"action", "approval", "decision", "join", "foreach", "subflow", "end"}:
         raise InvalidInputError(f"unsupported workflow node type: {node_type}")
     raw_handler = str(step.get("handler", "") or "").strip()
     is_legacy_step = not any(
@@ -508,6 +511,7 @@ def _normalize_workflow_step(
         or approval
         or node_type == "join"
         or node_type == "foreach"
+        or node_type == "subflow"
         or node_type == "end"
     )
     required = True if required_locked else bool(step.get("required", False))
@@ -560,9 +564,7 @@ def _normalize_workflow_step(
             ["approved", "changes_requested", "cancelled"]
             if node_type == "approval" and not legacy_approval
             else ["matched", "default"] if node_type == "decision"
-            else ["success"] if node_type == "join"
-            else ["success"] if node_type == "foreach"
-            else ["success"] if node_type == "end"
+            else ["success"] if node_type in {"join", "foreach", "subflow", "end"}
             else ["success", "rework"]
         )
     elif not isinstance(raw_ports, list):
@@ -597,6 +599,7 @@ def _normalize_workflow_step(
         else "decision" if node_type == "decision"
         else "join" if node_type == "join"
         else "foreach" if node_type == "foreach"
+        else "subflow" if node_type == "subflow"
         else "end" if node_type == "end"
         else "agent"
     )
@@ -668,14 +671,34 @@ def _normalize_workflow_step(
     if join_policy == "all":
         join_policy = "all_activated"
     aggregation = str(step.get("aggregation", "list") or "list").strip()
+    try:
+        join_threshold = int(step.get("join_threshold", 0) or 0)
+    except (TypeError, ValueError):
+        raise InvalidInputError("workflow join_threshold must be an integer") from None
+    join_remaining = str(
+        step.get("join_remaining", "continue") or "continue"
+    ).strip().lower()
     if node_type == "join":
-        if join_policy not in {"all_activated", "any"}:
+        if join_policy not in {"all_activated", "any", "quorum", "count", "all_successful"}:
             raise InvalidInputError(
-                "workflow join_policy must be 'all_activated' or 'any'"
+                "workflow join_policy must be one of all_activated, any, "
+                "quorum, count, all_successful"
             )
         if aggregation not in {"list", "object_by_source", "first"}:
             raise InvalidInputError(
                 "workflow join aggregation must be list, object_by_source, or first"
+            )
+        if join_policy in {"quorum", "count"}:
+            if join_threshold < 1:
+                raise InvalidInputError(
+                    "workflow join_threshold must be a positive integer "
+                    "for quorum/count joins"
+                )
+        else:
+            join_threshold = 0
+        if join_remaining not in {"continue", "cancel"}:
+            raise InvalidInputError(
+                "workflow join_remaining must be 'continue' or 'cancel'"
             )
     items_path = str(step.get("items", "$.input.items") or "").strip()
     item_key_path = str(step.get("item_key", "") or "").strip()
@@ -724,6 +747,13 @@ def _normalize_workflow_step(
             raise InvalidInputError(
                 "workflow foreach item_output_schema must be JSON-serializable"
             ) from None
+
+    raw_subflow_ref = str(step.get("subflow", "") or "").strip()
+    subflow_ref = _agent_slug(raw_subflow_ref) if raw_subflow_ref else ""
+    if node_type == "subflow" and not subflow_ref:
+        raise InvalidInputError(
+            f"workflow subflow node {step_id!r} requires a 'subflow' name"
+        )
 
     normalized_step = {
         "id": step_id,
@@ -787,12 +817,15 @@ def _normalize_workflow_step(
         "retry": {"normalization": normalization_retries},
         "rules": rules,
         "join_policy": join_policy if node_type == "join" else "",
+        "join_threshold": join_threshold if node_type == "join" else 0,
+        "join_remaining": join_remaining if node_type == "join" else "",
         "aggregation": aggregation if node_type == "join" else "",
         "items": items_path if node_type == "foreach" else "",
         "item_key": item_key_path if node_type == "foreach" else "",
         "item_depends_on": item_depends_on_path if node_type == "foreach" else "",
         "item_output_schema": deepcopy(item_output_schema) if node_type == "foreach" else {},
         "max_concurrency": foreach_concurrency if node_type == "foreach" else 1,
+        "subflow": subflow_ref if node_type == "subflow" else "",
         "ports": ports,
         "default_port": default_port,
         "unrouted": unrouted,
@@ -891,6 +924,109 @@ def _normalize_workflow_edges(
     return normalized
 
 
+def _normalize_workflow_subflows(raw: Any) -> dict[str, dict[str, Any]]:
+    """Normalize the top-level `subflows` map: {name: {steps, edges}}.
+
+    Each subflow is an independently executable graph reusing the main-graph
+    step/edge normalization. Unlike the main canvas (which saves half-connected
+    intermediate states), subflows are authored as complete units, so
+    structural problems are hard errors. First version keeps recursion out:
+    no decompose steps and no nested subflow nodes inside a subflow."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise InvalidInputError(
+            "workflow subflows must be an object mapping name to definition"
+        )
+    subflows: dict[str, dict[str, Any]] = {}
+    for raw_name, definition in raw.items():
+        stripped = str(raw_name or "").strip()
+        if not stripped:
+            raise InvalidInputError("workflow subflow name must not be empty")
+        name = _agent_slug(stripped)
+        if name in subflows:
+            raise InvalidInputError(f"duplicate workflow subflow name: {name!r}")
+        if not isinstance(definition, dict):
+            raise InvalidInputError(f"workflow subflow {name!r} must be an object")
+        raw_steps = definition.get("steps")
+        if not isinstance(raw_steps, list) or not raw_steps:
+            raise InvalidInputError(
+                f"workflow subflow {name!r} must include a non-empty steps list"
+            )
+        steps = [
+            _normalize_workflow_step(step, index)
+            for index, step in enumerate(raw_steps)
+        ]
+        step_ids = {step["id"] for step in steps}
+        if len(step_ids) != len(steps):
+            raise InvalidInputError(
+                f"workflow subflow {name!r} step ids must be unique"
+            )
+        for step in steps:
+            if step.get("decompose"):
+                raise InvalidInputError(
+                    f"workflow subflow {name!r} must not contain a decompose "
+                    f"step ({step['id']!r})"
+                )
+            if step.get("type") == "subflow":
+                raise InvalidInputError(
+                    f"workflow subflow {name!r} must not contain a nested "
+                    f"subflow node ({step['id']!r})"
+                )
+        edges = _normalize_workflow_edges(
+            definition.get("edges"),
+            step_ids,
+            {step["id"]: set(step["ports"]) for step in steps},
+        )
+        sub_cfg = {"steps": steps, "edges": edges}
+        errors = _workflow_execution_errors(sub_cfg, _workflow_graph(sub_cfg))
+        if errors:
+            raise InvalidInputError(
+                f"workflow subflow {name!r} is not executable: " + "; ".join(errors)
+            )
+        subflows[name] = sub_cfg
+    return subflows
+
+
+def _validate_subflow_references(
+    steps: list[dict[str, Any]], subflows: dict[str, dict[str, Any]]
+) -> None:
+    for step in steps:
+        if step.get("type") != "subflow":
+            continue
+        name = str(step.get("subflow") or "")
+        if name not in subflows:
+            raise InvalidInputError(
+                f"workflow step {step['id']!r} references unknown subflow: {name!r}"
+            )
+
+
+def workflow_config_for_task(
+    project_root: str | None, task: dict[str, Any] | None
+) -> dict[str, Any]:
+    """The workflow configuration the engine should route `task` by.
+
+    A task with an empty `workflow_ref` traverses the main graph; a subflow
+    child task traverses the named subflow, wrapped in a cfg dict of the same
+    shape as the main one so every engine path works unchanged."""
+    cfg = read_workflow_config(project_root)
+    ref = str((task or {}).get("workflow_ref") or "").strip()
+    if not ref:
+        return cfg
+    sub = (cfg.get("subflows") or {}).get(ref)
+    if sub is None:
+        raise InvalidInputError(f"unknown workflow subflow: {ref!r}")
+    return {
+        **cfg,
+        "steps": sub["steps"],
+        "edges": sub["edges"],
+        # A subflow may not contain subflow nodes, so the nested map is empty.
+        "subflows": {},
+        "subflow": ref,
+        "warnings": [],
+    }
+
+
 # Structural problems are warnings, not errors: the canvas saves after every
 # drag/add, so a half-connected graph is a normal intermediate state.
 def _workflow_graph_warnings(
@@ -966,6 +1102,19 @@ def _workflow_graph_warnings(
         radj.setdefault(edge["to"], []).append(edge["from"])
     terminals = [i for i in ids if i not in adj]
 
+    # A quorum/count join whose threshold exceeds its inbound branches can never
+    # reach it at runtime; that is an authoring mistake worth flagging, but the
+    # graph is still executable (a smaller run may route fewer branches).
+    for step in steps:
+        threshold = int(step.get("join_threshold") or 0)
+        if step.get("type") == "join" and threshold:
+            inbound = len({e["from"] for e in forward_edges if e["to"] == step["id"]})
+            if threshold > inbound:
+                warnings.append(
+                    f"join '{step['id']}' threshold {threshold} exceeds its "
+                    f"{inbound} incoming branch(es)"
+                )
+
     if not entries:
         warnings.append("no entry step: every step has an incoming connection")
     else:
@@ -1005,6 +1154,7 @@ def read_workflow_config(project_root: str | None = None) -> dict[str, Any]:
                 {step["id"] for step in default_steps},
                 {step["id"]: set(step["ports"]) for step in default_steps},
             ),
+            "subflows": {},
             "path": str(path),
             "warnings": [],
             "schema": workflow_node_schema(),
@@ -1047,10 +1197,15 @@ def read_workflow_config(project_root: str | None = None) -> dict[str, Any]:
             valid_ids,
             {step["id"]: set(step["ports"]) for step in normalized},
         )
+    subflows = _normalize_workflow_subflows(
+        data.get("subflows") if isinstance(data, dict) else None
+    )
+    _validate_subflow_references(normalized, subflows)
     result = {
         "steps": normalized,
         "statuses": statuses,
         "edges": edges,
+        "subflows": subflows,
         "path": str(path),
         "warnings": _workflow_graph_warnings(normalized, edges),
         "schema": workflow_node_schema(),
@@ -1099,6 +1254,7 @@ def write_workflow_config(
     steps: list[Any],
     project_root: str | None = None,
     edges: Any = None,
+    subflows: Any = None,
 ) -> dict[str, Any]:
     if not isinstance(steps, list):
         raise InvalidInputError("steps must be a list")
@@ -1125,6 +1281,17 @@ def write_workflow_config(
         {step["id"]: set(step["ports"]) for step in normalized},
     )
     path = _workflow_config_path(project_root)
+    # subflows=None means "leave subflows as they are": the workflow canvas
+    # only edits the main graph, and its save must not drop authored subflows.
+    if subflows is None and path.exists():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            existing = None
+        if isinstance(existing, dict):
+            subflows = existing.get("subflows")
+    normalized_subflows = _normalize_workflow_subflows(subflows)
+    _validate_subflow_references(normalized, normalized_subflows)
     project_root_path = _project_root(project_root)
     resolved_path = path.resolve()
     if project_root_path not in (resolved_path, *resolved_path.parents):
@@ -1136,6 +1303,8 @@ def write_workflow_config(
         "edges": normalized_edges,
         "expression_language": deepcopy(WORKFLOW_EXPRESSION_LANGUAGE),
     }
+    if normalized_subflows:
+        data["subflows"] = normalized_subflows
     path.write_text(
         json.dumps(data, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
@@ -1144,6 +1313,7 @@ def write_workflow_config(
         "steps": normalized,
         "statuses": normalized_statuses,
         "edges": normalized_edges,
+        "subflows": normalized_subflows,
         "path": str(path),
         "warnings": _workflow_graph_warnings(normalized, normalized_edges),
         "schema": workflow_node_schema(),

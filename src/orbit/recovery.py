@@ -7,8 +7,8 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from .runner_protocol import structured_upstream
-from .store import Store
-from .workflow_config import read_workflow_config
+from .store import InvalidInputError, Store
+from .workflow_config import read_workflow_config, workflow_config_for_task
 from .workflow_graph import active_step_assignees, workflow_graph
 
 @dataclass(frozen=True)
@@ -212,7 +212,7 @@ def check_task_health(
     every cycle for the same unchanged problem."""
     cfg = read_workflow_config(project_root)
     back = workflow_graph(cfg)
-    steps = {s["id"]: s for s in cfg["steps"]}
+    main_steps = {s["id"]: s for s in cfg["steps"]}
     alerts: list[dict[str, Any]] = []
     now = now or datetime.now(timezone.utc)
     for action in store.list_workflow_actions(status="pending", limit=500):
@@ -246,6 +246,17 @@ def check_task_health(
         if task.get("task_status") == "blocked":
             continue
         task_id = task["id"]
+        # A subflow child traverses its own graph: resolve its step map so its
+        # steps recover like main-graph ones (and its finished flow is not
+        # misread as "no forward target" against the main graph). A dangling
+        # workflow_ref is skipped rather than aborting the sweep.
+        steps = main_steps
+        if str(task.get("workflow_ref") or "").strip():
+            try:
+                task_cfg = workflow_config_for_task(project_root, task)
+            except InvalidInputError:
+                continue
+            steps = {s["id"]: s for s in task_cfg["steps"]}
         transitions = store.list_task_transitions(task_id)
         active = active_step_assignees(transitions)
 

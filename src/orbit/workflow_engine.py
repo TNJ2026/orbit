@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from typing import Any, Callable
 
@@ -27,7 +28,11 @@ from .workflow_data import (
 from .settings import read_settings
 from .store import InvalidInputError, Store, UnknownAgentError
 from .verification import detect_goal_verify as _detect_goal_verify
-from .workflow_config import _project_root, read_workflow_config
+from .workflow_config import (
+    _project_root,
+    read_workflow_config,
+    workflow_config_for_task,
+)
 from .workflow_graph import (
     _WORKFLOW_STATUS_OVERRIDES,
     active_step_assignees as _active_step_assignees,
@@ -50,6 +55,58 @@ from .worktrees import (
 )
 
 _WORKFLOW_ENGINE_LOCK = threading.RLock()
+
+_log = logging.getLogger("orbit.workflow_engine")
+
+
+def _ensure_workflow_run(
+    store: Store,
+    task_id: int,
+    cfg: dict[str, Any],
+    entry_steps: list[str],
+    parent_run_id: int | None = None,
+    parent_node_run_id: int | None = None,
+) -> None:
+    """Dual-write hook: open the workflow_run record (with the definition
+    snapshot read at start, §4.1) when a task enters the workflow. Every later
+    record-layer write hangs off this row and is mirrored inside the store's
+    own transaction hooks. `parent_run_id`/`parent_node_run_id` link the run
+    into the cross-run lineage tree (decompose split, subflow node). The record
+    layer never drives routing, so a failure here is logged and swallowed —
+    the engine keeps running on the old tables."""
+    try:
+        store.create_workflow_run(
+            task_id,
+            cfg,
+            entry_steps=entry_steps,
+            parent_run_id=parent_run_id,
+            parent_node_run_id=parent_node_run_id,
+        )
+    except Exception:
+        _log.exception(
+            "workflow_run dual-write failed for task %s (non-fatal)", task_id
+        )
+
+
+def _run_lineage_for_step(
+    store: Store, parent_task_id: int, step_id: str
+) -> tuple[int | None, int | None]:
+    """(parent_run_id, parent_node_run_id) anchoring a child run to the node
+    execution of `step_id` in the parent's run. Best-effort: the record layer
+    may be absent for pre-existing data, in which case lineage stays NULL."""
+    try:
+        run = store.get_workflow_run_by_task(parent_task_id)
+        if not run:
+            return None, None
+        node = store.latest_node_run(int(run["id"]), step_id) if step_id else None
+        return int(run["id"]), int(node["id"]) if node else None
+    except Exception:
+        _log.exception(
+            "workflow run lineage lookup failed for task %s step %s (non-fatal)",
+            parent_task_id, step_id,
+        )
+        return None, None
+
 
 def _coerce_token_budget(value: Any) -> int:
     try:
@@ -95,8 +152,17 @@ def goals_summary(
             child for child in children.get(task["id"], [])
             if child.get("source_message_id") is None
         ]
+        # Appended (never replacing) field: the new-runtime run record, so the
+        # UI can surface it without any change to the projected v1 fields.
+        try:
+            run = store.get_workflow_run_by_task(task["id"])
+        except Exception:
+            run = None
         goals.append({
             **task,
+            "workflow_run": (
+                {"id": run["id"], "status": run["status"]} if run else None
+            ),
             "subtask_total": len(subs),
             "subtask_closed": sum(1 for s in subs if s["task_status"] == "closed"),
             "subtask_blocked": sum(1 for s in subs if s["task_status"] == "blocked"),
@@ -212,7 +278,7 @@ WORKFLOW_OUTCOMES = {"done", "rework", "blocked", "approval"}
 MAX_REWORK_ROUNDS = 3
 
 
-def _record_not_selected_lineage(
+def _record_branch_closure_lineage(
     store: Store,
     task_id: int,
     cfg: dict[str, Any],
@@ -220,14 +286,18 @@ def _record_not_selected_lineage(
     source_step: str,
     branch_root: str,
     port: str,
-) -> None:
-    """Close merge boundaries downstream of an excluded conditional branch.
+    outcome: str = "not_selected",
+    note: str = "",
+) -> list[tuple[str, str]]:
+    """Close merge boundaries downstream of a branch that will never arrive.
 
-    A direct ``source -> branch_root`` not_selected transition is useful for
-    audit, but an implicit join waits on its own immediate predecessors. Walk
-    the excluded forward-only subgraph and add a closure event at every first
-    merge boundary, without walking beyond that merge (the selected branches
-    own the lineage after it activates).
+    A direct ``source -> branch_root`` closure transition is useful for audit,
+    but an implicit join waits on its own immediate predecessors. Walk the
+    closed forward-only subgraph and add a closure event at every first merge
+    boundary, without walking beyond that merge (the surviving branches own the
+    lineage after it activates). Used for excluded conditional branches
+    (`not_selected`) and for branches that terminally failed (`blocked`,
+    `cancelled`). Returns the (predecessor, merge) boundaries recorded.
     """
     forward_edges = [
         edge for edge in cfg["edges"]
@@ -240,6 +310,7 @@ def _record_not_selected_lineage(
         outgoing.setdefault(edge["from"], []).append(edge["to"])
     queue = [branch_root]
     visited: set[str] = set()
+    boundaries: list[tuple[str, str]] = []
     while queue:
         node = queue.pop(0)
         if node in visited:
@@ -252,12 +323,14 @@ def _record_not_selected_lineage(
                     node,
                     target,
                     WORKFLOW_ENGINE_AGENT,
-                    "not_selected",
-                    f"branch excluded by {source_step} before merge {target}",
+                    outcome,
+                    note or f"branch excluded by {source_step} before merge {target}",
                     port,
                 )
+                boundaries.append((node, target))
             else:
                 queue.append(target)
+    return boundaries
 
 
 def _branch_merge_boundaries(
@@ -377,13 +450,117 @@ def _persist_routing_correlations(
         persist_join(join_step)
 
 
-def _correlation_ready(correlation: dict[str, Any]) -> bool:
+def _correlation_ready(
+    correlation: dict[str, Any], join_def: dict[str, Any] | None = None
+) -> bool:
     states = [branch["state"] for branch in correlation.get("branches") or []]
     if not states:
         return False
-    if correlation.get("policy") == "any":
+    policy = str(correlation.get("policy") or "")
+    if policy == "any":
         return "arrived" in states
+    if policy in {"quorum", "count"}:
+        # quorum and count share one counting mechanism; the threshold lives on
+        # the join step definition, not in the persisted activation.
+        threshold = max(1, int((join_def or {}).get("join_threshold") or 0))
+        return states.count("arrived") >= threshold
+    # all_activated / all_successful: every routed branch must close. A blocked
+    # branch keeps the activation unready; for all_successful the dispatcher
+    # turns that into a blocked join instead of an indefinite wait.
     return all(state in {"arrived", "not_selected", "cancelled"} for state in states)
+
+
+def _failed_join_branches(
+    target: str,
+    correlation: dict[str, Any] | None,
+    transitions: list[dict[str, Any]],
+) -> list[str]:
+    """Predecessor branches of `target` that closed as failed/blocked."""
+    if correlation is not None:
+        return sorted({
+            branch["predecessor_step"]
+            for branch in correlation.get("branches") or []
+            if branch["state"] in {"failed", "blocked"}
+        })
+    return sorted({
+        t["from_step"] for t in transitions
+        if t["to_step"] == target and t["from_step"] and t["outcome"] == "blocked"
+    })
+
+
+def _cancel_remaining_join_branches(
+    store: Store,
+    task: dict[str, Any],
+    cfg: dict[str, Any],
+    back: set[tuple[str, str]],
+    join_step: str,
+    correlation: dict[str, Any],
+) -> list[str]:
+    """Cancel the branches a satisfied any/quorum/count join no longer waits on.
+
+    Marks the activation's still-selected branches cancelled, closes them in the
+    transition ledger, and stops their in-flight work: queued runner jobs are
+    cancelled, a running run is flagged for its owning runner to kill, and each
+    active step is settled with `reassigned` so the killed runner's late report
+    cannot re-advance (or block) the task.
+    """
+    task_id = task["id"]
+    remaining = store.cancel_workflow_correlation_branches(correlation["id"])
+    if not remaining:
+        return []
+    note = (
+        f"join '{join_step}' already satisfied "
+        f"(policy {correlation.get('policy')}, remaining: cancel)"
+    )
+    branch_roots = {
+        branch["predecessor_step"]: branch["branch_root"]
+        for branch in correlation.get("branches") or []
+    }
+    forward_outgoing: dict[str, list[str]] = {}
+    for edge in cfg["edges"]:
+        if (edge["from"], edge["to"]) not in back:
+            forward_outgoing.setdefault(edge["from"], []).append(edge["to"])
+    # Every node on a cancelled branch: forward walk from its root, stopping at
+    # the join (nodes past the join belong to the surviving flow).
+    branch_nodes: set[str] = set()
+    for predecessor in remaining:
+        queue = [branch_roots.get(predecessor) or predecessor]
+        while queue:
+            node = queue.pop(0)
+            if node == join_step or node in branch_nodes:
+                continue
+            branch_nodes.add(node)
+            queue.extend(forward_outgoing.get(node, []))
+    for predecessor in remaining:
+        store.record_task_transition(
+            task_id, predecessor, join_step, WORKFLOW_ENGINE_AGENT,
+            "cancelled", note, "cancelled",
+        )
+    transitions = store.list_task_transitions(task_id)
+    active = _active_step_assignees(transitions)
+    cancelled_steps: list[str] = []
+    for step_id in sorted(branch_nodes & set(active)):
+        store.cancel_pending_run_jobs(task_id, step_id, note)
+        run_holder_id = task_id
+        if _materializes_step_cards(task):
+            card = store.find_open_step_card(task_id, step_id)
+            if card:
+                run_holder_id = card["id"]
+        runs = store.list_task_runs(run_holder_id, limit=1)
+        if (
+            runs
+            and runs[0].get("status") == "running"
+            and (runs[0].get("workflow_step") or step_id) == step_id
+        ):
+            store.request_run_kill(int(runs[0]["id"]), note)
+        store.record_task_transition(
+            task_id, step_id, step_id, WORKFLOW_ENGINE_AGENT, "reassigned", note
+        )
+        _settle_step_card(store, task, step_id, "cancelled")
+        cancelled_steps.append(step_id)
+    if cancelled_steps:
+        return [f"{note}; cancelled in-flight step(s): {', '.join(cancelled_steps)}"]
+    return []
 
 
 def _foreach_scope_specs(step: dict[str, Any], context: dict[str, Any]) -> list[dict[str, Any]]:
@@ -662,17 +839,41 @@ def _validate_goal_auto_runners(
             + "; ".join(errors)
             + ". Check the Workflow page warnings."
         )
-    missing: list[str] = []
-    for step in _main_workflow_reachable_steps(cfg, back):
-        if not handler_requires_agent(step):
+    def _collect_missing_agents(
+        steps: list[dict[str, Any]], prefix: str = ""
+    ) -> list[str]:
+        problems: list[str] = []
+        for step in steps:
+            if not handler_requires_agent(step):
+                continue
+            label = f"{prefix}{step['id']}"
+            agents = step.get("agents") or []
+            if not agents:
+                problems.append(f"{label}: no agent selected")
+                continue
+            for agent in agents:
+                if not _step_agent_command(step, agent):
+                    problems.append(f"{label} ({agent}): no command")
+        return problems
+
+    reachable = _main_workflow_reachable_steps(cfg, back)
+    missing = _collect_missing_agents(reachable)
+    # A reachable subflow node runs its whole subgraph, so those steps must be
+    # runnable too before the goal may start.
+    subflows = cfg.get("subflows") or {}
+    for step in reachable:
+        if step.get("type") != "subflow":
             continue
-        agents = step.get("agents") or []
-        if not agents:
-            missing.append(f"{step['id']}: no agent selected")
+        sub = subflows.get(str(step.get("subflow") or ""))
+        if sub is None:
+            missing.append(
+                f"{step['id']}: unknown subflow {str(step.get('subflow') or '')!r}"
+            )
             continue
-        for agent in agents:
-            if not _step_agent_command(step, agent):
-                missing.append(f"{step['id']} ({agent}): no command")
+        sub_reachable = _main_workflow_reachable_steps(sub, _workflow_graph(sub))
+        missing.extend(
+            _collect_missing_agents(sub_reachable, prefix=f"{step['id']}/")
+        )
     if missing:
         raise InvalidInputError(
             "goal cannot start until every step has a runnable Agent — open the "
@@ -787,13 +988,15 @@ def _start_goal_business_subtasks(
     from_step: str | None = None,
     target_steps: list[str] | None = None,
     upstream_result: str = "",
+    decompose_step: str = "",
 ) -> list[dict[str, Any]]:
     """Create each business subtask and start it in the workflow. By default a
     subtask starts at the entry step (splits at intake). When `target_steps` is
     given (a later decompose step's successors, `from_step` being that decompose
     step), the subtask instead begins there with `upstream_result` — the goal's
     shared design/architecture output — as its upstream context, so those steps
-    run once on the goal, not per subtask."""
+    run once on the goal, not per subtask. `decompose_step` names the goal step
+    that produced the split for run lineage (defaults to `from_step`)."""
     source_message_id = goal.get("source_message_id")
     if source_message_id is None:
         raise InvalidInputError("goal is missing source_message_id")
@@ -827,6 +1030,9 @@ def _start_goal_business_subtasks(
     # 3. Dispatch only the dependency-free subtasks; the rest stay held (status
     #    "created", no workflow_step) until _release_ready_subtasks starts them
     #    once their prerequisites close (and are thus integrated on main).
+    parent_run_id, parent_node_run_id = _run_lineage_for_step(
+        store, goal["id"], decompose_step or from_step or ""
+    )
     started: list[dict[str, Any]] = []
     for idx, subtask in enumerate(subtasks):
         task = created[idx]
@@ -836,6 +1042,8 @@ def _start_goal_business_subtasks(
         result = _dispatch_business_subtask(
             store, project_root, actor, task["id"],
             from_step, target_steps, upstream_result,
+            parent_run_id=parent_run_id,
+            parent_node_run_id=parent_node_run_id,
         )
         started.append({"task": store.get_task(task["id"]), **result})
     return started
@@ -849,14 +1057,23 @@ def _dispatch_business_subtask(
     from_step: str | None,
     target_steps: list[str] | None,
     upstream_result: str,
+    parent_run_id: int | None = None,
+    parent_node_run_id: int | None = None,
 ) -> dict[str, Any]:
     """Start one business subtask in the workflow — at the entry step, or at the
-    decompose step's successors when the goal split after its design phase."""
+    decompose step's successors when the goal split after its design phase. The
+    subtask's run records the goal's run/decompose node as its lineage parent."""
     if target_steps is None:
-        return _start_workflow_task_locked(store, project_root, actor, task_id)
+        return _start_workflow_task_locked(
+            store, project_root, actor, task_id,
+            parent_run_id=parent_run_id,
+            parent_node_run_id=parent_node_run_id,
+        )
     return _start_workflow_task_at_locked(
         store, project_root, actor, task_id,
         from_step or "", target_steps, upstream_result,
+        parent_run_id=parent_run_id,
+        parent_node_run_id=parent_node_run_id,
     )
 
 
@@ -908,6 +1125,9 @@ def _release_ready_subtasks(
         target_steps = _forward_out(cfg, back, decompose_id)
         from_step = decompose_id
     upstream_result = _goal_decompose_upstream_result(store, goal_id, from_step)
+    parent_run_id, parent_node_run_id = _run_lineage_for_step(
+        store, goal_id, decompose_id or ""
+    )
     _ensure_engine_agent(store)
     released: list[int] = []
     for s in held:
@@ -919,6 +1139,8 @@ def _release_ready_subtasks(
         _dispatch_business_subtask(
             store, project_root, actor, s["id"], from_step, target_steps,
             upstream_result,
+            parent_run_id=parent_run_id,
+            parent_node_run_id=parent_node_run_id,
         )
         released.append(s["id"])
     return released
@@ -1025,12 +1247,115 @@ def _complete_end_node(
     return "closed"
 
 
+def _finalize_subflow_locked(
+    store: Store, project_root: str | None, child: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Settle the parent's subflow node once its child task reaches a terminal
+    state: child closed -> complete the node (passing the child's terminal port
+    through when the node declares it), child blocked -> block the node and let
+    the failure path notify the hub. Idempotent: a node no longer active on the
+    parent (already settled, superseded, or force-closed) is left alone."""
+    ref = str(child.get("workflow_ref") or "").strip()
+    if not ref or not child.get("parent_task_id"):
+        return None
+    # Callers pass pre-update snapshots; re-read the child's settled status.
+    child = store.get_task(int(child["id"])) or child
+    status = str(child.get("task_status") or "")
+    if status not in {"closed", "blocked"}:
+        return None
+    parent_id = int(child["parent_task_id"])
+    parent = store.get_task(parent_id)
+    if not parent or parent.get("task_status") == "closed":
+        return None
+    try:
+        cfg = workflow_config_for_task(project_root, parent)
+    except InvalidInputError:
+        return None
+    steps = {s["id"]: s for s in cfg["steps"]}
+    transitions = store.list_task_transitions(parent_id)
+    active = _active_step_assignees(transitions)
+    # Which subflow node spawned this child: the recorded run lineage names the
+    # exact node execution; fall back to the sole active node referencing the
+    # same subflow when the record layer has no lineage for this child.
+    parent_step_id = ""
+    try:
+        child_run = store.get_workflow_run_by_task(int(child["id"]))
+        if child_run and child_run.get("parent_node_run_id"):
+            node = store.get_node_run(int(child_run["parent_node_run_id"]))
+            if node:
+                parent_step_id = str(node["step"])
+    except Exception:
+        parent_step_id = ""
+    if not parent_step_id:
+        candidates = [
+            step_id for step_id in active
+            if (steps.get(step_id) or {}).get("type") == "subflow"
+            and str(steps[step_id].get("subflow") or "") == ref
+        ]
+        if len(candidates) != 1:
+            return None
+        parent_step_id = candidates[0]
+    step_def = steps.get(parent_step_id)
+    if (
+        parent_step_id not in active
+        or not step_def
+        or get_node_handler(step_def).dispatch_mode != "subflow"
+    ):
+        return None
+    if status == "blocked":
+        # A blocked child may block again (or later resume and close); block
+        # the parent node only once per dispatch cycle.
+        last_dispatch_id = max(
+            (t["id"] for t in transitions
+             if t["outcome"] == "dispatched" and t["to_step"] == parent_step_id),
+            default=0,
+        )
+        if any(
+            t["id"] > last_dispatch_id
+            and t["from_step"] == parent_step_id
+            and t["outcome"] == "blocked"
+            for t in transitions
+        ):
+            return None
+        return _advance_workflow_task_locked(
+            store, project_root, WORKFLOW_ENGINE_AGENT, parent_id,
+            parent_step_id, "blocked",
+            f"subflow '{ref}' task #{child['id']} blocked",
+        )
+    # Child closed: hand the child's terminal structured output to the parent
+    # node. Its port passes through only when the parent node declares it.
+    results = store.list_workflow_node_results(int(child["id"]))
+    final = results[-1] if results else {}
+    port = str(final.get("port") or "success")
+    if port not in set(step_def.get("ports") or ["success"]):
+        port = str(step_def.get("default_port") or "success")
+    payload = "WORKFLOW_RESULT: " + json.dumps(
+        {
+            "port": port,
+            "output": final.get("output") or {},
+            "summary": str(
+                final.get("summary") or f"subflow '{ref}' completed"
+            ),
+            "artifacts": final.get("artifacts") or [],
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return _advance_workflow_task_locked(
+        store, project_root, WORKFLOW_ENGINE_AGENT, parent_id,
+        parent_step_id, "done", payload,
+    )
+
+
 def _recompute_parent_goal_status(
     store: Store, task: dict[str, Any], project_root: str | None = None
 ) -> None:
     """Roll a subtask status change up to its parent goal:
     all business subtasks closed -> accepted; any blocked -> stalled;
-    otherwise in_progress. A goal that was explicitly closed is left as-is."""
+    otherwise in_progress. A goal that was explicitly closed is left as-is.
+    Also the terminal-propagation seam for subflow children: a child task
+    reaching closed/blocked settles the parent's subflow node here."""
+    _finalize_subflow_locked(store, project_root, task)
     parent_id = task.get("parent_task_id")
     if not parent_id:
         return
@@ -1199,7 +1524,8 @@ def _complete_goal_intake_locked(
     _commit_goal_design_artifacts(project_root)
     if target_steps is None:
         started = start_goal_business_subtasks(
-            store, project_root, goal, actor, subtasks
+            store, project_root, goal, actor, subtasks,
+            decompose_step=step["id"],
         )
     else:
         started = start_goal_business_subtasks(
@@ -1207,6 +1533,7 @@ def _complete_goal_intake_locked(
             from_step=step["id"],
             target_steps=target_steps,
             upstream_result=result,
+            decompose_step=step["id"],
         )
     return {
         "task_id": goal["id"],
@@ -1466,7 +1793,7 @@ def _dispatch_targets(
         transitions = store.list_task_transitions(task_id)
         correlation = store.sync_workflow_correlation(task_id, target)
         if target in _running_steps(transitions):
-            if correlation is not None and _correlation_ready(correlation):
+            if correlation is not None and _correlation_ready(correlation, steps.get(target)):
                 # Recovery for a crash after dispatch but before the activation
                 # was marked consumed. The active step proves dispatch won.
                 store.consume_workflow_correlation(correlation["id"])
@@ -1474,11 +1801,36 @@ def _dispatch_targets(
         if _dispatched_since(
             transitions, target, _latest_inbound_completion_id(transitions, target)
         ):
-            if correlation is not None and _correlation_ready(correlation):
+            if correlation is not None and _correlation_ready(correlation, steps.get(target)):
                 store.consume_workflow_correlation(correlation["id"])
             continue  # already dispatched for this target's current cycle
+        if steps[target].get("join_policy") == "all_successful":
+            # An all_successful join must not wait out a branch that already
+            # terminally failed: the join itself blocks for hub recovery.
+            failed_branches = _failed_join_branches(target, correlation, transitions)
+            if failed_branches:
+                already_blocked = any(
+                    t["from_step"] == target
+                    and t["to_step"] == target
+                    and t["outcome"] == "blocked"
+                    for t in transitions
+                )
+                if not already_blocked:
+                    reason = (
+                        f"join {target!r} policy all_successful: upstream "
+                        f"branch(es) failed: {', '.join(failed_branches)}"
+                    )
+                    store.record_task_transition(
+                        task_id, target, target, WORKFLOW_ENGINE_AGENT,
+                        "blocked", reason, "blocked",
+                    )
+                    store.set_task_workflow_state(task_id, task_status="blocked")
+                    if correlation is not None:
+                        store.consume_workflow_correlation(correlation["id"])
+                    notices.append(_notify_hub(store, f"Task #{task_id} {reason}"))
+                continue
         join_is_ready = (
-            _correlation_ready(correlation)
+            _correlation_ready(correlation, steps.get(target))
             if correlation is not None
             else _join_ready(target, cfg, back, steps, transitions)
         )
@@ -1606,6 +1958,98 @@ def _dispatch_targets(
             if correlation is not None:
                 store.consume_workflow_correlation(correlation["id"])
             continue
+        if handler.dispatch_mode == "subflow":
+            subflow_name = str(step.get("subflow") or "")
+            if subflow_name not in (cfg.get("subflows") or {}):
+                # The config changed under an in-flight task; block for the hub
+                # instead of stranding the step in a dispatch loop.
+                reason = f"step {target!r} references unknown subflow: {subflow_name!r}"
+                store.record_task_transition(
+                    task_id, target, target, WORKFLOW_ENGINE_AGENT,
+                    "blocked", reason, "blocked",
+                )
+                store.set_task_workflow_state(task_id, task_status="blocked")
+                notices.append(_notify_hub(store, f"Task #{task_id} {reason}"))
+                break
+            _ensure_engine_agent(store)
+            subflow_inputs = {
+                "task": {
+                    "id": task_id,
+                    "title": task.get("title") or "",
+                    "content": task.get("content") or "",
+                },
+                "step": {"id": target, "name": step.get("name") or target},
+                "upstream_result": upstream_result or "",
+                "mapped": mapped_inputs,
+                "subflow": {"name": subflow_name},
+            }
+            store.record_task_transition(
+                task_id, "", target, WORKFLOW_ENGINE_AGENT, "dispatched",
+                WORKFLOW_ENGINE_AGENT,
+            )
+            if task.get("is_goal"):
+                store.set_task_workflow_state(
+                    task_id,
+                    task_status=_goal_status_for_step(project_root, target),
+                    assignee=WORKFLOW_ENGINE_AGENT,
+                )
+            else:
+                store.set_task_workflow_state(
+                    task_id, task_status="in_progress", assignee=WORKFLOW_ENGINE_AGENT
+                )
+            if _materializes_step_cards(task):
+                _upsert_step_card(
+                    store, project_root, task, step,
+                    WORKFLOW_ENGINE_AGENT, subflow_inputs,
+                )
+            else:
+                store.update_task_step_details(
+                    task_id, step_inputs=subflow_inputs,
+                    result_summary="", step_output={}, artifacts=[],
+                )
+            # The subflow node's execution IS the child task: a fresh task whose
+            # workflow_ref routes it through the subflow's own graph. The parent
+            # step stays active until the child reaches a terminal state (see
+            # _finalize_subflow_locked).
+            work = (task.get("title") or "").strip()
+            child = store.create_subflow_task(
+                parent_task_id=task_id,
+                workflow_ref=subflow_name,
+                title=(f"{step.get('name') or target} · {work[:60]}" if work
+                       else str(step.get("name") or target))[:160],
+                content=task.get("content") or "",
+                sender=WORKFLOW_ENGINE_AGENT,
+            )
+            parent_run_id, parent_node_run_id = _run_lineage_for_step(
+                store, task_id, target
+            )
+            child_upstream = upstream_result
+            if mapped_inputs:
+                mapped_json = json.dumps(
+                    mapped_inputs, ensure_ascii=False, sort_keys=True
+                )
+                child_upstream = (
+                    f"{upstream_result}\n\nMAPPED_INPUTS:\n{mapped_json}".strip()
+                )
+            child_report = _start_workflow_task_locked(
+                store, project_root, WORKFLOW_ENGINE_AGENT, child["id"],
+                parent_run_id=parent_run_id,
+                parent_node_run_id=parent_node_run_id,
+                upstream_result=child_upstream,
+            )
+            dispatched.append(
+                {
+                    "step": target,
+                    "assignee": WORKFLOW_ENGINE_AGENT,
+                    "subflow": subflow_name,
+                    "subflow_task_id": child["id"],
+                }
+            )
+            dispatched.extend(child_report.get("dispatched") or [])
+            notices.extend(child_report.get("notices") or [])
+            if correlation is not None:
+                store.consume_workflow_correlation(correlation["id"])
+            continue
         if handler.dispatch_mode == "end":
             _complete_end_node(store, project_root, task, step)
             if correlation is not None:
@@ -1615,7 +2059,7 @@ def _dispatch_targets(
             break
         if handler.dispatch_mode == "join":
             if (
-                step.get("join_policy") == "any"
+                step.get("join_policy") in {"any", "quorum", "count"}
                 and store.list_workflow_node_results(task_id, target)
             ):
                 continue
@@ -1721,6 +2165,19 @@ def _dispatch_targets(
                 store.update_task_step_details(
                     task_id, step_inputs=join_step_inputs,
                     result_summary="", step_output={}, artifacts=[],
+                )
+            # A satisfied any/quorum/count join no longer needs its slower
+            # branches; `remaining: cancel` stops their in-flight work before
+            # the join's own advance dispatches downstream.
+            if (
+                correlation is not None
+                and step.get("join_remaining") == "cancel"
+                and step.get("join_policy") in {"any", "quorum", "count"}
+            ):
+                notices.extend(
+                    _cancel_remaining_join_branches(
+                        store, task, cfg, back, target, correlation
+                    )
                 )
             join_result = "WORKFLOW_RESULT: " + json.dumps(
                 {
@@ -1911,7 +2368,7 @@ def apply_foreach_item_outcome(
                 "closed": True,
                 "dispatched": [],
             }
-        cfg = read_workflow_config(project_root)
+        cfg = workflow_config_for_task(project_root, task)
         step = next(
             (item for item in cfg["steps"] if item["id"] == group["foreach_step"]),
             None,
@@ -2009,12 +2466,19 @@ def recover_foreach_item_groups(
     """Resume ready scopes and completed-but-unadvanced groups after restart."""
     recovered: list[dict[str, Any]] = []
     with _WORKFLOW_ENGINE_LOCK:
-        cfg = read_workflow_config(project_root)
-        steps = {step["id"]: step for step in cfg["steps"]}
         for group in store.list_recoverable_workflow_item_groups():
             task = store.get_task(int(group["task_id"]))
+            if not task:
+                continue
+            # Per-task config: a subflow child's foreach step lives in its own
+            # graph. A dangling workflow_ref must not abort the whole sweep.
+            try:
+                cfg = workflow_config_for_task(project_root, task)
+            except InvalidInputError:
+                continue
+            steps = {step["id"]: step for step in cfg["steps"]}
             step = steps.get(str(group["foreach_step"]))
-            if not task or not step or get_node_handler(step).dispatch_mode != "foreach":
+            if not step or get_node_handler(step).dispatch_mode != "foreach":
                 continue
             if task.get("task_status") == "closed":
                 for scope in group.get("scopes") or []:
@@ -2110,7 +2574,7 @@ def rerun_workflow_step(
                 raise InvalidInputError(
                     f"task {task_id} has not entered the workflow yet; start it first"
                 )
-        cfg = read_workflow_config(project_root)
+        cfg = workflow_config_for_task(project_root, task)
         steps = {s["id"]: s for s in cfg["steps"]}
         step_id = (step or "").strip()
         if not step_id:
@@ -2217,7 +2681,7 @@ def skip_workflow_step(
                 raise InvalidInputError(
                     f"task {task_id} has not entered the workflow yet; start it first"
                 )
-        cfg = read_workflow_config(project_root)
+        cfg = workflow_config_for_task(project_root, task)
         steps = {s["id"]: s for s in cfg["steps"]}
         back = _workflow_graph(cfg)
         step_id = (step or "").strip()
@@ -2408,7 +2872,7 @@ def _resume_goal_after_budget_increase_locked(
 
     _, task, transition = frozen
     step_id = transition.get("to_step") or transition.get("from_step")
-    cfg = read_workflow_config(project_root)
+    cfg = workflow_config_for_task(project_root, task)
     steps = {step["id"]: step for step in cfg["steps"]}
     step = steps.get(step_id)
     if not step:
@@ -2451,7 +2915,13 @@ def force_close_goal(
 
 
 def _start_workflow_task_locked(
-    store: Store, project_root: str | None, agent: str, task_id: int
+    store: Store,
+    project_root: str | None,
+    agent: str,
+    task_id: int,
+    parent_run_id: int | None = None,
+    parent_node_run_id: int | None = None,
+    upstream_result: str = "",
 ) -> dict[str, Any]:
     task = store.get_task(task_id)
     if not task:
@@ -2466,7 +2936,7 @@ def _start_workflow_task_locked(
             f"task {task_id} is already in the workflow "
             f"(active steps: {', '.join(_active_steps(transitions)) or 'none'})"
         )
-    cfg = read_workflow_config(project_root)
+    cfg = workflow_config_for_task(project_root, task)
     back = _workflow_graph(cfg)
     execution_errors = _workflow_execution_errors(cfg, back)
     if execution_errors:
@@ -2485,8 +2955,14 @@ def _start_workflow_task_locked(
         step_id for step_id in _workflow_entry_steps(cfg, back)
         if steps[step_id]["required"] or _forward_out(cfg, back, step_id)
     ]
+    # Dual-write: open the run record with entry tokens before the first
+    # dispatch, so the dispatch mirror finds its inbound token to consume.
+    _ensure_workflow_run(
+        store, task_id, cfg, entry_steps=entries,
+        parent_run_id=parent_run_id, parent_node_run_id=parent_node_run_id,
+    )
     dispatched, notices = _dispatch_targets(
-        store, project_root, task, entries, cfg, back, ""
+        store, project_root, task, entries, cfg, back, upstream_result
     )
     return {
         "task_id": task_id,
@@ -2504,6 +2980,8 @@ def _start_workflow_task_at_locked(
     from_step: str,
     target_steps: list[str],
     upstream_result: str = "",
+    parent_run_id: int | None = None,
+    parent_node_run_id: int | None = None,
 ) -> dict[str, Any]:
     """Start a fresh task partway through the workflow — at `target_steps` (the
     decompose step's successors) instead of the entry. Used for decompose subtasks
@@ -2512,10 +2990,16 @@ def _start_workflow_task_at_locked(
     task = store.get_task(task_id)
     if not task:
         raise InvalidInputError(f"unknown task: {task_id}")
-    cfg = read_workflow_config(project_root)
+    cfg = workflow_config_for_task(project_root, task)
     back = _workflow_graph(cfg)
     valid = {s["id"] for s in cfg["steps"]}
     targets = [s for s in target_steps if s in valid]
+    # Dual-write: open the run record first; the seed transitions below emit
+    # this run's entry tokens (from_step -> target) through the store mirror.
+    _ensure_workflow_run(
+        store, task_id, cfg, entry_steps=[],
+        parent_run_id=parent_run_id, parent_node_run_id=parent_node_run_id,
+    )
     # Seed the pre-split boundary exactly as a normal advance does before it
     # dispatches: record `from_step -> target (done)` so the join gate sees the
     # decompose step as a satisfied predecessor and lets each target dispatch on
@@ -2571,7 +3055,7 @@ def _advance_workflow_task_locked(
             "closed": True, "dispatched": [], "notices": [],
             "note": "task already terminal; advance ignored",
         }
-    cfg = read_workflow_config(project_root)
+    cfg = workflow_config_for_task(project_root, task)
     steps = {s["id"]: s for s in cfg["steps"]}
     if step not in steps:
         raise InvalidInputError(f"unknown workflow step: {step}")
@@ -2622,7 +3106,7 @@ def _advance_workflow_task_locked(
     # Constraint: only the agent that was dispatched the active step may
     # complete it. The hub agent can override any active step for recovery.
     engine_managed = get_node_handler(steps[step]).dispatch_mode in {
-        "decision", "join", "foreach", "end"
+        "decision", "join", "foreach", "subflow", "end"
     }
     if (
         agent != assigned_agent
@@ -2783,7 +3267,7 @@ def _advance_workflow_task_locked(
                 "edge condition did not select this branch",
                 selected_port,
             )
-            _record_not_selected_lineage(
+            _record_branch_closure_lineage(
                 store,
                 task_id,
                 cfg,
@@ -2824,6 +3308,14 @@ def _advance_workflow_task_locked(
     if control_outcome in failure_ports and not port_targets:
         store.record_task_transition(
             task_id, step, step, agent, control_outcome, result, selected_port
+        )
+        # This branch terminally failed with no recovery route. Close its merge
+        # boundaries so a downstream join learns the branch will never arrive —
+        # an all_successful join turns that closure into its own blocked state.
+        _record_branch_closure_lineage(
+            store, task_id, cfg, back, step, step, selected_port,
+            outcome="cancelled" if control_outcome == "cancelled" else "blocked",
+            note=f"branch failed at {step} ({selected_port})",
         )
         store.set_task_workflow_state(task_id, task_status="blocked")
         _settle_step_card(store, task, step, "blocked")

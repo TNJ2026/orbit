@@ -107,12 +107,12 @@ class WorkflowSchemaTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             schema = server.read_workflow_config(tmp)["schema"]
         self.assertEqual(
-            ["action", "approval", "decision", "join", "foreach", "end"],
+            ["action", "approval", "decision", "join", "foreach", "subflow", "end"],
             [item["id"] for item in schema["node_types"]],
         )
         handlers = {item["id"]: item for item in schema["handlers"]}
         self.assertEqual(
-            {"agent", "command", "human", "decision", "join", "foreach", "end"},
+            {"agent", "command", "human", "decision", "join", "foreach", "subflow", "end"},
             set(handlers),
         )
         self.assertTrue(handlers["agent"]["requires_agent"])
@@ -186,9 +186,36 @@ class WorkflowSchemaTests(unittest.TestCase):
 
         with self.assertRaisesRegex(server.InvalidInputError, "join_policy"):
             server._normalize_workflow_step(
+                {"id": "bad_join", "name": "Bad", "type": "join", "join_policy": "sometimes"},
+                0,
+            )
+
+        with self.assertRaisesRegex(server.InvalidInputError, "join_threshold"):
+            server._normalize_workflow_step(
                 {"id": "bad_join", "name": "Bad", "type": "join", "join_policy": "quorum"},
                 0,
             )
+
+        with self.assertRaisesRegex(server.InvalidInputError, "join_remaining"):
+            server._normalize_workflow_step(
+                {
+                    "id": "bad_join", "name": "Bad", "type": "join",
+                    "join_policy": "any", "join_remaining": "pause",
+                },
+                0,
+            )
+
+        quorum = server._normalize_workflow_step(
+            {
+                "id": "quorum_join", "name": "Quorum", "type": "join",
+                "join_policy": "quorum", "join_threshold": 2,
+                "join_remaining": "cancel",
+            },
+            0,
+        )
+        self.assertEqual("quorum", quorum["join_policy"])
+        self.assertEqual(2, quorum["join_threshold"])
+        self.assertEqual("cancel", quorum["join_remaining"])
 
         end = server._normalize_workflow_step(
             {"id": "finish", "name": "Finish", "type": "end"}, 0
@@ -853,6 +880,28 @@ class GitProvisioningTests(unittest.TestCase):
         warnings = server._workflow_graph_warnings(steps, edges)
         self.assertFalse(
             any("no terminal step" in warning for warning in warnings), warnings
+        )
+
+    def test_join_threshold_above_inbound_branches_warns(self):
+        steps = [
+            server._normalize_workflow_step(step, index)
+            for index, step in enumerate([
+                {"id": "fork", "name": "Fork", "agents": ["codex"]},
+                {"id": "left", "name": "Left", "agents": ["codex"]},
+                {"id": "right", "name": "Right", "agents": ["codex"]},
+                {
+                    "id": "collect", "name": "Collect", "type": "join",
+                    "join_policy": "quorum", "join_threshold": 3,
+                },
+            ])
+        ]
+        edges = [
+            {"from": "fork", "to": "left"}, {"from": "fork", "to": "right"},
+            {"from": "left", "to": "collect"}, {"from": "right", "to": "collect"},
+        ]
+        warnings = server._workflow_graph_warnings(steps, edges)
+        self.assertTrue(
+            any("threshold 3 exceeds" in warning for warning in warnings), warnings
         )
 
     def test_integrate_still_validates_in_non_git_project(self):

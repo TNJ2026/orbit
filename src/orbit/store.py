@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import sqlite3
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 def _resolve_state_dir(parent: Path) -> Path:
     """Return the Orbit state directory under `parent`, preferring the new
@@ -64,6 +65,17 @@ GOAL_STATUSES = {
     "closed",        # explicitly closed (terminal)
 }
 TASK_IMPORTANCE_LEVELS = {"low", "normal", "high", "critical"}
+# New-runtime record layer (workflow_runs / node_runs / workflow_tokens).
+# Dual-written next to tasks/task_transitions/run_jobs; never consulted for
+# routing decisions in this phase.
+WORKFLOW_RUN_STATUSES = {"running", "succeeded", "failed", "blocked", "cancelled"}
+NODE_RUN_STATUSES = {
+    "pending", "running", "waiting", "succeeded", "failed",
+    "blocked", "cancelled", "skipped",
+}
+WORKFLOW_TOKEN_STATUSES = {"pending", "consumed", "cancelled"}
+
+_log = logging.getLogger("orbit.store")
 TASK_SIZES = {"small", "medium", "large"}
 TASK_RISKS = {"low", "medium", "high"}
 
@@ -226,6 +238,57 @@ CREATE TABLE IF NOT EXISTS workflow_item_scopes (
     UNIQUE(group_id, item_index),
     UNIQUE(group_id, scope_key)
 );
+CREATE TABLE IF NOT EXISTS workflow_runs (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id             INTEGER NOT NULL UNIQUE,
+    definition_snapshot TEXT NOT NULL DEFAULT '{}',
+    status              TEXT NOT NULL DEFAULT 'running',
+    variables           TEXT NOT NULL DEFAULT '{}',
+    parent_run_id       INTEGER,
+    parent_node_run_id  INTEGER,
+    root_run_id         INTEGER,
+    created_at          TEXT NOT NULL,
+    updated_at          TEXT NOT NULL,
+    completed_at        TEXT,
+    FOREIGN KEY(task_id) REFERENCES tasks(id),
+    FOREIGN KEY(parent_run_id) REFERENCES workflow_runs(id),
+    FOREIGN KEY(parent_node_run_id) REFERENCES node_runs(id)
+);
+CREATE TABLE IF NOT EXISTS node_runs (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    workflow_run_id INTEGER NOT NULL,
+    task_id         INTEGER NOT NULL,
+    step            TEXT NOT NULL,
+    attempt         INTEGER NOT NULL DEFAULT 1,
+    item_scope_id   INTEGER,
+    executor        TEXT NOT NULL DEFAULT '',
+    status          TEXT NOT NULL DEFAULT 'pending',
+    port            TEXT NOT NULL DEFAULT '',
+    summary         TEXT NOT NULL DEFAULT '',
+    run_job_id      INTEGER,
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    completed_at    TEXT,
+    FOREIGN KEY(workflow_run_id) REFERENCES workflow_runs(id),
+    FOREIGN KEY(task_id) REFERENCES tasks(id),
+    FOREIGN KEY(item_scope_id) REFERENCES workflow_item_scopes(id),
+    FOREIGN KEY(run_job_id) REFERENCES run_jobs(id)
+);
+CREATE TABLE IF NOT EXISTS workflow_tokens (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    workflow_run_id INTEGER NOT NULL,
+    node_run_id     INTEGER,
+    from_step       TEXT NOT NULL DEFAULT '',
+    to_step         TEXT NOT NULL,
+    port            TEXT NOT NULL DEFAULT '',
+    item_scope_id   INTEGER,
+    status          TEXT NOT NULL DEFAULT 'pending',
+    created_at      TEXT NOT NULL,
+    consumed_at     TEXT,
+    FOREIGN KEY(workflow_run_id) REFERENCES workflow_runs(id),
+    FOREIGN KEY(node_run_id) REFERENCES node_runs(id),
+    FOREIGN KEY(item_scope_id) REFERENCES workflow_item_scopes(id)
+);
 CREATE TABLE IF NOT EXISTS run_jobs (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     task_id         INTEGER NOT NULL,
@@ -292,6 +355,22 @@ CREATE INDEX IF NOT EXISTS idx_run_jobs_available
     ON run_jobs (status, leased_until, id);
 CREATE INDEX IF NOT EXISTS idx_run_jobs_task
     ON run_jobs (task_id, step, id);
+CREATE INDEX IF NOT EXISTS idx_workflow_runs_status
+    ON workflow_runs (status, id);
+CREATE INDEX IF NOT EXISTS idx_workflow_runs_root
+    ON workflow_runs (root_run_id, id);
+CREATE INDEX IF NOT EXISTS idx_workflow_runs_parent
+    ON workflow_runs (parent_run_id, id);
+CREATE INDEX IF NOT EXISTS idx_node_runs_run_step
+    ON node_runs (workflow_run_id, step, id);
+CREATE INDEX IF NOT EXISTS idx_node_runs_task_step
+    ON node_runs (task_id, step, id);
+CREATE INDEX IF NOT EXISTS idx_node_runs_item_scope
+    ON node_runs (item_scope_id, id);
+CREATE INDEX IF NOT EXISTS idx_node_runs_run_job
+    ON node_runs (run_job_id);
+CREATE INDEX IF NOT EXISTS idx_workflow_tokens_pending
+    ON workflow_tokens (workflow_run_id, to_step, status, id);
 """
 
 
@@ -568,6 +647,9 @@ class Store:
             # JSON list of prerequisite task ids a business subtask waits on; the
             # engine holds it until they all close. '' / '[]' = no dependency.
             "depends_on": "TEXT NOT NULL DEFAULT ''",
+            # Name of the subflow whose graph this task traverses; '' = the
+            # main workflow graph (see workflow_config_for_task).
+            "workflow_ref": "TEXT NOT NULL DEFAULT ''",
             # Structured data for one materialized workflow-step execution.
             "step_inputs": "TEXT NOT NULL DEFAULT '{}'",
             "result_summary": "TEXT NOT NULL DEFAULT ''",
@@ -681,6 +763,25 @@ class Store:
             self._conn.execute(
                 "ALTER TABLE workflow_item_groups ADD COLUMN advanced_at TEXT"
             )
+        # Cross-run lineage: which run (and which node execution in it) spawned
+        # this run, plus the root of the whole lineage tree for one-query reads.
+        run_record_columns = {
+            row["name"]
+            for row in self._conn.execute(
+                "PRAGMA table_info(workflow_runs)"
+            ).fetchall()
+        }
+        if run_record_columns:
+            for column in ("parent_run_id", "parent_node_run_id", "root_run_id"):
+                if column not in run_record_columns:
+                    self._conn.execute(
+                        f"ALTER TABLE workflow_runs ADD COLUMN {column} INTEGER"
+                    )
+            if "root_run_id" not in run_record_columns:
+                # Pre-lineage runs are their own roots.
+                self._conn.execute(
+                    "UPDATE workflow_runs SET root_run_id = id WHERE root_run_id IS NULL"
+                )
         self._backfill_tasks_from_messages()
 
     def _backfill_tasks_from_messages(self) -> None:
@@ -950,7 +1051,7 @@ class Store:
                            created_at, updated_at,
                            importance, size, risk,
                            required_capabilities, exclusive_workspace,
-                           workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify, depends_on,
+                           workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify, depends_on, workflow_ref,
                            step_inputs, result_summary, step_output, artifacts
                     FROM tasks
                     {where}
@@ -967,7 +1068,7 @@ class Store:
                           assignee, assignee AS recipient, status AS task_status,
                           created_at, updated_at, importance, size,
                           risk, required_capabilities, exclusive_workspace,
-                          workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify, depends_on,
+                          workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify, depends_on, workflow_ref,
                           step_inputs, result_summary, step_output, artifacts
                    FROM tasks
                    WHERE id = ?""",
@@ -982,7 +1083,7 @@ class Store:
                           assignee, assignee AS recipient, status AS task_status,
                           created_at, updated_at, importance, size,
                           risk, required_capabilities, exclusive_workspace,
-                          workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify, depends_on,
+                          workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify, depends_on, workflow_ref,
                           step_inputs, result_summary, step_output, artifacts
                    FROM tasks
                    WHERE source_message_id = ?""",
@@ -997,7 +1098,7 @@ class Store:
                           assignee, assignee AS recipient, status AS task_status,
                           created_at, updated_at, importance, size,
                           risk, required_capabilities, exclusive_workspace,
-                          workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify, depends_on,
+                          workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify, depends_on, workflow_ref,
                           step_inputs, result_summary, step_output, artifacts
                    FROM tasks
                    WHERE parent_task_id = ?
@@ -1014,7 +1115,7 @@ class Store:
                           assignee, assignee AS recipient, status AS task_status,
                           created_at, updated_at, importance, size,
                           risk, required_capabilities, exclusive_workspace,
-                          workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify, depends_on,
+                          workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify, depends_on, workflow_ref,
                           step_inputs, result_summary, step_output, artifacts
                    FROM tasks
                    WHERE is_goal = 1
@@ -1031,7 +1132,7 @@ class Store:
                           assignee, assignee AS recipient, status AS task_status,
                           created_at, updated_at, importance, size,
                           risk, required_capabilities, exclusive_workspace,
-                          workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify, depends_on,
+                          workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify, depends_on, workflow_ref,
                           step_inputs, result_summary, step_output, artifacts
                    FROM tasks
                    WHERE workflow_step != ''
@@ -1051,7 +1152,7 @@ class Store:
                           assignee, assignee AS recipient, status AS task_status,
                           created_at, updated_at, importance, size,
                           risk, required_capabilities, exclusive_workspace,
-                          workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify, depends_on,
+                          workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify, depends_on, workflow_ref,
                           step_inputs, result_summary, step_output, artifacts
                    FROM tasks
                    WHERE status != 'closed'
@@ -1186,14 +1287,53 @@ class Store:
             self._conn.commit()
         return self.get_task(cur.lastrowid)
 
+    def create_subflow_task(
+        self,
+        parent_task_id: int,
+        workflow_ref: str,
+        title: str,
+        content: str,
+        sender: str,
+    ) -> dict[str, Any]:
+        """Create the child task a subflow node executes. Like a step card it
+        hangs off parent_task_id with no source message — so goal roll-up and
+        business-subtask queries ignore it — while `workflow_ref` routes the
+        engine to the subflow's own graph instead of the main workflow."""
+        workflow_ref = (workflow_ref or "").strip()
+        if not workflow_ref:
+            raise InvalidInputError("workflow_ref is required for a subflow task")
+        now = _now()
+        with self._lock:
+            parent = self._conn.execute(
+                "SELECT id FROM tasks WHERE id = ?", (parent_task_id,)
+            ).fetchone()
+            if parent is None:
+                raise InvalidInputError(f"unknown task: {parent_task_id}")
+            cur = self._conn.execute(
+                """INSERT INTO tasks (
+                       title, content, sender, assignee, status,
+                       parent_task_id, workflow_ref, created_at, updated_at
+                   )
+                   VALUES (?, ?, ?, ?, 'created', ?, ?, ?, ?)""",
+                (
+                    title, content, sender, "",
+                    parent_task_id, workflow_ref, now, now,
+                ),
+            )
+            self._conn.commit()
+        return self.get_task(cur.lastrowid)
+
     def find_open_step_card(
         self, parent_task_id: int, workflow_step: str
     ) -> dict[str, Any] | None:
         with self._lock:
+            # workflow_ref = '' excludes subflow child tasks: they also hang off
+            # the parent but traverse their own graph, and a subflow step id that
+            # happens to match a main-graph step must not shadow the real card.
             row = self._conn.execute(
                 """SELECT id FROM tasks
                    WHERE parent_task_id = ? AND workflow_step = ?
-                     AND status != 'closed'
+                     AND workflow_ref = '' AND status != 'closed'
                    ORDER BY id DESC LIMIT 1""",
                 (parent_task_id, workflow_step),
             ).fetchone()
@@ -1413,6 +1553,35 @@ class Store:
             self._conn.commit()
             return self._workflow_correlation_locked(int(row["id"]))
 
+    def cancel_workflow_correlation_branches(self, correlation_id: int) -> list[str]:
+        """Mark every still-selected branch of one activation cancelled.
+
+        Returns the predecessor steps that were cancelled, so the engine can
+        settle their in-flight work.
+        """
+        now = _now()
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT predecessor_step FROM workflow_correlation_branches
+                   WHERE correlation_id = ? AND state = 'selected'
+                   ORDER BY id""",
+                (correlation_id,),
+            ).fetchall()
+            cancelled = [str(row["predecessor_step"]) for row in rows]
+            if cancelled:
+                self._conn.execute(
+                    """UPDATE workflow_correlation_branches
+                       SET state = 'cancelled', updated_at = ?
+                       WHERE correlation_id = ? AND state = 'selected'""",
+                    (now, correlation_id),
+                )
+                self._conn.execute(
+                    "UPDATE workflow_correlations SET updated_at = ? WHERE id = ?",
+                    (now, correlation_id),
+                )
+            self._conn.commit()
+        return cancelled
+
     def consume_workflow_correlation(self, correlation_id: int) -> bool:
         now = _now()
         with self._lock:
@@ -1609,6 +1778,14 @@ class Store:
                     now, now if terminal else None, scope_id,
                 ),
             )
+            if terminal:
+                # Dual-write: settle the per-item node run with the scope.
+                self._guarded_mirror_locked(
+                    "item_scope",
+                    lambda: self._mirror_item_scope_settled_locked(
+                        scope_id, status, output, str(error or ""), now
+                    ),
+                )
             group_id = int(row["group_id"])
             self._refresh_workflow_item_group_locked(group_id, now)
             self._conn.commit()
@@ -1672,6 +1849,19 @@ class Store:
                             updated_at = ?, completed_at = ?
                         WHERE item_scope_id IN ({placeholders}) AND status = 'pending'""",
                     (str(error or "")[:2000], now, now, *scope_ids),
+                )
+                # Dual-write: cancel the per-item node runs of the scopes
+                # that never got to run.
+                self._guarded_mirror_locked(
+                    "item_scope_cancel",
+                    lambda: self._conn.execute(
+                        f"""UPDATE node_runs
+                            SET status = 'cancelled', summary = ?, updated_at = ?,
+                                completed_at = ?
+                            WHERE item_scope_id IN ({placeholders})
+                              AND completed_at IS NULL""",
+                        (str(error or "")[:2000], now, now, *scope_ids),
+                    ),
                 )
             self._conn.execute(
                 """UPDATE workflow_item_groups
@@ -1775,6 +1965,649 @@ class Store:
         result["artifacts"] = artifacts if isinstance(artifacts, list) else []
         return result
 
+    # ------------------------------------------------------------------
+    # Workflow-run record layer (workflow_runs / node_runs / workflow_tokens)
+    #
+    # These tables are the persistence model of the general workflow runtime
+    # (docs/general-workflow-design.md §10.3). During the transition they are
+    # DUAL-WRITTEN from the existing engine events — task transitions, run-job
+    # creation, item-scope settlement and task status convergence — while
+    # tasks/task_transitions/run_jobs stay the source of truth for every
+    # routing decision. A dual-write failure must never break the primary
+    # flow: mirror writes run inside a SAVEPOINT and roll themselves back on
+    # error (see _guarded_mirror_locked).
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _workflow_run_row(row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        for key in ("definition_snapshot", "variables"):
+            try:
+                item[key] = json.loads(item.get(key) or "{}")
+            except (TypeError, ValueError):
+                item[key] = {}
+        return item
+
+    def create_workflow_run(
+        self,
+        task_id: int,
+        definition: dict[str, Any] | None = None,
+        variables: dict[str, Any] | None = None,
+        entry_steps: list[str] | None = None,
+        parent_run_id: int | None = None,
+        parent_node_run_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Create the workflow_run record for a task entering the workflow.
+
+        Idempotent per task (task_id is UNIQUE): an existing run is returned
+        unchanged. Entry tokens ('' -> entry step) are emitted in the same
+        transaction so the token chain starts with the run itself.
+
+        `parent_run_id`/`parent_node_run_id` record cross-run lineage: the run
+        (and the node execution in it) that spawned this run — a goal's
+        decompose split or a subflow node. `root_run_id` denormalizes the tree
+        root so a whole lineage tree reads in one indexed query."""
+        now = _now()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM workflow_runs WHERE task_id = ?", (task_id,)
+            ).fetchone()
+            if row is not None:
+                return self._workflow_run_row(row)
+            task = self._conn.execute(
+                "SELECT id FROM tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+            if task is None:
+                raise InvalidInputError(f"unknown task: {task_id}")
+            root_run_id: int | None = None
+            if parent_run_id is not None:
+                parent = self._conn.execute(
+                    "SELECT id, root_run_id FROM workflow_runs WHERE id = ?",
+                    (parent_run_id,),
+                ).fetchone()
+                if parent is None:
+                    raise InvalidInputError(
+                        f"unknown parent workflow run: {parent_run_id}"
+                    )
+                root_run_id = int(parent["root_run_id"] or parent["id"])
+            cur = self._conn.execute(
+                """INSERT INTO workflow_runs (
+                       task_id, definition_snapshot, status, variables,
+                       parent_run_id, parent_node_run_id, root_run_id,
+                       created_at, updated_at
+                   ) VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?)""",
+                (
+                    task_id,
+                    json.dumps(definition or {}, ensure_ascii=False),
+                    json.dumps(variables or {}, ensure_ascii=False),
+                    parent_run_id,
+                    parent_node_run_id,
+                    root_run_id,
+                    now,
+                    now,
+                ),
+            )
+            run_id = cur.lastrowid
+            if root_run_id is None:
+                # A run with no parent roots its own lineage tree.
+                self._conn.execute(
+                    "UPDATE workflow_runs SET root_run_id = ? WHERE id = ?",
+                    (run_id, run_id),
+                )
+            for step in entry_steps or []:
+                step = (step or "").strip()
+                if step:
+                    self._insert_workflow_token_locked(
+                        run_id, "", step, "", None, None, now
+                    )
+            self._conn.commit()
+            row = self._conn.execute(
+                "SELECT * FROM workflow_runs WHERE id = ?", (run_id,)
+            ).fetchone()
+        return self._workflow_run_row(row)
+
+    def get_workflow_run(self, run_id: int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM workflow_runs WHERE id = ?", (run_id,)
+            ).fetchone()
+        return self._workflow_run_row(row) if row else None
+
+    def get_workflow_run_by_task(self, task_id: int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM workflow_runs WHERE task_id = ?", (task_id,)
+            ).fetchone()
+        return self._workflow_run_row(row) if row else None
+
+    def list_workflow_run_lineage(self, root_run_id: int) -> list[dict[str, Any]]:
+        """Every run in the lineage tree rooted at `root_run_id`, the root
+        itself included, ordered by id (parents always precede children)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM workflow_runs WHERE root_run_id = ? ORDER BY id",
+                (root_run_id,),
+            ).fetchall()
+        return [self._workflow_run_row(row) for row in rows]
+
+    def set_workflow_run_status(self, run_id: int, status: str) -> bool:
+        status = (status or "").strip()
+        if status not in WORKFLOW_RUN_STATUSES:
+            raise InvalidInputError(
+                f"invalid workflow run status: {status!r} "
+                f"(expected one of {sorted(WORKFLOW_RUN_STATUSES)})"
+            )
+        now = _now()
+        terminal = status in {"succeeded", "failed", "cancelled"}
+        with self._lock:
+            cur = self._conn.execute(
+                """UPDATE workflow_runs
+                   SET status = ?, updated_at = ?, completed_at = ?
+                   WHERE id = ?""",
+                (status, now, now if terminal else None, run_id),
+            )
+            self._conn.commit()
+        return cur.rowcount > 0
+
+    def record_node_run(
+        self,
+        workflow_run_id: int,
+        step: str,
+        *,
+        executor: str = "",
+        status: str = "running",
+        item_scope_id: int | None = None,
+        run_job_id: int | None = None,
+        consume_tokens: bool = True,
+    ) -> dict[str, Any]:
+        """Record a node execution attempt. Consumes the pending token(s)
+        targeting the step in the same transaction (a join consumes several)."""
+        step = (step or "").strip()
+        if not step:
+            raise InvalidInputError("node run step is required")
+        if status not in NODE_RUN_STATUSES:
+            raise InvalidInputError(
+                f"invalid node run status: {status!r} "
+                f"(expected one of {sorted(NODE_RUN_STATUSES)})"
+            )
+        now = _now()
+        with self._lock:
+            run = self._conn.execute(
+                "SELECT id, task_id FROM workflow_runs WHERE id = ?",
+                (workflow_run_id,),
+            ).fetchone()
+            if run is None:
+                raise InvalidInputError(f"unknown workflow run: {workflow_run_id}")
+            if consume_tokens:
+                self._consume_workflow_tokens_locked(workflow_run_id, step, now)
+            node_id = self._create_node_run_locked(
+                workflow_run_id,
+                int(run["task_id"]),
+                step,
+                executor=executor,
+                status=status,
+                item_scope_id=item_scope_id,
+                run_job_id=run_job_id,
+                now=now,
+            )
+            self._conn.commit()
+            row = self._conn.execute(
+                "SELECT * FROM node_runs WHERE id = ?", (node_id,)
+            ).fetchone()
+        return dict(row)
+
+    def finish_node_run(
+        self,
+        node_run_id: int,
+        status: str,
+        *,
+        port: str = "",
+        summary: str = "",
+        tokens: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any] | None:
+        """Settle a node run and emit its outgoing tokens in ONE transaction —
+        the §10.1 invariant: result row and output tokens commit together."""
+        if status not in NODE_RUN_STATUSES:
+            raise InvalidInputError(
+                f"invalid node run status: {status!r} "
+                f"(expected one of {sorted(NODE_RUN_STATUSES)})"
+            )
+        now = _now()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id, workflow_run_id FROM node_runs WHERE id = ?",
+                (node_run_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            self._finish_node_run_locked(node_run_id, status, port, summary, now)
+            for token in tokens or []:
+                to_step = str(token.get("to_step") or "").strip()
+                if not to_step:
+                    raise InvalidInputError("workflow token to_step is required")
+                self._insert_workflow_token_locked(
+                    int(row["workflow_run_id"]),
+                    str(token.get("from_step") or ""),
+                    to_step,
+                    str(token.get("port") or ""),
+                    node_run_id,
+                    token.get("item_scope_id"),
+                    now,
+                )
+            self._conn.commit()
+            settled = self._conn.execute(
+                "SELECT * FROM node_runs WHERE id = ?", (node_run_id,)
+            ).fetchone()
+        return dict(settled) if settled else None
+
+    def emit_workflow_token(
+        self,
+        workflow_run_id: int,
+        to_step: str,
+        *,
+        from_step: str = "",
+        port: str = "",
+        node_run_id: int | None = None,
+        item_scope_id: int | None = None,
+    ) -> dict[str, Any]:
+        to_step = (to_step or "").strip()
+        if not to_step:
+            raise InvalidInputError("workflow token to_step is required")
+        now = _now()
+        with self._lock:
+            token_id = self._insert_workflow_token_locked(
+                workflow_run_id, from_step, to_step, port,
+                node_run_id, item_scope_id, now,
+            )
+            self._conn.commit()
+            row = self._conn.execute(
+                "SELECT * FROM workflow_tokens WHERE id = ?", (token_id,)
+            ).fetchone()
+        return dict(row)
+
+    def consume_workflow_tokens(self, workflow_run_id: int, to_step: str) -> int:
+        """Mark every pending token targeting `to_step` consumed; returns count."""
+        now = _now()
+        with self._lock:
+            consumed = self._consume_workflow_tokens_locked(
+                workflow_run_id, (to_step or "").strip(), now
+            )
+            self._conn.commit()
+        return consumed
+
+    def get_node_run(self, node_run_id: int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM node_runs WHERE id = ?", (node_run_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def latest_node_run(
+        self, workflow_run_id: int, step: str
+    ) -> dict[str, Any] | None:
+        """Most recent step-level (non-item) node run for `step` in the run,
+        settled or not — used to anchor a child run's lineage to the node
+        execution that spawned it."""
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT * FROM node_runs
+                   WHERE workflow_run_id = ? AND step = ? AND item_scope_id IS NULL
+                   ORDER BY id DESC LIMIT 1""",
+                (workflow_run_id, (step or "").strip()),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_node_runs(
+        self,
+        workflow_run_id: int | None = None,
+        task_id: int | None = None,
+        step: str = "",
+    ) -> list[dict[str, Any]]:
+        filters: list[str] = []
+        params: list[Any] = []
+        if workflow_run_id is not None:
+            filters.append("workflow_run_id = ?")
+            params.append(workflow_run_id)
+        if task_id is not None:
+            filters.append("task_id = ?")
+            params.append(task_id)
+        if step:
+            filters.append("step = ?")
+            params.append(step)
+        where = f"WHERE {' AND '.join(filters)}" if filters else ""
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT * FROM node_runs {where} ORDER BY id", params
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_workflow_tokens(
+        self, workflow_run_id: int, status: str = ""
+    ) -> list[dict[str, Any]]:
+        where = "WHERE workflow_run_id = ?" + (" AND status = ?" if status else "")
+        params: list[Any] = [workflow_run_id] + ([status] if status else [])
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT * FROM workflow_tokens {where} ORDER BY id", params
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    # -- internal record-layer primitives (called with self._lock held; no
+    #    commit of their own so callers control transaction boundaries) -----
+
+    def _insert_workflow_token_locked(
+        self,
+        workflow_run_id: int,
+        from_step: str,
+        to_step: str,
+        port: str,
+        node_run_id: int | None,
+        item_scope_id: int | None,
+        now: str,
+    ) -> int:
+        cur = self._conn.execute(
+            """INSERT INTO workflow_tokens (
+                   workflow_run_id, node_run_id, from_step, to_step, port,
+                   item_scope_id, status, created_at
+               ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)""",
+            (
+                workflow_run_id, node_run_id, from_step or "", to_step,
+                port or "", item_scope_id, now,
+            ),
+        )
+        return int(cur.lastrowid)
+
+    def _consume_workflow_tokens_locked(
+        self, workflow_run_id: int, to_step: str, now: str
+    ) -> int:
+        cur = self._conn.execute(
+            """UPDATE workflow_tokens
+               SET status = 'consumed', consumed_at = ?
+               WHERE workflow_run_id = ? AND to_step = ? AND status = 'pending'""",
+            (now, workflow_run_id, to_step),
+        )
+        return int(cur.rowcount)
+
+    def _create_node_run_locked(
+        self,
+        workflow_run_id: int,
+        task_id: int,
+        step: str,
+        *,
+        executor: str,
+        status: str,
+        item_scope_id: int | None,
+        run_job_id: int | None,
+        now: str,
+    ) -> int:
+        # Attempt counts retries of the same execution slot: the step itself,
+        # or one foreach item of the step (per item_scope).
+        if item_scope_id is None:
+            row = self._conn.execute(
+                """SELECT COALESCE(MAX(attempt), 0) AS n FROM node_runs
+                   WHERE workflow_run_id = ? AND step = ? AND item_scope_id IS NULL""",
+                (workflow_run_id, step),
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                """SELECT COALESCE(MAX(attempt), 0) AS n FROM node_runs
+                   WHERE workflow_run_id = ? AND step = ? AND item_scope_id = ?""",
+                (workflow_run_id, step, item_scope_id),
+            ).fetchone()
+        attempt = int(row["n"]) + 1
+        cur = self._conn.execute(
+            """INSERT INTO node_runs (
+                   workflow_run_id, task_id, step, attempt, item_scope_id,
+                   executor, status, run_job_id, created_at, updated_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                workflow_run_id, task_id, step, attempt, item_scope_id,
+                (executor or "")[:120], status, run_job_id, now, now,
+            ),
+        )
+        return int(cur.lastrowid)
+
+    def _finish_node_run_locked(
+        self, node_run_id: int, status: str, port: str, summary: str, now: str
+    ) -> None:
+        self._conn.execute(
+            """UPDATE node_runs
+               SET status = ?, port = ?, summary = ?, updated_at = ?, completed_at = ?
+               WHERE id = ?""",
+            (status, port or "", (summary or "")[:2000], now, now, node_run_id),
+        )
+
+    def _open_node_run_locked(
+        self, workflow_run_id: int, step: str
+    ) -> sqlite3.Row | None:
+        return self._conn.execute(
+            """SELECT id, status FROM node_runs
+               WHERE workflow_run_id = ? AND step = ? AND item_scope_id IS NULL
+                 AND completed_at IS NULL
+               ORDER BY id DESC LIMIT 1""",
+            (workflow_run_id, step),
+        ).fetchone()
+
+    def _guarded_mirror_locked(self, label: str, mirror: Callable[[], None]) -> None:
+        """Run one dual-write mirror inside a SAVEPOINT: the mirror commits
+        with the primary write (same transaction) but rolls only itself back
+        on failure, so a record-layer bug can never break the engine."""
+        try:
+            self._conn.execute("SAVEPOINT wf_mirror")
+        except sqlite3.Error:
+            _log.exception("workflow record mirror (%s): savepoint failed", label)
+            return
+        try:
+            mirror()
+            self._conn.execute("RELEASE SAVEPOINT wf_mirror")
+        except Exception:
+            try:
+                self._conn.execute("ROLLBACK TO SAVEPOINT wf_mirror")
+                self._conn.execute("RELEASE SAVEPOINT wf_mirror")
+            except sqlite3.Error:
+                pass
+            _log.exception(
+                "workflow record mirror (%s) failed; primary write unaffected",
+                label,
+            )
+
+    # Engine transition outcome -> node run execution status (§10.2: execution
+    # state and business result stay orthogonal; the business result is `port`).
+    _TRANSITION_NODE_STATUS = {
+        "rework": "succeeded",   # reviewer ran fine; the business port says redo
+        "skipped": "skipped",
+        "blocked": "blocked",
+        "cancelled": "cancelled",
+        "error": "failed",
+        "timeout": "failed",
+        "reassigned": "failed",  # normalization retry / stalled-runner takeover
+    }
+    # Recovery routes keep transition outcome `done` while the port carries the
+    # real reason; map those ports back to the execution status.
+    _FAILURE_PORT_NODE_STATUS = {
+        "error": "failed",
+        "timeout": "failed",
+        "blocked": "blocked",
+        "cancelled": "cancelled",
+    }
+    _TOKEN_EMITTING_OUTCOMES = {"done", "rework", "skipped"}
+
+    def _mirror_transition_locked(
+        self,
+        task_id: int,
+        from_step: str,
+        to_step: str,
+        outcome: str,
+        note: str,
+        port: str,
+        now: str,
+    ) -> None:
+        run = self._conn.execute(
+            "SELECT id FROM workflow_runs WHERE task_id = ?", (task_id,)
+        ).fetchone()
+        if run is None:
+            return  # task not enrolled in the record layer (pre-existing data)
+        run_id = int(run["id"])
+        if outcome == "dispatched":
+            if not to_step:
+                return
+            self._consume_workflow_tokens_locked(run_id, to_step, now)
+            stale = self._open_node_run_locked(run_id, to_step)
+            if stale is not None:
+                # A manual re-run (or takeover) supersedes the open attempt.
+                self._finish_node_run_locked(
+                    int(stale["id"]), "cancelled", "",
+                    "superseded by re-dispatch", now,
+                )
+            self._create_node_run_locked(
+                run_id, task_id, to_step,
+                executor=note, status="running",
+                item_scope_id=None, run_job_id=None, now=now,
+            )
+            return
+        if not from_step:
+            return
+        if outcome == "approval":
+            open_run = self._open_node_run_locked(run_id, from_step)
+            if open_run is not None:
+                self._conn.execute(
+                    """UPDATE node_runs
+                       SET status = 'waiting', port = ?, summary = ?, updated_at = ?
+                       WHERE id = ?""",
+                    (port or "", (note or "")[:2000], now, int(open_run["id"])),
+                )
+            return
+        if outcome == "done":
+            status = self._FAILURE_PORT_NODE_STATUS.get(port, "succeeded")
+        else:
+            status = self._TRANSITION_NODE_STATUS.get(outcome)
+        if status is None:
+            return  # bookkeeping outcome (e.g. not_selected) — no node effect
+        node_run_id: int | None = None
+        open_run = self._open_node_run_locked(run_id, from_step)
+        if open_run is not None:
+            effective_port = port or (
+                "rework" if outcome == "rework"
+                else "success" if outcome == "done" else ""
+            )
+            self._finish_node_run_locked(
+                int(open_run["id"]), status, effective_port, note, now
+            )
+            node_run_id = int(open_run["id"])
+        if (
+            outcome in self._TOKEN_EMITTING_OUTCOMES
+            and to_step
+            and to_step != from_step
+        ):
+            if node_run_id is None:
+                # Multi-target completion: the first transition already settled
+                # the node run; attach later tokens to the same node.
+                latest = self._conn.execute(
+                    """SELECT id FROM node_runs
+                       WHERE workflow_run_id = ? AND step = ? AND item_scope_id IS NULL
+                       ORDER BY id DESC LIMIT 1""",
+                    (run_id, from_step),
+                ).fetchone()
+                node_run_id = int(latest["id"]) if latest else None
+            token_port = port or ("rework" if outcome == "rework" else "success")
+            self._insert_workflow_token_locked(
+                run_id, from_step, to_step, token_port, node_run_id, None, now
+            )
+
+    def _mirror_run_job_locked(
+        self,
+        job_id: int,
+        task_id: int,
+        step: str,
+        assignee: str,
+        item_scope_id: int | None,
+        now: str,
+    ) -> None:
+        run = self._conn.execute(
+            "SELECT id FROM workflow_runs WHERE task_id = ?", (task_id,)
+        ).fetchone()
+        if run is None:
+            return
+        run_id = int(run["id"])
+        if item_scope_id is None:
+            row = self._conn.execute(
+                """SELECT id FROM node_runs
+                   WHERE workflow_run_id = ? AND step = ? AND item_scope_id IS NULL
+                     AND completed_at IS NULL AND run_job_id IS NULL
+                   ORDER BY id DESC LIMIT 1""",
+                (run_id, step),
+            ).fetchone()
+            if row is not None:
+                self._conn.execute(
+                    """UPDATE node_runs
+                       SET run_job_id = ?, executor = ?, updated_at = ?
+                       WHERE id = ?""",
+                    (job_id, (assignee or "")[:120], now, int(row["id"])),
+                )
+            return
+        # A foreach item execution gets its own node run scoped to the item.
+        self._create_node_run_locked(
+            run_id, task_id, step,
+            executor=assignee, status="running",
+            item_scope_id=item_scope_id, run_job_id=job_id, now=now,
+        )
+
+    def _mirror_item_scope_settled_locked(
+        self, scope_id: int, status: str, output: Any, error: str, now: str
+    ) -> None:
+        node_status = {
+            "completed": "succeeded",
+            "blocked": "blocked",
+            "cancelled": "cancelled",
+        }.get(status)
+        if node_status is None:
+            return
+        row = self._conn.execute(
+            """SELECT id FROM node_runs
+               WHERE item_scope_id = ? AND completed_at IS NULL
+               ORDER BY id DESC LIMIT 1""",
+            (scope_id,),
+        ).fetchone()
+        if row is None:
+            return
+        port = ""
+        summary = str(error or "")
+        if isinstance(output, dict):
+            port = str(output.get("port") or "")
+            summary = str(output.get("summary") or "") or summary
+        if not port:
+            port = "success" if node_status == "succeeded" else node_status
+        self._finish_node_run_locked(int(row["id"]), node_status, port, summary, now)
+
+    def _mirror_task_status_locked(
+        self, task_id: int, status: str, is_goal: bool, now: str
+    ) -> None:
+        run = self._conn.execute(
+            "SELECT id, status FROM workflow_runs WHERE task_id = ?", (task_id,)
+        ).fetchone()
+        if run is None:
+            return
+        if is_goal:
+            new_status = {
+                "accepted": "succeeded",
+                "closed": "cancelled",
+                "stalled": "blocked",
+            }.get(status, "running")
+        else:
+            new_status = {
+                "closed": "succeeded",
+                "blocked": "blocked",
+            }.get(status, "running")
+        if new_status == str(run["status"]):
+            return
+        terminal = new_status in {"succeeded", "failed", "cancelled"}
+        self._conn.execute(
+            """UPDATE workflow_runs
+               SET status = ?, updated_at = ?, completed_at = ?
+               WHERE id = ?""",
+            (new_status, now, now if terminal else None, int(run["id"])),
+        )
+
     def set_task_workflow_state(
         self,
         task_id: int,
@@ -1788,10 +2621,9 @@ class Store:
             # Validate the status against the row's own vocabulary (goal rows use
             # GOAL_STATUSES, tasks/cards use TASK_STATUSES) — so this single method
             # serves both without ever letting a status cross the boundary.
+            is_goal = self._row_is_goal_locked(task_id)
             if task_status is not None:
-                task_status = _validate_status_for(
-                    self._row_is_goal_locked(task_id), task_status
-                )
+                task_status = _validate_status_for(is_goal, task_status)
             updates: list[str] = []
             params: list[Any] = []
             if workflow_step is not None:
@@ -1818,6 +2650,17 @@ class Store:
                 self._conn.execute(
                     "UPDATE messages SET task_status = ? WHERE id = ? AND kind = 'task'",
                     (task_status, row["source_message_id"]),
+                )
+            if task_status is not None:
+                # Dual-write: converge the workflow_run status with the task's
+                # lifecycle (accepted -> succeeded, stalled/blocked -> blocked,
+                # force close -> cancelled, resume -> running).
+                status_value = task_status
+                self._guarded_mirror_locked(
+                    "task_status",
+                    lambda: self._mirror_task_status_locked(
+                        task_id, status_value, is_goal, _now()
+                    ),
                 )
             self._conn.commit()
         return cur.rowcount > 0
@@ -1846,6 +2689,15 @@ class Store:
                    )
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (task_id, from_step, to_step, actor, outcome, port, note[:2000], now),
+            )
+            # Dual-write the new-runtime record layer in the SAME transaction:
+            # a completion settles its node run and emits the outgoing token
+            # atomically with the transition (§10.1).
+            self._guarded_mirror_locked(
+                "transition",
+                lambda: self._mirror_transition_locked(
+                    task_id, from_step, to_step, outcome, note[:2000], port, now
+                ),
             )
             self._conn.commit()
         return {
@@ -2092,6 +2944,16 @@ class Store:
                     note[:2000],
                     now,
                     now,
+                ),
+            )
+            job_id = int(cur.lastrowid)
+            # Dual-write: link the queued job to its open node run (regular
+            # step) or record a per-item node run (foreach item scope).
+            self._guarded_mirror_locked(
+                "run_job",
+                lambda: self._mirror_run_job_locked(
+                    job_id, task_id, (step or "").strip(),
+                    (assignee or "").strip(), item_scope_id, now,
                 ),
             )
             self._conn.commit()
@@ -2619,8 +3481,42 @@ class Store:
                      AND id IN (SELECT id FROM tree)""",
                 (root_id, now),
             )
+            # Dual-write: a force close cancels every non-terminal workflow_run
+            # in the tree, its open node runs, and its pending tokens.
+            self._guarded_mirror_locked(
+                "close_tree",
+                lambda: self._mirror_close_tree_locked(tree_cte, root_id, now),
+            )
             self._conn.commit()
         return n
+
+    def _mirror_close_tree_locked(self, tree_cte: str, root_id: int, now: str) -> None:
+        run_filter = """workflow_run_id IN (
+                            SELECT id FROM workflow_runs
+                            WHERE task_id IN (SELECT id FROM tree)
+                        )"""
+        self._conn.execute(
+            tree_cte + f"""
+               UPDATE node_runs
+               SET status = 'cancelled', updated_at = ?, completed_at = ?
+               WHERE completed_at IS NULL AND {run_filter}""",
+            (root_id, now, now),
+        )
+        self._conn.execute(
+            tree_cte + f"""
+               UPDATE workflow_tokens
+               SET status = 'cancelled', consumed_at = ?
+               WHERE status = 'pending' AND {run_filter}""",
+            (root_id, now),
+        )
+        self._conn.execute(
+            tree_cte + """
+               UPDATE workflow_runs
+               SET status = 'cancelled', updated_at = ?, completed_at = ?
+               WHERE status NOT IN ('succeeded', 'failed', 'cancelled')
+                 AND task_id IN (SELECT id FROM tree)""",
+            (root_id, now, now),
+        )
 
     def list_messages(
         self,

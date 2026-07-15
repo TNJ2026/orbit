@@ -358,6 +358,176 @@ class WorkflowEngineTests(unittest.TestCase):
             self.assertEqual([], late["dispatched"])
             self.assertEqual(1, len(h.store.list_workflow_node_results(tid, "first")))
 
+    def test_quorum_join_fires_at_threshold_and_ignores_late_arrivals(self):
+        steps = [
+            {"id": "fork", "name": "Fork", "agents": ["codex"], "required": True},
+            {"id": "a", "name": "A", "agents": ["rev"], "required": True},
+            {"id": "b", "name": "B", "agents": ["hub-agent"], "required": True},
+            {"id": "c", "name": "C", "agents": ["codex"], "required": True},
+            {
+                "id": "collect", "name": "Collect", "type": "join",
+                "join_policy": "quorum", "join_threshold": 2,
+            },
+            {"id": "publish", "name": "Publish", "agents": ["codex"]},
+        ]
+        edges = [
+            {"from": "fork", "to": "a"}, {"from": "fork", "to": "b"},
+            {"from": "fork", "to": "c"},
+            {"from": "a", "to": "collect"}, {"from": "b", "to": "collect"},
+            {"from": "c", "to": "collect"},
+            {"from": "collect", "to": "publish"},
+        ]
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, steps=steps, edges=edges)
+            tid = h.create_task()
+            h.start(tid)
+            h.complete("codex", tid, "fork", "done", "fork")
+            waiting = h.complete("rev", tid, "a", "done", "a done")
+            self.assertEqual([], waiting["dispatched"])
+            fired = h.complete("hub-agent", tid, "b", "done", "b done")
+            self.assertEqual(
+                ["collect", "publish"],
+                [item["step"] for item in fired["dispatched"]],
+            )
+            [result] = h.store.list_workflow_node_results(tid, "collect")
+            self.assertEqual(
+                {"a", "b"}, {item["source"] for item in result["output"]["inputs"]}
+            )
+            # The remaining branch keeps running (remaining defaults to
+            # continue) but its result no longer triggers the consumed join.
+            late = h.complete("codex", tid, "c", "done", "c done")
+            self.assertEqual([], late["dispatched"])
+            self.assertEqual(1, len(h.store.list_workflow_node_results(tid, "collect")))
+            [correlation] = h.store.list_workflow_correlations(tid, "collect")
+            self.assertEqual("consumed", correlation["status"])
+
+    def test_count_join_uses_same_threshold_mechanism(self):
+        steps = [
+            {"id": "fork", "name": "Fork", "agents": ["codex"], "required": True},
+            {"id": "left", "name": "Left", "agents": ["rev"], "required": True},
+            {"id": "right", "name": "Right", "agents": ["hub-agent"], "required": True},
+            {
+                "id": "collect", "name": "Collect", "type": "join",
+                "join_policy": "count", "join_threshold": 1,
+            },
+            {"id": "publish", "name": "Publish", "agents": ["codex"]},
+        ]
+        edges = [
+            {"from": "fork", "to": "left"}, {"from": "fork", "to": "right"},
+            {"from": "left", "to": "collect"}, {"from": "right", "to": "collect"},
+            {"from": "collect", "to": "publish"},
+        ]
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, steps=steps, edges=edges)
+            tid = h.create_task()
+            h.start(tid)
+            h.complete("codex", tid, "fork", "done", "fork")
+            fired = h.complete("rev", tid, "left", "done", "left")
+            self.assertEqual(
+                ["collect", "publish"],
+                [item["step"] for item in fired["dispatched"]],
+            )
+            late = h.complete("hub-agent", tid, "right", "done", "right")
+            self.assertEqual([], late["dispatched"])
+            self.assertEqual(1, len(h.store.list_workflow_node_results(tid, "collect")))
+
+    def test_any_join_remaining_cancel_stops_slow_branches(self):
+        steps = [
+            {"id": "fork", "name": "Fork", "agents": ["codex"], "required": True},
+            {"id": "left", "name": "Left", "agents": ["rev"], "required": True},
+            {"id": "right", "name": "Right", "agents": ["hub-agent"], "required": True},
+            {
+                "id": "first", "name": "First", "type": "join",
+                "join_policy": "any", "join_remaining": "cancel",
+            },
+            {"id": "consume", "name": "Consume", "agents": ["codex"]},
+        ]
+        edges = [
+            {"from": "fork", "to": "left"}, {"from": "fork", "to": "right"},
+            {"from": "left", "to": "first"}, {"from": "right", "to": "first"},
+            {"from": "first", "to": "consume"},
+        ]
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, steps=steps, edges=edges)
+            tid = h.create_task()
+            h.start(tid)
+            h.complete("codex", tid, "fork", "done", "fork")
+            fired = h.complete("rev", tid, "left", "done", "left")
+            self.assertEqual(
+                ["first", "consume"],
+                [item["step"] for item in fired["dispatched"]],
+            )
+            [correlation] = h.store.list_workflow_correlations(tid, "first")
+            self.assertEqual("consumed", correlation["status"])
+            self.assertEqual(
+                {"left": "arrived", "right": "cancelled"},
+                {
+                    branch["predecessor_step"]: branch["state"]
+                    for branch in correlation["branches"]
+                },
+            )
+            transitions = h.store.list_task_transitions(tid)
+            self.assertTrue(any(
+                t["from_step"] == "right" and t["to_step"] == "first"
+                and t["outcome"] == "cancelled"
+                for t in transitions
+            ))
+            # The cancelled step was settled, so its (killed) runner's late
+            # report cannot re-advance or block the task.
+            with self.assertRaisesRegex(InvalidInputError, "not active"):
+                h.complete("hub-agent", tid, "right", "done", "too late")
+            self.assertNotEqual("blocked", h.task(tid)["task_status"])
+
+    def test_all_successful_join_blocks_when_a_branch_fails(self):
+        steps = [
+            {"id": "fork", "name": "Fork", "agents": ["codex"], "required": True},
+            {"id": "left", "name": "Left", "agents": ["rev"], "required": True},
+            {"id": "right", "name": "Right", "agents": ["hub-agent"], "required": True},
+            {
+                "id": "collect", "name": "Collect", "type": "join",
+                "join_policy": "all_successful",
+            },
+            {"id": "publish", "name": "Publish", "agents": ["codex"]},
+        ]
+        edges = [
+            {"from": "fork", "to": "left"}, {"from": "fork", "to": "right"},
+            {"from": "left", "to": "collect"}, {"from": "right", "to": "collect"},
+            {"from": "collect", "to": "publish"},
+        ]
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, steps=steps, edges=edges)
+            tid = h.create_task()
+            h.start(tid)
+            h.complete("codex", tid, "fork", "done", "fork")
+            h.complete("hub-agent", tid, "right", "blocked", "cannot proceed")
+            # The failed branch closes its merge boundary instead of leaving
+            # the join waiting forever.
+            transitions = h.store.list_task_transitions(tid)
+            self.assertTrue(any(
+                t["from_step"] == "right" and t["to_step"] == "collect"
+                and t["outcome"] == "blocked"
+                for t in transitions
+            ))
+            report = h.complete("rev", tid, "left", "done", "left done")
+            self.assertEqual([], report["dispatched"])
+            self.assertEqual("blocked", h.task(tid)["task_status"])
+            transitions = h.store.list_task_transitions(tid)
+            self.assertTrue(any(
+                t["from_step"] == "collect" and t["to_step"] == "collect"
+                and t["outcome"] == "blocked"
+                for t in transitions
+            ))
+            [correlation] = h.store.list_workflow_correlations(tid, "collect")
+            self.assertEqual("consumed", correlation["status"])
+            self.assertEqual(
+                {"left": "arrived", "right": "blocked"},
+                {
+                    branch["predecessor_step"]: branch["state"]
+                    for branch in correlation["branches"]
+                },
+            )
+            self.assertEqual([], h.store.list_workflow_node_results(tid, "collect"))
+
     def test_correlation_activation_does_not_reuse_prior_loop_arrivals(self):
         steps = [
             {"id": "start", "name": "Start", "agents": ["hub-agent"], "required": True},

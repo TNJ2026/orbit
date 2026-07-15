@@ -40,6 +40,7 @@ NODE_HANDLERS = {
     "decision": NodeHandler("decision", frozenset({"decision"}), "decision", False),
     "join": NodeHandler("join", frozenset({"join"}), "join", False),
     "foreach": NodeHandler("foreach", frozenset({"foreach"}), "foreach", True, 3),
+    "subflow": NodeHandler("subflow", frozenset({"subflow"}), "subflow", False),
     "end": NodeHandler("end", frozenset({"end"}), "end", False),
 }
 
@@ -87,10 +88,20 @@ def workflow_node_schema() -> dict[str, Any]:
             "default_handler": "join",
             "default_ports": ["success"],
             "default_port": "success",
+            "join_policies": [
+                "all_activated", "any", "quorum", "count", "all_successful",
+            ],
+            "join_remaining": ["continue", "cancel"],
         },
         {
             "id": "foreach",
             "default_handler": "foreach",
+            "default_ports": ["success"],
+            "default_port": "success",
+        },
+        {
+            "id": "subflow",
+            "default_handler": "subflow",
             "default_ports": ["success"],
             "default_port": "success",
         },

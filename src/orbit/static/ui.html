@@ -1417,7 +1417,9 @@
       <label><div class="meta" data-i18n="modal.addStep.outputSchema">Output schema (JSON object)</div><textarea id="addStepOutputSchema" rows="4" placeholder='{"type":"object","properties":{}}' style="width:100%;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;"></textarea></label>
       <label id="addStepRulesField" style="display:none"><div class="meta" data-i18n="modal.addStep.rules">Decision rules (JSON array, first match wins)</div><textarea id="addStepRules" rows="5" placeholder='[{"when":{"==":[{"var":"status"},"ready"]},"port":"matched"}]' style="width:100%;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;"></textarea></label>
       <div id="addStepJoinFields" class="row" style="display:none;gap:10px;align-items:flex-end;">
-        <label style="flex:1"><div class="meta" data-i18n="modal.addStep.joinPolicy">Join policy</div><select id="addStepJoinPolicy"><option value="all_activated">all activated</option><option value="any">any</option></select></label>
+        <label style="flex:1"><div class="meta" data-i18n="modal.addStep.joinPolicy">Join policy</div><select id="addStepJoinPolicy"><option value="all_activated">all activated</option><option value="any">any</option><option value="quorum">quorum</option><option value="count">count</option><option value="all_successful">all successful</option></select></label>
+        <label style="flex:1"><div class="meta" data-i18n="modal.addStep.joinThreshold">Threshold (quorum/count)</div><input id="addStepJoinThreshold" type="number" min="1" step="1" placeholder="2"></label>
+        <label style="flex:1"><div class="meta" data-i18n="modal.addStep.joinRemaining">Remaining branches</div><select id="addStepJoinRemaining"><option value="continue">continue</option><option value="cancel">cancel</option></select></label>
         <label style="flex:1"><div class="meta" data-i18n="modal.addStep.aggregation">Aggregation</div><select id="addStepAggregation"><option value="list">list</option><option value="object_by_source">object by source</option><option value="first">first</option></select></label>
       </div>
       <div id="addStepForeachFields" style="display:none;gap:8px;flex-direction:column;">
@@ -3074,6 +3076,8 @@
       $("addStepOutputSchema").value = "";
       $("addStepRules").value = "";
       $("addStepJoinPolicy").value = "all_activated";
+      $("addStepJoinThreshold").value = "";
+      $("addStepJoinRemaining").value = "continue";
       $("addStepAggregation").value = "list";
       $("addStepForeachItems").value = "$.input.items";
       $("addStepForeachKey").value = "";
@@ -3120,6 +3124,8 @@
       $("addStepRules").value = (step.rules || []).length
         ? JSON.stringify(step.rules, null, 2) : "";
       $("addStepJoinPolicy").value = step.join_policy || "all_activated";
+      $("addStepJoinThreshold").value = step.join_threshold ? String(step.join_threshold) : "";
+      $("addStepJoinRemaining").value = step.join_remaining || "continue";
       $("addStepAggregation").value = step.aggregation || "list";
       $("addStepForeachItems").value = step.items || "$.input.items";
       $("addStepForeachKey").value = step.item_key || "";
@@ -3180,6 +3186,8 @@
         prompt, ports, default_port: defaultPort,
         rules,
         join_policy: nodeType === "join" ? $("addStepJoinPolicy").value : "",
+        join_threshold: nodeType === "join" ? Number($("addStepJoinThreshold").value || 0) : 0,
+        join_remaining: nodeType === "join" ? $("addStepJoinRemaining").value : "",
         aggregation: nodeType === "join" ? $("addStepAggregation").value : "",
         ...foreachConfig,
         ...schemas,
@@ -3235,6 +3243,8 @@
       step.output_schema = schemas.output_schema;
       step.rules = rules;
       step.join_policy = nodeType === "join" ? $("addStepJoinPolicy").value : "";
+      step.join_threshold = nodeType === "join" ? Number($("addStepJoinThreshold").value || 0) : 0;
+      step.join_remaining = nodeType === "join" ? $("addStepJoinRemaining").value : "";
       step.aggregation = nodeType === "join" ? $("addStepAggregation").value : "";
       Object.assign(step, foreachConfig);
       step.retry = {

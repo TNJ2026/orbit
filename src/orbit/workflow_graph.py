@@ -317,10 +317,19 @@ def join_ready(
         if t["to_step"] == target
         and t["outcome"] in ("done", "skipped", "not_selected", "cancelled")
     }
-    if steps[target].get("join_policy") == "any":
+    policy = steps[target].get("join_policy")
+    if policy in ("any", "quorum", "count"):
         successful = {
             t["from_step"] for t in transitions
             if t["to_step"] == target and t["outcome"] in ("done", "skipped")
         }
-        return any(pred in successful for pred in required_preds)
+        if policy == "any":
+            return any(pred in successful for pred in required_preds)
+        # quorum and count share the same counting mechanism: ready once the
+        # configured number of predecessors has completed successfully.
+        threshold = max(1, int(steps[target].get("join_threshold") or 0))
+        return sum(1 for pred in required_preds if pred in successful) >= threshold
+    # all_activated and all_successful both wait for every predecessor to close;
+    # a failed predecessor never lands in `arrived`, so an all_successful join
+    # stays unready here and the engine blocks it from the failure closure.
     return all(pred in arrived for pred in required_preds)
