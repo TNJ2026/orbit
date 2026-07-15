@@ -8,7 +8,8 @@ from pathlib import Path
 import uvicorn
 
 from . import __version__
-from .project_index import upsert_project
+from .project_index import project_id, server_url
+from .project_lock import ProjectProcessLock
 from .store import Store, project_db_path, project_state_dir, resolve_project_root
 from .server import create_server, runner_loop
 
@@ -116,12 +117,16 @@ def _serve(args) -> None:
             f"      To migrate it to this project: cp {LEGACY_DB_PATH} {db_path}",
             flush=True,
         )
-    project = upsert_project(
-        project_root=project_root,
-        db_path=db_path,
-        host=args.host,
-        port=args.port,
-    )
+    project = {
+        "id": project_id(project_root),
+        "name": project_root.name or str(project_root),
+        "project_root": str(project_root),
+        "db_path": db_path,
+        "server_url": server_url(args.host, args.port),
+        "host": args.host,
+        "port": args.port,
+        "last_seen": "",
+    }
     app = create_server(
         host=args.host,
         port=args.port,
@@ -137,7 +142,8 @@ def _serve(args) -> None:
         f"({worker}) (db: {db_path})",
         flush=True,
     )
-    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    with ProjectProcessLock(project_root):
+        uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 
 
 def main() -> None:

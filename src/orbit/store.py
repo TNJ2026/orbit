@@ -404,6 +404,9 @@ class Store:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self.db_path = db_path
         self._lock = threading.Lock()
+        self._job_condition = threading.Condition()
+        self._job_generation = 0
+        self._closed = False
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         with self._lock:
@@ -1204,6 +1207,31 @@ class Store:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def list_task_transitions_for_tasks(
+        self, task_ids: list[int]
+    ) -> dict[int, list[dict[str, Any]]]:
+        """Load transitions for many tasks without one query per board row."""
+        ids = list(dict.fromkeys(int(task_id) for task_id in task_ids))
+        grouped = {task_id: [] for task_id in ids}
+        if not ids:
+            return grouped
+        with self._lock:
+            for offset in range(0, len(ids), 500):
+                chunk = ids[offset : offset + 500]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = self._conn.execute(
+                    f"""SELECT id, task_id, from_step, to_step, actor, outcome,
+                               note, created_at
+                        FROM task_transitions
+                        WHERE task_id IN ({placeholders})
+                        ORDER BY id""",
+                    chunk,
+                ).fetchall()
+                for row in rows:
+                    item = dict(row)
+                    grouped[int(item["task_id"])].append(item)
+        return grouped
+
     def count_step_dispatches(self, step_id: str) -> int:
         """Round-robin cursor source: how many distinct tasks have entered this
         step. Distinct — not raw dispatch rows — so a task's reworks (which
@@ -1370,7 +1398,32 @@ class Store:
                 ),
             )
             self._conn.commit()
+        with self._job_condition:
+            self._job_generation += 1
+            self._job_condition.notify_all()
         return self.get_run_job(cur.lastrowid)
+
+    def run_job_generation(self) -> int:
+        with self._job_condition:
+            return self._job_generation
+
+    def wait_for_run_job(
+        self,
+        generation: int,
+        stop_event: threading.Event,
+        timeout: float = 30.0,
+    ) -> int:
+        """Wait until this in-process Store receives a newly queued run job."""
+        with self._job_condition:
+            self._job_condition.wait_for(
+                lambda: self._job_generation != generation or stop_event.is_set(),
+                timeout=max(0.1, float(timeout)),
+            )
+            return self._job_generation
+
+    def wake_run_job_waiters(self) -> None:
+        with self._job_condition:
+            self._job_condition.notify_all()
 
     def get_run_job(self, job_id: int) -> dict[str, Any] | None:
         with self._lock:
@@ -1955,6 +2008,9 @@ class Store:
 
     def close(self) -> None:
         with self._lock:
+            if self._closed:
+                return
+            self._closed = True
             self._conn.close()
 
     def _agent_exists_locked(self, name: str) -> bool:
