@@ -1397,7 +1397,10 @@
     <div class="modal" role="dialog" aria-modal="true" aria-labelledby="addStepModalTitle">
       <div id="addStepModalTitle" class="modal-title" data-i18n="modal.addStep.title">Add workflow step</div>
       <label><div class="meta" data-i18n="modal.addStep.name">Name</div><input id="addStepName" type="text" placeholder="Step name" data-i18n-ph="modal.addStep.namePh"></label>
-      <div>
+      <label><div class="meta" data-i18n="modal.addStep.type">Node type</div><select id="addStepType"><option value="action" data-i18n="node.action">Action</option><option value="approval" data-i18n="node.approval">Approval</option><option value="end" data-i18n="node.end">End</option></select></label>
+      <label id="addStepHandlerField"><div class="meta" data-i18n="modal.addStep.handler">Execution handler</div><select id="addStepHandler"><option value="agent" data-i18n="handler.agent">Agent</option><option value="command" data-i18n="handler.command">Shell command</option></select></label>
+      <label id="addStepCommandField" style="display:none"><div class="meta" data-i18n="modal.addStep.command">Shell command</div><textarea id="addStepCommand" rows="3" placeholder="printf 'WORKFLOW_OUTCOME: done\n'"></textarea></label>
+      <div id="addStepAgentsField">
         <div class="meta" style="display:flex;align-items:center;justify-content:space-between;">
           <span data-i18n="modal.addStep.agent">Agents</span>
           <button type="button" id="addStepAgentAdd" title="Add another agent" data-i18n-title="modal.addStep.agentAdd" style="border:1px dashed var(--line);background:none;cursor:pointer;color:var(--accent);border-radius:6px;padding:0 9px;font-size:15px;line-height:1.5;">＋</button>
@@ -1406,6 +1409,9 @@
       </div>
       <label id="addStepRequiredField" class="modal-check"><input id="addStepRequired" type="checkbox"><span class="meta" data-i18n="modal.addStep.required">Required (a step the flow must include)</span></label>
       <label id="addStepApprovalField" class="modal-check" style="display:none"><input id="addStepApproval" type="checkbox"><span class="meta" data-i18n="modal.addStep.approvalRequired">Require human approval after completion</span></label>
+      <label><div class="meta" data-i18n="modal.addStep.ports">Output ports (comma-separated)</div><input id="addStepPorts" type="text" value="success" placeholder="success, approved, rejected"></label>
+      <label><div class="meta" data-i18n="modal.addStep.defaultPort">Default output port</div><input id="addStepDefaultPort" type="text" value="success" placeholder="success"></label>
+      <label class="modal-check"><input id="addStepUnrouted" type="checkbox"><span class="meta" data-i18n="modal.addStep.unrouted">Allow an output port with no edge to end this branch</span></label>
       <label><div class="meta" data-i18n="modal.addStep.prompt">Step prompt</div><textarea id="addStepPrompt" rows="7" data-i18n-ph="modal.addStep.promptPh" placeholder="Additional instructions for this step" style="width:100%;resize:vertical;"></textarea><div class="meta" data-i18n="modal.addStep.promptHint">Keep this prompt meaningful for the step. It may be empty, but then the worker relies on task context and engine contracts.</div></label>
       <div class="modal-actions">
         <button id="addStepDelete" type="button" class="danger" style="margin-right: auto; display: none;" data-i18n="modal.addStep.delete">Delete</button>
@@ -1505,11 +1511,18 @@
         "action.close": "Close",
         "modal.addStep.title": "Add workflow step", "modal.addStep.editTitle": "Edit step",
         "modal.addStep.name": "Name", "modal.addStep.namePh": "Step name",
+        "modal.addStep.type": "Node type",
+        "node.action": "Action", "node.approval": "Approval", "node.end": "End",
+        "modal.addStep.handler": "Execution handler", "modal.addStep.command": "Shell command",
+        "handler.agent": "Agent", "handler.command": "Shell command",
         "modal.addStep.agent": "Agents", "modal.addStep.agentUnset": "— no agent selected —", "modal.addStep.agentMissing": "(not installed)",
         "modal.addStep.agentAdd": "Add another agent", "modal.addStep.agentRemove": "Remove",
         "modal.addStep.agentCmdPh": "command — blank uses the built-in CLI",
         "modal.addStep.agentBuiltin": "Built-in command when blank:",
         "modal.addStep.required": "Required (a step the flow must include)",
+        "modal.addStep.ports": "Output ports (comma-separated)",
+        "modal.addStep.defaultPort": "Default output port",
+        "modal.addStep.unrouted": "Allow an output port with no edge to end this branch",
         "modal.addStep.prompt": "Step prompt", "modal.addStep.promptPh": "Additional instructions for this step",
         "modal.addStep.promptHint": "Keep this prompt meaningful for the step. It may be empty, but then the worker relies on task context and engine contracts. Engine safety contracts and the output protocol still take priority.",
         "modal.addStep.delete": "Delete", "modal.addStep.cancel": "Cancel",
@@ -1528,6 +1541,10 @@
         "wf.connectHint": "Click a node, then click another node to connect them",
         "wf.editHint": "Double-click a node to edit it",
         "wf.connectSrc": "Connect: source \"{0}\" — now click the target node",
+        "wf.edgePortPrompt": "Output port for this connection. Allowed: {0}",
+        "wf.edgePortInvalid": "Port \"{0}\" is not declared by the source step",
+        "wf.edgeMaxPrompt": "Maximum loop iterations for this return edge (blank uses the global default)",
+        "wf.edgeMaxInvalid": "Maximum iterations must be a positive integer",
         "wf.connAdded": "Connection added", "wf.connRemoved": "Connection removed",
         "wf.stepAdded": "Step \"{0}\" added", "wf.stepSaved": "Step \"{0}\" saved",
         "wf.coreNoRemove": "Core steps cannot be removed", "wf.updated": "Workflow updated",
@@ -1647,11 +1664,18 @@
         "action.close": "关闭",
         "modal.addStep.title": "添加工作流步骤", "modal.addStep.editTitle": "编辑步骤",
         "modal.addStep.name": "名称", "modal.addStep.namePh": "步骤名称",
+        "modal.addStep.type": "节点类型",
+        "node.action": "执行", "node.approval": "审批", "node.end": "结束",
+        "modal.addStep.handler": "执行方式", "modal.addStep.command": "Shell 命令",
+        "handler.agent": "Agent", "handler.command": "Shell 命令",
         "modal.addStep.agent": "Agent", "modal.addStep.agentUnset": "—— 未设置 Agent ——", "modal.addStep.agentMissing": "(未安装)",
         "modal.addStep.agentAdd": "加一个 agent", "modal.addStep.agentRemove": "移除",
         "modal.addStep.agentCmdPh": "命令 —— 留空用内置 CLI",
         "modal.addStep.agentBuiltin": "留空时的内置命令：",
         "modal.addStep.required": "必选（流程必须包含的步骤）",
+        "modal.addStep.ports": "输出端口（逗号分隔）",
+        "modal.addStep.defaultPort": "默认输出端口",
+        "modal.addStep.unrouted": "允许没有连线的输出端口正常结束当前分支",
         "modal.addStep.prompt": "步骤 Prompt", "modal.addStep.promptPh": "该步骤的附加执行指令",
         "modal.addStep.promptHint": "请确认该步骤仍有合理、足够的执行指引。可以留空，但 worker 将只能依赖任务上下文和引擎契约；引擎安全契约与输出协议仍具有更高优先级。",
         "modal.addStep.delete": "删除", "modal.addStep.cancel": "取消",
@@ -1670,6 +1694,10 @@
         "wf.connectHint": "点击一个节点，再点击另一个节点以连接",
         "wf.editHint": "双击节点进行编辑",
         "wf.connectSrc": "连接：源 \"{0}\" — 现在点击目标节点",
+        "wf.edgePortPrompt": "选择此连接的输出端口。可用：{0}",
+        "wf.edgePortInvalid": "源节点未声明端口 \"{0}\"",
+        "wf.edgeMaxPrompt": "此回边的最大循环次数（留空使用全局默认值）",
+        "wf.edgeMaxInvalid": "最大循环次数必须为正整数",
         "wf.connAdded": "已添加连接", "wf.connRemoved": "已移除连接",
         "wf.stepAdded": "步骤 \"{0}\" 已添加", "wf.stepSaved": "步骤 \"{0}\" 已保存",
         "wf.coreNoRemove": "核心步骤不可删除", "wf.updated": "工作流已更新",
@@ -2067,6 +2095,14 @@
       return Object.fromEntries((state.workflow.steps || []).map(s => [s.id, s]));
     }
 
+    function wfPortSlug(value) {
+      return String(value || "").trim().toLowerCase().replace(/[^a-z0-9_.-]+/g, "-").replace(/^[-._]+|[-._]+$/g, "");
+    }
+
+    function wfEdgePort(edge) {
+      return edge.port || (edge.rework ? "rework" : "success");
+    }
+
     // Compute node coordinates with dagre and write them into the step models
     // (top-left corners; dagre returns centers). No-op when the dagre bundle is
     // unavailable, so callers keep whatever positions they already had. Node
@@ -2276,12 +2312,13 @@
                     return `
                     <div class="workflow-node-wrap" data-id="${escapeHtml(step.id)}" style="left:${step.x}px; top:${step.y}px">
                       <div class="workflow-node ${step.required ? "required" : "optional"}${terminalCls}" data-id="${escapeHtml(step.id)}" title="${escapeHtml(t("wf.dblClickEdit"))}" tabindex="0" role="button" aria-label="${escapeHtml(step.name || t("wf.step"))}">
-                        <div class="wf-box-index">#${index + 1}</div>
+                        <div class="wf-box-index">#${index + 1} · ${escapeHtml(t(`node.${step.type || "action"}`))}</div>
                         <div class="wf-box-name">${escapeHtml(step.name || t("wf.step"))}</div>
                         <div class="wf-box-meta">
                           <span class="wf-agent-badge">${escapeHtml((step.agents || []).length > 1 ? t("wf.agentCount", (step.agents || []).length) : ((step.agents || [])[0] || step.id))}</span>
                           ${tag}
                         </div>
+                        <div class="meta" style="margin-top:6px;white-space:normal;line-height:1.5;">${(step.ports || ["success"]).map(port => `<span style="display:inline-block;margin:1px 3px 1px 0;padding:0 5px;border:1px solid var(--line);border-radius:8px;font-size:9px;">${escapeHtml(port)}</span>`).join("")}</div>
                       </div>
                     </div>`;
                   }).join("")}
@@ -2373,7 +2410,8 @@
           const p1 = wfEdgeAnchor(a, rectA, "right");
           const p2 = wfEdgeAnchor(b, rectB, "left");
           const d = wfEdgePath(p1, p2, false);
-          return `<path class="wf-edge" data-edge="${i}" d="${d}" marker-start="url(#wfArrow)" marker-end="url(#wfArrow)"><title>${escapeHtml(t("wf.clickDelete"))}</title></path>`;
+          const label = wfEdgePort(edge) + (edge.max_iterations ? ` · ≤${edge.max_iterations}` : "");
+          return `<path class="wf-edge" data-edge="${i}" d="${d}" marker-start="url(#wfArrow)" marker-end="url(#wfArrow)"><title>${escapeHtml(label + " — " + t("wf.clickDelete"))}</title></path><text class="wf-edge-label" data-edge="${i}" x="${Math.round((p1.x + p2.x) / 2)}" y="${Math.round((p1.y + p2.y) / 2) - 6}" text-anchor="middle" style="font-size:10px;fill:var(--muted);cursor:pointer;paint-order:stroke;stroke:var(--panel);stroke-width:4px;">${escapeHtml(label)}</text>`;
         }
 
         const isReturn = (b.x + rectB.w / 2) < (a.x + rectA.w / 2);
@@ -2396,13 +2434,14 @@
           p2 = wfEdgeAnchor(b, rectB, "left");
         }
         const d = wfEdgePath(p1, p2, isReturn, channel);
-        return `<path class="wf-edge" data-edge="${i}" d="${d}" marker-end="url(#wfArrow)"><title>${escapeHtml(t("wf.clickDelete"))}</title></path>`;
+        const label = wfEdgePort(edge) + (edge.max_iterations ? ` · ≤${edge.max_iterations}` : "");
+        return `<path class="wf-edge" data-edge="${i}" d="${d}" marker-end="url(#wfArrow)"><title>${escapeHtml(label + " — " + t("wf.clickDelete"))}</title></path><text class="wf-edge-label" data-edge="${i}" x="${Math.round((p1.x + p2.x) / 2)}" y="${Math.round((p1.y + p2.y) / 2) - 6}" text-anchor="middle" style="font-size:10px;fill:var(--muted);cursor:pointer;paint-order:stroke;stroke:var(--panel);stroke-width:4px;">${escapeHtml(label)}</text>`;
       }).join("");
 
       if (wfTempPath) paths += `<path class="wf-edge temp" d="${wfTempPath}"></path>`;
       svg.innerHTML = paths;
-      svg.querySelectorAll(".wf-edge[data-edge]").forEach(path => {
-        path.addEventListener("click", () => removeWorkflowEdge(Number(path.dataset.edge)));
+      svg.querySelectorAll("[data-edge]").forEach(element => {
+        element.addEventListener("click", () => removeWorkflowEdge(Number(element.dataset.edge)));
       });
     }
 
@@ -2539,8 +2578,34 @@
 
     function addWorkflowEdge(from, to) {
       const edges = state.workflow.edges || (state.workflow.edges = []);
-      if (edges.some(e => e.from === from && e.to === to)) { drawEdges(); return; }
-      edges.push({ from, to });
+      const source = wfById()[from];
+      const ports = (source?.ports || ["success"]).map(wfPortSlug).filter(Boolean);
+      const suggested = source?.default_port || ports[0] || "success";
+      const rawPort = ports.length > 1
+        ? window.prompt(t("wf.edgePortPrompt", ports.join(", ")), suggested)
+        : suggested;
+      if (rawPort === null) { drawEdges(); return; }
+      const port = wfPortSlug(rawPort);
+      if (!ports.includes(port)) { setStatus(t("wf.edgePortInvalid", port), true); drawEdges(); return; }
+      if (edges.some(e => e.from === from && e.to === to && wfEdgePort(e) === port)) { drawEdges(); return; }
+      let max_iterations;
+      const target = wfById()[to];
+      if (target && source && Number(target.x) <= Number(source.x)) {
+        const rawLimit = window.prompt(t("wf.edgeMaxPrompt"), "");
+        if (rawLimit === null) { drawEdges(); return; }
+        if (String(rawLimit).trim()) {
+          max_iterations = Number(rawLimit);
+          if (!Number.isInteger(max_iterations) || max_iterations < 1) {
+            setStatus(t("wf.edgeMaxInvalid"), true); drawEdges(); return;
+          }
+        }
+      }
+      edges.push({
+        from, to,
+        ...(port === "success" ? {} : { port }),
+        ...(port === "rework" ? { rework: true } : {}),
+        ...(max_iterations ? { max_iterations } : {})
+      });
       run(async () => { await saveWorkflow(); setStatus(t("wf.connAdded")); });
     }
 
@@ -2616,14 +2681,38 @@
     // (blank = the Agent's built-in CLI).
     let stepAgentRows = [{ agent: "", command: "" }];
 
-    // Only these steps round-robin across Agents (＋ button, up to 3). Every
-    // other step — including any newly added one — takes a single Agent. Mirrors
-    // the server's _MULTI_AGENT_STEP_IDS.
-    const MULTI_AGENT_STEPS = new Set(["implement", "review", "test"]);
-    const APPROVAL_CAPABLE_STEPS = new Set(["product_design", "ui_design", "architecture", "decompose"]);
-    const NON_REMOVABLE_STEP_IDS = new Set(["implement", "review"]);
+    function editingWorkflowStep() {
+      return (state.workflow.steps || []).find(step => step.id === wfStepModalId) || null;
+    }
     function currentStepAllowsMultiAgent() {
-      return wfStepModalMode === "edit" && MULTI_AGENT_STEPS.has(wfStepModalId);
+      if (wfStepModalMode === "add") {
+        return ($("addStepType")?.value || "action") === "action"
+          && ($("addStepHandler")?.value || "agent") !== "command";
+      }
+      const step = editingWorkflowStep();
+      return step?.type === "action" && step?.handler !== "command"
+        && Number((step?.executor || {}).max_agents || 1) > 1;
+    }
+
+    function applyStepTypeFields(resetPorts = false) {
+      const nodeType = $("addStepType").value || "action";
+      const handler = $("addStepHandler").value || "agent";
+      $("addStepHandlerField").style.display = nodeType === "action" ? "" : "none";
+      $("addStepAgentsField").style.display = nodeType === "action" && handler !== "command" ? "" : "none";
+      $("addStepCommandField").style.display = nodeType === "action" && handler === "command" ? "" : "none";
+      $("addStepApprovalField").style.display = nodeType === "action" ? "" : "none";
+      if (resetPorts) {
+        if (nodeType === "approval") {
+          $("addStepPorts").value = "approved, changes_requested, cancelled";
+          $("addStepDefaultPort").value = "approved";
+          $("addStepUnrouted").checked = false;
+        } else {
+          $("addStepPorts").value = "success";
+          $("addStepDefaultPort").value = "success";
+          $("addStepUnrouted").checked = nodeType === "end";
+        }
+      }
+      renderAgentSelectors();
     }
 
     // One row = an Agent dropdown (installed CLIs minus the agents already picked
@@ -2706,6 +2795,25 @@
       return map;
     }
 
+    function selectedStepPorts(existingStepId = null) {
+      const ports = [];
+      for (const raw of String($("addStepPorts").value || "").split(",")) {
+        const port = wfPortSlug(raw);
+        if (port && !ports.includes(port)) ports.push(port);
+      }
+      if (!ports.includes("success")) ports.unshift("success");
+      if (existingStepId) {
+        for (const edge of state.workflow.edges || []) {
+          if (edge.from !== existingStepId) continue;
+          const port = wfEdgePort(edge);
+          if (!ports.includes(port)) ports.push(port);
+        }
+      }
+      const defaultPort = wfPortSlug($("addStepDefaultPort").value) || "success";
+      if (!ports.includes(defaultPort)) ports.push(defaultPort);
+      return { ports, defaultPort };
+    }
+
     function openAddStepModal() {
       wfStepModalMode = "add";
       wfStepModalId = null;
@@ -2714,6 +2822,10 @@
       $("addStepDelete").style.display = "none";
       $("addStepName").value = "";
       $("addStepName").placeholder = t("modal.addStep.namePh");
+      $("addStepType").value = "action";
+      $("addStepHandler").value = "agent";
+      $("addStepHandler").disabled = false;
+      $("addStepCommand").value = "";
       $("addStepPrompt").value = "";
       $("addStepPrompt").placeholder = t("modal.addStep.promptPh");
       setStepAgents([]);
@@ -2721,7 +2833,11 @@
       $("addStepRequired").disabled = false;
       $("addStepRequiredField").style.display = "none";
       $("addStepApproval").checked = false;
-      $("addStepApprovalField").style.display = "none";
+      $("addStepApprovalField").style.display = "";
+      $("addStepPorts").value = "success";
+      $("addStepDefaultPort").value = "success";
+      $("addStepUnrouted").checked = false;
+      applyStepTypeFields(false);
       $("addStepModalBackdrop").classList.add("open");
       $("addStepName").focus();
     }
@@ -2734,8 +2850,13 @@
       $("addStepModalTitle").textContent = t("modal.addStep.editTitle");
       $("addStepConfirm").textContent = t("modal.addStep.save");
       $("addStepDelete").style.display =
-        step.required_locked || NON_REMOVABLE_STEP_IDS.has(step.id) ? "none" : "";
+        step.removable === false ? "none" : "";
       $("addStepName").value = step.name || "";
+      $("addStepType").value = step.type || "action";
+      const editableHandler = ["agent", "command"].includes(step.handler || "agent");
+      $("addStepHandler").value = editableHandler ? (step.handler || "agent") : "agent";
+      $("addStepHandler").disabled = !editableHandler;
+      $("addStepCommand").value = step.command || "";
       $("addStepPrompt").value = step.prompt || "";
       $("addStepPrompt").placeholder = t("modal.addStep.promptPh");
       setStepAgents(step.agents || [], step.agent_commands || {});
@@ -2745,7 +2866,11 @@
       // Required control that would imply they should be part of every flow.
       $("addStepRequiredField").style.display = step.required ? "" : "none";
       $("addStepApproval").checked = !!step.approval_required;
-      $("addStepApprovalField").style.display = APPROVAL_CAPABLE_STEPS.has(step.id) ? "" : "none";
+      $("addStepApprovalField").style.display = step.type === "action" ? "" : "none";
+      $("addStepPorts").value = (step.ports || ["success"]).join(", ");
+      $("addStepDefaultPort").value = step.default_port || "success";
+      $("addStepUnrouted").checked = step.unrouted === "allowed";
+      applyStepTypeFields(false);
       $("addStepModalBackdrop").classList.add("open");
       $("addStepName").focus();
     }
@@ -2761,17 +2886,31 @@
 
     async function confirmAddStep() {
       const name = ($("addStepName").value || "").trim() || t("wf.step");
-      const agents = selectedStepAgents();
+      const nodeType = $("addStepType").value || "action";
+      const handler = nodeType === "approval" ? "human" : nodeType === "end" ? "end" : ($("addStepHandler").value || "agent");
+      const agents = nodeType === "action" && handler !== "command" ? selectedStepAgents() : [];
       const agent_commands = selectedAgentCommands();
       const required = $("addStepRequired").checked;
       const prompt = ($("addStepPrompt").value || "").trim();
+      const { ports, defaultPort } = selectedStepPorts();
       const steps = state.workflow.steps || [];
       // Seed coordinates only; saveWorkflow re-lays-out the graph with dagre.
       // Slugify the name into a stable step id (e.g. "Code Review" →
       // "code_review"); fall back to a timestamp suffix on collisions.
       let newId = name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "step";
       if (steps.some(s => s.id === newId)) newId = `${newId}_${Date.now().toString(36)}`;
-      const newStep = { id: newId, name, agents, agent_commands, required, prompt, x: 40, y: 60 };
+      const newStep = {
+        id: newId, name, type: nodeType,
+        handler,
+        command: handler === "command" ? ($("addStepCommand").value || "").trim() : "",
+        agents, agent_commands,
+        executor: { strategy: "round_robin", max_agents: 3, agents, command_overrides: agent_commands },
+        required: nodeType === "end" ? true : required, removable: true,
+        approval_required: nodeType === "action" && $("addStepApproval").checked,
+        prompt, ports, default_port: defaultPort,
+        unrouted: $("addStepUnrouted").checked ? "allowed" : "blocked",
+        x: 40, y: 60
+      };
       state.workflow.steps = [...steps, newStep];
       closeAddStepModal();
       await run(async () => {
@@ -2785,12 +2924,30 @@
     async function saveEditStep() {
       const step = (state.workflow.steps || []).find(s => s.id === wfStepModalId);
       if (!step) { closeAddStepModal(); return; }
+      const nodeType = $("addStepType").value || "action";
+      const selectedHandler = $("addStepHandler").disabled
+        ? step.handler
+        : ($("addStepHandler").value || "agent");
       step.name = ($("addStepName").value || "").trim() || step.name || t("wf.step");
-      step.agents = selectedStepAgents();
+      step.type = nodeType;
+      step.handler = nodeType === "approval" ? "human" : nodeType === "end" ? "end" : selectedHandler;
+      step.command = step.handler === "command" ? ($("addStepCommand").value || "").trim() : "";
+      step.agents = nodeType === "action" && step.handler !== "command" ? selectedStepAgents() : [];
       step.agent_commands = selectedAgentCommands();
+      step.executor = {
+        ...(step.executor || {}),
+        strategy: currentStepAllowsMultiAgent() ? "round_robin" : "single",
+        max_agents: currentStepAllowsMultiAgent() ? 3 : 1,
+        agents: step.agents,
+        command_overrides: step.agent_commands
+      };
       step.prompt = ($("addStepPrompt").value || "").trim();
-      step.approval_required = APPROVAL_CAPABLE_STEPS.has(step.id) && $("addStepApproval").checked;
-      if (!step.required_locked) step.required = $("addStepRequired").checked;
+      step.approval_required = nodeType === "action" && $("addStepApproval").checked;
+      const { ports, defaultPort } = selectedStepPorts(step.id);
+      step.ports = ports;
+      step.default_port = defaultPort;
+      step.unrouted = $("addStepUnrouted").checked ? "allowed" : "blocked";
+      if (!step.required_locked) step.required = nodeType === "end" ? true : $("addStepRequired").checked;
       closeAddStepModal();
       await run(async () => {
         await saveWorkflow();
@@ -2806,7 +2963,7 @@
 
     async function removeWorkflowStep(id) {
       const step = (state.workflow.steps || []).find(s => s.id === id);
-      if (step && (step.required_locked || NON_REMOVABLE_STEP_IDS.has(step.id))) {
+      if (step && step.removable === false) {
         setStatus(t("wf.coreNoRemove")); return;
       }
       state.workflow.steps = (state.workflow.steps || []).filter(s => s.id !== id);
@@ -2946,7 +3103,7 @@
           const instances = phaseInstances(goal, phase);
           const summary = phaseSummary(instances);
           const status = summary.status;
-          const awaitingApproval = !!phase.approval_required
+          const awaitingApproval = !!(phase.approval_required || phase.type === "approval")
             && ["blocked", "stalled"].includes(goal.task_status);
           const tone = awaitingApproval ? "blocked" : status === "closed" ? "done"
             : status === "blocked" ? "blocked"
@@ -3178,10 +3335,12 @@
     }
 
     async function approveWorkflowStep(taskId, step) {
+      const node = (state.workflow.steps || []).find(item => item.id === step);
+      const outcome = node?.type === "approval" ? (node.default_port || "approved") : "done";
       await run(async () => {
         await api(`/api/tasks/${taskId}/workflow/complete`, {
           method: "POST",
-          body: JSON.stringify({ step, outcome: "done" })
+          body: JSON.stringify({ step, outcome })
         });
         await loadGoals();
         await loadTasks();
@@ -3196,10 +3355,13 @@
         setStatus(t("task.requestChangesPrompt"));
         return;
       }
+      const node = (state.workflow.steps || []).find(item => item.id === step);
+      const outcome = node?.type === "approval" && (node.ports || []).includes("changes_requested")
+        ? "changes_requested" : "rework";
       await run(async () => {
         await api(`/api/tasks/${taskId}/workflow/complete`, {
           method: "POST",
-          body: JSON.stringify({ step, outcome: "rework", result })
+          body: JSON.stringify({ step, outcome, result })
         });
         await loadGoals();
         await loadTasks();
@@ -3535,7 +3697,7 @@
       const reworkLimited = task.task_status === "blocked" &&
         /^rework limit reached\b/i.test(task.blocked_reason || "");
       const approvalStep = (state.workflow.steps || []).find(step =>
-        step.id === task.workflow_step && step.approval_required
+        step.id === task.workflow_step && (step.approval_required || step.type === "approval")
       );
       const awaitingApproval = !!approvalStep
         && ["blocked", "stalled"].includes(task.task_status);
@@ -3799,6 +3961,8 @@
     $("addStepCancel").addEventListener("click", closeAddStepModal);
     $("addStepConfirm").addEventListener("click", confirmStep);
     $("addStepDelete").addEventListener("click", deleteStepFromModal);
+    $("addStepType").addEventListener("change", () => applyStepTypeFields(true));
+    $("addStepHandler").addEventListener("change", () => applyStepTypeFields(false));
     $("addStepAgentAdd").addEventListener("click", () => {
       if (currentStepAllowsMultiAgent() && stepAgentRows.length < 3) {
         stepAgentRows.push({ agent: "", command: "" });

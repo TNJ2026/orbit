@@ -82,6 +82,75 @@ class GoalStatusDecoupleTests(unittest.TestCase):
 
 
 class WorkflowSchemaTests(unittest.TestCase):
+    def test_builtin_node_types_select_handlers_and_defaults(self):
+        approval = server._normalize_workflow_step(
+            {"id": "legal", "name": "Legal", "type": "approval"}, 0
+        )
+        self.assertEqual("human", approval["handler"])
+        self.assertEqual(["approved", "changes_requested", "cancelled"], approval["ports"])
+        self.assertEqual("approved", approval["default_port"])
+        self.assertFalse(approval["approval_required"])
+
+        end = server._normalize_workflow_step(
+            {"id": "finish", "name": "Finish", "type": "end"}, 0
+        )
+        self.assertEqual("end", end["handler"])
+        self.assertTrue(end["terminal"])
+        self.assertTrue(end["required"])
+        self.assertEqual([], end["agents"])
+
+    def test_handler_registry_rejects_unknown_or_mismatched_handlers(self):
+        with self.assertRaisesRegex(server.InvalidInputError, "unknown workflow handler"):
+            server._normalize_workflow_step(
+                {"id": "x", "name": "X", "handler": "does.not.exist"}, 0
+            )
+        with self.assertRaisesRegex(server.InvalidInputError, "does not support"):
+            server._normalize_workflow_step(
+                {"id": "x", "name": "X", "type": "end", "handler": "agent"}, 0
+            )
+
+    def test_arbitrary_step_capabilities_are_id_independent(self):
+        norm = server._normalize_workflow_step(
+            {
+                "id": "legal_check",
+                "name": "Legal Check",
+                "handler": "agent",
+                "approval_required": True,
+                "executor": {
+                    "strategy": "round_robin",
+                    "max_agents": 3,
+                    "agents": ["a", "b", "c"],
+                    "command_overrides": {"b": "review-legal"},
+                },
+                "environment": {"type": "git.worktree", "scope": "workflow_item"},
+                "contract": "Review the submission without editing it.",
+                "ports": ["success", "approved", "rejected"],
+                "default_port": "approved",
+                "removable": True,
+            },
+            0,
+        )
+        self.assertEqual(["a", "b", "c"], norm["agents"])
+        self.assertEqual(3, norm["executor"]["max_agents"])
+        self.assertEqual("review-legal", norm["agent_commands"]["b"])
+        self.assertTrue(norm["approval_required"])
+        self.assertTrue(norm["isolate"])
+        self.assertEqual("Review the submission without editing it.", norm["contract"])
+        self.assertEqual("approved", norm["default_port"])
+        self.assertTrue(norm["removable"])
+
+    def test_edge_port_must_be_declared_by_source_step(self):
+        with TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(server.InvalidInputError, "not declared"):
+                server.write_workflow_config(
+                    [
+                        {"id": "a", "name": "A", "ports": ["success"]},
+                        {"id": "b", "name": "B"},
+                    ],
+                    tmp,
+                    [{"from": "a", "to": "b", "port": "approved"}],
+                )
+
     def test_integrate_flag_forces_isolate_off(self):
         norm = server._normalize_workflow_step(
             {"id": "x", "name": "X", "isolate": True, "integrate": True},
@@ -681,6 +750,66 @@ class VerifyGateTests(unittest.TestCase):
                 "cat >/dev/null; echo WORKFLOW_OUTCOME: done", verify="true",
             )
             self.assertEqual("done", res["outcome"])
+            store.close()
+
+    def test_runner_can_select_declared_business_port(self):
+        with TemporaryDirectory() as tmp:
+            root, store, task_id = self._setup(tmp)
+            result = server.run_step_worker(
+                store,
+                str(root),
+                task_id,
+                {
+                    "id": "classify", "name": "Classify", "ports": ["success", "priority"],
+                    "isolate": False, "integrate": False, "task_status": "in_progress",
+                },
+                {
+                    "agent_name": "dev",
+                    "runner_command": "cat >/dev/null; printf 'RESULT_SUMMARY: urgent\\nWORKFLOW_PORT: priority\\n'",
+                },
+                upstream_result="",
+                advance=False,
+            )
+            self.assertEqual("priority", result["outcome"])
+            store.close()
+
+    def test_runner_maps_nonzero_exit_to_declared_error_port(self):
+        with TemporaryDirectory() as tmp:
+            root, store, task_id = self._setup(tmp)
+            result = server.run_step_worker(
+                store,
+                str(root),
+                task_id,
+                {
+                    "id": "send", "name": "Send", "ports": ["success", "error"],
+                    "isolate": False, "integrate": False, "task_status": "in_progress",
+                },
+                {"agent_name": "dev", "runner_command": "cat >/dev/null; exit 7"},
+                upstream_result="",
+                advance=False,
+            )
+            self.assertEqual("error", result["outcome"])
+            self.assertIn("runner exited 7", result["result"])
+            store.close()
+
+    def test_runner_maps_hard_timeout_to_declared_timeout_port(self):
+        with TemporaryDirectory() as tmp:
+            root, store, task_id = self._setup(tmp)
+            result = server.run_step_worker(
+                store,
+                str(root),
+                task_id,
+                {
+                    "id": "wait", "name": "Wait", "ports": ["success", "timeout"],
+                    "isolate": False, "integrate": False, "task_status": "in_progress",
+                },
+                {"agent_name": "dev", "runner_command": "cat >/dev/null; sleep 5"},
+                upstream_result="",
+                timeout_seconds=0.1,
+                advance=False,
+            )
+            self.assertEqual("timeout", result["outcome"])
+            self.assertEqual("timeout", result["runner_status"])
             store.close()
 
     def test_verify_failure_overrides_selfreported_done(self):

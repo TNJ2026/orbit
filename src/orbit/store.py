@@ -116,6 +116,7 @@ CREATE TABLE IF NOT EXISTS task_transitions (
     to_step    TEXT NOT NULL DEFAULT '',
     actor      TEXT NOT NULL DEFAULT '',
     outcome    TEXT NOT NULL DEFAULT 'done',
+    port       TEXT NOT NULL DEFAULT '',
     note       TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     FOREIGN KEY(task_id) REFERENCES tasks(id)
@@ -454,6 +455,14 @@ class Store:
         }
         if "source_message_id" not in task_columns:
             self._conn.execute("ALTER TABLE tasks ADD COLUMN source_message_id INTEGER")
+        transition_columns = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(task_transitions)").fetchall()
+        }
+        if transition_columns and "port" not in transition_columns:
+            self._conn.execute(
+                "ALTER TABLE task_transitions ADD COLUMN port TEXT NOT NULL DEFAULT ''"
+            )
         task_defaults = {
             "importance": "TEXT NOT NULL DEFAULT 'normal'",
             "size": "TEXT NOT NULL DEFAULT 'medium'",
@@ -1173,15 +1182,16 @@ class Store:
         actor: str,
         outcome: str,
         note: str = "",
+        port: str = "",
     ) -> dict[str, Any]:
         now = _now()
         with self._lock:
             cur = self._conn.execute(
                 """INSERT INTO task_transitions (
-                       task_id, from_step, to_step, actor, outcome, note, created_at
+                       task_id, from_step, to_step, actor, outcome, port, note, created_at
                    )
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (task_id, from_step, to_step, actor, outcome, note[:2000], now),
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (task_id, from_step, to_step, actor, outcome, port, note[:2000], now),
             )
             self._conn.commit()
         return {
@@ -1191,6 +1201,7 @@ class Store:
             "to_step": to_step,
             "actor": actor,
             "outcome": outcome,
+            "port": port,
             "note": note[:2000],
             "created_at": now,
         }
@@ -1198,7 +1209,7 @@ class Store:
     def list_task_transitions(self, task_id: int) -> list[dict[str, Any]]:
         with self._lock:
             rows = self._conn.execute(
-                """SELECT id, task_id, from_step, to_step, actor, outcome, note,
+                """SELECT id, task_id, from_step, to_step, actor, outcome, port, note,
                           created_at
                    FROM task_transitions
                    WHERE task_id = ?
@@ -1221,7 +1232,7 @@ class Store:
                 placeholders = ",".join("?" for _ in chunk)
                 rows = self._conn.execute(
                     f"""SELECT id, task_id, from_step, to_step, actor, outcome,
-                               note, created_at
+                               port, note, created_at
                         FROM task_transitions
                         WHERE task_id IN ({placeholders})
                         ORDER BY id""",

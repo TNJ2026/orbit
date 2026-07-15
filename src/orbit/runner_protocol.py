@@ -12,6 +12,7 @@ STEP_SUMMARY_MAX = 2000
 _VERDICT_RE = re.compile(
     r"WORKFLOW_OUTCOME\s*[:=]\s*(done|rework|blocked)", re.IGNORECASE
 )
+_PORT_RE = re.compile(r"WORKFLOW_PORT\s*[:=]\s*([a-z][a-z0-9_-]*)", re.IGNORECASE)
 _RESULT_SUMMARY_RE = re.compile(r"(?im)^RESULT_SUMMARY\s*:\s*(.+?)\s*$")
 _ARTIFACTS_RE = re.compile(r"(?im)^ARTIFACTS\s*:\s*(\[.*\])\s*$")
 
@@ -24,6 +25,12 @@ def tail(text: str, limit: int) -> str:
 def parse_runner_verdict(text: str) -> str | None:
     """Return the last self-reported workflow outcome, if present."""
     matches = _VERDICT_RE.findall(text or "")
+    return matches[-1].lower() if matches else None
+
+
+def parse_runner_port(text: str) -> str | None:
+    """Return the last business output port selected by a runner, if present."""
+    matches = _PORT_RE.findall(text or "")
     return matches[-1].lower() if matches else None
 
 
@@ -51,7 +58,7 @@ def parse_step_output_metadata(text: str) -> tuple[str, list[str]]:
             line
             for line in text.splitlines()
             if not re.match(
-                r"(?i)^\s*(WORKFLOW_OUTCOME|TOKENS_USED|RESULT_SUMMARY|ARTIFACTS)\s*[:=]",
+                r"(?i)^\s*(WORKFLOW_OUTCOME|WORKFLOW_PORT|TOKENS_USED|RESULT_SUMMARY|ARTIFACTS)\s*[:=]",
                 line,
             )
         ]

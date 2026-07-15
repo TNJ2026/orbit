@@ -130,6 +130,231 @@ class EngineHarness:
 
 
 class WorkflowEngineTests(unittest.TestCase):
+    def test_independent_approval_node_waits_and_routes_approved(self):
+        with TemporaryDirectory() as tmp:
+            steps = [
+                {"id": "draft", "name": "Draft", "required": True, "agents": ["hub-agent"]},
+                {
+                    "id": "legal", "name": "Legal approval", "type": "approval",
+                    "ports": ["approved", "changes_requested", "cancelled"],
+                    "default_port": "approved", "unrouted": "allowed",
+                },
+                {"id": "publish", "name": "Publish", "required": True, "agents": ["codex"]},
+            ]
+            edges = [
+                {"from": "draft", "to": "legal"},
+                {"from": "legal", "to": "publish", "port": "approved"},
+                {
+                    "from": "legal", "to": "draft", "port": "changes_requested",
+                    "max_iterations": 2,
+                },
+            ]
+            h = EngineHarness(tmp, steps=steps, edges=edges)
+            task_id = h.create_task()
+            h.start(task_id)
+
+            waiting = h.complete("hub-agent", task_id, "draft", "done", "draft ready")
+            self.assertEqual([{"step": "legal", "assignee": "hub"}], waiting["dispatched"])
+            self.assertEqual("blocked", h.task(task_id)["task_status"])
+            self.assertEqual("approval", h.store.list_task_transitions(task_id)[-1]["outcome"])
+
+            approved = h.complete("hub", task_id, "legal", "approved", "approved")
+            self.assertEqual([{"step": "publish", "assignee": "codex"}], approved["dispatched"])
+
+    def test_explicit_end_node_closes_without_agent_dispatch(self):
+        with TemporaryDirectory() as tmp:
+            steps = [
+                {"id": "work", "name": "Work", "required": True, "agents": ["hub-agent"]},
+                {"id": "finish", "name": "Finish", "type": "end", "unrouted": "allowed"},
+            ]
+            h = EngineHarness(tmp, steps=steps, edges=[{"from": "work", "to": "finish"}])
+            task_id = h.create_task()
+            h.start(task_id)
+
+            report = h.complete("hub-agent", task_id, "work", "done", "complete")
+
+            self.assertTrue(report["closed"])
+            self.assertEqual(
+                [{"step": "finish", "assignee": server.WORKFLOW_ENGINE_AGENT}],
+                report["dispatched"],
+            )
+            self.assertEqual("closed", h.task(task_id)["task_status"])
+            self.assertEqual("", h.task(task_id)["workflow_step"])
+            self.assertEqual("explicit end node reached", h.store.list_task_transitions(task_id)[-1]["note"])
+
+    def test_command_handler_runs_without_configured_agent(self):
+        with TemporaryDirectory() as tmp:
+            steps = [{
+                "id": "notify", "name": "Notify", "type": "action",
+                "handler": "command",
+                "command": "printf 'RESULT_SUMMARY: sent\\nWORKFLOW_OUTCOME: done\\n'",
+                "required": True,
+            }]
+            h = EngineHarness(
+                tmp, steps=steps, edges=[{"from": "notify", "to": "notify"}]
+            )
+            task_id = h.create_task()
+
+            started = h.start(task_id)
+            self.assertEqual(
+                [{"step": "notify", "assignee": server.WORKFLOW_ENGINE_AGENT}],
+                started["dispatched"],
+            )
+            configured = server.read_workflow_config(tmp)["steps"][0]
+            self.assertEqual([], configured["agents"])
+
+            report = server.run_queued_job(
+                h.store, tmp, "local-runner", apply_inline=True
+            )
+
+            self.assertIsNotNone(report)
+            self.assertEqual("closed", h.task(task_id)["task_status"])
+
+    def test_reserved_error_port_routes_to_recovery_step(self):
+        with TemporaryDirectory() as tmp:
+            steps = [
+                {
+                    "id": "send", "name": "Send", "required": True,
+                    "agents": ["hub-agent"], "ports": ["success", "error"],
+                },
+                {"id": "recover", "name": "Recover", "required": True, "agents": ["codex"]},
+            ]
+            h = EngineHarness(
+                tmp,
+                steps=steps,
+                edges=[{"from": "send", "to": "recover", "port": "error"}],
+            )
+            task_id = h.create_task()
+            h.start(task_id)
+
+            report = h.complete("hub-agent", task_id, "send", "error", "service unavailable")
+
+            self.assertEqual([{"step": "recover", "assignee": "codex"}], report["dispatched"])
+            transition = h.store.list_task_transitions(task_id)[-2]
+            self.assertEqual("done", transition["outcome"])
+            self.assertEqual("error", transition["port"])
+            self.assertNotEqual("blocked", h.task(task_id)["task_status"])
+
+    def test_reserved_error_without_route_blocks(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(
+                tmp,
+                steps=[{
+                    "id": "send", "name": "Send", "required": True,
+                    "agents": ["hub-agent"], "ports": ["success", "error"],
+                }],
+                edges=[{"from": "send", "to": "send"}],
+            )
+            task_id = h.create_task()
+            h.start(task_id)
+            report = h.complete("hub-agent", task_id, "send", "error", "boom")
+            self.assertEqual("error", report["outcome"])
+            self.assertEqual("blocked", h.task(task_id)["task_status"])
+
+    def test_unrouted_blocked_policy_is_rejected_before_start(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(
+                tmp,
+                steps=[
+                    {
+                        "id": "decision", "name": "Decision", "required": True,
+                        "agents": ["hub-agent"], "ports": ["success", "approved"],
+                        "unrouted": "blocked",
+                    },
+                    {"id": "publish", "name": "Publish", "required": True, "agents": ["codex"]},
+                ],
+                edges=[{"from": "decision", "to": "publish", "port": "approved"}],
+            )
+            task_id = h.create_task()
+            with self.assertRaisesRegex(InvalidInputError, "unrouted ports: success"):
+                h.start(task_id)
+
+    def test_custom_loop_uses_edge_iteration_limit(self):
+        with TemporaryDirectory() as tmp:
+            steps = [
+                {
+                    "id": "draft", "name": "Draft", "required": True,
+                    "agents": ["hub-agent"], "ports": ["success", "ready"],
+                },
+                {
+                    "id": "check", "name": "Check", "required": True,
+                    "agents": ["codex"], "ports": ["success", "retry"],
+                },
+            ]
+            edges = [
+                {"from": "draft", "to": "check", "port": "ready"},
+                {
+                    "from": "check", "to": "draft", "port": "retry",
+                    "max_iterations": 1,
+                },
+            ]
+            h = EngineHarness(tmp, steps=steps, edges=edges)
+            task_id = h.create_task()
+            h.start(task_id)
+            h.complete("hub-agent", task_id, "draft", "ready")
+            first = h.complete("codex", task_id, "check", "retry", "fix once")
+            self.assertEqual([{"step": "draft", "assignee": "hub-agent"}], first["dispatched"])
+            h.complete("hub-agent", task_id, "draft", "ready")
+
+            limited = h.complete("codex", task_id, "check", "retry", "still wrong")
+
+            self.assertTrue(limited["iteration_limited"])
+            self.assertEqual("blocked", h.task(task_id)["task_status"])
+
+    def test_custom_business_port_routes_and_is_persisted(self):
+        with TemporaryDirectory() as tmp:
+            steps = [
+                {
+                    "id": "decision", "name": "Decision", "required": True,
+                    "agents": ["hub-agent"],
+                    "ports": ["success", "approved", "rejected"],
+                },
+                {"id": "publish", "name": "Publish", "required": True, "agents": ["codex"]},
+                {"id": "revise", "name": "Revise", "required": True, "agents": ["rev"]},
+            ]
+            edges = [
+                {"from": "decision", "to": "publish", "port": "approved"},
+                {"from": "decision", "to": "revise", "port": "rejected"},
+            ]
+            h = EngineHarness(tmp, steps=steps, edges=edges)
+            task_id = h.create_task()
+            h.start(task_id)
+
+            result = h.complete(
+                "hub-agent", task_id, "decision", "approved", "policy accepted"
+            )
+
+            self.assertEqual("approved", result["outcome"])
+            self.assertEqual([{"step": "publish", "assignee": "codex"}], result["dispatched"])
+            transition = h.store.list_task_transitions(task_id)[-2]
+            self.assertEqual("done", transition["outcome"])
+            self.assertEqual("approved", transition["port"])
+
+    def test_approval_preserves_selected_business_port(self):
+        with TemporaryDirectory() as tmp:
+            steps = [
+                {
+                    "id": "decision", "name": "Decision", "required": True,
+                    "agents": ["codex"], "approval_required": True,
+                    "ports": ["success", "approved", "rejected"],
+                },
+                {"id": "publish", "name": "Publish", "required": True, "agents": ["rev"]},
+            ]
+            h = EngineHarness(
+                tmp,
+                steps=steps,
+                edges=[{"from": "decision", "to": "publish", "port": "approved"}],
+            )
+            task_id = h.create_task()
+            h.start(task_id)
+
+            waiting = h.complete("codex", task_id, "decision", "approved", "looks good")
+            self.assertTrue(waiting["awaiting_approval"])
+            self.assertEqual("approved", h.store.list_task_transitions(task_id)[-1]["port"])
+
+            approved = h.complete("hub", task_id, "decision", "done", "approved")
+            self.assertEqual([{"step": "publish", "assignee": "rev"}], approved["dispatched"])
+
     def test_linear_flow_with_rework_and_close(self):
         with TemporaryDirectory() as tmp:
             h = EngineHarness(tmp)

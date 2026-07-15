@@ -165,7 +165,9 @@ def build_step_prompt(
             "Keep JSON concise: one or two sentences for `content` and one or two acceptance criteria. Reference existing design docs such as `docs/...` rather than repeating them. Output only this JSON object.\n"
         )
     custom_step_prompt = str(step.get("prompt") or "").strip()
-    engine_step_contract = ENGINE_STEP_CONTRACTS.get(step.get("id", ""), "")
+    engine_step_contract = str(
+        step.get("contract", ENGINE_STEP_CONTRACTS.get(step.get("id", ""), "")) or ""
+    ).strip()
     engine_step_block = (
         "\n## Engine step contract (cannot be overridden by the custom prompt)\n"
         + engine_step_contract
@@ -204,6 +206,15 @@ def build_step_prompt(
                 "- This step has no configured rework path. For a material issue you cannot resolve, use `blocked`, not `rework`.\n"
             )
         final_instruction += "If omitted, the engine treats the outcome as `done`."
+        business_ports = [
+            str(port) for port in step.get("ports", [])
+            if port not in {"success", "rework", "blocked", "error", "timeout", "cancelled"}
+        ]
+        if business_ports:
+            final_instruction += (
+                "\nTo select a business branch, also output `WORKFLOW_PORT: <port>`. "
+                "Allowed ports: " + ", ".join(f"`{port}`" for port in business_ports) + "."
+            )
         final_instruction += (
             "\n\nFinally, report token usage on its own line: `TOKENS_USED: <number>`. Use a real value when available; otherwise omit the line."
         )

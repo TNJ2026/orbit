@@ -114,8 +114,38 @@ def workflow_execution_errors(
     if not terminals:
         errors.append("no terminal step")
     for step in cfg["steps"]:
+        if step.get("type") == "end" and any(
+            edge["from"] == step["id"] for edge in cfg["edges"]
+        ):
+            errors.append(f"end step '{step['id']}' must not have outgoing edges")
         if step.get("decompose") and not forward_out(cfg, back, step["id"]):
             errors.append(f"decompose step '{step['id']}' has no forward successor")
+        if step.get("unrouted", "allowed") != "allowed":
+            routed_ports = {
+                edge.get("port") or ("rework" if edge.get("rework") else "success")
+                for edge in cfg["edges"]
+                if edge["from"] == step["id"]
+            }
+            missing_ports = [
+                port for port in step.get("ports", ["success", "rework"])
+                if port not in routed_ports
+            ]
+            if missing_ports:
+                errors.append(
+                    f"step '{step['id']}' has unrouted ports: " + ", ".join(missing_ports)
+                )
+    for source in ids:
+        by_port: dict[str, list[str]] = {}
+        for edge in cfg["edges"]:
+            if edge["from"] != source:
+                continue
+            port = edge.get("port") or ("rework" if edge.get("rework") else "success")
+            by_port.setdefault(port, []).append(edge["to"])
+        for port, targets in by_port.items():
+            if any(steps[target].get("type") == "end" for target in targets) and len(targets) > 1:
+                errors.append(
+                    f"step '{source}' port '{port}' mixes an end step with other targets"
+                )
     main_entry = entries[0] if entries else None
     # Reachability includes rework edges, so an explicitly rework-only step is
     # still reachable, not dead.

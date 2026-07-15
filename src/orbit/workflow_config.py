@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .agent_tools import agent_slug as _agent_slug
+from .node_handlers import get_node_handler
 from .store import InvalidInputError, project_state_dir
 from .worktrees import git_available as _git_available
 from .workflow_graph import workflow_graph as _workflow_graph
@@ -203,10 +204,15 @@ def default_workflow_edges() -> list[dict[str, str]]:
     ]
 
 
-# Only these steps may list more than one Agent (round-robin). Every other step
-# takes a single Agent, so the UI hides their add-Agent (+) button.
+# Legacy configs did not declare executor capabilities. Keep their historical
+# defaults while making the normalized/runtime schema capability-driven.
 _MULTI_AGENT_STEP_IDS = {"implement", "review", "test"}
-_APPROVAL_CAPABLE_STEP_IDS = {"product_design", "ui_design", "architecture", "decompose"}
+_LEGACY_NON_REMOVABLE_STEP_IDS = {"intake", "implement", "review"}
+
+
+def _port_slug(value: Any) -> str:
+    raw = str(value or "").strip()
+    return _agent_slug(raw).lower() if raw else ""
 
 
 def _normalize_agents(step: dict[str, Any]) -> list[str]:
@@ -284,25 +290,123 @@ def _normalize_workflow_step(
     # step splits a goal into subtasks. Both are structural, so always required.
     # The Triage entry step (`intake`) is the goal's front door — always required
     # and locked so it can't be unchecked or removed.
-    decompose = bool(step.get("decompose", False))
-    approval = bool(step.get("approval", False))
+    explicit_type = str(step.get("type", "") or "").strip().lower()
+    legacy_approval = bool(step.get("approval", False))
+    node_type = "approval" if legacy_approval else (explicit_type or "action")
+    if node_type not in {"action", "approval", "end"}:
+        raise InvalidInputError(f"unsupported workflow node type: {node_type}")
+    raw_handler = str(step.get("handler", "") or "").strip()
+    if legacy_approval and raw_handler in {"", "agent"}:
+        raw_handler = "human"
+    decompose = bool(step.get("decompose", False)) or raw_handler == "legacy.decompose"
+    approval = node_type == "approval"
+    integrate = bool(step.get("integrate", False))
     required_locked = (
         step_id == "intake"
-        or bool(step.get("integrate", False))
+        or integrate
         or decompose
         or approval
+        or node_type == "end"
     )
     required = True if required_locked else bool(step.get("required", False))
 
-    # Only implement/review/test round-robin across Agents; every other step is
-    # single-Agent, so keep just the first even if more were supplied.
-    _agents = _normalize_agents(step)
-    if step_id not in _MULTI_AGENT_STEP_IDS:
+    raw_executor = step.get("executor")
+    executor = raw_executor if isinstance(raw_executor, dict) else {}
+    agent_source = dict(step)
+    if "agents" in executor:
+        agent_source["agents"] = executor.get("agents")
+    _agents = _normalize_agents(agent_source)
+    default_max_agents = 3 if step_id in _MULTI_AGENT_STEP_IDS else 1
+    try:
+        max_agents = int(executor.get("max_agents", default_max_agents) or 1)
+    except (TypeError, ValueError):
+        raise InvalidInputError("workflow executor.max_agents must be an integer") from None
+    max_agents = max(1, min(3, max_agents))
+    _agents = _agents[:max_agents]
+    strategy = str(executor.get("strategy", "") or "").strip()
+    if strategy not in {"single", "round_robin"}:
+        strategy = "round_robin" if max_agents > 1 else "single"
+    if strategy == "single":
+        max_agents = 1
         _agents = _agents[:1]
+    command_source = executor.get("command_overrides", step.get("agent_commands"))
+    commands = _normalize_step_agent_commands(command_source, _agents, step.get("command"))
 
-    return {
+    raw_environment = step.get("environment")
+    if isinstance(raw_environment, dict):
+        environment = dict(raw_environment)
+        environment_type = str(environment.get("type", "project_root") or "project_root")
+    else:
+        environment_type = "git.worktree" if step.get("isolate") else "project_root"
+        environment = {"type": environment_type}
+    if environment_type not in {"project_root", "git.worktree"}:
+        raise InvalidInputError(f"unsupported workflow environment: {environment_type}")
+    environment["type"] = environment_type
+    if environment_type == "git.worktree":
+        environment.setdefault("scope", "workflow_item")
+        environment.setdefault("cleanup", "on_terminal")
+    isolate = environment_type == "git.worktree" and not integrate and not decompose and not approval
+
+    raw_ports = step.get("ports")
+    if raw_ports is None:
+        ports = (
+            ["approved", "changes_requested", "cancelled"]
+            if node_type == "approval" and not legacy_approval
+            else ["success"] if node_type == "end"
+            else ["success", "rework"]
+        )
+    elif not isinstance(raw_ports, list):
+        raise InvalidInputError("workflow step ports must be a list")
+    else:
+        ports = []
+        for raw_port in raw_ports:
+            port = _port_slug(raw_port)
+            if port and port not in ports:
+                ports.append(port)
+        if node_type == "action" and "success" not in ports:
+            ports.insert(0, "success")
+    implicit_default_port = (
+        "approved" if node_type == "approval" and not legacy_approval else "success"
+    )
+    default_port = _port_slug(step.get("default_port", implicit_default_port)) or implicit_default_port
+    if default_port not in ports:
+        raise InvalidInputError("workflow step default_port must be declared in ports")
+    raw_unrouted = step.get("unrouted", "allowed")
+    if isinstance(raw_unrouted, bool):
+        unrouted = "allowed" if raw_unrouted else "blocked"
+    else:
+        unrouted = str(raw_unrouted or "blocked").strip().lower()
+    if unrouted not in {"allowed", "blocked"}:
+        raise InvalidInputError("workflow step unrouted must be 'allowed' or 'blocked'")
+
+    handler = raw_handler or (
+        "legacy.decompose" if decompose
+        else "human" if node_type == "approval"
+        else "end" if node_type == "end"
+        else "agent"
+    )
+    try:
+        handler_spec = get_node_handler({"type": node_type, "handler": handler})
+    except ValueError as exc:
+        raise InvalidInputError(str(exc)) from exc
+    if not handler_spec.requires_agent:
+        _agents = []
+        commands = {}
+        strategy = "single"
+        max_agents = 1
+    contract = step.get("contract", ENGINE_STEP_CONTRACTS.get(step_id, ""))
+    if not isinstance(contract, str):
+        raise InvalidInputError("workflow step contract must be a string")
+    removable = bool(step.get("removable", step_id not in _LEGACY_NON_REMOVABLE_STEP_IDS))
+
+    normalized_step = {
         "id": step_id,
         "name": name,
+        "type": node_type,
+        "handler": handler,
+        "enabled": bool(step.get("enabled", True)),
+        "removable": removable,
+        "skippable": bool(step.get("skippable", not required)),
         "required": required,
         "required_locked": required_locked,
         "timeout_minutes": timeout_minutes,
@@ -314,17 +418,13 @@ def _normalize_workflow_step(
         # runs at goal level in project_root (never isolated), and the subtasks
         # begin at its forward successors — so goal-level design steps before it
         # happen once, not per subtask.
-        "isolate": bool(step.get("isolate", False))
-        and not bool(step.get("integrate", False))
-        and not decompose
-        and not approval,
-        "integrate": bool(step.get("integrate", False)),
+        "isolate": isolate,
+        "integrate": integrate,
         "decompose": decompose,
         "approval": approval,
-        # Human approval belongs to the preceding step's completion state, never
-        # to a separate workflow node. Only the design/decompose stages expose it.
-        "approval_required": bool(step.get("approval_required", False))
-        if step_id in _APPROVAL_CAPABLE_STEP_IDS else False,
+        "approval_required": (
+            bool(step.get("approval_required", False)) if node_type == "action" else False
+        ),
         # User-authored instructions for this step. They refine the generated
         # step contract but never replace the engine-owned output protocol.
         "prompt": raw_prompt.strip(),
@@ -338,22 +438,39 @@ def _normalize_workflow_step(
         # agent_commands: {agent: shell command} per this step. Blank for an
         # agent uses its built-in CLI. A legacy step-level `command` migrates
         # onto every agent so existing configs keep running.
-        "agent_commands": _normalize_step_agent_commands(
-            step.get("agent_commands"), _agents, step.get("command")
-        ),
+        "agent_commands": commands,
+        "executor": {
+            "strategy": strategy,
+            "max_agents": max_agents,
+            "agents": _agents,
+            "command_overrides": commands,
+            "rework_affinity": str(executor.get("rework_affinity", "same_executor") or "same_executor"),
+        },
+        "environment": environment,
+        "exclusive": str(step.get("exclusive", "project_root" if integrate else "") or "").strip(),
+        "contract": contract.strip(),
+        "ports": ports,
+        "default_port": default_port,
+        "unrouted": unrouted,
+        "terminal": node_type == "end" or bool(step.get("terminal", False)),
         "x": _coord("x", 40 + index * 300),
         "y": _coord("y", _DEFAULT_STEP_MID_Y),
     }
+    if handler == "command":
+        normalized_step["command"] = str(step.get("command", "") or "").strip()
+    return normalized_step
 
 
 def _normalize_workflow_edges(
-    edges: Any, valid_ids: set[str]
+    edges: Any,
+    valid_ids: set[str],
+    ports_by_step: dict[str, set[str]] | None = None,
 ) -> list[dict[str, str]]:
     if edges is None:
         return []
     if not isinstance(edges, list):
         raise InvalidInputError("workflow edges must be a list")
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, str]] = set()
     normalized: list[dict[str, str]] = []
     for edge in edges:
         if not isinstance(edge, dict):
@@ -364,12 +481,31 @@ def _normalize_workflow_edges(
             raise InvalidInputError("workflow edge references an unknown step")
         if src == dst:
             continue  # self-loops are meaningless; drop silently
-        key = (src, dst)
+        port = _port_slug(edge.get("port"))
+        if not port:
+            port = "rework" if edge.get("rework") else "success"
+        if ports_by_step is not None and port not in ports_by_step.get(src, set()):
+            raise InvalidInputError(
+                f"workflow edge port {port!r} is not declared by step {src!r}"
+            )
+        key = (src, dst, port)
         if key in seen:
             continue
         seen.add(key)
         norm_edge = {"from": src, "to": dst}
-        if edge.get("rework"):
+        # Keep legacy success/rework edge JSON byte-compatible when no explicit
+        # port was authored; the runtime derives success/rework exactly as before.
+        if str(edge.get("port", "") or "").strip():
+            norm_edge["port"] = port
+        if "max_iterations" in edge:
+            try:
+                max_iterations = int(edge.get("max_iterations"))
+            except (TypeError, ValueError):
+                raise InvalidInputError("workflow edge max_iterations must be an integer") from None
+            if max_iterations < 1:
+                raise InvalidInputError("workflow edge max_iterations must be >= 1")
+            norm_edge["max_iterations"] = max_iterations
+        if edge.get("rework") or port == "rework":
             # Explicit loop-back marker: lets a rework target sit off the
             # forward path (see _workflow_graph).
             norm_edge["rework"] = True
@@ -479,13 +615,18 @@ def read_workflow_config(project_root: str | None = None) -> dict[str, Any]:
         # Normalize the defaults too so unsaved workflows carry the same
         # derived fields (required_locked, timeout_minutes) as saved ones.
         statuses = default_workflow_statuses()
+        default_steps = [
+            _normalize_workflow_step(step, index)
+            for index, step in enumerate(default_workflow_steps())
+        ]
         result = {
-            "steps": [
-                _normalize_workflow_step(step, index)
-                for index, step in enumerate(default_workflow_steps())
-            ],
+            "steps": default_steps,
             "statuses": statuses,
-            "edges": default_workflow_edges(),
+            "edges": _normalize_workflow_edges(
+                default_workflow_edges(),
+                {step["id"] for step in default_steps},
+                {step["id"]: set(step["ports"]) for step in default_steps},
+            ),
             "path": str(path),
             "warnings": [],
         }
@@ -514,7 +655,11 @@ def read_workflow_config(project_root: str | None = None) -> dict[str, Any]:
             for i in range(len(normalized) - 1)
         ]
     else:
-        edges = _normalize_workflow_edges(raw_edges, valid_ids)
+        edges = _normalize_workflow_edges(
+            raw_edges,
+            valid_ids,
+            {step["id"]: set(step["ports"]) for step in normalized},
+        )
     result = {
         "steps": normalized,
         "statuses": statuses,
@@ -584,7 +729,11 @@ def write_workflow_config(
     # nodes from stacking on the canvas, where a covered edge reads as "not
     # connected". A UI save has already dagre-spaced them, so this is a no-op there.
     _separate_overlapping_steps(normalized)
-    normalized_edges = _normalize_workflow_edges(edges, valid_ids)
+    normalized_edges = _normalize_workflow_edges(
+        edges,
+        valid_ids,
+        {step["id"]: set(step["ports"]) for step in normalized},
+    )
     path = _workflow_config_path(project_root)
     project_root_path = _project_root(project_root)
     resolved_path = path.resolve()

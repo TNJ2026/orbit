@@ -6,6 +6,7 @@ import json
 import threading
 from typing import Any, Callable
 
+from .node_handlers import get_node_handler, handler_requires_agent
 from .process_control import terminate_pid_tree as _terminate_pid_tree
 from .runner_prompts import (
     step_agent_command as _step_agent_command,
@@ -297,7 +298,7 @@ def _validate_goal_auto_runners(
         )
     missing: list[str] = []
     for step in _main_workflow_reachable_steps(cfg, back):
-        if step.get("approval"):
+        if not handler_requires_agent(step):
             continue
         agents = step.get("agents") or []
         if not agents:
@@ -639,6 +640,25 @@ def _finish_goal_workflow(
     return status
 
 
+def _complete_end_node(
+    store: Store,
+    project_root: str | None,
+    task: dict[str, Any],
+    step: dict[str, Any],
+) -> str:
+    """Complete an explicit End node without dispatching an Agent runner."""
+    store.record_task_transition(
+        task["id"], step["id"], "", WORKFLOW_ENGINE_AGENT, "done",
+        "explicit end node reached", "success",
+    )
+    _settle_step_card(store, task, step["id"], "done")
+    if task.get("is_goal"):
+        return _finish_goal_workflow(store, project_root, task)
+    store.set_task_workflow_state(task["id"], workflow_step="", task_status="closed")
+    _recompute_parent_goal_status(store, task, project_root)
+    return "closed"
+
+
 def _recompute_parent_goal_status(
     store: Store, task: dict[str, Any], project_root: str | None = None
 ) -> None:
@@ -931,6 +951,7 @@ def _dispatch_step(
 ) -> dict[str, Any] | None:
     assignee = member["agent_name"]
     task_id = task["id"]
+    handler = get_node_handler(step)
     # Hard token ceiling: never dispatch new work for a goal that has blown its
     # budget. Covers every dispatch path (initial, rework, timeout-reassign,
     # manual rerun) since all funnel through here.
@@ -948,13 +969,21 @@ def _dispatch_step(
     if not store.agent_exists(assignee):
         # Pre-register so the dispatch waits in their inbox until they poll.
         store.register_agent(assignee, f"workflow agent for step {step['id']}")
+    completion_hint = (
+        f"Choose one declared outcome port ({', '.join(step.get('ports') or ['success'])}) "
+        "when completing this approval."
+        if handler.dispatch_mode == "human"
+        else (
+            f"When finished call complete_step(agent=\"{assignee}\", task_id={task_id}, "
+            f"step=\"{step['id']}\", outcome=\"done\"|\"rework\"|\"blocked\", result=\"...\")."
+        )
+    )
     content = (
         f"[workflow step: {step['id']}] Task #{task_id}: {task.get('title') or 'untitled'}\n\n"
         f"{task.get('content', '')}\n"
         + (f"\nUpstream result:\n{upstream_result}\n" if upstream_result else "")
         + f"\nYou are running step '{step['name']}'.\n"
-        f"When finished call complete_step(agent=\"{assignee}\", task_id={task_id}, "
-        f"step=\"{step['id']}\", outcome=\"done\"|\"rework\"|\"blocked\", result=\"...\")."
+        + completion_hint
     )
     store.send_message(
         WORKFLOW_ENGINE_AGENT, assignee, content,
@@ -999,6 +1028,7 @@ def _dispatch_step(
     # robin Agent's per-step command (or its built-in CLI) is used.
     command = (
         str(member.get("runner_command") or "").strip()
+        or (str(step.get("command") or "").strip() if handler.name == "command" else "")
         or _step_agent_command(step, assignee)
     )
     if command:
@@ -1046,7 +1076,19 @@ def _dispatch_targets(
             notices.append(f"step {target} is waiting for other required branches")
             continue
         step = steps[target]
-        assignee = HUB_NOTIFY_AGENT if step.get("approval") else _step_round_robin_assignee(store, step, transitions)
+        handler = get_node_handler(step)
+        if handler.dispatch_mode == "end":
+            _complete_end_node(store, project_root, task, step)
+            dispatched.append({"step": target, "assignee": WORKFLOW_ENGINE_AGENT})
+            queue.clear()
+            break
+        assignee = (
+            HUB_NOTIFY_AGENT
+            if handler.dispatch_mode == "human"
+            else _step_round_robin_assignee(store, step, transitions)
+            if handler.requires_agent
+            else WORKFLOW_ENGINE_AGENT
+        )
         action = store.create_workflow_action(
             task_id,
             "dispatch_step",
@@ -1067,6 +1109,12 @@ def _dispatch_targets(
         if action:
             store.finish_workflow_action(action["id"], "done")
         dispatched.append({"step": target, "assignee": assignee})
+        if handler.dispatch_mode == "human":
+            store.record_task_transition(
+                task_id, target, target, WORKFLOW_ENGINE_AGENT, "approval",
+                "waiting for human decision", step.get("default_port") or "approved",
+            )
+            store.set_task_workflow_state(task_id, task_status="blocked")
     transitions = store.list_task_transitions(task_id)
     active = _active_steps(transitions)
     if active:
@@ -1571,10 +1619,6 @@ def _advance_workflow_task_locked(
     result: str = "",
 ) -> dict[str, Any]:
     outcome = (outcome or "done").strip()
-    if outcome not in WORKFLOW_OUTCOMES:
-        raise InvalidInputError(
-            f"invalid outcome: {outcome!r} (expected one of {sorted(WORKFLOW_OUTCOMES)})"
-        )
     task = store.get_task(task_id)
     if not task:
         raise InvalidInputError(f"unknown task: {task_id}")
@@ -1591,7 +1635,39 @@ def _advance_workflow_task_locked(
     steps = {s["id"]: s for s in cfg["steps"]}
     if step not in steps:
         raise InvalidInputError(f"unknown workflow step: {step}")
+    declared_ports = set(steps[step].get("ports") or ["success", "rework"])
+    reserved_ports = {"success", "rework", "blocked", "error", "timeout", "cancelled"}
+    if outcome == "done":
+        selected_port = steps[step].get("default_port") or "success"
+        control_outcome = "done"
+    elif outcome in {"rework", "blocked", "error", "timeout", "cancelled"}:
+        selected_port = outcome
+        control_outcome = outcome
+    elif outcome == "approval":
+        raise InvalidInputError("approval is an engine-managed step state")
+    elif outcome in declared_ports and outcome not in reserved_ports:
+        selected_port = outcome
+        control_outcome = "done"
+    else:
+        allowed = sorted(
+            {"done", "rework", "blocked", "error", "timeout", "cancelled"}
+            | (declared_ports - reserved_ports)
+        )
+        raise InvalidInputError(
+            f"invalid outcome: {outcome!r} (expected one of {allowed})"
+        )
     transitions = store.list_task_transitions(task_id)
+    if agent == HUB_NOTIFY_AGENT and outcome == "done":
+        prior_approval = next(
+            (
+                transition for transition in reversed(transitions)
+                if transition["from_step"] == step and transition["outcome"] == "approval"
+            ),
+            None,
+        )
+        approval_port = (prior_approval or {}).get("port", "")
+        if approval_port in declared_ports:
+            selected_port = approval_port
     active_assignees = _active_step_assignees(transitions)
     if step not in active_assignees:
         raise InvalidInputError(f"workflow step {step} is not active for task {task_id}")
@@ -1610,20 +1686,38 @@ def _advance_workflow_task_locked(
         f"step settled by {agent} with outcome {outcome}",
     )
     back = _workflow_graph(cfg)
-    forward = [
-        e["to"] for e in cfg["edges"]
-        if e["from"] == step and (e["from"], e["to"]) not in back
-    ]
+    def _edge_port(edge: dict[str, Any]) -> str:
+        if edge.get("port"):
+            return str(edge["port"])
+        if edge.get("rework") or (edge["from"], edge["to"]) in back:
+            return "rework"
+        return "success"
+
     backward = [
         e["to"] for e in cfg["edges"]
-        if e["from"] == step and (e["from"], e["to"]) in back
+        if e["from"] == step
+        and (e["from"], e["to"]) in back
+        and _edge_port(e) == "rework"
     ]
+    port_targets = [
+        edge["to"] for edge in cfg["edges"]
+        if edge["from"] == step
+        and _edge_port(edge) == selected_port
+    ]
+    failure_ports = {"blocked", "error", "timeout", "cancelled"}
 
     # Approval is a state of this completed step, not another node in the
     # graph. The runner has finished, but the step remains active so the hub can
     # later submit `done` (continue) or `rework` (use its loop-back edge).
-    if outcome == "done" and steps[step].get("approval_required") and agent != HUB_NOTIFY_AGENT:
-        store.record_task_transition(task_id, step, step, agent, "approval", result)
+    if (
+        control_outcome == "done"
+        and selected_port not in failure_ports
+        and steps[step].get("approval_required")
+        and agent != HUB_NOTIFY_AGENT
+    ):
+        store.record_task_transition(
+            task_id, step, step, agent, "approval", result, selected_port
+        )
         store.set_task_workflow_state(task_id, task_status="blocked")
         _recompute_parent_goal_status(store, task, project_root)
         return {
@@ -1631,26 +1725,34 @@ def _advance_workflow_task_locked(
             "dispatched": [], "notices": [], "awaiting_approval": True,
         }
 
-    if outcome == "approval":
-        raise InvalidInputError("approval is an engine-managed step state")
     if agent == HUB_NOTIFY_AGENT and task.get("task_status") == "blocked":
         store.set_task_workflow_state(task_id, task_status="in_progress")
 
-    if outcome == "blocked":
-        store.record_task_transition(task_id, step, step, agent, "blocked", result)
+    if control_outcome in failure_ports and not port_targets:
+        store.record_task_transition(
+            task_id, step, step, agent, control_outcome, result, selected_port
+        )
         store.set_task_workflow_state(task_id, task_status="blocked")
         _settle_step_card(store, task, step, "blocked")
         _recompute_parent_goal_status(store, task, project_root)
         notice = _notify_hub(
             store,
-            f"Task #{task_id} blocked at step '{step}' by {agent}: {result or 'no details'}",
+            f"Task #{task_id} reached {selected_port!r} at step '{step}' by {agent}: "
+            f"{result or 'no details'}",
         )
         return {
-            "task_id": task_id, "step": step, "outcome": "blocked",
+            "task_id": task_id, "step": step, "outcome": outcome,
             "dispatched": [], "notices": [notice],
         }
 
-    if outcome == "rework":
+    transition_outcome = control_outcome
+    if control_outcome in failure_ports:
+        targets = port_targets
+        # The runner/node run remains failed/blocked/timed-out; the transition is
+        # completion-style so the existing active-step and join ledger can move
+        # on, while `port` preserves the real recovery reason.
+        transition_outcome = "done"
+    elif control_outcome == "rework":
         targets = backward
         if not targets:
             raise InvalidInputError(f"step {step} has no rework (loop-back) path")
@@ -1666,11 +1768,23 @@ def _advance_workflow_task_locked(
             and t["from_step"] == step
             and t["to_step"] in targets
         )
-        max_rework = read_settings(project_root)["max_rework_rounds"]
+        edge_rework_limits = [
+            int(edge["max_iterations"])
+            for edge in cfg["edges"]
+            if edge["from"] == step
+            and edge["to"] in targets
+            and _edge_port(edge) == "rework"
+            and edge.get("max_iterations") is not None
+        ]
+        max_rework = (
+            min(edge_rework_limits)
+            if edge_rework_limits
+            else read_settings(project_root)["max_rework_rounds"]
+        )
         if prior_rework >= max_rework:
             store.record_task_transition(
                 task_id, step, step, agent, "blocked",
-                f"rework limit reached ({max_rework} rounds); {result}",
+                f"rework limit reached ({max_rework} rounds); {result}", "blocked",
             )
             store.set_task_workflow_state(task_id, task_status="blocked")
             _settle_step_card(store, task, step, "blocked")
@@ -1686,14 +1800,74 @@ def _advance_workflow_task_locked(
                 "dispatched": [], "notices": [notice], "rework_limited": True,
             }
     else:
-        targets = forward
+        targets = port_targets
+
+    selected_edges = [
+        edge for edge in cfg["edges"]
+        if edge["from"] == step
+        and edge["to"] in targets
+        and _edge_port(edge) == selected_port
+    ]
+    exhausted_edge = next(
+        (
+            edge for edge in selected_edges
+            if edge.get("max_iterations") is not None
+            and sum(
+                1 for transition in transitions
+                if transition["from_step"] == step
+                and transition["to_step"] == edge["to"]
+                and (
+                    transition.get("port")
+                    or ("rework" if transition["outcome"] == "rework" else "success")
+                ) == selected_port
+            ) >= int(edge["max_iterations"])
+        ),
+        None,
+    )
+    if exhausted_edge is not None:
+        limit = int(exhausted_edge["max_iterations"])
+        reason = (
+            f"edge iteration limit reached ({limit}): {step} "
+            f"-[{selected_port}]-> {exhausted_edge['to']}"
+        )
+        store.record_task_transition(
+            task_id, step, step, agent, "blocked", f"{reason}; {result}", selected_port
+        )
+        store.set_task_workflow_state(task_id, task_status="blocked")
+        _settle_step_card(store, task, step, "blocked")
+        _recompute_parent_goal_status(store, task, project_root)
+        notice = _notify_hub(store, f"Task #{task_id} {reason}")
+        return {
+            "task_id": task_id, "step": step, "outcome": "blocked",
+            "dispatched": [], "notices": [notice], "iteration_limited": True,
+        }
 
     for target in targets:
-        store.record_task_transition(task_id, step, target, agent, outcome, result)
+        store.record_task_transition(
+            task_id, step, target, agent, transition_outcome, result, selected_port
+        )
 
-    if outcome == "done" and not targets:
+    if (
+        control_outcome == "done"
+        and not targets
+        and steps[step].get("unrouted", "allowed") != "allowed"
+    ):
+        reason = f"step {step} emitted unrouted port {selected_port!r}"
+        store.record_task_transition(
+            task_id, step, step, agent, "blocked", f"{reason}; {result}", selected_port
+        )
+        store.set_task_workflow_state(task_id, task_status="blocked")
+        _settle_step_card(store, task, step, "blocked")
+        _recompute_parent_goal_status(store, task, project_root)
+        notice = _notify_hub(store, f"Task #{task_id} {reason}")
+        return {
+            "task_id": task_id, "step": step, "outcome": "blocked",
+            "dispatched": [], "notices": [notice], "unrouted_port": selected_port,
+        }
+
+    if control_outcome == "done" and not targets:
         # Terminal step completed: the task leaves the workflow.
-        store.record_task_transition(task_id, step, "", agent, "done", result)
+        store.record_task_transition(task_id, step, "", agent, "done", result, selected_port)
         _settle_step_card(store, task, step, "done")
         if task.get("is_goal"):
             final_status = _finish_goal_workflow(store, project_root, task)
@@ -1704,21 +1878,31 @@ def _advance_workflow_task_locked(
             )
             _recompute_parent_goal_status(store, task, project_root)
         return {
-            "task_id": task_id, "step": step, "outcome": "done",
+            "task_id": task_id, "step": step, "outcome": outcome,
             "closed": True, "goal_status": final_status if task.get("is_goal") else None,
             "dispatched": [], "notices": [],
         }
 
-    _settle_step_card(store, task, step, outcome)
+    _settle_step_card(
+        store, task, step, "done" if control_outcome in failure_ports else control_outcome
+    )
     # Forward flow hands the next step the structured upstream block (summary +
     # artifact references it reads directly). Rework keeps the raw feedback:
     # the reviewer's itemized reasons ARE the instructions for the redo, and
     # collapsing them to a one-line summary would lose exactly what matters.
-    upstream = _structured_upstream(result) if outcome == "done" else result
+    upstream = (
+        _structured_upstream(result)
+        if control_outcome == "done" and selected_port not in failure_ports
+        else result
+    )
     dispatched, notices = _dispatch_targets(
         store, project_root, task, targets, cfg, back, upstream
     )
-    return {
+    report = {
         "task_id": task_id, "step": step, "outcome": outcome,
         "dispatched": dispatched, "notices": notices,
     }
+    latest_task = store.get_task(task_id) or {}
+    if latest_task.get("task_status") in {"closed", "accepted", "verifying"}:
+        report["closed"] = True
+    return report

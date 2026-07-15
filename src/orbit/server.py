@@ -98,6 +98,7 @@ from .runner_protocol import (
     parse_claude_json_output as _parse_claude_json_output,
     parse_gemini_json_output as _parse_gemini_json_output,
     parse_run_tokens as _parse_run_tokens,
+    parse_runner_port as _parse_runner_port,
     parse_runner_verdict as _parse_runner_verdict,
     parse_step_output_metadata as _parse_step_output_metadata,
     structured_upstream as _structured_upstream,
@@ -170,7 +171,6 @@ from .token_usage import (
 from .workflow_config import (
     DEFAULT_STEP_PROMPTS,
     ENGINE_STEP_CONTRACTS,
-    _APPROVAL_CAPABLE_STEP_IDS,
     _DEFAULT_STEP_MID_Y,
     _MULTI_AGENT_STEP_IDS,
     _WF_MIN_STEP_DX,

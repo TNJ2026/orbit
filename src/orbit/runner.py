@@ -29,7 +29,8 @@ from .runner_prompts import (
 )
 from .runner_protocol import (
     normalize_agent_output as _normalize_agent_output, parse_run_tokens as _parse_run_tokens,
-    parse_runner_verdict as _parse_runner_verdict, tail as _tail,
+    parse_runner_port as _parse_runner_port, parse_runner_verdict as _parse_runner_verdict,
+    tail as _tail,
 )
 from .settings import read_settings
 from .store import DEFAULT_LEASE_SECONDS, InvalidInputError, Store, UnknownAgentError
@@ -266,7 +267,11 @@ def run_step_worker(
     exec_dir = _project_root(project_root)
     isolated = False
     can_rework = False
+    declared_ports = set(step.get("ports") or [])
+    def _reserved_outcome(port: str) -> str:
+        return port if port in declared_ports else "blocked"
     if not command:
+        outcome = _reserved_outcome("error")
         result = (
             f"no runner command for step {step['id']} (agent {assignee}); select "
             "an installed agent or set the step's command"
@@ -357,11 +362,14 @@ def run_step_worker(
                 kill_reason = None
                 if remaining <= 0:
                     kill_reason = f"runner hard-timed out after {int(hard_seconds)}s"
+                    outcome = _reserved_outcome("timeout")
+                    status = "timeout"
                 elif run and store.run_cancel_requested(run["id"]):
                     kill_reason = f"hub inspection killed the step after {int(elapsed)}s (stuck/errored)"
+                    outcome = _reserved_outcome("cancelled")
+                    status = "cancelled"
                 if kill_reason is not None:
                     _kill_process_group(proc)
-                    status = "timeout"
                     result = kill_reason
                     if run:
                         try:
@@ -402,7 +410,7 @@ def run_step_worker(
             # Result/verdict parse the decoded text, so a JSON envelope is
             # transparent; the raw stdout is still what's written to stdout.log.
             output_text, native_tokens = _normalize_agent_output(stdout, stderr)
-            if status == "timeout":
+            if status in {"timeout", "cancelled"}:
                 pass
             elif exit_code == 0:
                 # Decompose output is a single JSON object the engine parses into
@@ -418,10 +426,20 @@ def run_step_worker(
                 # (it ran but the work failed / is stuck); a rework-capable step
                 # (e.g. review) may send the task back with `rework`.
                 verdict = _parse_runner_verdict(output_text)
+                selected_port = _parse_runner_port(output_text)
                 if verdict == "blocked":
                     outcome, status = "blocked", "failed"
                 elif verdict == "rework" and can_rework:
                     outcome, status = "rework", "succeeded"
+                elif selected_port:
+                    declared_ports = set(step.get("ports") or [])
+                    if selected_port in declared_ports and selected_port not in {
+                        "success", "rework", "blocked", "error", "timeout", "cancelled"
+                    }:
+                        outcome, status = selected_port, "succeeded"
+                    else:
+                        outcome, status = "blocked", "failed"
+                        result = f"runner selected undeclared or reserved WORKFLOW_PORT: {selected_port}"
                 elif not output_text.strip():
                     # Clean exit but zero output: the runner ignored the
                     # "print a summary + WORKFLOW_OUTCOME" contract — a silent CLI
@@ -433,10 +451,13 @@ def run_step_worker(
                 else:
                     outcome, status = "done", "succeeded"
             elif stdin_errors:
+                outcome = _reserved_outcome("error")
                 result = f"runner stdin failed: {stdin_errors[-1]}"
             else:
+                outcome = _reserved_outcome("error")
                 result = f"runner exited {exit_code}: {_tail(stderr or stdout, 2000)}"
         except OSError as exc:
+            outcome = _reserved_outcome("error")
             result = f"runner failed to start: {exc}"
             if run:
                 try:
@@ -451,7 +472,10 @@ def run_step_worker(
                     )
                 except (InvalidInputError, OSError):
                     pass
-    if outcome == "done" and goal_intake:
+    success_outcome = outcome == "done" or outcome in set(step.get("ports") or []) - {
+        "success", "rework", "blocked", "error", "timeout", "cancelled"
+    }
+    if success_outcome and goal_intake:
         try:
             _parse_goal_subtasks(result)
         except InvalidInputError as exc:
@@ -464,7 +488,7 @@ def run_step_worker(
     # worktree for isolated steps) — a failing exit code the agent can't fake
     # overrides `done`, sending a rework-capable step back instead of advancing.
     verify_cmd = str(step.get("verify") or "").strip()
-    if outcome == "done" and not goal_intake and verify_cmd:
+    if success_outcome and not goal_intake and verify_cmd:
         v_code, v_out = _run_step_verify(verify_cmd, exec_dir)
         if run:
             try:
@@ -492,6 +516,9 @@ def run_step_worker(
                 f"--- verify 输出（末尾） ---\n{_tail(v_out, 3000)}\n\n"
                 f"--- agent 自报产出 ---\n{result}"
             )
+    success_outcome = outcome == "done" or outcome in set(step.get("ports") or []) - {
+        "success", "rework", "blocked", "error", "timeout", "cancelled"
+    }
     # Prefer the count decoded from structured output (accurate); the plain-text
     # path already resolved to the regex-based count inside _normalize_agent_output.
     tokens = native_tokens if native_tokens is not None else _parse_run_tokens(stdout, stderr)
@@ -516,7 +543,7 @@ def run_step_worker(
             # in the token count. stderr is written verbatim.
             _write_run_file(run, "stdout", output_text)
             _write_run_file(run, "stderr", stderr)
-            if outcome == "done":
+            if success_outcome:
                 _write_run_file(run, "result", result)
             _append_run_event(
                 run,

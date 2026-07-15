@@ -153,6 +153,14 @@ class PackagingTests(unittest.TestCase):
         self.assertIn('id="workflowPage"', html)
         self.assertIn('id="tasksPage"', html)
         self.assertIn('id="tasksList"', html)
+        self.assertIn('id="addStepPorts"', html)
+        self.assertIn('id="addStepDefaultPort"', html)
+        self.assertIn('id="addStepUnrouted"', html)
+        self.assertIn('id="addStepType"', html)
+        self.assertIn('id="addStepHandler"', html)
+        self.assertIn('id="addStepCommand"', html)
+        self.assertIn('"wf.edgePortPrompt"', html)
+        self.assertNotIn("const MULTI_AGENT_STEPS", html)
         self.assertIn('id="taskDetails"', html)
         self.assertIn('id="toggleTaskDetails"', html)
         self.assertIn("details-collapsed", html)
@@ -196,9 +204,10 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("function selectedAgentCommands()", html)
         self.assertNotIn('id="setDefaultCommand"', html)
         self.assertNotIn('id="setSubtaskAgents"', html)
-        # The global agent-command overrides setting is gone (moved onto steps).
+        # The global agent-command overrides setting is gone. Agent handlers use
+        # per-agent commands; command handlers expose one node-level command.
         self.assertNotIn('id="setAgentCommands"', html)
-        self.assertNotIn('id="addStepCommand"', html)
+        self.assertIn('id="addStepCommand"', html)
         # Empty Agent rows render a disabled prompt instead of defaulting to the
         # first installed Agent.
         self.assertNotIn("modal.addStep.agentDefault", html)
