@@ -6,6 +6,8 @@ import json
 import re
 from typing import Any
 
+from .workflow_data import parse_workflow_result
+
 
 STEP_SUMMARY_MAX = 2000
 
@@ -30,6 +32,9 @@ def parse_runner_verdict(text: str) -> str | None:
 
 def parse_runner_port(text: str) -> str | None:
     """Return the last business output port selected by a runner, if present."""
+    structured, _ = parse_workflow_result(text)
+    if structured and structured.get("port"):
+        return str(structured["port"])
     matches = _PORT_RE.findall(text or "")
     return matches[-1].lower() if matches else None
 
@@ -58,7 +63,7 @@ def parse_step_output_metadata(text: str) -> tuple[str, list[str]]:
             line
             for line in text.splitlines()
             if not re.match(
-                r"(?i)^\s*(WORKFLOW_OUTCOME|WORKFLOW_PORT|TOKENS_USED|RESULT_SUMMARY|ARTIFACTS)\s*[:=]",
+                r"(?i)^\s*(WORKFLOW_OUTCOME|WORKFLOW_PORT|WORKFLOW_RESULT|TOKENS_USED|RESULT_SUMMARY|ARTIFACTS)\s*[:=]",
                 line,
             )
         ]
@@ -66,16 +71,45 @@ def parse_step_output_metadata(text: str) -> tuple[str, list[str]]:
     return summary, artifacts
 
 
+def normalized_step_result(text: str, port: str = "") -> tuple[dict[str, Any], str]:
+    """Normalize structured JSON or legacy text into one handler result shape."""
+    structured, error = parse_workflow_result(text)
+    legacy_summary, legacy_artifacts = parse_step_output_metadata(text)
+    if structured is None:
+        return {
+            "port": port,
+            "output": {},
+            "summary": legacy_summary,
+            "artifacts": legacy_artifacts,
+        }, error
+    if not structured.get("port"):
+        structured["port"] = port
+    if not structured.get("summary"):
+        structured["summary"] = legacy_summary
+    if not structured.get("artifacts"):
+        structured["artifacts"] = legacy_artifacts
+    return structured, error
+
+
 def structured_upstream(result: str) -> str:
     """Build compact downstream context from a completed step's output."""
-    summary, artifacts = parse_step_output_metadata(result)
+    normalized, _ = normalized_step_result(result)
+    summary = str(normalized.get("summary") or "")
+    artifacts = normalized.get("artifacts") or []
+    output = normalized.get("output") or {}
     lines: list[str] = []
     if summary:
         lines.append(summary)
     if artifacts:
         lines.append("ARTIFACTS:")
-        lines.extend(f"- {artifact}" for artifact in artifacts)
+        lines.extend(
+            f"- {artifact.get('uri', '') if isinstance(artifact, dict) else artifact}"
+            for artifact in artifacts
+        )
         lines.append("（完整细节请直接读取上述产物文件/引用，不要依赖摘要复述。）")
+    if output:
+        lines.append("STRUCTURED_OUTPUT:")
+        lines.append(json.dumps(output, ensure_ascii=False, sort_keys=True))
     return "\n".join(lines)
 
 

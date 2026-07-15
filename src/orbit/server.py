@@ -172,7 +172,6 @@ from .workflow_config import (
     DEFAULT_STEP_PROMPTS,
     ENGINE_STEP_CONTRACTS,
     _DEFAULT_STEP_MID_Y,
-    _MULTI_AGENT_STEP_IDS,
     _WF_MIN_STEP_DX,
     _WF_NODE_WIDTH,
     _WF_ROW_TOLERANCE,
@@ -189,6 +188,8 @@ from .workflow_config import (
     default_workflow_statuses,
     default_workflow_steps,
     read_workflow_config,
+    workflow_template_definition,
+    workflow_template_summaries,
     write_workflow_config,
 )
 from .workflow_graph import (

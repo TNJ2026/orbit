@@ -12,6 +12,9 @@ from unittest import mock
 
 import orbit.server as server
 from orbit.store import InvalidInputError, Store
+from orbit.workflow_data import apply_input_mapping, build_mapping_context
+from orbit.workflow_engine import apply_foreach_item_outcome
+from orbit.workflow_engine import recover_foreach_item_groups
 
 # Dispatches with runner commands spawn runner threads; in tests that would
 # launch real CLIs (codex, hermes, ...) and race the manual complete() calls.
@@ -130,6 +133,755 @@ class EngineHarness:
 
 
 class WorkflowEngineTests(unittest.TestCase):
+    def test_conditional_edges_use_priority_and_unconditional_fallback(self):
+        steps = [
+            {"id": "score", "name": "Score", "agents": ["codex"]},
+            {"id": "high", "name": "High", "agents": ["rev"]},
+            {"id": "medium", "name": "Medium", "agents": ["hub-agent"]},
+            {"id": "low", "name": "Low", "agents": ["hub-agent"]},
+        ]
+        edges = [
+            {
+                "from": "score", "to": "high", "priority": 0,
+                "condition": {">=": [{"var": "output.score"}, 80]},
+            },
+            {
+                "from": "score", "to": "medium", "priority": 10,
+                "condition": {">=": [{"var": "output.score"}, 50]},
+            },
+            {"from": "score", "to": "low"},
+        ]
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, steps=steps, edges=edges)
+            tid = h.create_task()
+            h.start(tid)
+            high = h.complete(
+                "codex", tid, "score", "done",
+                'WORKFLOW_RESULT: {"output":{"score":92}}',
+            )
+            self.assertEqual([{"step": "high", "assignee": "rev"}], high["dispatched"])
+            not_selected = [
+                transition["to_step"]
+                for transition in h.store.list_task_transitions(tid)
+                if transition["outcome"] == "not_selected"
+            ]
+            self.assertEqual(["medium", "low"], not_selected)
+
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, steps=steps, edges=edges)
+            tid = h.create_task()
+            h.start(tid)
+            low = h.complete(
+                "codex", tid, "score", "done",
+                'WORKFLOW_RESULT: {"output":{"score":20}}',
+            )
+            self.assertEqual([{"step": "low", "assignee": "hub-agent"}], low["dispatched"])
+
+    def test_decision_node_routes_structured_mapped_input_without_agent(self):
+        steps = [
+            {"id": "inspect", "name": "Inspect", "agents": ["codex"]},
+            {
+                "id": "quality_gate", "name": "Quality Gate", "type": "decision",
+                "ports": ["pass", "revise"], "default_port": "revise",
+                "input_schema": {
+                    "type": "object", "required": ["quality"],
+                    "properties": {"quality": {"type": "integer"}},
+                },
+                "rules": [
+                    {"when": {">=": [{"var": "quality"}, 80]}, "port": "pass"}
+                ],
+            },
+            {"id": "publish", "name": "Publish", "agents": ["rev"]},
+            {"id": "revise", "name": "Revise", "agents": ["hub-agent"]},
+        ]
+        edges = [
+            {
+                "from": "inspect", "to": "quality_gate",
+                "mapping": {"quality": "$.output.quality"},
+            },
+            {"from": "quality_gate", "to": "publish", "port": "pass"},
+            {"from": "quality_gate", "to": "revise", "port": "revise"},
+        ]
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, steps=steps, edges=edges)
+            tid = h.create_task()
+            h.start(tid)
+            report = h.complete(
+                "codex", tid, "inspect", "done",
+                'WORKFLOW_RESULT: {"output":{"quality":88}}',
+            )
+            self.assertEqual(
+                [
+                    {"step": "quality_gate", "assignee": "workflow"},
+                    {"step": "publish", "assignee": "rev"},
+                ],
+                report["dispatched"],
+            )
+            [decision_result] = h.store.list_workflow_node_results(tid, "quality_gate")
+            self.assertEqual("pass", decision_result["port"])
+            self.assertEqual({"quality": 88}, decision_result["output"])
+            self.assertFalse(h.store.agent_exists("quality_gate"))
+
+    def test_unselected_decision_branch_closes_downstream_merge_lineage(self):
+        steps = [
+            {"id": "inspect", "name": "Inspect", "agents": ["codex"], "required": True},
+            {
+                "id": "gate", "name": "Gate", "type": "decision", "required": True,
+                "ports": ["fast", "slow"], "default_port": "slow",
+                "rules": [{"when": {"==": [{"var": "route"}, "fast"]}, "port": "fast"}],
+            },
+            {"id": "fast", "name": "Fast", "agents": ["rev"], "required": True},
+            {"id": "slow", "name": "Slow", "agents": ["hub-agent"], "required": True},
+            {"id": "merge", "name": "Merge", "agents": ["codex"], "required": True},
+        ]
+        edges = [
+            {"from": "inspect", "to": "gate", "mapping": {"route": "$.output.route"}},
+            {"from": "gate", "to": "fast", "port": "fast"},
+            {"from": "gate", "to": "slow", "port": "slow"},
+            {"from": "fast", "to": "merge"},
+            {"from": "slow", "to": "merge"},
+        ]
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, steps=steps, edges=edges)
+            tid = h.create_task()
+            h.start(tid)
+            h.complete(
+                "codex", tid, "inspect", "done",
+                'WORKFLOW_RESULT: {"output":{"route":"fast"}}',
+            )
+            lineage = [
+                transition for transition in h.store.list_task_transitions(tid)
+                if transition["from_step"] == "slow"
+                and transition["to_step"] == "merge"
+                and transition["outcome"] == "not_selected"
+            ]
+            self.assertEqual(1, len(lineage))
+
+            merged = h.complete("rev", tid, "fast", "done", "fast complete")
+            self.assertEqual([{"step": "merge", "assignee": "codex"}], merged["dispatched"])
+
+    def test_explicit_join_aggregates_all_inputs_and_maps_output(self):
+        steps = [
+            {"id": "fork", "name": "Fork", "agents": ["codex"], "required": True},
+            {"id": "left", "name": "Left", "agents": ["rev"], "required": True},
+            {"id": "right", "name": "Right", "agents": ["hub-agent"], "required": True},
+            {
+                "id": "collect", "name": "Collect", "type": "join",
+                "join_policy": "all_activated", "aggregation": "object_by_source",
+            },
+            {
+                "id": "publish", "name": "Publish", "agents": ["codex"],
+                "input_schema": {
+                    "type": "object", "required": ["left_value", "right_value", "all_values"],
+                    "properties": {
+                        "left_value": {"type": "string"},
+                        "right_value": {"type": "string"},
+                        "all_values": {"type": "array", "items": {"type": "string"}},
+                    },
+                },
+            },
+        ]
+        edges = [
+            {"from": "fork", "to": "left"},
+            {"from": "fork", "to": "right"},
+            {"from": "left", "to": "collect"},
+            {"from": "right", "to": "collect"},
+            {
+                "from": "collect", "to": "publish",
+                "mapping": {
+                    "left_value": "$.output.value.left.output.value",
+                    "right_value": "$.output.value.right.output.value",
+                    "all_values": "$.join.inputs[*].output.value",
+                },
+            },
+        ]
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, steps=steps, edges=edges)
+            tid = h.create_task()
+            h.start(tid)
+            forked = h.complete("codex", tid, "fork", "done", "fork")
+            self.assertEqual({"left", "right"}, {item["step"] for item in forked["dispatched"]})
+            waiting = h.complete(
+                "rev", tid, "left", "done",
+                'WORKFLOW_RESULT: {"output":{"value":"L"}}',
+            )
+            self.assertEqual([], waiting["dispatched"])
+            joined = h.complete(
+                "hub-agent", tid, "right", "done",
+                'WORKFLOW_RESULT: {"output":{"value":"R"}}',
+            )
+            self.assertEqual(
+                [
+                    {"step": "collect", "assignee": "workflow"},
+                    {"step": "publish", "assignee": "codex"},
+                ],
+                joined["dispatched"],
+            )
+            [result] = h.store.list_workflow_node_results(tid, "collect")
+            self.assertEqual("L", result["output"]["value"]["left"]["output"]["value"])
+            self.assertEqual("R", result["output"]["value"]["right"]["output"]["value"])
+            self.assertEqual(
+                {"left_value": "L", "right_value": "R", "all_values": ["L", "R"]},
+                h.task(tid)["step_inputs"]["mapped"],
+            )
+            [correlation] = h.store.list_workflow_correlations(tid, "collect")
+            self.assertEqual("consumed", correlation["status"])
+            self.assertEqual(
+                {"left": "arrived", "right": "arrived"},
+                {branch["predecessor_step"]: branch["state"] for branch in correlation["branches"]},
+            )
+
+    def test_explicit_any_join_fires_once_on_first_arrival(self):
+        steps = [
+            {"id": "fork", "name": "Fork", "agents": ["codex"], "required": True},
+            {"id": "left", "name": "Left", "agents": ["rev"], "required": True},
+            {"id": "right", "name": "Right", "agents": ["hub-agent"], "required": True},
+            {
+                "id": "first", "name": "First", "type": "join",
+                "join_policy": "any", "aggregation": "first",
+            },
+            {"id": "consume", "name": "Consume", "agents": ["codex"]},
+        ]
+        edges = [
+            {"from": "fork", "to": "left"}, {"from": "fork", "to": "right"},
+            {"from": "left", "to": "first"}, {"from": "right", "to": "first"},
+            {"from": "first", "to": "consume"},
+        ]
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, steps=steps, edges=edges)
+            tid = h.create_task()
+            h.start(tid)
+            h.complete("codex", tid, "fork", "done", "fork")
+            first = h.complete("rev", tid, "left", "done", "left")
+            self.assertEqual(["first", "consume"], [item["step"] for item in first["dispatched"]])
+            late = h.complete("hub-agent", tid, "right", "done", "right")
+            self.assertEqual([], late["dispatched"])
+            self.assertEqual(1, len(h.store.list_workflow_node_results(tid, "first")))
+
+    def test_correlation_activation_does_not_reuse_prior_loop_arrivals(self):
+        steps = [
+            {"id": "start", "name": "Start", "agents": ["hub-agent"], "required": True},
+            {"id": "fork", "name": "Fork", "agents": ["codex"], "required": True},
+            {"id": "left", "name": "Left", "agents": ["rev"], "required": True},
+            {"id": "right", "name": "Right", "agents": ["hub-agent"], "required": True},
+            {"id": "collect", "name": "Collect", "type": "join"},
+            {"id": "gate", "name": "Gate", "agents": ["codex"], "required": True},
+        ]
+        edges = [
+            {"from": "start", "to": "fork"},
+            {"from": "fork", "to": "left"}, {"from": "fork", "to": "right"},
+            {"from": "left", "to": "collect"}, {"from": "right", "to": "collect"},
+            {"from": "collect", "to": "gate"},
+            {"from": "gate", "to": "fork", "port": "rework", "rework": True, "max_iterations": 2},
+        ]
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, steps=steps, edges=edges)
+            tid = h.create_task()
+            h.start(tid)
+            h.complete("hub-agent", tid, "start", "done", "start")
+            h.complete("codex", tid, "fork", "done", "round 1")
+            h.complete("rev", tid, "left", "done", "left 1")
+            h.complete("hub-agent", tid, "right", "done", "right 1")
+            h.complete("codex", tid, "gate", "rework", "again")
+
+            h.complete("codex", tid, "fork", "done", "round 2")
+            only_left = h.complete("rev", tid, "left", "done", "left 2")
+            self.assertEqual([], only_left["dispatched"])
+            correlations = h.store.list_workflow_correlations(tid, "collect")
+            self.assertEqual([1, 2], [item["activation"] for item in correlations])
+            self.assertEqual("consumed", correlations[0]["status"])
+            self.assertEqual("open", correlations[1]["status"])
+            self.assertEqual(
+                {"left": "arrived", "right": "selected"},
+                {
+                    branch["predecessor_step"]: branch["state"]
+                    for branch in correlations[1]["branches"]
+                },
+            )
+            h.complete("hub-agent", tid, "right", "done", "right 2")
+            results = h.store.list_workflow_node_results(tid, "collect")
+            self.assertEqual(2, len(results))
+            self.assertEqual(
+                {"left": "left 2", "right": "right 2"},
+                {
+                    item["source"]: item["summary"]
+                    for item in results[-1]["output"]["inputs"]
+                },
+            )
+
+    def test_nested_join_correlation_links_to_enclosing_activation(self):
+        steps = [
+            {"id": "outer_fork", "name": "Outer Fork", "agents": ["codex"]},
+            {"id": "direct", "name": "Direct", "agents": ["rev"]},
+            {"id": "inner_fork", "name": "Inner Fork", "agents": ["hub-agent"]},
+            {"id": "left", "name": "Left", "agents": ["codex"]},
+            {"id": "right", "name": "Right", "agents": ["rev"]},
+            {"id": "inner_join", "name": "Inner Join", "type": "join"},
+            {"id": "after_inner", "name": "After Inner", "agents": ["hub-agent"]},
+            {"id": "outer_join", "name": "Outer Join", "type": "join"},
+            {"id": "finish", "name": "Finish", "agents": ["codex"]},
+        ]
+        edges = [
+            {"from": "outer_fork", "to": "direct"},
+            {"from": "outer_fork", "to": "inner_fork"},
+            {"from": "inner_fork", "to": "left"},
+            {"from": "inner_fork", "to": "right"},
+            {"from": "left", "to": "inner_join"},
+            {"from": "right", "to": "inner_join"},
+            {"from": "inner_join", "to": "after_inner"},
+            {"from": "direct", "to": "outer_join"},
+            {"from": "after_inner", "to": "outer_join"},
+            {"from": "outer_join", "to": "finish"},
+        ]
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, steps=steps, edges=edges)
+            tid = h.create_task()
+            h.start(tid)
+            h.complete("codex", tid, "outer_fork", "done", "outer")
+            direct = h.complete("rev", tid, "direct", "done", "direct")
+            self.assertEqual([], direct["dispatched"])
+            h.complete("hub-agent", tid, "inner_fork", "done", "inner")
+            h.complete("codex", tid, "left", "done", "left")
+            inner = h.complete("rev", tid, "right", "done", "right")
+            self.assertEqual(
+                ["inner_join", "after_inner"],
+                [item["step"] for item in inner["dispatched"]],
+            )
+
+            [outer_correlation] = h.store.list_workflow_correlations(tid, "outer_join")
+            [inner_correlation] = h.store.list_workflow_correlations(tid, "inner_join")
+            self.assertEqual(outer_correlation["id"], inner_correlation["parent_correlation_id"])
+            self.assertEqual("open", outer_correlation["status"])
+            self.assertEqual("consumed", inner_correlation["status"])
+
+            outer = h.complete("hub-agent", tid, "after_inner", "done", "after")
+            self.assertEqual(
+                ["outer_join", "finish"],
+                [item["step"] for item in outer["dispatched"]],
+            )
+            [outer_correlation] = h.store.list_workflow_correlations(tid, "outer_join")
+            self.assertEqual("consumed", outer_correlation["status"])
+
+    def test_foreach_runs_item_dag_and_aggregates_isolated_outputs(self):
+        steps = [
+            {"id": "plan", "name": "Plan", "agents": ["codex"]},
+            {
+                "id": "process", "name": "Process", "type": "foreach",
+                "agents": ["codex", "gemini"],
+                "executor": {
+                    "strategy": "round_robin", "max_agents": 2,
+                    "agents": ["codex", "gemini"],
+                },
+                "items": "$.input.items",
+                "item_key": "$.id",
+                "item_depends_on": "$.depends_on",
+                "max_concurrency": 2,
+                "item_output_schema": {
+                    "type": "object", "required": ["value"],
+                    "properties": {"value": {"type": "string"}},
+                },
+            },
+            {
+                "id": "publish", "name": "Publish", "agents": ["hub-agent"],
+                "input_schema": {
+                    "type": "object", "required": ["values"],
+                    "properties": {
+                        "values": {"type": "array", "items": {"type": "string"}}
+                    },
+                },
+            },
+        ]
+        edges = [
+            {
+                "from": "plan", "to": "process",
+                "mapping": {"items": "$.output.items"},
+            },
+            {
+                "from": "process", "to": "publish",
+                "mapping": {"values": "$.output.items[*].output.value"},
+            },
+        ]
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, steps=steps, edges=edges)
+            tid = h.create_task()
+            h.start(tid)
+            report = h.complete(
+                "codex", tid, "plan", "done",
+                'WORKFLOW_RESULT: {"output":{"items":['
+                '{"id":"a"},{"id":"b","depends_on":["a"]},{"id":"c"}'
+                ']}}',
+            )
+            self.assertEqual("process", report["dispatched"][0]["step"])
+            [group] = h.store.list_workflow_item_groups(tid, "process")
+            self.assertEqual(
+                {"a": "running", "b": "pending", "c": "running"},
+                {scope["scope_key"]: scope["status"] for scope in group["scopes"]},
+            )
+            scopes = {scope["scope_key"]: scope for scope in group["scopes"]}
+            released = apply_foreach_item_outcome(
+                h.store, tmp, scopes["a"]["id"], "codex", "done",
+                'WORKFLOW_RESULT: {"output":{"value":"A"}}',
+            )
+            self.assertEqual("b", released["dispatched"][0]["item_key"])
+            apply_foreach_item_outcome(
+                h.store, tmp, scopes["c"]["id"], "codex", "done",
+                'WORKFLOW_RESULT: {"output":{"value":"C"}}',
+            )
+            finished = apply_foreach_item_outcome(
+                h.store, tmp, scopes["b"]["id"], "gemini", "done",
+                'WORKFLOW_RESULT: {"output":{"value":"B"}}',
+            )
+            self.assertEqual("publish", finished["dispatched"][0]["step"])
+            [group] = h.store.list_workflow_item_groups(tid, "process")
+            self.assertEqual("completed", group["status"])
+            self.assertIsNotNone(group["advanced_at"])
+            self.assertEqual(
+                {"values": ["A", "B", "C"]},
+                h.task(tid)["step_inputs"]["mapped"],
+            )
+
+    def test_foreach_item_failure_blocks_group_and_cancels_waiting_items(self):
+        steps = [
+            {"id": "plan", "name": "Plan", "agents": ["codex"]},
+            {
+                "id": "process", "name": "Process", "type": "foreach",
+                "agents": ["codex"], "item_key": "$.id", "max_concurrency": 1,
+            },
+            {"id": "publish", "name": "Publish", "agents": ["rev"]},
+        ]
+        edges = [
+            {"from": "plan", "to": "process", "mapping": {"items": "$.output.items"}},
+            {"from": "process", "to": "publish"},
+        ]
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, steps=steps, edges=edges)
+            tid = h.create_task()
+            h.start(tid)
+            h.complete(
+                "codex", tid, "plan", "done",
+                'WORKFLOW_RESULT: {"output":{"items":[{"id":"a"},{"id":"b"}]}}',
+            )
+            [group] = h.store.list_workflow_item_groups(tid, "process")
+            failed = apply_foreach_item_outcome(
+                h.store, tmp, group["scopes"][0]["id"], "codex", "blocked", "failed"
+            )
+            self.assertTrue(failed["blocked"])
+            [group] = h.store.list_workflow_item_groups(tid, "process")
+            self.assertEqual("blocked", group["status"])
+            self.assertEqual(["blocked", "cancelled"], [
+                scope["status"] for scope in group["scopes"]
+            ])
+            self.assertEqual("blocked", h.task(tid)["task_status"])
+
+    def test_foreach_recovery_advances_completed_unapplied_group(self):
+        steps = [
+            {"id": "plan", "name": "Plan", "agents": ["codex"]},
+            {
+                "id": "process", "name": "Process", "type": "foreach",
+                "agents": ["codex"], "item_key": "$.id",
+            },
+            {"id": "publish", "name": "Publish", "agents": ["rev"]},
+        ]
+        edges = [
+            {"from": "plan", "to": "process", "mapping": {"items": "$.output.items"}},
+            {"from": "process", "to": "publish"},
+        ]
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, steps=steps, edges=edges)
+            tid = h.create_task()
+            h.start(tid)
+            h.complete(
+                "codex", tid, "plan", "done",
+                'WORKFLOW_RESULT: {"output":{"items":[{"id":"a"}]}}',
+            )
+            [group] = h.store.list_workflow_item_groups(tid, "process")
+            h.store.update_workflow_item_scope(
+                group["scopes"][0]["id"],
+                "completed",
+                {"output": {"value": "A"}, "summary": "", "artifacts": []},
+            )
+            [group] = h.store.list_workflow_item_groups(tid, "process")
+            self.assertIsNone(group["advanced_at"])
+
+            recovered = recover_foreach_item_groups(h.store, tmp)
+            self.assertEqual("publish", recovered[0]["report"]["dispatched"][0]["step"])
+            [group] = h.store.list_workflow_item_groups(tid, "process")
+            self.assertIsNotNone(group["advanced_at"])
+            self.assertEqual("publish", h.task(tid)["workflow_step"])
+
+    def test_empty_foreach_completes_without_creating_item_jobs(self):
+        steps = [
+            {"id": "plan", "name": "Plan", "agents": ["codex"]},
+            {"id": "process", "name": "Process", "type": "foreach", "agents": ["codex"]},
+            {"id": "publish", "name": "Publish", "agents": ["rev"]},
+        ]
+        edges = [
+            {"from": "plan", "to": "process", "mapping": {"items": "$.output.items"}},
+            {"from": "process", "to": "publish"},
+        ]
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, steps=steps, edges=edges)
+            tid = h.create_task()
+            h.start(tid)
+            report = h.complete(
+                "codex", tid, "plan", "done",
+                'WORKFLOW_RESULT: {"output":{"items":[]}}',
+            )
+            self.assertEqual(
+                ["process", "publish"],
+                [item["step"] for item in report["dispatched"]],
+            )
+            [group] = h.store.list_workflow_item_groups(tid, "process")
+            self.assertEqual("completed", group["status"])
+            self.assertIsNotNone(group["advanced_at"])
+            self.assertEqual([], [
+                job for job in h.store.list_run_jobs(status="all")
+                if job.get("item_scope_id") is not None
+            ])
+
+    def test_structured_output_maps_into_target_inputs(self):
+        steps = [
+            {
+                "id": "draft", "name": "Draft", "agents": ["codex"],
+                "output_schema": {
+                    "type": "object", "required": ["article"],
+                    "properties": {"article": {"type": "string"}},
+                },
+            },
+            {
+                "id": "publish", "name": "Publish", "agents": ["rev"],
+                "input_schema": {
+                    "type": "object", "required": ["document"],
+                    "properties": {"document": {"type": "string"}},
+                },
+            },
+            {"id": "complete", "name": "Complete", "type": "end"},
+        ]
+        edges = [
+            {
+                "from": "draft", "to": "publish",
+                "mapping": {"document": "$.output.article"},
+            },
+            {"from": "publish", "to": "complete"},
+        ]
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, steps=steps, edges=edges)
+            tid = h.create_task()
+            h.start(tid)
+            result = (
+                'WORKFLOW_RESULT: {"port":"success","output":{"article":"article.md"},'
+                '"summary":"Draft ready","artifacts":[{"type":"file","uri":"article.md"}]}'
+            )
+            report = h.complete("codex", tid, "draft", "done", result)
+            self.assertEqual("publish", report["dispatched"][0]["step"])
+            [draft_result] = h.store.list_workflow_node_results(tid, "draft")
+            publish = h.store.get_task(tid)
+            self.assertEqual({"article": "article.md"}, draft_result["output"])
+            self.assertEqual(
+                [{"type": "file", "uri": "article.md"}], draft_result["artifacts"]
+            )
+            self.assertEqual({"document": "article.md"}, publish["step_inputs"]["mapped"])
+            self.assertIn('"document": "article.md"', publish["step_inputs"]["upstream_result"])
+
+    def test_scoped_mapping_reads_run_item_and_node_history(self):
+        steps = [
+            {"id": "draft", "name": "Draft", "agents": ["codex"]},
+            {"id": "review", "name": "Review", "agents": ["rev"]},
+            {
+                "id": "publish", "name": "Publish", "agents": ["hub-agent"],
+                "input_schema": {
+                    "type": "object",
+                    "required": ["draft", "review", "first", "title", "item_id", "iteration"],
+                    "properties": {
+                        "draft": {"type": "string"},
+                        "review": {"type": "string"},
+                        "first": {"type": "string"},
+                        "title": {"type": "string"},
+                        "item_id": {"type": "integer"},
+                        "iteration": {"type": "integer"},
+                    },
+                },
+            },
+        ]
+        edges = [
+            {"from": "draft", "to": "review"},
+            {
+                "from": "review", "to": "publish",
+                "mapping": {
+                    "draft": "$.nodes.draft.latest.output.document",
+                    "review": "$.output.verdict",
+                    "first": "$.nodes.draft.runs[0].output.document",
+                    "title": "$.run.inputs.task.title",
+                    "item_id": "$.scope.item.id",
+                    "iteration": "$.scope.iteration",
+                },
+            },
+        ]
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, steps=steps, edges=edges)
+            tid = h.create_task(title="Publish scoped article")
+            h.start(tid)
+            h.complete(
+                "codex", tid, "draft", "done",
+                'WORKFLOW_RESULT: {"output":{"document":"draft.md"}}',
+            )
+            report = h.complete(
+                "rev", tid, "review", "done",
+                'WORKFLOW_RESULT: {"output":{"verdict":"approved"}}',
+            )
+
+            self.assertEqual("publish", report["dispatched"][0]["step"])
+            self.assertEqual(
+                {
+                    "draft": "draft.md",
+                    "review": "approved",
+                    "first": "draft.md",
+                    "title": "Publish scoped article",
+                    "item_id": tid,
+                    "iteration": 0,
+                },
+                h.task(tid)["step_inputs"]["mapped"],
+            )
+
+    def test_mapping_context_uses_persisted_foreach_item_scope(self):
+        context = build_mapping_context(
+            {"output": {}},
+            {"id": 9, "title": "Parent", "content": "parent"},
+            [],
+            "body",
+            {
+                "id": 17,
+                "group_id": 4,
+                "item_index": 2,
+                "scope_key": "article-c",
+                "item_value": {"title": "Article C", "language": "zh"},
+                "depends_on": ["article-a"],
+                "status": "ready",
+            },
+        )
+        self.assertEqual(
+            {
+                "title": "Article C",
+                "key": "article-c",
+                "dependency": "article-a",
+            },
+            apply_input_mapping(
+                context,
+                {
+                    "title": "$.scope.item.title",
+                    "key": "$.scope.item_meta.key",
+                    "dependency": "$.scope.item_meta.depends_on[0]",
+                },
+            ),
+        )
+
+    def test_scoped_mapping_missing_array_run_blocks(self):
+        steps = [
+            {"id": "draft", "name": "Draft", "agents": ["codex"]},
+            {"id": "publish", "name": "Publish", "agents": ["rev"]},
+        ]
+        edges = [{
+            "from": "draft", "to": "publish",
+            "mapping": {"document": "$.nodes.draft.runs[1].output.document"},
+        }]
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, steps=steps, edges=edges)
+            tid = h.create_task()
+            h.start(tid)
+            report = h.complete(
+                "codex", tid, "draft", "done",
+                'WORKFLOW_RESULT: {"output":{"document":"draft.md"}}',
+            )
+
+            self.assertEqual("blocked", report["outcome"])
+            self.assertIn("runs[1]", report["mapping_error"])
+
+    def test_invalid_structured_output_blocks_before_dispatch(self):
+        steps = [
+            {
+                "id": "extract", "name": "Extract", "agents": ["codex"],
+                "output_schema": {
+                    "type": "object", "required": ["rows"],
+                    "properties": {"rows": {"type": "array"}},
+                },
+            },
+            {"id": "load", "name": "Load", "agents": ["rev"]},
+        ]
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, steps=steps, edges=[{"from": "extract", "to": "load"}])
+            tid = h.create_task()
+            h.start(tid)
+            report = h.complete(
+                "codex", tid, "extract", "done",
+                'WORKFLOW_RESULT: {"output":{"rows":"not-an-array"},"summary":"bad"}',
+            )
+            self.assertEqual("blocked", report["outcome"])
+            self.assertTrue(report["normalization_errors"])
+            self.assertEqual([], report["dispatched"])
+            self.assertEqual("blocked", h.task(tid)["task_status"])
+
+    def test_structured_output_retry_redispatches_same_activation_then_advances(self):
+        steps = [
+            {
+                "id": "extract", "name": "Extract", "agents": ["codex"],
+                "retry": {"normalization": 1},
+                "output_schema": {
+                    "type": "object", "required": ["rows"],
+                    "properties": {"rows": {"type": "array"}},
+                },
+            },
+            {"id": "load", "name": "Load", "agents": ["rev"]},
+        ]
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, steps=steps, edges=[{"from": "extract", "to": "load"}])
+            tid = h.create_task()
+            h.start(tid)
+            retry = h.complete(
+                "codex", tid, "extract", "done",
+                'WORKFLOW_RESULT: {"output":{"rows":"bad"},"summary":"retry me"}',
+            )
+            self.assertEqual("retry", retry["outcome"])
+            self.assertEqual(1, retry["normalization_retry"])
+            self.assertEqual("extract", retry["dispatched"][0]["step"])
+
+            completed = h.complete(
+                "codex", tid, "extract", "done",
+                'WORKFLOW_RESULT: {"output":{"rows":[1,2]},"summary":"ready"}',
+            )
+            self.assertEqual("load", completed["dispatched"][0]["step"])
+            transitions = h.store.list_task_transitions(tid)
+            self.assertEqual(
+                1,
+                sum(
+                    t["outcome"] == "reassigned"
+                    and t["note"].startswith("normalization retry ")
+                    for t in transitions
+                ),
+            )
+            self.assertFalse(any(t["outcome"] == "rework" for t in transitions))
+
+    def test_structured_output_retry_exhaustion_blocks(self):
+        steps = [
+            {
+                "id": "extract", "name": "Extract", "agents": ["codex"],
+                "retry": {"normalization": 1},
+                "output_schema": {
+                    "type": "object", "required": ["rows"],
+                    "properties": {"rows": {"type": "array"}},
+                },
+            },
+            {"id": "load", "name": "Load", "agents": ["rev"]},
+        ]
+        bad = 'WORKFLOW_RESULT: {"output":{"rows":"bad"},"summary":"bad"}'
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, steps=steps, edges=[{"from": "extract", "to": "load"}])
+            tid = h.create_task()
+            h.start(tid)
+            self.assertEqual("retry", h.complete("codex", tid, "extract", "done", bad)["outcome"])
+            exhausted = h.complete("codex", tid, "extract", "done", bad)
+            self.assertEqual("blocked", exhausted["outcome"])
+            self.assertEqual("blocked", h.task(tid)["task_status"])
+
     def test_independent_approval_node_waits_and_routes_approved(self):
         with TemporaryDirectory() as tmp:
             steps = [
@@ -1758,6 +2510,55 @@ class AutoRunnerTests(unittest.TestCase):
             # The finished job is now marked done (advanced).
             self.assertEqual("done", h.store.get_run_job(job["id"])["status"])
 
+    def test_foreach_item_job_runs_then_scheduler_advances_parent(self):
+        steps = [
+            {"id": "plan", "name": "Plan", "agents": ["hub-agent"]},
+            {
+                "id": "process", "name": "Process", "type": "foreach",
+                "agents": ["codex"],
+                "agent_commands": {
+                    "codex": "printf 'WORKFLOW_RESULT: {\"output\":{\"value\":\"done\"}}'"
+                },
+                "executor": {
+                    "strategy": "single", "max_agents": 1,
+                    "agents": ["codex"],
+                    "command_overrides": {
+                        "codex": "printf 'WORKFLOW_RESULT: {\"output\":{\"value\":\"done\"}}'"
+                    },
+                },
+                "item_key": "$.id",
+            },
+            {"id": "publish", "name": "Publish", "agents": ["rev"]},
+        ]
+        edges = [
+            {
+                "from": "plan", "to": "process",
+                "mapping": {"items": "$.output.items"},
+            },
+            {"from": "process", "to": "publish"},
+        ]
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, steps=steps, edges=edges)
+            tid = h.create_task()
+            h.start(tid)
+            h.complete(
+                "hub-agent", tid, "plan", "done",
+                'WORKFLOW_RESULT: {"output":{"items":[{"id":"one"}]}}',
+            )
+            [job] = h.store.list_run_jobs(status="pending")
+            self.assertIsNotNone(job["item_scope_id"])
+
+            executed = server.run_queued_job(
+                h.store, tmp, runner_name="foreach-runner"
+            )
+            self.assertEqual("finished", executed["status"])
+            processed = server.scheduler_tick(h.store, tmp)
+            reports = [item["report"] for item in processed if "report" in item]
+            self.assertEqual("publish", reports[-1]["dispatched"][0]["step"])
+            scope = h.store.get_workflow_item_scope(job["item_scope_id"])
+            self.assertEqual("completed", scope["status"])
+            self.assertEqual("done", h.store.get_run_job(job["id"])["status"])
+
     def test_empty_output_is_blocked_not_done(self):
         with TemporaryDirectory() as tmp:
             # `true` exits 0 with no output — a silent runner (like agy producing
@@ -1881,6 +2682,22 @@ class RerunTests(unittest.TestCase):
             # review is no longer active; accept is.
             self.assertNotIn("review", server._active_steps(trs))
             self.assertIn("accept", server._active_steps(trs))
+
+    def test_skip_respects_explicit_node_capability(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp, bindings=self._bindings())
+            cfg = server.read_workflow_config(tmp)
+            for step in cfg["steps"]:
+                if step["id"] == "review":
+                    step["skippable"] = False
+            server.write_workflow_config(cfg["steps"], tmp, cfg["edges"])
+            tid = h.create_task()
+            h.start(tid)
+            h.complete("hub-agent", tid, "intake", "done")
+            h.complete("codex", tid, "implement", "done")
+
+            with self.assertRaisesRegex(server.InvalidInputError, "not skippable"):
+                server.skip_workflow_step(h.store, tmp, tid, step="review")
 
     def test_skip_refuses_terminal_step_with_no_successor(self):
         with TemporaryDirectory() as tmp:

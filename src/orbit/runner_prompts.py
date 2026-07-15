@@ -116,7 +116,7 @@ def build_step_prompt(
     elif isolated:
         completion = (
             "When finished, commit the result with `git add -A && git commit` on this branch so the integrate step can merge it.\n"
-            if step.get("id") not in {"review", "test"}
+            if step.get("workspace_access", "read_write") != "read_only"
             else "This is a read-only check; do not modify files or create an empty commit just to produce a commit.\n"
         )
         cwd_line = (
@@ -128,7 +128,7 @@ def build_step_prompt(
         cwd_line = "Your working directory is the project root; work directly in it.\n"
     triage_block = ""
     if (
-        step.get("id") == "intake"
+        step.get("inject_workflow_snapshot")
         and task.get("is_goal")
         and not task.get("parent_task_id")
     ):
@@ -192,6 +192,19 @@ def build_step_prompt(
         )
     )
     if not goal_contract:
+        output_schema = (
+            step.get("item_output_schema") or {}
+            if step.get("type") == "foreach"
+            else step.get("output_schema") or {}
+        )
+        if output_schema:
+            final_instruction += (
+                "\n\nThis node requires structured output. End with one single-line JSON envelope:\n"
+                '`WORKFLOW_RESULT: {"port":"success","output":{},"summary":"...","artifacts":[]}`\n'
+                "`output` must validate against this schema:\n"
+                f"```json\n{json.dumps(output_schema, ensure_ascii=False, sort_keys=True)}\n```\n"
+                "The JSON port takes precedence over WORKFLOW_PORT. Do not put the envelope in a code fence."
+            )
         final_instruction += (
             "\n\nEnd with a separate verdict line: `WORKFLOW_OUTCOME: <value>`, optionally followed by one reason line:\n"
             "- `done`: this step completed successfully and may advance.\n"

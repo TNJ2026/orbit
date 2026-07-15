@@ -13,9 +13,16 @@ from .runner_prompts import (
     step_round_robin_assignee as _step_round_robin_assignee,
 )
 from .runner_protocol import (
-    parse_step_output_metadata as _parse_step_output_metadata,
+    normalized_step_result as _normalized_step_result,
     structured_upstream as _structured_upstream,
     tail as _tail,
+)
+from .workflow_data import (
+    apply_input_mapping,
+    build_mapping_context,
+    evaluate_jsonlogic,
+    resolve_path,
+    validate_json_schema,
 )
 from .settings import read_settings
 from .store import InvalidInputError, Store, UnknownAgentError
@@ -105,6 +112,7 @@ def goals_summary(
                     "assignee": step.get("assignee", ""),
                     "step_inputs": step.get("step_inputs") or {},
                     "result_summary": step.get("result_summary", ""),
+                    "step_output": step.get("step_output") or {},
                     "artifacts": step.get("artifacts") or [],
                 }
                 for step in sorted(goal_steps, key=lambda item: item["id"])
@@ -202,6 +210,364 @@ WORKFLOW_OUTCOMES = {"done", "rework", "blocked", "approval"}
 # stops looping and blocks the task for the hub. Prevents review/implement
 # rework from spinning forever when feedback is not being resolved.
 MAX_REWORK_ROUNDS = 3
+
+
+def _record_not_selected_lineage(
+    store: Store,
+    task_id: int,
+    cfg: dict[str, Any],
+    back: set[tuple[str, str]],
+    source_step: str,
+    branch_root: str,
+    port: str,
+) -> None:
+    """Close merge boundaries downstream of an excluded conditional branch.
+
+    A direct ``source -> branch_root`` not_selected transition is useful for
+    audit, but an implicit join waits on its own immediate predecessors. Walk
+    the excluded forward-only subgraph and add a closure event at every first
+    merge boundary, without walking beyond that merge (the selected branches
+    own the lineage after it activates).
+    """
+    forward_edges = [
+        edge for edge in cfg["edges"]
+        if (edge["from"], edge["to"]) not in back
+    ]
+    incoming: dict[str, int] = {}
+    outgoing: dict[str, list[str]] = {}
+    for edge in forward_edges:
+        incoming[edge["to"]] = incoming.get(edge["to"], 0) + 1
+        outgoing.setdefault(edge["from"], []).append(edge["to"])
+    queue = [branch_root]
+    visited: set[str] = set()
+    while queue:
+        node = queue.pop(0)
+        if node in visited:
+            continue
+        visited.add(node)
+        for target in outgoing.get(node, []):
+            if incoming.get(target, 0) > 1:
+                store.record_task_transition(
+                    task_id,
+                    node,
+                    target,
+                    WORKFLOW_ENGINE_AGENT,
+                    "not_selected",
+                    f"branch excluded by {source_step} before merge {target}",
+                    port,
+                )
+            else:
+                queue.append(target)
+
+
+def _branch_merge_boundaries(
+    cfg: dict[str, Any],
+    back: set[tuple[str, str]],
+    origin: str,
+    branch_root: str,
+) -> list[tuple[str, str, int]]:
+    """Return (predecessor, merge, depth) boundaries along one branch.
+
+    Traversal continues beyond an inner merge so an outer fork can establish
+    both its child Join activation and the enclosing Join activation.
+    """
+    forward_edges = [
+        edge for edge in cfg["edges"]
+        if (edge["from"], edge["to"]) not in back
+    ]
+    incoming: dict[str, int] = {}
+    outgoing: dict[str, list[str]] = {}
+    for edge in forward_edges:
+        incoming[edge["to"]] = incoming.get(edge["to"], 0) + 1
+        outgoing.setdefault(edge["from"], []).append(edge["to"])
+    if incoming.get(branch_root, 0) > 1:
+        return [(origin, branch_root, 0)]
+    boundaries: list[tuple[str, str, int]] = []
+    queue = [(branch_root, 0)]
+    visited: set[str] = set()
+    while queue:
+        node, depth = queue.pop(0)
+        if node in visited:
+            continue
+        visited.add(node)
+        for target in outgoing.get(node, []):
+            if incoming.get(target, 0) > 1:
+                boundary = (node, target, depth + 1)
+                if boundary not in boundaries:
+                    boundaries.append(boundary)
+            queue.append((target, depth + 1))
+    return boundaries
+
+
+def _persist_routing_correlations(
+    store: Store,
+    task_id: int,
+    cfg: dict[str, Any],
+    back: set[tuple[str, str]],
+    source_step: str,
+    audited_edges: list[dict[str, Any]],
+    routed_edges: list[dict[str, Any]],
+) -> None:
+    if len(audited_edges) < 2:
+        return
+    routed_ids = {id(edge) for edge in routed_edges}
+    steps = {step["id"]: step for step in cfg["steps"]}
+    by_join: dict[str, dict[str, Any]] = {}
+    for edge in audited_edges:
+        state = "selected" if id(edge) in routed_ids else "not_selected"
+        for predecessor, join_step, depth in _branch_merge_boundaries(
+            cfg, back, source_step, edge["to"]
+        ):
+            join_info = by_join.setdefault(join_step, {"depth": depth, "branches": {}})
+            join_info["depth"] = max(int(join_info["depth"]), depth)
+            existing = join_info["branches"].get(predecessor)
+            if existing and existing["state"] == "selected":
+                continue
+            join_info["branches"][predecessor] = {
+                "predecessor_step": predecessor,
+                "branch_root": edge["to"],
+                "state": state,
+            }
+    explicit_joins = {
+        join_step
+        for join_step in by_join
+        if get_node_handler(steps.get(join_step, {})).dispatch_mode == "join"
+    }
+    forward_outgoing: dict[str, list[str]] = {}
+    for edge in cfg["edges"]:
+        if (edge["from"], edge["to"]) not in back:
+            forward_outgoing.setdefault(edge["from"], []).append(edge["to"])
+
+    def enclosing_join(join_step: str) -> str | None:
+        queue = list(forward_outgoing.get(join_step, []))
+        visited: set[str] = set()
+        while queue:
+            node = queue.pop(0)
+            if node in visited:
+                continue
+            visited.add(node)
+            if node in explicit_joins:
+                return node
+            queue.extend(forward_outgoing.get(node, []))
+        return None
+
+    parent_by_join = {join_step: enclosing_join(join_step) for join_step in explicit_joins}
+    persisted: dict[str, dict[str, Any]] = {}
+
+    def persist_join(join_step: str) -> dict[str, Any]:
+        if join_step in persisted:
+            return persisted[join_step]
+        parent_step = parent_by_join[join_step]
+        parent = persist_join(parent_step) if parent_step is not None else None
+        join_info = by_join[join_step]
+        join_def = steps.get(join_step, {})
+        policy = str(join_def.get("join_policy") or "all_activated")
+        correlation = store.ensure_workflow_correlation(
+            task_id,
+            source_step,
+            join_step,
+            policy,
+            list(join_info["branches"].values()),
+            parent["id"] if parent is not None else None,
+        )
+        persisted[join_step] = correlation
+        return correlation
+
+    for join_step in explicit_joins:
+        persist_join(join_step)
+
+
+def _correlation_ready(correlation: dict[str, Any]) -> bool:
+    states = [branch["state"] for branch in correlation.get("branches") or []]
+    if not states:
+        return False
+    if correlation.get("policy") == "any":
+        return "arrived" in states
+    return all(state in {"arrived", "not_selected", "cancelled"} for state in states)
+
+
+def _foreach_scope_specs(step: dict[str, Any], context: dict[str, Any]) -> list[dict[str, Any]]:
+    try:
+        items = resolve_path(context, str(step.get("items") or "$.input.items"))
+    except (KeyError, ValueError) as exc:
+        raise InvalidInputError(f"workflow foreach items cannot be resolved: {exc}") from None
+    if not isinstance(items, list):
+        raise InvalidInputError("workflow foreach items path must resolve to a list")
+    scopes: list[dict[str, Any]] = []
+    key_path = str(step.get("item_key") or "")
+    depends_path = str(step.get("item_depends_on") or "")
+    for index, item in enumerate(items):
+        key: Any = index
+        if key_path:
+            try:
+                key = resolve_path(item, key_path)
+            except (KeyError, ValueError):
+                raise InvalidInputError(
+                    f"workflow foreach item {index} key path is missing"
+                ) from None
+        dependencies: Any = []
+        if depends_path:
+            try:
+                dependencies = resolve_path(item, depends_path)
+            except KeyError:
+                dependencies = []
+            except ValueError as exc:
+                raise InvalidInputError(
+                    f"workflow foreach item_depends_on is invalid: {exc}"
+                ) from None
+        if dependencies is None:
+            dependencies = []
+        if not isinstance(dependencies, list):
+            raise InvalidInputError(
+                f"workflow foreach item {index} dependencies must resolve to a list"
+            )
+        scopes.append({"key": key, "value": item, "depends_on": dependencies})
+    return scopes
+
+
+def _foreach_item_upstream(
+    upstream_result: str, mapped_inputs: dict[str, Any], scope: dict[str, Any]
+) -> str:
+    payload = {
+        "item": scope.get("item_value"),
+        "item_meta": {
+            "id": scope.get("id"),
+            "group_id": scope.get("group_id"),
+            "index": scope.get("item_index"),
+            "key": scope.get("scope_key"),
+            "depends_on": scope.get("depends_on") or [],
+        },
+        "input": mapped_inputs,
+    }
+    parts = [upstream_result.strip()] if upstream_result.strip() else []
+    parts.append(
+        "FOREACH_ITEM_SCOPE:\n"
+        + json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    )
+    return "\n\n".join(parts)
+
+
+def _queue_ready_foreach_scopes(
+    store: Store,
+    project_root: str | None,
+    task: dict[str, Any],
+    step: dict[str, Any],
+    group: dict[str, Any],
+    upstream_result: str,
+    mapped_inputs: dict[str, Any],
+) -> list[dict[str, Any]]:
+    agents = step.get("agents") or []
+    if not agents:
+        raise InvalidInputError(
+            f"foreach step {step['id']!r} requires at least one Agent"
+        )
+    dispatched: list[dict[str, Any]] = []
+    for scope in group.get("scopes") or []:
+        if scope.get("status") != "ready" or store.has_open_item_run_job(scope["id"]):
+            continue
+        if _enforce_goal_token_budget(store, project_root, task):
+            reason = "goal token budget exceeded; foreach dispatch frozen"
+            store.update_workflow_item_scope(scope["id"], "blocked", {}, reason)
+            store.cancel_open_workflow_item_scopes(group["id"], reason)
+            transitions = store.list_task_transitions(task["id"])
+            if step["id"] in _running_steps(transitions):
+                store.record_task_transition(
+                    task["id"], step["id"], step["id"], WORKFLOW_ENGINE_AGENT,
+                    "blocked", reason, "blocked",
+                )
+            store.set_task_workflow_state(task["id"], task_status="blocked")
+            return dispatched
+        assignee = agents[int(scope.get("item_index") or 0) % len(agents)]
+        command = _step_agent_command(step, assignee)
+        if not command:
+            raise InvalidInputError(
+                f"foreach step {step['id']!r} item {scope['scope_key']!r} "
+                f"has no runnable command for Agent {assignee!r}"
+            )
+        if not store.agent_exists(assignee):
+            store.register_agent(assignee, f"workflow agent for step {step['id']}")
+        job = store.create_run_job(
+            task["id"],
+            step["id"],
+            assignee,
+            command,
+            _foreach_item_upstream(upstream_result, mapped_inputs, scope),
+            note=f"queued foreach item {scope['scope_key']}",
+            item_scope_id=int(scope["id"]),
+        )
+        if job:
+            dispatched.append(
+                {
+                    "step": step["id"],
+                    "assignee": assignee,
+                    "item_scope_id": scope["id"],
+                    "item_key": scope["scope_key"],
+                    "queued_job_id": job["id"],
+                }
+            )
+    return dispatched
+
+
+def _foreach_group_result(group: dict[str, Any]) -> str:
+    items = []
+    artifacts: list[Any] = []
+    for scope in group.get("scopes") or []:
+        normalized = scope.get("output") or {}
+        item_artifacts = normalized.get("artifacts") or []
+        artifacts.extend(item_artifacts)
+        items.append(
+            {
+                "scope_id": scope["id"],
+                "key": scope["scope_key"],
+                "index": scope["item_index"],
+                "item": scope.get("item_value"),
+                "output": normalized.get("output") or {},
+                "summary": str(normalized.get("summary") or ""),
+                "artifacts": item_artifacts,
+            }
+        )
+    return "WORKFLOW_RESULT: " + json.dumps(
+        {
+            "port": "success",
+            "output": {"items": items, "count": len(items)},
+            "summary": f"Processed {len(items)} foreach item(s)",
+            "artifacts": artifacts,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _finalize_foreach_group_locked(
+    store: Store,
+    project_root: str | None,
+    task: dict[str, Any],
+    step: dict[str, Any],
+    group: dict[str, Any],
+) -> dict[str, Any]:
+    if group.get("status") != "completed" or group.get("advanced_at"):
+        return {"task_id": task["id"], "step": step["id"], "dispatched": []}
+    transitions = store.list_task_transitions(task["id"])
+    already_advanced = any(
+        int(transition["id"]) > int(group.get("transition_cursor") or 0)
+        and transition["from_step"] == step["id"]
+        and transition["outcome"] == "done"
+        for transition in transitions
+    )
+    if already_advanced:
+        store.mark_workflow_item_group_advanced(group["id"])
+        return {"task_id": task["id"], "step": step["id"], "dispatched": []}
+    report = _advance_workflow_task_locked(
+        store,
+        project_root,
+        WORKFLOW_ENGINE_AGENT,
+        task["id"],
+        step["id"],
+        "done",
+        _foreach_group_result(group),
+    )
+    store.mark_workflow_item_group_advanced(group["id"])
+    return report
 
 
 def _project_workflow_task_status(
@@ -890,7 +1256,7 @@ def _upsert_step_card(
             card["id"], task_status="assigned", assignee=assignee
         )
         return store.update_task_step_details(
-            card["id"], step_inputs=step_inputs, result_summary="", artifacts=[]
+            card["id"], step_inputs=step_inputs, result_summary="", step_output={}, artifacts=[]
         ) or card
     # Title = step type + what THIS task is actually about (the parent task's
     # title), so each card reflects its own work — not a generic step label.
@@ -928,17 +1294,46 @@ def _record_step_result(
     task: dict[str, Any],
     step_id: str,
     result: str,
-) -> None:
+    *,
+    port: str = "",
+    output_schema: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], list[str]]:
     """Attach structured output to the current step execution holder."""
     holder_id = task["id"]
     if _materializes_step_cards(task):
         card = store.find_open_step_card(task["id"], step_id)
         if card:
             holder_id = card["id"]
-    summary, artifacts = _parse_step_output_metadata(result)
-    store.update_task_step_details(
-        holder_id, result_summary=summary, artifacts=artifacts
+    normalized, parse_error = _normalized_step_result(result, port)
+    schema_errors = validate_json_schema(
+        normalized.get("output") or {}, output_schema or {}
     )
+    errors = ([parse_error] if parse_error else []) + schema_errors
+    summary = str(normalized.get("summary") or "")
+    artifact_refs: list[str] = []
+    for artifact in normalized.get("artifacts") or []:
+        value = (
+            str(artifact.get("uri") or "").strip()
+            if isinstance(artifact, dict)
+            else str(artifact).strip()
+        )
+        if value and value not in artifact_refs:
+            artifact_refs.append(value)
+    store.record_workflow_node_result(
+        task["id"],
+        step_id,
+        port=str(normalized.get("port") or port),
+        output=normalized.get("output") or {},
+        summary=summary,
+        artifacts=normalized.get("artifacts") or [],
+    )
+    store.update_task_step_details(
+        holder_id,
+        result_summary=summary,
+        step_output=normalized.get("output") or {},
+        artifacts=artifact_refs,
+    )
+    return normalized, errors
 
 
 def _dispatch_step(
@@ -948,6 +1343,7 @@ def _dispatch_step(
     step: dict[str, Any],
     member: dict[str, Any],
     upstream_result: str,
+    mapped_inputs: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     assignee = member["agent_name"]
     task_id = task["id"]
@@ -1015,6 +1411,7 @@ def _dispatch_step(
             "name": step.get("name") or step["id"],
         },
         "upstream_result": upstream_result or "",
+        "mapped": mapped_inputs or {},
     }
     if _materializes_step_cards(task):
         _upsert_step_card(
@@ -1022,7 +1419,7 @@ def _dispatch_step(
         )
     else:
         store.update_task_step_details(
-            task_id, step_inputs=step_inputs, result_summary="", artifacts=[]
+            task_id, step_inputs=step_inputs, result_summary="", step_output={}, artifacts=[]
         )
     # An explicit dispatch override (manual Re-run) wins; otherwise the round-
     # robin Agent's per-step command (or its built-in CLI) is used.
@@ -1051,6 +1448,7 @@ def _dispatch_targets(
     cfg: dict[str, Any],
     back: set[tuple[str, str]],
     upstream_result: str,
+    mapped_inputs_by_target: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     steps = {s["id"]: s for s in cfg["steps"]}
     task_id = task["id"]
@@ -1066,22 +1464,352 @@ def _dispatch_targets(
             break
         target = queue.pop(0)
         transitions = store.list_task_transitions(task_id)
+        correlation = store.sync_workflow_correlation(task_id, target)
         if target in _running_steps(transitions):
+            if correlation is not None and _correlation_ready(correlation):
+                # Recovery for a crash after dispatch but before the activation
+                # was marked consumed. The active step proves dispatch won.
+                store.consume_workflow_correlation(correlation["id"])
             continue  # a runner is still executing this step
         if _dispatched_since(
             transitions, target, _latest_inbound_completion_id(transitions, target)
         ):
+            if correlation is not None and _correlation_ready(correlation):
+                store.consume_workflow_correlation(correlation["id"])
             continue  # already dispatched for this target's current cycle
-        if not _join_ready(target, cfg, back, steps, transitions):
+        join_is_ready = (
+            _correlation_ready(correlation)
+            if correlation is not None
+            else _join_ready(target, cfg, back, steps, transitions)
+        )
+        if not join_is_ready:
             notices.append(f"step {target} is waiting for other required branches")
             continue
         step = steps[target]
         handler = get_node_handler(step)
+        mapped_inputs = (mapped_inputs_by_target or {}).get(target, {})
+        input_errors = [] if handler.dispatch_mode == "join" else validate_json_schema(
+            mapped_inputs, step.get("input_schema") or {}, "$.input"
+        )
+        if input_errors:
+            reason = f"step {target!r} input validation failed: {'; '.join(input_errors)}"
+            store.record_task_transition(
+                task_id, "", target, WORKFLOW_ENGINE_AGENT, "dispatched", reason
+            )
+            store.record_task_transition(
+                task_id, target, target, WORKFLOW_ENGINE_AGENT, "blocked", reason, "blocked"
+            )
+            store.set_task_workflow_state(task_id, task_status="blocked")
+            notices.append(_notify_hub(store, f"Task #{task_id} {reason}"))
+            break
+        if handler.dispatch_mode == "foreach":
+            foreach_context = build_mapping_context(
+                {"input": mapped_inputs},
+                task,
+                store.list_workflow_node_results(task_id),
+                target,
+            )
+            foreach_context["input"] = mapped_inputs
+            try:
+                scope_specs = _foreach_scope_specs(step, foreach_context)
+                agents = step.get("agents") or []
+                if not agents:
+                    raise InvalidInputError(
+                        f"foreach step {target!r} requires at least one Agent"
+                    )
+                used_agents = {
+                    agents[index % len(agents)] for index in range(len(scope_specs))
+                }
+                missing_commands = [
+                    agent for agent in used_agents
+                    if not _step_agent_command(step, agent)
+                ]
+                if missing_commands:
+                    raise InvalidInputError(
+                        f"foreach step {target!r} has no runnable command for: "
+                        + ", ".join(sorted(missing_commands))
+                    )
+                group = store.create_workflow_item_group(
+                    task_id,
+                    target,
+                    scope_specs,
+                    max_concurrency=int(step.get("max_concurrency") or 1),
+                )
+            except InvalidInputError as exc:
+                reason = str(exc)
+                store.record_task_transition(
+                    task_id, target, target, WORKFLOW_ENGINE_AGENT,
+                    "blocked", reason, "blocked",
+                )
+                store.set_task_workflow_state(task_id, task_status="blocked")
+                notices.append(_notify_hub(store, f"Task #{task_id} {reason}"))
+                break
+            display_assignee = (step.get("agents") or [WORKFLOW_ENGINE_AGENT])[0]
+            foreach_inputs = {
+                "task": {
+                    "id": task_id,
+                    "title": task.get("title") or "",
+                    "content": task.get("content") or "",
+                },
+                "step": {"id": target, "name": step.get("name") or target},
+                "upstream_result": upstream_result or "",
+                "mapped": mapped_inputs,
+                "foreach": {
+                    "group_id": group["id"],
+                    "activation": group["activation"],
+                    "item_count": len(group.get("scopes") or []),
+                },
+            }
+            store.record_task_transition(
+                task_id, "", target, WORKFLOW_ENGINE_AGENT, "dispatched",
+                display_assignee,
+            )
+            if task.get("is_goal"):
+                store.set_task_workflow_state(
+                    task_id,
+                    task_status=_goal_status_for_step(project_root, target),
+                    assignee=display_assignee,
+                )
+            else:
+                store.set_task_workflow_state(
+                    task_id, task_status="in_progress", assignee=display_assignee
+                )
+            if _materializes_step_cards(task):
+                _upsert_step_card(
+                    store, project_root, task, step, display_assignee, foreach_inputs
+                )
+            else:
+                store.update_task_step_details(
+                    task_id,
+                    step_inputs=foreach_inputs,
+                    result_summary="",
+                    step_output={},
+                    artifacts=[],
+                )
+            item_dispatches = _queue_ready_foreach_scopes(
+                store, project_root, task, step, group, upstream_result, mapped_inputs
+            )
+            dispatched.append(
+                {
+                    "step": target,
+                    "assignee": display_assignee,
+                    "item_group_id": group["id"],
+                }
+            )
+            dispatched.extend(item_dispatches)
+            if group.get("status") == "completed":
+                foreach_report = _finalize_foreach_group_locked(
+                    store, project_root, task, step, group
+                )
+                dispatched.extend(foreach_report.get("dispatched") or [])
+                notices.extend(foreach_report.get("notices") or [])
+            if correlation is not None:
+                store.consume_workflow_correlation(correlation["id"])
+            continue
         if handler.dispatch_mode == "end":
             _complete_end_node(store, project_root, task, step)
+            if correlation is not None:
+                store.consume_workflow_correlation(correlation["id"])
             dispatched.append({"step": target, "assignee": WORKFLOW_ENGINE_AGENT})
             queue.clear()
             break
+        if handler.dispatch_mode == "join":
+            if (
+                step.get("join_policy") == "any"
+                and store.list_workflow_node_results(task_id, target)
+            ):
+                continue
+            latest_to_join: dict[str, dict[str, Any]] = {}
+            for transition in transitions:
+                if (
+                    transition["to_step"] == target
+                    and transition["from_step"]
+                    and (
+                        correlation is None
+                        or transition["id"] > correlation["transition_cursor"]
+                    )
+                ):
+                    latest_to_join[transition["from_step"]] = transition
+            join_inputs: list[dict[str, Any]] = []
+            artifacts: list[Any] = []
+            seen_sources: set[str] = set()
+            for edge in cfg["edges"]:
+                source = edge["from"]
+                if (
+                    edge["to"] != target
+                    or (source, target) in back
+                    or source in seen_sources
+                ):
+                    continue
+                seen_sources.add(source)
+                arrival = latest_to_join.get(source) or {}
+                if arrival.get("outcome") not in {"done", "skipped"}:
+                    continue
+                stored_results = store.list_workflow_node_results(task_id, source)
+                stored = stored_results[-1] if stored_results else {}
+                item = {
+                    "source": source,
+                    "port": str(stored.get("port") or arrival.get("port") or ""),
+                    "output": stored.get("output") or {},
+                    "summary": str(stored.get("summary") or arrival.get("note") or ""),
+                    "artifacts": stored.get("artifacts") or [],
+                }
+                join_inputs.append(item)
+                artifacts.extend(item["artifacts"])
+            aggregation = step.get("aggregation") or "list"
+            if aggregation == "object_by_source":
+                value: Any = {
+                    item["source"]: {
+                        "port": item["port"],
+                        "output": item["output"],
+                        "summary": item["summary"],
+                        "artifacts": item["artifacts"],
+                    }
+                    for item in join_inputs
+                }
+            elif aggregation == "first":
+                value = join_inputs[0] if join_inputs else None
+            else:
+                value = join_inputs
+            join_output = {"inputs": join_inputs, "value": value}
+            join_input_errors = validate_json_schema(
+                join_output, step.get("input_schema") or {}, "$.input"
+            )
+            if join_input_errors:
+                reason = (
+                    f"step {target!r} input validation failed: "
+                    + "; ".join(join_input_errors)
+                )
+                store.record_task_transition(
+                    task_id, target, target, WORKFLOW_ENGINE_AGENT,
+                    "blocked", reason, "blocked",
+                )
+                store.set_task_workflow_state(task_id, task_status="blocked")
+                notices.append(_notify_hub(store, f"Task #{task_id} {reason}"))
+                break
+            _ensure_engine_agent(store)
+            join_step_inputs = {
+                "task": {
+                    "id": task_id,
+                    "title": task.get("title") or "",
+                    "content": task.get("content") or "",
+                },
+                "step": {"id": target, "name": step.get("name") or target},
+                "upstream_result": upstream_result or "",
+                "mapped": join_output,
+            }
+            store.record_task_transition(
+                task_id, "", target, WORKFLOW_ENGINE_AGENT, "dispatched",
+                WORKFLOW_ENGINE_AGENT,
+            )
+            if task.get("is_goal"):
+                store.set_task_workflow_state(
+                    task_id,
+                    task_status=_goal_status_for_step(project_root, target),
+                    assignee=WORKFLOW_ENGINE_AGENT,
+                )
+            else:
+                store.set_task_workflow_state(
+                    task_id, task_status="in_progress", assignee=WORKFLOW_ENGINE_AGENT
+                )
+            if _materializes_step_cards(task):
+                _upsert_step_card(
+                    store, project_root, task, step,
+                    WORKFLOW_ENGINE_AGENT, join_step_inputs,
+                )
+            else:
+                store.update_task_step_details(
+                    task_id, step_inputs=join_step_inputs,
+                    result_summary="", step_output={}, artifacts=[],
+                )
+            join_result = "WORKFLOW_RESULT: " + json.dumps(
+                {
+                    "port": step.get("default_port") or "success",
+                    "output": join_output,
+                    "summary": f"Joined {len(join_inputs)} input(s) using {aggregation}",
+                    "artifacts": artifacts,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            dispatched.append({"step": target, "assignee": WORKFLOW_ENGINE_AGENT})
+            join_report = _advance_workflow_task_locked(
+                store, project_root, WORKFLOW_ENGINE_AGENT,
+                task_id, target, "done", join_result,
+            )
+            dispatched.extend(join_report.get("dispatched") or [])
+            notices.extend(join_report.get("notices") or [])
+            if correlation is not None:
+                store.consume_workflow_correlation(correlation["id"])
+            continue
+        if handler.dispatch_mode == "decision":
+            _ensure_engine_agent(store)
+            decision_inputs = {
+                "task": {
+                    "id": task_id,
+                    "title": task.get("title") or "",
+                    "content": task.get("content") or "",
+                },
+                "step": {"id": step["id"], "name": step.get("name") or step["id"]},
+                "upstream_result": upstream_result or "",
+                "mapped": mapped_inputs,
+            }
+            store.record_task_transition(
+                task_id, "", target, WORKFLOW_ENGINE_AGENT, "dispatched",
+                WORKFLOW_ENGINE_AGENT,
+            )
+            if task.get("is_goal"):
+                store.set_task_workflow_state(
+                    task_id,
+                    task_status=_goal_status_for_step(project_root, target),
+                    assignee=WORKFLOW_ENGINE_AGENT,
+                )
+            else:
+                store.set_task_workflow_state(
+                    task_id, task_status="in_progress", assignee=WORKFLOW_ENGINE_AGENT
+                )
+            if _materializes_step_cards(task):
+                _upsert_step_card(
+                    store, project_root, task, step, WORKFLOW_ENGINE_AGENT, decision_inputs
+                )
+            else:
+                store.update_task_step_details(
+                    task_id,
+                    step_inputs=decision_inputs,
+                    result_summary="",
+                    step_output={},
+                    artifacts=[],
+                )
+            selected_port = str(step.get("default_port") or "default")
+            for rule in step.get("rules") or []:
+                if evaluate_jsonlogic(rule["when"], mapped_inputs):
+                    selected_port = str(rule["port"])
+                    break
+            decision_result = "WORKFLOW_RESULT: " + json.dumps(
+                {
+                    "port": selected_port,
+                    "output": mapped_inputs,
+                    "summary": f"Decision selected {selected_port}",
+                    "artifacts": [],
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            dispatched.append({"step": target, "assignee": WORKFLOW_ENGINE_AGENT})
+            decision_report = _advance_workflow_task_locked(
+                store,
+                project_root,
+                WORKFLOW_ENGINE_AGENT,
+                task_id,
+                target,
+                "done",
+                decision_result,
+            )
+            dispatched.extend(decision_report.get("dispatched") or [])
+            notices.extend(decision_report.get("notices") or [])
+            if correlation is not None:
+                store.consume_workflow_correlation(correlation["id"])
+            continue
         assignee = (
             HUB_NOTIFY_AGENT
             if handler.dispatch_mode == "human"
@@ -1097,10 +1825,17 @@ def _dispatch_targets(
             note=f"dispatch step {target} to {assignee}",
         )
         try:
+            target_upstream = upstream_result
+            if mapped_inputs:
+                mapped_json = json.dumps(mapped_inputs, ensure_ascii=False, sort_keys=True)
+                target_upstream = (
+                    f"{upstream_result}\n\nMAPPED_INPUTS:\n{mapped_json}".strip()
+                )
             _dispatch_step(
                 store, project_root, task, step,
                 {"agent_name": assignee},
-                upstream_result,
+                target_upstream,
+                mapped_inputs,
             )
         except Exception as exc:
             if action:
@@ -1108,6 +1843,8 @@ def _dispatch_targets(
             raise
         if action:
             store.finish_workflow_action(action["id"], "done")
+        if correlation is not None:
+            store.consume_workflow_correlation(correlation["id"])
         dispatched.append({"step": target, "assignee": assignee})
         if handler.dispatch_mode == "human":
             store.record_task_transition(
@@ -1123,6 +1860,209 @@ def _dispatch_targets(
             workflow_step=",".join(active),
         )
     return dispatched, notices
+
+
+def _foreach_saved_inputs(
+    store: Store, task: dict[str, Any], step_id: str
+) -> tuple[str, dict[str, Any]]:
+    holder = task
+    if _materializes_step_cards(task):
+        card = store.find_open_step_card(task["id"], step_id)
+        if card:
+            holder = card
+    step_inputs = holder.get("step_inputs") or {}
+    return (
+        str(step_inputs.get("upstream_result") or ""),
+        step_inputs.get("mapped") or {},
+    )
+
+
+def apply_foreach_item_outcome(
+    store: Store,
+    project_root: str | None,
+    item_scope_id: int,
+    assignee: str,
+    outcome: str,
+    result: str,
+) -> dict[str, Any]:
+    """Settle one item run, release siblings, and advance the parent foreach."""
+    with _WORKFLOW_ENGINE_LOCK:
+        scope = store.get_workflow_item_scope(item_scope_id)
+        if not scope:
+            return {"item_scope_id": item_scope_id, "error": "unknown foreach item scope"}
+        group = store.get_workflow_item_group(int(scope["group_id"]))
+        if not group:
+            return {"item_scope_id": item_scope_id, "error": "unknown foreach item group"}
+        task = store.get_task(int(group["task_id"]))
+        if not task:
+            return {"item_scope_id": item_scope_id, "error": "unknown workflow task"}
+        if task.get("task_status") == "closed":
+            for open_scope in group.get("scopes") or []:
+                if open_scope.get("status") in {"pending", "ready", "running"}:
+                    store.update_workflow_item_scope(
+                        int(open_scope["id"]), "cancelled", {}, "workflow task is closed"
+                    )
+            store.cancel_open_workflow_item_scopes(
+                group["id"], "workflow task is closed"
+            )
+            return {
+                "task_id": task["id"],
+                "item_scope_id": item_scope_id,
+                "closed": True,
+                "dispatched": [],
+            }
+        cfg = read_workflow_config(project_root)
+        step = next(
+            (item for item in cfg["steps"] if item["id"] == group["foreach_step"]),
+            None,
+        )
+        if not step or get_node_handler(step).dispatch_mode != "foreach":
+            return {"item_scope_id": item_scope_id, "error": "foreach step is unavailable"}
+
+        if scope.get("status") in {"completed", "blocked", "cancelled"}:
+            if group.get("status") == "completed":
+                report = _finalize_foreach_group_locked(
+                    store, project_root, task, step, group
+                )
+                return {**report, "item_scope_id": item_scope_id, "replayed": True}
+            if scope.get("status") == "completed" and group.get("status") == "active":
+                upstream_result, mapped_inputs = _foreach_saved_inputs(
+                    store, task, step["id"]
+                )
+                dispatched = _queue_ready_foreach_scopes(
+                    store, project_root, task, step, group, upstream_result, mapped_inputs
+                )
+                return {
+                    "task_id": task["id"],
+                    "step": step["id"],
+                    "item_scope_id": item_scope_id,
+                    "replayed": True,
+                    "dispatched": dispatched,
+                    "notices": [],
+                }
+            return {
+                "task_id": task["id"],
+                "step": step["id"],
+                "item_scope_id": item_scope_id,
+                "replayed": True,
+                "dispatched": [],
+            }
+
+        normalized, parse_error = _normalized_step_result(result, "success")
+        schema_errors = validate_json_schema(
+            normalized.get("output") or {},
+            step.get("item_output_schema") or {},
+            "$.item.output",
+        )
+        errors = ([parse_error] if parse_error else []) + schema_errors
+        if outcome != "done":
+            errors.insert(0, f"item runner outcome was {outcome or 'blocked'}")
+        if errors:
+            reason = f"foreach item {scope['scope_key']!r} failed: {'; '.join(errors)}"
+            store.update_workflow_item_scope(
+                item_scope_id, "blocked", normalized, reason
+            )
+            store.cancel_open_workflow_item_scopes(group["id"], reason)
+            transitions = store.list_task_transitions(task["id"])
+            if step["id"] in _running_steps(transitions):
+                store.record_task_transition(
+                    task["id"], step["id"], step["id"], assignee,
+                    "blocked", reason, "blocked",
+                )
+            store.set_task_workflow_state(task["id"], task_status="blocked")
+            _settle_step_card(store, task, step["id"], "blocked")
+            notice = _notify_hub(store, f"Task #{task['id']} {reason}")
+            return {
+                "task_id": task["id"],
+                "step": step["id"],
+                "item_scope_id": item_scope_id,
+                "blocked": True,
+                "dispatched": [],
+                "notices": [notice],
+            }
+
+        store.update_workflow_item_scope(
+            item_scope_id, "completed", normalized
+        )
+        group = store.get_workflow_item_group(group["id"])
+        if group and group.get("status") == "completed":
+            report = _finalize_foreach_group_locked(
+                store, project_root, task, step, group
+            )
+            return {**report, "item_scope_id": item_scope_id}
+        upstream_result, mapped_inputs = _foreach_saved_inputs(store, task, step["id"])
+        dispatched = _queue_ready_foreach_scopes(
+            store, project_root, task, step, group or {}, upstream_result, mapped_inputs
+        )
+        return {
+            "task_id": task["id"],
+            "step": step["id"],
+            "item_scope_id": item_scope_id,
+            "dispatched": dispatched,
+            "notices": [],
+        }
+
+
+def recover_foreach_item_groups(
+    store: Store, project_root: str | None
+) -> list[dict[str, Any]]:
+    """Resume ready scopes and completed-but-unadvanced groups after restart."""
+    recovered: list[dict[str, Any]] = []
+    with _WORKFLOW_ENGINE_LOCK:
+        cfg = read_workflow_config(project_root)
+        steps = {step["id"]: step for step in cfg["steps"]}
+        for group in store.list_recoverable_workflow_item_groups():
+            task = store.get_task(int(group["task_id"]))
+            step = steps.get(str(group["foreach_step"]))
+            if not task or not step or get_node_handler(step).dispatch_mode != "foreach":
+                continue
+            if task.get("task_status") == "closed":
+                for scope in group.get("scopes") or []:
+                    if scope.get("status") in {"pending", "ready", "running"}:
+                        store.update_workflow_item_scope(
+                            int(scope["id"]), "cancelled", {}, "workflow task is closed"
+                        )
+                store.cancel_open_workflow_item_scopes(
+                    group["id"], "workflow task is closed"
+                )
+                continue
+            if group.get("status") == "completed":
+                report = _finalize_foreach_group_locked(
+                    store, project_root, task, step, group
+                )
+                recovered.append({"group_id": group["id"], "report": report})
+                continue
+            failed_scope = None
+            for scope in group.get("scopes") or []:
+                if scope.get("status") != "running":
+                    continue
+                if store.has_open_item_run_job(scope["id"]):
+                    continue
+                jobs = store.list_run_jobs_for_item_scope(scope["id"])
+                if jobs and jobs[-1].get("status") in {"done", "failed", "cancelled"}:
+                    failed_scope = (scope, jobs[-1])
+                    break
+            if failed_scope:
+                scope, job = failed_scope
+                report = apply_foreach_item_outcome(
+                    store,
+                    project_root,
+                    int(scope["id"]),
+                    str(job.get("assignee") or WORKFLOW_ENGINE_AGENT),
+                    "blocked",
+                    str(job.get("note") or "foreach runner job failed"),
+                )
+                recovered.append({"group_id": group["id"], "report": report})
+                continue
+            upstream_result, mapped_inputs = _foreach_saved_inputs(
+                store, task, step["id"]
+            )
+            dispatched = _queue_ready_foreach_scopes(
+                store, project_root, task, step, group, upstream_result, mapped_inputs
+            )
+            if dispatched:
+                recovered.append({"group_id": group["id"], "dispatched": dispatched})
+    return recovered
 
 
 def start_workflow_task(
@@ -1302,9 +2242,9 @@ def skip_workflow_step(
         ]
         if not forward:
             raise InvalidInputError(f"step {step_id!r} has no forward step to skip to")
-        if step_def.get("integrate") or step_def.get("decompose"):
+        if not step_def.get("skippable", True):
             raise InvalidInputError(
-                f"step {step_id!r} is structural (integrate/decompose) and cannot be skipped"
+                f"step {step_id!r} is not skippable"
             )
         # Never skip past an in-flight runner — wait for it (or block) first.
         run_holder_id = task_id
@@ -1637,9 +2577,11 @@ def _advance_workflow_task_locked(
         raise InvalidInputError(f"unknown workflow step: {step}")
     declared_ports = set(steps[step].get("ports") or ["success", "rework"])
     reserved_ports = {"success", "rework", "blocked", "error", "timeout", "cancelled"}
+    structured_preview, _ = _normalized_step_result(result)
+    structured_port = str(structured_preview.get("port") or "").strip()
     if outcome == "done":
-        selected_port = steps[step].get("default_port") or "success"
-        control_outcome = "done"
+        selected_port = structured_port or steps[step].get("default_port") or "success"
+        control_outcome = selected_port if selected_port in reserved_ports - {"success"} else "done"
     elif outcome in {"rework", "blocked", "error", "timeout", "cancelled"}:
         selected_port = outcome
         control_outcome = outcome
@@ -1656,7 +2598,12 @@ def _advance_workflow_task_locked(
         raise InvalidInputError(
             f"invalid outcome: {outcome!r} (expected one of {allowed})"
         )
+    if structured_port and structured_port not in declared_ports and structured_port not in reserved_ports:
+        raise InvalidInputError(
+            f"WORKFLOW_RESULT selected undeclared port: {structured_port!r}"
+        )
     transitions = store.list_task_transitions(task_id)
+    prior_approval = None
     if agent == HUB_NOTIFY_AGENT and outcome == "done":
         prior_approval = next(
             (
@@ -1674,17 +2621,114 @@ def _advance_workflow_task_locked(
     assigned_agent = active_assignees[step]
     # Constraint: only the agent that was dispatched the active step may
     # complete it. The hub agent can override any active step for recovery.
-    if agent != assigned_agent and agent != HUB_NOTIFY_AGENT:
+    engine_managed = get_node_handler(steps[step]).dispatch_mode in {
+        "decision", "join", "foreach", "end"
+    }
+    if (
+        agent != assigned_agent
+        and agent != HUB_NOTIFY_AGENT
+        and not (agent == WORKFLOW_ENGINE_AGENT and engine_managed)
+    ):
         raise InvalidInputError(
             f"agent {agent} is not assigned to active step {step} "
             f"(assigned to {assigned_agent})"
         )
-    _record_step_result(store, task, step, result)
+    prior_results = (
+        store.list_workflow_node_results(task_id, step)
+        if prior_approval and steps[step].get("approval_required") and not result.strip()
+        else []
+    )
+    if prior_results:
+        latest_result = prior_results[-1]
+        normalized_result = {
+            "port": selected_port,
+            "output": latest_result.get("output") or {},
+            "summary": latest_result.get("summary") or "",
+            "artifacts": latest_result.get("artifacts") or [],
+        }
+        normalization_errors = validate_json_schema(
+            normalized_result["output"], steps[step].get("output_schema") or {}
+        )
+    else:
+        normalized_result, normalization_errors = _record_step_result(
+            store,
+            task,
+            step,
+            result,
+            port=selected_port,
+            output_schema=steps[step].get("output_schema") or {},
+        )
     store.cancel_pending_run_jobs(
         task_id,
         step,
         f"step settled by {agent} with outcome {outcome}",
     )
+    if normalization_errors:
+        reason = "structured output validation failed: " + "; ".join(normalization_errors)
+        max_normalization_retries = int(
+            (steps[step].get("retry") or {}).get("normalization", 0) or 0
+        )
+        prior_normalization_retries = sum(
+            1
+            for transition in transitions
+            if transition["from_step"] == step
+            and transition["outcome"] == "reassigned"
+            and str(transition.get("note") or "").startswith("normalization retry ")
+        )
+        if prior_normalization_retries < max_normalization_retries:
+            retry_number = prior_normalization_retries + 1
+            retry_note = (
+                f"normalization retry {retry_number}/{max_normalization_retries}: {reason}"
+            )
+            retry_holder = task
+            if _materializes_step_cards(task):
+                retry_card = store.find_open_step_card(task_id, step)
+                if retry_card:
+                    retry_holder = retry_card
+            prior_inputs = retry_holder.get("step_inputs") or {}
+            original_upstream = str(prior_inputs.get("upstream_result") or "")
+            retry_context = (
+                f"{original_upstream}\n\nSTRUCTURED_OUTPUT_RETRY:\n{retry_note}\n"
+                "Return a corrected WORKFLOW_RESULT matching the output schema."
+            ).strip()
+            store.record_task_transition(
+                task_id, step, step, agent, "reassigned", retry_note, selected_port
+            )
+            job = _dispatch_step(
+                store,
+                project_root,
+                task,
+                steps[step],
+                {"agent_name": assigned_agent},
+                retry_context,
+                prior_inputs.get("mapped") or {},
+            )
+            return {
+                "task_id": task_id,
+                "step": step,
+                "outcome": "retry",
+                "dispatched": [{"step": step, "assignee": assigned_agent}],
+                "notices": [],
+                "normalization_errors": normalization_errors,
+                "normalization_retry": retry_number,
+                "normalization_retry_limit": max_normalization_retries,
+                "queued_job_id": job["id"] if job else None,
+            }
+        store.record_task_transition(
+            task_id, step, step, agent, "blocked", f"{reason}; {result}", "blocked"
+        )
+        store.set_task_workflow_state(task_id, task_status="blocked")
+        _settle_step_card(store, task, step, "blocked")
+        _recompute_parent_goal_status(store, task, project_root)
+        notice = _notify_hub(store, f"Task #{task_id} at step {step!r}: {reason}")
+        return {
+            "task_id": task_id,
+            "step": step,
+            "outcome": "blocked",
+            "dispatched": [],
+            "notices": [notice],
+            "normalization_errors": normalization_errors,
+        }
     back = _workflow_graph(cfg)
     def _edge_port(edge: dict[str, Any]) -> str:
         if edge.get("port"):
@@ -1693,17 +2737,66 @@ def _advance_workflow_task_locked(
             return "rework"
         return "success"
 
+    mapping_context = build_mapping_context(
+        normalized_result,
+        task,
+        store.list_workflow_node_results(task_id),
+        step,
+    )
+    if steps[step].get("type") == "join":
+        mapping_context["join"] = {
+            "inputs": normalized_result.get("output", {}).get("inputs") or []
+        }
+    port_edges = [
+        edge for edge in cfg["edges"]
+        if edge["from"] == step and _edge_port(edge) == selected_port
+    ]
+    conditional_matches = [
+        edge for edge in port_edges
+        if "condition" in edge and bool(evaluate_jsonlogic(edge["condition"], mapping_context))
+    ]
+    if conditional_matches:
+        winning_priority = min(int(edge.get("priority", 0)) for edge in conditional_matches)
+        routed_edges = [
+            edge for edge in conditional_matches
+            if int(edge.get("priority", 0)) == winning_priority
+        ]
+    else:
+        routed_edges = [edge for edge in port_edges if "condition" not in edge]
+    routed_edge_ids = {id(edge) for edge in routed_edges}
+    audited_edges = (
+        [edge for edge in cfg["edges"] if edge["from"] == step]
+        if steps[step].get("type") == "decision"
+        else port_edges
+    )
+    _persist_routing_correlations(
+        store, task_id, cfg, back, step, audited_edges, routed_edges
+    )
+    for edge in audited_edges:
+        if id(edge) not in routed_edge_ids:
+            store.record_task_transition(
+                task_id,
+                step,
+                edge["to"],
+                WORKFLOW_ENGINE_AGENT,
+                "not_selected",
+                "edge condition did not select this branch",
+                selected_port,
+            )
+            _record_not_selected_lineage(
+                store,
+                task_id,
+                cfg,
+                back,
+                step,
+                edge["to"],
+                selected_port,
+            )
     backward = [
-        e["to"] for e in cfg["edges"]
-        if e["from"] == step
-        and (e["from"], e["to"]) in back
-        and _edge_port(e) == "rework"
+        edge["to"] for edge in routed_edges
+        if (edge["from"], edge["to"]) in back and _edge_port(edge) == "rework"
     ]
-    port_targets = [
-        edge["to"] for edge in cfg["edges"]
-        if edge["from"] == step
-        and _edge_port(edge) == selected_port
-    ]
+    port_targets = [edge["to"] for edge in routed_edges]
     failure_ports = {"blocked", "error", "timeout", "cancelled"}
 
     # Approval is a state of this completed step, not another node in the
@@ -1802,12 +2895,7 @@ def _advance_workflow_task_locked(
     else:
         targets = port_targets
 
-    selected_edges = [
-        edge for edge in cfg["edges"]
-        if edge["from"] == step
-        and edge["to"] in targets
-        and _edge_port(edge) == selected_port
-    ]
+    selected_edges = [edge for edge in routed_edges if edge["to"] in targets]
     exhausted_edge = next(
         (
             edge for edge in selected_edges
@@ -1840,6 +2928,27 @@ def _advance_workflow_task_locked(
         return {
             "task_id": task_id, "step": step, "outcome": "blocked",
             "dispatched": [], "notices": [notice], "iteration_limited": True,
+        }
+
+    mapped_inputs_by_target: dict[str, dict[str, Any]] = {}
+    try:
+        for edge in selected_edges:
+            if edge.get("mapping") is not None:
+                mapped_inputs_by_target[edge["to"]] = apply_input_mapping(
+                    mapping_context, edge.get("mapping")
+                )
+    except ValueError as exc:
+        reason = f"edge input mapping failed at step {step!r}: {exc}"
+        store.record_task_transition(
+            task_id, step, step, agent, "blocked", reason, "blocked"
+        )
+        store.set_task_workflow_state(task_id, task_status="blocked")
+        _settle_step_card(store, task, step, "blocked")
+        _recompute_parent_goal_status(store, task, project_root)
+        notice = _notify_hub(store, f"Task #{task_id} {reason}")
+        return {
+            "task_id": task_id, "step": step, "outcome": "blocked",
+            "dispatched": [], "notices": [notice], "mapping_error": str(exc),
         }
 
     for target in targets:
@@ -1896,7 +3005,8 @@ def _advance_workflow_task_locked(
         else result
     )
     dispatched, notices = _dispatch_targets(
-        store, project_root, task, targets, cfg, back, upstream
+        store, project_root, task, targets, cfg, back, upstream,
+        mapped_inputs_by_target,
     )
     report = {
         "task_id": task_id, "step": step, "outcome": outcome,

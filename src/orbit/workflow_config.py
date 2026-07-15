@@ -9,13 +9,17 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .agent_tools import agent_slug as _agent_slug
-from .node_handlers import get_node_handler
+from .node_handlers import get_node_handler, workflow_node_schema
 from .store import InvalidInputError, project_state_dir
+from .workflow_data import resolve_path, validate_jsonlogic
 from .worktrees import git_available as _git_available
 from .workflow_graph import workflow_graph as _workflow_graph
 
 _CONFIG_CACHE_LOCK = threading.Lock()
 _CONFIG_CACHE: dict[str, tuple[tuple[int, int] | None, dict[str, Any]]] = {}
+WORKFLOW_EXPRESSION_LANGUAGE = {
+    "name": "jsonlogic", "version": "1", "profile": "orbit-safe-v1"
+}
 
 
 def _config_stamp(path: Path) -> tuple[int, int] | None:
@@ -177,6 +181,25 @@ def default_workflow_steps() -> list[dict[str, Any]]:
             # an Agent per step, so nothing silently runs the wrong CLI.
             "agents": [],
             "prompt": DEFAULT_STEP_PROMPTS[step_id],
+            "type": "action",
+            "handler": "legacy.decompose" if decompose else "agent",
+            "executor": {
+                "strategy": "round_robin" if step_id in {"implement", "review", "test"} else "single",
+                "max_agents": 3 if step_id in {"implement", "review", "test"} else 1,
+                "rework_affinity": "same_executor",
+            },
+            "environment": {
+                "type": "git.worktree" if isolate else "project_root",
+                **({"scope": "workflow_item", "cleanup": "on_terminal"} if isolate else {}),
+            },
+            "enabled": True,
+            "removable": step_id not in {"intake", "implement", "review"},
+            "skippable": step_id not in {"intake", "decompose", "integrate"},
+            "required_locked": step_id in {"intake", "decompose", "integrate"},
+            "workspace_access": "read_only" if step_id in {"review", "test"} else "read_write",
+            "inject_workflow_snapshot": step_id == "intake",
+            "contract": ENGINE_STEP_CONTRACTS.get(step_id, ""),
+            "exclusive": "project_root" if integrate else "",
             "x": x,
             "y": y,
         }
@@ -204,10 +227,178 @@ def default_workflow_edges() -> list[dict[str, str]]:
     ]
 
 
+def workflow_template_summaries() -> list[dict[str, str]]:
+    return [
+        {"id": "software", "name": "Software development"},
+        {"id": "content", "name": "Content publishing"},
+        {"id": "data", "name": "Data processing"},
+    ]
+
+
+def _template_action(
+    step_id: str,
+    name: str,
+    prompt: str,
+    x: float,
+    *,
+    max_agents: int = 1,
+    workspace_access: str = "read_write",
+    contract: str = "",
+) -> dict[str, Any]:
+    return {
+        "id": step_id,
+        "name": name,
+        "type": "action",
+        "handler": "agent",
+        "agents": [],
+        "executor": {
+            "strategy": "round_robin" if max_agents > 1 else "single",
+            "max_agents": max_agents,
+            "rework_affinity": "same_executor",
+        },
+        "environment": {"type": "project_root"},
+        "enabled": True,
+        "removable": True,
+        "skippable": True,
+        "required": True,
+        "required_locked": False,
+        "workspace_access": workspace_access,
+        "inject_workflow_snapshot": False,
+        "contract": contract,
+        "prompt": prompt,
+        "ports": ["success", "rework"],
+        "default_port": "success",
+        "unrouted": "allowed",
+        "x": x,
+        "y": _DEFAULT_STEP_MID_Y,
+    }
+
+
+def _content_workflow_template() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    steps = [
+        _template_action(
+            "brief", "Brief",
+            "Clarify the audience, purpose, channel, constraints, facts to preserve, and acceptance criteria for the content.",
+            40,
+        ),
+        _template_action(
+            "draft", "Draft",
+            "Create the content from the approved brief. Keep claims sourced, match the intended channel, and return the draft as an artifact.",
+            340,
+            max_agents=3,
+        ),
+        _template_action(
+            "editorial_review", "Editorial Review",
+            "Review accuracy, structure, tone, accessibility, policy compliance, and channel fit. Request rework for material issues.",
+            640,
+            workspace_access="read_only",
+            contract="Review independently. Do not rewrite or publish the content; report actionable findings or approve it.",
+        ),
+        {
+            "id": "owner_approval",
+            "name": "Owner Approval",
+            "type": "approval",
+            "handler": "human",
+            "ports": ["approved", "changes_requested"],
+            "default_port": "approved",
+            "unrouted": "blocked",
+            "required": True,
+            "removable": True,
+            "skippable": False,
+            "prompt": "Approve the reviewed content or request specific changes.",
+            "x": 940,
+            "y": _DEFAULT_STEP_MID_Y,
+        },
+        _template_action(
+            "publish", "Publish",
+            "Publish or package the approved content for its target channel. Record the final location and publication evidence as artifacts.",
+            1240,
+            contract="Publish only the explicitly approved revision and preserve an auditable artifact reference.",
+        ),
+        {
+            "id": "complete", "name": "Complete", "type": "end", "handler": "end",
+            "ports": ["success"], "default_port": "success", "unrouted": "allowed",
+            "required": True, "removable": True, "skippable": False,
+            "x": 1540, "y": _DEFAULT_STEP_MID_Y,
+        },
+    ]
+    edges = [
+        {"from": "brief", "to": "draft"},
+        {"from": "draft", "to": "editorial_review"},
+        {"from": "editorial_review", "to": "owner_approval"},
+        {"from": "editorial_review", "to": "draft", "port": "rework", "rework": True, "max_iterations": 3},
+        {"from": "owner_approval", "to": "publish", "port": "approved"},
+        {"from": "owner_approval", "to": "draft", "port": "changes_requested", "rework": True, "max_iterations": 3},
+        {"from": "publish", "to": "complete"},
+    ]
+    return steps, edges
+
+
+def _data_workflow_template() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    steps = [
+        _template_action(
+            "source", "Source",
+            "Identify and inspect the input datasets, access constraints, expected grain, freshness, and required output contract.",
+            40,
+        ),
+        _template_action(
+            "transform", "Transform",
+            "Clean, normalize, join, and transform the source data reproducibly. Preserve lineage and record generated datasets as artifacts.",
+            340,
+            max_agents=3,
+        ),
+        _template_action(
+            "validate", "Validate",
+            "Validate schema, completeness, uniqueness, ranges, reconciliation totals, and representative samples. Request rework on any material failure.",
+            640,
+            workspace_access="read_only",
+            contract="Validate independently against the declared data contract. Do not alter source or transformed datasets to make checks pass.",
+        ),
+        _template_action(
+            "deliver", "Deliver",
+            "Package the validated output, documentation, lineage, and reproducible commands. Record every deliverable location as an artifact.",
+            940,
+        ),
+        {
+            "id": "complete", "name": "Complete", "type": "end", "handler": "end",
+            "ports": ["success"], "default_port": "success", "unrouted": "allowed",
+            "required": True, "removable": True, "skippable": False,
+            "x": 1240, "y": _DEFAULT_STEP_MID_Y,
+        },
+    ]
+    edges = [
+        {"from": "source", "to": "transform"},
+        {"from": "transform", "to": "validate"},
+        {"from": "validate", "to": "deliver"},
+        {"from": "validate", "to": "transform", "port": "rework", "rework": True, "max_iterations": 3},
+        {"from": "deliver", "to": "complete"},
+    ]
+    return steps, edges
+
+
+def workflow_template_definition(
+    template_id: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    template_id = str(template_id or "software").strip().lower()
+    if template_id == "software":
+        return default_workflow_steps(), default_workflow_edges()
+    if template_id == "content":
+        return _content_workflow_template()
+    if template_id == "data":
+        return _data_workflow_template()
+    raise InvalidInputError(f"unknown workflow template: {template_id}")
+
+
 # Legacy configs did not declare executor capabilities. Keep their historical
 # defaults while making the normalized/runtime schema capability-driven.
-_MULTI_AGENT_STEP_IDS = {"implement", "review", "test"}
-_LEGACY_NON_REMOVABLE_STEP_IDS = {"intake", "implement", "review"}
+_LEGACY_STEP_CAPABILITIES = {
+    "intake": {"required_locked": True, "removable": False, "skippable": False,
+               "inject_workflow_snapshot": True},
+    "implement": {"max_agents": 3, "removable": False, "skippable": True},
+    "review": {"max_agents": 3, "removable": False, "skippable": True,
+               "workspace_access": "read_only"},
+    "test": {"max_agents": 3, "skippable": True, "workspace_access": "read_only"},
+}
 
 
 def _port_slug(value: Any) -> str:
@@ -293,19 +484,30 @@ def _normalize_workflow_step(
     explicit_type = str(step.get("type", "") or "").strip().lower()
     legacy_approval = bool(step.get("approval", False))
     node_type = "approval" if legacy_approval else (explicit_type or "action")
-    if node_type not in {"action", "approval", "end"}:
+    if node_type not in {"action", "approval", "decision", "join", "foreach", "end"}:
         raise InvalidInputError(f"unsupported workflow node type: {node_type}")
     raw_handler = str(step.get("handler", "") or "").strip()
+    is_legacy_step = not any(
+        key in step
+        for key in (
+            "type", "handler", "executor", "environment", "enabled",
+            "removable", "skippable", "contract", "workspace_access",
+            "inject_workflow_snapshot",
+        )
+    )
+    legacy_capabilities = _LEGACY_STEP_CAPABILITIES.get(step_id, {}) if is_legacy_step else {}
     if legacy_approval and raw_handler in {"", "agent"}:
         raw_handler = "human"
     decompose = bool(step.get("decompose", False)) or raw_handler == "legacy.decompose"
     approval = node_type == "approval"
     integrate = bool(step.get("integrate", False))
     required_locked = (
-        step_id == "intake"
+        bool(step.get("required_locked", legacy_capabilities.get("required_locked", False)))
         or integrate
         or decompose
         or approval
+        or node_type == "join"
+        or node_type == "foreach"
         or node_type == "end"
     )
     required = True if required_locked else bool(step.get("required", False))
@@ -316,7 +518,7 @@ def _normalize_workflow_step(
     if "agents" in executor:
         agent_source["agents"] = executor.get("agents")
     _agents = _normalize_agents(agent_source)
-    default_max_agents = 3 if step_id in _MULTI_AGENT_STEP_IDS else 1
+    default_max_agents = int(legacy_capabilities.get("max_agents", 1))
     try:
         max_agents = int(executor.get("max_agents", default_max_agents) or 1)
     except (TypeError, ValueError):
@@ -346,12 +548,20 @@ def _normalize_workflow_step(
         environment.setdefault("scope", "workflow_item")
         environment.setdefault("cleanup", "on_terminal")
     isolate = environment_type == "git.worktree" and not integrate and not decompose and not approval
+    if node_type == "foreach" and environment_type == "git.worktree":
+        raise InvalidInputError(
+            "workflow foreach currently requires project_root environment; "
+            "item-scoped git worktrees are not supported"
+        )
 
     raw_ports = step.get("ports")
     if raw_ports is None:
         ports = (
             ["approved", "changes_requested", "cancelled"]
             if node_type == "approval" and not legacy_approval
+            else ["matched", "default"] if node_type == "decision"
+            else ["success"] if node_type == "join"
+            else ["success"] if node_type == "foreach"
             else ["success"] if node_type == "end"
             else ["success", "rework"]
         )
@@ -368,6 +578,8 @@ def _normalize_workflow_step(
     implicit_default_port = (
         "approved" if node_type == "approval" and not legacy_approval else "success"
     )
+    if node_type == "decision":
+        implicit_default_port = "default"
     default_port = _port_slug(step.get("default_port", implicit_default_port)) or implicit_default_port
     if default_port not in ports:
         raise InvalidInputError("workflow step default_port must be declared in ports")
@@ -382,6 +594,9 @@ def _normalize_workflow_step(
     handler = raw_handler or (
         "legacy.decompose" if decompose
         else "human" if node_type == "approval"
+        else "decision" if node_type == "decision"
+        else "join" if node_type == "join"
+        else "foreach" if node_type == "foreach"
         else "end" if node_type == "end"
         else "agent"
     )
@@ -389,6 +604,8 @@ def _normalize_workflow_step(
         handler_spec = get_node_handler({"type": node_type, "handler": handler})
     except ValueError as exc:
         raise InvalidInputError(str(exc)) from exc
+    max_agents = min(max_agents, handler_spec.max_agents)
+    _agents = _agents[:max_agents]
     if not handler_spec.requires_agent:
         _agents = []
         commands = {}
@@ -397,7 +614,116 @@ def _normalize_workflow_step(
     contract = step.get("contract", ENGINE_STEP_CONTRACTS.get(step_id, ""))
     if not isinstance(contract, str):
         raise InvalidInputError("workflow step contract must be a string")
-    removable = bool(step.get("removable", step_id not in _LEGACY_NON_REMOVABLE_STEP_IDS))
+    removable = bool(step.get("removable", legacy_capabilities.get("removable", True)))
+    workspace_access = str(
+        step.get("workspace_access", legacy_capabilities.get("workspace_access", "read_write"))
+        or "read_write"
+    ).strip().lower()
+    if workspace_access not in {"read_write", "read_only"}:
+        raise InvalidInputError("workflow step workspace_access must be 'read_write' or 'read_only'")
+    input_schema = step.get("input_schema") or {}
+    output_schema = step.get("output_schema") or {}
+    for field_name, schema in (("input_schema", input_schema), ("output_schema", output_schema)):
+        if not isinstance(schema, dict):
+            raise InvalidInputError(f"workflow step {field_name} must be an object")
+        if schema and schema.get("type", "object") != "object":
+            raise InvalidInputError(f"workflow step {field_name} root type must be 'object'")
+        try:
+            json.dumps(schema)
+        except (TypeError, ValueError):
+            raise InvalidInputError(f"workflow step {field_name} must be JSON-serializable") from None
+    raw_retry = step.get("retry") or {}
+    if not isinstance(raw_retry, dict):
+        raise InvalidInputError("workflow step retry must be an object")
+    try:
+        normalization_retries = int(raw_retry.get("normalization", 0) or 0)
+    except (TypeError, ValueError):
+        raise InvalidInputError("workflow step retry.normalization must be an integer") from None
+    if normalization_retries < 0 or normalization_retries > 5:
+        raise InvalidInputError("workflow step retry.normalization must be between 0 and 5")
+    raw_rules = step.get("rules") or []
+    if not isinstance(raw_rules, list):
+        raise InvalidInputError("workflow decision rules must be a list")
+    rules: list[dict[str, Any]] = []
+    if node_type == "decision":
+        for rule_index, rule in enumerate(raw_rules):
+            if not isinstance(rule, dict) or "when" not in rule:
+                raise InvalidInputError(
+                    f"workflow decision rule {rule_index} must contain 'when'"
+                )
+            rule_port = _port_slug(rule.get("port"))
+            if rule_port not in ports:
+                raise InvalidInputError(
+                    f"workflow decision rule {rule_index} port must be declared by the node"
+                )
+            errors = validate_jsonlogic(rule["when"], f"rules[{rule_index}].when")
+            if errors:
+                raise InvalidInputError("; ".join(errors))
+            rules.append({"when": deepcopy(rule["when"]), "port": rule_port})
+    elif raw_rules:
+        raise InvalidInputError("workflow rules are only valid on decision nodes")
+    join_policy = str(
+        step.get("join_policy", "all_activated") or "all_activated"
+    ).strip()
+    if join_policy == "all":
+        join_policy = "all_activated"
+    aggregation = str(step.get("aggregation", "list") or "list").strip()
+    if node_type == "join":
+        if join_policy not in {"all_activated", "any"}:
+            raise InvalidInputError(
+                "workflow join_policy must be 'all_activated' or 'any'"
+            )
+        if aggregation not in {"list", "object_by_source", "first"}:
+            raise InvalidInputError(
+                "workflow join aggregation must be list, object_by_source, or first"
+            )
+    items_path = str(step.get("items", "$.input.items") or "").strip()
+    item_key_path = str(step.get("item_key", "") or "").strip()
+    item_depends_on_path = str(
+        step.get("item_depends_on", "$.depends_on") or ""
+    ).strip()
+    try:
+        foreach_concurrency = int(step.get("max_concurrency", 1) or 1)
+    except (TypeError, ValueError):
+        raise InvalidInputError("workflow foreach max_concurrency must be an integer") from None
+    item_output_schema = step.get("item_output_schema") or {}
+    if node_type == "foreach":
+        if not items_path.startswith("$"):
+            raise InvalidInputError("workflow foreach items must be a '$'-rooted path")
+        for field_name, path in (
+            ("items", items_path),
+            ("item_key", item_key_path),
+            ("item_depends_on", item_depends_on_path),
+        ):
+            if path and not path.startswith("$"):
+                raise InvalidInputError(
+                    f"workflow foreach {field_name} must be a '$'-rooted path"
+                )
+            if path:
+                try:
+                    resolve_path({}, path)
+                except KeyError:
+                    pass
+                except ValueError as exc:
+                    raise InvalidInputError(
+                        f"workflow foreach {field_name} path is invalid: {exc}"
+                    ) from None
+        if foreach_concurrency < 1 or foreach_concurrency > 100:
+            raise InvalidInputError(
+                "workflow foreach max_concurrency must be between 1 and 100"
+            )
+        if not isinstance(item_output_schema, dict):
+            raise InvalidInputError("workflow foreach item_output_schema must be an object")
+        if item_output_schema and item_output_schema.get("type", "object") != "object":
+            raise InvalidInputError(
+                "workflow foreach item_output_schema root type must be 'object'"
+            )
+        try:
+            json.dumps(item_output_schema)
+        except (TypeError, ValueError):
+            raise InvalidInputError(
+                "workflow foreach item_output_schema must be JSON-serializable"
+            ) from None
 
     normalized_step = {
         "id": step_id,
@@ -406,7 +732,7 @@ def _normalize_workflow_step(
         "handler": handler,
         "enabled": bool(step.get("enabled", True)),
         "removable": removable,
-        "skippable": bool(step.get("skippable", not required)),
+        "skippable": bool(step.get("skippable", legacy_capabilities.get("skippable", not required))),
         "required": required,
         "required_locked": required_locked,
         "timeout_minutes": timeout_minutes,
@@ -449,6 +775,24 @@ def _normalize_workflow_step(
         "environment": environment,
         "exclusive": str(step.get("exclusive", "project_root" if integrate else "") or "").strip(),
         "contract": contract.strip(),
+        "workspace_access": workspace_access,
+        "inject_workflow_snapshot": bool(
+            step.get(
+                "inject_workflow_snapshot",
+                legacy_capabilities.get("inject_workflow_snapshot", False),
+            )
+        ),
+        "input_schema": deepcopy(input_schema),
+        "output_schema": deepcopy(output_schema),
+        "retry": {"normalization": normalization_retries},
+        "rules": rules,
+        "join_policy": join_policy if node_type == "join" else "",
+        "aggregation": aggregation if node_type == "join" else "",
+        "items": items_path if node_type == "foreach" else "",
+        "item_key": item_key_path if node_type == "foreach" else "",
+        "item_depends_on": item_depends_on_path if node_type == "foreach" else "",
+        "item_output_schema": deepcopy(item_output_schema) if node_type == "foreach" else {},
+        "max_concurrency": foreach_concurrency if node_type == "foreach" else 1,
         "ports": ports,
         "default_port": default_port,
         "unrouted": unrouted,
@@ -505,6 +849,40 @@ def _normalize_workflow_edges(
             if max_iterations < 1:
                 raise InvalidInputError("workflow edge max_iterations must be >= 1")
             norm_edge["max_iterations"] = max_iterations
+        if "mapping" in edge:
+            mapping = edge.get("mapping")
+            if not isinstance(mapping, dict):
+                raise InvalidInputError("workflow edge mapping must be an object")
+            for target, rule in mapping.items():
+                if not str(target).strip():
+                    raise InvalidInputError("workflow edge mapping target must not be empty")
+                if isinstance(rule, str):
+                    source = rule
+                elif isinstance(rule, dict):
+                    source = str(rule.get("from") or "")
+                else:
+                    raise InvalidInputError(
+                        "workflow edge mapping values must be path strings or objects"
+                    )
+                if source != "$" and not source.startswith("$."):
+                    raise InvalidInputError("workflow edge mapping source must start with '$.'")
+            norm_edge["mapping"] = deepcopy(mapping)
+        if "condition" in edge:
+            condition = edge.get("condition")
+            errors = validate_jsonlogic(condition, "workflow edge condition")
+            if errors:
+                raise InvalidInputError("; ".join(errors))
+            norm_edge["condition"] = deepcopy(condition)
+        if "priority" in edge:
+            if "condition" not in edge:
+                raise InvalidInputError(
+                    "workflow edge priority requires a condition"
+                )
+            try:
+                priority = int(edge.get("priority"))
+            except (TypeError, ValueError):
+                raise InvalidInputError("workflow edge priority must be an integer") from None
+            norm_edge["priority"] = priority
         if edge.get("rework") or port == "rework":
             # Explicit loop-back marker: lets a rework target sit off the
             # forward path (see _workflow_graph).
@@ -629,6 +1007,9 @@ def read_workflow_config(project_root: str | None = None) -> dict[str, Any]:
             ),
             "path": str(path),
             "warnings": [],
+            "schema": workflow_node_schema(),
+            "templates": workflow_template_summaries(),
+            "expression_language": deepcopy(WORKFLOW_EXPRESSION_LANGUAGE),
         }
         with _CONFIG_CACHE_LOCK:
             _CONFIG_CACHE[cache_key] = (stamp, result)
@@ -638,6 +1019,12 @@ def read_workflow_config(project_root: str | None = None) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError) as exc:
         raise InvalidInputError(f"invalid workflow config: {exc}") from exc
     steps = data.get("steps", []) if isinstance(data, dict) else []
+    expression_language = data.get("expression_language") if isinstance(data, dict) else None
+    if expression_language is not None and expression_language != WORKFLOW_EXPRESSION_LANGUAGE:
+        raise InvalidInputError(
+            "unsupported workflow expression_language; expected "
+            "jsonlogic v1 profile orbit-safe-v1"
+        )
     if not isinstance(steps, list):
         raise InvalidInputError("workflow steps must be a list")
     statuses = default_workflow_statuses()
@@ -666,6 +1053,9 @@ def read_workflow_config(project_root: str | None = None) -> dict[str, Any]:
         "edges": edges,
         "path": str(path),
         "warnings": _workflow_graph_warnings(normalized, edges),
+        "schema": workflow_node_schema(),
+        "templates": workflow_template_summaries(),
+        "expression_language": deepcopy(WORKFLOW_EXPRESSION_LANGUAGE),
     }
     with _CONFIG_CACHE_LOCK:
         _CONFIG_CACHE[cache_key] = (stamp, result)
@@ -740,13 +1130,12 @@ def write_workflow_config(
     if project_root_path not in (resolved_path, *resolved_path.parents):
         raise InvalidInputError("workflow config path escapes project root")
     path.parent.mkdir(parents=True, exist_ok=True)
-    # required_locked is derived from engine step flags on every read; keep it out of
-    # the persisted file so hand-edits can't desync it.
-    persisted = [
-        {k: v for k, v in step.items() if k != "required_locked"}
-        for step in normalized
-    ]
-    data = {"steps": persisted, "edges": normalized_edges}
+    persisted = normalized
+    data = {
+        "steps": persisted,
+        "edges": normalized_edges,
+        "expression_language": deepcopy(WORKFLOW_EXPRESSION_LANGUAGE),
+    }
     path.write_text(
         json.dumps(data, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
@@ -757,6 +1146,9 @@ def write_workflow_config(
         "edges": normalized_edges,
         "path": str(path),
         "warnings": _workflow_graph_warnings(normalized, normalized_edges),
+        "schema": workflow_node_schema(),
+        "templates": workflow_template_summaries(),
+        "expression_language": deepcopy(WORKFLOW_EXPRESSION_LANGUAGE),
     }
     with _CONFIG_CACHE_LOCK:
         _CONFIG_CACHE[str(path.resolve())] = (_config_stamp(path), result)

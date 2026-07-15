@@ -135,6 +135,49 @@ class PackagingTests(unittest.TestCase):
             status_body = json.loads(status_response.body)
             self.assertEqual({}, status_body["background_errors"])
 
+    def test_workflow_template_api_applies_selected_template(self):
+        import asyncio
+        import json
+
+        import orbit.server as server
+        from starlette.requests import Request
+
+        with TemporaryDirectory() as tmp:
+            app = server.create_server(
+                db_path=str(Path(tmp) / "orbit.db"),
+                project={"project_root": tmp},
+                run_worker=False,
+            )
+            endpoint = next(
+                route.endpoint
+                for route in app.routes
+                if route.path == "/api/workflow/reset"
+            )
+            payload = json.dumps({"template": "content"}).encode()
+            delivered = False
+
+            async def receive():
+                nonlocal delivered
+                if delivered:
+                    return {"type": "http.disconnect"}
+                delivered = True
+                return {"type": "http.request", "body": payload, "more_body": False}
+
+            request = Request(
+                {
+                    "type": "http", "method": "POST", "path": "/api/workflow/reset",
+                    "headers": [(b"host", b"127.0.0.1"), (b"content-type", b"application/json")],
+                    "client": ("127.0.0.1", 12345), "scheme": "http",
+                    "server": ("127.0.0.1", 8848),
+                },
+                receive,
+            )
+            response = asyncio.run(endpoint(request))
+            body = json.loads(response.body)
+            self.assertEqual(200, response.status_code)
+            self.assertEqual("content", body["template"])
+            self.assertIn("owner_approval", {step["id"] for step in body["steps"]})
+
     def test_ui_asset_is_present_and_loadable(self):
         html = (
             resources.files("orbit")
@@ -156,9 +199,20 @@ class PackagingTests(unittest.TestCase):
         self.assertIn('id="addStepPorts"', html)
         self.assertIn('id="addStepDefaultPort"', html)
         self.assertIn('id="addStepUnrouted"', html)
+        self.assertIn('id="addStepForeachFields"', html)
+        self.assertIn('id="addStepForeachItems"', html)
+        self.assertIn('id="addStepForeachConcurrency"', html)
         self.assertIn('id="addStepType"', html)
         self.assertIn('id="addStepHandler"', html)
         self.assertIn('id="addStepCommand"', html)
+        self.assertIn('id="addStepInputSchema"', html)
+        self.assertIn('id="addStepOutputSchema"', html)
+        self.assertIn('id="addStepNormalizationRetries"', html)
+        self.assertIn("wf.edgeMappingPrompt", html)
+        self.assertIn('id="workflowTemplate"', html)
+        self.assertIn("body: JSON.stringify({ template })", html)
+        self.assertIn("function workflowAuthoringSchema()", html)
+        self.assertIn("schema: data.schema ||", html)
         self.assertIn('"wf.edgePortPrompt"', html)
         self.assertNotIn("const MULTI_AGENT_STEPS", html)
         self.assertIn('id="taskDetails"', html)

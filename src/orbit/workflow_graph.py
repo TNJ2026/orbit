@@ -300,15 +300,27 @@ def join_ready(
     # A rework target feeds back into a shared step but is not a parallel branch
     # of it, so it must not gate the join.
     rework_targets = {e["to"] for e in cfg["edges"] if e.get("rework")}
-    required_preds = [
-        e["from"] for e in cfg["edges"]
+    predecessor_edges = [
+        e for e in cfg["edges"]
         if e["to"] == target
         and (e["from"], e["to"]) not in back
-        and steps[e["from"]]["required"]
         and e["from"] not in rework_targets
     ]
+    required_preds = [
+        edge["from"] for edge in predecessor_edges
+        if steps[edge["from"]]["required"]
+    ]
+    if steps[target].get("type") == "join":
+        required_preds = [edge["from"] for edge in predecessor_edges]
     arrived = {
         t["from_step"] for t in transitions
-        if t["to_step"] == target and t["outcome"] in ("done", "skipped")
+        if t["to_step"] == target
+        and t["outcome"] in ("done", "skipped", "not_selected", "cancelled")
     }
+    if steps[target].get("join_policy") == "any":
+        successful = {
+            t["from_step"] for t in transitions
+            if t["to_step"] == target and t["outcome"] in ("done", "skipped")
+        }
+        return any(pred in successful for pred in required_preds)
     return all(pred in arrived for pred in required_preds)

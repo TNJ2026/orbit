@@ -105,6 +105,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     exclusive_workspace INTEGER NOT NULL DEFAULT 1,
     step_inputs       TEXT NOT NULL DEFAULT '{}',
     result_summary    TEXT NOT NULL DEFAULT '',
+    step_output       TEXT NOT NULL DEFAULT '{}',
     artifacts         TEXT NOT NULL DEFAULT '[]',
     created_at        TEXT NOT NULL,
     updated_at        TEXT NOT NULL
@@ -153,6 +154,78 @@ CREATE TABLE IF NOT EXISTS workflow_actions (
     completed_at TEXT,
     FOREIGN KEY(task_id) REFERENCES tasks(id)
 );
+CREATE TABLE IF NOT EXISTS workflow_node_results (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id    INTEGER NOT NULL,
+    step       TEXT NOT NULL,
+    port       TEXT NOT NULL DEFAULT '',
+    output     TEXT NOT NULL DEFAULT '{}',
+    summary    TEXT NOT NULL DEFAULT '',
+    artifacts  TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(task_id) REFERENCES tasks(id)
+);
+CREATE TABLE IF NOT EXISTS workflow_correlations (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id           INTEGER NOT NULL,
+    parent_correlation_id INTEGER,
+    source_step       TEXT NOT NULL,
+    join_step         TEXT NOT NULL,
+    activation        INTEGER NOT NULL,
+    policy            TEXT NOT NULL DEFAULT 'all_activated',
+    status            TEXT NOT NULL DEFAULT 'open',
+    transition_cursor INTEGER NOT NULL DEFAULT 0,
+    created_at        TEXT NOT NULL,
+    updated_at        TEXT NOT NULL,
+    consumed_at       TEXT,
+    FOREIGN KEY(task_id) REFERENCES tasks(id),
+    FOREIGN KEY(parent_correlation_id) REFERENCES workflow_correlations(id),
+    UNIQUE(task_id, join_step, activation)
+);
+CREATE TABLE IF NOT EXISTS workflow_correlation_branches (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    correlation_id   INTEGER NOT NULL,
+    predecessor_step TEXT NOT NULL,
+    branch_root      TEXT NOT NULL DEFAULT '',
+    state            TEXT NOT NULL DEFAULT 'selected',
+    updated_at       TEXT NOT NULL,
+    FOREIGN KEY(correlation_id) REFERENCES workflow_correlations(id),
+    UNIQUE(correlation_id, predecessor_step)
+);
+CREATE TABLE IF NOT EXISTS workflow_item_groups (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id         INTEGER NOT NULL,
+    foreach_step    TEXT NOT NULL,
+    activation      INTEGER NOT NULL,
+    parent_scope_id INTEGER,
+    max_concurrency INTEGER NOT NULL DEFAULT 1,
+    status          TEXT NOT NULL DEFAULT 'active',
+    transition_cursor INTEGER NOT NULL DEFAULT 0,
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    completed_at    TEXT,
+    advanced_at     TEXT,
+    FOREIGN KEY(task_id) REFERENCES tasks(id),
+    FOREIGN KEY(parent_scope_id) REFERENCES workflow_item_scopes(id),
+    UNIQUE(task_id, foreach_step, activation, parent_scope_id)
+);
+CREATE TABLE IF NOT EXISTS workflow_item_scopes (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id     INTEGER NOT NULL,
+    item_index   INTEGER NOT NULL,
+    scope_key    TEXT NOT NULL,
+    item_value   TEXT NOT NULL DEFAULT '{}',
+    depends_on   TEXT NOT NULL DEFAULT '[]',
+    status       TEXT NOT NULL DEFAULT 'pending',
+    output       TEXT NOT NULL DEFAULT '{}',
+    error        TEXT NOT NULL DEFAULT '',
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL,
+    completed_at TEXT,
+    FOREIGN KEY(group_id) REFERENCES workflow_item_groups(id),
+    UNIQUE(group_id, item_index),
+    UNIQUE(group_id, scope_key)
+);
 CREATE TABLE IF NOT EXISTS run_jobs (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     task_id         INTEGER NOT NULL,
@@ -160,6 +233,7 @@ CREATE TABLE IF NOT EXISTS run_jobs (
     assignee        TEXT NOT NULL DEFAULT '',
     command         TEXT NOT NULL DEFAULT '',
     upstream_result TEXT NOT NULL DEFAULT '',
+    item_scope_id   INTEGER,
     status          TEXT NOT NULL DEFAULT 'pending',
     claimed_by      TEXT NOT NULL DEFAULT '',
     leased_until    TEXT,
@@ -170,7 +244,8 @@ CREATE TABLE IF NOT EXISTS run_jobs (
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL,
     completed_at    TEXT,
-    FOREIGN KEY(task_id) REFERENCES tasks(id)
+    FOREIGN KEY(task_id) REFERENCES tasks(id),
+    FOREIGN KEY(item_scope_id) REFERENCES workflow_item_scopes(id)
 );
 """
 
@@ -201,6 +276,18 @@ CREATE INDEX IF NOT EXISTS idx_task_transitions_step_outcome
     ON task_transitions (to_step, outcome);
 CREATE INDEX IF NOT EXISTS idx_workflow_actions_pending
     ON workflow_actions (status, task_id, id);
+CREATE INDEX IF NOT EXISTS idx_workflow_node_results_task_step
+    ON workflow_node_results (task_id, step, id);
+CREATE INDEX IF NOT EXISTS idx_workflow_correlations_open
+    ON workflow_correlations (task_id, join_step, status, id);
+CREATE INDEX IF NOT EXISTS idx_workflow_item_groups_task_step
+    ON workflow_item_groups (task_id, foreach_step, activation);
+CREATE INDEX IF NOT EXISTS idx_workflow_item_scopes_group_status
+    ON workflow_item_scopes (group_id, status, item_index);
+CREATE INDEX IF NOT EXISTS idx_run_jobs_item_scope
+    ON run_jobs (item_scope_id, status, id);
+CREATE INDEX IF NOT EXISTS idx_workflow_correlation_branches_group
+    ON workflow_correlation_branches (correlation_id, predecessor_step);
 CREATE INDEX IF NOT EXISTS idx_run_jobs_available
     ON run_jobs (status, leased_until, id);
 CREATE INDEX IF NOT EXISTS idx_run_jobs_task
@@ -484,6 +571,7 @@ class Store:
             # Structured data for one materialized workflow-step execution.
             "step_inputs": "TEXT NOT NULL DEFAULT '{}'",
             "result_summary": "TEXT NOT NULL DEFAULT ''",
+            "step_output": "TEXT NOT NULL DEFAULT '{}'",
             "artifacts": "TEXT NOT NULL DEFAULT '[]'",
         }
         for column, definition in task_defaults.items():
@@ -566,6 +654,32 @@ class Store:
         if job_columns and "applied_by" not in job_columns:
             self._conn.execute(
                 "ALTER TABLE run_jobs ADD COLUMN applied_by TEXT NOT NULL DEFAULT ''"
+            )
+        if job_columns and "item_scope_id" not in job_columns:
+            self._conn.execute("ALTER TABLE run_jobs ADD COLUMN item_scope_id INTEGER")
+        correlation_columns = {
+            row["name"]
+            for row in self._conn.execute(
+                "PRAGMA table_info(workflow_correlations)"
+            ).fetchall()
+        }
+        if correlation_columns and "parent_correlation_id" not in correlation_columns:
+            self._conn.execute(
+                "ALTER TABLE workflow_correlations ADD COLUMN parent_correlation_id INTEGER"
+            )
+        item_group_columns = {
+            row["name"]
+            for row in self._conn.execute(
+                "PRAGMA table_info(workflow_item_groups)"
+            ).fetchall()
+        }
+        if item_group_columns and "transition_cursor" not in item_group_columns:
+            self._conn.execute(
+                "ALTER TABLE workflow_item_groups ADD COLUMN transition_cursor INTEGER NOT NULL DEFAULT 0"
+            )
+        if item_group_columns and "advanced_at" not in item_group_columns:
+            self._conn.execute(
+                "ALTER TABLE workflow_item_groups ADD COLUMN advanced_at TEXT"
             )
         self._backfill_tasks_from_messages()
 
@@ -837,7 +951,7 @@ class Store:
                            importance, size, risk,
                            required_capabilities, exclusive_workspace,
                            workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify, depends_on,
-                           step_inputs, result_summary, artifacts
+                           step_inputs, result_summary, step_output, artifacts
                     FROM tasks
                     {where}
                     ORDER BY id DESC
@@ -854,7 +968,7 @@ class Store:
                           created_at, updated_at, importance, size,
                           risk, required_capabilities, exclusive_workspace,
                           workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify, depends_on,
-                          step_inputs, result_summary, artifacts
+                          step_inputs, result_summary, step_output, artifacts
                    FROM tasks
                    WHERE id = ?""",
                 (task_id,),
@@ -869,7 +983,7 @@ class Store:
                           created_at, updated_at, importance, size,
                           risk, required_capabilities, exclusive_workspace,
                           workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify, depends_on,
-                          step_inputs, result_summary, artifacts
+                          step_inputs, result_summary, step_output, artifacts
                    FROM tasks
                    WHERE source_message_id = ?""",
                 (message_id,),
@@ -884,7 +998,7 @@ class Store:
                           created_at, updated_at, importance, size,
                           risk, required_capabilities, exclusive_workspace,
                           workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify, depends_on,
-                          step_inputs, result_summary, artifacts
+                          step_inputs, result_summary, step_output, artifacts
                    FROM tasks
                    WHERE parent_task_id = ?
                    ORDER BY id DESC""",
@@ -901,7 +1015,7 @@ class Store:
                           created_at, updated_at, importance, size,
                           risk, required_capabilities, exclusive_workspace,
                           workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify, depends_on,
-                          step_inputs, result_summary, artifacts
+                          step_inputs, result_summary, step_output, artifacts
                    FROM tasks
                    WHERE is_goal = 1
                       OR parent_task_id IN (SELECT id FROM tasks WHERE is_goal = 1)
@@ -918,7 +1032,7 @@ class Store:
                           created_at, updated_at, importance, size,
                           risk, required_capabilities, exclusive_workspace,
                           workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify, depends_on,
-                          step_inputs, result_summary, artifacts
+                          step_inputs, result_summary, step_output, artifacts
                    FROM tasks
                    WHERE workflow_step != ''
                      AND status NOT IN ('blocked', 'closed')
@@ -938,7 +1052,7 @@ class Store:
                           created_at, updated_at, importance, size,
                           risk, required_capabilities, exclusive_workspace,
                           workflow_step, parent_task_id, is_goal, display_id, token_budget, goal_verify, depends_on,
-                          step_inputs, result_summary, artifacts
+                          step_inputs, result_summary, step_output, artifacts
                    FROM tasks
                    WHERE status != 'closed'
                      AND NOT (status = 'accepted' AND is_goal = 1)
@@ -1091,6 +1205,7 @@ class Store:
         *,
         step_inputs: dict[str, Any] | None = None,
         result_summary: str | None = None,
+        step_output: dict[str, Any] | None = None,
         artifacts: list[str] | None = None,
     ) -> dict[str, Any] | None:
         """Persist structured workflow-step data on a step card (or, for a
@@ -1105,6 +1220,11 @@ class Store:
         if result_summary is not None:
             updates.append("result_summary = ?")
             params.append(str(result_summary).strip()[:20000])
+        if step_output is not None:
+            if not isinstance(step_output, dict):
+                raise InvalidInputError("step_output must be an object")
+            updates.append("step_output = ?")
+            params.append(_encode_step_inputs(step_output))
         if artifacts is not None:
             if not isinstance(artifacts, list):
                 raise InvalidInputError("artifacts must be a list")
@@ -1120,6 +1240,540 @@ class Store:
             )
             self._conn.commit()
         return self.get_task(task_id) if cur.rowcount else None
+
+    def record_workflow_node_result(
+        self,
+        task_id: int,
+        step: str,
+        *,
+        port: str = "",
+        output: dict[str, Any] | None = None,
+        summary: str = "",
+        artifacts: list[Any] | None = None,
+    ) -> dict[str, Any]:
+        if not isinstance(output or {}, dict):
+            raise InvalidInputError("workflow node output must be an object")
+        now = _now()
+        with self._lock:
+            cur = self._conn.execute(
+                """INSERT INTO workflow_node_results
+                   (task_id, step, port, output, summary, artifacts, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    task_id,
+                    str(step),
+                    str(port),
+                    _encode_step_inputs(output or {}),
+                    str(summary).strip()[:20000],
+                    json.dumps(artifacts or [], ensure_ascii=False),
+                    now,
+                ),
+            )
+            self._conn.commit()
+            row = self._conn.execute(
+                "SELECT * FROM workflow_node_results WHERE id = ?", (cur.lastrowid,)
+            ).fetchone()
+        return self._workflow_node_result_row(row)
+
+    def list_workflow_node_results(
+        self, task_id: int, step: str = ""
+    ) -> list[dict[str, Any]]:
+        where = "task_id = ?" + (" AND step = ?" if step else "")
+        params: list[Any] = [task_id] + ([step] if step else [])
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT * FROM workflow_node_results WHERE {where} ORDER BY id",
+                params,
+            ).fetchall()
+        return [self._workflow_node_result_row(row) for row in rows]
+
+    def ensure_workflow_correlation(
+        self,
+        task_id: int,
+        source_step: str,
+        join_step: str,
+        policy: str,
+        branches: list[dict[str, str]],
+        parent_correlation_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Create or extend the current open join activation atomically."""
+        now = _now()
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT * FROM workflow_correlations
+                   WHERE task_id = ? AND join_step = ? AND status = 'open'
+                   ORDER BY id DESC LIMIT 1""",
+                (task_id, join_step),
+            ).fetchone()
+            if row is None:
+                activation_row = self._conn.execute(
+                    """SELECT COALESCE(MAX(activation), 0) AS activation
+                       FROM workflow_correlations
+                       WHERE task_id = ? AND join_step = ?""",
+                    (task_id, join_step),
+                ).fetchone()
+                cursor_row = self._conn.execute(
+                    "SELECT COALESCE(MAX(id), 0) AS cursor FROM task_transitions WHERE task_id = ?",
+                    (task_id,),
+                ).fetchone()
+                activation = int(activation_row["activation"] or 0) + 1
+                cur = self._conn.execute(
+                    """INSERT INTO workflow_correlations
+                       (task_id, parent_correlation_id, source_step, join_step,
+                        activation, policy, status,
+                        transition_cursor, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)""",
+                    (
+                        task_id, parent_correlation_id, source_step, join_step,
+                        activation, policy,
+                        int(cursor_row["cursor"] or 0), now, now,
+                    ),
+                )
+                correlation_id = int(cur.lastrowid)
+            else:
+                correlation_id = int(row["id"])
+                if parent_correlation_id is not None:
+                    self._conn.execute(
+                        """UPDATE workflow_correlations
+                           SET parent_correlation_id = COALESCE(parent_correlation_id, ?)
+                           WHERE id = ?""",
+                        (parent_correlation_id, correlation_id),
+                    )
+            for branch in branches:
+                predecessor = str(branch.get("predecessor_step") or "")
+                if not predecessor:
+                    continue
+                existing = self._conn.execute(
+                    """SELECT state FROM workflow_correlation_branches
+                       WHERE correlation_id = ? AND predecessor_step = ?""",
+                    (correlation_id, predecessor),
+                ).fetchone()
+                new_state = str(branch.get("state") or "selected")
+                if existing is not None and existing["state"] == "arrived":
+                    new_state = "arrived"
+                self._conn.execute(
+                    """INSERT INTO workflow_correlation_branches
+                       (correlation_id, predecessor_step, branch_root, state, updated_at)
+                       VALUES (?, ?, ?, ?, ?)
+                       ON CONFLICT(correlation_id, predecessor_step) DO UPDATE SET
+                         branch_root = excluded.branch_root,
+                         state = excluded.state,
+                         updated_at = excluded.updated_at""",
+                    (
+                        correlation_id, predecessor,
+                        str(branch.get("branch_root") or ""), new_state, now,
+                    ),
+                )
+            self._conn.execute(
+                "UPDATE workflow_correlations SET updated_at = ? WHERE id = ?",
+                (now, correlation_id),
+            )
+            self._conn.commit()
+            return self._workflow_correlation_locked(correlation_id)
+
+    def sync_workflow_correlation(
+        self, task_id: int, join_step: str
+    ) -> dict[str, Any] | None:
+        """Project post-creation transition arrivals into the open activation."""
+        now = _now()
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT * FROM workflow_correlations
+                   WHERE task_id = ? AND join_step = ? AND status = 'open'
+                   ORDER BY id DESC LIMIT 1""",
+                (task_id, join_step),
+            ).fetchone()
+            if row is None:
+                return None
+            state_by_outcome = {
+                "done": "arrived", "skipped": "arrived",
+                "not_selected": "not_selected", "cancelled": "cancelled",
+                "blocked": "blocked",
+            }
+            transitions = self._conn.execute(
+                """SELECT from_step, outcome FROM task_transitions
+                   WHERE task_id = ? AND to_step = ? AND id > ?
+                   ORDER BY id""",
+                (task_id, join_step, int(row["transition_cursor"] or 0)),
+            ).fetchall()
+            for transition in transitions:
+                state = state_by_outcome.get(str(transition["outcome"]))
+                if not state:
+                    continue
+                self._conn.execute(
+                    """UPDATE workflow_correlation_branches
+                       SET state = ?, updated_at = ?
+                       WHERE correlation_id = ? AND predecessor_step = ?""",
+                    (state, now, int(row["id"]), str(transition["from_step"])),
+                )
+            self._conn.execute(
+                "UPDATE workflow_correlations SET updated_at = ? WHERE id = ?",
+                (now, int(row["id"])),
+            )
+            self._conn.commit()
+            return self._workflow_correlation_locked(int(row["id"]))
+
+    def consume_workflow_correlation(self, correlation_id: int) -> bool:
+        now = _now()
+        with self._lock:
+            cur = self._conn.execute(
+                """UPDATE workflow_correlations
+                   SET status = 'consumed', consumed_at = ?, updated_at = ?
+                   WHERE id = ? AND status = 'open'""",
+                (now, now, correlation_id),
+            )
+            self._conn.commit()
+        return cur.rowcount == 1
+
+    def list_workflow_correlations(
+        self, task_id: int, join_step: str = ""
+    ) -> list[dict[str, Any]]:
+        where = "task_id = ?" + (" AND join_step = ?" if join_step else "")
+        params: list[Any] = [task_id] + ([join_step] if join_step else [])
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT id FROM workflow_correlations WHERE {where} ORDER BY id",
+                params,
+            ).fetchall()
+            return [self._workflow_correlation_locked(int(row["id"])) for row in rows]
+
+    def _workflow_correlation_locked(self, correlation_id: int) -> dict[str, Any]:
+        row = self._conn.execute(
+            "SELECT * FROM workflow_correlations WHERE id = ?", (correlation_id,)
+        ).fetchone()
+        result = dict(row)
+        branches = self._conn.execute(
+            """SELECT predecessor_step, branch_root, state, updated_at
+               FROM workflow_correlation_branches
+               WHERE correlation_id = ? ORDER BY id""",
+            (correlation_id,),
+        ).fetchall()
+        result["branches"] = [dict(branch) for branch in branches]
+        return result
+
+    def create_workflow_item_group(
+        self,
+        task_id: int,
+        foreach_step: str,
+        items: list[dict[str, Any]],
+        max_concurrency: int = 1,
+        parent_scope_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Persist one foreach activation and its dependency-isolated scopes."""
+        if not isinstance(items, list):
+            raise InvalidInputError("workflow foreach items must be a list")
+        try:
+            concurrency = int(max_concurrency)
+        except (TypeError, ValueError):
+            raise InvalidInputError("workflow foreach max_concurrency must be an integer") from None
+        if concurrency < 1:
+            raise InvalidInputError("workflow foreach max_concurrency must be >= 1")
+
+        normalized: list[dict[str, Any]] = []
+        keys: set[str] = set()
+        for index, raw in enumerate(items):
+            if not isinstance(raw, dict):
+                raise InvalidInputError("workflow foreach scope must be an object")
+            key = str(raw.get("key", index)).strip()
+            if not key:
+                raise InvalidInputError("workflow foreach scope key must not be empty")
+            if key in keys:
+                raise InvalidInputError(f"duplicate workflow foreach scope key: {key}")
+            keys.add(key)
+            try:
+                encoded_value = json.dumps(raw.get("value"), ensure_ascii=False)
+            except (TypeError, ValueError):
+                raise InvalidInputError(
+                    f"workflow foreach scope {key!r} value must be JSON-serializable"
+                ) from None
+            dependencies = raw.get("depends_on") or []
+            if not isinstance(dependencies, list):
+                raise InvalidInputError(
+                    f"workflow foreach scope {key!r} depends_on must be a list"
+                )
+            normalized.append(
+                {
+                    "key": key,
+                    "value_json": encoded_value,
+                    "depends_on": [str(value).strip() for value in dependencies],
+                }
+            )
+        for item in normalized:
+            unknown = [key for key in item["depends_on"] if key not in keys]
+            if unknown:
+                raise InvalidInputError(
+                    f"workflow foreach scope {item['key']!r} has unknown dependencies: "
+                    + ", ".join(unknown)
+                )
+            if item["key"] in item["depends_on"]:
+                raise InvalidInputError(
+                    f"workflow foreach scope {item['key']!r} cannot depend on itself"
+                )
+        dependencies_by_key = {
+            item["key"]: set(item["depends_on"]) for item in normalized
+        }
+        resolved: set[str] = set()
+        while len(resolved) < len(normalized):
+            ready = {
+                key for key, dependencies in dependencies_by_key.items()
+                if key not in resolved and dependencies <= resolved
+            }
+            if not ready:
+                raise InvalidInputError("workflow foreach item dependencies contain a cycle")
+            resolved.update(ready)
+
+        now = _now()
+        with self._lock:
+            activation_row = self._conn.execute(
+                """SELECT COALESCE(MAX(activation), 0) AS activation
+                   FROM workflow_item_groups
+                   WHERE task_id = ? AND foreach_step = ?
+                     AND parent_scope_id IS ?""",
+                (task_id, foreach_step, parent_scope_id),
+            ).fetchone()
+            activation = int(activation_row["activation"] or 0) + 1
+            cursor_row = self._conn.execute(
+                "SELECT COALESCE(MAX(id), 0) AS cursor FROM task_transitions WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+            cur = self._conn.execute(
+                """INSERT INTO workflow_item_groups
+                   (task_id, foreach_step, activation, parent_scope_id,
+                    max_concurrency, status, transition_cursor,
+                    created_at, updated_at, completed_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    task_id, foreach_step, activation, parent_scope_id, concurrency,
+                    "completed" if not normalized else "active",
+                    int(cursor_row["cursor"] or 0), now, now,
+                    now if not normalized else None,
+                ),
+            )
+            group_id = int(cur.lastrowid)
+            for index, item in enumerate(normalized):
+                self._conn.execute(
+                    """INSERT INTO workflow_item_scopes
+                       (group_id, item_index, scope_key, item_value, depends_on,
+                        status, output, error, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, 'pending', '{}', '', ?, ?)""",
+                    (
+                        group_id, index, item["key"],
+                        item["value_json"],
+                        json.dumps(item["depends_on"], ensure_ascii=False), now, now,
+                    ),
+                )
+            self._refresh_workflow_item_group_locked(group_id, now)
+            self._conn.commit()
+            return self._workflow_item_group_locked(group_id)
+
+    def update_workflow_item_scope(
+        self,
+        scope_id: int,
+        status: str,
+        output: Any = None,
+        error: str = "",
+    ) -> dict[str, Any]:
+        allowed = {"running", "completed", "blocked", "cancelled"}
+        if status not in allowed:
+            raise InvalidInputError(f"unsupported workflow item scope status: {status}")
+        try:
+            encoded_output = json.dumps(output or {}, ensure_ascii=False)
+        except (TypeError, ValueError):
+            raise InvalidInputError(
+                "workflow item scope output must be JSON-serializable"
+            ) from None
+        now = _now()
+        terminal = status in {"completed", "blocked", "cancelled"}
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT group_id, status FROM workflow_item_scopes WHERE id = ?", (scope_id,)
+            ).fetchone()
+            if row is None:
+                raise InvalidInputError(f"unknown workflow item scope: {scope_id}")
+            current = str(row["status"])
+            valid_transition = (
+                (status == "running" and current == "ready")
+                or (status in {"completed", "blocked"} and current in {"ready", "running"})
+                or (status == "cancelled" and current in {"pending", "ready", "running"})
+            )
+            if not valid_transition:
+                raise InvalidInputError(
+                    f"workflow item scope cannot transition from {current!r} to {status!r}"
+                )
+            self._conn.execute(
+                """UPDATE workflow_item_scopes
+                   SET status = ?, output = ?, error = ?, updated_at = ?, completed_at = ?
+                   WHERE id = ?""",
+                (
+                    status, encoded_output, str(error or ""),
+                    now, now if terminal else None, scope_id,
+                ),
+            )
+            group_id = int(row["group_id"])
+            self._refresh_workflow_item_group_locked(group_id, now)
+            self._conn.commit()
+            return self._workflow_item_scope_locked(scope_id)
+
+    def list_workflow_item_groups(
+        self, task_id: int, foreach_step: str = ""
+    ) -> list[dict[str, Any]]:
+        where = "task_id = ?" + (" AND foreach_step = ?" if foreach_step else "")
+        params: list[Any] = [task_id] + ([foreach_step] if foreach_step else [])
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT id FROM workflow_item_groups WHERE {where} ORDER BY id", params
+            ).fetchall()
+            return [self._workflow_item_group_locked(int(row["id"])) for row in rows]
+
+    def get_workflow_item_group(self, group_id: int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id FROM workflow_item_groups WHERE id = ?", (group_id,)
+            ).fetchone()
+            return self._workflow_item_group_locked(group_id) if row else None
+
+    def get_workflow_item_scope(self, scope_id: int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id FROM workflow_item_scopes WHERE id = ?", (scope_id,)
+            ).fetchone()
+            return self._workflow_item_scope_locked(scope_id) if row else None
+
+    def list_recoverable_workflow_item_groups(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT id FROM workflow_item_groups
+                   WHERE status = 'active'
+                      OR (status = 'completed' AND advanced_at IS NULL)
+                   ORDER BY id"""
+            ).fetchall()
+            return [self._workflow_item_group_locked(int(row["id"])) for row in rows]
+
+    def cancel_open_workflow_item_scopes(self, group_id: int, error: str = "") -> int:
+        now = _now()
+        with self._lock:
+            scope_rows = self._conn.execute(
+                """SELECT id FROM workflow_item_scopes
+                   WHERE group_id = ? AND status IN ('pending', 'ready')""",
+                (group_id,),
+            ).fetchall()
+            scope_ids = [int(row["id"]) for row in scope_rows]
+            if scope_ids:
+                placeholders = ",".join("?" for _ in scope_ids)
+                self._conn.execute(
+                    f"""UPDATE workflow_item_scopes
+                        SET status = 'cancelled', error = ?, updated_at = ?, completed_at = ?
+                        WHERE id IN ({placeholders})""",
+                    (str(error or ""), now, now, *scope_ids),
+                )
+                self._conn.execute(
+                    f"""UPDATE run_jobs
+                        SET status = 'cancelled', note = ?, leased_until = NULL,
+                            updated_at = ?, completed_at = ?
+                        WHERE item_scope_id IN ({placeholders}) AND status = 'pending'""",
+                    (str(error or "")[:2000], now, now, *scope_ids),
+                )
+            self._conn.execute(
+                """UPDATE workflow_item_groups
+                   SET status = 'blocked', updated_at = ? WHERE id = ?""",
+                (now, group_id),
+            )
+            self._conn.commit()
+        return len(scope_ids)
+
+    def mark_workflow_item_group_advanced(self, group_id: int) -> bool:
+        now = _now()
+        with self._lock:
+            cur = self._conn.execute(
+                """UPDATE workflow_item_groups
+                   SET advanced_at = COALESCE(advanced_at, ?), updated_at = ?
+                   WHERE id = ?""",
+                (now, now, group_id),
+            )
+            self._conn.commit()
+        return cur.rowcount == 1
+
+    def _refresh_workflow_item_group_locked(self, group_id: int, now: str) -> None:
+        group = self._conn.execute(
+            "SELECT max_concurrency FROM workflow_item_groups WHERE id = ?", (group_id,)
+        ).fetchone()
+        rows = self._conn.execute(
+            "SELECT * FROM workflow_item_scopes WHERE group_id = ? ORDER BY item_index",
+            (group_id,),
+        ).fetchall()
+        if not rows:
+            return
+        states = {str(row["scope_key"]): str(row["status"]) for row in rows}
+        if any(state in {"blocked", "cancelled"} for state in states.values()):
+            self._conn.execute(
+                """UPDATE workflow_item_groups
+                   SET status = 'blocked', updated_at = ? WHERE id = ?""",
+                (now, group_id),
+            )
+            return
+        if all(state == "completed" for state in states.values()):
+            self._conn.execute(
+                """UPDATE workflow_item_groups
+                   SET status = 'completed', updated_at = ?, completed_at = ? WHERE id = ?""",
+                (now, now, group_id),
+            )
+            return
+        occupied = sum(state in {"ready", "running"} for state in states.values())
+        available = max(0, int(group["max_concurrency"]) - occupied)
+        for row in rows:
+            if available <= 0:
+                break
+            if row["status"] != "pending":
+                continue
+            try:
+                dependencies = json.loads(row["depends_on"] or "[]")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                dependencies = []
+            if all(states.get(str(key)) == "completed" for key in dependencies):
+                self._conn.execute(
+                    """UPDATE workflow_item_scopes
+                       SET status = 'ready', updated_at = ? WHERE id = ?""",
+                    (now, int(row["id"])),
+                )
+                states[str(row["scope_key"])] = "ready"
+                available -= 1
+
+    def _workflow_item_group_locked(self, group_id: int) -> dict[str, Any]:
+        row = self._conn.execute(
+            "SELECT * FROM workflow_item_groups WHERE id = ?", (group_id,)
+        ).fetchone()
+        result = dict(row)
+        scopes = self._conn.execute(
+            "SELECT id FROM workflow_item_scopes WHERE group_id = ? ORDER BY item_index",
+            (group_id,),
+        ).fetchall()
+        result["scopes"] = [
+            self._workflow_item_scope_locked(int(scope["id"])) for scope in scopes
+        ]
+        return result
+
+    def _workflow_item_scope_locked(self, scope_id: int) -> dict[str, Any]:
+        row = self._conn.execute(
+            "SELECT * FROM workflow_item_scopes WHERE id = ?", (scope_id,)
+        ).fetchone()
+        result = dict(row)
+        for field, fallback in (("item_value", None), ("depends_on", []), ("output", {})):
+            try:
+                result[field] = json.loads(result.get(field) or "null")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                result[field] = fallback
+        return result
+
+    @staticmethod
+    def _workflow_node_result_row(row: sqlite3.Row) -> dict[str, Any]:
+        result = dict(row)
+        result["output"] = _decode_step_inputs(result.get("output", ""))
+        try:
+            artifacts = json.loads(result.get("artifacts") or "[]")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            artifacts = []
+        result["artifacts"] = artifacts if isinstance(artifacts, list) else []
+        return result
 
     def set_task_workflow_state(
         self,
@@ -1383,6 +2037,7 @@ class Store:
         command: str,
         upstream_result: str = "",
         note: str = "",
+        item_scope_id: int | None = None,
     ) -> dict[str, Any] | None:
         now = _now()
         with self._lock:
@@ -1391,18 +2046,49 @@ class Store:
             ).fetchone()
             if task is None:
                 return None
+            if item_scope_id is not None:
+                scope = self._conn.execute(
+                    """SELECT s.status, g.task_id, g.foreach_step
+                       FROM workflow_item_scopes s
+                       JOIN workflow_item_groups g ON g.id = s.group_id
+                       WHERE s.id = ?""",
+                    (item_scope_id,),
+                ).fetchone()
+                if (
+                    scope is None
+                    or int(scope["task_id"]) != task_id
+                    or str(scope["foreach_step"]) != (step or "").strip()
+                    or str(scope["status"]) != "ready"
+                ):
+                    return None
+                open_job = self._conn.execute(
+                    """SELECT 1 FROM run_jobs
+                       WHERE item_scope_id = ?
+                         AND status IN ('pending', 'running', 'finished', 'applying')
+                       LIMIT 1""",
+                    (item_scope_id,),
+                ).fetchone()
+                if open_job is not None:
+                    return None
+                self._conn.execute(
+                    """UPDATE workflow_item_scopes
+                       SET status = 'running', updated_at = ?
+                       WHERE id = ? AND status = 'ready'""",
+                    (now, item_scope_id),
+                )
             cur = self._conn.execute(
                 """INSERT INTO run_jobs (
-                       task_id, step, assignee, command, upstream_result,
+                       task_id, step, assignee, command, upstream_result, item_scope_id,
                        status, note, created_at, updated_at
                    )
-                   VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)""",
                 (
                     task_id,
                     (step or "").strip(),
                     (assignee or "").strip(),
                     (command or "").strip(),
                     upstream_result or "",
+                    item_scope_id,
                     note[:2000],
                     now,
                     now,
@@ -1440,6 +2126,7 @@ class Store:
         with self._lock:
             row = self._conn.execute(
                 """SELECT id, task_id, step, assignee, command, upstream_result,
+                          item_scope_id,
                           status, claimed_by, leased_until, note, outcome, result,
                           applied_by, created_at, updated_at, completed_at
                    FROM run_jobs
@@ -1447,6 +2134,14 @@ class Store:
                 (job_id,),
             ).fetchone()
         return dict(row) if row else None
+
+    def list_run_jobs_for_item_scope(self, item_scope_id: int) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id FROM run_jobs WHERE item_scope_id = ? ORDER BY id",
+                (item_scope_id,),
+            ).fetchall()
+        return [self.get_run_job(int(row["id"])) for row in rows]
 
     def has_open_run_job(self, task_id: int, step: str) -> bool:
         """Whether a dispatched step still has work queued or being applied."""
@@ -1457,6 +2152,17 @@ class Store:
                      AND status IN ('pending', 'running', 'finished', 'applying')
                    LIMIT 1""",
                 (task_id, (step or "").strip()),
+            ).fetchone()
+        return row is not None
+
+    def has_open_item_run_job(self, item_scope_id: int) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT 1 FROM run_jobs
+                   WHERE item_scope_id = ?
+                     AND status IN ('pending', 'running', 'finished', 'applying')
+                   LIMIT 1""",
+                (item_scope_id,),
             ).fetchone()
         return row is not None
 
@@ -1657,6 +2363,7 @@ class Store:
         with self._lock:
             rows = self._conn.execute(
                 f"""SELECT id, task_id, step, assignee, command, upstream_result,
+                           item_scope_id,
                            status, claimed_by, leased_until, note, outcome, result,
                            applied_by, created_at, updated_at, completed_at
                     FROM run_jobs
@@ -2039,5 +2746,6 @@ class Store:
         task["is_goal"] = bool(task.get("is_goal", 0))
         task["depends_on"] = _decode_depends_on(task.get("depends_on", ""))
         task["step_inputs"] = _decode_step_inputs(task.get("step_inputs", ""))
+        task["step_output"] = _decode_step_inputs(task.get("step_output", ""))
         task["artifacts"] = _decode_artifacts(task.get("artifacts", ""))
         return task

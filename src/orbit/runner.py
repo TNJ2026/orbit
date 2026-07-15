@@ -40,6 +40,7 @@ from .workflow_config import _project_root, read_workflow_config
 from .workflow_engine import (
     _WORKFLOW_ENGINE_LOCK, _complete_goal_intake_locked, _is_root_goal_decompose_step,
     _materializes_step_cards, _parse_goal_subtasks, advance_workflow_task,
+    apply_foreach_item_outcome, recover_foreach_item_groups,
 )
 from .workflow_graph import workflow_graph as _workflow_graph
 from .worktrees import ensure_task_worktree as _ensure_task_worktree
@@ -196,6 +197,7 @@ def run_step_worker(
     *,
     build_prompt: Callable[..., str] | None = None,
     stream_drain_seconds: float | None = None,
+    item_scope_id: int | None = None,
 ) -> dict[str, Any]:
     """Execute one dispatched step via the member's CLI and record the run.
 
@@ -235,6 +237,7 @@ def run_step_worker(
                     "type": "run_created",
                     "workflow_task_id": task_id,
                     "workflow_step": step["id"],
+                    "item_scope_id": item_scope_id,
                     "command": command,
                 },
             )
@@ -433,13 +436,17 @@ def run_step_worker(
                     outcome, status = "rework", "succeeded"
                 elif selected_port:
                     declared_ports = set(step.get("ports") or [])
-                    if selected_port in declared_ports and selected_port not in {
-                        "success", "rework", "blocked", "error", "timeout", "cancelled"
-                    }:
+                    if selected_port == "success" and selected_port in declared_ports:
+                        outcome, status = "done", "succeeded"
+                    elif selected_port == "rework" and can_rework:
+                        outcome, status = "rework", "succeeded"
+                    elif selected_port in {"blocked", "error", "timeout", "cancelled"}:
+                        outcome, status = selected_port, "failed"
+                    elif selected_port in declared_ports:
                         outcome, status = selected_port, "succeeded"
                     else:
                         outcome, status = "blocked", "failed"
-                        result = f"runner selected undeclared or reserved WORKFLOW_PORT: {selected_port}"
+                        result = f"runner selected undeclared WORKFLOW_PORT: {selected_port}"
                 elif not output_text.strip():
                     # Clean exit but zero output: the runner ignored the
                     # "print a summary + WORKFLOW_OUTCOME" contract — a silent CLI
@@ -551,6 +558,7 @@ def run_step_worker(
                     "type": "runner_finished",
                     "workflow_task_id": task_id,
                     "workflow_step": step["id"],
+                    "item_scope_id": item_scope_id,
                     "status": status,
                     "outcome": outcome,
                     "exit_code": exit_code,
@@ -720,6 +728,7 @@ def run_queued_job(
                 job.get("upstream_result") or "",
                 timeout_seconds=timeout_seconds,
                 advance=False,  # runner only executes; the scheduler advances
+                item_scope_id=job.get("item_scope_id"),
             )
         finally:
             stop_heartbeat.set()
@@ -729,14 +738,25 @@ def run_queued_job(
         # runner does not advance the workflow itself.
         outcome = report.get("outcome") or "blocked"
         if apply_inline:
-            applied = apply_run_outcome(
-                store,
-                project_root,
-                int(job["task_id"]),
-                step,
-                job["assignee"],
-                outcome,
-                report.get("result") or "",
+            applied = (
+                apply_foreach_item_outcome(
+                    store,
+                    project_root,
+                    int(job["item_scope_id"]),
+                    job["assignee"],
+                    outcome,
+                    report.get("result") or "",
+                )
+                if job.get("item_scope_id") is not None
+                else apply_run_outcome(
+                    store,
+                    project_root,
+                    int(job["task_id"]),
+                    step,
+                    job["assignee"],
+                    outcome,
+                    report.get("result") or "",
+                )
             )
             finished = store.finish_run_job(
                 job["id"],
@@ -851,7 +871,10 @@ def scheduler_tick(
     serialized here instead of racing across runner processes."""
     cfg = read_workflow_config(project_root)
     steps = {s["id"]: s for s in cfg["steps"]}
-    processed: list[dict[str, Any]] = []
+    processed: list[dict[str, Any]] = [
+        {"foreach_recovery": item}
+        for item in recover_foreach_item_groups(store, project_root)
+    ]
     # Bound total work per tick by iterations (not just successes) so a burst of
     # failing jobs can't process unboundedly in one pass.
     for _ in range(200):
@@ -869,14 +892,25 @@ def scheduler_tick(
             )
             continue
         try:
-            report = apply_run_outcome(
-                store,
-                project_root,
-                int(job["task_id"]),
-                step,
-                job["assignee"],
-                job.get("outcome") or "blocked",
-                job.get("result") or "",
+            report = (
+                apply_foreach_item_outcome(
+                    store,
+                    project_root,
+                    int(job["item_scope_id"]),
+                    job["assignee"],
+                    job.get("outcome") or "blocked",
+                    job.get("result") or "",
+                )
+                if job.get("item_scope_id") is not None
+                else apply_run_outcome(
+                    store,
+                    project_root,
+                    int(job["task_id"]),
+                    step,
+                    job["assignee"],
+                    job.get("outcome") or "blocked",
+                    job.get("result") or "",
+                )
             )
             store.finish_run_job(
                 job["id"], "done", str(report.get("error") or ""),

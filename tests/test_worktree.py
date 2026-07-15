@@ -82,6 +82,67 @@ class GoalStatusDecoupleTests(unittest.TestCase):
 
 
 class WorkflowSchemaTests(unittest.TestCase):
+    def test_builtin_templates_are_executable_generic_graphs(self):
+        self.assertEqual(
+            ["software", "content", "data"],
+            [item["id"] for item in server.workflow_template_summaries()],
+        )
+        with TemporaryDirectory() as tmp:
+            for template_id in ("software", "content", "data"):
+                steps, edges = server.workflow_template_definition(template_id)
+                cfg = server.write_workflow_config(steps, tmp, edges)
+                self.assertEqual([], server._workflow_execution_errors(cfg, server._workflow_graph(cfg)))
+                if template_id != "software":
+                    self.assertTrue(any(step["type"] == "end" for step in cfg["steps"]))
+                self.assertTrue(all(not step["agents"] for step in cfg["steps"]))
+        content_steps, content_edges = server.workflow_template_definition("content")
+        self.assertTrue(any(step.get("type") == "approval" for step in content_steps))
+        self.assertTrue(any(edge.get("port") == "changes_requested" for edge in content_edges))
+        data_steps, _ = server.workflow_template_definition("data")
+        self.assertFalse(any(step.get("integrate") or step.get("decompose") for step in data_steps))
+        with self.assertRaisesRegex(server.InvalidInputError, "unknown workflow template"):
+            server.workflow_template_definition("missing")
+
+    def test_authoring_schema_is_returned_with_public_capabilities(self):
+        with TemporaryDirectory() as tmp:
+            schema = server.read_workflow_config(tmp)["schema"]
+        self.assertEqual(
+            ["action", "approval", "decision", "join", "foreach", "end"],
+            [item["id"] for item in schema["node_types"]],
+        )
+        handlers = {item["id"]: item for item in schema["handlers"]}
+        self.assertEqual(
+            {"agent", "command", "human", "decision", "join", "foreach", "end"},
+            set(handlers),
+        )
+        self.assertTrue(handlers["agent"]["requires_agent"])
+        self.assertEqual(3, handlers["agent"]["max_agents"])
+        self.assertTrue(handlers["command"]["accepts_command"])
+        self.assertNotIn("legacy.decompose", handlers)
+
+    def test_modern_steps_do_not_inherit_legacy_id_privileges(self):
+        modern = server._normalize_workflow_step(
+            {
+                "id": "intake",
+                "name": "Ordinary Intake",
+                "type": "action",
+                "handler": "agent",
+                "required": False,
+            },
+            0,
+        )
+        self.assertFalse(modern["required_locked"])
+        self.assertTrue(modern["removable"])
+        self.assertFalse(modern["inject_workflow_snapshot"])
+        self.assertEqual(1, modern["executor"]["max_agents"])
+
+        legacy = server._normalize_workflow_step(
+            {"id": "intake", "name": "Legacy Intake", "required": False}, 0
+        )
+        self.assertTrue(legacy["required_locked"])
+        self.assertFalse(legacy["removable"])
+        self.assertTrue(legacy["inject_workflow_snapshot"])
+
     def test_builtin_node_types_select_handlers_and_defaults(self):
         approval = server._normalize_workflow_step(
             {"id": "legal", "name": "Legal", "type": "approval"}, 0
@@ -90,6 +151,44 @@ class WorkflowSchemaTests(unittest.TestCase):
         self.assertEqual(["approved", "changes_requested", "cancelled"], approval["ports"])
         self.assertEqual("approved", approval["default_port"])
         self.assertFalse(approval["approval_required"])
+
+        join = server._normalize_workflow_step(
+            {
+                "id": "collect", "name": "Collect", "type": "join",
+                "join_policy": "any", "aggregation": "object_by_source",
+            },
+            0,
+        )
+        self.assertEqual("join", join["handler"])
+        self.assertEqual("any", join["join_policy"])
+        self.assertEqual("object_by_source", join["aggregation"])
+        self.assertTrue(join["required"])
+        self.assertTrue(join["required_locked"])
+        self.assertEqual([], join["agents"])
+
+        foreach = server._normalize_workflow_step(
+            {
+                "id": "process", "name": "Process", "type": "foreach",
+                "agents": ["codex"], "items": "$.input.records",
+                "item_key": "$.id", "item_depends_on": "$.after",
+                "max_concurrency": 4,
+                "item_output_schema": {"type": "object"},
+            },
+            0,
+        )
+        self.assertEqual("foreach", foreach["handler"])
+        self.assertEqual("$.input.records", foreach["items"])
+        self.assertEqual("$.id", foreach["item_key"])
+        self.assertEqual("$.after", foreach["item_depends_on"])
+        self.assertEqual(4, foreach["max_concurrency"])
+        self.assertTrue(foreach["required_locked"])
+        self.assertEqual(["codex"], foreach["agents"])
+
+        with self.assertRaisesRegex(server.InvalidInputError, "join_policy"):
+            server._normalize_workflow_step(
+                {"id": "bad_join", "name": "Bad", "type": "join", "join_policy": "quorum"},
+                0,
+            )
 
         end = server._normalize_workflow_step(
             {"id": "finish", "name": "Finish", "type": "end"}, 0
@@ -150,6 +249,73 @@ class WorkflowSchemaTests(unittest.TestCase):
                     tmp,
                     [{"from": "a", "to": "b", "port": "approved"}],
                 )
+
+    def test_structured_schemas_and_edge_mapping_round_trip(self):
+        with TemporaryDirectory() as tmp:
+            saved = server.write_workflow_config(
+                [
+                    {
+                        "id": "source", "name": "Source",
+                        "output_schema": {
+                            "type": "object", "required": ["value"],
+                            "properties": {"value": {"type": "string"}},
+                        },
+                        "retry": {"normalization": 2},
+                    },
+                    {
+                        "id": "target", "name": "Target",
+                        "input_schema": {
+                            "type": "object", "required": ["input"],
+                            "properties": {"input": {"type": "string"}},
+                        },
+                    },
+                ],
+                tmp,
+                [{"from": "source", "to": "target", "mapping": {"input": "$.output.value"}}],
+            )
+            loaded = server.read_workflow_config(tmp)
+            self.assertEqual(saved, loaded)
+            self.assertEqual(
+                {"input": "$.output.value"}, loaded["edges"][0]["mapping"]
+            )
+            self.assertEqual(2, loaded["steps"][0]["retry"]["normalization"])
+            with self.assertRaisesRegex(server.InvalidInputError, "mapping source"):
+                server.write_workflow_config(
+                    [{"id": "a", "name": "A"}, {"id": "b", "name": "B"}],
+                    tmp,
+                    [{"from": "a", "to": "b", "mapping": {"x": "output.value"}}],
+                )
+            with self.assertRaisesRegex(server.InvalidInputError, "between 0 and 5"):
+                server._normalize_workflow_step(
+                    {"id": "bad", "name": "Bad", "retry": {"normalization": 6}}, 0
+                )
+
+    def test_decision_rules_and_edge_conditions_round_trip(self):
+        with TemporaryDirectory() as tmp:
+            steps = [
+                {"id": "source", "name": "Source", "agents": ["codex"]},
+                {
+                    "id": "gate", "name": "Gate", "type": "decision",
+                    "ports": ["yes", "no"], "default_port": "no",
+                    "rules": [{"when": {"==": [{"var": "ready"}, True]}, "port": "yes"}],
+                },
+            ]
+            edges = [{
+                "from": "source", "to": "gate", "priority": 2,
+                "condition": {"!!": [{"var": "output.enabled"}]},
+            }]
+            server.write_workflow_config(steps, tmp, edges)
+            loaded = server.read_workflow_config(tmp)
+            gate = next(step for step in loaded["steps"] if step["id"] == "gate")
+            self.assertEqual("decision", gate["handler"])
+            self.assertEqual(steps[1]["rules"], gate["rules"])
+            self.assertEqual(edges[0]["condition"], loaded["edges"][0]["condition"])
+            self.assertEqual(2, loaded["edges"][0]["priority"])
+            self.assertEqual("orbit-safe-v1", loaded["expression_language"]["profile"])
+
+            steps[1]["rules"] = [{"when": {"eval": ["bad"]}, "port": "yes"}]
+            with self.assertRaisesRegex(server.InvalidInputError, "unsupported JSONLogic"):
+                server.write_workflow_config(steps, tmp, edges)
 
     def test_integrate_flag_forces_isolate_off(self):
         norm = server._normalize_workflow_step(
@@ -375,7 +541,12 @@ class StepPromptTests(unittest.TestCase):
                 p = server._build_step_prompt(
                     tmp,
                     self.TASK,
-                    {"id": step_id, "name": step_id.title(), "prompt": ""},
+                    {
+                        "id": step_id,
+                        "name": step_id.title(),
+                        "prompt": "",
+                        "workspace_access": "read_only",
+                    },
                     "",
                     can_rework=True,
                     isolated=True,
@@ -383,6 +554,58 @@ class StepPromptTests(unittest.TestCase):
                 self.assertIn("Engine step contract", p)
                 self.assertIn(phrase, p)
                 self.assertIn("do not modify files or create an empty commit", p)
+
+    def test_prompt_capabilities_work_for_arbitrary_step_ids(self):
+        goal = {**self.TASK, "is_goal": 1}
+        with TemporaryDirectory() as tmp:
+            prompt = server._build_step_prompt(
+                tmp,
+                goal,
+                {
+                    "id": "legal_audit",
+                    "name": "Legal Audit",
+                    "workspace_access": "read_only",
+                    "inject_workflow_snapshot": True,
+                },
+                "",
+                can_rework=False,
+                isolated=True,
+            )
+        self.assertIn("do not modify files or create an empty commit", prompt)
+        self.assertIn("Triage dynamic configuration context", prompt)
+
+    def test_output_schema_adds_structured_result_contract(self):
+        with TemporaryDirectory() as tmp:
+            prompt = server._build_step_prompt(
+                tmp,
+                self.TASK,
+                {
+                    "id": "extract", "name": "Extract",
+                    "output_schema": {
+                        "type": "object", "required": ["rows"],
+                        "properties": {"rows": {"type": "array"}},
+                    },
+                },
+                "",
+            )
+        self.assertIn("WORKFLOW_RESULT", prompt)
+        self.assertIn('"required": ["rows"]', prompt)
+
+    def test_foreach_prompt_uses_per_item_output_schema(self):
+        with TemporaryDirectory() as tmp:
+            prompt = server._build_step_prompt(
+                tmp,
+                self.TASK,
+                {
+                    "id": "process", "name": "Process", "type": "foreach",
+                    "output_schema": {"type": "object", "required": ["items"]},
+                    "item_output_schema": {"type": "object", "required": ["value"]},
+                },
+                'FOREACH_ITEM_SCOPE:\n{"item":{"id":"a"}}',
+            )
+        self.assertIn('"required": ["value"]', prompt)
+        self.assertNotIn('"required": ["items"]', prompt)
+        self.assertIn("FOREACH_ITEM_SCOPE", prompt)
 
     def test_implement_contract_and_rework_availability_are_explicit(self):
         with TemporaryDirectory() as tmp:
@@ -766,6 +989,33 @@ class VerifyGateTests(unittest.TestCase):
                 {
                     "agent_name": "dev",
                     "runner_command": "cat >/dev/null; printf 'RESULT_SUMMARY: urgent\\nWORKFLOW_PORT: priority\\n'",
+                },
+                upstream_result="",
+                advance=False,
+            )
+            self.assertEqual("priority", result["outcome"])
+            store.close()
+
+    def test_runner_prefers_structured_result_port(self):
+        with TemporaryDirectory() as tmp:
+            root, store, task_id = self._setup(tmp)
+            result = server.run_step_worker(
+                store,
+                str(root),
+                task_id,
+                {
+                    "id": "classify", "name": "Classify",
+                    "ports": ["success", "priority"],
+                    "isolate": False, "integrate": False,
+                    "task_status": "in_progress",
+                },
+                {
+                    "agent_name": "dev",
+                    "runner_command": (
+                        "cat >/dev/null; printf '%s\\n' "
+                        "'WORKFLOW_PORT: success' "
+                        "'WORKFLOW_RESULT: {\"port\":\"priority\",\"output\":{},\"summary\":\"urgent\",\"artifacts\":[]}'"
+                    ),
                 },
                 upstream_result="",
                 advance=False,

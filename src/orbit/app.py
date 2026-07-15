@@ -40,6 +40,7 @@ _RUNTIME_NAMES = (
     "reimplement_workflow_task", "rerun_workflow_step", "resume_goal_after_budget_increase",
     "runner_loop", "scheduler_tick", "skip_workflow_step", "start_workflow_task",
     "workflow_locked_reason", "workflow_task_state", "write_settings",
+    "workflow_template_definition", "workflow_template_summaries",
     "write_workflow_config",
 )
 
@@ -340,13 +341,19 @@ def create_server(
         locked = await _to_thread(workflow_locked_reason, store)
         if locked:
             return _json_error(locked, 409, request)
+        data = await _read_json(request)
+        template_id = str(data.get("template") or "software").strip().lower()
+        try:
+            template_steps, template_edges = workflow_template_definition(template_id)
+        except InvalidInputError as exc:
+            return _json_error(str(exc), request=request)
         workflow = await _to_thread(
             write_workflow_config,
-            default_workflow_steps(),
+            template_steps,
             current_project.get("project_root"),
-            default_workflow_edges(),
+            template_edges,
         )
-        return _json(request, {"success": True, **workflow})
+        return _json(request, {"success": True, "template": template_id, **workflow})
 
     @route("/api/settings", methods=["GET"])
     async def api_get_settings(request: Request) -> JSONResponse:

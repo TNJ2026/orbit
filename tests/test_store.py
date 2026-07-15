@@ -186,12 +186,24 @@ class StoreTests(unittest.TestCase):
         updated = store.update_task_step_details(
             card["id"],
             result_summary="Review passed",
+            step_output={"score": 98, "approved": True},
             artifacts=["draft.md", "report.json", "draft.md"],
         )
 
         self.assertEqual("draft.md", updated["step_inputs"]["upstream_result"])
         self.assertEqual("Review passed", updated["result_summary"])
+        self.assertEqual({"score": 98, "approved": True}, updated["step_output"])
         self.assertEqual(["draft.md", "report.json"], updated["artifacts"])
+
+        recorded = store.record_workflow_node_result(
+            parent["id"], "review", port="approved",
+            output={"score": 98}, summary="Approved",
+            artifacts=[{"type": "file", "uri": "report.json"}],
+        )
+        self.assertEqual({"score": 98}, recorded["output"])
+        self.assertEqual(
+            [recorded], store.list_workflow_node_results(parent["id"], "review")
+        )
 
     def test_task_metadata_rejects_off_list_values(self):
         store = self.make_store()
@@ -411,8 +423,20 @@ class StoreTests(unittest.TestCase):
                 for row in store._conn.execute("PRAGMA table_info(tasks)").fetchall()
             }
             self.assertTrue(
-                {"step_inputs", "result_summary", "artifacts"} <= task_columns
+                {"step_inputs", "result_summary", "step_output", "artifacts"} <= task_columns
             )
+            run_job_columns = {
+                row["name"]
+                for row in store._conn.execute("PRAGMA table_info(run_jobs)").fetchall()
+            }
+            self.assertIn("item_scope_id", run_job_columns)
+            item_group_columns = {
+                row["name"]
+                for row in store._conn.execute(
+                    "PRAGMA table_info(workflow_item_groups)"
+                ).fetchall()
+            }
+            self.assertTrue({"transition_cursor", "advanced_at"} <= item_group_columns)
             store.close()
 
     def test_old_task_messages_are_backfilled_into_task_engine(self):
@@ -461,6 +485,137 @@ class StoreTests(unittest.TestCase):
             self.assertEqual("legacy task", tasks[0]["content"])
             self.assertEqual("assigned", tasks[0]["task_status"])
             store.close()
+
+    def test_workflow_correlation_survives_store_reopen(self):
+        with TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "messages.db"
+            store = Store(db_path)
+            self.register_pair(store)
+            store.send_message("a", "b", "work", kind="task", title="Work")
+            task_id = store.list_tasks()[0]["id"]
+            correlation = store.ensure_workflow_correlation(
+                task_id,
+                "fork",
+                "join",
+                "all_activated",
+                [
+                    {"predecessor_step": "left", "branch_root": "left", "state": "selected"},
+                    {"predecessor_step": "right", "branch_root": "right", "state": "selected"},
+                ],
+            )
+            store.record_task_transition(task_id, "left", "join", "a", "done")
+            store.sync_workflow_correlation(task_id, "join")
+            store.close()
+
+            reopened = Store(db_path)
+            [persisted] = reopened.list_workflow_correlations(task_id, "join")
+            self.assertEqual(correlation["id"], persisted["id"])
+            self.assertEqual("open", persisted["status"])
+            self.assertEqual(
+                {"left": "arrived", "right": "selected"},
+                {
+                    branch["predecessor_step"]: branch["state"]
+                    for branch in persisted["branches"]
+                },
+            )
+            reopened.close()
+
+    def test_existing_correlation_table_adds_parent_lineage_column(self):
+        with TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "messages.db"
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                """CREATE TABLE workflow_correlations (
+                       id INTEGER PRIMARY KEY AUTOINCREMENT,
+                       task_id INTEGER NOT NULL,
+                       source_step TEXT NOT NULL,
+                       join_step TEXT NOT NULL,
+                       activation INTEGER NOT NULL,
+                       policy TEXT NOT NULL DEFAULT 'all_activated',
+                       status TEXT NOT NULL DEFAULT 'open',
+                       transition_cursor INTEGER NOT NULL DEFAULT 0,
+                       created_at TEXT NOT NULL,
+                       updated_at TEXT NOT NULL,
+                       consumed_at TEXT,
+                       UNIQUE(task_id, join_step, activation)
+                   )"""
+            )
+            conn.commit()
+            conn.close()
+
+            store = Store(db_path)
+            columns = {
+                row["name"]
+                for row in store._conn.execute(
+                    "PRAGMA table_info(workflow_correlations)"
+                ).fetchall()
+            }
+            self.assertIn("parent_correlation_id", columns)
+            store.close()
+
+    def test_workflow_item_group_releases_dependency_dag_with_concurrency_limit(self):
+        with TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "messages.db"
+            store = Store(db_path)
+            self.register_pair(store)
+            store.send_message("a", "b", "work", kind="task", title="Work")
+            task_id = store.list_tasks()[0]["id"]
+            group = store.create_workflow_item_group(
+                task_id,
+                "foreach",
+                [
+                    {"key": "a", "value": {"name": "A"}},
+                    {"key": "b", "value": {"name": "B"}, "depends_on": ["a"]},
+                    {"key": "c", "value": {"name": "C"}, "depends_on": ["a", "b"]},
+                ],
+                max_concurrency=1,
+            )
+            self.assertEqual(
+                {"a": "ready", "b": "pending", "c": "pending"},
+                {scope["scope_key"]: scope["status"] for scope in group["scopes"]},
+            )
+            by_key = {scope["scope_key"]: scope for scope in group["scopes"]}
+            store.update_workflow_item_scope(by_key["a"]["id"], "completed", {"ok": "A"})
+            [group] = store.list_workflow_item_groups(task_id, "foreach")
+            self.assertEqual(
+                {"a": "completed", "b": "ready", "c": "pending"},
+                {scope["scope_key"]: scope["status"] for scope in group["scopes"]},
+            )
+            by_key = {scope["scope_key"]: scope for scope in group["scopes"]}
+            store.update_workflow_item_scope(by_key["b"]["id"], "running")
+            store.update_workflow_item_scope(by_key["b"]["id"], "completed", {"ok": "B"})
+            [group] = store.list_workflow_item_groups(task_id, "foreach")
+            self.assertEqual("ready", group["scopes"][2]["status"])
+            store.update_workflow_item_scope(group["scopes"][2]["id"], "completed", {"ok": "C"})
+            store.close()
+
+            reopened = Store(db_path)
+            [persisted] = reopened.list_workflow_item_groups(task_id, "foreach")
+            self.assertEqual("completed", persisted["status"])
+            self.assertEqual(["completed", "completed", "completed"], [
+                scope["status"] for scope in persisted["scopes"]
+            ])
+            self.assertEqual({"ok": "C"}, persisted["scopes"][2]["output"])
+            reopened.close()
+
+    def test_workflow_item_group_rejects_unknown_and_cyclic_dependencies(self):
+        store = self.make_store()
+        self.register_pair(store)
+        store.send_message("a", "b", "work", kind="task", title="Work")
+        task_id = store.list_tasks()[0]["id"]
+        with self.assertRaisesRegex(InvalidInputError, "unknown dependencies"):
+            store.create_workflow_item_group(
+                task_id, "foreach", [{"key": "a", "depends_on": ["missing"]}]
+            )
+        with self.assertRaisesRegex(InvalidInputError, "contain a cycle"):
+            store.create_workflow_item_group(
+                task_id,
+                "foreach",
+                [
+                    {"key": "a", "depends_on": ["b"]},
+                    {"key": "b", "depends_on": ["a"]},
+                ],
+            )
 
     def test_project_db_path_is_stable_and_project_scoped(self):
         with TemporaryDirectory() as tmp:
