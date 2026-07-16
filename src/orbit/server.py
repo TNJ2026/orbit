@@ -254,6 +254,7 @@ from .workflow_engine import (
     _workflow_api_actor,
     active_goal_conflict_reason,
     advance_workflow_task,
+    confirm_node_run,
     force_close_goal,
     goals_summary,
     reimplement_workflow_task,

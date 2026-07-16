@@ -34,6 +34,7 @@ _RUNTIME_NAMES = (
     "_task_run_dir", "_to_thread", "_validate_goal_auto_runners",
     "_workflow_api_actor", "_write_run_file", "active_goal_conflict_reason",
     "advance_workflow_task", "check_task_health", "check_workflow_step_timeouts",
+    "confirm_node_run",
     "default_workflow_edges", "default_workflow_steps", "detect_agent_tools",
     "force_close_goal", "goal_verify_sweep", "goals_summary", "hub_inspect_sweep",
     "list_projects", "read_settings", "read_workflow_config",
@@ -187,6 +188,14 @@ def create_server(
     def _engine_rerun(task_id: int, agent: str, step: str) -> dict:
         return rerun_workflow_step(
             store, current_project.get("project_root"), task_id, agent, step or None
+        )
+
+    def _engine_confirm(
+        task_id: int, step: str, disposition: str, agent: str, note: str
+    ) -> dict:
+        return confirm_node_run(
+            store, current_project.get("project_root"), task_id, step,
+            disposition, agent=agent, note=note,
         )
 
     def _engine_reimplement(task_id: int, agent: str) -> dict:
@@ -762,6 +771,32 @@ def create_server(
         except Exception as exc:
             traceback.print_exc()
             return _json_error(f"re-run failed: {exc!r}", 500, request)
+        return _json(request, result)
+
+    @route("/api/tasks/{task_id:int}/confirm", methods=["POST"])
+    async def api_task_confirm(request: Request) -> JSONResponse:
+        """Resolve a needs_confirmation node run (§10.1 crash window):
+        disposition 'succeeded' treats the external effect as done and
+        advances; 'retry' re-executes the step under the same idempotency
+        key."""
+        if forbidden := _forbid_non_local(request):
+            return forbidden
+        task_id = int(request.path_params["task_id"])
+        data = await _read_json(request)
+        try:
+            result = await _to_thread(
+                _engine_confirm,
+                task_id,
+                str(data.get("step") or ""),
+                str(data.get("disposition") or ""),
+                str(data.get("agent") or ""),
+                str(data.get("note") or ""),
+            )
+        except (InvalidInputError, UnknownAgentError) as exc:
+            return _json_error(str(exc), request=request)
+        except Exception as exc:
+            traceback.print_exc()
+            return _json_error(f"confirm failed: {exc!r}", 500, request)
         return _json(request, result)
 
     @route("/api/tasks/{task_id:int}/reimplement", methods=["POST"])

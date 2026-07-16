@@ -2674,6 +2674,93 @@ def rerun_workflow_step(
         }
 
 
+def confirm_node_run(
+    store: Store,
+    project_root: str | None,
+    task_id: int,
+    step: str,
+    disposition: str,
+    agent: str = "",
+    note: str = "",
+) -> dict[str, Any]:
+    """Resolve a `needs_confirmation` node run (§10.1 crash window).
+
+    A non-idempotent handler crashed after its runner started: the external
+    side effect may or may not have happened, and the engine refused to replay
+    it automatically. The operator inspects the external system and confirms:
+
+    - ``succeeded``: the operation did happen — settle the node run as
+      succeeded and advance along the step's default port via the existing
+      hub proxy-completion path (which also lifts the recovery block).
+    - ``retry``: the operation did not happen — cancel the unresolved attempt
+      and re-dispatch the step; the new attempt keeps the SAME business
+      idempotency key with an incremented attempt counter.
+    """
+    disposition = (disposition or "").strip()
+    if disposition not in {"succeeded", "retry"}:
+        raise InvalidInputError(
+            f"invalid disposition: {disposition!r} (expected 'succeeded' or 'retry')"
+        )
+    step_id = (step or "").strip()
+    if not step_id:
+        raise InvalidInputError("step is required to confirm a node run")
+    with _WORKFLOW_ENGINE_LOCK:
+        task = store.get_task(task_id)
+        if not task:
+            raise InvalidInputError(f"unknown task: {task_id}")
+        run = store.get_workflow_run_by_task(task_id)
+        if not run:
+            raise InvalidInputError(
+                f"task {task_id} has no workflow run record to confirm"
+            )
+        pending = [
+            r for r in store.list_node_runs(
+                workflow_run_id=int(run["id"]), step=step_id
+            )
+            if r["status"] == "needs_confirmation"
+        ]
+        if not pending:
+            raise InvalidInputError(
+                f"task {task_id} step {step_id!r} has no node run awaiting "
+                "confirmation"
+            )
+        node = pending[-1]
+        if disposition == "succeeded":
+            # The hub proxy completion settles the open node run as succeeded
+            # (with the selected port) and emits its token in one transaction,
+            # then dispatches the default-port successor.
+            advanced = _advance_workflow_task_locked(
+                store, project_root, HUB_NOTIFY_AGENT, task_id, step_id, "done",
+                note or "operator confirmed the external effect as succeeded "
+                        "(crash-window confirmation)",
+            )
+            return {
+                "task_id": task_id, "step": step_id,
+                "disposition": "succeeded", "node_run_id": int(node["id"]),
+                "advance": advanced,
+            }
+        store.finish_node_run(
+            int(node["id"]), "cancelled",
+            summary=note or "operator chose re-execution after crash window",
+        )
+        chosen = (agent or "").strip()
+        if not chosen:
+            chosen = _active_step_assignees(
+                store.list_task_transitions(task_id)
+            ).get(step_id, "")
+        if not chosen:
+            raise InvalidInputError(
+                f"no agent to retry step {step_id!r}; pass one explicitly"
+            )
+        reran = rerun_workflow_step(
+            store, project_root, task_id, chosen, step_id, context=note
+        )
+        return {
+            "task_id": task_id, "step": step_id, "disposition": "retry",
+            "node_run_id": int(node["id"]), **reran,
+        }
+
+
 def skip_workflow_step(
     store: Store,
     project_root: str | None,

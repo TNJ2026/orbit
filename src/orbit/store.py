@@ -71,8 +71,14 @@ TASK_IMPORTANCE_LEVELS = {"low", "normal", "high", "critical"}
 WORKFLOW_RUN_STATUSES = {"running", "succeeded", "failed", "blocked", "cancelled"}
 NODE_RUN_STATUSES = {
     "pending", "running", "waiting", "succeeded", "failed",
-    "blocked", "cancelled", "skipped",
+    "blocked", "cancelled", "skipped", "needs_confirmation",
 }
+# Statuses that settle the node's BUSINESS outcome (§10.1): the next activation
+# of the same step/scope is a new business cycle and gets a fresh idempotency
+# key. Every other status (failed / blocked / cancelled / needs_confirmation /
+# still-open) means the same business activation is being retried, so the next
+# attempt reuses the previous key.
+_NODE_RUN_CYCLE_CLOSING_STATUSES = {"succeeded", "skipped"}
 WORKFLOW_TOKEN_STATUSES = {"pending", "consumed", "cancelled"}
 
 _log = logging.getLogger("orbit.store")
@@ -265,6 +271,7 @@ CREATE TABLE IF NOT EXISTS node_runs (
     status          TEXT NOT NULL DEFAULT 'pending',
     port            TEXT NOT NULL DEFAULT '',
     summary         TEXT NOT NULL DEFAULT '',
+    idempotency_key TEXT NOT NULL DEFAULT '',
     run_job_id      INTEGER,
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL,
@@ -782,6 +789,16 @@ class Store:
                 self._conn.execute(
                     "UPDATE workflow_runs SET root_run_id = id WHERE root_run_id IS NULL"
                 )
+        node_run_columns = {
+            row["name"]
+            for row in self._conn.execute(
+                "PRAGMA table_info(node_runs)"
+            ).fetchall()
+        }
+        if node_run_columns and "idempotency_key" not in node_run_columns:
+            self._conn.execute(
+                "ALTER TABLE node_runs ADD COLUMN idempotency_key TEXT NOT NULL DEFAULT ''"
+            )
         self._backfill_tasks_from_messages()
 
     def _backfill_tasks_from_messages(self) -> None:
@@ -2275,6 +2292,41 @@ class Store:
             self._conn.commit()
         return consumed
 
+    def mark_node_run_needs_confirmation(
+        self, task_id: int, step: str, note: str = ""
+    ) -> dict[str, Any] | None:
+        """Flag the open node run of `step` as `needs_confirmation` (§10.1):
+        a non-idempotent handler crashed mid-execution, so the external side
+        effect may or may not have happened. The run stays open (no
+        completed_at) until an operator confirms "treat as succeeded" or
+        "re-execute"; automatic recovery must not replay it. Returns the
+        updated node run, or None when the task has no record-layer run or the
+        step has no open node run (pre-existing data)."""
+        step = (step or "").strip()
+        if not step:
+            raise InvalidInputError("step is required")
+        now = _now()
+        with self._lock:
+            run = self._conn.execute(
+                "SELECT id FROM workflow_runs WHERE task_id = ?", (task_id,)
+            ).fetchone()
+            if run is None:
+                return None
+            open_run = self._open_node_run_locked(int(run["id"]), step)
+            if open_run is None:
+                return None
+            self._conn.execute(
+                """UPDATE node_runs
+                   SET status = 'needs_confirmation', summary = ?, updated_at = ?
+                   WHERE id = ?""",
+                ((note or "")[:2000], now, int(open_run["id"])),
+            )
+            self._conn.commit()
+            row = self._conn.execute(
+                "SELECT * FROM node_runs WHERE id = ?", (int(open_run["id"]),)
+            ).fetchone()
+        return dict(row) if row else None
+
     def get_node_run(self, node_run_id: int) -> dict[str, Any] | None:
         with self._lock:
             row = self._conn.execute(
@@ -2381,31 +2433,74 @@ class Store:
         now: str,
     ) -> int:
         # Attempt counts retries of the same execution slot: the step itself,
-        # or one foreach item of the step (per item_scope).
+        # or one foreach item of the step (per item_scope). The previous run of
+        # the slot also decides the idempotency key (§10.1): a retry of the
+        # same business activation reuses the key with attempt+1, while a new
+        # activation cycle (previous run settled its business outcome and the
+        # step got re-entered, e.g. via a rework loop) mints a fresh key.
         if item_scope_id is None:
-            row = self._conn.execute(
-                """SELECT COALESCE(MAX(attempt), 0) AS n FROM node_runs
-                   WHERE workflow_run_id = ? AND step = ? AND item_scope_id IS NULL""",
+            prev = self._conn.execute(
+                """SELECT attempt, status, idempotency_key FROM node_runs
+                   WHERE workflow_run_id = ? AND step = ? AND item_scope_id IS NULL
+                   ORDER BY id DESC LIMIT 1""",
                 (workflow_run_id, step),
             ).fetchone()
         else:
-            row = self._conn.execute(
-                """SELECT COALESCE(MAX(attempt), 0) AS n FROM node_runs
-                   WHERE workflow_run_id = ? AND step = ? AND item_scope_id = ?""",
+            prev = self._conn.execute(
+                """SELECT attempt, status, idempotency_key FROM node_runs
+                   WHERE workflow_run_id = ? AND step = ? AND item_scope_id = ?
+                   ORDER BY id DESC LIMIT 1""",
                 (workflow_run_id, step, item_scope_id),
             ).fetchone()
-        attempt = int(row["n"]) + 1
+        attempt = (int(prev["attempt"]) if prev else 0) + 1
+        idempotency_key = self._next_idempotency_key_locked(
+            workflow_run_id, step, item_scope_id, prev, attempt
+        )
         cur = self._conn.execute(
             """INSERT INTO node_runs (
                    workflow_run_id, task_id, step, attempt, item_scope_id,
-                   executor, status, run_job_id, created_at, updated_at
-               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   executor, status, idempotency_key, run_job_id,
+                   created_at, updated_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 workflow_run_id, task_id, step, attempt, item_scope_id,
-                (executor or "")[:120], status, run_job_id, now, now,
+                (executor or "")[:120], status, idempotency_key, run_job_id,
+                now, now,
             ),
         )
         return int(cur.lastrowid)
+
+    @staticmethod
+    def _next_idempotency_key_locked(
+        workflow_run_id: int,
+        step: str,
+        item_scope_id: int | None,
+        prev: sqlite3.Row | None,
+        attempt: int,
+    ) -> str:
+        """Stable business idempotency key for one execution slot (§10.1):
+        `{workflow_run_id}:{step}:{item_scope_id or 0}:{activation_cycle}`.
+        Every attempt of the same business activation shares the key; a new
+        activation cycle (loop / rework re-entry after the previous run closed
+        its business outcome) increments the cycle segment."""
+        prefix = f"{workflow_run_id}:{step}:{item_scope_id or 0}:"
+        prev_key = str(prev["idempotency_key"]) if prev else ""
+        new_cycle = prev is None or (
+            str(prev["status"]) in _NODE_RUN_CYCLE_CLOSING_STATUSES
+        )
+        if prev is not None and not new_cycle and prev_key:
+            return prev_key  # retry: same business activation, same key
+        cycle = 1
+        if prev_key.startswith(prefix):
+            try:
+                cycle = int(prev_key[len(prefix):]) + (1 if new_cycle else 0)
+            except ValueError:
+                cycle = attempt
+        elif prev is not None:
+            # Legacy row without a key: fall back to the attempt counter so a
+            # fresh key can never collide with an earlier cycle's key.
+            cycle = attempt
+        return f"{prefix}{cycle}"
 
     def _finish_node_run_locked(
         self, node_run_id: int, status: str, port: str, summary: str, now: str
@@ -2525,6 +2620,16 @@ class Store:
             return  # bookkeeping outcome (e.g. not_selected) — no node effect
         node_run_id: int | None = None
         open_run = self._open_node_run_locked(run_id, from_step)
+        if (
+            open_run is not None
+            and str(open_run["status"]) == "needs_confirmation"
+            and status not in {"succeeded", "cancelled"}
+        ):
+            # §10.1: a crash-window run awaiting human confirmation is sticky —
+            # automatic bookkeeping (blocked/failed settles) must not overwrite
+            # it. Only a real completion (a straggler runner that did finish, or
+            # the operator's confirmation) or an explicit cancel resolves it.
+            open_run = None
         if open_run is not None:
             effective_port = port or (
                 "rework" if outcome == "rework"
@@ -3044,6 +3149,21 @@ class Store:
                 (item_scope_id,),
             ).fetchall()
         return [self.get_run_job(int(row["id"])) for row in rows]
+
+    def latest_run_job_for_step(
+        self, task_id: int, step: str
+    ) -> dict[str, Any] | None:
+        """Newest run job queued for (task, step), any status. A non-empty
+        `claimed_by` on it is the §10.1 "execution started" evidence: a runner
+        claimed the lease and may have begun external side effects."""
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT * FROM run_jobs
+                   WHERE task_id = ? AND step = ?
+                   ORDER BY id DESC LIMIT 1""",
+                (task_id, (step or "").strip()),
+            ).fetchone()
+        return dict(row) if row else None
 
     def has_open_run_job(self, task_id: int, step: str) -> bool:
         """Whether a dispatched step still has work queued or being applied."""

@@ -20,6 +20,13 @@ class NodeHandler:
     max_agents: int = 1
     accepts_command: bool = False
     public: bool = True
+    # §10.1: what the handler can promise about replaying `execute()`.
+    #   guaranteed — pure engine-internal state transition; replay is safe.
+    #   keyed      — safe only when the idempotency key reaches the downstream
+    #                system (no built-in handler claims this yet).
+    #   none       — arbitrary external side effects (agent CLIs run any
+    #                shell); a crash mid-execution needs human confirmation.
+    idempotency: str = "none"
 
     def supports(self, node_type: str) -> bool:
         return node_type in self.node_types
@@ -36,12 +43,27 @@ NODE_HANDLERS = {
     "git.merge": NodeHandler(
         "git.merge", frozenset({"action"}), "runner", True, public=False
     ),
-    "human": NodeHandler("human", frozenset({"approval"}), "human", False),
-    "decision": NodeHandler("decision", frozenset({"decision"}), "decision", False),
-    "join": NodeHandler("join", frozenset({"join"}), "join", False),
-    "foreach": NodeHandler("foreach", frozenset({"foreach"}), "foreach", True, 3),
-    "subflow": NodeHandler("subflow", frozenset({"subflow"}), "subflow", False),
-    "end": NodeHandler("end", frozenset({"end"}), "end", False),
+    "human": NodeHandler(
+        "human", frozenset({"approval"}), "human", False, idempotency="guaranteed"
+    ),
+    "decision": NodeHandler(
+        "decision", frozenset({"decision"}), "decision", False,
+        idempotency="guaranteed",
+    ),
+    "join": NodeHandler(
+        "join", frozenset({"join"}), "join", False, idempotency="guaranteed"
+    ),
+    "foreach": NodeHandler(
+        "foreach", frozenset({"foreach"}), "foreach", True, 3,
+        idempotency="guaranteed",
+    ),
+    "subflow": NodeHandler(
+        "subflow", frozenset({"subflow"}), "subflow", False,
+        idempotency="guaranteed",
+    ),
+    "end": NodeHandler(
+        "end", frozenset({"end"}), "end", False, idempotency="guaranteed"
+    ),
 }
 
 
@@ -120,6 +142,7 @@ def workflow_node_schema() -> dict[str, Any]:
             "requires_agent": handler.requires_agent,
             "max_agents": handler.max_agents,
             "accepts_command": handler.accepts_command,
+            "idempotency": handler.idempotency,
         }
         for handler in NODE_HANDLERS.values()
         if handler.public

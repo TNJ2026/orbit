@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+from .node_handlers import get_node_handler
 from .runner_protocol import structured_upstream
 from .store import InvalidInputError, Store
 from .workflow_config import read_workflow_config, workflow_config_for_task
@@ -196,6 +197,73 @@ def auto_recover_step(
             f"recovery {'queued' if job else 'could not dispatch'}",
         )
     return {"action": "recovered" if job else "dispatch_failed", "job_id": job and job["id"]}
+_NON_IDEMPOTENT_CRASH_NOTE = (
+    "non-idempotent step crashed mid-execution; confirm outcome before retrying"
+)
+
+
+def _handle_non_idempotent_crash(
+    store: Store,
+    project_root: str | None,
+    task: dict[str, Any],
+    step: dict[str, Any],
+    step_id: str,
+    *,
+    callbacks: RecoveryCallbacks,
+) -> dict[str, Any] | None:
+    """§10.1 crash-window guard for a dead runner.
+
+    Applies when the step's handler declares `idempotency: none` AND its run
+    job was actually claimed (execution-started evidence) — the external side
+    effect may already have happened, so `recover()` must not re-invoke
+    `execute()`. The node run goes to `needs_confirmation` and the task blocks
+    through the existing blocked transition + hub notice, which old UIs and
+    sweeps already understand; the confirm API resolves it.
+
+    Returns None when the guard does not apply (callers proceed with normal
+    auto-recovery), {} when it applies but was already flagged, or the alert
+    payload when it flags the crash now.
+    """
+    try:
+        handler = get_node_handler(step)
+    except ValueError:
+        return None
+    if handler.idempotency != "none":
+        return None  # guaranteed/keyed: replay is safe, keep auto-recovery
+    job = store.latest_run_job_for_step(int(task["id"]), step_id)
+    if not job or not str(job.get("claimed_by") or "").strip():
+        # Never claimed: the runner cannot have started the external work, so
+        # a replay is the first execution — normal recovery is safe.
+        return None
+    task_id = int(task["id"])
+    marked = store.mark_node_run_needs_confirmation(
+        task_id, step_id, _NON_IDEMPOTENT_CRASH_NOTE
+    )
+    if str(task.get("task_status")) in {"blocked", "stalled"}:
+        # Already surfaced (a blocked task is skipped at the sweep top; a
+        # stalled goal re-enters here) — the re-mark above is idempotent, do
+        # not re-block or re-ping the hub.
+        return {}
+    store.record_task_transition(
+        task_id, step_id, step_id, callbacks.workflow_engine_agent,
+        "blocked", _NON_IDEMPOTENT_CRASH_NOTE, "blocked",
+    )
+    store.set_task_workflow_state(
+        task_id,
+        task_status="stalled" if task.get("is_goal") else "blocked",
+    )
+    callbacks.recompute_parent_goal_status(store, task, project_root)
+    notice = callbacks.notify_hub(
+        store,
+        f"Task #{task_id} step '{step_id}': the runner died while a "
+        "non-idempotent step was executing; the external effect may already "
+        "have happened. Confirm the outcome (treat as succeeded, or "
+        "re-execute) before any retry — it will not be replayed automatically.",
+    )
+    return {"action": "needs_confirmation", "notice": notice,
+            "node_run_id": marked and int(marked["id"])}
+
+
 def check_task_health(
     store: Store,
     project_root: str | None,
@@ -280,6 +348,20 @@ def check_task_health(
             # the latest (re)dispatch, a fresh runner is still spawning — a new
             # run just has not been recorded yet — so hold off.
             if not run_is_after(run, last_dispatch):
+                continue
+            # §10.1 crash window: a non-idempotent handler whose runner died
+            # after execution started may have completed its external side
+            # effect without the result reaching the store. Never auto-replay;
+            # flag the node run for human confirmation and block the task.
+            crash = _handle_non_idempotent_crash(
+                store, project_root, task, steps[step_id], step_id,
+                callbacks=callbacks,
+            )
+            if crash is not None:
+                if crash:
+                    alerts.append({"task_id": task_id, "step": step_id,
+                                   "problem": "non-idempotent crash window",
+                                   **crash})
                 continue
             recovered = auto_recover_step(
                 store,
