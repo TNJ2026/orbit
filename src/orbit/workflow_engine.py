@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 from .node_handlers import get_node_handler, handler_requires_agent
@@ -75,9 +76,17 @@ def _ensure_workflow_run(
     layer never drives routing, so a failure here is logged and swallowed —
     the engine keeps running on the old tables."""
     try:
+        # Migration-period dual-write (design §11): a goal's token budget is
+        # recorded in the run's variables at creation, but tasks.token_budget
+        # remains the authoritative source the budget guard reads.
+        variables: dict[str, Any] = {}
+        task = store.get_task(task_id)
+        if task and task.get("is_goal"):
+            variables["token_budget"] = _coerce_token_budget(task.get("token_budget"))
         store.create_workflow_run(
             task_id,
             cfg,
+            variables=variables or None,
             entry_steps=entry_steps,
             parent_run_id=parent_run_id,
             parent_node_run_id=parent_node_run_id,
@@ -1181,6 +1190,8 @@ def _enforce_goal_token_budget(
     goal = store.get_task(goal_id)
     if not goal:
         return False
+    # Guard reads tasks.token_budget (authoritative); the workflow run's
+    # variables are a migration-period dual-write record only (design §11).
     budget = _coerce_token_budget(goal.get("token_budget"))
     if budget <= 0:
         return False
@@ -1193,6 +1204,22 @@ def _enforce_goal_token_budget(
             note=f"goal tokens {total} exceed budget {budget}",
         )
         store.set_task_workflow_state(goal_id, task_status="stalled")
+        # Record-layer mirror of the freeze: usage snapshot + frozen marker in
+        # the goal run's variables. Never read for routing; non-fatal on error.
+        try:
+            run = store.get_workflow_run_by_task(goal_id)
+            if run is not None:
+                store.update_workflow_run_variables(
+                    int(run["id"]),
+                    tokens_total=total,
+                    budget_frozen_at=datetime.now(timezone.utc).isoformat(
+                        timespec="seconds"
+                    ),
+                )
+        except Exception:
+            _log.exception(
+                "budget freeze mirror failed for goal %s (non-fatal)", goal_id
+            )
         _notify_hub(
             store,
             f"目标 #{goal_id} 触及 token 硬预算：已用 {total} > 预算 {budget}。"
@@ -2879,7 +2906,20 @@ def _resume_goal_after_budget_increase_locked(
         raise InvalidInputError(f"frozen step {step_id!r} is no longer in the workflow")
     transitions = store.list_task_transitions(task["id"])
     agent = _step_round_robin_assignee(store, step, transitions)
+    # update_task_metadata mirrors the new budget into the goal run's variables
+    # (migration-period dual-write, design §11); clear the frozen marker and
+    # refresh the usage snapshot here. Record layer only — non-fatal on error.
     store.update_task_metadata(goal_id, token_budget=budget)
+    try:
+        run = store.get_workflow_run_by_task(goal_id)
+        if run is not None:
+            store.update_workflow_run_variables(
+                int(run["id"]), tokens_total=total, budget_frozen_at=None
+            )
+    except Exception:
+        _log.exception(
+            "budget resume mirror failed for goal %s (non-fatal)", goal_id
+        )
     if step_id == "implement" and any(
         t["outcome"] == "blocked"
         and (t.get("note") or "").startswith("rework limit reached")

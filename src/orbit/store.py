@@ -1221,6 +1221,15 @@ class Store:
             self._conn.commit()
         if cur.rowcount == 0:
             return None
+        if token_budget is not None:
+            # Migration-period dual-write (design §11): tasks.token_budget stays
+            # the authoritative source every guard reads; the workflow run's
+            # variables only mirror it at the record layer.
+            run = self.get_workflow_run_by_task(task_id)
+            if run is not None:
+                self.update_workflow_run_variables(
+                    int(run["id"]), token_budget=max(0, int(token_budget))
+                )
         return self.get_task(task_id)
 
     def update_task_item_status(self, task_id: int, task_status: str) -> bool:
@@ -2079,6 +2088,37 @@ class Store:
                 "SELECT * FROM workflow_runs WHERE task_id = ?", (task_id,)
             ).fetchone()
         return self._workflow_run_row(row) if row else None
+
+    def update_workflow_run_variables(
+        self, run_id: int, **patch: Any
+    ) -> dict[str, Any] | None:
+        """Merge `patch` into a workflow run's `variables` JSON (record layer
+        only — variables never drive routing). Merge semantics: existing keys
+        outside the patch are kept, a key patched to None is removed. Returns
+        the updated run, or None for an unknown run."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT variables FROM workflow_runs WHERE id = ?", (run_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            try:
+                variables = json.loads(row["variables"] or "{}")
+            except (TypeError, ValueError):
+                variables = {}
+            if not isinstance(variables, dict):
+                variables = {}
+            for key, value in patch.items():
+                if value is None:
+                    variables.pop(key, None)
+                else:
+                    variables[key] = value
+            self._conn.execute(
+                "UPDATE workflow_runs SET variables = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(variables, ensure_ascii=False), _now(), run_id),
+            )
+            self._conn.commit()
+        return self.get_workflow_run(run_id)
 
     def list_workflow_run_lineage(self, root_run_id: int) -> list[dict[str, Any]]:
         """Every run in the lineage tree rooted at `root_run_id`, the root

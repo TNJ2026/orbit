@@ -369,5 +369,102 @@ class WorkflowRunRecordTests(unittest.TestCase):
             store.close()
 
 
+class RunVariablesTests(unittest.TestCase):
+    """Goal token budget mirrored into workflow run `variables` (design §11).
+    tasks.token_budget stays the authoritative source the engine guard reads;
+    variables are a migration-period record layer with zero routing role."""
+
+    def _goal(self, h, budget=500):
+        goal_id = h.create_task(title="budgeted goal")
+        h.store.update_task_metadata(goal_id, is_goal=True, token_budget=budget)
+        return goal_id
+
+    def _variables(self, h, task_id):
+        return h.store.get_workflow_run_by_task(task_id)["variables"]
+
+    def test_goal_start_records_budget_in_run_variables(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            goal_id = self._goal(h, 500)
+            h.start(goal_id)
+            self.assertEqual({"token_budget": 500}, self._variables(h, goal_id))
+
+    def test_non_goal_run_variables_stay_empty(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            task_id = h.create_task()
+            h.start(task_id)
+            self.assertEqual({}, self._variables(h, task_id))
+
+    def test_budget_update_syncs_run_variables(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            goal_id = self._goal(h, 500)
+            h.start(goal_id)
+            h.store.update_task_metadata(goal_id, token_budget=800)
+            self.assertEqual(800, self._variables(h, goal_id)["token_budget"])
+            # tasks.token_budget stays the authoritative source.
+            self.assertEqual(800, h.store.get_task(goal_id)["token_budget"])
+
+    def test_update_variables_merges_and_none_deletes(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            task_id = h.create_task()
+            run = h.store.create_workflow_run(task_id, {})
+            h.store.update_workflow_run_variables(run["id"], a=1, b="x")
+            h.store.update_workflow_run_variables(run["id"], b=None, c=2)
+            self.assertEqual({"a": 1, "c": 2}, self._variables(h, task_id))
+            self.assertIsNone(h.store.update_workflow_run_variables(999_999, a=1))
+
+    def test_budget_freeze_mirrors_usage_snapshot(self):
+        with TemporaryDirectory() as tmp:
+            h = EngineHarness(tmp)
+            goal_id = self._goal(h, 500)
+            h.start(goal_id)
+            run = h.store.create_task_run(
+                goal_id, worker="hub-agent", status="running"
+            )
+            h.store.finish_task_run(run["id"], "succeeded", 0, 600)
+            # Advancing dispatches the next step; the budget guard freezes the
+            # goal and mirrors the usage snapshot into the run's variables.
+            h.complete("hub-agent", goal_id, "intake", "done")
+            variables = self._variables(h, goal_id)
+            self.assertEqual(500, variables["token_budget"])
+            self.assertEqual(600, variables["tokens_total"])
+            self.assertTrue(variables["budget_frozen_at"])
+
+    def test_budget_resume_syncs_budget_and_clears_frozen_marker(self):
+        with TemporaryDirectory() as tmp:
+            bindings = [{**m, "runner_command": "cat"} for m in BINDINGS]
+            h = EngineHarness(tmp, bindings=bindings)
+            goal_id = h.create_task(title="budgeted goal")
+            task_id = h.create_task(title="frozen subtask")
+            h.store.update_task_metadata(goal_id, is_goal=True, token_budget=500)
+            h.store._conn.execute(
+                "UPDATE tasks SET parent_task_id = ?, status = 'blocked', "
+                "workflow_step = 'implement' WHERE id = ?",
+                (goal_id, task_id),
+            )
+            h.store.set_task_workflow_state(goal_id, task_status="stalled")
+            h.store.record_task_transition(
+                task_id, "", "implement", "workflow", "blocked",
+                "goal token budget exceeded; dispatch frozen",
+            )
+            run = h.store.create_task_run(task_id, worker="codex", status="running")
+            h.store.finish_task_run(run["id"], "succeeded", 0, 600)
+            wf_run = h.store.create_workflow_run(goal_id, {})
+            h.store.update_workflow_run_variables(
+                wf_run["id"], token_budget=500, tokens_total=600,
+                budget_frozen_at="2026-01-01T00:00:00+00:00",
+            )
+
+            server.resume_goal_after_budget_increase(h.store, tmp, goal_id, 1_000)
+
+            variables = self._variables(h, goal_id)
+            self.assertEqual(1_000, variables["token_budget"])
+            self.assertEqual(600, variables["tokens_total"])
+            self.assertNotIn("budget_frozen_at", variables)
+
+
 if __name__ == "__main__":
     unittest.main()

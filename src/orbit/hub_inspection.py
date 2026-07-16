@@ -27,10 +27,19 @@ def root_goal_decompose_step_id(cfg: dict[str, Any]) -> str | None:
 
 
 def hub_command(project_root: str | None) -> str:
-    """Runner command for hub-supervision CLI calls (timeout KILL/CONTINUE): the
-    Decompose step's first Agent (its per-step command, else that Agent's built-in
-    CLI). No decompose step — or its Agent has no command — disables supervision."""
+    """Runner command for hub-supervision CLI calls (timeout KILL/CONTINUE).
+
+    A workflow-level `supervisor.command` wins (design §11: the supervisor is
+    explicit config, decoupled from any node; its agent identity is
+    `supervisor.agent`, else the built-in hub agent name). Without one, fall
+    back to the legacy implicit anchor: the Decompose step's first Agent (its
+    per-step command, else that Agent's built-in CLI). Neither configured —
+    or the Decompose Agent has no command — disables supervision."""
     cfg = read_workflow_config(project_root)
+    supervisor = cfg.get("supervisor") or {}
+    supervisor_command = str(supervisor.get("command") or "").strip()
+    if supervisor_command:
+        return supervisor_command
     decompose_id = root_goal_decompose_step_id(cfg)
     if not decompose_id:
         return ""

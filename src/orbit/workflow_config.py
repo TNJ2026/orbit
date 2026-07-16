@@ -988,6 +988,28 @@ def _normalize_workflow_subflows(raw: Any) -> dict[str, dict[str, Any]]:
     return subflows
 
 
+def _normalize_workflow_supervisor(raw: Any) -> dict[str, str]:
+    """Normalize the top-level `supervisor` config: {agent, command}.
+
+    The workflow-level supervisor runs hub supervision (stuck-run inspection)
+    explicitly, decoupled from any node (design §11). Both fields are optional
+    strings; an empty command falls back to the legacy implicit anchor (the
+    Decompose step's first Agent)."""
+    if raw is None:
+        return {"agent": "", "command": ""}
+    if not isinstance(raw, dict):
+        raise InvalidInputError("workflow supervisor must be an object")
+    normalized: dict[str, str] = {}
+    for key in ("agent", "command"):
+        value = raw.get(key, "")
+        if value is None:
+            value = ""
+        if not isinstance(value, str):
+            raise InvalidInputError(f"workflow supervisor {key} must be a string")
+        normalized[key] = value.strip()
+    return normalized
+
+
 def _validate_subflow_references(
     steps: list[dict[str, Any]], subflows: dict[str, dict[str, Any]]
 ) -> None:
@@ -1155,6 +1177,7 @@ def read_workflow_config(project_root: str | None = None) -> dict[str, Any]:
                 {step["id"]: set(step["ports"]) for step in default_steps},
             ),
             "subflows": {},
+            "supervisor": _normalize_workflow_supervisor(None),
             "path": str(path),
             "warnings": [],
             "schema": workflow_node_schema(),
@@ -1201,11 +1224,15 @@ def read_workflow_config(project_root: str | None = None) -> dict[str, Any]:
         data.get("subflows") if isinstance(data, dict) else None
     )
     _validate_subflow_references(normalized, subflows)
+    supervisor = _normalize_workflow_supervisor(
+        data.get("supervisor") if isinstance(data, dict) else None
+    )
     result = {
         "steps": normalized,
         "statuses": statuses,
         "edges": edges,
         "subflows": subflows,
+        "supervisor": supervisor,
         "path": str(path),
         "warnings": _workflow_graph_warnings(normalized, edges),
         "schema": workflow_node_schema(),
@@ -1255,6 +1282,7 @@ def write_workflow_config(
     project_root: str | None = None,
     edges: Any = None,
     subflows: Any = None,
+    supervisor: Any = None,
 ) -> dict[str, Any]:
     if not isinstance(steps, list):
         raise InvalidInputError("steps must be a list")
@@ -1281,16 +1309,21 @@ def write_workflow_config(
         {step["id"]: set(step["ports"]) for step in normalized},
     )
     path = _workflow_config_path(project_root)
-    # subflows=None means "leave subflows as they are": the workflow canvas
-    # only edits the main graph, and its save must not drop authored subflows.
-    if subflows is None and path.exists():
+    # subflows/supervisor=None means "leave them as they are": the workflow
+    # canvas only edits the main graph, and its save must not drop authored
+    # subflows or the workflow-level supervisor.
+    if (subflows is None or supervisor is None) and path.exists():
         try:
             existing = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             existing = None
         if isinstance(existing, dict):
-            subflows = existing.get("subflows")
+            if subflows is None:
+                subflows = existing.get("subflows")
+            if supervisor is None:
+                supervisor = existing.get("supervisor")
     normalized_subflows = _normalize_workflow_subflows(subflows)
+    normalized_supervisor = _normalize_workflow_supervisor(supervisor)
     _validate_subflow_references(normalized, normalized_subflows)
     project_root_path = _project_root(project_root)
     resolved_path = path.resolve()
@@ -1305,6 +1338,8 @@ def write_workflow_config(
     }
     if normalized_subflows:
         data["subflows"] = normalized_subflows
+    if normalized_supervisor["agent"] or normalized_supervisor["command"]:
+        data["supervisor"] = normalized_supervisor
     path.write_text(
         json.dumps(data, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
@@ -1314,6 +1349,7 @@ def write_workflow_config(
         "statuses": normalized_statuses,
         "edges": normalized_edges,
         "subflows": normalized_subflows,
+        "supervisor": normalized_supervisor,
         "path": str(path),
         "warnings": _workflow_graph_warnings(normalized, normalized_edges),
         "schema": workflow_node_schema(),

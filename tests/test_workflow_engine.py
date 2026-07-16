@@ -1893,6 +1893,28 @@ class StepTimeoutTests(unittest.TestCase):
             server.write_workflow_config(custom, tmp, LINEAR_EDGES)
             self.assertEqual("my-hub", server._hub_command(tmp))
 
+    def test_hub_command_prefers_workflow_supervisor(self):
+        with TemporaryDirectory() as tmp:
+            flagged = [
+                {**s, **({"decompose": True, "agents": ["codex"],
+                          "agent_commands": {"codex": "decompose-hub"}}
+                         if s["id"] == "intake" else {})}
+                for s in LINEAR_STEPS
+            ]
+            # A workflow-level supervisor.command wins over the Decompose
+            # step's first Agent (design §11: explicit workflow-level config).
+            server.write_workflow_config(
+                flagged, tmp, LINEAR_EDGES, None,
+                {"agent": "sup", "command": "supervisor-cli"},
+            )
+            self.assertEqual("supervisor-cli", server._hub_command(tmp))
+            # An empty supervisor command falls back to the legacy anchor.
+            server.write_workflow_config(
+                flagged, tmp, LINEAR_EDGES, None,
+                {"agent": "sup", "command": ""},
+            )
+            self.assertEqual("decompose-hub", server._hub_command(tmp))
+
     def _timed_steps(self, timeout=30):
         steps = [dict(s) for s in LINEAR_STEPS]
         for s in steps:
@@ -1946,6 +1968,62 @@ class StepTimeoutTests(unittest.TestCase):
             self.assertEqual(
                 [], server.check_workflow_step_timeouts(h.store, tmp, now=much_later)
             )
+
+
+class WorkflowSupervisorConfigTests(unittest.TestCase):
+    """Top-level `supervisor: {agent, command}` in workflow.json (design §11)."""
+
+    def _steps(self):
+        return [dict(s) for s in LINEAR_STEPS]
+
+    def test_read_defaults_to_empty_supervisor(self):
+        with TemporaryDirectory() as tmp:
+            # No config file yet.
+            self.assertEqual(
+                {"agent": "", "command": ""},
+                server.read_workflow_config(tmp)["supervisor"],
+            )
+            # Saved config without a supervisor key.
+            server.write_workflow_config(self._steps(), tmp, LINEAR_EDGES)
+            self.assertEqual(
+                {"agent": "", "command": ""},
+                server.read_workflow_config(tmp)["supervisor"],
+            )
+
+    def test_write_normalizes_and_persists_supervisor(self):
+        with TemporaryDirectory() as tmp:
+            saved = server.write_workflow_config(
+                self._steps(), tmp, LINEAR_EDGES, None,
+                {"agent": "  sup  ", "command": "  supervisor-cli  "},
+            )
+            self.assertEqual(
+                {"agent": "sup", "command": "supervisor-cli"}, saved["supervisor"]
+            )
+            self.assertEqual(
+                {"agent": "sup", "command": "supervisor-cli"},
+                server.read_workflow_config(tmp)["supervisor"],
+            )
+
+    def test_save_without_supervisor_preserves_existing(self):
+        with TemporaryDirectory() as tmp:
+            server.write_workflow_config(
+                self._steps(), tmp, LINEAR_EDGES, None,
+                {"agent": "sup", "command": "supervisor-cli"},
+            )
+            # A canvas save that omits supervisor must not drop it.
+            server.write_workflow_config(self._steps(), tmp, LINEAR_EDGES)
+            self.assertEqual(
+                {"agent": "sup", "command": "supervisor-cli"},
+                server.read_workflow_config(tmp)["supervisor"],
+            )
+
+    def test_invalid_supervisor_rejected(self):
+        with TemporaryDirectory() as tmp:
+            for bad in ("supervisor-cli", ["sup"], {"agent": 1}, {"command": ["x"]}):
+                with self.assertRaises(InvalidInputError):
+                    server.write_workflow_config(
+                        self._steps(), tmp, LINEAR_EDGES, None, bad
+                    )
 
 
 class GoalTests(unittest.TestCase):
