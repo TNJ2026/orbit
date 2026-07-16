@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .environments import environment_provider_schema
+
 
 @dataclass(frozen=True)
 class NodeHandler:
@@ -147,4 +149,9 @@ def workflow_node_schema() -> dict[str, Any]:
         for handler in NODE_HANDLERS.values()
         if handler.public
     ]
-    return {"node_types": node_types, "handlers": handlers, "max_agents": 3}
+    return {
+        "node_types": node_types,
+        "handlers": handlers,
+        "environments": environment_provider_schema(),
+        "max_agents": 3,
+    }

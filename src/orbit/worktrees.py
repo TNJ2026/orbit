@@ -71,7 +71,16 @@ def git_available() -> bool:
 
 
 def workflow_needs_git(cfg: dict[str, Any]) -> bool:
-    return any(step.get("isolate") or step.get("integrate") for step in cfg["steps"])
+    # A workflow needs git when any step resolves to the git.worktree
+    # environment provider, or an integrate step must merge a task branch in
+    # the main tree. Late import: environments.py wraps this module.
+    from .environments import GIT_WORKTREE, resolve_environment
+
+    for step in cfg["steps"]:
+        provider, _scope, _cleanup = resolve_environment(step)
+        if provider is GIT_WORKTREE or step.get("integrate"):
+            return True
+    return False
 
 
 def ensure_state_dir_gitignored(root: Path) -> None:

@@ -45,7 +45,7 @@ from .workflow_engine import (
     apply_foreach_item_outcome, recover_foreach_item_groups,
 )
 from .workflow_graph import workflow_graph as _workflow_graph
-from .worktrees import ensure_task_worktree as _ensure_task_worktree
+from .environments import resolve_environment as _resolve_environment
 
 # --- Auto-runner -------------------------------------------------------------
 WORKFLOW_TIMEOUT_POLL_SECONDS = 60
@@ -285,14 +285,17 @@ def run_step_worker(
         # Per-task config: a subflow child's step lives in its own graph.
         _cfg = workflow_config_for_task(project_root, task)
         can_rework = _step_can_rework(_cfg, _workflow_graph(_cfg), step["id"])
-        # Isolated steps run in a per-task git worktree so concurrent
-        # implementers of different tasks never share a working tree. Falls back
-        # to project_root (no isolation) on non-git projects.
-        if step.get("isolate"):
-            wt = _ensure_task_worktree(project_root, task_id)
-            if wt is not None:
-                exec_dir = wt
-                isolated = True
+        # The execution root comes from the step's environment provider:
+        # git.worktree steps run in a per-task worktree so concurrent
+        # implementers of different tasks never share a working tree, and the
+        # provider falls back to project_root (no isolation) on non-git projects.
+        env_provider, _env_scope, _env_cleanup = _resolve_environment(step)
+        environment = env_provider.acquire(
+            {"project_root": project_root, "task_id": task_id, "step": step}
+        )
+        if environment.get("root") is not None:
+            exec_dir = environment["root"]
+        isolated = bool((environment.get("meta") or {}).get("isolated"))
         prompt = build_prompt(
             project_root, task, step, upstream_result, can_rework,
             isolated=isolated,
