@@ -7,6 +7,7 @@ capability filtering — supports that one property.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 import subprocess
 import tempfile
@@ -15,6 +16,7 @@ import unittest
 
 from orbit.workflow.domain.durable_execution import ExecutionSafety
 from orbit.workflow.domain.handlers import ExternalEffect, RecoveryDisposition
+from orbit.workflow.domain.ids import EntityId
 from orbit.workflow.handlers.dev_tools import (
     CAPABILITY_WORKSPACE_WRITE, DevToolError, GitDiffAdapter, GitIntegrateAdapter,
     GitStatusAdapter, VerifyAdapter, VerifyProfile, WorkspaceRunner,
@@ -304,6 +306,91 @@ class IntegrateTests(unittest.TestCase):
             WorkspaceRunner(FakeProvider(self.temp.name), runner=scripted_runner([]))
         ).recover("recovery:1", None)
         self.assertEqual(RecoveryDisposition.NOT_FOUND, outcome.disposition)
+
+
+class UsageReportingTests(unittest.TestCase):
+    """A development workflow must run inside its budget, not beside it.
+
+    A tool that reports no usage is invisible to the ledger, so a run whose
+    budget is exhausted would keep invoking git and the test suite forever.
+    """
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.attempt = EntityId("attempt", "a" * 64)
+        self.context = SimpleNamespace(
+            artifacts=RecordingArtifacts(),
+            request=SimpleNamespace(attempt_id=self.attempt),
+            clock=lambda: datetime(2026, 7, 19, tzinfo=timezone.utc),
+        )
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def runner(self, outcomes):
+        return WorkspaceRunner(
+            FakeProvider(self.temp.name), runner=scripted_runner(outcomes)
+        )
+
+    def test_every_tool_reports_its_child_processes(self) -> None:
+        cases = (
+            (GitStatusAdapter(self.runner([(0, "")])), {"workspace_ref": "ws1"}, 1),
+            (GitDiffAdapter(self.runner([(0, "diff\n")])), {"workspace_ref": "ws1"}, 1),
+            (
+                VerifyAdapter(
+                    self.runner([(0, "ok\n")]), [VerifyProfile("unit", ("true",))]
+                ),
+                {"workspace_ref": "ws1", "profile": "unit"},
+                1,
+            ),
+            (
+                GitIntegrateAdapter(self.runner([(0, ""), (0, ""), (0, "abc\n")])),
+                {"workspace_ref": "ws1", "message": "done"},
+                3,
+            ),
+        )
+        for adapter, payload, expected_calls in cases:
+            with self.subTest(adapter=type(adapter).__name__):
+                result = adapter.execute(request(**payload), self.context)
+                self.assertIsNotNone(result.usage, "the ledger would never hear")
+                self.assertEqual(self.attempt, result.usage.attempt_id)
+                self.assertEqual(expected_calls, result.usage.tool_calls)
+
+    def test_usage_carries_no_tokens_it_cannot_know(self) -> None:
+        result = GitStatusAdapter(self.runner([(0, "")])).execute(
+            request(workspace_ref="ws1"), self.context
+        )
+        self.assertEqual(0, result.usage.input_tokens)
+        self.assertEqual(0, result.usage.output_tokens)
+        self.assertIsNone(result.usage.provider_request_id)
+
+    def test_usage_uses_the_context_clock(self) -> None:
+        result = GitStatusAdapter(self.runner([(0, "")])).execute(
+            request(workspace_ref="ws1"), self.context
+        )
+        self.assertEqual(
+            datetime(2026, 7, 19, tzinfo=timezone.utc), result.usage.observed_at
+        )
+
+    def test_a_failing_verification_is_still_billed(self) -> None:
+        """The work was done; a red result does not make it free."""
+
+        adapter = VerifyAdapter(
+            self.runner([(1, "2 failed\n")]), [VerifyProfile("unit", ("true",))]
+        )
+        result = adapter.execute(
+            request(workspace_ref="ws1", profile="unit"), self.context
+        )
+        self.assertFalse(result.output["passed"])
+        self.assertEqual(1, result.usage.tool_calls)
+
+    def test_a_context_without_an_attempt_reports_nothing(self) -> None:
+        """Recovery paths have no live attempt to bill."""
+
+        result = GitStatusAdapter(self.runner([(0, "")])).execute(
+            request(workspace_ref="ws1"), SimpleNamespace(artifacts=None)
+        )
+        self.assertIsNone(result.usage)
 
 
 class ManifestTests(unittest.TestCase):

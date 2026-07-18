@@ -27,11 +27,13 @@ from typing import Any, Callable, Mapping, Sequence
 
 from ...platform import process as process_port
 from ...workspace.git import WorkspaceError, WorkspaceUnavailable
+from ..domain.accounting import UsageSnapshot
 from ..domain.durable_execution import ExecutionSafety
 from ..domain.handlers import (
     CancelAck, CancelDisposition, ExternalEffect, RecoveryDisposition,
     RecoveryResult,
 )
+from ..domain.versions import Revision
 from .tools import ToolManifest, ToolRequest, ToolResult
 
 
@@ -154,6 +156,35 @@ class _BaseAdapter:
     def __init__(self, runner: WorkspaceRunner) -> None:
         self.runner = runner
 
+    def _usage(self, context, tool_calls: int) -> UsageSnapshot | None:
+        """Report child processes as tool calls so the budget can see them.
+
+        Without this a development workflow runs outside its budget entirely:
+        the ledger only ever hears from handlers that report usage, so a run
+        that had exhausted its budget would still happily keep invoking git and
+        the test suite.
+
+        There are no tokens to report — the unit that means something here is
+        "we started a child process" — so the deployment's cost estimator is
+        what turns a tool call into microunits.
+        """
+
+        request = getattr(context, "request", None)
+        if request is None or not hasattr(request, "attempt_id"):
+            # Recovery and cancellation paths hand us a context without a live
+            # request; there is no attempt to bill.
+            return None
+        clock = getattr(context, "clock", None)
+        return UsageSnapshot(
+            request.attempt_id,
+            Revision(1),
+            input_tokens=0,
+            output_tokens=0,
+            tool_calls=tool_calls,
+            provider_request_id=None,
+            observed_at=clock() if callable(clock) else _now(),
+        )
+
     def cancel(self, execution_ref: str, context) -> CancelAck:
         # The child is killed by the executor's process supervision, so the
         # stop is observed rather than assumed.
@@ -206,7 +237,8 @@ class GitStatusAdapter(_BaseAdapter):
                 "clean": not entries,
                 "entries": entries,
                 "truncated": outcome.truncated,
-            }
+            },
+            usage=self._usage(context, tool_calls=1),
         )
 
 
@@ -231,7 +263,8 @@ class GitDiffAdapter(_BaseAdapter):
                 "line_count": len(outcome.stdout.splitlines()),
                 "truncated": outcome.truncated,
                 "diff_artifact_id": artifact_id,
-            }
+            },
+            usage=self._usage(context, tool_calls=1),
         )
 
 
@@ -281,6 +314,8 @@ class GitIntegrateAdapter(_BaseAdapter):
                 "committed": committed.succeeded,
                 "commit": head.stdout.strip() if head.succeeded else None,
             },
+            # add, commit and rev-parse are three real child processes.
+            usage=self._usage(context, tool_calls=3),
             # KNOWN_APPLIED only because we just read HEAD back: the write is
             # confirmed, not merely attempted.
             external_effect=(
@@ -324,7 +359,8 @@ class VerifyAdapter(_BaseAdapter):
                 "timed_out": outcome.timed_out,
                 "truncated": outcome.truncated,
                 "log_artifact_id": self._publish(context, "verify_log", log),
-            }
+            },
+            usage=self._usage(context, tool_calls=1),
         )
 
 
