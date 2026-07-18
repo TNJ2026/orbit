@@ -167,3 +167,10 @@ orbit serve --acknowledge-discard-legacy-data
 .venv/bin/python -m unittest discover -s tests
 node --test tests/ui/client_modules.test.mjs   # 客户端模块，装了 node 才跑
 ```
+
+浏览器套件需要额外依赖，没装就跳过：
+
+```bash
+uv pip install -e '.[dev]'
+python -m playwright install chromium
+```

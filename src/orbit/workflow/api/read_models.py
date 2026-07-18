@@ -368,6 +368,15 @@ def default_allowed_commands(
                 f"/api/v1/human-tasks/{task_id}/submit",
                 f"human_task:{task_id}", version, "human-submit/1.0",
             ),
+            # Abandoning the run is a third, distinct answer. Rejecting an
+            # approval decides the task and lets the workflow carry on down its
+            # rejection path; without this a run parked on a person could only
+            # be answered, never called off.
+            AllowedCommand(
+                "run.cancel", "Cancel run", "POST",
+                f"/api/v1/runs/{run_id}/cancel",
+                run_id, run_version, "run-cancel/1.0",
+            ),
         )
     if kind == "budget":
         return (

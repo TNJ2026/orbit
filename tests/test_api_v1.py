@@ -412,6 +412,36 @@ class HumanTaskCommandTests(ApiTestCase):
             )
             self.assertEqual(403, response.status_code)
 
+    def test_a_run_parked_on_a_person_can_still_be_cancelled(self) -> None:
+        """Answering an approval and abandoning the run are different acts.
+
+        Without cancel on a human responsibility, a run waiting for someone who
+        will never answer has no exit at all.
+        """
+
+        with AsgiHarness(self.app) as client:
+            run_id, _task_id, _token = self._run_with_task(client)
+            items = client.get(
+                f"/api/v1/runs/{run_id}/responsibilities", actor="reader"
+            ).json()["data"]["responsibilities"]
+            human = next(item for item in items if item["kind"] == "human")
+            commands = {command["command"] for command in human["allowed_commands"]}
+            self.assertIn("run.cancel", commands)
+            self.assertIn("human.submit.approve", commands)
+
+    def test_the_cancel_command_targets_the_run_not_the_task(self) -> None:
+        with AsgiHarness(self.app) as client:
+            run_id, _task_id, _token = self._run_with_task(client)
+            items = client.get(
+                f"/api/v1/runs/{run_id}/responsibilities", actor="reader"
+            ).json()["data"]["responsibilities"]
+            human = next(item for item in items if item["kind"] == "human")
+            cancel = next(
+                c for c in human["allowed_commands"] if c["command"] == "run.cancel"
+            )
+            self.assertEqual(run_id, cancel["target_aggregate_id"])
+            self.assertNotEqual(human["expected_version"], cancel["expected_version"])
+
     def test_task_appears_in_the_inbox(self) -> None:
         with AsgiHarness(self.app) as client:
             _run, task_id, _token = self._run_with_task(client)

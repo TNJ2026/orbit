@@ -213,3 +213,10 @@ is exactly how two sources of truth come back.
 .venv/bin/python -m unittest discover -s tests
 node --test tests/ui/client_modules.test.mjs   # client modules, if node is installed
 ```
+
+The browser suite needs its own extras and skips without them:
+
+```bash
+uv pip install -e '.[dev]'
+python -m playwright install chromium
+```

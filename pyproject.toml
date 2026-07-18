@@ -1,7 +1,7 @@
 [project]
 name = "orbit"
 dynamic = ["version"]
-description = "Local multi-agent workflow orchestrator that runs coding tasks across agent CLIs"
+description = "Local durable workflow runtime for agent work"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -10,6 +10,11 @@ dependencies = [
     "starlette>=0.37",
     "uvicorn>=0.29",
 ]
+
+# Test-only. playwright is never imported by the package; the browser suite
+# skips when it is absent, so a plain install stays four dependencies deep.
+[project.optional-dependencies]
+dev = ["playwright>=1.45"]
 
 [project.scripts]
 orbit = "orbit.__main__:main"
