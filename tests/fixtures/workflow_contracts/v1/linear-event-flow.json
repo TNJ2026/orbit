@@ -1,0 +1,68 @@
+[
+  {
+    "event_id": "event:e-001",
+    "event_type": "run_started",
+    "event_version": 1,
+    "aggregate_id": "run:run-001",
+    "sequence": 1,
+    "correlation_id": "run:run-001",
+    "causation_id": "command:c-001",
+    "occurred_at": "2026-07-17T00:00:01.000000Z",
+    "payload": {}
+  },
+  {
+    "event_id": "event:e-002",
+    "event_type": "node_run_created",
+    "event_version": 1,
+    "aggregate_id": "node_run:nr-001",
+    "sequence": 1,
+    "correlation_id": "run:run-001",
+    "causation_id": "command:c-002",
+    "occurred_at": "2026-07-17T00:00:02.000000Z",
+    "payload": {"node_id": "analyze"}
+  },
+  {
+    "event_id": "event:e-003",
+    "event_type": "attempt_started",
+    "event_version": 1,
+    "aggregate_id": "attempt:a-001",
+    "sequence": 1,
+    "correlation_id": "run:run-001",
+    "causation_id": "command:c-003",
+    "occurred_at": "2026-07-17T00:00:03.000000Z",
+    "payload": {}
+  },
+  {
+    "event_id": "event:e-004",
+    "event_type": "attempt_succeeded",
+    "event_version": 1,
+    "aggregate_id": "attempt:a-001",
+    "sequence": 2,
+    "correlation_id": "run:run-001",
+    "causation_id": "command:c-004",
+    "occurred_at": "2026-07-17T00:00:04.000000Z",
+    "payload": {}
+  },
+  {
+    "event_id": "event:e-005",
+    "event_type": "node_run_succeeded",
+    "event_version": 1,
+    "aggregate_id": "node_run:nr-001",
+    "sequence": 2,
+    "correlation_id": "run:run-001",
+    "causation_id": "command:c-005",
+    "occurred_at": "2026-07-17T00:00:05.000000Z",
+    "payload": {}
+  },
+  {
+    "event_id": "event:e-006",
+    "event_type": "run_succeeded",
+    "event_version": 1,
+    "aggregate_id": "run:run-001",
+    "sequence": 2,
+    "correlation_id": "run:run-001",
+    "causation_id": "command:c-006",
+    "occurred_at": "2026-07-17T00:00:06.000000Z",
+    "payload": {}
+  }
+]

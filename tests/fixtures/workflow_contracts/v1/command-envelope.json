@@ -1,0 +1,13 @@
+{
+  "actor": "test-suite",
+  "aggregate_id": "run:run-001",
+  "command_id": "command:cmd-001",
+  "command_type": "start_run",
+  "correlation_id": "run:run-001",
+  "expected_version": 0,
+  "idempotency_key": "start-run-001",
+  "issued_at": "2026-07-17T00:00:00.000000Z",
+  "payload": {
+    "workflow_version": 1
+  }
+}

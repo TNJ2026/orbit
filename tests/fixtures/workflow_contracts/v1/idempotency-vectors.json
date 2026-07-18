@@ -1,0 +1,30 @@
+[
+  {
+    "name": "new command at current version",
+    "current_version": 0,
+    "expected_version": 0,
+    "processed": "none",
+    "result": "apply"
+  },
+  {
+    "name": "new command with stale expected version",
+    "current_version": 1,
+    "expected_version": 0,
+    "processed": "none",
+    "error": "concurrency_conflict"
+  },
+  {
+    "name": "same idempotency key and fingerprint",
+    "current_version": 1,
+    "expected_version": 0,
+    "processed": "same",
+    "result": "replay_prior_result"
+  },
+  {
+    "name": "same idempotency key with different payload",
+    "current_version": 1,
+    "expected_version": 0,
+    "processed": "different",
+    "error": "idempotency_conflict"
+  }
+]

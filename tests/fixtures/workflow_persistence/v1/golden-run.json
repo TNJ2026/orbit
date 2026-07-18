@@ -1,0 +1,48 @@
+{
+  "schema_version": "1.0",
+  "raw_events": [
+    {
+      "event_id": "event:e1",
+      "event_type": "run_progressed",
+      "event_version": 1,
+      "aggregate_id": "run:r1",
+      "sequence": 1,
+      "correlation_id": "run:r1",
+      "causation_id": "command:c1",
+      "occurred_at": "2026-07-17T00:00:00.000000Z",
+      "payload": {"value": 1}
+    },
+    {
+      "event_id": "event:e2",
+      "event_type": "run_progressed",
+      "event_version": 1,
+      "aggregate_id": "run:r1",
+      "sequence": 2,
+      "correlation_id": "run:r1",
+      "causation_id": "command:c2",
+      "occurred_at": "2026-07-17T00:00:00.000000Z",
+      "payload": {"value": 2}
+    }
+  ],
+  "expected_upcasted_payloads": [
+    {"format": "v2", "value": 1},
+    {"format": "v2", "value": 2}
+  ],
+  "snapshot": {
+    "last_global_position": 1,
+    "state": {"values": [1]}
+  },
+  "expected_state": {"values": [1, 2]},
+  "expected_cursor": 2,
+  "cross_aggregate_global_stream": [
+    {"global_position": 1, "aggregate_id": "run:r1", "aggregate_sequence": 1},
+    {"global_position": 2, "aggregate_id": "node_run:n1", "aggregate_sequence": 1},
+    {"global_position": 3, "aggregate_id": "attempt:a1", "aggregate_sequence": 1}
+  ],
+  "expected_global_cursor": 3,
+  "receipt": {
+    "aggregate_id": "run:r1",
+    "idempotency_key": "progress-1",
+    "result_event_ids": ["event:e1"]
+  }
+}

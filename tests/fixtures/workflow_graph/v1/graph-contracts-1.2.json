@@ -1,0 +1,71 @@
+{
+  "completion_decision": {
+    "active_responsibility_ids": ["timer:retry-001"],
+    "disposition": "wait",
+    "reason": "retry timer is pending",
+    "terminal_node_run_ids": [],
+    "waiting_reason": "retry_wait"
+  },
+  "join_decision": {
+    "disposition": "open",
+    "ignored_edge_ids": ["edge-b"],
+    "join_group_id": "join_group:join-001",
+    "merged_input_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "participant_edge_ids": ["edge-a", "edge-b"],
+    "settled_edge_ids": ["edge-a", "edge-b"],
+    "winner_edge_ids": ["edge-a"]
+  },
+  "join_policy": {
+    "deadline_seconds": null,
+    "merge_mode": "array_by_edge",
+    "min_successful": null,
+    "mode": "n_of_m",
+    "threshold": 2
+  },
+  "loop_policy": {
+    "exhaustion": "fail",
+    "max_iterations": 4
+  },
+  "plan_edge": {
+    "back_edge": false,
+    "condition": {
+      "left": {"path": "source.ok"},
+      "op": "eq",
+      "right": true
+    },
+    "edge_id": "edge-a",
+    "mapping": {"op": "identity"},
+    "policy_ref": null,
+    "priority": 10,
+    "route": "success",
+    "source_node_id": "decide",
+    "source_port": "result",
+    "target_node_id": "work",
+    "target_port": "input"
+  },
+  "retry_policy": {
+    "backoff_seconds": [1, 5],
+    "categories": ["transient_error", "timeout"],
+    "max_attempts": 3
+  },
+  "rework_policy": {
+    "exhaustion": "error_route",
+    "max_generations": 2
+  },
+  "route_decision": {
+    "context_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "evaluated_edge_ids": ["edge-a", "edge-b"],
+    "mode": "parallel",
+    "node_run_id": "node_run:decision-001",
+    "not_selected_edge_ids": ["edge-b"],
+    "route": "success",
+    "selected_edge_ids": ["edge-a"]
+  },
+  "token_scope": {
+    "branch_group": "parallel-1",
+    "edge_id": "edge-a",
+    "plan_version": 1,
+    "target_generation": 2,
+    "target_node_id": "work"
+  }
+}

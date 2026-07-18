@@ -5,6 +5,8 @@ description = "Local multi-agent workflow orchestrator that runs coding tasks ac
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "jsonschema>=4.23",
+    "PyYAML>=6.0",
     "starlette>=0.37",
     "uvicorn>=0.29",
 ]

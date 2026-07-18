@@ -1,0 +1,18 @@
+{
+  "definition": {
+    "schema_version": "1.0",
+    "workflow": {
+      "id": "demo",
+      "name": "研究流程"
+    },
+    "nodes": [
+      {
+        "id": "start",
+        "type": "transform"
+      }
+    ],
+    "edges": []
+  },
+  "canonical_json": "{\"edges\":[],\"nodes\":[{\"id\":\"start\",\"type\":\"transform\"}],\"schema_version\":\"1.0\",\"workflow\":{\"id\":\"demo\",\"name\":\"研究流程\"}}",
+  "definition_hash": "sha256:8b93bcf4178eff94ba2655b660c956fc41d3534fd04dc9672d9ac0848b080d99"
+}

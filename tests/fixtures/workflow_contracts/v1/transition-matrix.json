@@ -1,0 +1,52 @@
+{
+  "attempt": {
+    "created": ["cancelled", "leased"],
+    "leased": ["cancelled", "lost", "running"],
+    "running": [
+      "cancelled",
+      "failed",
+      "lost",
+      "succeeded",
+      "timed_out",
+      "unknown_external_result"
+    ]
+  },
+  "branch_token": {
+    "active": ["cancelled", "completed", "failed", "not_selected"]
+  },
+  "human_task": {
+    "waiting": ["cancelled", "completed"]
+  },
+  "job": {
+    "leased": ["cancelled", "ready", "running"],
+    "ready": ["cancelled", "leased"],
+    "retry_wait": ["cancelled", "ready"],
+    "running": ["cancelled", "completed", "failed", "retry_wait"]
+  },
+  "lease": {
+    "active": ["expired", "released"]
+  },
+  "node_run": {
+    "pending": ["cancelled", "ready", "skipped"],
+    "ready": ["cancelled", "running"],
+    "running": ["cancelled", "failed", "succeeded", "waiting"],
+    "waiting": ["cancelled", "failed", "running", "succeeded"]
+  },
+  "timer": {
+    "leased": ["cancelled", "fired", "scheduled"],
+    "scheduled": ["cancelled", "leased"]
+  },
+  "workflow_run": {
+    "budget_exhausted": ["cancelled", "failed", "waiting_for_budget"],
+    "created": ["cancelled", "running"],
+    "running": [
+      "budget_exhausted",
+      "cancelled",
+      "failed",
+      "succeeded",
+      "waiting"
+    ],
+    "waiting": ["cancelled", "failed", "running"],
+    "waiting_for_budget": ["cancelled", "failed", "running"]
+  }
+}

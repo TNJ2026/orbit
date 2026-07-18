@@ -1,0 +1,21 @@
+{
+  "artifact_refs": [],
+  "diagnostics": [],
+  "error": null,
+  "external_effect": "known_applied",
+  "output": {
+    "answer": 42
+  },
+  "provider_request_id": "request-001",
+  "status": "succeeded",
+  "usage": {
+    "attempt_id": "attempt:attempt-001",
+    "input_tokens": 10,
+    "observed_at": "2026-07-17T00:00:01.000000Z",
+    "output_tokens": 4,
+    "provider_request_id": "request-001",
+    "sequence": 1,
+    "tool_calls": 0
+  },
+  "usage_incomplete": false
+}

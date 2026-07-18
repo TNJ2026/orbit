@@ -1,0 +1,14 @@
+{
+  "aggregate_id": "run:run-001",
+  "causation_id": "command:cmd-001",
+  "correlation_id": "run:run-001",
+  "event_id": "event:event-upcast-001",
+  "event_type": "run_finished",
+  "event_version": 2,
+  "occurred_at": "2026-07-17T00:00:01.000000Z",
+  "payload": {
+    "result": null,
+    "status": "succeeded"
+  },
+  "sequence": 5
+}

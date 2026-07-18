@@ -1,0 +1,140 @@
+{
+  "artifact_link": {
+    "artifact_id": "artifact:report-001",
+    "created_at": "2026-07-17T12:00:00.000000Z",
+    "created_event_id": "event:data-001",
+    "link_id": "artifact_link:producer-001",
+    "link_type": "producer",
+    "run_id": "run:data-001",
+    "target_id": "attempt:produce-001",
+    "workflow_id": "workflow:data"
+  },
+  "artifact_metadata": {
+    "artifact_id": "artifact:report-001",
+    "blob_key": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "checksum": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "committed_at": "2026-07-17T12:00:00.000000Z",
+    "content_type": "text/markdown",
+    "created_at": "2026-07-17T12:00:00.000000Z",
+    "created_event_id": "event:data-001",
+    "output_port_id": "report",
+    "producer_id": "attempt:produce-001",
+    "producer_node_run_id": "node_run:produce-001",
+    "producer_type": "attempt",
+    "run_id": "run:data-001",
+    "schema_id": "schema://report/1.0",
+    "scope_id": "run:data-001",
+    "size_bytes": 120,
+    "status": "committed",
+    "visibility": "run",
+    "workflow_id": "workflow:data"
+  },
+  "data_commit_manifest": {
+    "artifacts": [
+      {
+        "artifact_id": "artifact:report-001",
+        "checksum": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "port_id": "report",
+        "size_bytes": 120
+      }
+    ],
+    "owner_id": "attempt:produce-001",
+    "owner_kind": "attempt_output",
+    "run_id": "run:data-001",
+    "values": [
+      {
+        "checksum": "sha256:97e40b934553e2b9e093c693fe906b9e3c8db95544bca15344aa29674cf42194",
+        "data": {"score": 0.8},
+        "port_id": "score",
+        "schema_id": "schema://score/1.0",
+        "size_bytes": 13
+      }
+    ]
+  },
+  "input_manifest": {
+    "attempt_id": "attempt:produce-001",
+    "items": [
+      {
+        "artifact": null,
+        "port_id": "credential",
+        "schema_id": "schema://secret-ref/1.0",
+        "secret": {"logical_name": "API_KEY", "provider_hint": "local", "version": "v1"},
+        "transport": "secret_ref",
+        "value": null
+      },
+      {
+        "artifact": {
+          "artifact_id": "artifact:report-001",
+          "checksum": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "content_type": "text/markdown",
+          "schema_id": "schema://report/1.0",
+          "size_bytes": 120
+        },
+        "port_id": "report",
+        "schema_id": "schema://report/1.0",
+        "secret": null,
+        "transport": "artifact_ref",
+        "value": null
+      },
+      {
+        "artifact": null,
+        "port_id": "score",
+        "schema_id": "schema://score/1.0",
+        "secret": null,
+        "transport": "inline",
+        "value": {
+          "checksum": "sha256:97e40b934553e2b9e093c693fe906b9e3c8db95544bca15344aa29674cf42194",
+          "data": {"score": 0.8},
+          "port_id": "score",
+          "schema_id": "schema://score/1.0",
+          "size_bytes": 13
+        }
+      }
+    ],
+    "node_run_id": "node_run:produce-001",
+    "run_id": "run:data-001"
+  },
+  "port_data_policy": {
+    "content_types": ["application/octet-stream"],
+    "max_size_bytes": 67108864,
+    "transport": "artifact_ref",
+    "visibility": "run"
+  },
+  "secret_ref": {"logical_name": "API_KEY", "provider_hint": "local", "version": "v1"},
+  "staged_artifact_commit": {
+    "artifact_id": "artifact:report-001",
+    "checksum": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "port_id": "report",
+    "size_bytes": 120
+  },
+  "value_commit": {
+    "checksum": "sha256:97e40b934553e2b9e093c693fe906b9e3c8db95544bca15344aa29674cf42194",
+    "data": {"score": 0.8},
+    "port_id": "score",
+    "schema_id": "schema://score/1.0",
+    "size_bytes": 13
+  },
+  "value_link": {
+    "created_at": "2026-07-17T12:00:00.000000Z",
+    "created_event_id": "event:data-001",
+    "link_id": "value_link:mapped-001",
+    "link_type": "mapped_from",
+    "mapping_hash": "sha256:0e84f67f7ad259ce41270d65dc687b75706e774d261708da1a30d789381322c6",
+    "run_id": "run:data-001",
+    "source_value_id": "value:source-001",
+    "target_value_id": "value:score-001"
+  },
+  "value_record": {
+    "checksum": "sha256:97e40b934553e2b9e093c693fe906b9e3c8db95544bca15344aa29674cf42194",
+    "created_at": "2026-07-17T12:00:00.000000Z",
+    "created_event_id": "event:data-001",
+    "data": {"score": 0.8},
+    "owner_id": "attempt:produce-001",
+    "owner_kind": "attempt_output",
+    "port_id": "score",
+    "run_id": "run:data-001",
+    "schema_id": "schema://score/1.0",
+    "size_bytes": 13,
+    "value_id": "value:score-001"
+  }
+}

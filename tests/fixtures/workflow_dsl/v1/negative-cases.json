@@ -1,0 +1,14 @@
+[
+  {"id": "unsupported-version", "expected_code": "DSL_UNSUPPORTED_VERSION", "mutation": "unsupported_version"},
+  {"id": "unknown-field", "expected_code": "DSL_SCHEMA_ERROR", "mutation": "unknown_field"},
+  {"id": "too-many-errors", "expected_code": "DSL_TOO_MANY_ERRORS", "mutation": "too_many_errors"},
+  {"id": "duplicate-id", "expected_code": "DSL_DUPLICATE_ID", "mutation": "duplicate_id"},
+  {"id": "missing-handler", "expected_code": "DSL_HANDLER_NOT_FOUND", "mutation": "missing_handler"},
+  {"id": "missing-node-reference", "expected_code": "DSL_REFERENCE_NOT_FOUND", "mutation": "missing_node"},
+  {"id": "graph-cycle", "expected_code": "DSL_GRAPH_CYCLE", "mutation": "cycle"},
+  {"id": "unreachable-node", "expected_code": "DSL_GRAPH_UNREACHABLE", "mutation": "unreachable"},
+  {"id": "no-terminal-path", "expected_code": "DSL_GRAPH_NO_TERMINAL_PATH", "mutation": "no_terminal_path"},
+  {"id": "incompatible-port", "expected_code": "DSL_PORT_INCOMPATIBLE", "mutation": "incompatible_port"},
+  {"id": "invalid-expression", "expected_code": "DSL_EXPRESSION_INVALID", "mutation": "invalid_expression"},
+  {"id": "invalid-mapping", "expected_code": "DSL_MAPPING_INVALID", "mutation": "invalid_mapping"}
+]

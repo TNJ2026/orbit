@@ -1,0 +1,28 @@
+[
+  {
+    "name": "finish-valid",
+    "run_id": "run:planner",
+    "raw_response": "{\"schema_version\":\"1.0\",\"proposal_id\":\"proposal:eval-finish\",\"run_id\":\"run:planner\",\"base_plan_version\":1,\"action\":{\"kind\":\"finish\",\"arguments\":{\"outputs\":{}}},\"reason\":\"required output exists\"}",
+    "expected_valid": true,
+    "expected_action": "finish",
+    "task_success": true,
+    "decision_count": 1,
+    "input_tokens": 40,
+    "output_tokens": 18,
+    "cost_microunits": 25,
+    "duration_ms": 120
+  },
+  {
+    "name": "free-text-rejected",
+    "run_id": "run:planner",
+    "raw_response": "I think the workflow is done.",
+    "expected_valid": false,
+    "expected_action": null,
+    "task_success": false,
+    "decision_count": 1,
+    "input_tokens": 35,
+    "output_tokens": 9,
+    "cost_microunits": 15,
+    "duration_ms": 90
+  }
+]

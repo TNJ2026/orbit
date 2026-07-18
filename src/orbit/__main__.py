@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import uvicorn
@@ -11,6 +12,116 @@ from . import __version__
 from .project_index import upsert_project
 from .store import Store, project_db_path, project_state_dir, resolve_project_root
 from .server import create_server, runner_loop
+
+
+def _workflow_command(args) -> None:
+    from .workflow.application import WorkflowDefinitionService, load_catalogs
+    from .workflow.domain.serialization import canonical_json
+    from .workflow.dsl import DiagnosticError, canonical_ir_json
+    from .workflow.persistence import PublishConflictError, SQLiteWorkflowVersionStore
+
+    machine_output = getattr(args, "json", False)
+    try:
+        if args.workflow_action == "db-check":
+            from .workflow.persistence.integrity import check_database
+
+            db_path = args.db or str(project_db_path(resolve_project_root()))
+            run_id = None
+            if args.run_id:
+                from .workflow.domain.ids import EntityId
+
+                run_id = EntityId.parse(args.run_id)
+            report = check_database(db_path, run_id=run_id)
+            payload = report.to_dict()
+            if args.drop_invalid_snapshots:
+                snapshot_ids = tuple(
+                    item.entity_id
+                    for item in report.issues
+                    if item.code == "SNAPSHOT_CORRUPT" and item.entity_id is not None
+                )
+                if snapshot_ids:
+                    from .workflow.persistence import SQLiteUnitOfWork
+                    from .workflow.domain.ids import EntityId
+
+                    with SQLiteUnitOfWork(db_path) as uow:
+                        for snapshot_id in snapshot_ids:
+                            uow.snapshots.delete(EntityId.parse(snapshot_id))
+                        uow.commit()
+                    report = check_database(db_path, run_id=run_id)
+                    payload = report.to_dict()
+                    payload["dropped_invalid_snapshots"] = list(snapshot_ids)
+            print(
+                json.dumps(payload, ensure_ascii=False, sort_keys=True)
+                if machine_output
+                else (
+                    f"ok: {report.checked_events} events, "
+                    f"{report.checked_snapshots} snapshots"
+                    if report.ok
+                    else "\n".join(
+                        f"{item.code}: {item.message}" for item in report.issues
+                    )
+                )
+            )
+            if not report.ok:
+                raise SystemExit(4)
+            return
+        catalogs = load_catalogs(args.catalog)
+        source_path = Path(args.file)
+        source = source_path.read_text(encoding="utf-8-sig")
+        source_format = "json" if source_path.suffix.lower() == ".json" else "yaml"
+        store = None
+        if args.workflow_action == "publish":
+            db_path = args.db or str(project_db_path(resolve_project_root()))
+            store = SQLiteWorkflowVersionStore(db_path)
+        service = WorkflowDefinitionService(catalogs, store)
+        if args.workflow_action == "validate":
+            compiled = service.validate_workflow(
+                source, source_name=str(source_path), source_format=source_format
+            )
+            result = {
+                "valid": True,
+                "definition_hash": compiled.definition_hash.value,
+                "workflow_id": compiled.ir.workflow_id,
+            }
+            print(json.dumps(result, ensure_ascii=False, sort_keys=True) if machine_output else f"valid {result['workflow_id']} {result['definition_hash']}")
+            return
+        if args.workflow_action == "compile":
+            compiled = service.compile_workflow(
+                source, source_name=str(source_path), source_format=source_format
+            )
+            output = canonical_ir_json(compiled) + "\n"
+            if args.output == "-":
+                print(output, end="")
+            else:
+                Path(args.output).write_text(output, encoding="utf-8")
+            return
+        record = service.publish_workflow(
+            source,
+            source_name=str(source_path),
+            source_format=source_format,
+            expected_latest_version=args.expected_version,
+            actor=args.actor,
+        )
+        result = {
+            "workflow_id": record.workflow_id,
+            "version": record.version.value,
+            "definition_hash": record.definition_hash.value,
+        }
+        print(canonical_json(result) if machine_output else f"published {record.workflow_id}@{record.version.value} {record.definition_hash.value}")
+    except DiagnosticError as exc:
+        payload = [item.to_dict() for item in exc.diagnostics]
+        if machine_output:
+            print(json.dumps({"valid": False, "diagnostics": payload}, ensure_ascii=False, sort_keys=True))
+        else:
+            for item in exc.diagnostics:
+                location = ""
+                if item.source_range is not None:
+                    location = f"{item.source_range.source}:{item.source_range.start_line}:{item.source_range.start_column}: "
+                print(f"{location}{item.code} {item.json_path}: {item.message}")
+        raise SystemExit(2) from None
+    except PublishConflictError as exc:
+        print(json.dumps({"code": "WORKFLOW_PUBLISH_CONFLICT", "expected": exc.expected, "actual": exc.actual}) if machine_output else str(exc))
+        raise SystemExit(3) from None
 
 
 def init_project(project_root: Path) -> dict[str, list[str]]:
@@ -243,7 +354,44 @@ def main() -> None:
     config_cmd.add_argument("--host", default="127.0.0.1", help="Host for the printed serve hint (default: 127.0.0.1)")
     config_cmd.add_argument("--port", type=int, default=8848, help="Port for the printed serve hint (default: 8848)")
 
+    workflow_cmd = sub.add_parser(
+        "workflow",
+        help="Validate, compile, or publish a Workflow DSL 1.0 definition",
+    )
+    workflow_sub = workflow_cmd.add_subparsers(dest="workflow_action", required=True)
+    for action in ("validate", "compile", "publish"):
+        command = workflow_sub.add_parser(action)
+        command.add_argument("file", help="Workflow DSL .yaml, .yml, or .json file")
+        command.add_argument(
+            "--catalog",
+            required=True,
+            help="Compile-time Handler, Schema, and Extension catalog JSON",
+        )
+        if action in {"validate", "publish"}:
+            command.add_argument("--json", action="store_true", help="Emit stable machine-readable JSON")
+        if action == "compile":
+            command.add_argument("--output", default="-", help="Canonical IR output path (default: stdout)")
+        if action == "publish":
+            command.add_argument("--db", default=None, help="SQLite database path")
+            command.add_argument("--expected-version", type=int, required=True)
+            command.add_argument("--actor", default="local-cli")
+    db_check = workflow_sub.add_parser(
+        "db-check", help="Audit workflow event, projection, receipt, and snapshot integrity"
+    )
+    db_check.add_argument("--db", default=None, help="SQLite database path")
+    db_check.add_argument("--run-id", default=None, help="Optional run:<id> scope")
+    db_check.add_argument("--json", action="store_true", help="Emit stable machine-readable JSON")
+    db_check.add_argument(
+        "--drop-invalid-snapshots",
+        action="store_true",
+        help="Explicitly delete corrupt snapshots; event and projection data remain read-only",
+    )
+
     args = parser.parse_args()
+
+    if args.command == "workflow":
+        _workflow_command(args)
+        return
 
     if args.command in ("config", "init"):
         project_root = resolve_project_root()
