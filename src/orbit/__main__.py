@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import sqlite3
 
 import uvicorn
 
@@ -56,8 +57,16 @@ def _db_check_command(args) -> None:
     from .workflow.persistence.integrity import check_database
 
     db_path = _runtime_db_path(args.db)
+    if not Path(db_path).exists():
+        # A mistyped --db is the common case here. A stack trace tells the user
+        # sqlite3 could not open a file; this tells them which one.
+        raise SystemExit(f"orbit db check: no database at {db_path}")
+
     run_id = EntityId.parse(args.run_id) if args.run_id else None
-    report = check_database(db_path, run_id=run_id)
+    try:
+        report = check_database(db_path, run_id=run_id)
+    except sqlite3.DatabaseError as exc:
+        raise SystemExit(f"orbit db check: cannot read {db_path}: {exc}") from None
     payload = report.to_dict()
 
     if args.drop_invalid_snapshots:
