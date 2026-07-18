@@ -10,6 +10,7 @@ import uvicorn
 
 from . import __version__
 from .platform.projects import (
+    legacy_engine_db_path,
     project_db_path,
     resolve_project_root,
     upsert_project,
@@ -251,9 +252,61 @@ def ensure_state_dir_gitignored(project_root: Path) -> bool:
 
 
 def _serve(args) -> None:
-    """Start the UI/API + Scheduler server (shared by `serve` and `up`)."""
+    """Start the new Runtime composition root."""
+
+    from .web.app import HandlerRegistration, create_app
+    from .web.schema_guard import MixedSchemaError
+    from .workflow.catalogs import HandlerManifest
+    from .workflow.domain.durable_execution import ExecutionSafety
+    from .workflow.domain.handlers import ResourceProfile
+    from .workflow.handlers import TransformHandler
+
     project_root = resolve_project_root()
     db_path = _runtime_db_path(args.db)
+
+    # Only trusted, deterministic first-party handlers are registered here.
+    # Agent CLI and git tooling arrive in M5 behind an explicit catalog; the
+    # composition root never registers arbitrary shell or network handlers.
+    transform = HandlerManifest(
+        "transform", "1.0.0", ("action",),
+        {"value": "example://integer/1.0"}, {"value": "example://integer/1.0"},
+        {"type": "object"}, ExecutionSafety.REPLAY_SAFE,
+        ResourceProfile(100_000, 100_000, 0, 300, 0, "builtin"),
+        "schema://object/1.0", (), (), True, True,
+    )
+    schemas = {
+        "schema://object/1.0": {"type": "object"},
+        "example://integer/1.0": {"type": "integer"},
+    }
+
+    try:
+        app = create_app(
+            db_path,
+            handlers=[HandlerRegistration(transform, TransformHandler(), "transform@1.0.0")],
+            schemas=schemas,
+            worker_count=args.runner_concurrency,
+        )
+    except MixedSchemaError as exc:
+        raise SystemExit(f"error: {exc}") from None
+
+    upsert_project(
+        project_root=project_root, db_path=db_path,
+        host=args.host, port=args.port,
+    )
+    print(
+        f"orbit Runtime listening on http://{args.host}:{args.port} "
+        f"(health: /health/ready, workers: {args.runner_concurrency}) "
+        f"(db: {db_path})",
+        flush=True,
+    )
+    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+
+
+def _serve_legacy(args) -> None:
+    """Start the legacy engine. Removed with the rest of it in M6."""
+
+    project_root = resolve_project_root()
+    db_path = args.db or str(legacy_engine_db_path(project_root))
     project = upsert_project(
         project_root=project_root,
         db_path=db_path,
@@ -458,7 +511,7 @@ def main() -> None:
             "copied into the repo. Run `orbit config` to customize and commit them.",
             flush=True,
         )
-        _serve(args)
+        _serve_legacy(args)
         return
 
     if args.command == "serve":
@@ -467,7 +520,7 @@ def main() -> None:
 
     if args.command == "runner":
         project_root = resolve_project_root(args.project)
-        db_path = args.db or str(project_db_path(project_root))
+        db_path = args.db or str(legacy_engine_db_path(project_root))
         steps = [s.strip() for s in (args.steps or "").split(",") if s.strip()]
         scope = []
         if args.agent:

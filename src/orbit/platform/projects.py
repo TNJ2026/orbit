@@ -122,6 +122,21 @@ def legacy_database_candidates(
     return tuple(path for path in candidates if path.exists())
 
 
+def legacy_engine_db_path(
+    project_dir: Path | str | None = None,
+    base_dir: Path | str | None = None,
+) -> Path:
+    """Database the *legacy* commands write to during the transition.
+
+    `orbit serve` runs the new Runtime against `runtime.db`, which refuses to
+    start on a file containing legacy tables. Keeping the legacy engine on its
+    own filename means running `orbit up` cannot poison the new database. Both
+    this function and the legacy commands disappear in M6.
+    """
+
+    return project_db_dir(project_dir, base_dir) / "messages.db"
+
+
 def legacy_database_warning(paths: tuple[Path, ...]) -> str | None:
     """One-shot message for abandoned pre-migration data.
 
