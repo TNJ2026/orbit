@@ -133,12 +133,18 @@ class DurableRuntimeApplicationService:
         execution_safety: ExecutionSafety = ExecutionSafety.REPLAY_SAFE,
         execution_registry=None,
         artifact_backend=None,
+        uow_factory=None,
     ) -> None:
         self.path = Path(path)
         self.execution_registry = execution_registry
         self.artifact_backend = artifact_backend
         self.workflow_versions = SQLiteWorkflowVersionStore(self.path)
-        self.uow_factory = lambda: SQLiteUnitOfWork(self.path)
+        # Injectable so the memory adapter can be driven through the same
+        # service the production one uses. Assigning `service.uow_factory`
+        # afterwards does not work — the kernel, scheduler and recovery
+        # scanner all capture the factory here — and a parity test that
+        # silently kept writing to SQLite would prove nothing.
+        self.uow_factory = uow_factory or (lambda: SQLiteUnitOfWork(self.path))
         self.snapshots = SnapshotCoordinator(self.uow_factory)
         self.scheduler = DurableWorkScheduler(
             execution_safety=execution_safety,
