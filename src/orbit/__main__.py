@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 import uvicorn
@@ -313,10 +314,34 @@ def _serve(args) -> None:
     project_root = resolve_project_root()
     db_path = _runtime_db_path(args.db)
 
+    handlers = list(builtin_handlers())
+    if args.dev_tools:
+        # Opt-in on purpose: this is the only switch that lets a workflow run a
+        # child process against the checkout, so it is never the default.
+        from .web.builtin_handlers import dev_tool_handlers
+        from .workflow.handlers.dev_tools import VerifyProfile
+
+        dev_handlers, tool_names = dev_tool_handlers(
+            project_root,
+            project_state_dir(project_root),
+            verify_profiles=(
+                VerifyProfile(
+                    "unit", ("python", "-m", "unittest", "discover", "-s", "tests"),
+                    "the project's unittest suite",
+                ),
+            ),
+            environment={
+                "PATH": os.environ.get("PATH", ""),
+                "HOME": os.environ.get("HOME", ""),
+            },
+        )
+        handlers.extend(dev_handlers)
+        print(f"dev tools: {', '.join(tool_names) or 'none granted'}", flush=True)
+
     try:
         app = create_app(
             db_path,
-            handlers=builtin_handlers(),
+            handlers=handlers,
             schemas=BUILTIN_SCHEMAS,
             worker_count=args.runner_concurrency,
             discover_agents=not args.no_agent_discovery,
@@ -399,14 +424,24 @@ def main() -> None:
         help="How many jobs the in-process worker runs in parallel (default: 5).",
     )
 
-    sub.add_parser(
+    serve_cmd = sub.add_parser(
         "serve",
         parents=[serve_common],
         help="Start the UI/API + Scheduler server",
-    ).add_argument(
+    )
+    serve_cmd.add_argument(
         "--no-agent-discovery",
         action="store_true",
         help="Skip probing for installed Agent CLIs at startup",
+    )
+    serve_cmd.add_argument(
+        "--dev-tools",
+        action="store_true",
+        help=(
+            "Register the trusted git and verify tools. Workflows may then run "
+            "reviewed commands inside a git worktree; they still cannot supply "
+            "a command of their own."
+        ),
     )
 
     sub.add_parser(
