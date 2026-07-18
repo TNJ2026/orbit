@@ -1501,7 +1501,8 @@
    "disposition": "rewrite",
    "target_phase": "M1B",
    "capability": "worktree acquire/release",
-   "replacement_hint": "Replacement: workspace/git.py tests"
+   "replacement_hint": "Replaced by tests/test_workspace_git.py::LifecycleTests + ::CrashRecoveryTests (M1B, delivered)",
+   "status": "replacement_delivered"
   },
   {
    "test_id": "tests/test_worktree.py::WorktreeLifecycleTests::test_ensure_is_idempotent_and_on_task_branch",
@@ -1510,7 +1511,8 @@
    "disposition": "rewrite",
    "target_phase": "M1B",
    "capability": "worktree acquire/release",
-   "replacement_hint": "Replacement: workspace/git.py tests"
+   "replacement_hint": "Replaced by tests/test_workspace_git.py::LifecycleTests + ::CrashRecoveryTests (M1B, delivered)",
+   "status": "replacement_delivered"
   },
   {
    "test_id": "tests/test_worktree.py::WorktreeLifecycleTests::test_design_artifacts_committed_reach_isolated_worktrees",
@@ -1519,7 +1521,8 @@
    "disposition": "rewrite",
    "target_phase": "M1B",
    "capability": "worktree acquire/release",
-   "replacement_hint": "Replacement: workspace/git.py tests"
+   "replacement_hint": "Replaced by tests/test_workspace_git.py::LifecycleTests + ::CrashRecoveryTests (M1B, delivered)",
+   "status": "replacement_delivered"
   },
   {
    "test_id": "tests/test_worktree.py::WorktreeLifecycleTests::test_remove_then_recreate",
@@ -1528,7 +1531,8 @@
    "disposition": "rewrite",
    "target_phase": "M1B",
    "capability": "worktree acquire/release",
-   "replacement_hint": "Replacement: workspace/git.py tests"
+   "replacement_hint": "Replaced by tests/test_workspace_git.py::LifecycleTests + ::CrashRecoveryTests (M1B, delivered)",
+   "status": "replacement_delivered"
   },
   {
    "test_id": "tests/test_worktree.py::WorktreeLifecycleTests::test_ensure_recovers_stale_unregistered_dir",
@@ -1537,7 +1541,8 @@
    "disposition": "rewrite",
    "target_phase": "M1B",
    "capability": "worktree acquire/release",
-   "replacement_hint": "Replacement: workspace/git.py tests"
+   "replacement_hint": "Replaced by tests/test_workspace_git.py::LifecycleTests + ::CrashRecoveryTests (M1B, delivered)",
+   "status": "replacement_delivered"
   },
   {
    "test_id": "tests/test_worktree.py::GitProvisioningTests::test_needs_git_predicate",
@@ -1546,7 +1551,8 @@
    "disposition": "rewrite",
    "target_phase": "M1B",
    "capability": "git provisioning, dirty tree",
-   "replacement_hint": "Replacement: workspace/git.py tests"
+   "replacement_hint": "Replaced by tests/test_workspace_git.py::LifecycleTests + ::UnavailableTests + ::GitignoreTests + ::ConcurrencyTests (M1B, delivered)",
+   "status": "replacement_delivered"
   },
   {
    "test_id": "tests/test_worktree.py::GitProvisioningTests::test_ensure_inits_non_git_dir_with_base_commit",
@@ -1555,7 +1561,8 @@
    "disposition": "rewrite",
    "target_phase": "M1B",
    "capability": "git provisioning, dirty tree",
-   "replacement_hint": "Replacement: workspace/git.py tests"
+   "replacement_hint": "Replaced by tests/test_workspace_git.py::LifecycleTests + ::UnavailableTests + ::GitignoreTests + ::ConcurrencyTests (M1B, delivered)",
+   "status": "replacement_delivered"
   },
   {
    "test_id": "tests/test_worktree.py::GitProvisioningTests::test_ensure_seeds_base_in_empty_dir",
@@ -1564,7 +1571,8 @@
    "disposition": "rewrite",
    "target_phase": "M1B",
    "capability": "git provisioning, dirty tree",
-   "replacement_hint": "Replacement: workspace/git.py tests"
+   "replacement_hint": "Replaced by tests/test_workspace_git.py::LifecycleTests + ::UnavailableTests + ::GitignoreTests + ::ConcurrencyTests (M1B, delivered)",
+   "status": "replacement_delivered"
   },
   {
    "test_id": "tests/test_worktree.py::GitProvisioningTests::test_ensure_leaves_existing_commits_untouched",
@@ -1573,7 +1581,8 @@
    "disposition": "rewrite",
    "target_phase": "M1B",
    "capability": "git provisioning, dirty tree",
-   "replacement_hint": "Replacement: workspace/git.py tests"
+   "replacement_hint": "Replaced by tests/test_workspace_git.py::LifecycleTests + ::UnavailableTests + ::GitignoreTests + ::ConcurrencyTests (M1B, delivered)",
+   "status": "replacement_delivered"
   },
   {
    "test_id": "tests/test_worktree.py::GitProvisioningTests::test_warns_when_git_missing_for_isolating_workflow",
@@ -1582,7 +1591,8 @@
    "disposition": "rewrite",
    "target_phase": "M1B",
    "capability": "git provisioning, dirty tree",
-   "replacement_hint": "Replacement: workspace/git.py tests"
+   "replacement_hint": "Replaced by tests/test_workspace_git.py::LifecycleTests + ::UnavailableTests + ::GitignoreTests + ::ConcurrencyTests (M1B, delivered)",
+   "status": "replacement_delivered"
   },
   {
    "test_id": "tests/test_worktree.py::GitProvisioningTests::test_no_git_warning_when_git_available",
@@ -1591,7 +1601,8 @@
    "disposition": "rewrite",
    "target_phase": "M1B",
    "capability": "git provisioning, dirty tree",
-   "replacement_hint": "Replacement: workspace/git.py tests"
+   "replacement_hint": "Replaced by tests/test_workspace_git.py::LifecycleTests + ::UnavailableTests + ::GitignoreTests + ::ConcurrencyTests (M1B, delivered)",
+   "status": "replacement_delivered"
   },
   {
    "test_id": "tests/test_worktree.py::GitProvisioningTests::test_no_git_warning_for_workflow_without_isolation",
@@ -1600,7 +1611,8 @@
    "disposition": "rewrite",
    "target_phase": "M1B",
    "capability": "git provisioning, dirty tree",
-   "replacement_hint": "Replacement: workspace/git.py tests"
+   "replacement_hint": "Replaced by tests/test_workspace_git.py::LifecycleTests + ::UnavailableTests + ::GitignoreTests + ::ConcurrencyTests (M1B, delivered)",
+   "status": "replacement_delivered"
   },
   {
    "test_id": "tests/test_worktree.py::GitProvisioningTests::test_rework_edges_do_not_remove_terminal_step_warning",
@@ -1609,7 +1621,8 @@
    "disposition": "rewrite",
    "target_phase": "M1B",
    "capability": "git provisioning, dirty tree",
-   "replacement_hint": "Replacement: workspace/git.py tests"
+   "replacement_hint": "Replaced by tests/test_workspace_git.py::LifecycleTests + ::UnavailableTests + ::GitignoreTests + ::ConcurrencyTests (M1B, delivered)",
+   "status": "replacement_delivered"
   },
   {
    "test_id": "tests/test_worktree.py::GitProvisioningTests::test_integrate_still_validates_in_non_git_project",
@@ -1618,7 +1631,8 @@
    "disposition": "rewrite",
    "target_phase": "M1B",
    "capability": "git provisioning, dirty tree",
-   "replacement_hint": "Replacement: workspace/git.py tests"
+   "replacement_hint": "Replaced by tests/test_workspace_git.py::LifecycleTests + ::UnavailableTests + ::GitignoreTests + ::ConcurrencyTests (M1B, delivered)",
+   "status": "replacement_delivered"
   },
   {
    "test_id": "tests/test_worktree.py::GitProvisioningTests::test_integrate_still_validates_when_task_branch_is_missing",
@@ -1627,7 +1641,8 @@
    "disposition": "rewrite",
    "target_phase": "M1B",
    "capability": "git provisioning, dirty tree",
-   "replacement_hint": "Replacement: workspace/git.py tests"
+   "replacement_hint": "Replaced by tests/test_workspace_git.py::LifecycleTests + ::UnavailableTests + ::GitignoreTests + ::ConcurrencyTests (M1B, delivered)",
+   "status": "replacement_delivered"
   },
   {
    "test_id": "tests/test_worktree.py::WorktreeSweepTests::test_sweep_reaps_finished_and_orphan_but_keeps_active",
@@ -1636,7 +1651,8 @@
    "disposition": "rewrite",
    "target_phase": "M1B",
    "capability": "crash cleanup",
-   "replacement_hint": "Replacement: workspace/git.py sweep tests"
+   "replacement_hint": "Replaced by tests/test_workspace_git.py::SweepTests (M1B, delivered)",
+   "status": "replacement_delivered"
   },
   {
    "test_id": "tests/test_worktree.py::VerifyGateTests::test_verify_pass_keeps_done",
@@ -1825,7 +1841,8 @@
    "disposition": "rewrite",
    "target_phase": "M1B",
    "capability": "process group kill portability",
-   "replacement_hint": "Replacement: platform/process.py tests"
+   "replacement_hint": "Replaced by tests/test_platform_process.py::ProcessTreeTests + ::CancellationTests (M1B, delivered)",
+   "status": "replacement_delivered"
   },
   {
    "test_id": "tests/test_worktree.py::ProcessControlPortabilityTests::test_windows_ppid_backend_is_noop_off_windows",
@@ -1834,7 +1851,8 @@
    "disposition": "rewrite",
    "target_phase": "M1B",
    "capability": "process group kill portability",
-   "replacement_hint": "Replacement: platform/process.py tests"
+   "replacement_hint": "Replaced by tests/test_platform_process.py::ProcessTreeTests + ::CancellationTests (M1B, delivered)",
+   "status": "replacement_delivered"
   },
   {
    "test_id": "tests/test_worktree.py::ProcessControlPortabilityTests::test_terminate_missing_pid_is_false",
@@ -1843,7 +1861,8 @@
    "disposition": "rewrite",
    "target_phase": "M1B",
    "capability": "process group kill portability",
-   "replacement_hint": "Replacement: platform/process.py tests"
+   "replacement_hint": "Replaced by tests/test_platform_process.py::ProcessTreeTests + ::CancellationTests (M1B, delivered)",
+   "status": "replacement_delivered"
   },
   {
    "test_id": "tests/test_worktree.py::ProcessControlPortabilityTests::test_terminate_pid_tree_kills_a_detached_process",
@@ -1852,7 +1871,8 @@
    "disposition": "rewrite",
    "target_phase": "M1B",
    "capability": "process group kill portability",
-   "replacement_hint": "Replacement: platform/process.py tests"
+   "replacement_hint": "Replaced by tests/test_platform_process.py::ProcessTreeTests + ::CancellationTests (M1B, delivered)",
+   "status": "replacement_delivered"
   },
   {
    "test_id": "tests/test_worktree.py::DescendantPidSnapshotTests::test_snapshot_maps_self_to_parent",
@@ -1861,7 +1881,8 @@
    "disposition": "rewrite",
    "target_phase": "M1B",
    "capability": "descendant pid snapshot",
-   "replacement_hint": "Replacement: platform/process.py tests"
+   "replacement_hint": "Replaced by tests/test_platform_process.py::SnapshotTests (M1B, delivered)",
+   "status": "replacement_delivered"
   },
   {
    "test_id": "tests/test_worktree.py::DescendantPidSnapshotTests::test_descendant_pids_includes_a_spawned_child",
@@ -1870,7 +1891,8 @@
    "disposition": "rewrite",
    "target_phase": "M1B",
    "capability": "descendant pid snapshot",
-   "replacement_hint": "Replacement: platform/process.py tests"
+   "replacement_hint": "Replaced by tests/test_platform_process.py::SnapshotTests (M1B, delivered)",
+   "status": "replacement_delivered"
   },
   {
    "test_id": "tests/test_worktree.py::TaskTerminalTests::test_task_workflow_finished_predicate",
