@@ -190,9 +190,15 @@ M1B 的估算依据：从 6,903 行 `server.py` 中识别进程/取消/日志/Gi
 | B2 | Agent CLI 发现能力归属 | 能力归属 | ✅ 关闭 — §7，`agent_discovery.py` @ M5 |
 | B3 | i18n 去留 | 能力归属 | ✅ 关闭 — §7，中英双语 catalog @ M4 |
 | B4 | UI U0 后端契约未实现（11 项） | 依赖阶段 | 归属 M3，不阻断 M0 |
-| B5 | Step 11 Foreach/Subflow Runtime 缺口 | 依赖阶段 | 归属 M5/U6，不阻断 M0 |
+| B5 | Step 11 Foreach/Subflow Runtime 缺口 | 依赖阶段 | ⚠️ M7 复核重开并部分关闭 — 恢复接线已修；能力仍不可达，见 [unwired-capabilities.md](./unwired-capabilities.md) |
 
 **M0 无未关闭阻断项。**
+
+> **M7 复核补记**：B5 在 M5 被宣布完成时未复查。M7 复核发现两件事：
+> 恢复路径缺 ForeachService 接线（已修，见 `tests/test_recovery_wiring.py`），
+> 以及 Foreach/Subflow/Planner 三项能力虽已实现且有测试，但 DSL 无法表达、
+> 运行时无循环驱动，因此从运行中的系统不可达。详见
+> [unwired-capabilities.md](./unwired-capabilities.md)。
 
 ## 11. M0 Gate 状态
 

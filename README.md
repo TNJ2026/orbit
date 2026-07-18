@@ -25,6 +25,15 @@ workflow definition ──▶ plan ──▶ jobs ──▶ handlers
 - **One process.** `orbit serve` is the runtime, the API, the UI, the workers
   and the timer dispatcher. State lives in SQLite under `~/.orbit/projects/`.
 
+## Scope
+
+orbit runs **static** workflow graphs: a published workflow compiles to a plan
+whose shape does not change while it runs. Dynamic planning — foreach groups,
+subflows and agentic regions that rewrite their own graph — is implemented in
+the domain and service layers but is not reachable from a running system: the
+DSL has no syntax for it and no loop drives the planner. See
+[docs/migration/unwired-capabilities.md](docs/migration/unwired-capabilities.md).
+
 ## Table of Contents
 
 - [Install](#install)

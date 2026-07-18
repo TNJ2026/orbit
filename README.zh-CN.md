@@ -15,6 +15,14 @@
 - **没注册过的东西跑不了。** Handler 注册表在第一个 worker 启动前就 seal，计划绑定的是它编译时的那个 manifest fingerprint。
 - **一个进程。** `orbit serve` 就是 Runtime + API + UI + worker + timer。状态存在 `~/.orbit/projects/` 下的 SQLite。
 
+## 适用范围
+
+orbit 运行的是**静态**工作流图：发布的工作流编译成一份计划，运行期间形状不变。
+动态规划——foreach 组、subflow、能改写自身图的 agentic region——在领域层和
+service 层已实现，但从运行中的系统不可达：DSL 没有对应语法，也没有循环驱动
+planner。详见
+[docs/migration/unwired-capabilities.md](docs/migration/unwired-capabilities.md)。
+
 ## 目录
 
 - [安装](#安装)
