@@ -1,7 +1,7 @@
-"""M1A: the top-level `orbit db check` command.
+"""The `orbit db check` command.
 
-The nested `orbit workflow db-check` stays as a hidden alias until M6, so both
-spellings are exercised here to prove they run the same implementation.
+`orbit workflow db-check` was a transitional alias and no longer exists; a test
+below pins its removal so it cannot quietly return.
 """
 
 from __future__ import annotations
@@ -52,20 +52,14 @@ class DbCheckCommandTests(unittest.TestCase):
         self.assertIn("migration_versions", payload)
         self.assertIn("table_counts", payload)
 
-    def test_top_level_and_legacy_alias_agree(self) -> None:
-        top = run_cli("db", "check", "--db", str(self.db), "--json")
-        alias = run_cli("workflow", "db-check", "--db", str(self.db), "--json")
-        self.assertEqual(top.returncode, alias.returncode)
-        self.assertEqual(json.loads(top.stdout), json.loads(alias.stdout))
+    def test_the_nested_alias_is_gone(self) -> None:
+        """`orbit workflow db-check` was a transitional spelling; M6 removed it."""
 
-    def test_help_advertises_db_check_but_not_the_alias(self) -> None:
-        top = run_cli("--help")
-        self.assertEqual(0, top.returncode, top.stderr)
-        self.assertIn("db", top.stdout)
+        alias = run_cli("workflow", "db-check", "--db", str(self.db), "--json")
+        self.assertNotEqual(0, alias.returncode)
 
         workflow = run_cli("workflow", "--help")
         self.assertEqual(0, workflow.returncode, workflow.stderr)
-        # The nested spelling still works but must no longer be advertised.
         self.assertNotIn("db-check", workflow.stdout)
 
     def test_corrupt_database_exits_four(self) -> None:

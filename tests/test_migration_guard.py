@@ -1,8 +1,10 @@
 """Architecture guards for the legacy-engine migration.
 
-M0 installs these in *record* mode: they pin the migration inventories to the
-code that exists today, so drift is visible immediately, but they do not yet
-forbid legacy imports.  M6 flips the recorded baselines into hard denials.
+M0 installed these in *record* mode. M6 flipped them: the legacy engine is
+deleted, so the baselines below are now hard denials. What they forbid is not
+"code that looks old" but specific things that would restore dual state —
+importing a removed module, shipping a removed asset, advertising a removed
+command, or reading a pre-migration database file.
 """
 
 from __future__ import annotations
@@ -19,17 +21,29 @@ TESTS = ROOT / "tests"
 MIGRATION = TESTS / "migration"
 SRC = ROOT / "src" / "orbit"
 
-LEGACY_TEST_FILES = (
+# The legacy test modules M6 deleted. `test_packaging.py` survives as a
+# package-manifest guard, so its rewritten tests stay under disposition.
+LEGACY_TEST_FILES = ("test_packaging.py",)
+DELETED_TEST_FILES = (
     "test_workflow_engine.py",
     "test_worktree.py",
     "test_store.py",
-    "test_packaging.py",
     "test_project_index.py",
+    "test_workflow_db_check_cli.py",
 )
 
-# Files that make up the new Runtime.  Everything else under src/orbit is legacy
-# and must disappear (or move) by M6.
-NEW_RUNTIME_ROOTS = ("workflow",)
+# Modules and assets that must never come back.
+REMOVED_MODULES = ("server.py", "store.py", "project_index.py")
+REMOVED_ASSETS = (
+    "static/ui.html", "static/workflow-ui.html", "static/vendor/dagre.min.js",
+)
+# Commands the cutover retired. A CLI that advertises one again has grown a
+# second way to run the system.
+REMOVED_COMMANDS = ("start", "up", "init", "config", "runner")
+
+# After the cutover every package under src/orbit is new Runtime, so the
+# import guard covers all of them rather than one subtree.
+NEW_RUNTIME_ROOTS = ("workflow", "web", "platform", "workspace")
 
 
 def _load(name: str) -> dict:
@@ -57,22 +71,32 @@ class LegacyTestDispositionGuard(unittest.TestCase):
         self.inventory = _load("legacy_test_disposition.json")
         self.declared = {item["test_id"]: item for item in self.inventory["tests"]}
 
-    def test_every_legacy_test_has_a_disposition(self) -> None:
-        actual: set[str] = set()
-        for name in LEGACY_TEST_FILES:
-            actual |= _test_ids(TESTS / name)
+    def test_the_inventory_is_closed(self) -> None:
+        """Post-cutover the inventory is a record, not a to-do list.
 
-        missing = sorted(actual - set(self.declared))
-        stale = sorted(set(self.declared) - actual)
-        self.assertEqual(
-            [], missing,
-            "legacy tests without a disposition (add them to "
-            "tests/migration/legacy_test_disposition.json):\n" + "\n".join(missing),
+        Every legacy test either lives in a module that M6 deleted, or was
+        rewritten into `test_packaging.py`. Nothing may still be pending, and
+        no entry may point at a module that was never dealt with.
+        """
+
+        pending = sorted(
+            test_id for test_id, item in self.declared.items()
+            if item["disposition"] != "delete"
+            and not item.get("replacement_delivered")
+            and Path(ROOT / test_id.split("::")[0]).exists()
+            and test_id.split("::")[0].split("/")[-1] not in {"test_packaging.py"}
         )
-        self.assertEqual(
-            [], stale,
-            "disposition entries for tests that no longer exist:\n" + "\n".join(stale),
-        )
+        self.assertEqual([], pending, "unmigrated legacy tests:\n" + "\n".join(pending))
+
+    def test_every_declared_module_is_accounted_for(self) -> None:
+        surviving = {"tests/test_packaging.py"}
+        for test_id in self.declared:
+            module = test_id.split("::")[0]
+            with self.subTest(module=module):
+                self.assertTrue(
+                    module in surviving or not (ROOT / module).exists(),
+                    f"{module} still exists but its tests were dispositioned away",
+                )
 
     def test_dispositions_are_well_formed(self) -> None:
         allowed = set(self.inventory["dispositions"])
@@ -134,38 +158,104 @@ class ExternalIntegrationGuard(unittest.TestCase):
             )
 
 
-class LegacySurfaceBaseline(unittest.TestCase):
-    """Record the legacy surface M6 has to remove.
+class LegacyRemovalGuard(unittest.TestCase):
+    """The cutover, as assertions. These are denials, not baselines."""
 
-    Recording it as a test means the numbers cannot drift unnoticed while the
-    migration is in flight.  These assertions are deliberately *upper bounds*:
-    the legacy surface may shrink during M1–M5, never grow.
-    """
-
-    def test_legacy_production_modules_do_not_grow(self) -> None:
-        # Modules slated for outright deletion in M6. They may shrink as
-        # behaviour moves out, never grow: new behaviour belongs in the new
-        # Runtime, not in code that is on its way out.
-        #
-        # `__main__.py` is deliberately absent — the plan converges it rather
-        # than deleting it (M1A/M3 add the new CLI, M6 strips the legacy
-        # parsers), so a line ceiling would fight the migration itself.
-        baseline = {
-            "server.py": 6903,
-            "store.py": 1976,
-            "project_index.py": 146,
-        }
-        for name, ceiling in baseline.items():
+    def test_the_legacy_modules_stay_deleted(self) -> None:
+        for name in REMOVED_MODULES:
             with self.subTest(name):
-                path = SRC / name
-                if not path.exists():
-                    continue  # already deleted by a later milestone
-                lines = len(path.read_text(encoding="utf-8").splitlines())
-                self.assertLessEqual(
-                    lines, ceiling,
-                    f"{name} grew past its M0 baseline; the legacy engine is "
-                    "frozen — new behaviour belongs in the new Runtime",
+                self.assertFalse(
+                    (SRC / name).exists(),
+                    f"{name} is back; the legacy engine was deleted in M6",
                 )
+
+    def test_the_legacy_assets_stay_deleted(self) -> None:
+        for asset in REMOVED_ASSETS:
+            with self.subTest(asset):
+                self.assertFalse((SRC / asset).exists())
+
+    def test_the_legacy_test_modules_stay_deleted(self) -> None:
+        for name in DELETED_TEST_FILES:
+            with self.subTest(name):
+                self.assertFalse((TESTS / name).exists())
+
+    def test_production_code_never_opens_a_legacy_database(self) -> None:
+        """The restricted-path sentinel rule.
+
+        `messages.db` and `.dev_loop` may appear only in the one function that
+        stats them for the upgrade prompt. Anywhere else — and especially near
+        an open() or a database connection — they would mean the runtime had
+        started reading abandoned state again.
+        """
+
+        sentinel = SRC / "platform" / "projects.py"
+        offenders: list[str] = []
+        for path in SRC.rglob("*.py"):
+            if path == sentinel:
+                continue
+            text = path.read_text(encoding="utf-8")
+            for literal in ("messages.db", ".dev_loop"):
+                if literal in text:
+                    offenders.append(f"{path.relative_to(ROOT)}: {literal}")
+        self.assertEqual(
+            [], offenders,
+            "legacy paths must stay inside legacy_database_candidates()",
+        )
+
+    def test_the_sentinel_only_stats_legacy_paths(self) -> None:
+        """It may ask whether the file exists. It may not open it.
+
+        Scoped to the legacy functions rather than the whole module: the
+        project index legitimately opens its own lock file, and a
+        module-wide ban would only teach people to route around the guard.
+        """
+
+        sentinel = SRC / "platform" / "projects.py"
+        tree = ast.parse(sentinel.read_text(encoding="utf-8"), filename=str(sentinel))
+        legacy_functions = {
+            "legacy_database_candidates", "legacy_engine_db_path",
+            "legacy_database_warning", "warn_about_legacy_database",
+        }
+        forbidden = {
+            "open", "connect", "connect_workflow_database", "copy", "copyfile",
+            "read_text", "read_bytes", "unlink", "rename",
+        }
+        offenders: list[str] = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef) or node.name not in legacy_functions:
+                continue
+            for call in ast.walk(node):
+                if not isinstance(call, ast.Call):
+                    continue
+                name = (
+                    call.func.id if isinstance(call.func, ast.Name)
+                    else call.func.attr if isinstance(call.func, ast.Attribute)
+                    else None
+                )
+                if name in forbidden:
+                    offenders.append(f"{node.name} calls {name}")
+        self.assertEqual([], offenders, "the legacy sentinel must only stat")
+
+    def test_the_cli_advertises_no_retired_command(self) -> None:
+        """A help snapshot, not a string search: `run` and `runner` differ."""
+
+        import subprocess
+        import sys
+
+        result = subprocess.run(
+            [sys.executable, "-m", "orbit", "--help"],
+            capture_output=True, text=True, cwd=str(ROOT),
+            env={"PYTHONPATH": str(ROOT / "src"), "PATH": "/usr/bin:/bin"},
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        advertised = set(
+            re.findall(r"^\s{4}(\w[\w-]*)", result.stdout, flags=re.MULTILINE)
+        )
+        for command in REMOVED_COMMANDS:
+            with self.subTest(command=command):
+                self.assertNotIn(command, advertised)
+        self.assertIn("serve", advertised)
+        self.assertIn("run", advertised)
 
     def test_new_runtime_never_imports_the_legacy_engine(self) -> None:
         """This one is already a hard rule: the new Runtime must stay clean."""
@@ -184,6 +274,23 @@ class LegacySurfaceBaseline(unittest.TestCase):
                         if re.search(r"(^|\.)(server|store|project_index)$", name):
                             offenders.append(f"{path.relative_to(ROOT)}:{node.lineno}:{name}")
         self.assertEqual([], offenders, "new Runtime imported a legacy module")
+
+    def test_nothing_in_the_package_imports_the_legacy_engine(self) -> None:
+        """Including the CLI entry point, which used to be the last holdout."""
+
+        offenders: list[str] = []
+        for path in SRC.rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                names: list[str] = []
+                if isinstance(node, ast.Import):
+                    names = [alias.name for alias in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.module:
+                    names = [node.module]
+                for name in names:
+                    if re.search(r"(^|\.)(server|store|project_index)$", name):
+                        offenders.append(f"{path.relative_to(ROOT)}:{node.lineno}:{name}")
+        self.assertEqual([], offenders)
 
 
 if __name__ == "__main__":
