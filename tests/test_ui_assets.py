@@ -164,6 +164,28 @@ class PlanSeparationTests(unittest.TestCase):
                 self.assertNotIn(forbidden, overlay_view)
 
 
+class ErrorRenderingTests(unittest.TestCase):
+    """An error entry is an event; its fields live under `payload.error`.
+
+    Reading them from the top level rendered an empty Errors panel for a run
+    that had failed with a perfectly precise message — the worst possible
+    failure mode for the one panel an operator opens when something breaks.
+    """
+
+    def setUp(self) -> None:
+        self.app_js = (ASSETS / "app.js").read_text(encoding="utf-8")
+
+    def test_the_error_renderer_reads_the_event_payload(self) -> None:
+        self.assertIn("item.payload && item.payload.error", self.app_js)
+
+    def test_the_error_renderer_surfaces_more_than_a_message(self) -> None:
+        start = self.app_js.index('pagedPanel(runId, "errors"')
+        section = self.app_js[start:start + 900]
+        for field in ("error.message", "error.category", "error.source"):
+            with self.subTest(field=field):
+                self.assertIn(field, section)
+
+
 class AccessibilityTests(unittest.TestCase):
     def setUp(self) -> None:
         self.index = (UI_ROOT / "index.html").read_text(encoding="utf-8")

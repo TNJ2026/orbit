@@ -319,12 +319,21 @@ async function renderRun(root, runId) {
       el("span", { class: "mono muted", text: item.aggregate_id }),
     ]),
   ));
-  root.append(await pagedPanel(runId, "errors", "run.errors", (item) =>
-    el("div", {}, [
-      el("div", { text: item.message || item.code || "" }),
-      el("div", { class: "muted mono", text: item.source || "" }),
-    ]),
-  ));
+  root.append(await pagedPanel(runId, "errors", "run.errors", (item) => {
+    // The error lives in the event payload, not at the top level: an error
+    // entry is an event, and flattening it here would hide the fields an
+    // operator needs (category, code, which node) behind a bare message.
+    const error = (item.payload && item.payload.error) || {};
+    const where = (item.payload && item.payload.node_run_id) || item.aggregate_id;
+    return el("div", {}, [
+      el("div", { text: error.message || error.code || item.type }),
+      el("div", {
+        class: "muted mono",
+        text: [error.category, error.source, where].filter(Boolean).join(" · "),
+      }),
+      el("div", { class: "muted mono", text: i18n.dateTime(item.occurred_at) }),
+    ]);
+  }));
 }
 
 /** The plan, in three separately-labelled views.

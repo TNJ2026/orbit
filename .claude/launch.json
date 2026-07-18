@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "orbit-ui",
+      "runtimeExecutable": "/bin/sh",
+      "runtimeArgs": ["-c", "HOME=/private/tmp/claude-501/-Users-cxd-developer-dev-loop/c05fed3f-bb75-43bf-938a-cd3770bfbc39/scratchpad/home PYTHONPATH=src .venv/bin/python -m orbit serve --port 8877 --db /private/tmp/claude-501/-Users-cxd-developer-dev-loop/c05fed3f-bb75-43bf-938a-cd3770bfbc39/scratchpad/ui.db --no-agent-discovery"],
+      "port": 8877
+    }
+  ]
+}
