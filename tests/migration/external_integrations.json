@@ -14,9 +14,9 @@
     {
       "id": "mcp-devloop",
       "kind": "mcp",
-      "consumer": "codex CLI (.codex/config.toml [mcp_servers.devloop])",
+      "consumer": "codex CLI (.codex/config.toml [mcp_servers.orbit])",
       "current_url": "http://127.0.0.1:8848/mcp",
-      "current_state": "implemented",
+      "current_state": "migrated",
       "evidence": "Restored in M3 as src/orbit/web/mcp.py: JSON-RPC 2.0 over POST /mcp, mounted by the composition root with the same authenticator/authorizer as /api/v1. Tools: list_runs, inspect_run, start_run, cancel_run. Contract tests in tests/test_mcp.py. The pre-8e4d786 FastMCP tool surface is NOT reproduced: mailbox tools are gone and the tool names differ, so the .codex consumer config must be updated.",
       "disposition": "retain_and_rewrite",
       "target_url": "http://127.0.0.1:8848/mcp",
@@ -24,7 +24,7 @@
       "target_phase": "M3",
       "auth": "same identity + Capability Policy as /api/v1; no anonymous tool calls",
       "contract_test": "M3: initialize, tool discovery, read-only inspect, authorized write command, unauthorized, version conflict, restart, .codex config smoke",
-      "notes": "Plan Gate M0 forbids silent deletion even though the implementation is already gone: this is a to-be-restored external contract. Consumer must be notified if the restored tool surface differs from the pre-8e4d786 one."
+      "notes": "Consumer notified in M6: the server block was renamed devloop -> orbit and the tool surface differs from the pre-8e4d786 FastMCP one (mailbox tools are gone; tools are now list_runs / inspect_run / start_run / cancel_run). Contract tests: tests/test_mcp.py."
     },
     {
       "id": "orbit-serve-port",
