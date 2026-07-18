@@ -1,0 +1,211 @@
+/* Client-side behaviour that no server test can reach.
+ *
+ * api.js and i18n.js are pure modules — no DOM — so they run directly under
+ * node with a stubbed fetch. What is covered here is exactly what broke during
+ * manual verification: error-status mapping, idempotency-key reuse across
+ * retries, and locale-aware formatting.
+ *
+ * Run by tests/test_ui_client_modules.py, which skips when node is absent.
+ */
+
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
+import test from "node:test";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const assets = resolve(here, "../../src/orbit/static/workflow-ui/assets");
+
+const { Api, ApiError } = await import(`${assets}/api.js`);
+const { I18n, preferredLocale, LOCALES } = await import(`${assets}/i18n.js`);
+
+function catalog(locale) {
+  return JSON.parse(readFileSync(`${assets}/i18n.${locale}.json`, "utf8"));
+}
+
+function stubFetch(responses) {
+  const calls = [];
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({ url, ...options });
+    const next = responses.shift() ?? { status: 200, body: {} };
+    if (next.throws) throw new Error("connection refused");
+    return {
+      ok: next.status < 400,
+      status: next.status,
+      text: async () =>
+        typeof next.body === "string" ? next.body : JSON.stringify(next.body),
+    };
+  };
+  return calls;
+}
+
+// node exposes crypto as a getter-only property; define over it.
+function stubUuid(next) {
+  Object.defineProperty(globalThis, "crypto", {
+    value: { randomUUID: next }, configurable: true, writable: true,
+  });
+}
+stubUuid(() => "uuid-1");
+
+/* -- error mapping -------------------------------------------------------- */
+
+test("http statuses map to distinct message keys", async () => {
+  const cases = [
+    [401, null, "error.unauthenticated"],
+    [403, null, "error.forbidden"],
+    [409, null, "error.conflict"],
+    [409, "command_in_progress", "error.commandInProgress"],
+    [429, null, "error.rateLimited"],
+    [500, null, "error.generic"],
+  ];
+  for (const [status, code, expected] of cases) {
+    stubFetch([{ status, body: { error: { code, message: "no" } } }]);
+    const failed = await new Api().get("/api/v1/runs").catch((error) => error);
+    assert.ok(failed instanceof ApiError, `${status} did not raise ApiError`);
+    assert.equal(failed.messageKey, expected, `status ${status}`);
+  }
+});
+
+test("a dead server is a network error, not a crash", async () => {
+  stubFetch([{ throws: true }]);
+  const failed = await new Api().get("/api/v1/runs").catch((error) => error);
+  assert.ok(failed instanceof ApiError);
+  assert.equal(failed.messageKey, "error.network");
+});
+
+test("a non-JSON error body does not become a SyntaxError", async () => {
+  // A framework 404 is plain text. Parsing it blindly blanked the whole page.
+  stubFetch([{ status: 404, body: "Not Found" }]);
+  const failed = await new Api().get("/api/v1/runs/x/plan").catch((error) => error);
+  assert.ok(failed instanceof ApiError);
+  assert.equal(failed.status, 404);
+});
+
+test("only a conflict asks the caller to refresh", async () => {
+  const conflict = new ApiError(409, null, "stale");
+  const forbidden = new ApiError(403, null, "no");
+  assert.equal(conflict.requiresRefresh, true);
+  assert.equal(forbidden.requiresRefresh, false);
+});
+
+/* -- idempotency ---------------------------------------------------------- */
+
+const command = {
+  command: "run.cancel",
+  method: "POST",
+  href: "/api/v1/runs/run:1/cancel",
+  target_aggregate_id: "run:1",
+  expected_version: 3,
+  payload_schema: "run-cancel/1.0",
+};
+
+test("a retried command reuses its idempotency key", async () => {
+  let counter = 0;
+  stubUuid(() => `uuid-${++counter}`);
+  const api = new Api();
+  const calls = stubFetch([
+    { status: 500, body: { error: { code: "boom" } } },
+    { status: 200, body: { data: {} } },
+  ]);
+
+  await api.execute(command, {}).catch(() => {});
+  await api.execute(command, {});
+
+  assert.equal(calls.length, 2);
+  assert.equal(
+    calls[0].headers["idempotency-key"],
+    calls[1].headers["idempotency-key"],
+    "a retry of the same intent must not start a second command",
+  );
+});
+
+test("a conflict retires the key so the next attempt is a new intent", async () => {
+  let counter = 0;
+  stubUuid(() => `uuid-${++counter}`);
+  const api = new Api();
+  const calls = stubFetch([
+    { status: 409, body: { error: { code: "version_conflict" } } },
+    { status: 200, body: { data: {} } },
+  ]);
+
+  await api.execute(command, {}).catch(() => {});
+  await api.execute({ ...command, expected_version: 4 }, {});
+
+  assert.notEqual(
+    calls[0].headers["idempotency-key"],
+    calls[1].headers["idempotency-key"],
+    "acting on refreshed state is a different intent and needs a fresh key",
+  );
+});
+
+test("a command posts the server's href and expected version verbatim", async () => {
+  const calls = stubFetch([{ status: 200, body: { data: {} } }]);
+  await new Api().execute(command, { reason: "because" });
+  assert.equal(calls[0].url, "/api/v1/runs/run:1/cancel");
+  assert.equal(calls[0].method, "POST");
+  assert.deepEqual(JSON.parse(calls[0].body), {
+    expected_version: 3,
+    reason: "because",
+  });
+});
+
+/* -- i18n ----------------------------------------------------------------- */
+
+test("both catalogs load and share every key", () => {
+  const zh = new I18n("zh-CN", catalog("zh-CN"));
+  const en = new I18n("en-US", catalog("en-US"));
+  assert.deepEqual(Object.keys(zh.messages).sort(), Object.keys(en.messages).sort());
+});
+
+test("a missing key is reported loudly, not silently blank", () => {
+  const i18n = new I18n("en-US", {});
+  assert.equal(i18n.t("nope.missing"), "nope.missing");
+  assert.ok(i18n.missing.has("nope.missing"));
+});
+
+test("placeholders are substituted in both locales", () => {
+  for (const locale of LOCALES) {
+    const i18n = new I18n(locale, catalog(locale));
+    const rendered = i18n.t("newRun.started", { runId: "run:7" });
+    assert.ok(rendered.includes("run:7"), `${locale}: ${rendered}`);
+    assert.ok(!rendered.includes("{runId}"));
+  }
+});
+
+test("numbers and dates follow the locale", () => {
+  const zh = new I18n("zh-CN", catalog("zh-CN"));
+  const en = new I18n("en-US", catalog("en-US"));
+  const when = "2026-07-18T14:05:23Z";
+  assert.notEqual(zh.dateTime(when), en.dateTime(when));
+  assert.equal(en.number(1234567), "1,234,567");
+});
+
+test("an unparseable timestamp is shown as-is rather than as Invalid Date", () => {
+  const i18n = new I18n("en-US", catalog("en-US"));
+  assert.equal(i18n.dateTime("not-a-date"), "not-a-date");
+  assert.equal(i18n.dateTime(null), "");
+});
+
+test("a command label falls back to the server's own label", () => {
+  const i18n = new I18n("en-US", catalog("en-US"));
+  assert.equal(i18n.command({ command: "run.cancel", label: "X" }), "Cancel run");
+  assert.equal(
+    i18n.command({ command: "brand.new", label: "Brand new" }),
+    "Brand new",
+    "a command shipped ahead of its translation must still be clickable",
+  );
+});
+
+test("an unknown status shows the raw server value", () => {
+  const i18n = new I18n("en-US", catalog("en-US"));
+  assert.equal(i18n.status("succeeded"), "Succeeded");
+  assert.equal(i18n.status("quiescing"), "quiescing");
+});
+
+test("the browser's language picks the initial locale", () => {
+  assert.equal(preferredLocale(null, ["zh-CN"]), "zh-CN");
+  assert.equal(preferredLocale(null, ["zh-TW"]), "zh-CN");
+  assert.equal(preferredLocale(null, ["fr-FR"]), "en-US");
+  assert.equal(preferredLocale("en-US", ["zh-CN"]), "en-US", "a stored choice wins");
+});
