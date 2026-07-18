@@ -286,52 +286,24 @@ class PackagingTests(unittest.TestCase):
         self.assertNotIn('id="registerAgent"', html)
         self.assertGreater(len(html), 1000)
 
-    def test_workflow_ui_prototype_is_packaged_and_routable(self):
-        import asyncio
-        import orbit.server as server
-        from starlette.requests import Request
+    def test_modular_workflow_ui_is_packaged(self):
+        """The wheel ships the modular UI, and only the modular UI.
 
-        html = (
-            resources.files("orbit")
-            .joinpath("static/workflow-ui.html")
-            .read_text(encoding="utf-8")
+        The single-file prototype was deleted in M4; if it comes back, it comes
+        back with mock data, which is exactly what this asserts against.
+        """
+
+        root = resources.files("orbit").joinpath("static/workflow-ui")
+        index = root.joinpath("index.html").read_text(encoding="utf-8")
+        self.assertIn("Orbit Runtime", index)
+        self.assertIn('src="assets/app.js"', index)
+        for asset in ("app.css", "app.js", "api.js", "i18n.js",
+                      "i18n.zh-CN.json", "i18n.en-US.json"):
+            with self.subTest(asset=asset):
+                self.assertTrue(root.joinpath("assets", asset).is_file())
+        self.assertFalse(
+            resources.files("orbit").joinpath("static/workflow-ui.html").is_file()
         )
-        self.assertIn("Orbit Runtime", html)
-        self.assertIn('id="page-home"', html)
-        self.assertIn('id="page-goals"', html)
-        self.assertIn('id="page-workflows"', html)
-        self.assertIn('id="page-runs"', html)
-        self.assertIn('id="page-inbox"', html)
-        self.assertIn('id="page-artifacts"', html)
-        self.assertIn('id="page-agents"', html)
-        self.assertIn('id="page-ops"', html)
-        self.assertIn('id="page-settings"', html)
-        self.assertIn('id="goalModal"', html)
-        self.assertIn("Confirm & start", html)
-        self.assertIn("allowed_commands[]", html)
-
-        with TemporaryDirectory() as tmp:
-            app = server.create_server(
-                db_path=str(Path(tmp) / "orbit.db"),
-                project={"project_root": tmp},
-                run_worker=False,
-            )
-            endpoint = next(
-                route.endpoint for route in app.routes
-                if route.path == "/workflow-ui"
-            )
-            request = Request({
-                "type": "http",
-                "method": "GET",
-                "path": "/workflow-ui",
-                "headers": [(b"host", b"127.0.0.1")],
-                "client": ("127.0.0.1", 12345),
-                "scheme": "http",
-                "server": ("127.0.0.1", 8848),
-            })
-            response = asyncio.run(endpoint(request))
-            self.assertEqual(200, response.status_code)
-            self.assertIn(b"Mission Control", response.body)
 
     def test_server_module_imports(self):
         # Importing the module reads the UI asset at module load time;

@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Orbit Runtime</title>
+  <link rel="stylesheet" href="assets/app.css">
+</head>
+<body>
+  <a class="skip-link" href="#content" data-i18n="app.skipToContent">Skip to main content</a>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div data-i18n="app.title">Orbit Runtime</div>
+        <div class="brand-sub" data-i18n="app.subtitle">Mission control</div>
+      </div>
+      <nav class="nav" data-i18n-label="nav.label" aria-label="Main navigation">
+        <button class="nav-button" data-view="runs" aria-current="page">
+          <span data-i18n="nav.runs">Runs</span>
+        </button>
+        <button class="nav-button" data-view="inbox">
+          <span data-i18n="nav.inbox">Inbox</span>
+          <span class="nav-count" id="inboxCount"></span>
+        </button>
+        <button class="nav-button" data-view="ops">
+          <span data-i18n="nav.ops">Ops</span>
+        </button>
+      </nav>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <h1 id="viewTitle">Runs</h1>
+        <button class="button" id="refresh" data-i18n="action.refresh">Refresh</button>
+        <button class="button primary" id="newRun" data-i18n="action.newRun">New run</button>
+        <select id="localeSelect" data-i18n-label="locale.switch" aria-label="Change language"></select>
+        <button class="button" id="themeToggle" data-i18n-label="theme.toggle" aria-label="Toggle theme">◐</button>
+      </header>
+      <!-- Command outcomes are announced here rather than shown as a toast, so
+           a screen reader hears the same result a sighted operator reads. -->
+      <div id="liveRegion" class="banner info" role="status" aria-live="polite" hidden></div>
+      <div id="content" class="content"></div>
+    </main>
+  </div>
+
+  <script type="module" src="assets/app.js"></script>
+</body>
+</html>

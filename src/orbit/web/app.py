@@ -289,7 +289,7 @@ def create_app(
     extra_routes: Sequence[Route | Mount] = (),
     authenticator: Callable[[Any], str | None] | None = None,
     authorizer: Any = None,
-    serve_prototype_ui: bool = False,
+    serve_ui: bool = False,
     discover_agents: bool = False,
 ) -> Starlette:
     """Build the Runtime application.
@@ -363,23 +363,18 @@ def create_app(
         ),
     ]
 
-    if serve_prototype_ui:
-        # Development-only smoke entry for the single-file prototype. It is a
-        # read-only page: it must never gain a mock mutation API, and M4 deletes
-        # it once the modular UI talks to the real API.
+    if serve_ui:
+        # The modular UI is static files only: it holds no server-side session
+        # and no mock adapter, and reaches the runtime exclusively through
+        # /api/v1. Mounting it here is the whole integration.
         from importlib import resources
 
-        from starlette.responses import HTMLResponse
+        from starlette.staticfiles import StaticFiles
 
-        async def prototype(_request: Request) -> HTMLResponse:
-            html = (
-                resources.files("orbit")
-                .joinpath("static/workflow-ui.html")
-                .read_text(encoding="utf-8")
-            )
-            return HTMLResponse(html)
-
-        routes.append(Route("/workflow-ui", prototype, methods=["GET"]))
+        ui_root = resources.files("orbit").joinpath("static/workflow-ui")
+        routes.append(
+            Mount("/ui", app=StaticFiles(directory=str(ui_root), html=True), name="ui")
+        )
 
     routes.extend(extra_routes)
     app = Starlette(routes=routes, lifespan=lifespan)

@@ -305,38 +305,24 @@ def _run_command(args) -> None:
 def _serve(args) -> None:
     """Start the new Runtime composition root."""
 
-    from .web.app import HandlerRegistration, create_app
+    from .web.app import create_app
+    from .web.builtin_handlers import BUILTIN_SCHEMAS, builtin_handlers
+    from .web.local_identity import local_authorizer, loopback_authenticator
     from .web.schema_guard import MixedSchemaError
-    from .workflow.catalogs import HandlerManifest
-    from .workflow.domain.durable_execution import ExecutionSafety
-    from .workflow.domain.handlers import ResourceProfile
-    from .workflow.handlers import TransformHandler
 
     project_root = resolve_project_root()
     db_path = _runtime_db_path(args.db)
 
-    # Only trusted, deterministic first-party handlers are registered here.
-    # Agent CLI and git tooling arrive in M5 behind an explicit catalog; the
-    # composition root never registers arbitrary shell or network handlers.
-    transform = HandlerManifest(
-        "transform", "1.0.0", ("action",),
-        {"value": "example://integer/1.0"}, {"value": "example://integer/1.0"},
-        {"type": "object"}, ExecutionSafety.REPLAY_SAFE,
-        ResourceProfile(100_000, 100_000, 0, 300, 0, "builtin"),
-        "schema://object/1.0", (), (), True, True,
-    )
-    schemas = {
-        "schema://object/1.0": {"type": "object"},
-        "example://integer/1.0": {"type": "integer"},
-    }
-
     try:
         app = create_app(
             db_path,
-            handlers=[HandlerRegistration(transform, TransformHandler(), "transform@1.0.0")],
-            schemas=schemas,
+            handlers=builtin_handlers(),
+            schemas=BUILTIN_SCHEMAS,
             worker_count=args.runner_concurrency,
             discover_agents=not args.no_agent_discovery,
+            serve_ui=True,
+            authenticator=loopback_authenticator,
+            authorizer=local_authorizer(),
         )
     except MixedSchemaError as exc:
         raise SystemExit(f"error: {exc}") from None
@@ -346,7 +332,7 @@ def _serve(args) -> None:
         host=args.host, port=args.port,
     )
     print(
-        f"orbit Runtime listening on http://{args.host}:{args.port} "
+        f"orbit Runtime listening on http://{args.host}:{args.port}/ui/ "
         f"(health: /health/ready, workers: {args.runner_concurrency}) "
         f"(db: {db_path})",
         flush=True,
