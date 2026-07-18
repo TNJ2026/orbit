@@ -61,10 +61,21 @@ export class Api {
     }
 
     const text = await response.text();
-    const payload = text ? JSON.parse(text) : null;
+    // Not every response is our own envelope: a framework 404 or a proxy's
+    // error page is plain text, and parsing it blindly turns a handled HTTP
+    // status into an unhandled SyntaxError.
+    let payload = null;
+    try {
+      payload = text ? JSON.parse(text) : null;
+    } catch {
+      if (response.ok) throw new ApiError(response.status, "invalid_response", text.slice(0, 200));
+      payload = null;
+    }
     if (!response.ok) {
       const error = (payload && payload.error) || {};
-      throw new ApiError(response.status, error.code, error.message, error.details);
+      throw new ApiError(
+        response.status, error.code, error.message || text.slice(0, 200), error.details,
+      );
     }
     return payload;
   }
@@ -112,6 +123,29 @@ export class Api {
     const params = new URLSearchParams({ limit: String(limit) });
     if (cursor) params.set("cursor", cursor);
     return this.get(`/api/v1/runs/${encodeURIComponent(runId)}/${kind}?${params}`);
+  }
+
+  /* Plan reads are three calls on purpose. The server keeps definition,
+     overlay and diff apart, and merging them here would put the distinction
+     back at the mercy of the client. */
+
+  planDefinition(runId, planVersion) {
+    const suffix = planVersion === undefined ? "" : `?plan_version=${planVersion}`;
+    return this.get(`/api/v1/runs/${encodeURIComponent(runId)}/plan${suffix}`);
+  }
+
+  planOverlay(runId, planVersion) {
+    const suffix = planVersion === undefined ? "" : `?plan_version=${planVersion}`;
+    return this.get(
+      `/api/v1/runs/${encodeURIComponent(runId)}/plan/overlay${suffix}`,
+    );
+  }
+
+  planDiff(runId, baseVersion, targetVersion) {
+    const params = new URLSearchParams({
+      base_version: String(baseVersion), target_version: String(targetVersion),
+    });
+    return this.get(`/api/v1/runs/${encodeURIComponent(runId)}/plan/diff?${params}`);
   }
 
   inbox(cursor) {

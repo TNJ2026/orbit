@@ -310,6 +310,8 @@ async function renderRun(root, runId) {
     ]),
   );
 
+  root.append(await planPanel(runId));
+
   root.append(await pagedPanel(runId, "timeline", "run.timeline", (item) =>
     el("div", { class: "actions" }, [
       el("span", { class: "mono muted", text: i18n.dateTime(item.occurred_at) }),
@@ -323,6 +325,177 @@ async function renderRun(root, runId) {
       el("div", { class: "muted mono", text: item.source || "" }),
     ]),
   ));
+}
+
+/** The plan, in three separately-labelled views.
+ *
+ * Definition, overlay and diff are fetched and rendered apart, and the overlay
+ * is only drawn against the plan version it names. Painting last version's
+ * statuses onto this version's graph is the bug this shape prevents; showing
+ * "no run state for this version" is the correct, honest alternative.
+ */
+async function planPanel(runId) {
+  const body = el("div", { class: "panel-body" });
+  const panel = el("section", { class: "panel" }, [
+    el("div", { class: "panel-head" }, [
+      el("div", { class: "panel-title", text: i18n.t("plan.title") }),
+    ]),
+    body,
+  ]);
+
+  let definition;
+  try {
+    definition = (await api.planDefinition(runId)).data;
+  } catch (error) {
+    if (!(error instanceof ApiError) || error.status !== 404) throw error;
+    body.append(el("div", { class: "muted", text: i18n.t("plan.none") }));
+    return panel;
+  }
+
+  const versions = definition.available_versions || [definition.plan_version];
+  const state = { version: definition.plan_version, view: "definition" };
+
+  const tabs = el("div", { class: "actions" });
+  const content = el("div", {});
+
+  const draw = async () => {
+    content.replaceChildren(el("div", { class: "muted", text: i18n.t("loading") }));
+    for (const button of tabs.querySelectorAll("button[data-view]")) {
+      button.setAttribute("aria-pressed", String(button.dataset.view === state.view));
+    }
+    try {
+      if (state.view === "definition") content.replaceChildren(await planDefinitionView(runId, state));
+      else if (state.view === "overlay") content.replaceChildren(await planOverlayView(runId, state));
+      else content.replaceChildren(await planDiffView(runId, state, versions));
+    } catch (error) {
+      content.replaceChildren();
+      reportError(error);
+    }
+  };
+
+  for (const view of ["definition", "overlay", "diff"]) {
+    if (view === "diff" && versions.length < 2) continue;
+    tabs.append(
+      el("button", {
+        class: "button",
+        "data-view": view,
+        "aria-pressed": String(view === state.view),
+        text: i18n.t(`plan.${view}`),
+        onclick: () => {
+          state.view = view;
+          draw();
+        },
+      }),
+    );
+  }
+
+  if (versions.length > 1) {
+    const select = el("select", { "aria-label": i18n.t("plan.version") });
+    for (const version of versions) {
+      select.append(
+        el("option", {
+          value: String(version),
+          ...(version === state.version ? { selected: "selected" } : {}),
+          text: `v${version}`,
+        }),
+      );
+    }
+    select.addEventListener("change", (event) => {
+      state.version = Number(event.target.value);
+      draw();
+    });
+    tabs.append(select);
+  }
+
+  body.append(tabs, content);
+  await draw();
+  return panel;
+}
+
+async function planDefinitionView(runId, state) {
+  const definition = (await api.planDefinition(runId, state.version)).data;
+  const list = el("div", {});
+  for (const node of definition.nodes) {
+    list.append(
+      el("div", { class: "actions" }, [
+        el("span", { class: "mono", text: node.node_id }),
+        el("span", { class: "muted", text: node.kind }),
+        el("span", {
+          class: "muted mono",
+          text: node.handler_name ? `${node.handler_name}@${node.handler_version}` : "",
+        }),
+      ]),
+    );
+  }
+  list.append(
+    el("div", {
+      class: "muted",
+      text: definition.edges.map((edge) => `${edge.from} → ${edge.to}`).join("   "),
+    }),
+  );
+  return list;
+}
+
+async function planOverlayView(runId, state) {
+  const overlay = (await api.planOverlay(runId, state.version)).data;
+  const list = el("div", {}, [
+    el("div", {
+      class: "eyebrow",
+      text: i18n.t("plan.overlay.for", { version: overlay.plan_version }),
+    }),
+  ]);
+  if (!overlay.nodes.length) {
+    list.append(el("div", { class: "muted", text: i18n.t("plan.overlay.empty") }));
+    return list;
+  }
+  for (const node of overlay.nodes) {
+    list.append(
+      el("div", { class: "actions" }, [
+        el("span", { class: "mono", text: node.node_id }),
+        pill(node.status),
+        el("span", {
+          class: "muted",
+          text: i18n.t("plan.overlay.counts", {
+            generation: i18n.number(node.generation),
+            attempts: i18n.number(node.attempts),
+          }),
+        }),
+      ]),
+    );
+  }
+  return list;
+}
+
+async function planDiffView(runId, state, versions) {
+  const base = versions[versions.indexOf(state.version) - 1] ?? versions[0];
+  const diff = (await api.planDiff(runId, base, state.version)).data;
+  const list = el("div", {}, [
+    el("div", {
+      class: "eyebrow",
+      text: i18n.t("plan.diff.between", {
+        base: diff.base_version, target: diff.target_version,
+      }),
+    }),
+  ]);
+  if (diff.identical) {
+    list.append(el("div", { class: "muted", text: i18n.t("plan.diff.identical") }));
+    return list;
+  }
+  const rows = [
+    ["plan.diff.added", diff.added_nodes],
+    ["plan.diff.removed", diff.removed_nodes],
+    ["plan.diff.changed", diff.changed_nodes.map((node) => node.node_id)],
+  ];
+  for (const [key, values] of rows) {
+    if (!values.length) continue;
+    list.append(
+      el("div", { class: "actions" }, [
+        el("span", { class: "muted", text: i18n.t(key) }),
+        el("span", { class: "mono", text: values.join(", ") }),
+      ]),
+    );
+  }
+  return list;
 }
 
 /** A cursor-paged section. Paging is the server's; the UI only carries tokens. */

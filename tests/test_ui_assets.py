@@ -124,6 +124,46 @@ class SourceTests(unittest.TestCase):
                 self.assertNotIn(forbidden, joined)
 
 
+class PlanSeparationTests(unittest.TestCase):
+    """M4.6: definition, overlay and diff must not be merged in the client."""
+
+    def setUp(self) -> None:
+        self.app_js = (ASSETS / "app.js").read_text(encoding="utf-8")
+        self.api_js = (ASSETS / "api.js").read_text(encoding="utf-8")
+
+    def test_each_view_has_its_own_renderer(self) -> None:
+        for function in ("planDefinitionView", "planOverlayView", "planDiffView"):
+            with self.subTest(function=function):
+                self.assertIn(f"function {function}", self.app_js)
+
+    def test_each_view_has_its_own_fetch(self) -> None:
+        for method in ("planDefinition(", "planOverlay(", "planDiff("):
+            with self.subTest(method=method):
+                self.assertIn(method, self.api_js)
+
+    def test_the_overlay_always_states_the_version_it_describes(self) -> None:
+        """Otherwise a reader cannot tell they are looking at stale state."""
+
+        self.assertIn("plan.overlay.for", self.app_js)
+        self.assertIn("overlay.plan_version", self.app_js)
+
+    def test_the_definition_view_renders_no_status(self) -> None:
+        start = self.app_js.index("async function planDefinitionView")
+        end = self.app_js.index("async function planOverlayView")
+        definition_view = self.app_js[start:end]
+        for forbidden in ("status", "pill(", "attempts", "generation"):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, definition_view)
+
+    def test_the_overlay_view_renders_no_handler_identity(self) -> None:
+        start = self.app_js.index("async function planOverlayView")
+        end = self.app_js.index("async function planDiffView")
+        overlay_view = self.app_js[start:end]
+        for forbidden in ("handler_name", "handler_version", "edges", "kind"):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, overlay_view)
+
+
 class AccessibilityTests(unittest.TestCase):
     def setUp(self) -> None:
         self.index = (UI_ROOT / "index.html").read_text(encoding="utf-8")

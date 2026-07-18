@@ -253,6 +253,73 @@ class PaginationTests(ApiTestCase):
             self.assertIn("correlation_id", page["data"]["items"][0])
 
 
+class PlanApiTests(ApiTestCase):
+    def _run(self, client):
+        return client.post(
+            "/api/v1/runs", actor="writer", key="plan-run",
+            body={"workflow_id": "workflow:linear", "input": {"value": 0}},
+        ).json()["data"]["run_id"]
+
+    def test_definition_and_overlay_are_separate_endpoints(self) -> None:
+        with AsgiHarness(self.app) as client:
+            run_id = self._run(client)
+
+            definition = client.get(f"/api/v1/runs/{run_id}/plan", actor="reader")
+            self.assertEqual(200, definition.status_code, definition.text)
+            nodes = definition.json()["data"]["nodes"]
+            self.assertTrue(nodes)
+            for node in nodes:
+                self.assertNotIn("status", node)
+
+            overlay = client.get(
+                f"/api/v1/runs/{run_id}/plan/overlay", actor="reader"
+            )
+            self.assertEqual(200, overlay.status_code, overlay.text)
+            for node in overlay.json()["data"]["nodes"]:
+                self.assertIn("status", node)
+                self.assertNotIn("handler_name", node)
+
+    def test_overlay_names_the_plan_version_it_describes(self) -> None:
+        with AsgiHarness(self.app) as client:
+            run_id = self._run(client)
+            overlay = client.get(
+                f"/api/v1/runs/{run_id}/plan/overlay", actor="reader"
+            ).json()["data"]
+            definition = client.get(
+                f"/api/v1/runs/{run_id}/plan", actor="reader"
+            ).json()["data"]
+            self.assertEqual(definition["plan_version"], overlay["plan_version"])
+
+    def test_a_diff_needs_both_versions(self) -> None:
+        with AsgiHarness(self.app) as client:
+            run_id = self._run(client)
+            response = client.get(f"/api/v1/runs/{run_id}/plan/diff", actor="reader")
+            self.assertEqual(400, response.status_code)
+
+    def test_a_run_diffed_against_itself_is_identical(self) -> None:
+        with AsgiHarness(self.app) as client:
+            run_id = self._run(client)
+            response = client.get(
+                f"/api/v1/runs/{run_id}/plan/diff?base_version=1&target_version=1",
+                actor="reader",
+            )
+            self.assertEqual(200, response.status_code, response.text)
+            self.assertTrue(response.json()["data"]["identical"])
+
+    def test_plan_reads_require_a_scope(self) -> None:
+        with AsgiHarness(self.app) as client:
+            run_id = self._run(client)
+            self.assertEqual(
+                403,
+                client.get(f"/api/v1/runs/{run_id}/plan", actor="nobody").status_code,
+            )
+
+    def test_an_unknown_run_has_no_plan(self) -> None:
+        with AsgiHarness(self.app) as client:
+            response = client.get("/api/v1/runs/run:missing/plan", actor="reader")
+            self.assertEqual(404, response.status_code)
+
+
 class CatalogTests(ApiTestCase):
     def test_handler_catalog_exposes_identity_not_commands(self) -> None:
         with AsgiHarness(self.app) as client:

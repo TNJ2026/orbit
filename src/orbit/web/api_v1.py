@@ -19,6 +19,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from ..workflow.api.dto import CursorError, envelope, page_size
+from ..workflow.api.plan_read_models import PlanNotFound, PlanReadModelService
 from ..workflow.api.read_models import ReadModelService
 from ..workflow.api.routes import (
     ApiCommandExecutor, CommandInProgress, IdempotencyConflict, RateLimiter,
@@ -91,6 +92,7 @@ def build_api_v1(
     path = Path(db_path)
     reads = ReadModelService(path)
     runs = RunApplicationService(path, durable_service)
+    plans = PlanReadModelService(path)
     humans = HumanTaskService(path)
     budgets = BudgetService(path)
     recovery = RecoveryManager(
@@ -180,6 +182,68 @@ def build_api_v1(
             return JSONResponse(envelope({"items": items}, next_cursor=next_cursor))
 
         return handler
+
+    def _plan_version(request: Request) -> int | None:
+        raw = request.query_params.get("plan_version")
+        return None if raw is None else int(raw)
+
+    async def plan_definition(request: Request) -> JSONResponse:
+        """The plan as authored — never mixed with what the run did to it."""
+
+        actor = authenticate(request, READ_SCOPE)
+        if isinstance(actor, JSONResponse):
+            return actor
+        try:
+            payload = plans.definition(
+                EntityId.parse(request.path_params["run_id"]),
+                plan_version=_plan_version(request),
+            )
+        except PlanNotFound as exc:
+            return error("not_found", str(exc), 404)
+        except ValueError as exc:
+            return error("invalid_request", str(exc))
+        return JSONResponse(envelope(payload))
+
+    async def plan_overlay(request: Request) -> JSONResponse:
+        """What the run did, keyed by node id and stamped with a plan version.
+
+        Separate from the definition so a client cannot render one version's
+        graph with another version's statuses without noticing.
+        """
+
+        actor = authenticate(request, READ_SCOPE)
+        if isinstance(actor, JSONResponse):
+            return actor
+        try:
+            payload = plans.overlay(
+                EntityId.parse(request.path_params["run_id"]),
+                plan_version=_plan_version(request),
+            )
+        except PlanNotFound as exc:
+            return error("not_found", str(exc), 404)
+        except ValueError as exc:
+            return error("invalid_request", str(exc))
+        return JSONResponse(envelope(payload))
+
+    async def plan_diff(request: Request) -> JSONResponse:
+        actor = authenticate(request, READ_SCOPE)
+        if isinstance(actor, JSONResponse):
+            return actor
+        try:
+            base = int(request.query_params["base_version"])
+            target = int(request.query_params["target_version"])
+        except (KeyError, ValueError):
+            return error(
+                "invalid_request", "base_version and target_version are required"
+            )
+        try:
+            payload = plans.diff(
+                EntityId.parse(request.path_params["run_id"]),
+                base_version=base, target_version=target,
+            )
+        except PlanNotFound as exc:
+            return error("not_found", str(exc), 404)
+        return JSONResponse(envelope(payload))
 
     async def inbox(request: Request) -> JSONResponse:
         actor = authenticate(request, READ_SCOPE)
@@ -416,6 +480,9 @@ def build_api_v1(
         Route("/api/v1/runs/{run_id}/timeline", _paged_read(reads.timeline), methods=["GET"]),
         Route("/api/v1/runs/{run_id}/errors", _paged_read(reads.errors), methods=["GET"]),
         Route("/api/v1/runs/{run_id}/cancel", cancel_run, methods=["POST"]),
+        Route("/api/v1/runs/{run_id}/plan", plan_definition, methods=["GET"]),
+        Route("/api/v1/runs/{run_id}/plan/overlay", plan_overlay, methods=["GET"]),
+        Route("/api/v1/runs/{run_id}/plan/diff", plan_diff, methods=["GET"]),
         Route("/api/v1/runs/{run_id}/budget", add_budget, methods=["POST"]),
         Route("/api/v1/inbox", inbox, methods=["GET"]),
         Route(
