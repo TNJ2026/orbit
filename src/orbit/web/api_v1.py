@@ -26,6 +26,7 @@ from ..workflow.api.routes import (
     RequestTooLarge, _bounded_json,
 )
 from ..workflow.application.budget_service import BudgetService
+from ..workflow.application.foreach_service import ForeachService
 from ..workflow.application.human_service import HumanTaskService
 from ..workflow.application.run_service import RunApplicationService, RunStartError
 from ..workflow.domain.ids import EntityId
@@ -95,8 +96,12 @@ def build_api_v1(
     plans = PlanReadModelService(path)
     humans = HumanTaskService(path)
     budgets = BudgetService(path)
+    # Every service a finding can be applied through. Recovery that detects a
+    # problem it cannot act on is worse than not detecting it: the operator is
+    # told the runtime knows, and the fix fails.
     recovery = RecoveryManager(
-        path, durable_service=durable_service, human_service=humans
+        path, durable_service=durable_service, human_service=humans,
+        foreach_service=ForeachService(path),
     )
     limiter = rate_limiter or RateLimiter()
     executor = ApiCommandExecutor(path, fault_hook=fault_hook)
