@@ -143,10 +143,16 @@ class LegacySurfaceBaseline(unittest.TestCase):
     """
 
     def test_legacy_production_modules_do_not_grow(self) -> None:
+        # Modules slated for outright deletion in M6. They may shrink as
+        # behaviour moves out, never grow: new behaviour belongs in the new
+        # Runtime, not in code that is on its way out.
+        #
+        # `__main__.py` is deliberately absent — the plan converges it rather
+        # than deleting it (M1A/M3 add the new CLI, M6 strips the legacy
+        # parsers), so a line ceiling would fight the migration itself.
         baseline = {
             "server.py": 6903,
             "store.py": 1976,
-            "__main__.py": 463,
             "project_index.py": 146,
         }
         for name, ceiling in baseline.items():

@@ -2509,7 +2509,8 @@
    "disposition": "rewrite",
    "target_phase": "M1A",
    "capability": "project index, online probe",
-   "replacement_hint": "Replacement: platform/projects.py tests"
+   "replacement_hint": "Replaced by tests/test_platform_projects.py::ProjectIndexTests + ::ProjectResolutionTests (M1A, delivered)",
+   "status": "replacement_delivered"
   },
   {
    "test_id": "tests/test_project_index.py::ProjectIndexTests::test_browser_host_prefers_loopback_for_wildcard_binds",
@@ -2518,7 +2519,8 @@
    "disposition": "rewrite",
    "target_phase": "M1A",
    "capability": "project index, online probe",
-   "replacement_hint": "Replacement: platform/projects.py tests"
+   "replacement_hint": "Replaced by tests/test_platform_projects.py::ProjectIndexTests + ::ProjectResolutionTests (M1A, delivered)",
+   "status": "replacement_delivered"
   },
   {
    "test_id": "tests/test_project_index.py::ProjectIndexTests::test_upsert_project_writes_and_replaces_index_entry",
@@ -2527,7 +2529,8 @@
    "disposition": "rewrite",
    "target_phase": "M1A",
    "capability": "project index, online probe",
-   "replacement_hint": "Replacement: platform/projects.py tests"
+   "replacement_hint": "Replaced by tests/test_platform_projects.py::ProjectIndexTests + ::ProjectResolutionTests (M1A, delivered)",
+   "status": "replacement_delivered"
   },
   {
    "test_id": "tests/test_project_index.py::ProjectIndexTests::test_list_projects_marks_non_current_with_checker",
@@ -2536,7 +2539,8 @@
    "disposition": "rewrite",
    "target_phase": "M1A",
    "capability": "project index, online probe",
-   "replacement_hint": "Replacement: platform/projects.py tests"
+   "replacement_hint": "Replaced by tests/test_platform_projects.py::ProjectIndexTests + ::ProjectResolutionTests (M1A, delivered)",
+   "status": "replacement_delivered"
   }
  ]
 }

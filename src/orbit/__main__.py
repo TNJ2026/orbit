@@ -9,9 +9,85 @@ from pathlib import Path
 import uvicorn
 
 from . import __version__
-from .project_index import upsert_project
-from .store import Store, project_db_path, project_state_dir, resolve_project_root
+from .platform.projects import (
+    project_db_path,
+    resolve_project_root,
+    upsert_project,
+    warn_about_legacy_database,
+)
+from .store import Store, project_state_dir
 from .server import create_server, runner_loop
+
+
+def _runtime_db_path(explicit: str | None) -> str:
+    """Resolve the runtime database, warning once about abandoned legacy data.
+
+    Every command that touches the default database goes through here, so the
+    warning and the path rule can never drift apart between `serve`, `workflow
+    publish` and `db check`.
+    """
+
+    if explicit:
+        return explicit
+    warn_about_legacy_database()
+    return str(project_db_path(resolve_project_root()))
+
+
+def _add_db_check_arguments(command) -> None:
+    command.add_argument("--db", default=None, help="SQLite database path")
+    command.add_argument("--run-id", default=None, help="Optional run:<id> scope")
+    command.add_argument(
+        "--json", action="store_true", help="Emit stable machine-readable JSON"
+    )
+    command.add_argument(
+        "--drop-invalid-snapshots",
+        action="store_true",
+        help=(
+            "Explicitly delete corrupt snapshots; event and projection data "
+            "remain read-only"
+        ),
+    )
+
+
+def _db_check_command(args) -> None:
+    """Audit the runtime database. Read-only unless --drop-invalid-snapshots."""
+
+    from .workflow.domain.ids import EntityId
+    from .workflow.persistence.integrity import check_database
+
+    db_path = _runtime_db_path(args.db)
+    run_id = EntityId.parse(args.run_id) if args.run_id else None
+    report = check_database(db_path, run_id=run_id)
+    payload = report.to_dict()
+
+    if args.drop_invalid_snapshots:
+        snapshot_ids = tuple(
+            item.entity_id
+            for item in report.issues
+            if item.code == "SNAPSHOT_CORRUPT" and item.entity_id is not None
+        )
+        if snapshot_ids:
+            from .workflow.persistence import SQLiteUnitOfWork
+
+            with SQLiteUnitOfWork(db_path) as uow:
+                for snapshot_id in snapshot_ids:
+                    uow.snapshots.delete(EntityId.parse(snapshot_id))
+                uow.commit()
+            report = check_database(db_path, run_id=run_id)
+            payload = report.to_dict()
+            payload["dropped_invalid_snapshots"] = list(snapshot_ids)
+
+    if getattr(args, "json", False):
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    elif report.ok:
+        print(
+            f"ok: {report.checked_events} events, {report.checked_snapshots} snapshots"
+        )
+    else:
+        print("\n".join(f"{item.code}: {item.message}" for item in report.issues))
+
+    if not report.ok:
+        raise SystemExit(4)
 
 
 def _workflow_command(args) -> None:
@@ -23,47 +99,10 @@ def _workflow_command(args) -> None:
     machine_output = getattr(args, "json", False)
     try:
         if args.workflow_action == "db-check":
-            from .workflow.persistence.integrity import check_database
-
-            db_path = args.db or str(project_db_path(resolve_project_root()))
-            run_id = None
-            if args.run_id:
-                from .workflow.domain.ids import EntityId
-
-                run_id = EntityId.parse(args.run_id)
-            report = check_database(db_path, run_id=run_id)
-            payload = report.to_dict()
-            if args.drop_invalid_snapshots:
-                snapshot_ids = tuple(
-                    item.entity_id
-                    for item in report.issues
-                    if item.code == "SNAPSHOT_CORRUPT" and item.entity_id is not None
-                )
-                if snapshot_ids:
-                    from .workflow.persistence import SQLiteUnitOfWork
-                    from .workflow.domain.ids import EntityId
-
-                    with SQLiteUnitOfWork(db_path) as uow:
-                        for snapshot_id in snapshot_ids:
-                            uow.snapshots.delete(EntityId.parse(snapshot_id))
-                        uow.commit()
-                    report = check_database(db_path, run_id=run_id)
-                    payload = report.to_dict()
-                    payload["dropped_invalid_snapshots"] = list(snapshot_ids)
-            print(
-                json.dumps(payload, ensure_ascii=False, sort_keys=True)
-                if machine_output
-                else (
-                    f"ok: {report.checked_events} events, "
-                    f"{report.checked_snapshots} snapshots"
-                    if report.ok
-                    else "\n".join(
-                        f"{item.code}: {item.message}" for item in report.issues
-                    )
-                )
-            )
-            if not report.ok:
-                raise SystemExit(4)
+            # Deprecated nesting kept only so in-flight scripts do not break
+            # mid-migration; `orbit db check` is the product surface and this
+            # alias is removed in M6.
+            _db_check_command(args)
             return
         catalogs = load_catalogs(args.catalog)
         source_path = Path(args.file)
@@ -71,8 +110,7 @@ def _workflow_command(args) -> None:
         source_format = "json" if source_path.suffix.lower() == ".json" else "yaml"
         store = None
         if args.workflow_action == "publish":
-            db_path = args.db or str(project_db_path(resolve_project_root()))
-            store = SQLiteWorkflowVersionStore(db_path)
+            store = SQLiteWorkflowVersionStore(_runtime_db_path(args.db))
         service = WorkflowDefinitionService(catalogs, store)
         if args.workflow_action == "validate":
             compiled = service.validate_workflow(
@@ -170,9 +208,6 @@ def init_project(project_root: Path) -> dict[str, list[str]]:
 
     return {"created": created, "skipped": skipped}
 
-# Database location used by orbit before databases became per-project.
-LEGACY_DB_PATH = Path.home() / ".dev_loop" / "messages.db"
-
 
 def _serve_hint(host: str, port: int) -> str:
     """A serve command that actually works in the caller's shell: plain
@@ -218,15 +253,7 @@ def ensure_state_dir_gitignored(project_root: Path) -> bool:
 def _serve(args) -> None:
     """Start the UI/API + Scheduler server (shared by `serve` and `up`)."""
     project_root = resolve_project_root()
-    db_path = args.db or str(project_db_path(project_root))
-    if args.db is None and LEGACY_DB_PATH.exists():
-        print(
-            f"note: legacy shared database exists at {LEGACY_DB_PATH} and is NOT "
-            f"used anymore — agents and messages stored there will not appear.\n"
-            f"      To keep using it: orbit serve --db {LEGACY_DB_PATH}\n"
-            f"      To migrate it to this project: cp {LEGACY_DB_PATH} {db_path}",
-            flush=True,
-        )
+    db_path = _runtime_db_path(args.db)
     project = upsert_project(
         project_root=project_root,
         db_path=db_path,
@@ -358,7 +385,10 @@ def main() -> None:
         "workflow",
         help="Validate, compile, or publish a Workflow DSL 1.0 definition",
     )
-    workflow_sub = workflow_cmd.add_subparsers(dest="workflow_action", required=True)
+    # metavar hides the deprecated db-check alias from help without removing it.
+    workflow_sub = workflow_cmd.add_subparsers(
+        dest="workflow_action", required=True, metavar="{validate,compile,publish}"
+    )
     for action in ("validate", "compile", "publish"):
         command = workflow_sub.add_parser(action)
         command.add_argument("file", help="Workflow DSL .yaml, .yml, or .json file")
@@ -375,22 +405,27 @@ def main() -> None:
             command.add_argument("--db", default=None, help="SQLite database path")
             command.add_argument("--expected-version", type=int, required=True)
             command.add_argument("--actor", default="local-cli")
-    db_check = workflow_sub.add_parser(
-        "db-check", help="Audit workflow event, projection, receipt, and snapshot integrity"
+    # Deprecated alias; `orbit db check` is the product surface. Registered
+    # without help text so it stays runnable but unadvertised until M6 removes
+    # it outright.
+    _add_db_check_arguments(workflow_sub.add_parser("db-check"))
+
+    db_cmd = sub.add_parser("db", help="Inspect the project runtime database")
+    db_sub = db_cmd.add_subparsers(dest="db_action", required=True)
+    db_check = db_sub.add_parser(
+        "check",
+        help="Audit runtime event, projection, receipt, and snapshot integrity",
     )
-    db_check.add_argument("--db", default=None, help="SQLite database path")
-    db_check.add_argument("--run-id", default=None, help="Optional run:<id> scope")
-    db_check.add_argument("--json", action="store_true", help="Emit stable machine-readable JSON")
-    db_check.add_argument(
-        "--drop-invalid-snapshots",
-        action="store_true",
-        help="Explicitly delete corrupt snapshots; event and projection data remain read-only",
-    )
+    _add_db_check_arguments(db_check)
 
     args = parser.parse_args()
 
     if args.command == "workflow":
         _workflow_command(args)
+        return
+
+    if args.command == "db":
+        _db_check_command(args)
         return
 
     if args.command in ("config", "init"):
