@@ -10,4 +10,16 @@ build/
 .DS_Store
 docs/orbit-与-loop-engineering.md
 .playwright-cli/
-docs/
+
+# Working notes under docs/ stay local. The normative migration baseline and
+# the contracts it gates on must be reviewable in Git (see M0 Gate in
+# docs/workflow-runtime-clean-migration-plan.md).
+docs/*
+!docs/workflow-runtime-clean-migration-plan.md
+!docs/agentic-workflow-implementation-plan.md
+!docs/migration/
+!docs/adr/
+!docs/ui/
+docs/ui/*
+!docs/ui/agent-workflow-ui-api-contract.md
+!docs/ui/agent-workflow-ui-implementation.md

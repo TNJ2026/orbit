@@ -119,6 +119,11 @@ _to_thread = anyio.to_thread.run_sync
 _UI_HTML = (
     resources.files("orbit").joinpath("static/ui.html").read_text(encoding="utf-8")
 )
+_WORKFLOW_UI_HTML = (
+    resources.files("orbit")
+    .joinpath("static/workflow-ui.html")
+    .read_text(encoding="utf-8")
+)
 
 # Vendored, self-contained: the dagre layout engine (bundles graphlib, exposes a
 # global `dagre`). Served from our own origin so auto-layout works offline and
@@ -6119,6 +6124,14 @@ def create_server(
         if forbidden := _forbid_non_local(request):
             return forbidden
         return HTMLResponse(_UI_HTML)
+
+    @route("/workflow-ui", methods=["GET"])
+    async def workflow_ui(request: Request) -> HTMLResponse | JSONResponse:
+        """Serve the offline Agent Workflow Mission Control prototype."""
+
+        if forbidden := _forbid_non_local(request):
+            return forbidden
+        return HTMLResponse(_WORKFLOW_UI_HTML)
 
     @route("/static/dagre.min.js", methods=["GET"])
     async def static_dagre(request: Request) -> Response:

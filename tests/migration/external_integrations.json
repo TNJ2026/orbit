@@ -1,0 +1,118 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-07-18",
+  "source": "M0 task 7 of docs/workflow-runtime-clean-migration-plan.md",
+  "scan_scope": [
+    ".codex/config.toml",
+    ".claude/launch.json",
+    "src/orbit/server.py route decorators",
+    "src/orbit/__main__.py argparse subcommands",
+    "src/orbit/static/*.html asset references"
+  ],
+  "rule": "Any consumer-facing entry point not classified here blocks M2 and M6.",
+  "integrations": [
+    {
+      "id": "mcp-devloop",
+      "kind": "mcp",
+      "consumer": "codex CLI (.codex/config.toml [mcp_servers.devloop])",
+      "current_url": "http://127.0.0.1:8848/mcp",
+      "current_state": "not_implemented",
+      "evidence": "FastMCP surface was removed in commit 8e4d786 'refactor: drop FastMCP, serve on plain Starlette + uvicorn' (2026-07-09); mailbox MCP tools removed earlier in 948d0e2. No /mcp route exists in src/orbit today. The .codex config is stale and currently fails to connect.",
+      "disposition": "retain_and_rewrite",
+      "target_url": "http://127.0.0.1:8848/mcp",
+      "target_module": "src/orbit/web/mcp.py",
+      "target_phase": "M3",
+      "auth": "same identity + Capability Policy as /api/v1; no anonymous tool calls",
+      "contract_test": "M3: initialize, tool discovery, read-only inspect, authorized write command, unauthorized, version conflict, restart, .codex config smoke",
+      "notes": "Plan Gate M0 forbids silent deletion even though the implementation is already gone: this is a to-be-restored external contract. Consumer must be notified if the restored tool surface differs from the pre-8e4d786 one."
+    },
+    {
+      "id": "orbit-serve-port",
+      "kind": "process",
+      "consumer": ".claude/launch.json (uv run orbit serve, port 8848)",
+      "current_url": "http://127.0.0.1:8848",
+      "current_state": "active",
+      "disposition": "retain_unchanged",
+      "target_url": "http://127.0.0.1:8848",
+      "target_phase": "M6",
+      "auth": "loopback-only guard",
+      "contract_test": "M7 package CLI matrix: orbit serve boots on 8848",
+      "notes": "Port and command name stay; only routes below it change."
+    },
+    {
+      "id": "legacy-ui",
+      "kind": "http_ui",
+      "consumer": "human browser",
+      "current_url": "/ui (legacy task board, static/ui.html)",
+      "current_state": "active",
+      "disposition": "replace",
+      "target_url": "/ui (new Runtime UI, static/workflow-ui/index.html)",
+      "target_phase": "M6",
+      "auth": "loopback-only guard, then new auth in M3",
+      "contract_test": "M4 browser E2E; M7 package contents",
+      "notes": "Same URL, different content. No redirect or alias per plan 2.5."
+    },
+    {
+      "id": "workflow-ui-prototype",
+      "kind": "http_ui",
+      "consumer": "developer smoke only",
+      "current_url": "/workflow-ui (static/workflow-ui.html single file)",
+      "current_state": "active",
+      "disposition": "delete",
+      "target_url": null,
+      "target_phase": "M4",
+      "contract_test": "M6 guard: /workflow-ui absent from route manifest",
+      "notes": "Read-only prototype entry. Must not gain mock mutation APIs. Deleted once the modular UI passes real-HTTP smoke."
+    },
+    {
+      "id": "dagre-asset",
+      "kind": "http_asset",
+      "consumer": "legacy UI canvas; candidate for new UI graph view",
+      "current_url": "/static/dagre.min.js",
+      "current_state": "active",
+      "disposition": "replace",
+      "target_url": "/ui/assets/dagre.min.js (only if the new UI graph view reuses it)",
+      "target_phase": "M4",
+      "contract_test": "M4: asset served from /ui/assets/*; M6: /static/* route absent",
+      "notes": "Vendored, no CDN. If the new Graph tab does not need dagre, drop the vendor file entirely in M6."
+    },
+    {
+      "id": "legacy-rest-api",
+      "kind": "http_api",
+      "consumer": "legacy UI, any external script",
+      "current_url": "38 unversioned routes under /api/* (tasks, goals, messages, agents, run-jobs, settings, workflow, ...)",
+      "current_state": "active",
+      "disposition": "delete",
+      "target_url": "/api/v1/* (new semantics, not a 1:1 mapping)",
+      "target_phase": "M6",
+      "contract_test": "M6 guard: route manifest contains no unversioned /api/* mutation route",
+      "notes": "No redirect or compatibility alias. Old resources (task, message, goal-as-aggregate) do not exist in the new model."
+    },
+    {
+      "id": "project-index-probe",
+      "kind": "internal_http",
+      "consumer": "orbit project index online detection",
+      "current_url": "legacy health-check URL",
+      "current_state": "active",
+      "disposition": "replace",
+      "target_url": "/health/ready",
+      "target_phase": "M1A",
+      "contract_test": "M1A: project index probe hits /health/ready",
+      "notes": "Moves into platform/projects.py."
+    },
+    {
+      "id": "legacy-cli",
+      "kind": "cli",
+      "consumer": "human, scripts, .claude/launch.json",
+      "current_url": "orbit start|up, orbit config|init, orbit runner, orbit workflow db-check",
+      "current_state": "active",
+      "disposition": "delete",
+      "target_url": "orbit serve | workflow validate|publish | run start|inspect | db check",
+      "target_phase": "M6",
+      "contract_test": "M7 package CLI matrix: legacy commands return argparse unknown command",
+      "notes": "orbit serve is the only surviving name. orbit db check replaces the nested orbit workflow db-check with no alias."
+    }
+  ],
+  "unclassified": [],
+  "blocking_rule": "unclassified MUST stay empty; a non-empty list blocks M2 and M6."
+}

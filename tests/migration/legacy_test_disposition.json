@@ -1,0 +1,2542 @@
+{
+ "schema_version": "1.0",
+ "generated_at": "2026-07-18",
+ "source": "M0 task 8 of docs/workflow-runtime-clean-migration-plan.md",
+ "rule": "Every legacy test ID must carry a disposition. 'migrate'/'rewrite' require a Replacement Test ID before M6 may delete the original.",
+ "dispositions": {
+  "migrate": "capability survives; behaviour must exist in a new-module test",
+  "rewrite": "capability survives; test must be rebuilt against new ports",
+  "delete": "domain concept removed with the legacy engine"
+ },
+ "tests": [
+  {
+   "test_id": "tests/test_workflow_engine.py::WorkflowEngineTests::test_linear_flow_with_rework_and_close",
+   "file": "tests/test_workflow_engine.py",
+   "class": "WorkflowEngineTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy goal/task state machine",
+   "replacement_hint": "Old Task/Transition advance semantics; superseded by graph runtime + kernel contract tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::WorkflowEngineTests::test_merge_waits_for_all_required_branches",
+   "file": "tests/test_workflow_engine.py",
+   "class": "WorkflowEngineTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy goal/task state machine",
+   "replacement_hint": "Old Task/Transition advance semantics; superseded by graph runtime + kernel contract tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::WorkflowEngineTests::test_visible_status_is_independent_of_workflow_step_config",
+   "file": "tests/test_workflow_engine.py",
+   "class": "WorkflowEngineTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy goal/task state machine",
+   "replacement_hint": "Old Task/Transition advance semantics; superseded by graph runtime + kernel contract tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::WorkflowEngineTests::test_blocked_status_overrides_active_step_projection",
+   "file": "tests/test_workflow_engine.py",
+   "class": "WorkflowEngineTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy goal/task state machine",
+   "replacement_hint": "Old Task/Transition advance semantics; superseded by graph runtime + kernel contract tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::WorkflowEngineTests::test_forward_dispatch_carries_structured_upstream",
+   "file": "tests/test_workflow_engine.py",
+   "class": "WorkflowEngineTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy goal/task state machine",
+   "replacement_hint": "Old Task/Transition advance semantics; superseded by graph runtime + kernel contract tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::WorkflowEngineTests::test_rework_dispatch_keeps_raw_feedback",
+   "file": "tests/test_workflow_engine.py",
+   "class": "WorkflowEngineTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy goal/task state machine",
+   "replacement_hint": "Old Task/Transition advance semantics; superseded by graph runtime + kernel contract tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::WorkflowEngineTests::test_manual_status_rejected_while_steps_active",
+   "file": "tests/test_workflow_engine.py",
+   "class": "WorkflowEngineTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy goal/task state machine",
+   "replacement_hint": "Old Task/Transition advance semantics; superseded by graph runtime + kernel contract tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::WorkflowEngineTests::test_goals_summary_projects_subtask_status",
+   "file": "tests/test_workflow_engine.py",
+   "class": "WorkflowEngineTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy goal/task state machine",
+   "replacement_hint": "Old Task/Transition advance semantics; superseded by graph runtime + kernel contract tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::WorkflowEngineTests::test_large_decompose_json_is_not_tail_truncated",
+   "file": "tests/test_workflow_engine.py",
+   "class": "WorkflowEngineTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy goal/task state machine",
+   "replacement_hint": "Old Task/Transition advance semantics; superseded by graph runtime + kernel contract tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::WorkflowEngineTests::test_held_subtask_has_no_placeholder_assignee",
+   "file": "tests/test_workflow_engine.py",
+   "class": "WorkflowEngineTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy goal/task state machine",
+   "replacement_hint": "Old Task/Transition advance semantics; superseded by graph runtime + kernel contract tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::WorkflowEngineTests::test_optional_late_branch_does_not_redispatch_join_target",
+   "file": "tests/test_workflow_engine.py",
+   "class": "WorkflowEngineTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy goal/task state machine",
+   "replacement_hint": "Old Task/Transition advance semantics; superseded by graph runtime + kernel contract tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::WorkflowEngineTests::test_assignee_mismatch_is_rejected",
+   "file": "tests/test_workflow_engine.py",
+   "class": "WorkflowEngineTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy goal/task state machine",
+   "replacement_hint": "Old Task/Transition advance semantics; superseded by graph runtime + kernel contract tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::WorkflowEngineTests::test_inactive_step_completion_is_rejected",
+   "file": "tests/test_workflow_engine.py",
+   "class": "WorkflowEngineTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy goal/task state machine",
+   "replacement_hint": "Old Task/Transition advance semantics; superseded by graph runtime + kernel contract tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::WorkflowEngineTests::test_blocked_pauses_task_and_notifies_hub",
+   "file": "tests/test_workflow_engine.py",
+   "class": "WorkflowEngineTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy goal/task state machine",
+   "replacement_hint": "Old Task/Transition advance semantics; superseded by graph runtime + kernel contract tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::WorkflowEngineTests::test_start_twice_is_rejected",
+   "file": "tests/test_workflow_engine.py",
+   "class": "WorkflowEngineTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy goal/task state machine",
+   "replacement_hint": "Old Task/Transition advance semantics; superseded by graph runtime + kernel contract tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::WorkflowEngineTests::test_required_cycle_disconnected_from_main_entry_is_rejected",
+   "file": "tests/test_workflow_engine.py",
+   "class": "WorkflowEngineTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy goal/task state machine",
+   "replacement_hint": "Old Task/Transition advance semantics; superseded by graph runtime + kernel contract tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::WorkflowEngineTests::test_start_allows_warning_for_dangling_optional_step",
+   "file": "tests/test_workflow_engine.py",
+   "class": "WorkflowEngineTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy goal/task state machine",
+   "replacement_hint": "Old Task/Transition advance semantics; superseded by graph runtime + kernel contract tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::WorkflowEngineTests::test_ui_actor_defaults_to_hub_agent",
+   "file": "tests/test_workflow_engine.py",
+   "class": "WorkflowEngineTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy goal/task state machine",
+   "replacement_hint": "Old Task/Transition advance semantics; superseded by graph runtime + kernel contract tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::WorkflowEngineTests::test_workflow_config_locked_while_task_active",
+   "file": "tests/test_workflow_engine.py",
+   "class": "WorkflowEngineTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy goal/task state machine",
+   "replacement_hint": "Old Task/Transition advance semantics; superseded by graph runtime + kernel contract tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::WorkflowEngineTests::test_workflow_config_stays_locked_for_blocked_goal",
+   "file": "tests/test_workflow_engine.py",
+   "class": "WorkflowEngineTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy goal/task state machine",
+   "replacement_hint": "Old Task/Transition advance semantics; superseded by graph runtime + kernel contract tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::WorkflowEngineTests::test_manual_approval_step_waits_for_hub_confirmation",
+   "file": "tests/test_workflow_engine.py",
+   "class": "WorkflowEngineTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy goal/task state machine",
+   "replacement_hint": "Old Task/Transition advance semantics; superseded by graph runtime + kernel contract tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::WorkflowEngineTests::test_only_one_goal_can_run_at_a_time",
+   "file": "tests/test_workflow_engine.py",
+   "class": "WorkflowEngineTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy goal/task state machine",
+   "replacement_hint": "Old Task/Transition advance semantics; superseded by graph runtime + kernel contract tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::WorkflowEngineTests::test_rework_loop_caps_and_blocks",
+   "file": "tests/test_workflow_engine.py",
+   "class": "WorkflowEngineTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy goal/task state machine",
+   "replacement_hint": "Old Task/Transition advance semantics; superseded by graph runtime + kernel contract tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::WorkflowEngineTests::test_rework_budget_is_per_originating_step",
+   "file": "tests/test_workflow_engine.py",
+   "class": "WorkflowEngineTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy goal/task state machine",
+   "replacement_hint": "Old Task/Transition advance semantics; superseded by graph runtime + kernel contract tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::WorkflowEngineTests::test_blocked_reason_from_latest_transition",
+   "file": "tests/test_workflow_engine.py",
+   "class": "WorkflowEngineTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy goal/task state machine",
+   "replacement_hint": "Old Task/Transition advance semantics; superseded by graph runtime + kernel contract tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::WorkflowEngineTests::test_blocked_reason_none_when_not_blocked",
+   "file": "tests/test_workflow_engine.py",
+   "class": "WorkflowEngineTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy goal/task state machine",
+   "replacement_hint": "Old Task/Transition advance semantics; superseded by graph runtime + kernel contract tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::WorkflowEngineTests::test_reopen_loop_into_entry_is_executable",
+   "file": "tests/test_workflow_engine.py",
+   "class": "WorkflowEngineTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy goal/task state machine",
+   "replacement_hint": "Old Task/Transition advance semantics; superseded by graph runtime + kernel contract tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::StepTimeoutTests::test_hub_command_from_decompose_step_first_agent",
+   "file": "tests/test_workflow_engine.py",
+   "class": "StepTimeoutTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "node timeout",
+   "replacement_hint": "Replacement: DurableTimer node_timeout tests in test_workflow_durable_runtime.py"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::StepTimeoutTests::test_timeout_without_alternative_notifies_hub_once",
+   "file": "tests/test_workflow_engine.py",
+   "class": "StepTimeoutTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "node timeout",
+   "replacement_hint": "Replacement: DurableTimer node_timeout tests in test_workflow_durable_runtime.py"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::StepTimeoutTests::test_step_within_timeout_is_untouched",
+   "file": "tests/test_workflow_engine.py",
+   "class": "StepTimeoutTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "node timeout",
+   "replacement_hint": "Replacement: DurableTimer node_timeout tests in test_workflow_durable_runtime.py"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::StepTimeoutTests::test_step_without_timeout_never_fires",
+   "file": "tests/test_workflow_engine.py",
+   "class": "StepTimeoutTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "node timeout",
+   "replacement_hint": "Replacement: DurableTimer node_timeout tests in test_workflow_durable_runtime.py"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::GoalTests::test_goal_intake_card_settled_even_if_subtask_dispatch_fails",
+   "file": "tests/test_workflow_engine.py",
+   "class": "GoalTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy goal aggregate",
+   "replacement_hint": "Goal becomes a root-Run view; no separate aggregate"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::GoalTests::test_subtask_links_to_goal_and_summary_aggregates",
+   "file": "tests/test_workflow_engine.py",
+   "class": "GoalTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy goal aggregate",
+   "replacement_hint": "Goal becomes a root-Run view; no separate aggregate"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::GoalTests::test_non_goal_tasks_absent_from_summary",
+   "file": "tests/test_workflow_engine.py",
+   "class": "GoalTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy goal aggregate",
+   "replacement_hint": "Goal becomes a root-Run view; no separate aggregate"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::StepCardTests::test_goal_intake_creates_business_tasks_and_step_cards",
+   "file": "tests/test_workflow_engine.py",
+   "class": "StepCardTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy step card projection",
+   "replacement_hint": "Step cards are replaced by NodeRun projections"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::StepCardTests::test_goal_runner_preflight_rejects_missing_command",
+   "file": "tests/test_workflow_engine.py",
+   "class": "StepCardTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy step card projection",
+   "replacement_hint": "Step cards are replaced by NodeRun projections"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::StepCardTests::test_goal_start_rejects_step_without_agent",
+   "file": "tests/test_workflow_engine.py",
+   "class": "StepCardTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy step card projection",
+   "replacement_hint": "Step cards are replaced by NodeRun projections"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::StepCardTests::test_goal_intake_invalid_json_blocks_goal",
+   "file": "tests/test_workflow_engine.py",
+   "class": "StepCardTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy step card projection",
+   "replacement_hint": "Step cards are replaced by NodeRun projections"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::StepCardTests::test_business_task_step_cards_settle_and_goal_waits_for_acceptance",
+   "file": "tests/test_workflow_engine.py",
+   "class": "StepCardTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy step card projection",
+   "replacement_hint": "Step cards are replaced by NodeRun projections"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::StepCardTests::test_rerun_after_block_opens_fresh_step_card",
+   "file": "tests/test_workflow_engine.py",
+   "class": "StepCardTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy step card projection",
+   "replacement_hint": "Step cards are replaced by NodeRun projections"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::StepCardTests::test_blocked_reason_for_step_card_uses_parent_transition",
+   "file": "tests/test_workflow_engine.py",
+   "class": "StepCardTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy step card projection",
+   "replacement_hint": "Step cards are replaced by NodeRun projections"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::StepCardTests::test_non_goal_tasks_get_no_step_cards",
+   "file": "tests/test_workflow_engine.py",
+   "class": "StepCardTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy step card projection",
+   "replacement_hint": "Step cards are replaced by NodeRun projections"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::StepCardTests::test_parse_depends_on_to_zero_based_indices",
+   "file": "tests/test_workflow_engine.py",
+   "class": "StepCardTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy step card projection",
+   "replacement_hint": "Step cards are replaced by NodeRun projections"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::StepCardTests::test_parse_rejects_invalid_depends_on",
+   "file": "tests/test_workflow_engine.py",
+   "class": "StepCardTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy step card projection",
+   "replacement_hint": "Step cards are replaced by NodeRun projections"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::StepCardTests::test_parse_rejects_task_level_agent",
+   "file": "tests/test_workflow_engine.py",
+   "class": "StepCardTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy step card projection",
+   "replacement_hint": "Step cards are replaced by NodeRun projections"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::StepCardTests::test_dependent_subtask_is_held_then_released_on_prereq_close",
+   "file": "tests/test_workflow_engine.py",
+   "class": "StepCardTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy step card projection",
+   "replacement_hint": "Step cards are replaced by NodeRun projections"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::AutoRunnerTests::test_reviewer_runner_rework_verdict_loops_back",
+   "file": "tests/test_workflow_engine.py",
+   "class": "AutoRunnerTests",
+   "disposition": "migrate",
+   "target_phase": "M1B/M5",
+   "capability": "process exec, cancel, stream, timeout",
+   "replacement_hint": "Replacement: platform/process.py tests + handler execution tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::AutoRunnerTests::test_runner_blocked_verdict_blocks_despite_exit0",
+   "file": "tests/test_workflow_engine.py",
+   "class": "AutoRunnerTests",
+   "disposition": "migrate",
+   "target_phase": "M1B/M5",
+   "capability": "process exec, cancel, stream, timeout",
+   "replacement_hint": "Replacement: platform/process.py tests + handler execution tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::AutoRunnerTests::test_runner_not_wedged_by_child_holding_pipe",
+   "file": "tests/test_workflow_engine.py",
+   "class": "AutoRunnerTests",
+   "disposition": "migrate",
+   "target_phase": "M1B/M5",
+   "capability": "process exec, cancel, stream, timeout",
+   "replacement_hint": "Replacement: platform/process.py tests + handler execution tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::AutoRunnerTests::test_descendant_pids_walks_process_tree_and_kill_reaps_it",
+   "file": "tests/test_workflow_engine.py",
+   "class": "AutoRunnerTests",
+   "disposition": "migrate",
+   "target_phase": "M1B/M5",
+   "capability": "process exec, cancel, stream, timeout",
+   "replacement_hint": "Replacement: platform/process.py tests + handler execution tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::AutoRunnerTests::test_reviewer_runner_default_verdict_advances",
+   "file": "tests/test_workflow_engine.py",
+   "class": "AutoRunnerTests",
+   "disposition": "migrate",
+   "target_phase": "M1B/M5",
+   "capability": "process exec, cancel, stream, timeout",
+   "replacement_hint": "Replacement: platform/process.py tests + handler execution tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::AutoRunnerTests::test_worker_success_advances_step_with_stdout_result",
+   "file": "tests/test_workflow_engine.py",
+   "class": "AutoRunnerTests",
+   "disposition": "migrate",
+   "target_phase": "M1B/M5",
+   "capability": "process exec, cancel, stream, timeout",
+   "replacement_hint": "Replacement: platform/process.py tests + handler execution tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::AutoRunnerTests::test_goal_step_persists_structured_inputs_result_and_artifacts",
+   "file": "tests/test_workflow_engine.py",
+   "class": "AutoRunnerTests",
+   "disposition": "migrate",
+   "target_phase": "M1B/M5",
+   "capability": "process exec, cancel, stream, timeout",
+   "replacement_hint": "Replacement: platform/process.py tests + handler execution tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::AutoRunnerTests::test_worker_streams_stdout_while_running",
+   "file": "tests/test_workflow_engine.py",
+   "class": "AutoRunnerTests",
+   "disposition": "migrate",
+   "target_phase": "M1B/M5",
+   "capability": "process exec, cancel, stream, timeout",
+   "replacement_hint": "Replacement: platform/process.py tests + handler execution tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::AutoRunnerTests::test_worker_timeout_is_not_blocked_by_unread_stdin",
+   "file": "tests/test_workflow_engine.py",
+   "class": "AutoRunnerTests",
+   "disposition": "migrate",
+   "target_phase": "M1B/M5",
+   "capability": "process exec, cancel, stream, timeout",
+   "replacement_hint": "Replacement: platform/process.py tests + handler execution tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::AutoRunnerTests::test_worker_failure_blocks_and_notifies_hub",
+   "file": "tests/test_workflow_engine.py",
+   "class": "AutoRunnerTests",
+   "disposition": "migrate",
+   "target_phase": "M1B/M5",
+   "capability": "process exec, cancel, stream, timeout",
+   "replacement_hint": "Replacement: platform/process.py tests + handler execution tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::AutoRunnerTests::test_worker_timeout_blocks",
+   "file": "tests/test_workflow_engine.py",
+   "class": "AutoRunnerTests",
+   "disposition": "migrate",
+   "target_phase": "M1B/M5",
+   "capability": "process exec, cancel, stream, timeout",
+   "replacement_hint": "Replacement: platform/process.py tests + handler execution tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::AutoRunnerTests::test_dispatch_queues_runner_job_only_when_runner_command_exists",
+   "file": "tests/test_workflow_engine.py",
+   "class": "AutoRunnerTests",
+   "disposition": "migrate",
+   "target_phase": "M1B/M5",
+   "capability": "process exec, cancel, stream, timeout",
+   "replacement_hint": "Replacement: platform/process.py tests + handler execution tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::AutoRunnerTests::test_step_command_drives_run_job_without_bindings_runner_command",
+   "file": "tests/test_workflow_engine.py",
+   "class": "AutoRunnerTests",
+   "disposition": "migrate",
+   "target_phase": "M1B/M5",
+   "capability": "process exec, cancel, stream, timeout",
+   "replacement_hint": "Replacement: platform/process.py tests + handler execution tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::AutoRunnerTests::test_selected_agent_builtin_command_drives_dispatch",
+   "file": "tests/test_workflow_engine.py",
+   "class": "AutoRunnerTests",
+   "disposition": "migrate",
+   "target_phase": "M1B/M5",
+   "capability": "process exec, cancel, stream, timeout",
+   "replacement_hint": "Replacement: platform/process.py tests + handler execution tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::AutoRunnerTests::test_step_agent_binds_directly_over_bindings_ranking",
+   "file": "tests/test_workflow_engine.py",
+   "class": "AutoRunnerTests",
+   "disposition": "migrate",
+   "target_phase": "M1B/M5",
+   "capability": "process exec, cancel, stream, timeout",
+   "replacement_hint": "Replacement: platform/process.py tests + handler execution tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::AutoRunnerTests::test_runner_claims_and_reports_then_scheduler_advances",
+   "file": "tests/test_workflow_engine.py",
+   "class": "AutoRunnerTests",
+   "disposition": "migrate",
+   "target_phase": "M1B/M5",
+   "capability": "process exec, cancel, stream, timeout",
+   "replacement_hint": "Replacement: platform/process.py tests + handler execution tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::AutoRunnerTests::test_empty_output_is_blocked_not_done",
+   "file": "tests/test_workflow_engine.py",
+   "class": "AutoRunnerTests",
+   "disposition": "migrate",
+   "target_phase": "M1B/M5",
+   "capability": "process exec, cancel, stream, timeout",
+   "replacement_hint": "Replacement: platform/process.py tests + handler execution tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::AutoRunnerTests::test_goal_step_run_recorded_on_step_card",
+   "file": "tests/test_workflow_engine.py",
+   "class": "AutoRunnerTests",
+   "disposition": "migrate",
+   "target_phase": "M1B/M5",
+   "capability": "process exec, cancel, stream, timeout",
+   "replacement_hint": "Replacement: platform/process.py tests + handler execution tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::AutoRunnerTests::test_missing_runner_command_blocks",
+   "file": "tests/test_workflow_engine.py",
+   "class": "AutoRunnerTests",
+   "disposition": "migrate",
+   "target_phase": "M1B/M5",
+   "capability": "process exec, cancel, stream, timeout",
+   "replacement_hint": "Replacement: platform/process.py tests + handler execution tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::RerunTests::test_upstream_rerun_redispatches_settled_downstream",
+   "file": "tests/test_workflow_engine.py",
+   "class": "RerunTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy rerun/skip on tasks",
+   "replacement_hint": "New retry/rework lives in graph runtime with generations"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::RerunTests::test_skip_step_advances_to_forward_successor",
+   "file": "tests/test_workflow_engine.py",
+   "class": "RerunTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy rerun/skip on tasks",
+   "replacement_hint": "New retry/rework lives in graph runtime with generations"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::RerunTests::test_skip_refuses_terminal_step_with_no_successor",
+   "file": "tests/test_workflow_engine.py",
+   "class": "RerunTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy rerun/skip on tasks",
+   "replacement_hint": "New retry/rework lives in graph runtime with generations"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::RerunTests::test_rerun_blocked_step_dispatches_to_chosen_agent",
+   "file": "tests/test_workflow_engine.py",
+   "class": "RerunTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy rerun/skip on tasks",
+   "replacement_hint": "New retry/rework lives in graph runtime with generations"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::RerunTests::test_rerun_on_step_card_redirects_to_parent",
+   "file": "tests/test_workflow_engine.py",
+   "class": "RerunTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy rerun/skip on tasks",
+   "replacement_hint": "New retry/rework lives in graph runtime with generations"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::RerunTests::test_rerun_refuses_when_a_run_is_in_progress",
+   "file": "tests/test_workflow_engine.py",
+   "class": "RerunTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy rerun/skip on tasks",
+   "replacement_hint": "New retry/rework lives in graph runtime with generations"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::RerunTests::test_rerun_ignores_stale_running_attempt_when_latest_failed",
+   "file": "tests/test_workflow_engine.py",
+   "class": "RerunTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy rerun/skip on tasks",
+   "replacement_hint": "New retry/rework lives in graph runtime with generations"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::RerunTests::test_reimplement_after_rework_cap_carries_latest_review_feedback",
+   "file": "tests/test_workflow_engine.py",
+   "class": "RerunTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy rerun/skip on tasks",
+   "replacement_hint": "New retry/rework lives in graph runtime with generations"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::RerunTests::test_budget_resume_updates_goal_and_redispatches_frozen_step",
+   "file": "tests/test_workflow_engine.py",
+   "class": "RerunTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy rerun/skip on tasks",
+   "replacement_hint": "New retry/rework lives in graph runtime with generations"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::MarkTaskRunningTests::test_run_start_marks_card_subtask_and_goal_in_progress",
+   "file": "tests/test_workflow_engine.py",
+   "class": "MarkTaskRunningTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy task status rollup",
+   "deletion_rationale": "legacy task status rollup"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::MarkTaskRunningTests::test_running_card_remains_in_progress",
+   "file": "tests/test_workflow_engine.py",
+   "class": "MarkTaskRunningTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy task status rollup",
+   "deletion_rationale": "legacy task status rollup"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::MarkTaskRunningTests::test_terminal_parent_is_not_reopened",
+   "file": "tests/test_workflow_engine.py",
+   "class": "MarkTaskRunningTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy task status rollup",
+   "deletion_rationale": "legacy task status rollup"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::GoalRollupTests::test_all_subtasks_closed_accepts_goal",
+   "file": "tests/test_workflow_engine.py",
+   "class": "GoalRollupTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy goal rollup",
+   "deletion_rationale": "legacy goal rollup"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::GoalRollupTests::test_any_blocked_subtask_stalls_goal",
+   "file": "tests/test_workflow_engine.py",
+   "class": "GoalRollupTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy goal rollup",
+   "deletion_rationale": "legacy goal rollup"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::GoalRollupTests::test_mixed_subtasks_keep_goal_in_progress",
+   "file": "tests/test_workflow_engine.py",
+   "class": "GoalRollupTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy goal rollup",
+   "deletion_rationale": "legacy goal rollup"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::GoalRollupTests::test_explicitly_closed_goal_is_left_alone",
+   "file": "tests/test_workflow_engine.py",
+   "class": "GoalRollupTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy goal rollup",
+   "deletion_rationale": "legacy goal rollup"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::RunJobLeaseTests::test_renew_keeps_lease_and_blocks_reclaim",
+   "file": "tests/test_workflow_engine.py",
+   "class": "RunJobLeaseTests",
+   "disposition": "migrate",
+   "target_phase": "M2",
+   "capability": "lease renew/expire/single-owner",
+   "replacement_hint": "Replacement: durable lease tests in test_workflow_durable_runtime.py (verify parity, then delete)"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::RunJobLeaseTests::test_expired_lease_is_reclaimed_by_another_runner",
+   "file": "tests/test_workflow_engine.py",
+   "class": "RunJobLeaseTests",
+   "disposition": "migrate",
+   "target_phase": "M2",
+   "capability": "lease renew/expire/single-owner",
+   "replacement_hint": "Replacement: durable lease tests in test_workflow_durable_runtime.py (verify parity, then delete)"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::RunJobLeaseTests::test_lost_lease_owner_cannot_finish_job",
+   "file": "tests/test_workflow_engine.py",
+   "class": "RunJobLeaseTests",
+   "disposition": "migrate",
+   "target_phase": "M2",
+   "capability": "lease renew/expire/single-owner",
+   "replacement_hint": "Replacement: durable lease tests in test_workflow_durable_runtime.py (verify parity, then delete)"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::RunJobLeaseTests::test_finished_job_claim_is_single_owner",
+   "file": "tests/test_workflow_engine.py",
+   "class": "RunJobLeaseTests",
+   "disposition": "migrate",
+   "target_phase": "M2",
+   "capability": "lease renew/expire/single-owner",
+   "replacement_hint": "Replacement: durable lease tests in test_workflow_durable_runtime.py (verify parity, then delete)"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::HubInspectTests::test_batch_parses_per_run_decisions",
+   "file": "tests/test_workflow_engine.py",
+   "class": "HubInspectTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "stuck-run detection / supervisor sweep",
+   "replacement_hint": "Replacement: recovery scanner + supervisor tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::HubInspectTests::test_batch_unclear_defaults_continue",
+   "file": "tests/test_workflow_engine.py",
+   "class": "HubInspectTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "stuck-run detection / supervisor sweep",
+   "replacement_hint": "Replacement: recovery scanner + supervisor tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::HubInspectTests::test_batch_no_hub_command_defaults_continue",
+   "file": "tests/test_workflow_engine.py",
+   "class": "HubInspectTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "stuck-run detection / supervisor sweep",
+   "replacement_hint": "Replacement: recovery scanner + supervisor tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::HubInspectTests::test_sweep_flags_stuck_run_instead_of_killing_pid",
+   "file": "tests/test_workflow_engine.py",
+   "class": "HubInspectTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "stuck-run detection / supervisor sweep",
+   "replacement_hint": "Replacement: recovery scanner + supervisor tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::HubInspectTests::test_sweep_kill_blocks_the_workflow_task",
+   "file": "tests/test_workflow_engine.py",
+   "class": "HubInspectTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "stuck-run detection / supervisor sweep",
+   "replacement_hint": "Replacement: recovery scanner + supervisor tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::HubInspectTests::test_sweep_skips_already_condemned_run",
+   "file": "tests/test_workflow_engine.py",
+   "class": "HubInspectTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "stuck-run detection / supervisor sweep",
+   "replacement_hint": "Replacement: recovery scanner + supervisor tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::HubInspectTests::test_run_cancel_flag_roundtrip",
+   "file": "tests/test_workflow_engine.py",
+   "class": "HubInspectTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "stuck-run detection / supervisor sweep",
+   "replacement_hint": "Replacement: recovery scanner + supervisor tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::HubInspectTests::test_sweep_skips_run_that_is_producing_output",
+   "file": "tests/test_workflow_engine.py",
+   "class": "HubInspectTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "stuck-run detection / supervisor sweep",
+   "replacement_hint": "Replacement: recovery scanner + supervisor tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::HubInspectTests::test_sweep_waits_for_ten_minutes_without_output",
+   "file": "tests/test_workflow_engine.py",
+   "class": "HubInspectTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "stuck-run detection / supervisor sweep",
+   "replacement_hint": "Replacement: recovery scanner + supervisor tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::RunnerScopeTests::test_configured_step_scope_resolves_ids",
+   "file": "tests/test_workflow_engine.py",
+   "class": "RunnerScopeTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy runner --steps scope",
+   "deletion_rationale": "legacy runner --steps scope"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::RunnerScopeTests::test_claim_filters_by_step",
+   "file": "tests/test_workflow_engine.py",
+   "class": "RunnerScopeTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy runner --steps scope",
+   "deletion_rationale": "legacy runner --steps scope"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::ForceCloseTests::test_force_close_closes_tree_and_orphans_runs",
+   "file": "tests/test_workflow_engine.py",
+   "class": "ForceCloseTests",
+   "disposition": "migrate",
+   "target_phase": "M3",
+   "capability": "cancel run cascade",
+   "replacement_hint": "Replacement: run.cancel command tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::ForceCloseTests::test_advance_on_terminal_task_is_noop",
+   "file": "tests/test_workflow_engine.py",
+   "class": "ForceCloseTests",
+   "disposition": "migrate",
+   "target_phase": "M3",
+   "capability": "cancel run cascade",
+   "replacement_hint": "Replacement: run.cancel command tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::ActiveStepLedgerTests::test_step_outcome_classification_invariants",
+   "file": "tests/test_workflow_engine.py",
+   "class": "ActiveStepLedgerTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy active-step ledger",
+   "deletion_rationale": "legacy active-step ledger"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::ActiveStepLedgerTests::test_killed_runner_extra_dispatch_does_not_phantom_activate",
+   "file": "tests/test_workflow_engine.py",
+   "class": "ActiveStepLedgerTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy active-step ledger",
+   "deletion_rationale": "legacy active-step ledger"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::ActiveStepLedgerTests::test_latest_dispatch_without_finish_stays_active",
+   "file": "tests/test_workflow_engine.py",
+   "class": "ActiveStepLedgerTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy active-step ledger",
+   "deletion_rationale": "legacy active-step ledger"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::TaskHealthCheckTests::test_direct_goal_orphaned_between_steps_is_recovered",
+   "file": "tests/test_workflow_engine.py",
+   "class": "TaskHealthCheckTests",
+   "disposition": "migrate",
+   "target_phase": "M2/M5",
+   "capability": "health + stale run recovery",
+   "replacement_hint": "Replacement: /health/ready + recovery manager tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::TaskHealthCheckTests::test_direct_goal_orphaned_after_terminal_is_accepted",
+   "file": "tests/test_workflow_engine.py",
+   "class": "TaskHealthCheckTests",
+   "disposition": "migrate",
+   "target_phase": "M2/M5",
+   "capability": "health + stale run recovery",
+   "replacement_hint": "Replacement: /health/ready + recovery manager tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::TaskHealthCheckTests::test_dead_runner_step_is_auto_recovered",
+   "file": "tests/test_workflow_engine.py",
+   "class": "TaskHealthCheckTests",
+   "disposition": "migrate",
+   "target_phase": "M2/M5",
+   "capability": "health + stale run recovery",
+   "replacement_hint": "Replacement: /health/ready + recovery manager tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::TaskHealthCheckTests::test_orphaned_with_undispatched_next_step_is_recovered",
+   "file": "tests/test_workflow_engine.py",
+   "class": "TaskHealthCheckTests",
+   "disposition": "migrate",
+   "target_phase": "M2/M5",
+   "capability": "health + stale run recovery",
+   "replacement_hint": "Replacement: /health/ready + recovery manager tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::TaskHealthCheckTests::test_orphaned_after_terminal_done_is_closed",
+   "file": "tests/test_workflow_engine.py",
+   "class": "TaskHealthCheckTests",
+   "disposition": "migrate",
+   "target_phase": "M2/M5",
+   "capability": "health + stale run recovery",
+   "replacement_hint": "Replacement: /health/ready + recovery manager tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::TaskHealthCheckTests::test_undispatched_rework_is_auto_recovered",
+   "file": "tests/test_workflow_engine.py",
+   "class": "TaskHealthCheckTests",
+   "disposition": "migrate",
+   "target_phase": "M2/M5",
+   "capability": "health + stale run recovery",
+   "replacement_hint": "Replacement: /health/ready + recovery manager tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::TaskHealthCheckTests::test_stale_pending_dispatch_action_alerts_and_dedupes",
+   "file": "tests/test_workflow_engine.py",
+   "class": "TaskHealthCheckTests",
+   "disposition": "migrate",
+   "target_phase": "M2/M5",
+   "capability": "health + stale run recovery",
+   "replacement_hint": "Replacement: /health/ready + recovery manager tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::TaskHealthCheckTests::test_normal_dispatch_completes_workflow_action",
+   "file": "tests/test_workflow_engine.py",
+   "class": "TaskHealthCheckTests",
+   "disposition": "migrate",
+   "target_phase": "M2/M5",
+   "capability": "health + stale run recovery",
+   "replacement_hint": "Replacement: /health/ready + recovery manager tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::TaskHealthCheckTests::test_no_alert_when_dead_run_predates_redispatch",
+   "file": "tests/test_workflow_engine.py",
+   "class": "TaskHealthCheckTests",
+   "disposition": "migrate",
+   "target_phase": "M2/M5",
+   "capability": "health + stale run recovery",
+   "replacement_hint": "Replacement: /health/ready + recovery manager tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::TaskHealthCheckTests::test_healthy_running_step_no_alert",
+   "file": "tests/test_workflow_engine.py",
+   "class": "TaskHealthCheckTests",
+   "disposition": "migrate",
+   "target_phase": "M2/M5",
+   "capability": "health + stale run recovery",
+   "replacement_hint": "Replacement: /health/ready + recovery manager tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::TaskHealthCheckTests::test_blocked_task_ignored_after_runner_failure",
+   "file": "tests/test_workflow_engine.py",
+   "class": "TaskHealthCheckTests",
+   "disposition": "migrate",
+   "target_phase": "M2/M5",
+   "capability": "health + stale run recovery",
+   "replacement_hint": "Replacement: /health/ready + recovery manager tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::TaskHealthCheckTests::test_closed_task_ignored",
+   "file": "tests/test_workflow_engine.py",
+   "class": "TaskHealthCheckTests",
+   "disposition": "migrate",
+   "target_phase": "M2/M5",
+   "capability": "health + stale run recovery",
+   "replacement_hint": "Replacement: /health/ready + recovery manager tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::TokenStatsTests::test_parse_structured_step_output_and_legacy_fallback",
+   "file": "tests/test_workflow_engine.py",
+   "class": "TokenStatsTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "token/cost accounting",
+   "replacement_hint": "Replacement: UsageMeter + budget ledger tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::TokenStatsTests::test_parse_run_tokens_native_and_sentinel",
+   "file": "tests/test_workflow_engine.py",
+   "class": "TokenStatsTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "token/cost accounting",
+   "replacement_hint": "Replacement: UsageMeter + budget ledger tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::TokenStatsTests::test_normalize_agent_output_claude_json_extracts_text_and_tokens",
+   "file": "tests/test_workflow_engine.py",
+   "class": "TokenStatsTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "token/cost accounting",
+   "replacement_hint": "Replacement: UsageMeter + budget ledger tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::TokenStatsTests::test_normalize_agent_output_single_json_object",
+   "file": "tests/test_workflow_engine.py",
+   "class": "TokenStatsTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "token/cost accounting",
+   "replacement_hint": "Replacement: UsageMeter + budget ledger tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::TokenStatsTests::test_normalize_agent_output_gemini_json_sums_model_tokens",
+   "file": "tests/test_workflow_engine.py",
+   "class": "TokenStatsTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "token/cost accounting",
+   "replacement_hint": "Replacement: UsageMeter + budget ledger tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::TokenStatsTests::test_normalize_agent_output_passthrough_text_and_non_claude_json",
+   "file": "tests/test_workflow_engine.py",
+   "class": "TokenStatsTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "token/cost accounting",
+   "replacement_hint": "Replacement: UsageMeter + budget ledger tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::TokenStatsTests::test_antigravity_run_tokens_from_conversation_db",
+   "file": "tests/test_workflow_engine.py",
+   "class": "TokenStatsTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "token/cost accounting",
+   "replacement_hint": "Replacement: UsageMeter + budget ledger tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::TokenStatsTests::test_hermes_run_tokens_from_state_db",
+   "file": "tests/test_workflow_engine.py",
+   "class": "TokenStatsTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "token/cost accounting",
+   "replacement_hint": "Replacement: UsageMeter + budget ledger tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::TokenStatsTests::test_opencode_run_tokens_from_message_db",
+   "file": "tests/test_workflow_engine.py",
+   "class": "TokenStatsTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "token/cost accounting",
+   "replacement_hint": "Replacement: UsageMeter + budget ledger tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::TokenStatsTests::test_sqlite_ro_uri_and_path_match_keys",
+   "file": "tests/test_workflow_engine.py",
+   "class": "TokenStatsTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "token/cost accounting",
+   "replacement_hint": "Replacement: UsageMeter + budget ledger tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::TokenStatsTests::test_step_prompt_asks_for_tokens",
+   "file": "tests/test_workflow_engine.py",
+   "class": "TokenStatsTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "token/cost accounting",
+   "replacement_hint": "Replacement: UsageMeter + budget ledger tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::TokenStatsTests::test_finish_task_run_persists_tokens",
+   "file": "tests/test_workflow_engine.py",
+   "class": "TokenStatsTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "token/cost accounting",
+   "replacement_hint": "Replacement: UsageMeter + budget ledger tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::TokenStatsTests::test_goal_tokens_total_sums_subtree",
+   "file": "tests/test_workflow_engine.py",
+   "class": "TokenStatsTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "token/cost accounting",
+   "replacement_hint": "Replacement: UsageMeter + budget ledger tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::TokenStatsTests::test_goal_summary_marks_exceeded_token_budget",
+   "file": "tests/test_workflow_engine.py",
+   "class": "TokenStatsTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "token/cost accounting",
+   "replacement_hint": "Replacement: UsageMeter + budget ledger tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::DecomposeStepTests::test_flag_normalizes_locks_required_and_forces_isolate_off",
+   "file": "tests/test_workflow_engine.py",
+   "class": "DecomposeStepTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy decompose-to-subtasks",
+   "replacement_hint": "Foreach/planner replace decompose"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::DecomposeStepTests::test_decompose_step_id_requires_explicit_flag",
+   "file": "tests/test_workflow_engine.py",
+   "class": "DecomposeStepTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy decompose-to-subtasks",
+   "replacement_hint": "Foreach/planner replace decompose"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::DecomposeStepTests::test_goal_without_decompose_runs_whole_workflow_without_subtasks",
+   "file": "tests/test_workflow_engine.py",
+   "class": "DecomposeStepTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy decompose-to-subtasks",
+   "replacement_hint": "Foreach/planner replace decompose"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::DecomposeStepTests::test_goal_without_decompose_runs_goal_verify_at_terminal",
+   "file": "tests/test_workflow_engine.py",
+   "class": "DecomposeStepTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy decompose-to-subtasks",
+   "replacement_hint": "Foreach/planner replace decompose"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::DecomposeStepTests::test_subtasks_start_at_decompose_successor",
+   "file": "tests/test_workflow_engine.py",
+   "class": "DecomposeStepTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy decompose-to-subtasks",
+   "replacement_hint": "Foreach/planner replace decompose"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::DecomposeStepTests::test_held_subtask_released_after_decompose_keeps_upstream_result",
+   "file": "tests/test_workflow_engine.py",
+   "class": "DecomposeStepTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy decompose-to-subtasks",
+   "replacement_hint": "Foreach/planner replace decompose"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::DecomposeStepTests::test_decompose_warnings",
+   "file": "tests/test_workflow_engine.py",
+   "class": "DecomposeStepTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy decompose-to-subtasks",
+   "replacement_hint": "Foreach/planner replace decompose"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::SubtaskAgentTests::test_command_for_agent_resolves_builtin_and_pattern",
+   "file": "tests/test_workflow_engine.py",
+   "class": "SubtaskAgentTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "agent binding/discovery",
+   "replacement_hint": "Replacement: agent_discovery catalog tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::SubtaskAgentTests::test_step_agent_command_prefers_per_agent_override",
+   "file": "tests/test_workflow_engine.py",
+   "class": "SubtaskAgentTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "agent binding/discovery",
+   "replacement_hint": "Replacement: agent_discovery catalog tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::SubtaskAgentTests::test_step_command_migrates_onto_each_agent",
+   "file": "tests/test_workflow_engine.py",
+   "class": "SubtaskAgentTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "agent binding/discovery",
+   "replacement_hint": "Replacement: agent_discovery catalog tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::SubtaskAgentTests::test_each_step_round_robins_its_own_agents",
+   "file": "tests/test_workflow_engine.py",
+   "class": "SubtaskAgentTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "agent binding/discovery",
+   "replacement_hint": "Replacement: agent_discovery catalog tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::SubtaskAgentTests::test_agent_list_normalization_caps_and_dedupes",
+   "file": "tests/test_workflow_engine.py",
+   "class": "SubtaskAgentTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "agent binding/discovery",
+   "replacement_hint": "Replacement: agent_discovery catalog tests"
+  },
+  {
+   "test_id": "tests/test_workflow_engine.py::SubtaskAgentTests::test_only_impl_review_test_allow_multiple_agents",
+   "file": "tests/test_workflow_engine.py",
+   "class": "SubtaskAgentTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "agent binding/discovery",
+   "replacement_hint": "Replacement: agent_discovery catalog tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::GoalStatusDecoupleTests::test_goal_status_for_default_workflow_phases",
+   "file": "tests/test_worktree.py",
+   "class": "GoalStatusDecoupleTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy goal status mapping",
+   "deletion_rationale": "legacy goal status mapping"
+  },
+  {
+   "test_id": "tests/test_worktree.py::GoalStatusDecoupleTests::test_goal_status_validation_maps_task_statuses",
+   "file": "tests/test_worktree.py",
+   "class": "GoalStatusDecoupleTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy goal status mapping",
+   "deletion_rationale": "legacy goal status mapping"
+  },
+  {
+   "test_id": "tests/test_worktree.py::GoalStatusDecoupleTests::test_goal_row_never_carries_a_step_column",
+   "file": "tests/test_worktree.py",
+   "class": "GoalStatusDecoupleTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy goal status mapping",
+   "deletion_rationale": "legacy goal status mapping"
+  },
+  {
+   "test_id": "tests/test_worktree.py::WorkflowSchemaTests::test_integrate_flag_forces_isolate_off",
+   "file": "tests/test_worktree.py",
+   "class": "WorkflowSchemaTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy workflow.json schema",
+   "replacement_hint": "Replaced by DSL/IR schema tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::WorkflowSchemaTests::test_isolate_flag_roundtrips",
+   "file": "tests/test_worktree.py",
+   "class": "WorkflowSchemaTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy workflow.json schema",
+   "replacement_hint": "Replaced by DSL/IR schema tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::WorkflowSchemaTests::test_default_workflow_has_integrate_gate_and_isolation",
+   "file": "tests/test_worktree.py",
+   "class": "WorkflowSchemaTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy workflow.json schema",
+   "replacement_hint": "Replaced by DSL/IR schema tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::WorkflowSchemaTests::test_default_workflow_is_design_first",
+   "file": "tests/test_worktree.py",
+   "class": "WorkflowSchemaTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy workflow.json schema",
+   "replacement_hint": "Replaced by DSL/IR schema tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::WorkflowSchemaTests::test_default_workflow_roundtrips_flags",
+   "file": "tests/test_worktree.py",
+   "class": "WorkflowSchemaTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy workflow.json schema",
+   "replacement_hint": "Replaced by DSL/IR schema tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::WorkflowSchemaTests::test_default_step_prompts_are_populated_and_clearable",
+   "file": "tests/test_worktree.py",
+   "class": "WorkflowSchemaTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy workflow.json schema",
+   "replacement_hint": "Replaced by DSL/IR schema tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::WorkflowSchemaTests::test_verify_field_roundtrips",
+   "file": "tests/test_worktree.py",
+   "class": "WorkflowSchemaTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy workflow.json schema",
+   "replacement_hint": "Replaced by DSL/IR schema tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::WorkflowSchemaTests::test_step_prompt_roundtrips_and_rejects_non_string",
+   "file": "tests/test_worktree.py",
+   "class": "WorkflowSchemaTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy workflow.json schema",
+   "replacement_hint": "Replaced by DSL/IR schema tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::WorkflowSchemaTests::test_default_test_is_optional_gate_with_rework_edge",
+   "file": "tests/test_worktree.py",
+   "class": "WorkflowSchemaTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy workflow.json schema",
+   "replacement_hint": "Replaced by DSL/IR schema tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::StepSeparationTests::test_cramped_same_row_is_separated",
+   "file": "tests/test_worktree.py",
+   "class": "StepSeparationTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy canvas layout",
+   "deletion_rationale": "legacy canvas layout"
+  },
+  {
+   "test_id": "tests/test_worktree.py::StepSeparationTests::test_default_layout_is_left_untouched",
+   "file": "tests/test_worktree.py",
+   "class": "StepSeparationTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy canvas layout",
+   "deletion_rationale": "legacy canvas layout"
+  },
+  {
+   "test_id": "tests/test_worktree.py::StepSeparationTests::test_parallel_stack_same_x_different_row_kept",
+   "file": "tests/test_worktree.py",
+   "class": "StepSeparationTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy canvas layout",
+   "deletion_rationale": "legacy canvas layout"
+  },
+  {
+   "test_id": "tests/test_worktree.py::StepSeparationTests::test_duplicate_position_is_split",
+   "file": "tests/test_worktree.py",
+   "class": "StepSeparationTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy canvas layout",
+   "deletion_rationale": "legacy canvas layout"
+  },
+  {
+   "test_id": "tests/test_worktree.py::StepSeparationTests::test_write_config_persists_separated_coords",
+   "file": "tests/test_worktree.py",
+   "class": "StepSeparationTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy canvas layout",
+   "deletion_rationale": "legacy canvas layout"
+  },
+  {
+   "test_id": "tests/test_worktree.py::StepPromptTests::test_integrate_prompt_has_merge_instructions",
+   "file": "tests/test_worktree.py",
+   "class": "StepPromptTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy step prompt config",
+   "replacement_hint": "Replaced by handler manifest/config schema"
+  },
+  {
+   "test_id": "tests/test_worktree.py::StepPromptTests::test_isolated_prompt_mentions_worktree_branch",
+   "file": "tests/test_worktree.py",
+   "class": "StepPromptTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy step prompt config",
+   "replacement_hint": "Replaced by handler manifest/config schema"
+  },
+  {
+   "test_id": "tests/test_worktree.py::StepPromptTests::test_non_isolated_prompt_uses_project_root",
+   "file": "tests/test_worktree.py",
+   "class": "StepPromptTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy step prompt config",
+   "replacement_hint": "Replaced by handler manifest/config schema"
+  },
+  {
+   "test_id": "tests/test_worktree.py::StepPromptTests::test_review_and_test_keep_non_editable_safety_contracts",
+   "file": "tests/test_worktree.py",
+   "class": "StepPromptTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy step prompt config",
+   "replacement_hint": "Replaced by handler manifest/config schema"
+  },
+  {
+   "test_id": "tests/test_worktree.py::StepPromptTests::test_implement_contract_and_rework_availability_are_explicit",
+   "file": "tests/test_worktree.py",
+   "class": "StepPromptTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy step prompt config",
+   "replacement_hint": "Replaced by handler manifest/config schema"
+  },
+  {
+   "test_id": "tests/test_worktree.py::StepPromptTests::test_triage_prompt_contains_effective_config_snapshot",
+   "file": "tests/test_worktree.py",
+   "class": "StepPromptTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy step prompt config",
+   "replacement_hint": "Replaced by handler manifest/config schema"
+  },
+  {
+   "test_id": "tests/test_worktree.py::StepPromptTests::test_decompose_step_contract_is_the_only_output_contract",
+   "file": "tests/test_worktree.py",
+   "class": "StepPromptTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy step prompt config",
+   "replacement_hint": "Replaced by handler manifest/config schema"
+  },
+  {
+   "test_id": "tests/test_worktree.py::StepPromptTests::test_custom_step_prompt_is_injected_before_engine_output_protocol",
+   "file": "tests/test_worktree.py",
+   "class": "StepPromptTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy step prompt config",
+   "replacement_hint": "Replaced by handler manifest/config schema"
+  },
+  {
+   "test_id": "tests/test_worktree.py::WorktreeLifecycleTests::test_non_git_project_skips_isolation",
+   "file": "tests/test_worktree.py",
+   "class": "WorktreeLifecycleTests",
+   "disposition": "rewrite",
+   "target_phase": "M1B",
+   "capability": "worktree acquire/release",
+   "replacement_hint": "Replacement: workspace/git.py tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::WorktreeLifecycleTests::test_ensure_is_idempotent_and_on_task_branch",
+   "file": "tests/test_worktree.py",
+   "class": "WorktreeLifecycleTests",
+   "disposition": "rewrite",
+   "target_phase": "M1B",
+   "capability": "worktree acquire/release",
+   "replacement_hint": "Replacement: workspace/git.py tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::WorktreeLifecycleTests::test_design_artifacts_committed_reach_isolated_worktrees",
+   "file": "tests/test_worktree.py",
+   "class": "WorktreeLifecycleTests",
+   "disposition": "rewrite",
+   "target_phase": "M1B",
+   "capability": "worktree acquire/release",
+   "replacement_hint": "Replacement: workspace/git.py tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::WorktreeLifecycleTests::test_remove_then_recreate",
+   "file": "tests/test_worktree.py",
+   "class": "WorktreeLifecycleTests",
+   "disposition": "rewrite",
+   "target_phase": "M1B",
+   "capability": "worktree acquire/release",
+   "replacement_hint": "Replacement: workspace/git.py tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::WorktreeLifecycleTests::test_ensure_recovers_stale_unregistered_dir",
+   "file": "tests/test_worktree.py",
+   "class": "WorktreeLifecycleTests",
+   "disposition": "rewrite",
+   "target_phase": "M1B",
+   "capability": "worktree acquire/release",
+   "replacement_hint": "Replacement: workspace/git.py tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::GitProvisioningTests::test_needs_git_predicate",
+   "file": "tests/test_worktree.py",
+   "class": "GitProvisioningTests",
+   "disposition": "rewrite",
+   "target_phase": "M1B",
+   "capability": "git provisioning, dirty tree",
+   "replacement_hint": "Replacement: workspace/git.py tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::GitProvisioningTests::test_ensure_inits_non_git_dir_with_base_commit",
+   "file": "tests/test_worktree.py",
+   "class": "GitProvisioningTests",
+   "disposition": "rewrite",
+   "target_phase": "M1B",
+   "capability": "git provisioning, dirty tree",
+   "replacement_hint": "Replacement: workspace/git.py tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::GitProvisioningTests::test_ensure_seeds_base_in_empty_dir",
+   "file": "tests/test_worktree.py",
+   "class": "GitProvisioningTests",
+   "disposition": "rewrite",
+   "target_phase": "M1B",
+   "capability": "git provisioning, dirty tree",
+   "replacement_hint": "Replacement: workspace/git.py tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::GitProvisioningTests::test_ensure_leaves_existing_commits_untouched",
+   "file": "tests/test_worktree.py",
+   "class": "GitProvisioningTests",
+   "disposition": "rewrite",
+   "target_phase": "M1B",
+   "capability": "git provisioning, dirty tree",
+   "replacement_hint": "Replacement: workspace/git.py tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::GitProvisioningTests::test_warns_when_git_missing_for_isolating_workflow",
+   "file": "tests/test_worktree.py",
+   "class": "GitProvisioningTests",
+   "disposition": "rewrite",
+   "target_phase": "M1B",
+   "capability": "git provisioning, dirty tree",
+   "replacement_hint": "Replacement: workspace/git.py tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::GitProvisioningTests::test_no_git_warning_when_git_available",
+   "file": "tests/test_worktree.py",
+   "class": "GitProvisioningTests",
+   "disposition": "rewrite",
+   "target_phase": "M1B",
+   "capability": "git provisioning, dirty tree",
+   "replacement_hint": "Replacement: workspace/git.py tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::GitProvisioningTests::test_no_git_warning_for_workflow_without_isolation",
+   "file": "tests/test_worktree.py",
+   "class": "GitProvisioningTests",
+   "disposition": "rewrite",
+   "target_phase": "M1B",
+   "capability": "git provisioning, dirty tree",
+   "replacement_hint": "Replacement: workspace/git.py tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::GitProvisioningTests::test_rework_edges_do_not_remove_terminal_step_warning",
+   "file": "tests/test_worktree.py",
+   "class": "GitProvisioningTests",
+   "disposition": "rewrite",
+   "target_phase": "M1B",
+   "capability": "git provisioning, dirty tree",
+   "replacement_hint": "Replacement: workspace/git.py tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::GitProvisioningTests::test_integrate_still_validates_in_non_git_project",
+   "file": "tests/test_worktree.py",
+   "class": "GitProvisioningTests",
+   "disposition": "rewrite",
+   "target_phase": "M1B",
+   "capability": "git provisioning, dirty tree",
+   "replacement_hint": "Replacement: workspace/git.py tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::GitProvisioningTests::test_integrate_still_validates_when_task_branch_is_missing",
+   "file": "tests/test_worktree.py",
+   "class": "GitProvisioningTests",
+   "disposition": "rewrite",
+   "target_phase": "M1B",
+   "capability": "git provisioning, dirty tree",
+   "replacement_hint": "Replacement: workspace/git.py tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::WorktreeSweepTests::test_sweep_reaps_finished_and_orphan_but_keeps_active",
+   "file": "tests/test_worktree.py",
+   "class": "WorktreeSweepTests",
+   "disposition": "rewrite",
+   "target_phase": "M1B",
+   "capability": "crash cleanup",
+   "replacement_hint": "Replacement: workspace/git.py sweep tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::VerifyGateTests::test_verify_pass_keeps_done",
+   "file": "tests/test_worktree.py",
+   "class": "VerifyGateTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "verify command gate",
+   "replacement_hint": "Replacement: trusted verify ToolHandler tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::VerifyGateTests::test_verify_failure_overrides_selfreported_done",
+   "file": "tests/test_worktree.py",
+   "class": "VerifyGateTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "verify command gate",
+   "replacement_hint": "Replacement: trusted verify ToolHandler tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::VerifyGateTests::test_verify_runs_in_the_task_worktree",
+   "file": "tests/test_worktree.py",
+   "class": "VerifyGateTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "verify command gate",
+   "replacement_hint": "Replacement: trusted verify ToolHandler tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::VerifyGateTests::test_no_verify_leaves_selfreport_untouched",
+   "file": "tests/test_worktree.py",
+   "class": "VerifyGateTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "verify command gate",
+   "replacement_hint": "Replacement: trusted verify ToolHandler tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::GoalConvergenceGateTests::test_no_goal_verify_accepts_on_aggregation",
+   "file": "tests/test_worktree.py",
+   "class": "GoalConvergenceGateTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy goal convergence",
+   "replacement_hint": "Completion evaluator covers this"
+  },
+  {
+   "test_id": "tests/test_worktree.py::GoalConvergenceGateTests::test_configured_queues_action_and_holds_accept",
+   "file": "tests/test_worktree.py",
+   "class": "GoalConvergenceGateTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy goal convergence",
+   "replacement_hint": "Completion evaluator covers this"
+  },
+  {
+   "test_id": "tests/test_worktree.py::GoalConvergenceGateTests::test_sweep_pass_accepts_goal",
+   "file": "tests/test_worktree.py",
+   "class": "GoalConvergenceGateTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy goal convergence",
+   "replacement_hint": "Completion evaluator covers this"
+  },
+  {
+   "test_id": "tests/test_worktree.py::GoalConvergenceGateTests::test_sweep_fail_stalls_goal_and_notifies_hub",
+   "file": "tests/test_worktree.py",
+   "class": "GoalConvergenceGateTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy goal convergence",
+   "replacement_hint": "Completion evaluator covers this"
+  },
+  {
+   "test_id": "tests/test_worktree.py::GoalConvergenceGateTests::test_sweep_records_a_task_run",
+   "file": "tests/test_worktree.py",
+   "class": "GoalConvergenceGateTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy goal convergence",
+   "replacement_hint": "Completion evaluator covers this"
+  },
+  {
+   "test_id": "tests/test_worktree.py::GoalConvergenceGateTests::test_failed_verify_requeues_on_next_close",
+   "file": "tests/test_worktree.py",
+   "class": "GoalConvergenceGateTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy goal convergence",
+   "replacement_hint": "Completion evaluator covers this"
+  },
+  {
+   "test_id": "tests/test_worktree.py::GoalConvergenceGateTests::test_accepted_goal_not_requeued",
+   "file": "tests/test_worktree.py",
+   "class": "GoalConvergenceGateTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy goal convergence",
+   "replacement_hint": "Completion evaluator covers this"
+  },
+  {
+   "test_id": "tests/test_worktree.py::GoalVerifyDetectionTests::test_detects_python_unittest",
+   "file": "tests/test_worktree.py",
+   "class": "GoalVerifyDetectionTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "project verify autodetect",
+   "replacement_hint": "Replacement: verify ToolHandler detection tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::GoalVerifyDetectionTests::test_python_marker_without_tests_dir_detects_nothing",
+   "file": "tests/test_worktree.py",
+   "class": "GoalVerifyDetectionTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "project verify autodetect",
+   "replacement_hint": "Replacement: verify ToolHandler detection tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::GoalVerifyDetectionTests::test_detects_npm_only_with_test_script",
+   "file": "tests/test_worktree.py",
+   "class": "GoalVerifyDetectionTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "project verify autodetect",
+   "replacement_hint": "Replacement: verify ToolHandler detection tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::GoalVerifyDetectionTests::test_detects_make_test_target",
+   "file": "tests/test_worktree.py",
+   "class": "GoalVerifyDetectionTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "project verify autodetect",
+   "replacement_hint": "Replacement: verify ToolHandler detection tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::GoalVerifyDetectionTests::test_detects_cargo_and_go",
+   "file": "tests/test_worktree.py",
+   "class": "GoalVerifyDetectionTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "project verify autodetect",
+   "replacement_hint": "Replacement: verify ToolHandler detection tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::GoalVerifyDetectionTests::test_no_markers_detects_nothing",
+   "file": "tests/test_worktree.py",
+   "class": "GoalVerifyDetectionTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "project verify autodetect",
+   "replacement_hint": "Replacement: verify ToolHandler detection tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::GoalVerifyDetectionTests::test_own_goal_verify_overrides_detected",
+   "file": "tests/test_worktree.py",
+   "class": "GoalVerifyDetectionTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "project verify autodetect",
+   "replacement_hint": "Replacement: verify ToolHandler detection tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::GoalVerifyDetectionTests::test_effective_falls_back_to_detected",
+   "file": "tests/test_worktree.py",
+   "class": "GoalVerifyDetectionTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "project verify autodetect",
+   "replacement_hint": "Replacement: verify ToolHandler detection tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::GoalVerifyDetectionTests::test_detected_verify_queues_and_holds_accept",
+   "file": "tests/test_worktree.py",
+   "class": "GoalVerifyDetectionTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "project verify autodetect",
+   "replacement_hint": "Replacement: verify ToolHandler detection tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::ProcessControlPortabilityTests::test_detached_kwargs_match_platform",
+   "file": "tests/test_worktree.py",
+   "class": "ProcessControlPortabilityTests",
+   "disposition": "rewrite",
+   "target_phase": "M1B",
+   "capability": "process group kill portability",
+   "replacement_hint": "Replacement: platform/process.py tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::ProcessControlPortabilityTests::test_windows_ppid_backend_is_noop_off_windows",
+   "file": "tests/test_worktree.py",
+   "class": "ProcessControlPortabilityTests",
+   "disposition": "rewrite",
+   "target_phase": "M1B",
+   "capability": "process group kill portability",
+   "replacement_hint": "Replacement: platform/process.py tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::ProcessControlPortabilityTests::test_terminate_missing_pid_is_false",
+   "file": "tests/test_worktree.py",
+   "class": "ProcessControlPortabilityTests",
+   "disposition": "rewrite",
+   "target_phase": "M1B",
+   "capability": "process group kill portability",
+   "replacement_hint": "Replacement: platform/process.py tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::ProcessControlPortabilityTests::test_terminate_pid_tree_kills_a_detached_process",
+   "file": "tests/test_worktree.py",
+   "class": "ProcessControlPortabilityTests",
+   "disposition": "rewrite",
+   "target_phase": "M1B",
+   "capability": "process group kill portability",
+   "replacement_hint": "Replacement: platform/process.py tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::DescendantPidSnapshotTests::test_snapshot_maps_self_to_parent",
+   "file": "tests/test_worktree.py",
+   "class": "DescendantPidSnapshotTests",
+   "disposition": "rewrite",
+   "target_phase": "M1B",
+   "capability": "descendant pid snapshot",
+   "replacement_hint": "Replacement: platform/process.py tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::DescendantPidSnapshotTests::test_descendant_pids_includes_a_spawned_child",
+   "file": "tests/test_worktree.py",
+   "class": "DescendantPidSnapshotTests",
+   "disposition": "rewrite",
+   "target_phase": "M1B",
+   "capability": "descendant pid snapshot",
+   "replacement_hint": "Replacement: platform/process.py tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::TaskTerminalTests::test_task_workflow_finished_predicate",
+   "file": "tests/test_worktree.py",
+   "class": "TaskTerminalTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy task terminal states",
+   "deletion_rationale": "legacy task terminal states"
+  },
+  {
+   "test_id": "tests/test_worktree.py::TaskTerminalTests::test_regular_in_progress_task_stays_non_terminal",
+   "file": "tests/test_worktree.py",
+   "class": "TaskTerminalTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy task terminal states",
+   "deletion_rationale": "legacy task terminal states"
+  },
+  {
+   "test_id": "tests/test_worktree.py::TaskTerminalTests::test_accepted_goal_is_terminal",
+   "file": "tests/test_worktree.py",
+   "class": "TaskTerminalTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy task terminal states",
+   "deletion_rationale": "legacy task terminal states"
+  },
+  {
+   "test_id": "tests/test_worktree.py::TaskTerminalTests::test_sweep_keeps_worktree_for_regular_active_task",
+   "file": "tests/test_worktree.py",
+   "class": "TaskTerminalTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy task terminal states",
+   "deletion_rationale": "legacy task terminal states"
+  },
+  {
+   "test_id": "tests/test_worktree.py::ReapStaleRunsTests::test_reap_orphans_running_task_runs",
+   "file": "tests/test_worktree.py",
+   "class": "ReapStaleRunsTests",
+   "disposition": "migrate",
+   "target_phase": "M2",
+   "capability": "stale run reaping",
+   "replacement_hint": "Replacement: recovery manager tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::TokenBudgetConfigTests::test_coerce_token_budget",
+   "file": "tests/test_worktree.py",
+   "class": "TokenBudgetConfigTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "budget config",
+   "replacement_hint": "Replacement: budget account/ledger tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::TokenBudgetConfigTests::test_workflow_config_has_no_goal_gates",
+   "file": "tests/test_worktree.py",
+   "class": "TokenBudgetConfigTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "budget config",
+   "replacement_hint": "Replacement: budget account/ledger tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::TokenBudgetGateTests::test_root_goal_id_walks_to_goal",
+   "file": "tests/test_worktree.py",
+   "class": "TokenBudgetGateTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "budget exhaustion gate",
+   "replacement_hint": "Replacement: budget exhaustion tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::TokenBudgetGateTests::test_no_budget_never_blocks",
+   "file": "tests/test_worktree.py",
+   "class": "TokenBudgetGateTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "budget exhaustion gate",
+   "replacement_hint": "Replacement: budget exhaustion tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::TokenBudgetGateTests::test_under_budget_passes",
+   "file": "tests/test_worktree.py",
+   "class": "TokenBudgetGateTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "budget exhaustion gate",
+   "replacement_hint": "Replacement: budget exhaustion tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::TokenBudgetGateTests::test_over_budget_blocks_goal_notifies_once",
+   "file": "tests/test_worktree.py",
+   "class": "TokenBudgetGateTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "budget exhaustion gate",
+   "replacement_hint": "Replacement: budget exhaustion tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::TokenBudgetGateTests::test_new_task_budget_defaults_to_zero",
+   "file": "tests/test_worktree.py",
+   "class": "TokenBudgetGateTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "budget exhaustion gate",
+   "replacement_hint": "Replacement: budget exhaustion tests"
+  },
+  {
+   "test_id": "tests/test_worktree.py::TokenBudgetGateTests::test_dispatch_step_is_frozen_over_budget",
+   "file": "tests/test_worktree.py",
+   "class": "TokenBudgetGateTests",
+   "disposition": "migrate",
+   "target_phase": "M5",
+   "capability": "budget exhaustion gate",
+   "replacement_hint": "Replacement: budget exhaustion tests"
+  },
+  {
+   "test_id": "tests/test_store.py::StoreTests::test_send_message_requires_registered_sender_and_recipient",
+   "file": "tests/test_store.py",
+   "class": "StoreTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy Store CRUD/lease/message",
+   "replacement_hint": "New persistence covered by workflow repository contract tests"
+  },
+  {
+   "test_id": "tests/test_store.py::StoreTests::test_fetch_leases_until_ack",
+   "file": "tests/test_store.py",
+   "class": "StoreTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy Store CRUD/lease/message",
+   "replacement_hint": "New persistence covered by workflow repository contract tests"
+  },
+  {
+   "test_id": "tests/test_store.py::StoreTests::test_ack_requires_current_lease_token",
+   "file": "tests/test_store.py",
+   "class": "StoreTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy Store CRUD/lease/message",
+   "replacement_hint": "New persistence covered by workflow repository contract tests"
+  },
+  {
+   "test_id": "tests/test_store.py::StoreTests::test_unacked_message_is_redelivered_after_lease_expiry",
+   "file": "tests/test_store.py",
+   "class": "StoreTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy Store CRUD/lease/message",
+   "replacement_hint": "New persistence covered by workflow repository contract tests"
+  },
+  {
+   "test_id": "tests/test_store.py::StoreTests::test_get_thread_uses_ancestors_and_descendants",
+   "file": "tests/test_store.py",
+   "class": "StoreTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy Store CRUD/lease/message",
+   "replacement_hint": "New persistence covered by workflow repository contract tests"
+  },
+  {
+   "test_id": "tests/test_store.py::StoreTests::test_list_messages_reports_ui_status_without_leasing",
+   "file": "tests/test_store.py",
+   "class": "StoreTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy Store CRUD/lease/message",
+   "replacement_hint": "New persistence covered by workflow repository contract tests"
+  },
+  {
+   "test_id": "tests/test_store.py::StoreTests::test_task_metadata_can_be_filtered_and_updated",
+   "file": "tests/test_store.py",
+   "class": "StoreTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy Store CRUD/lease/message",
+   "replacement_hint": "New persistence covered by workflow repository contract tests"
+  },
+  {
+   "test_id": "tests/test_store.py::StoreTests::test_task_message_creates_executable_task",
+   "file": "tests/test_store.py",
+   "class": "StoreTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy Store CRUD/lease/message",
+   "replacement_hint": "New persistence covered by workflow repository contract tests"
+  },
+  {
+   "test_id": "tests/test_store.py::StoreTests::test_task_metadata_can_be_updated_for_assignment",
+   "file": "tests/test_store.py",
+   "class": "StoreTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy Store CRUD/lease/message",
+   "replacement_hint": "New persistence covered by workflow repository contract tests"
+  },
+  {
+   "test_id": "tests/test_store.py::StoreTests::test_step_card_structured_details_round_trip",
+   "file": "tests/test_store.py",
+   "class": "StoreTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy Store CRUD/lease/message",
+   "replacement_hint": "New persistence covered by workflow repository contract tests"
+  },
+  {
+   "test_id": "tests/test_store.py::StoreTests::test_task_metadata_rejects_off_list_values",
+   "file": "tests/test_store.py",
+   "class": "StoreTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy Store CRUD/lease/message",
+   "replacement_hint": "New persistence covered by workflow repository contract tests"
+  },
+  {
+   "test_id": "tests/test_store.py::StoreTests::test_reap_stale_runs_frees_worker_capacity",
+   "file": "tests/test_store.py",
+   "class": "StoreTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy Store CRUD/lease/message",
+   "replacement_hint": "New persistence covered by workflow repository contract tests"
+  },
+  {
+   "test_id": "tests/test_store.py::StoreTests::test_task_engine_status_syncs_back_to_source_message",
+   "file": "tests/test_store.py",
+   "class": "StoreTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy Store CRUD/lease/message",
+   "replacement_hint": "New persistence covered by workflow repository contract tests"
+  },
+  {
+   "test_id": "tests/test_store.py::StoreTests::test_goal_queries_return_only_goals_and_direct_children",
+   "file": "tests/test_store.py",
+   "class": "StoreTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy Store CRUD/lease/message",
+   "replacement_hint": "New persistence covered by workflow repository contract tests"
+  },
+  {
+   "test_id": "tests/test_store.py::StoreTests::test_active_workflow_tasks_excludes_blocked_and_closed",
+   "file": "tests/test_store.py",
+   "class": "StoreTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy Store CRUD/lease/message",
+   "replacement_hint": "New persistence covered by workflow repository contract tests"
+  },
+  {
+   "test_id": "tests/test_store.py::StoreTests::test_message_task_status_syncs_to_task_engine",
+   "file": "tests/test_store.py",
+   "class": "StoreTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy Store CRUD/lease/message",
+   "replacement_hint": "New persistence covered by workflow repository contract tests"
+  },
+  {
+   "test_id": "tests/test_store.py::StoreTests::test_task_runs_track_execution_attempts",
+   "file": "tests/test_store.py",
+   "class": "StoreTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy Store CRUD/lease/message",
+   "replacement_hint": "New persistence covered by workflow repository contract tests"
+  },
+  {
+   "test_id": "tests/test_store.py::StoreTests::test_run_cancel_reason_persists_and_finish_clears_flag",
+   "file": "tests/test_store.py",
+   "class": "StoreTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy Store CRUD/lease/message",
+   "replacement_hint": "New persistence covered by workflow repository contract tests"
+  },
+  {
+   "test_id": "tests/test_store.py::StoreTests::test_step_card_display_id_tied_to_parent",
+   "file": "tests/test_store.py",
+   "class": "StoreTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy Store CRUD/lease/message",
+   "replacement_hint": "New persistence covered by workflow repository contract tests"
+  },
+  {
+   "test_id": "tests/test_store.py::StoreTests::test_task_run_log_dir_can_be_set_after_attempt_is_reserved",
+   "file": "tests/test_store.py",
+   "class": "StoreTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy Store CRUD/lease/message",
+   "replacement_hint": "New persistence covered by workflow repository contract tests"
+  },
+  {
+   "test_id": "tests/test_store.py::StoreTests::test_active_task_counts_tracks_running_workers",
+   "file": "tests/test_store.py",
+   "class": "StoreTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy Store CRUD/lease/message",
+   "replacement_hint": "New persistence covered by workflow repository contract tests"
+  },
+  {
+   "test_id": "tests/test_store.py::StoreTests::test_task_metadata_is_returned_from_inbox_and_thread",
+   "file": "tests/test_store.py",
+   "class": "StoreTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy Store CRUD/lease/message",
+   "replacement_hint": "New persistence covered by workflow repository contract tests"
+  },
+  {
+   "test_id": "tests/test_store.py::StoreTests::test_existing_old_schema_database_migrates_before_index_creation",
+   "file": "tests/test_store.py",
+   "class": "StoreTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy Store CRUD/lease/message",
+   "replacement_hint": "New persistence covered by workflow repository contract tests"
+  },
+  {
+   "test_id": "tests/test_store.py::StoreTests::test_old_task_messages_are_backfilled_into_task_engine",
+   "file": "tests/test_store.py",
+   "class": "StoreTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy Store CRUD/lease/message",
+   "replacement_hint": "New persistence covered by workflow repository contract tests"
+  },
+  {
+   "test_id": "tests/test_store.py::StoreTests::test_project_db_path_is_stable_and_project_scoped",
+   "file": "tests/test_store.py",
+   "class": "StoreTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy Store CRUD/lease/message",
+   "replacement_hint": "New persistence covered by workflow repository contract tests"
+  },
+  {
+   "test_id": "tests/test_store.py::StoreTests::test_store_exposes_database_path_for_status_api",
+   "file": "tests/test_store.py",
+   "class": "StoreTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy Store CRUD/lease/message",
+   "replacement_hint": "New persistence covered by workflow repository contract tests"
+  },
+  {
+   "test_id": "tests/test_store.py::StoreTests::test_invalid_task_status_is_rejected_not_cleaned",
+   "file": "tests/test_store.py",
+   "class": "StoreTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy Store CRUD/lease/message",
+   "replacement_hint": "New persistence covered by workflow repository contract tests"
+  },
+  {
+   "test_id": "tests/test_store.py::StoreTests::test_invalid_kind_is_rejected",
+   "file": "tests/test_store.py",
+   "class": "StoreTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy Store CRUD/lease/message",
+   "replacement_hint": "New persistence covered by workflow repository contract tests"
+  },
+  {
+   "test_id": "tests/test_store.py::StoreTests::test_reserved_and_empty_agent_names_are_rejected",
+   "file": "tests/test_store.py",
+   "class": "StoreTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy Store CRUD/lease/message",
+   "replacement_hint": "New persistence covered by workflow repository contract tests"
+  },
+  {
+   "test_id": "tests/test_store.py::StoreTests::test_project_db_path_resolves_project_root_from_subdirectory",
+   "file": "tests/test_store.py",
+   "class": "StoreTests",
+   "disposition": "delete",
+   "target_phase": "M6",
+   "capability": "legacy Store CRUD/lease/message",
+   "replacement_hint": "New persistence covered by workflow repository contract tests"
+  },
+  {
+   "test_id": "tests/test_packaging.py::PackagingTests::test_init_project_bootstraps_everything_and_is_idempotent",
+   "file": "tests/test_packaging.py",
+   "class": "PackagingTests",
+   "disposition": "rewrite",
+   "target_phase": "M6/M7",
+   "capability": "package contents, CLI surface",
+   "replacement_hint": "Replacement: package manifest test asserting new UI assets + new CLI"
+  },
+  {
+   "test_id": "tests/test_packaging.py::PackagingTests::test_ensure_state_dir_gitignored_adds_entry_once",
+   "file": "tests/test_packaging.py",
+   "class": "PackagingTests",
+   "disposition": "rewrite",
+   "target_phase": "M6/M7",
+   "capability": "package contents, CLI surface",
+   "replacement_hint": "Replacement: package manifest test asserting new UI assets + new CLI"
+  },
+  {
+   "test_id": "tests/test_packaging.py::PackagingTests::test_ensure_state_dir_gitignored_respects_existing_content",
+   "file": "tests/test_packaging.py",
+   "class": "PackagingTests",
+   "disposition": "rewrite",
+   "target_phase": "M6/M7",
+   "capability": "package contents, CLI surface",
+   "replacement_hint": "Replacement: package manifest test asserting new UI assets + new CLI"
+  },
+  {
+   "test_id": "tests/test_packaging.py::PackagingTests::test_append_missing_gitignore_adds_only_absent_entries",
+   "file": "tests/test_packaging.py",
+   "class": "PackagingTests",
+   "disposition": "rewrite",
+   "target_phase": "M6/M7",
+   "capability": "package contents, CLI surface",
+   "replacement_hint": "Replacement: package manifest test asserting new UI assets + new CLI"
+  },
+  {
+   "test_id": "tests/test_packaging.py::PackagingTests::test_create_server_locals_do_not_shadow_module_functions",
+   "file": "tests/test_packaging.py",
+   "class": "PackagingTests",
+   "disposition": "rewrite",
+   "target_phase": "M6/M7",
+   "capability": "package contents, CLI surface",
+   "replacement_hint": "Replacement: package manifest test asserting new UI assets + new CLI"
+  },
+  {
+   "test_id": "tests/test_packaging.py::PackagingTests::test_health_check_api_runs_and_returns_recovery_counts",
+   "file": "tests/test_packaging.py",
+   "class": "PackagingTests",
+   "disposition": "rewrite",
+   "target_phase": "M6/M7",
+   "capability": "package contents, CLI surface",
+   "replacement_hint": "Replacement: package manifest test asserting new UI assets + new CLI"
+  },
+  {
+   "test_id": "tests/test_packaging.py::PackagingTests::test_ui_asset_is_present_and_loadable",
+   "file": "tests/test_packaging.py",
+   "class": "PackagingTests",
+   "disposition": "rewrite",
+   "target_phase": "M6/M7",
+   "capability": "package contents, CLI surface",
+   "replacement_hint": "Replacement: package manifest test asserting new UI assets + new CLI"
+  },
+  {
+   "test_id": "tests/test_packaging.py::PackagingTests::test_workflow_ui_prototype_is_packaged_and_routable",
+   "file": "tests/test_packaging.py",
+   "class": "PackagingTests",
+   "disposition": "rewrite",
+   "target_phase": "M6/M7",
+   "capability": "package contents, CLI surface",
+   "replacement_hint": "Replacement: package manifest test asserting new UI assets + new CLI"
+  },
+  {
+   "test_id": "tests/test_packaging.py::PackagingTests::test_server_module_imports",
+   "file": "tests/test_packaging.py",
+   "class": "PackagingTests",
+   "disposition": "rewrite",
+   "target_phase": "M6/M7",
+   "capability": "package contents, CLI surface",
+   "replacement_hint": "Replacement: package manifest test asserting new UI assets + new CLI"
+  },
+  {
+   "test_id": "tests/test_packaging.py::PackagingTests::test_gitignore_excludes_orbit_state_dirs",
+   "file": "tests/test_packaging.py",
+   "class": "PackagingTests",
+   "disposition": "rewrite",
+   "target_phase": "M6/M7",
+   "capability": "package contents, CLI surface",
+   "replacement_hint": "Replacement: package manifest test asserting new UI assets + new CLI"
+  },
+  {
+   "test_id": "tests/test_packaging.py::PackagingTests::test_agent_tool_detection_shape",
+   "file": "tests/test_packaging.py",
+   "class": "PackagingTests",
+   "disposition": "rewrite",
+   "target_phase": "M6/M7",
+   "capability": "package contents, CLI surface",
+   "replacement_hint": "Replacement: package manifest test asserting new UI assets + new CLI"
+  },
+  {
+   "test_id": "tests/test_packaging.py::PackagingTests::test_agent_tool_detection_marks_installed_paths",
+   "file": "tests/test_packaging.py",
+   "class": "PackagingTests",
+   "disposition": "rewrite",
+   "target_phase": "M6/M7",
+   "capability": "package contents, CLI surface",
+   "replacement_hint": "Replacement: package manifest test asserting new UI assets + new CLI"
+  },
+  {
+   "test_id": "tests/test_packaging.py::PackagingTests::test_hermes_profile_detection_lists_profile_directories",
+   "file": "tests/test_packaging.py",
+   "class": "PackagingTests",
+   "disposition": "rewrite",
+   "target_phase": "M6/M7",
+   "capability": "package contents, CLI surface",
+   "replacement_hint": "Replacement: package manifest test asserting new UI assets + new CLI"
+  },
+  {
+   "test_id": "tests/test_packaging.py::PackagingTests::test_agent_tool_detection_splits_hermes_profiles_into_agents",
+   "file": "tests/test_packaging.py",
+   "class": "PackagingTests",
+   "disposition": "rewrite",
+   "target_phase": "M6/M7",
+   "capability": "package contents, CLI surface",
+   "replacement_hint": "Replacement: package manifest test asserting new UI assets + new CLI"
+  },
+  {
+   "test_id": "tests/test_packaging.py::PackagingTests::test_hermes_profile_agent_ids_are_slugged",
+   "file": "tests/test_packaging.py",
+   "class": "PackagingTests",
+   "disposition": "rewrite",
+   "target_phase": "M6/M7",
+   "capability": "package contents, CLI surface",
+   "replacement_hint": "Replacement: package manifest test asserting new UI assets + new CLI"
+  },
+  {
+   "test_id": "tests/test_packaging.py::PackagingTests::test_workflow_config_defaults_and_round_trips_project_file",
+   "file": "tests/test_packaging.py",
+   "class": "PackagingTests",
+   "disposition": "rewrite",
+   "target_phase": "M6/M7",
+   "capability": "package contents, CLI surface",
+   "replacement_hint": "Replacement: package manifest test asserting new UI assets + new CLI"
+  },
+  {
+   "test_id": "tests/test_packaging.py::PackagingTests::test_workflow_steps_do_not_configure_task_status",
+   "file": "tests/test_packaging.py",
+   "class": "PackagingTests",
+   "disposition": "rewrite",
+   "target_phase": "M6/M7",
+   "capability": "package contents, CLI surface",
+   "replacement_hint": "Replacement: package manifest test asserting new UI assets + new CLI"
+  },
+  {
+   "test_id": "tests/test_packaging.py::PackagingTests::test_workflow_allows_step_without_agent",
+   "file": "tests/test_packaging.py",
+   "class": "PackagingTests",
+   "disposition": "rewrite",
+   "target_phase": "M6/M7",
+   "capability": "package contents, CLI surface",
+   "replacement_hint": "Replacement: package manifest test asserting new UI assets + new CLI"
+  },
+  {
+   "test_id": "tests/test_packaging.py::PackagingTests::test_workflow_reports_graph_warnings",
+   "file": "tests/test_packaging.py",
+   "class": "PackagingTests",
+   "disposition": "rewrite",
+   "target_phase": "M6/M7",
+   "capability": "package contents, CLI surface",
+   "replacement_hint": "Replacement: package manifest test asserting new UI assets + new CLI"
+  },
+  {
+   "test_id": "tests/test_packaging.py::PackagingTests::test_workflow_warns_on_unreachable_steps",
+   "file": "tests/test_packaging.py",
+   "class": "PackagingTests",
+   "disposition": "rewrite",
+   "target_phase": "M6/M7",
+   "capability": "package contents, CLI surface",
+   "replacement_hint": "Replacement: package manifest test asserting new UI assets + new CLI"
+  },
+  {
+   "test_id": "tests/test_packaging.py::PackagingTests::test_integrate_and_decompose_steps_are_always_required_and_locked",
+   "file": "tests/test_packaging.py",
+   "class": "PackagingTests",
+   "disposition": "rewrite",
+   "target_phase": "M6/M7",
+   "capability": "package contents, CLI surface",
+   "replacement_hint": "Replacement: package manifest test asserting new UI assets + new CLI"
+  },
+  {
+   "test_id": "tests/test_packaging.py::PackagingTests::test_triage_intake_step_is_required_and_locked",
+   "file": "tests/test_packaging.py",
+   "class": "PackagingTests",
+   "disposition": "rewrite",
+   "target_phase": "M6/M7",
+   "capability": "package contents, CLI surface",
+   "replacement_hint": "Replacement: package manifest test asserting new UI assets + new CLI"
+  },
+  {
+   "test_id": "tests/test_packaging.py::PackagingTests::test_default_workflow_is_sequential_with_split_and_loopback",
+   "file": "tests/test_packaging.py",
+   "class": "PackagingTests",
+   "disposition": "rewrite",
+   "target_phase": "M6/M7",
+   "capability": "package contents, CLI surface",
+   "replacement_hint": "Replacement: package manifest test asserting new UI assets + new CLI"
+  },
+  {
+   "test_id": "tests/test_packaging.py::PackagingTests::test_workflow_persists_positions_and_edges",
+   "file": "tests/test_packaging.py",
+   "class": "PackagingTests",
+   "disposition": "rewrite",
+   "target_phase": "M6/M7",
+   "capability": "package contents, CLI surface",
+   "replacement_hint": "Replacement: package manifest test asserting new UI assets + new CLI"
+  },
+  {
+   "test_id": "tests/test_packaging.py::PackagingTests::test_workflow_edges_drop_selfloops_and_dupes_and_reject_unknown",
+   "file": "tests/test_packaging.py",
+   "class": "PackagingTests",
+   "disposition": "rewrite",
+   "target_phase": "M6/M7",
+   "capability": "package contents, CLI surface",
+   "replacement_hint": "Replacement: package manifest test asserting new UI assets + new CLI"
+  },
+  {
+   "test_id": "tests/test_packaging.py::PackagingTests::test_legacy_workflow_without_edges_gets_sequential_chain",
+   "file": "tests/test_packaging.py",
+   "class": "PackagingTests",
+   "disposition": "rewrite",
+   "target_phase": "M6/M7",
+   "capability": "package contents, CLI surface",
+   "replacement_hint": "Replacement: package manifest test asserting new UI assets + new CLI"
+  },
+  {
+   "test_id": "tests/test_packaging.py::PackagingTests::test_workflow_steps_have_no_kind_field",
+   "file": "tests/test_packaging.py",
+   "class": "PackagingTests",
+   "disposition": "rewrite",
+   "target_phase": "M6/M7",
+   "capability": "package contents, CLI surface",
+   "replacement_hint": "Replacement: package manifest test asserting new UI assets + new CLI"
+  },
+  {
+   "test_id": "tests/test_project_index.py::ProjectIndexTests::test_project_id_is_stable_for_resolved_root",
+   "file": "tests/test_project_index.py",
+   "class": "ProjectIndexTests",
+   "disposition": "rewrite",
+   "target_phase": "M1A",
+   "capability": "project index, online probe",
+   "replacement_hint": "Replacement: platform/projects.py tests"
+  },
+  {
+   "test_id": "tests/test_project_index.py::ProjectIndexTests::test_browser_host_prefers_loopback_for_wildcard_binds",
+   "file": "tests/test_project_index.py",
+   "class": "ProjectIndexTests",
+   "disposition": "rewrite",
+   "target_phase": "M1A",
+   "capability": "project index, online probe",
+   "replacement_hint": "Replacement: platform/projects.py tests"
+  },
+  {
+   "test_id": "tests/test_project_index.py::ProjectIndexTests::test_upsert_project_writes_and_replaces_index_entry",
+   "file": "tests/test_project_index.py",
+   "class": "ProjectIndexTests",
+   "disposition": "rewrite",
+   "target_phase": "M1A",
+   "capability": "project index, online probe",
+   "replacement_hint": "Replacement: platform/projects.py tests"
+  },
+  {
+   "test_id": "tests/test_project_index.py::ProjectIndexTests::test_list_projects_marks_non_current_with_checker",
+   "file": "tests/test_project_index.py",
+   "class": "ProjectIndexTests",
+   "disposition": "rewrite",
+   "target_phase": "M1A",
+   "capability": "project index, online probe",
+   "replacement_hint": "Replacement: platform/projects.py tests"
+  }
+ ]
+}

@@ -158,6 +158,7 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("details-collapsed", html)
         self.assertIn("function toggleTaskDetails()", html)
         self.assertIn("function renderTaskDetails(task)", html)
+
         self.assertIn("task-detail-body", html)
         self.assertIn('localStorage.getItem("orbit-task-details-collapsed") !== "0"', html)
         self.assertIn('class="side-menu"', html)
@@ -284,6 +285,53 @@ class PackagingTests(unittest.TestCase):
         self.assertNotIn('id="projectSelect"', html)
         self.assertNotIn('id="registerAgent"', html)
         self.assertGreater(len(html), 1000)
+
+    def test_workflow_ui_prototype_is_packaged_and_routable(self):
+        import asyncio
+        import orbit.server as server
+        from starlette.requests import Request
+
+        html = (
+            resources.files("orbit")
+            .joinpath("static/workflow-ui.html")
+            .read_text(encoding="utf-8")
+        )
+        self.assertIn("Orbit Runtime", html)
+        self.assertIn('id="page-home"', html)
+        self.assertIn('id="page-goals"', html)
+        self.assertIn('id="page-workflows"', html)
+        self.assertIn('id="page-runs"', html)
+        self.assertIn('id="page-inbox"', html)
+        self.assertIn('id="page-artifacts"', html)
+        self.assertIn('id="page-agents"', html)
+        self.assertIn('id="page-ops"', html)
+        self.assertIn('id="page-settings"', html)
+        self.assertIn('id="goalModal"', html)
+        self.assertIn("Confirm & start", html)
+        self.assertIn("allowed_commands[]", html)
+
+        with TemporaryDirectory() as tmp:
+            app = server.create_server(
+                db_path=str(Path(tmp) / "orbit.db"),
+                project={"project_root": tmp},
+                run_worker=False,
+            )
+            endpoint = next(
+                route.endpoint for route in app.routes
+                if route.path == "/workflow-ui"
+            )
+            request = Request({
+                "type": "http",
+                "method": "GET",
+                "path": "/workflow-ui",
+                "headers": [(b"host", b"127.0.0.1")],
+                "client": ("127.0.0.1", 12345),
+                "scheme": "http",
+                "server": ("127.0.0.1", 8848),
+            })
+            response = asyncio.run(endpoint(request))
+            self.assertEqual(200, response.status_code)
+            self.assertIn(b"Mission Control", response.body)
 
     def test_server_module_imports(self):
         # Importing the module reads the UI asset at module load time;
