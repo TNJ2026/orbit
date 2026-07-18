@@ -51,7 +51,15 @@ class DurableRecoveryScanner:
                     if item.status in {JobStatus.READY, JobStatus.LEASED, JobStatus.RUNNING, JobStatus.RETRY_WAIT}
                 }
                 nodes = uow.node_runs.list_by_run(run.run_id)
-                plan_record = uow.plans.get(run.run_id, Revision(1))
+                # The run's *current* plan, not version 1. A replanned run is
+                # described by the newest version; recovering it against the
+                # original graph would route by nodes the patch removed and
+                # miss the ones it added.
+                versions = uow.plans.list_versions(run.run_id)
+                plan_version = max(
+                    (record.plan_version.value for record in versions), default=1
+                )
+                plan_record = uow.plans.get(run.run_id, Revision(plan_version))
                 graph_controllers = set()
                 if plan_record is not None:
                     plan = execution_plan_from_primitive(to_primitive(plan_record.plan))
@@ -86,7 +94,7 @@ class DurableRecoveryScanner:
                     new_id("command"), "advance_graph", run.run_id, run.run_id,
                     run.aggregate_version,
                     f"advance-graph:{run.run_id}:{run.aggregate_version.value}",
-                    "system:recovery", now, {"plan_version": 1},
+                    "system:recovery", now, {"plan_version": plan_version},
                 ))
                 if result.disposition.value == "applied":
                     graph_advances += 1
