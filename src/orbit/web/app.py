@@ -287,6 +287,10 @@ def create_app(
     clock: Callable[[], datetime] = utc_now,
     artifact_backend: Any = None,
     extra_routes: Sequence[Route | Mount] = (),
+    authenticator: Callable[[Any], str | None] | None = None,
+    authorizer: Any = None,
+    serve_prototype_ui: bool = False,
+    discover_agents: bool = False,
 ) -> Starlette:
     """Build the Runtime application.
 
@@ -329,13 +333,55 @@ def create_app(
             status_code=200 if ready else 503,
         )
 
-    app = Starlette(
-        routes=[
-            Route("/health/live", health_live, methods=["GET"]),
-            Route("/health/ready", health_ready, methods=["GET"]),
-            *extra_routes,
-        ],
-        lifespan=lifespan,
-    )
+    from .api_v1 import build_api_v1
+    from .mcp import build_mcp
+
+    agent_catalog: Sequence[Mapping[str, Any]] = ()
+    if discover_agents:
+        # Discovery is opt-in because it shells out to probe versions. In M3 it
+        # only populates the authoring catalog — no Agent CLI is registered as
+        # an executable handler until M5 provides the adapter.
+        from ..workflow.catalogs.agent_discovery import (
+            catalog_entries, discover_agent_clis,
+        )
+
+        agent_catalog = catalog_entries(discover_agent_clis())
+
+    routes: list[Route | Mount] = [
+        Route("/health/live", health_live, methods=["GET"]),
+        Route("/health/ready", health_ready, methods=["GET"]),
+        *build_api_v1(
+            composition.db_path, composition.service,
+            authenticator=authenticator, authorizer=authorizer,
+            agent_catalog=agent_catalog,
+        ),
+        # The MCP surface is a second protocol over the same application
+        # services and the same identity, not a second implementation.
+        *build_mcp(
+            composition.db_path, composition.service,
+            authenticator=authenticator, authorizer=authorizer,
+        ),
+    ]
+
+    if serve_prototype_ui:
+        # Development-only smoke entry for the single-file prototype. It is a
+        # read-only page: it must never gain a mock mutation API, and M4 deletes
+        # it once the modular UI talks to the real API.
+        from importlib import resources
+
+        from starlette.responses import HTMLResponse
+
+        async def prototype(_request: Request) -> HTMLResponse:
+            html = (
+                resources.files("orbit")
+                .joinpath("static/workflow-ui.html")
+                .read_text(encoding="utf-8")
+            )
+            return HTMLResponse(html)
+
+        routes.append(Route("/workflow-ui", prototype, methods=["GET"]))
+
+    routes.extend(extra_routes)
+    app = Starlette(routes=routes, lifespan=lifespan)
     app.state.runtime = composition
     return app

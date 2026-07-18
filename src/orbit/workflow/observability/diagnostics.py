@@ -18,7 +18,7 @@ class DiagnosticsService:
             responsibilities=[]
             queries=(
                 ("human","SELECT task_id AS id,status,kind AS detail FROM human_tasks WHERE run_id=? AND status IN ('waiting','claimed')"),
-                ("job","SELECT job_id AS id,status,handler_name AS detail FROM jobs WHERE run_id=? AND status IN ('ready','leased','running','retry_wait')"),
+                ("job","SELECT job_id AS id,status,job_kind AS detail FROM jobs WHERE run_id=? AND status IN ('ready','leased','running','retry_wait')"),
                 ("timer","SELECT timer_id AS id,status,purpose AS detail FROM durable_timers WHERE run_id=? AND status IN ('scheduled','leased')"),
                 ("planner","SELECT attempt_id AS id,status,provider_id AS detail FROM planner_attempts WHERE run_id=? AND status IN ('requested','running','response_received','unknown')"),
                 ("foreach","SELECT group_id AS id,status,failure_policy AS detail FROM foreach_groups WHERE run_id=? AND status IN ('pending','running')"),

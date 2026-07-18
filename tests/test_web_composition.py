@@ -86,21 +86,44 @@ class AsgiHarness:
         finally:
             self._loop.close()
 
-    def get(self, path: str):
+    def get(self, path: str, *, actor: str | None = None):
+        return self.request("GET", path, actor=actor)
+
+    def post(self, path: str, *, actor=None, key=None, body=None):
+        """POST with the two headers every write on /api/v1 requires."""
+
+        headers = {} if key is None else {"idempotency-key": key}
+        return self.request("POST", path, actor=actor, headers=headers, body=body)
+
+    def request(self, method: str, path: str, *, actor=None, headers=None, body=None):
+        raw = b"" if body is None else json.dumps(body).encode()
+        header_map = dict(headers or {})
+        if actor is not None:
+            header_map["x-orbit-actor"] = actor
+        if body is not None:
+            header_map["content-type"] = "application/json"
+            header_map["content-length"] = str(len(raw))
+        target, _, query = path.partition("?")
+
         async def call():
             messages = []
 
             async def receive():
-                return {"type": "http.request", "body": b"", "more_body": False}
+                return {"type": "http.request", "body": raw, "more_body": False}
 
             async def send(message):
                 messages.append(message)
 
             await self.app(
                 {
-                    "type": "http", "http_version": "1.1", "method": "GET",
-                    "path": path, "raw_path": path.encode(), "query_string": b"",
-                    "headers": [], "client": ("127.0.0.1", 12345),
+                    "type": "http", "http_version": "1.1", "method": method,
+                    "path": target, "raw_path": target.encode(),
+                    "query_string": query.encode(),
+                    "headers": [
+                        (name.lower().encode(), str(value).encode())
+                        for name, value in header_map.items()
+                    ],
+                    "client": ("127.0.0.1", 12345),
                     "server": ("127.0.0.1", 8848), "scheme": "http",
                 },
                 receive, send,

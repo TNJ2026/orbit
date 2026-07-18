@@ -251,6 +251,57 @@ def ensure_state_dir_gitignored(project_root: Path) -> bool:
     return bool(append_missing_gitignore(project_root, [f"{state_name}/"]))
 
 
+def _run_command(args) -> None:
+    """`orbit run start|inspect`.
+
+    The CLI writes through the same RunApplicationService the HTTP API uses, so
+    a start from the terminal and a start from the UI produce identical events.
+    It talks to SQLite directly rather than to a running server: the kernel is
+    the concurrency boundary, and adding an HTTP hop would only mean the CLI
+    stops working whenever the server is down.
+    """
+
+    import uuid
+
+    from .workflow.application.durable_runtime_service import (
+        DurableRuntimeApplicationService,
+    )
+    from .workflow.application.run_service import (
+        RunApplicationService, RunStartError,
+    )
+
+    db_path = _runtime_db_path(args.db)
+    service = RunApplicationService(
+        db_path, DurableRuntimeApplicationService(db_path)
+    )
+
+    try:
+        if args.run_action == "inspect":
+            print(json.dumps(service.inspect(args.run_id), ensure_ascii=False, indent=2, sort_keys=True))
+            return
+
+        started = service.start_run(
+            workflow_id=args.workflow_id,
+            version=args.workflow_version,
+            inputs=json.loads(args.input) if args.input else {},
+            goal=args.goal or "",
+            budget_microunits=args.budget_microunits,
+            actor=args.actor,
+            # A generated key still makes the start idempotent under retry
+            # inside one invocation; passing --idempotency-key is what makes a
+            # re-run of the whole command idempotent.
+            idempotency_key=args.idempotency_key or uuid.uuid4().hex,
+        )
+    except (RunStartError, ValueError) as exc:
+        raise SystemExit(f"orbit run: {exc}")
+
+    if args.json:
+        print(json.dumps(started.to_dict(), ensure_ascii=False, sort_keys=True))
+    else:
+        state = "replayed" if started.replayed else "started"
+        print(f"{state} {started.run_id} ({started.workflow_id}@{started.workflow_version})")
+
+
 def _serve(args) -> None:
     """Start the new Runtime composition root."""
 
@@ -285,6 +336,7 @@ def _serve(args) -> None:
             handlers=[HandlerRegistration(transform, TransformHandler(), "transform@1.0.0")],
             schemas=schemas,
             worker_count=args.runner_concurrency,
+            discover_agents=not args.no_agent_discovery,
         )
     except MixedSchemaError as exc:
         raise SystemExit(f"error: {exc}") from None
@@ -365,6 +417,10 @@ def main() -> None:
         "serve",
         parents=[serve_common],
         help="Start the UI/API + Scheduler server",
+    ).add_argument(
+        "--no-agent-discovery",
+        action="store_true",
+        help="Skip probing for installed Agent CLIs at startup",
     )
 
     sub.add_parser(
@@ -463,6 +519,25 @@ def main() -> None:
     # it outright.
     _add_db_check_arguments(workflow_sub.add_parser("db-check"))
 
+    run_cmd = sub.add_parser("run", help="Start and inspect workflow runs")
+    run_sub = run_cmd.add_subparsers(dest="run_action", required=True)
+    run_start = run_sub.add_parser("start", help="Start a run of a published workflow")
+    run_start.add_argument("workflow_id")
+    run_start.add_argument("--workflow-version", type=int, default=None, help="Default: latest published")
+    run_start.add_argument("--input", default=None, help="Run input as a JSON object")
+    run_start.add_argument("--goal", default=None)
+    run_start.add_argument("--budget-microunits", type=int, default=None)
+    run_start.add_argument("--actor", default="local-cli")
+    run_start.add_argument(
+        "--idempotency-key", default=None,
+        help="Reuse to make repeated invocations resolve to the same run",
+    )
+    run_inspect = run_sub.add_parser("inspect", help="Why is this run where it is")
+    run_inspect.add_argument("run_id")
+    for command in (run_start, run_inspect):
+        command.add_argument("--db", default=None, help="SQLite database path")
+        command.add_argument("--json", action="store_true", help="Emit stable machine-readable JSON")
+
     db_cmd = sub.add_parser("db", help="Inspect the project runtime database")
     db_sub = db_cmd.add_subparsers(dest="db_action", required=True)
     db_check = db_sub.add_parser(
@@ -479,6 +554,10 @@ def main() -> None:
 
     if args.command == "db":
         _db_check_command(args)
+        return
+
+    if args.command == "run":
+        _run_command(args)
         return
 
     if args.command in ("config", "init"):
