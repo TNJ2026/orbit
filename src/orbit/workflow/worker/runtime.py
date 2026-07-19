@@ -157,11 +157,19 @@ class PlannerDispatcher:
         self.worker_id = worker_id
         self.clock = clock
         self.metrics = metrics or InMemoryMetrics()
-        provider_timeout = getattr(getattr(service, "provider", None), "timeout_seconds", 0)
+        provider_timeout = float(
+            getattr(getattr(service, "provider", None), "timeout_seconds", 0)
+        )
         lease_seconds = max(60, float(provider_timeout) + lease_margin_seconds)
-        # PlannerApplicationService deliberately rejects leases above ten
-        # minutes. The production CLI's 300s timeout therefore claims 360s.
-        self.lease_ttl = timedelta(seconds=min(600, lease_seconds))
+        # Silently capping this would reintroduce the fence race for providers
+        # configured above 540s. Refuse an unsafe Runtime instead. The
+        # production CLI's 300s timeout claims 360s.
+        if lease_seconds > 600:
+            raise ValueError(
+                "Planner provider timeout plus lease margin exceeds the "
+                "10-minute maximum lease"
+            )
+        self.lease_ttl = timedelta(seconds=lease_seconds)
 
     def _increment(self, name):
         try: self.metrics.increment(name)
@@ -175,6 +183,13 @@ class PlannerDispatcher:
         if claimed is None:
             self._increment("planner_empty")
             return False
-        self.service.execute_claimed(claimed, self.clock(), clock=self.clock)
-        self._increment("planner_completed")
+        result = self.service.execute_claimed(
+            claimed, self.clock(), clock=self.clock
+        )
+        status_object = getattr(result, "status", None)
+        status = getattr(status_object, "value", status_object)
+        if status == "unknown" and getattr(result, "raw_response", None) is not None:
+            self._increment("planner_unknown_preserved")
+        else:
+            self._increment("planner_completed")
         return True

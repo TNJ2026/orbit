@@ -236,6 +236,35 @@ class PlannerTestCase(unittest.TestCase):
         self.assertEqual(timedelta(seconds=360), calls["claim"][2])
         self.assertIs(calls["execute"][2], dispatcher.clock)
 
+    def test_dispatcher_rejects_timeout_that_cannot_keep_its_margin(self):
+        class Service:
+            provider = type("Provider", (), {"timeout_seconds": 541})()
+
+        with self.assertRaisesRegex(ValueError, "exceeds.*maximum lease"):
+            PlannerDispatcher(Service(), clock=lambda: NOW)
+
+    def test_dispatcher_counts_preserved_unknown_separately(self):
+        class Service:
+            provider = type("Provider", (), {"timeout_seconds": 300})()
+
+            def claim(service_self, *_args, **_kwargs):
+                return "claim"
+
+            def execute_claimed(service_self, *_args, **_kwargs):
+                return type(
+                    "Attempt", (),
+                    {
+                        "status": PlannerAttemptStatus.UNKNOWN,
+                        "raw_response": '{"late":true}',
+                    },
+                )()
+
+        dispatcher = PlannerDispatcher(Service(), clock=lambda: NOW)
+        self.assertTrue(dispatcher.run_once())
+        counters = dispatcher.metrics.counters
+        self.assertEqual(1, counters[("planner_unknown_preserved", ())])
+        self.assertNotIn(("planner_completed", ()), counters)
+
     def test_invalid_response_is_rejected_and_duplicate_request_is_idempotent(self):
         provider = FakePlannerProvider([PlannerProviderResponse("not json")])
         service = PlannerApplicationService(self.path, provider=provider)
