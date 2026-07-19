@@ -113,6 +113,10 @@ class SourceTests(unittest.TestCase):
         self.assertNotIn("/cancel", app_js)
         self.assertIn("allowed.href", api_js)
 
+    def test_new_run_distinguishes_catalog_failure_from_invalid_workflow(self) -> None:
+        app_js = (ASSETS / "app.js").read_text(encoding="utf-8")
+        self.assertIn('catalog === null ? "newRun.catalog.unavailable"', app_js)
+
     def test_no_mock_data_survives(self) -> None:
         joined = "\n".join(path.read_text(encoding="utf-8") for path in source_files())
         for forbidden in ("mock", "Mock", "fixture", "Lorem", "Good morning"):

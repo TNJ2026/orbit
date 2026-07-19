@@ -34,6 +34,7 @@ from orbit.workflow.planner.provider import PlannerTransientError
 from orbit.workflow.runtime.planner_recovery import PlannerRecoveryScanner
 from orbit.workflow.runtime.reducers import reduce_run_view
 from orbit.workflow.testing import side_effect_guard
+from orbit.workflow.worker.runtime import PlannerDispatcher
 
 
 NOW = datetime(2026, 7, 17, 15, tzinfo=timezone.utc)
@@ -173,6 +174,67 @@ class PlannerTestCase(unittest.TestCase):
         )
         self.assertEqual(0, len(service.list_proposals(self.run_id)))
         self.assertIs(PlannerAttemptStatus.UNKNOWN, service.get_attempt(original.attempt_id).status)
+
+    def test_recovered_long_call_is_preserved_as_a_late_response(self):
+        completed_at = NOW + timedelta(seconds=61)
+
+        class Provider:
+            timeout_seconds = 300
+            service = None
+
+            def generate(provider_self, *_args, **_kwargs):
+                PlannerRecoveryScanner(provider_self.service).scan_once(completed_at)
+                return PlannerProviderResponse(
+                    proposal_raw(self.run_id, proposal_id="late-race"), "req-late"
+                )
+
+        provider = Provider()
+        service = PlannerApplicationService(self.path, provider=provider)
+        provider.service = service
+        attempt = self.request(service)
+        claim = service.claim("worker", NOW)
+
+        result = service.execute_claimed(
+            claim, NOW, clock=lambda: completed_at
+        )
+
+        self.assertIs(PlannerAttemptStatus.UNKNOWN, result.status)
+        self.assertEqual("req-late", result.provider_request_id)
+        self.assertEqual(proposal_raw(self.run_id, proposal_id="late-race"), result.raw_response)
+        self.assertEqual(completed_at, result.updated_at)
+        self.assertEqual((), service.list_proposals(self.run_id))
+        self.assertIs(PlannerAttemptStatus.UNKNOWN, service.get_attempt(attempt.attempt_id).status)
+
+    def test_execute_claimed_uses_fresh_completion_time(self):
+        completed_at = NOW + timedelta(minutes=2)
+        provider = FakePlannerProvider([
+            PlannerProviderResponse(proposal_raw(self.run_id), "req-fresh")
+        ])
+        service = PlannerApplicationService(self.path, provider=provider)
+        attempt = self.request(service)
+        claim = service.claim("worker", NOW, lease_ttl=timedelta(minutes=3))
+
+        service.execute_claimed(claim, NOW, clock=lambda: completed_at)
+
+        self.assertEqual(completed_at, service.get_attempt(attempt.attempt_id).updated_at)
+
+    def test_dispatcher_claim_covers_provider_timeout_with_margin(self):
+        calls = {}
+
+        class Service:
+            provider = type("Provider", (), {"timeout_seconds": 300})()
+
+            def claim(service_self, worker_id, now, *, lease_ttl):
+                calls["claim"] = (worker_id, now, lease_ttl)
+                return "claim"
+
+            def execute_claimed(service_self, claim, now, *, clock):
+                calls["execute"] = (claim, now, clock)
+
+        dispatcher = PlannerDispatcher(Service(), clock=lambda: NOW)
+        self.assertTrue(dispatcher.run_once())
+        self.assertEqual(timedelta(seconds=360), calls["claim"][2])
+        self.assertIs(calls["execute"][2], dispatcher.clock)
 
     def test_invalid_response_is_rejected_and_duplicate_request_is_idempotent(self):
         provider = FakePlannerProvider([PlannerProviderResponse("not json")])

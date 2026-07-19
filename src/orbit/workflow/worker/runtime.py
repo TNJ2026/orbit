@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from threading import Event
 from typing import Any, Callable
 
@@ -149,11 +149,19 @@ class TimerDispatcher:
 class PlannerDispatcher:
     """Claim and execute one durable Planner attempt."""
 
-    def __init__(self, service, *, worker_id="planner-1", clock, metrics=None):
+    def __init__(
+        self, service, *, worker_id="planner-1", clock, metrics=None,
+        lease_margin_seconds=60,
+    ):
         self.service = service
         self.worker_id = worker_id
         self.clock = clock
         self.metrics = metrics or InMemoryMetrics()
+        provider_timeout = getattr(getattr(service, "provider", None), "timeout_seconds", 0)
+        lease_seconds = max(60, float(provider_timeout) + lease_margin_seconds)
+        # PlannerApplicationService deliberately rejects leases above ten
+        # minutes. The production CLI's 300s timeout therefore claims 360s.
+        self.lease_ttl = timedelta(seconds=min(600, lease_seconds))
 
     def _increment(self, name):
         try: self.metrics.increment(name)
@@ -161,10 +169,12 @@ class PlannerDispatcher:
 
     def run_once(self):
         self._increment("planner_heartbeat")
-        claimed = self.service.claim(self.worker_id, self.clock())
+        claimed = self.service.claim(
+            self.worker_id, self.clock(), lease_ttl=self.lease_ttl
+        )
         if claimed is None:
             self._increment("planner_empty")
             return False
-        self.service.execute_claimed(claimed, self.clock())
+        self.service.execute_claimed(claimed, self.clock(), clock=self.clock)
         self._increment("planner_completed")
         return True

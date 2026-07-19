@@ -369,8 +369,16 @@ class PlannerApplicationService:
             uow.planner_attempts.update(updated, attempt.aggregate_version)
             uow.commit(); return updated
 
-    def execute_claimed(self, claim, now):
+    def execute_claimed(self, claim, now, *, clock=None):
+        """Execute a claimed call using fresh completion timestamps.
+
+        Direct callers that omit ``clock`` retain their supplied deterministic
+        timestamp; the background dispatcher supplies its live clock so a long
+        provider call cannot authorize or timestamp its response at dispatch
+        time.
+        """
         if self.provider is None: raise RuntimeError("Planner provider is not configured")
+        completion_clock = clock or (lambda: now)
         with self.uow_factory() as uow:
             attempt = uow.planner_attempts.get(claim.attempt_id)
             self._authorize(attempt, claim, now)
@@ -380,19 +388,44 @@ class PlannerApplicationService:
                 request_fingerprint=attempt.request_fingerprint.value,
             )
         except TimeoutError:
-            return self.mark_unknown(claim, now, reason="planner provider timed out with unknown result")
+            return self.mark_unknown(
+                claim, completion_clock(),
+                reason="planner provider timed out with unknown result",
+            )
         except Exception as exc:
             from ..planner.provider import PlannerTransientError
+            completed_at = completion_clock()
             if isinstance(exc, PlannerTransientError):
                 failed = self.mark_failed(
-                    claim, now, code="planner_provider_transient",
+                    claim, completed_at, code="planner_provider_transient",
                     message=f"{type(exc).__name__}: {exc}",
                 )
-                retry = self.retry_failed(failed.attempt_id, now)
+                retry = self.retry_failed(failed.attempt_id, completed_at)
                 return failed if retry is None else retry
-            return self.mark_failed(claim, now, message=f"{type(exc).__name__}: {exc}")
-        self.record_response(claim, response, now)
-        return self.parse_response(claim.attempt_id, now)
+            return self.mark_failed(
+                claim, completed_at, message=f"{type(exc).__name__}: {exc}"
+            )
+        completed_at = completion_clock()
+        try:
+            self.record_response(claim, response, completed_at)
+        except PermissionError as authorization_error:
+            # Recovery may fence a long-running, already-billed call before its
+            # response returns. Preserve that response on the UNKNOWN attempt;
+            # if recovery has not run yet, establish UNKNOWN first.
+            current = self.get_attempt(claim.attempt_id)
+            if (
+                current is not None
+                and current.status is PlannerAttemptStatus.RUNNING
+                and current.lease_expires_at <= completed_at
+            ):
+                self.expire_attempt(claim.attempt_id, completed_at)
+            try:
+                return self.record_late_response(
+                    claim.attempt_id, response, completed_at
+                )
+            except ValueError:
+                raise authorization_error
+        return self.parse_response(claim.attempt_id, completion_clock())
 
     def get_attempt(self, attempt_id):
         with self.uow_factory() as uow: return uow.planner_attempts.get(attempt_id)

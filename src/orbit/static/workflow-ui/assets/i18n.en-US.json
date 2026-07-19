@@ -49,6 +49,7 @@
   "nav.ops": "Ops",
   "nav.runs": "Runs",
   "newRun.goal": "Goal (optional)",
+  "newRun.catalog.unavailable": "The workflow catalog is unavailable. Try again when the runtime is reachable.",
   "newRun.input": "Input (JSON object)",
   "newRun.input.invalid": "Input must be a valid JSON object.",
   "newRun.started": "Started run {runId}",

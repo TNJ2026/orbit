@@ -7,6 +7,7 @@ reason in one pass instead of asking the diagnostics service per row.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -245,8 +246,6 @@ class ReadModelService:
                 " ORDER BY global_position LIMIT ?",
                 (str(run_id), after, limit),
             ).fetchall()
-        import json as _json
-
         events = [
             {
                 "position": row["global_position"],
@@ -257,7 +256,7 @@ class ReadModelService:
                 "correlation_id": row["correlation_id"],
                 "causation_id": row["causation_id"],
                 "occurred_at": row["occurred_at"],
-                "payload": _json.loads(row["payload_json"]),
+                "payload": json.loads(row["payload_json"]),
             }
             for row in rows
         ]
@@ -283,8 +282,6 @@ class ReadModelService:
                 " ORDER BY global_position LIMIT ?",
                 (str(run_id), after, limit),
             ).fetchall()
-        import json as _json
-
         errors = [
             {
                 "position": row["global_position"],
@@ -292,7 +289,7 @@ class ReadModelService:
                 "aggregate_id": row["aggregate_id"],
                 "type": row["event_type"],
                 "occurred_at": row["occurred_at"],
-                "payload": _json.loads(row["payload_json"]),
+                "payload": json.loads(row["payload_json"]),
             }
             for row in rows
         ]
@@ -338,8 +335,6 @@ class ReadModelService:
                 """,
                 (str(run_id), after, str(run_id), after, limit),
             ).fetchall()
-        import json as _json
-
         items = [
             {
                 "data_id": row["data_id"],
@@ -348,7 +343,7 @@ class ReadModelService:
                 "owner_id": row["owner_id"],
                 "port_id": row["port_id"],
                 "schema_id": row["schema_id"],
-                "value": None if row["data_json"] is None else _json.loads(row["data_json"]),
+                "value": None if row["data_json"] is None else json.loads(row["data_json"]),
                 "checksum": row["checksum"],
                 "size_bytes": row["size_bytes"],
                 "content_type": row["content_type"],

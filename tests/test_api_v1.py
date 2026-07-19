@@ -351,7 +351,7 @@ class DataApiTests(ApiTestCase):
                 client.get("/api/v1/runs/run:missing/data", actor="reader").status_code,
             )
             self.assertEqual(
-                400,
+                404,
                 client.get("/api/v1/runs/run:missing/data", actor="sensitive").status_code,
             )
 

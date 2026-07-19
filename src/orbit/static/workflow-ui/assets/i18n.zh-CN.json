@@ -49,6 +49,7 @@
   "nav.ops": "运维",
   "nav.runs": "运行",
   "newRun.goal": "目标（可选）",
+  "newRun.catalog.unavailable": "工作流目录暂不可用，请在 Runtime 恢复连接后重试。",
   "newRun.input": "输入（JSON 对象）",
   "newRun.input.invalid": "输入必须是合法的 JSON 对象。",
   "newRun.started": "已开始运行 {runId}",

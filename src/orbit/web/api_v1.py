@@ -172,7 +172,7 @@ def build_api_v1(
             return error("not_found", str(exc), 404)
         return JSONResponse(envelope({"responsibilities": items}))
 
-    def _paged_read(loader, scope: str = READ_SCOPE):
+    def _paged_read(loader, scope: str = READ_SCOPE, *, missing_is_not_found=False):
         async def handler(request: Request) -> JSONResponse:
             actor = authenticate(request, scope)
             if isinstance(actor, JSONResponse):
@@ -186,6 +186,8 @@ def build_api_v1(
             except CursorError as exc:
                 return error("invalid_cursor", str(exc))
             except ValueError as exc:
+                if missing_is_not_found:
+                    return error("not_found", str(exc), 404)
                 return error("invalid_request", str(exc))
             return JSONResponse(envelope({"items": items}, next_cursor=next_cursor))
 
@@ -566,7 +568,8 @@ def build_api_v1(
         Route("/api/v1/runs/{run_id}/errors", _paged_read(reads.errors), methods=["GET"]),
         Route(
             "/api/v1/runs/{run_id}/data",
-            _paged_read(reads.data, SENSITIVE_SCOPE), methods=["GET"],
+            _paged_read(reads.data, SENSITIVE_SCOPE, missing_is_not_found=True),
+            methods=["GET"],
         ),
         Route(
             "/api/v1/runs/{run_id}/data/{data_id}/lineage", data_lineage,

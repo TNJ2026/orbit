@@ -376,9 +376,14 @@ async function dataPanel(runId) {
         }
       },
     });
-    const value = item.kind === "value" && item.value !== null
+    const rawValue = item.kind === "value" && item.value !== null
       ? JSON.stringify(item.value)
-      : `${item.content_type || item.schema_id} · ${i18n.number(item.size_bytes)} B`;
+      : null;
+    const value = rawValue === null
+      ? `${item.content_type || item.schema_id} · ${i18n.number(item.size_bytes)} B`
+      : rawValue.length <= 500
+        ? rawValue
+        : `${rawValue.slice(0, 500)}… · ${i18n.number(item.size_bytes)} B`;
     return el("div", { class: "data-item" }, [
       el("div", { class: "actions" }, [
         el("span", { class: "mono", text: item.data_id }),
@@ -752,7 +757,10 @@ async function newRunDialog() {
       ]),
     ]),
   ]);
-  if (catalog === null) problem.hidden = false;
+  if (catalog === null) {
+    problem.textContent = i18n.t("newRun.catalog.unavailable");
+    problem.hidden = false;
+  }
 
   // The wizard keeps nothing server-side: the whole thing resolves to exactly
   // one start_run, and closing the dialog leaves no draft behind.
@@ -777,7 +785,10 @@ async function newRunDialog() {
   const entry = entries.find((item) => item.workflow_id === body.workflow_id);
   const allowed = entry && entry.allowed_commands[0];
   if (!allowed) {
-    announce(i18n.t("newRun.workflow.invalid"), "error");
+    announce(
+      i18n.t(catalog === null ? "newRun.catalog.unavailable" : "newRun.workflow.invalid"),
+      "error",
+    );
     return;
   }
 
