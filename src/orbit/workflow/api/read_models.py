@@ -487,6 +487,16 @@ def default_allowed_commands(
                 f"/api/v1/human-tasks/{task_id}/submit",
                 f"human_task:{task_id}", version, "human-submit/1.0",
             ),
+            # Retrieval surface for the one-time submission token. The kernel
+            # keeps only the hash and the delivery adapter is process-local, so
+            # without this command a restart would leave the task answerable by
+            # no one. It is not rendered as an inbox button; the submit dialog
+            # invokes it to fill its token field.
+            AllowedCommand(
+                "human.token", "Get token", "POST",
+                f"/api/v1/human-tasks/{task_id}/token",
+                f"human_task:{task_id}", version, "human-token/1.0",
+            ),
             # Abandoning the run is a third, distinct answer. Rejecting an
             # approval decides the task and lets the workflow carry on down its
             # rejection path; without this a run parked on a person could only

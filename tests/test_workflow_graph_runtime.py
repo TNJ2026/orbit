@@ -263,6 +263,88 @@ class GraphRuntimeE2ETests(unittest.TestCase):
             {item["node_id"]: item["status"] for item in summary["nodes"]},
         )
 
+    def test_reissued_token_supersedes_the_delivered_one(self):
+        """Restart-lost tokens are recovered by rotation, not resignation.
+
+        The delivery adapter is process memory; after a restart the only way
+        back in is the reissue path. It must invalidate the original token,
+        bump the task version, and leave the kernel submit working with the
+        rotated credential.
+        """
+        from orbit.workflow.application.human_service import HumanTaskService
+
+        dsl = {
+            "dsl_version": "1.2",
+            "metadata": {"id": "human_rotate", "name": "Human rotate"},
+            "nodes": [
+                {
+                    "id": "approve", "kind": "human",
+                    "inputs": PORT("value"), "outputs": PORT("value"),
+                    "config": {
+                        "task_kind": "approval", "participants": ["operator"],
+                        "quorum": "any",
+                    },
+                },
+                {"id": "done", "kind": "terminal", "inputs": PORT("value")},
+            ],
+            "edges": [{
+                "id": "approved",
+                "from": {"node": "approve", "port": "value"},
+                "to": {"node": "done", "port": "value"},
+            }],
+            "entry": ["approve"], "terminals": ["done"],
+        }
+        temp = tempfile.TemporaryDirectory(); self.addCleanup(temp.cleanup)
+        path = Path(temp.name) / "rotate.db"
+        compiled = compile_graph(dsl)
+        SQLiteWorkflowVersionStore(path).publish(
+            compiled, expected_latest_version=0, source_format="json",
+            source_text=None, actor="test",
+        )
+        # No delivery adapter at all — the token minted at activation is lost
+        # exactly as it would be when the process dies before hand-off.
+        service = DurableRuntimeApplicationService(path)
+        run_id = EntityId("run", "rotate")
+        started = service.submit(CommandEnvelope(
+            EntityId("command", "rotate-start"), "start_run", run_id, run_id,
+            AggregateVersion(0), "rotate-start", "starter", NOW,
+            {
+                "workflow_id": compiled.ir.workflow_id,
+                "workflow_version": 1,
+                "definition_hash": compiled.definition_hash.value,
+                "input": {"value": 1},
+            },
+        ))
+        self.assertEqual("applied", started.disposition.value, started.diagnostics)
+        with service.uow_factory() as uow:
+            row = uow.connection.execute(
+                "SELECT task_id,aggregate_version FROM human_tasks WHERE run_id=?",
+                (str(run_id),),
+            ).fetchone()
+        task_id = EntityId.parse(row["task_id"])
+
+        reissued = HumanTaskService(path).reissue_token(
+            task_id, actor="operator",
+            expected_version=row["aggregate_version"], now=NOW,
+        )
+        self.assertEqual(
+            row["aggregate_version"] + 1, reissued["expected_version"]
+        )
+        with self.assertRaises(PermissionError):
+            HumanTaskService(path).reissue_token(
+                task_id, actor="stranger",
+                expected_version=reissued["expected_version"], now=NOW,
+            )
+
+        submitted = service.submit_human_task(
+            task_id, run_id, reissued["expected_version"],
+            token=reissued["submission_token"], decision="approve",
+            value=None, actor="operator",
+            idempotency_key="rotate-approve", now=NOW,
+        )
+        self.assertEqual("completed", submitted["status"])
+        self.assertIs(WorkflowRunStatus.SUCCEEDED, service.get_run(run_id).status)
+
     def test_parallel_join_opens_once_and_is_recoverable(self):
         dsl = {
             "dsl_version": "1.2", "metadata": {"id": "join_graph", "name": "Join"},

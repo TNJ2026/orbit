@@ -444,15 +444,11 @@ def build_api_v1(
             if not token:
                 raise ValueError("submission_token is required")
             parsed_task_id = EntityId.parse(task_id)
-            node_run_id = humans.linked_node_run_id(parsed_task_id)
-            if node_run_id is not None:
-                with connect_workflow_database(path, read_only=True) as connection:
-                    row = connection.execute(
-                        "SELECT run_id FROM human_tasks WHERE task_id=?",
-                        (task_id,),
-                    ).fetchone()
+            linked = humans.linked_scope(parsed_task_id)
+            if linked is not None:
+                _node_run_id, run_id = linked
                 return durable_service.submit_human_task(
-                    parsed_task_id, EntityId.parse(row["run_id"]),
+                    parsed_task_id, run_id,
                     _required_version(body), token=token, decision=decision,
                     value=body.get("value"), actor=actor,
                     idempotency_key=key, now=now(),
@@ -464,6 +460,25 @@ def build_api_v1(
             return {"task_id": task_id, "decision": decision, "status": status.value}
 
         return await mutate(request, WRITE_SCOPE, "human.submit", command)
+
+    async def reissue_human_token(request: Request) -> JSONResponse:
+        """Hand the submission token to an authorised participant.
+
+        The kernel stores only the token's hash, and the in-memory delivery
+        adapter does not survive a restart — without this route a waiting run
+        could become permanently unsubmittable. Rotation semantics live in
+        HumanTaskService.reissue_token.
+        """
+
+        task_id = request.path_params["task_id"]
+
+        def command(body: Mapping[str, Any], actor: str, key: str) -> Mapping[str, Any]:
+            return humans.reissue_token(
+                EntityId.parse(task_id), actor=actor,
+                expected_version=_required_version(body), now=now(),
+            )
+
+        return await mutate(request, WRITE_SCOPE, "human.token", command)
 
     async def add_budget(request: Request) -> JSONResponse:
         run_id = request.path_params["run_id"]
@@ -600,6 +615,10 @@ def build_api_v1(
         ),
         Route(
             "/api/v1/human-tasks/{task_id}/submit", submit_human_task, methods=["POST"]
+        ),
+        Route(
+            "/api/v1/human-tasks/{task_id}/token", reissue_human_token,
+            methods=["POST"],
         ),
         Route("/api/v1/recovery", recovery_scan, methods=["GET"]),
         Route("/api/v1/recovery/apply", recovery_apply, methods=["POST"]),

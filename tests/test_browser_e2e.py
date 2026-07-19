@@ -276,15 +276,6 @@ class HumanTaskTests(BrowserE2ETestCase):
                 row = page.locator("tr", has_text=run_id)
                 row.wait_for(timeout=15000)
 
-                with self.app.state.runtime.service.uow_factory() as uow:
-                    task_row = uow.connection.execute(
-                        "SELECT task_id FROM human_tasks WHERE run_id=?",
-                        (run_id,),
-                    ).fetchone()
-                task_id = EntityId.parse(task_row["task_id"])
-                token = self.app.state.runtime.human_delivery.take(task_id, "local")
-                self.assertIsNotNone(token)
-
                 # The first button is whatever the server advertised first;
                 # the test must not assume which command that is.
                 approve = row.locator("td").last.locator("button").first
@@ -295,8 +286,15 @@ class HumanTaskTests(BrowserE2ETestCase):
                 )
                 approve.click()
 
+                # The whole journey stays on HTTP: the token is fetched from
+                # the server-advertised reissue command, never taken out of
+                # the process. This is exactly the surface an operator has
+                # after a restart wiped the in-memory delivery.
                 page.wait_for_selector("dialog[open]")
-                page.fill("#humanToken", token)
+                page.click("#humanTokenFetch")
+                page.wait_for_function(
+                    "() => document.querySelector('#humanToken').value.length > 0"
+                )
                 page.click("dialog button[value=confirm]")
 
                 # The row leaves the inbox because the server stopped listing

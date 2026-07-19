@@ -130,14 +130,7 @@ class RuntimeKernel:
                 )
                 uow.receipts.record(run_id, command, tuple(event_ids), command.issued_at)
                 uow.commit()
-            for task_id, participants, token in builder.human_deliveries:
-                try:
-                    self.human_task_delivery(task_id, participants, token)
-                except Exception as exc:
-                    self._log(
-                        "human_task_delivery_failed",
-                        {"task_id": str(task_id), "error_type": type(exc).__name__},
-                    )
+            self._dispatch_human_deliveries(builder)
             result = CommandResult(
                 CommandResultDisposition.APPLIED, tuple(event_ids), version,
                 summary=summary,
@@ -202,6 +195,22 @@ class RuntimeKernel:
             self.logger(message, fields)
         except Exception:
             pass
+
+    def _dispatch_human_deliveries(self, builder: _EventBuilder) -> None:
+        """Best-effort post-commit token hand-off; loss is recoverable.
+
+        A delivery that fails (or a process that dies first) does not strand
+        the task: a participant can rotate the token through the reissue
+        endpoint, which is why this is a log rather than a retry loop.
+        """
+        for task_id, participants, token in builder.human_deliveries:
+            try:
+                self.human_task_delivery(task_id, participants, token)
+            except Exception as exc:
+                self._log(
+                    "human_task_delivery_failed",
+                    {"task_id": str(task_id), "error_type": type(exc).__name__},
+                )
 
     @staticmethod
     def _replay_summary(command: CommandEnvelope) -> Mapping[str, Any]:
@@ -1108,7 +1117,10 @@ class RuntimeKernel:
         if row is None or row["node_run_id"] is None:
             raise ValueError("linked HumanTask was not found")
         if row["aggregate_version"] != command.expected_version.value:
-            raise ValueError("HumanTask version conflict")
+            raise ConcurrencyConflictError(
+                command.aggregate_id, command.expected_version.value,
+                row["aggregate_version"],
+            )
         if row["status"] not in {"waiting", "claimed"}:
             raise ValueError("HumanTask is terminal")
         if submission_token_hash(command.payload["submission_token"]) != row["submission_token_hash"]:

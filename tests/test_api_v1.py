@@ -79,6 +79,7 @@ class ApiTestCase(unittest.TestCase):
         self.scopes = {
             "reader": [READ_SCOPE],
             "writer": [READ_SCOPE, WRITE_SCOPE],
+            "second-writer": [READ_SCOPE, WRITE_SCOPE],
             "sensitive": [READ_SCOPE, SENSITIVE_SCOPE],
             "nobody": [],
         }
@@ -468,6 +469,57 @@ class HumanTaskCommandTests(ApiTestCase):
                 body={"expected_version": 1},
             )
             self.assertEqual(403, response.status_code)
+
+    def test_reissue_rotates_the_token_and_bumps_the_version(self) -> None:
+        with AsgiHarness(self.app) as client:
+            _run, task_id, original = self._run_with_task(client)
+            reissued = client.post(
+                f"/api/v1/human-tasks/{task_id}/token", actor="writer", key="t1",
+                body={"expected_version": 1},
+            )
+            self.assertEqual(200, reissued.status_code, reissued.text)
+            data = reissued.json()["data"]
+            self.assertEqual(2, data["expected_version"])
+            self.assertNotEqual(original, data["submission_token"])
+
+            # The original token died the moment the new one was minted.
+            stale = client.post(
+                f"/api/v1/human-tasks/{task_id}/submit", actor="writer", key="t2",
+                body={
+                    "submission_token": original, "decision": "approve",
+                    "expected_version": 2,
+                },
+            )
+            self.assertEqual(403, stale.status_code)
+
+            fresh = client.post(
+                f"/api/v1/human-tasks/{task_id}/submit", actor="writer", key="t3",
+                body={
+                    "submission_token": data["submission_token"],
+                    "decision": "approve", "expected_version": 2,
+                },
+            )
+            self.assertEqual(200, fresh.status_code, fresh.text)
+            self.assertEqual("completed", fresh.json()["data"]["status"])
+
+    def test_reissue_is_refused_for_a_stranger(self) -> None:
+        # "reader" holds only the read scope, so use a second writer-scoped
+        # actor who is neither participant, assignee, claimer nor creator.
+        with AsgiHarness(self.app) as client:
+            _run, task_id, _token = self._run_with_task(client)
+            response = client.post(
+                f"/api/v1/human-tasks/{task_id}/token", actor="second-writer",
+                key="t4", body={"expected_version": 1},
+            )
+            self.assertEqual(403, response.status_code, response.text)
+
+    def test_inbox_advertises_the_token_command(self) -> None:
+        with AsgiHarness(self.app) as client:
+            self._run_with_task(client)
+            items = client.get("/api/v1/inbox", actor="reader").json()["data"]["items"]
+            human = next(item for item in items if item["kind"] == "human")
+            commands = {command["command"] for command in human["allowed_commands"]}
+            self.assertIn("human.token", commands)
 
     def test_a_run_parked_on_a_person_can_still_be_cancelled(self) -> None:
         """Answering an approval and abandoning the run are different acts.

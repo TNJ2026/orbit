@@ -74,13 +74,71 @@ class HumanTaskService:
             deadline_at=deadline_at,
         )
 
-    def linked_node_run_id(self, task_id: EntityId) -> EntityId | None:
+    def linked_scope(self, task_id: EntityId) -> tuple[EntityId, EntityId] | None:
+        """(node_run_id, run_id) when the task belongs to a graph node, else None."""
         with connect_workflow_database(self.path, read_only=True) as db:
             row = self._get(db, task_id)
-            return (
-                None if row["node_run_id"] is None
-                else EntityId.parse(row["node_run_id"])
+            if row["node_run_id"] is None:
+                return None
+            return EntityId.parse(row["node_run_id"]), EntityId.parse(row["run_id"])
+
+    def reissue_token(
+        self, task_id: EntityId, *, actor: str, expected_version: int, now: datetime
+    ) -> dict[str, Any]:
+        """Rotate the submission token and hand the new one to `actor`.
+
+        This is how a participant obtains a token the original delivery lost
+        (restart, crash between commit and delivery). Rotation, not recall: the
+        stored hash is replaced in the same transaction, so exactly one token
+        is live at any moment and the old one stops working the instant the
+        new one exists. Only someone already tied to the task may rotate —
+        a participant, the assignee, the claimer or the creating actor.
+        """
+        with connect_workflow_database(self.path) as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = self._get(db, task_id)
+            if row["aggregate_version"] != expected_version:
+                raise ValueError("HumanTask version conflict")
+            if row["status"] not in {"waiting", "claimed"}:
+                raise ValueError("HumanTask is terminal")
+            participant = db.execute(
+                "SELECT 1 FROM human_task_participants WHERE task_id=? AND actor=?",
+                (str(task_id), actor),
+            ).fetchone()
+            allowed = (
+                participant is not None
+                or actor in {row["assignee"], row["claimed_by"], row["actor"]}
             )
+            if not allowed:
+                raise PermissionError("actor may not obtain this HumanTask token")
+            token = secrets.token_urlsafe(32)
+            append_control_event(
+                db, run_id=EntityId.parse(row["run_id"]), aggregate_id=task_id,
+                event_type="human_token_reissued",
+                payload={"actor": actor},
+                actor=actor, idempotency_key=f"reissue:{expected_version}:{actor}",
+                occurred_at=now,
+            )
+            db.execute(
+                """UPDATE human_tasks SET submission_token_hash=?,
+                     aggregate_version=aggregate_version+1, updated_at=?
+                   WHERE task_id=? AND aggregate_version=?""",
+                (
+                    submission_token_hash(token), now.isoformat(),
+                    str(task_id), expected_version,
+                ),
+            )
+            audit(
+                db, run_id=EntityId.parse(row["run_id"]), actor=actor,
+                action="human.token", target_id=str(task_id), decision="allowed",
+                details={"expected_version": expected_version}, occurred_at=now,
+            )
+            db.commit()
+        return {
+            "task_id": str(task_id),
+            "submission_token": token,
+            "expected_version": expected_version + 1,
+        }
 
     def claim(self, task_id: EntityId, *, actor: str, expected_version: int, now: datetime) -> None:
         with connect_workflow_database(self.path) as db:

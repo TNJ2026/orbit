@@ -175,5 +175,14 @@ and succeeds in both supported locales. The Human node is deliberately a
 Kernel controller rather than a Handler, so a long human wait never occupies a
 Job lease.
 
+The claim includes the credential, not just the buttons. The kernel stores
+only the submission token's hash and the in-process delivery adapter does not
+survive a restart, so the inbox advertises a `human.token` AllowedCommand:
+an authorised participant rotates the token over HTTP
+(`POST /api/v1/human-tasks/{id}/token`), which invalidates the old one in the
+same transaction. The browser E2E fetches its token through that command —
+never out of process memory — so the journey it exercises is exactly the one
+an operator has after a restart.
+
 Foreach, subflow and agentic DSL support remain out of scope and deserve their
 own plan.

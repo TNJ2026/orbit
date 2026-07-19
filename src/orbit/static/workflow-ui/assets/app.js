@@ -49,22 +49,30 @@ function reportError(error) {
 
 /* ---------------------------------------------------------------- commands */
 
-/** Render the buttons a responsibility advertises — and nothing else. */
+/** Render the buttons a responsibility advertises — and nothing else.
+ *
+ * `human.token` is advertised but deliberately not rendered: it exists for
+ * the submit dialog, which uses it to fill its token field. A bare "Get
+ * token" button on the row would hand out a credential with nowhere to put
+ * it.
+ */
 function commandButtons(commands, onDone) {
-  return commands.map((allowed) =>
-    el("button", {
-      class: allowed.command === "run.cancel" ? "button danger" : "button",
-      text: i18n.command(allowed),
-      onclick: () => promptAndExecute(allowed, onDone),
-    }),
-  );
+  return commands
+    .filter((allowed) => allowed.command !== "human.token")
+    .map((allowed) =>
+      el("button", {
+        class: allowed.command === "run.cancel" ? "button danger" : "button",
+        text: i18n.command(allowed),
+        onclick: () => promptAndExecute(allowed, onDone, commands),
+      }),
+    );
 }
 
 /** Collect whatever the command's payload schema needs, then send it once. */
-async function promptAndExecute(allowed, onDone) {
+async function promptAndExecute(allowed, onDone, siblings = []) {
   let payload = {};
   if (allowed.payload_schema.startsWith("human-submit")) {
-    payload = await humanSubmitDialog(allowed);
+    payload = await humanSubmitDialog(allowed, siblings);
   } else if (allowed.payload_schema.startsWith("budget-add")) {
     payload = await budgetDialog();
   } else if (allowed.payload_schema.startsWith("run-cancel")) {
@@ -118,10 +126,32 @@ function dialogResult(dialog, collect) {
   });
 }
 
-function humanSubmitDialog(allowed) {
+function humanSubmitDialog(allowed, siblings = []) {
   const decision = allowed.command.endsWith("reject") ? "reject" : "approve";
   const token = el("input", { type: "text", id: "humanToken", required: "required" });
   const value = el("textarea", { id: "humanValue" });
+  // The token retrieval command, when the server advertises one. Fetching
+  // rotates the stored hash, so the submit must then carry the bumped
+  // expected_version — patched onto `allowed` from the response.
+  const tokenCommand = siblings.find((item) => item.command === "human.token");
+  const fetchToken = tokenCommand
+    ? el("button", {
+        type: "button",
+        class: "button",
+        id: "humanTokenFetch",
+        text: i18n.t("human.token.fetch"),
+        onclick: async () => {
+          try {
+            const response = await api.execute(tokenCommand, {});
+            token.value = response.data.submission_token;
+            allowed.expected_version = response.data.expected_version;
+            tokenCommand.expected_version = response.data.expected_version;
+          } catch (error) {
+            reportError(error);
+          }
+        },
+      })
+    : null;
   const dialog = el("dialog", { "aria-label": i18n.t("human.title") }, [
     el("form", { method: "dialog" }, [
       el("h2", { text: i18n.t("human.title") }),
@@ -132,6 +162,7 @@ function humanSubmitDialog(allowed) {
       el("div", { class: "field" }, [
         el("label", { for: "humanToken", text: i18n.t("human.token") }),
         token,
+        ...(fetchToken ? [fetchToken] : []),
         el("small", { class: "muted", text: i18n.t("human.token.hint") }),
       ]),
       el("div", { class: "field" }, [

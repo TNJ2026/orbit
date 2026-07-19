@@ -280,6 +280,55 @@ class WorkflowDslSemanticTests(unittest.TestCase):
         self.assertEqual("artifact_ref", output.data_policy.transport.value)
         self.assertEqual(("application/json",), output.data_policy.content_types)
 
+    def test_human_output_schema_must_accept_the_submission_shape(self) -> None:
+        # A schema that rejects {"decision": ..., "value": null} would publish
+        # fine and then fail every submit — the task could never be answered.
+        schemas = InMemorySchemaCatalog({
+            "example://request/1.0": {"type": "object"},
+            "example://integer/1.0": {"type": "integer"},
+        })
+        value = {
+            "dsl_version": "1.2",
+            "metadata": {"id": "human_bad_port", "name": "Human"},
+            "nodes": [
+                {
+                    "id": "approve", "kind": "human",
+                    "inputs": [{"id": "value", "schema_id": "example://request/1.0"}],
+                    "outputs": [{"id": "result", "schema_id": "example://integer/1.0"}],
+                    "config": {
+                        "task_kind": "approval", "participants": ["local"],
+                        "quorum": "any",
+                    },
+                },
+                {
+                    "id": "done", "kind": "terminal",
+                    "inputs": [{"id": "result", "schema_id": "example://integer/1.0"}],
+                },
+            ],
+            "edges": [{
+                "id": "approved",
+                "from": {"node": "approve", "port": "result"},
+                "to": {"node": "done", "port": "result"},
+            }],
+            "entry": ["approve"], "terminals": ["done"],
+        }
+        with self.assertRaises(DiagnosticError) as raised:
+            compile_source(
+                json.dumps(value), self.handlers, schemas, source_format="json"
+            )
+        self.assertIn(
+            "DSL_PORT_INCOMPATIBLE",
+            {item.code for item in raised.exception.diagnostics},
+        )
+        # The permissive object schema accepts the shape, so the same graph
+        # with that port publishes cleanly.
+        value["nodes"][0]["outputs"][0]["schema_id"] = "example://request/1.0"
+        value["nodes"][1]["inputs"][0]["schema_id"] = "example://request/1.0"
+        compiled = compile_source(
+            json.dumps(value), self.handlers, schemas, source_format="json"
+        )
+        self.assertEqual("human", compiled.ir.nodes[0].kind)
+
     def test_artifact_and_secret_edges_fail_closed(self) -> None:
         artifact = json.loads(json.dumps(VALID_DSL))
         for port in (

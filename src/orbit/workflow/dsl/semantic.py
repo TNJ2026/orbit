@@ -302,7 +302,8 @@ def analyze_dsl(
             )
         if kind == "human":
             config = node.get("config", {})
-            if len(node.get("outputs", [])) != 1:
+            outputs = node.get("outputs", [])
+            if len(outputs) != 1:
                 diagnostics.append(
                     _diagnostic(
                         document, "DSL_PORT_INCOMPATIBLE",
@@ -310,6 +311,24 @@ def analyze_dsl(
                         node_path + ("outputs",),
                     )
                 )
+            else:
+                # A submission always emits {"decision": ..., "value": ...}
+                # (value may be null). A port schema that rejects that shape
+                # would publish fine and then fail every submit, leaving the
+                # task answerable by no one — so it is a publish-time error.
+                output_schema = schemas.get(outputs[0].get("schema_id", ""))
+                if output_schema is not None:
+                    sample = {"decision": "approve", "value": None}
+                    if any(
+                        Draft202012Validator(to_primitive(output_schema)).iter_errors(sample)
+                    ):
+                        diagnostics.append(
+                            _diagnostic(
+                                document, "DSL_PORT_INCOMPATIBLE",
+                                "human output port schema must accept the submission result {decision, value}",
+                                node_path + ("outputs", 0, "schema_id"),
+                            )
+                        )
             task_kind = config.get("task_kind")
             if task_kind != "approval":
                 diagnostics.append(
