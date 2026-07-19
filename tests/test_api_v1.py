@@ -436,8 +436,12 @@ class PlanApiTests(ApiTestCase):
             )
             self.assertEqual(200, historical.status_code, historical.text)
             self.assertEqual(head, historical.json()["data"]["as_of_global_position"])
+            # The in-process worker may append events between reading the head
+            # and making this request. A one-position lead therefore races the
+            # worker and intermittently becomes a valid historical cursor.
+            future_position = head + 1_000_000
             future = client.get(
-                f"/api/v1/runs/{run_id}/plan/overlay?as_of_global_position={head + 1}",
+                f"/api/v1/runs/{run_id}/plan/overlay?as_of_global_position={future_position}",
                 actor="reader",
             )
             self.assertEqual(400, future.status_code)

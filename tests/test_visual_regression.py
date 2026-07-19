@@ -321,6 +321,19 @@ class VisualRegressionTests(unittest.TestCase):
                     )
                     self.assert_matches_baseline(name, image, viewport)
 
+    def test_runs_phone_cards_in_both_themes(self) -> None:
+        """The operator list stays usable without horizontal table panning."""
+
+        viewport = VIEWPORTS["360x800"]
+        for theme in ("dark", "light"):
+            name = f"runs-{theme}-360x800"
+            with self.subTest(name=name):
+                image = self.capture(
+                    f"{self.base}/ui/#/runs", theme=theme, viewport=viewport,
+                    ready_selector=".runs-table tbody tr",
+                )
+                self.assert_matches_baseline(name, image, viewport)
+
     def test_p3_workflows_and_wizard_in_both_themes(self) -> None:
         viewport = VIEWPORTS["1280x800"]
         for theme in ("dark", "light"):

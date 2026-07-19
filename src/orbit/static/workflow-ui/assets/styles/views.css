@@ -97,6 +97,40 @@
 .check-field { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
 .needs-action { color: var(--amber); font-weight: 600; }
 
+/* Keep the semantic table on desktop, then turn each row into a labelled
+   summary card where a five-column table would otherwise force phone users
+   to pan sideways. The labels come from the active locale in the DOM. */
+@media (max-width: 680px) {
+  .runs-table { min-width: 0; }
+  .runs-table thead {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+  }
+  .runs-table tbody { display: grid; gap: 10px; padding: 12px; }
+  .runs-table tr {
+    display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 14px;
+    padding: 12px; border: 1px solid var(--line); border-radius: 10px;
+    background: var(--panel-2);
+  }
+  .runs-table td {
+    display: grid; grid-template-columns: minmax(84px, .42fr) minmax(0, 1fr);
+    align-items: baseline; gap: 8px; padding: 0; border: 0; overflow-wrap: anywhere;
+  }
+  .runs-table td::before {
+    content: attr(data-label); color: var(--muted); font-size: 11px;
+    font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
+  }
+  .runs-table td[data-field="run"],
+  .runs-table td[data-field="workflow"],
+  .runs-table td[data-field="responsibility"],
+  .runs-table td[data-field="updated"] { grid-column: 1 / -1; }
+  .runs-table td[data-field="run"] {
+    display: block; padding-bottom: 10px; border-bottom: 1px solid var(--line);
+  }
+  .runs-table td[data-field="run"]::before { display: none; }
+  .runs-table .id-button { max-width: 100%; min-height: 40px; text-align: left; }
+}
+
 .goals-layout { display: grid; grid-template-columns: minmax(280px, .8fr) minmax(420px, 1.35fr); gap: 16px; align-items: start; }
 .goal-list {
   display: flex; flex-direction: column; overflow: hidden;
@@ -126,6 +160,10 @@
 @media (max-width: 520px) {
   .home-hero { align-items: flex-start; flex-direction: column; padding: 20px; }
   .stat-grid { grid-template-columns: 1fr 1fr; }
+  .filter-bar > input[type="search"], .filter-bar > select, .filter-bar > button {
+    flex: 1 1 100%; width: 100%; min-height: 40px;
+  }
+  .filter-bar .check-field { flex: 1 1 100%; min-height: 40px; }
   .fact-grid { grid-template-columns: 1fr; }
   .responsibility-row { grid-template-columns: 1fr auto; }
   .responsibility-row .actions { grid-column: 1 / -1; }

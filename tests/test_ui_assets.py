@@ -260,6 +260,14 @@ class AccessibilityTests(unittest.TestCase):
         css = stylesheet_source()
         self.assertIn("@media (max-width", css)
 
+    def test_runs_table_becomes_labelled_cards_on_phones(self) -> None:
+        app_js = (ASSETS / "app.js").read_text(encoding="utf-8")
+        css = stylesheet_source()
+        self.assertIn('class: "runs-table"', app_js)
+        self.assertIn('"data-label": i18n.t("runs.column.run")', app_js)
+        self.assertIn('.runs-table td::before', css)
+        self.assertIn('content: attr(data-label)', css)
+
     def test_mobile_navigation_is_a_real_drawer(self) -> None:
         css = stylesheet_source()
         self.assertIn('body[data-nav-open="true"] .sidebar', css)

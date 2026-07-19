@@ -299,14 +299,14 @@ async function renderGoals(root, selectedRunId = null) {
 
 async function renderRuns(root) {
   const body = el("tbody");
-  const table = el("table", {}, [
+  const table = el("table", { class: "runs-table" }, [
     el("thead", {}, [
       el("tr", {}, [
-        el("th", { text: i18n.t("runs.column.run") }),
-        el("th", { text: i18n.t("runs.column.workflow") }),
-        el("th", { text: i18n.t("runs.column.status") }),
-        el("th", { text: i18n.t("runs.column.responsibility") }),
-        el("th", { text: i18n.t("runs.column.updated") }),
+        el("th", { scope: "col", text: i18n.t("runs.column.run") }),
+        el("th", { scope: "col", text: i18n.t("runs.column.workflow") }),
+        el("th", { scope: "col", text: i18n.t("runs.column.status") }),
+        el("th", { scope: "col", text: i18n.t("runs.column.responsibility") }),
+        el("th", { scope: "col", text: i18n.t("runs.column.updated") }),
       ]),
     ]),
     body,
@@ -367,7 +367,9 @@ async function renderRuns(root) {
     for (const run of response.data.runs) {
       body.append(
         el("tr", {}, [
-          el("td", {}, [
+          el("td", {
+            "data-field": "run", "data-label": i18n.t("runs.column.run"),
+          }, [
             el("button", {
               class: "button id-button",
               text: runName(run),
@@ -375,10 +377,22 @@ async function renderRuns(root) {
               onclick: () => navigate({ view: "run", runId: run.run_id }),
             }),
           ]),
-          el("td", { text: run.workflow_id }),
-          el("td", {}, [pill(run.status)]),
-          el("td", { class: run.requires_actor_action ? "needs-action" : "", text: waitText(run) }),
-          el("td", { text: i18n.dateTime(run.updated_at) }),
+          el("td", {
+            "data-field": "workflow", "data-label": i18n.t("runs.column.workflow"),
+            text: run.workflow_id,
+          }),
+          el("td", {
+            "data-field": "status", "data-label": i18n.t("runs.column.status"),
+          }, [pill(run.status)]),
+          el("td", {
+            "data-field": "responsibility",
+            "data-label": i18n.t("runs.column.responsibility"),
+            class: run.requires_actor_action ? "needs-action" : "", text: waitText(run),
+          }),
+          el("td", {
+            "data-field": "updated", "data-label": i18n.t("runs.column.updated"),
+            text: i18n.dateTime(run.updated_at),
+          }),
         ]),
       );
     }
