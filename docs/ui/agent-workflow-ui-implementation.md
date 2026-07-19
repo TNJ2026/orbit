@@ -23,20 +23,20 @@
 
 | | 旧引擎 | 新 runtime（本文对象） |
 |---|---|---|
-| 代码 | `src/orbit/server.py` | `src/orbit/workflow/` |
-| UI | 8848/ui 任务看板（保留给存量） | 本设计（新建） |
+| 代码 | （旧引擎已在 M6 删除） | `src/orbit/workflow/` |
+| UI | （旧任务看板已在 M6 删除） | `/ui`（本设计，已上线） |
 | 数据源 | SQLite 直读 | `RunViewService` + `DiagnosticsService` + `/api/v1` |
 
-新 UI 不把 Runtime 逻辑写回 `server.py`，但必须在 composition root 中挂载新 API 和静态资源。单机产品默认部署形态：
+新 UI 不含任何服务端状态，静态资源与新 API 均由唯一组合根 `web/app.py` 挂载。单机产品默认部署形态：
 
 ```text
 orbit serve
 ├─ /ui              现有项目/Goal UI
-├─ /workflow-ui     新 Runtime UI
+├─ /ui              Runtime UI（src/orbit/static/workflow-ui/）
 └─ /api/v1          新 Runtime API
 ```
 
-如果未来拆为独立进程，必须另行解决项目发现、DB 路径、认证、CORS 和生命周期；不能把“新 UI 不碰 server.py”理解为无需集成。Authoring 与 Operating 通过不可变 `WorkflowVersion` 连接，并共享统一身份、项目和权限边界。
+如果未来拆为独立进程，必须另行解决项目发现、DB 路径、认证、CORS 和生命周期；单进程内的挂载不是可以省略的集成。Authoring 与 Operating 通过不可变 `WorkflowVersion` 连接，并共享统一身份、项目和权限边界。
 
 ## 2. 三层信息架构
 

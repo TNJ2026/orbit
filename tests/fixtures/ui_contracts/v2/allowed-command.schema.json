@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "orbit://ui-contracts/allowed-command/2.0",
+  "title": "AllowedCommand 2.0",
+  "description": "One action the current actor may take. The client uses method, href, payload_schema and expected_version exactly as given and never constructs a mutation path itself.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "command", "label", "method", "href",
+    "target_aggregate_id", "expected_version", "payload_schema", "confirmation"
+  ],
+  "properties": {
+    "command": {"type": "string", "minLength": 1},
+    "label": {"type": "string", "minLength": 1},
+    "method": {"enum": ["POST"]},
+    "href": {"type": "string", "pattern": "^/api/v1/"},
+    "target_aggregate_id": {"type": "string", "minLength": 1},
+    "expected_version": {"type": "integer", "minimum": 0},
+    "payload_schema": {"type": "string", "minLength": 1},
+    "confirmation": {"enum": ["explicit", "none"]},
+    "action_id": {
+      "type": "string",
+      "description": "Recovery findings only: the scanner action this command applies."
+    }
+  }
+}

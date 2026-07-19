@@ -402,6 +402,32 @@ def create_app(
     from .api_v1 import build_api_v1
     from .mcp import build_mcp
 
+    # Composition facts for /api/v1/capabilities: what this deployment can do,
+    # with a reason when it cannot. The UI renders "service not provided" from
+    # these instead of probing endpoints for 404s (delivery plan API-7).
+    capabilities = {
+        "static_graph": {"available": True},
+        "human_tasks": {"available": True},
+        "planner": (
+            {"available": True}
+            if planner_service is not None
+            else {
+                "available": False,
+                "reason": (
+                    "no_planner_provider" if discover_agents
+                    else "agent_discovery_disabled"
+                ),
+            }
+        ),
+        "agent_handlers": {
+            "available": bool(agent_catalog),
+            **({} if agent_catalog else {"reason": "no_discovered_agents"}),
+        },
+        "foreach": {"available": False, "reason": "not_reachable_from_dsl"},
+        "subflow": {"available": False, "reason": "not_reachable_from_dsl"},
+        "history_overlay": {"available": False, "reason": "not_implemented"},
+    }
+
     routes: list[Route | Mount] = [
         Route("/health/live", health_live, methods=["GET"]),
         Route("/health/ready", health_ready, methods=["GET"]),
@@ -409,6 +435,7 @@ def create_app(
             composition.db_path, composition.service,
             authenticator=authenticator, authorizer=authorizer,
             agent_catalog=agent_catalog,
+            capabilities=capabilities,
         ),
         # The MCP surface is a second protocol over the same application
         # services and the same identity, not a second implementation.

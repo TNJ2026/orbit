@@ -394,6 +394,28 @@ class CatalogTests(ApiTestCase):
             self.assertEqual(200, started.status_code, started.text)
 
 
+class CapabilityTests(ApiTestCase):
+    def test_capabilities_declare_absence_with_a_reason(self) -> None:
+        """Plan API-7: the client never learns 'not provided' from a 404."""
+        with AsgiHarness(self.app) as client:
+            self.assertEqual(401, client.get("/api/v1/capabilities").status_code)
+            response = client.get("/api/v1/capabilities", actor="reader")
+            self.assertEqual(200, response.status_code, response.text)
+            caps = response.json()["data"]["capabilities"]
+            self.assertTrue(caps["static_graph"]["available"])
+            self.assertTrue(caps["human_tasks"]["available"])
+            # This composition runs without discovery: absent features carry
+            # their reason instead of silently missing keys.
+            self.assertFalse(caps["planner"]["available"])
+            self.assertEqual(
+                "agent_discovery_disabled", caps["planner"]["reason"]
+            )
+            self.assertFalse(caps["foreach"]["available"])
+            self.assertEqual(
+                "not_reachable_from_dsl", caps["foreach"]["reason"]
+            )
+
+
 class InboxTests(ApiTestCase):
     def test_inbox_is_readable_and_empty_without_human_tasks(self) -> None:
         with AsgiHarness(self.app) as client:

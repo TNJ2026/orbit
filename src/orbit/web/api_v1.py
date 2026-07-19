@@ -90,6 +90,7 @@ def build_api_v1(
     fault_hook: Callable[[str], None] | None = None,
     clock: Callable[[], datetime] | None = None,
     agent_catalog: Sequence[Mapping[str, Any]] = (),
+    capabilities: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> list[Route]:
     """Routes for `/api/v1`, ready to mount on the composition root."""
 
@@ -329,6 +330,19 @@ def build_api_v1(
         return JSONResponse(
             envelope({"handlers": handlers, "agents": list(agent_catalog)})
         )
+
+    async def capability_read(request: Request) -> JSONResponse:
+        """What this deployment can actually do, and why not when it cannot.
+
+        The delivery plan's empty states need three distinguishable answers —
+        no data, no permission, not provided — and the client must never learn
+        "not provided" by probing for 404s (plan §8, API-7). Capabilities are
+        composition facts injected at build time, not guesses.
+        """
+        actor = authenticate(request, READ_SCOPE)
+        if isinstance(actor, JSONResponse):
+            return actor
+        return JSONResponse(envelope({"capabilities": dict(capabilities or {})}))
 
     async def workflow_catalog(request: Request) -> JSONResponse:
         actor = authenticate(request, READ_SCOPE)
@@ -640,4 +654,5 @@ def build_api_v1(
         Route("/api/v1/recovery/apply", recovery_apply, methods=["POST"]),
         Route("/api/v1/handler-catalog", handler_catalog, methods=["GET"]),
         Route("/api/v1/workflows", workflow_catalog, methods=["GET"]),
+        Route("/api/v1/capabilities", capability_read, methods=["GET"]),
     ]

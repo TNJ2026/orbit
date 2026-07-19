@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "orbit://ui-contracts/run-query/2.0",
+  "title": "RunQuery 2.0",
+  "description": "Query parameters for the run list (plan B3 / API-1). q matches the normalised display name, run id and workflow id. Filtering and sorting happen server-side before pagination; the cursor embeds the order and is opaque to the client.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "q": {"type": "string", "maxLength": 200},
+    "status": {
+      "enum": ["pending", "running", "waiting", "succeeded", "failed", "cancelled"]
+    },
+    "responsibility": {
+      "enum": ["human", "budget", "unknown", "recovery"],
+      "description": "Only runs holding a waiting responsibility of this kind."
+    },
+    "active": {"enum": ["true", "false"]},
+    "cursor": {"type": "string"},
+    "limit": {"type": "string", "pattern": "^[0-9]+$"}
+  }
+}

@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "orbit://ui-contracts/inbox-item/2.0",
+  "title": "InboxItem 2.0",
+  "description": "One waiting responsibility across every run (plan B2). Frozen at P0; the projection lands with API-3/P5. Aggregates human tasks, exhausted budgets, unknown external results and recovery findings into one actor-aware queue. allowed_commands is already authorised for the requesting actor: a reader receives [].",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "item_id", "kind", "run_id", "status", "label",
+    "requires_actor_action", "expected_version", "allowed_commands"
+  ],
+  "properties": {
+    "item_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Stable, cursor-friendly identity: '<kind>:<aggregate id>'."
+    },
+    "kind": {"enum": ["human", "budget", "unknown", "recovery"]},
+    "run_id": {"type": "string", "pattern": "^run:"},
+    "task_id": {
+      "type": ["string", "null"],
+      "description": "Bare HumanTask id for /human-tasks/{task_id}/... paths; null for non-human kinds."
+    },
+    "status": {
+      "enum": ["waiting", "claimed", "exhausted", "unknown", "needs_attention"]
+    },
+    "label": {"type": "string", "minLength": 1},
+    "detail": {"type": ["string", "null"]},
+    "deadline_at": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "description": "UTC ISO-8601; null when the item has no deadline."
+    },
+    "quorum": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["kind", "count", "submitted"],
+      "properties": {
+        "kind": {"enum": ["any", "all", "count"]},
+        "count": {"type": "integer", "minimum": 1},
+        "submitted": {"type": "integer", "minimum": 0}
+      },
+      "description": "Present only for human items with participants."
+    },
+    "requires_actor_action": {
+      "type": "boolean",
+      "description": "True when the requesting actor holds a command that resolves this item. Drives the badge count; badge and list must come from this same projection."
+    },
+    "expected_version": {"type": "integer", "minimum": 0},
+    "allowed_commands": {
+      "type": "array",
+      "items": {"$ref": "allowed-command.schema.json"}
+    }
+  }
+}

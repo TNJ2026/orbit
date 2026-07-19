@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "orbit://ui-contracts/run-summary/2.0",
+  "title": "RunSummary 2.0",
+  "description": "One run as a list row (plan B3). Frozen at P0; the projection lands with API-1/P2. Everything Home, Goals and Runs need in a single page — no per-row follow-up reads. Query semantics: parameters are validated by run-query.schema.json; filtering and sorting happen before pagination; order is requires_actor_action DESC, updated_at DESC, run_id ASC; the cursor is opaque and embeds the same order.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "run_id", "display_name", "workflow_id", "workflow_version", "status",
+    "wait_reason", "goal", "created_at", "updated_at", "projection_version",
+    "responsibility_count", "primary_responsibility", "requires_actor_action",
+    "budget_summary"
+  ],
+  "properties": {
+    "run_id": {"type": "string", "pattern": "^run:"},
+    "display_name": {"type": "string", "minLength": 1},
+    "workflow_id": {"type": "string", "pattern": "^workflow:"},
+    "workflow_version": {"type": "integer", "minimum": 1},
+    "status": {
+      "enum": ["pending", "running", "waiting", "succeeded", "failed", "cancelled"]
+    },
+    "wait_reason": {
+      "enum": [
+        "human_wait", "unknown_wait", "retry_wait", "join_wait",
+        "timer_wait", "budget_wait", "stalled", null
+      ],
+      "description": "Why the run is not progressing; null when it is. Same vocabulary as the graph summary's waiting_reason plus budget_wait."
+    },
+    "goal": {
+      "type": ["string", "null"],
+      "description": "The operator-supplied goal text; null when the run was started without one."
+    },
+    "created_at": {"type": "string", "format": "date-time"},
+    "updated_at": {"type": "string", "format": "date-time"},
+    "projection_version": {"type": "integer", "minimum": 0},
+    "responsibility_count": {"type": "integer", "minimum": 0},
+    "primary_responsibility": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["kind", "label"],
+      "properties": {
+        "kind": {"type": "string", "minLength": 1},
+        "label": {"type": "string", "minLength": 1}
+      }
+    },
+    "requires_actor_action": {
+      "type": "boolean",
+      "description": "Actor-aware: true only when the requesting actor can act. Must agree with the inbox badge semantics."
+    },
+    "budget_summary": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": [
+        "total_microunits", "reserved_microunits", "consumed_microunits",
+        "remaining_microunits", "overrun", "unit"
+      ],
+      "properties": {
+        "total_microunits": {"type": "integer", "minimum": 0},
+        "reserved_microunits": {"type": "integer", "minimum": 0},
+        "consumed_microunits": {"type": "integer", "minimum": 0},
+        "remaining_microunits": {"type": "integer"},
+        "overrun": {"type": "boolean"},
+        "unit": {"const": "microunits"}
+      }
+    }
+  }
+}

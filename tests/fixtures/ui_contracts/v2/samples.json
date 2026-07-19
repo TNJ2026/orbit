@@ -1,0 +1,164 @@
+{
+  "inbox_item_valid": [
+    {
+      "item_id": "human:human_task:8f14e45fceea167a5a36dedd4bea2543",
+      "kind": "human",
+      "run_id": "run:demo-1",
+      "task_id": "human_task:8f14e45fceea167a5a36dedd4bea2543",
+      "status": "waiting",
+      "label": "Human task: approval",
+      "detail": "approval",
+      "deadline_at": "2026-07-20T12:00:00Z",
+      "quorum": {"kind": "any", "count": 1, "submitted": 0},
+      "requires_actor_action": true,
+      "expected_version": 1,
+      "allowed_commands": [
+        {
+          "command": "human.submit.approve",
+          "label": "Approve",
+          "method": "POST",
+          "href": "/api/v1/human-tasks/human_task:8f14e45fceea167a5a36dedd4bea2543/submit",
+          "target_aggregate_id": "human_task:8f14e45fceea167a5a36dedd4bea2543",
+          "expected_version": 1,
+          "payload_schema": "human-submit/1.0",
+          "confirmation": "explicit"
+        },
+        {
+          "command": "human.token",
+          "label": "Get token",
+          "method": "POST",
+          "href": "/api/v1/human-tasks/human_task:8f14e45fceea167a5a36dedd4bea2543/token",
+          "target_aggregate_id": "human_task:8f14e45fceea167a5a36dedd4bea2543",
+          "expected_version": 1,
+          "payload_schema": "human-token/1.0",
+          "confirmation": "explicit"
+        }
+      ]
+    },
+    {
+      "item_id": "budget:budget_account:run:demo-2",
+      "kind": "budget",
+      "run_id": "run:demo-2",
+      "task_id": null,
+      "status": "exhausted",
+      "label": "Budget exhausted",
+      "detail": "consumed 1200000 of 1000000 microunits",
+      "deadline_at": null,
+      "quorum": null,
+      "requires_actor_action": true,
+      "expected_version": 4,
+      "allowed_commands": [
+        {
+          "command": "budget.add",
+          "label": "Add budget",
+          "method": "POST",
+          "href": "/api/v1/runs/run:demo-2/budget",
+          "target_aggregate_id": "budget_account:run:demo-2",
+          "expected_version": 4,
+          "payload_schema": "budget-add/1.0",
+          "confirmation": "explicit"
+        }
+      ]
+    },
+    {
+      "item_id": "unknown:attempt:a1b2c3",
+      "kind": "unknown",
+      "run_id": "run:demo-3",
+      "task_id": null,
+      "status": "unknown",
+      "label": "Unknown external result",
+      "detail": "lease expired during agent.claude execution",
+      "deadline_at": null,
+      "quorum": null,
+      "requires_actor_action": false,
+      "expected_version": 2,
+      "allowed_commands": []
+    },
+    {
+      "item_id": "recovery:node_run:f00d",
+      "kind": "recovery",
+      "run_id": "run:demo-4",
+      "task_id": null,
+      "status": "needs_attention",
+      "label": "Orphaned foreach group",
+      "detail": "ORPHAN_FOREACH",
+      "deadline_at": null,
+      "quorum": null,
+      "requires_actor_action": true,
+      "expected_version": 7,
+      "allowed_commands": [
+        {
+          "command": "recovery.apply",
+          "label": "Apply recovery",
+          "method": "POST",
+          "href": "/api/v1/recovery/apply",
+          "target_aggregate_id": "node_run:f00d",
+          "expected_version": 7,
+          "payload_schema": "recovery-apply/1.0",
+          "confirmation": "explicit",
+          "action_id": "aggregate-orphan-foreach"
+        }
+      ]
+    }
+  ],
+  "inbox_item_invalid": [
+    {"_reason": "unknown kind", "item_id": "x:1", "kind": "planner", "run_id": "run:r", "status": "waiting", "label": "x", "requires_actor_action": false, "expected_version": 1, "allowed_commands": []},
+    {"_reason": "missing requires_actor_action", "item_id": "human:t", "kind": "human", "run_id": "run:r", "status": "waiting", "label": "x", "expected_version": 1, "allowed_commands": []},
+    {"_reason": "command with mutation URL outside /api/v1", "item_id": "human:t", "kind": "human", "run_id": "run:r", "status": "waiting", "label": "x", "requires_actor_action": true, "expected_version": 1, "allowed_commands": [{"command": "human.submit.approve", "label": "Approve", "method": "POST", "href": "/legacy/submit", "target_aggregate_id": "human_task:t", "expected_version": 1, "payload_schema": "human-submit/1.0", "confirmation": "explicit"}]}
+  ],
+  "run_summary_valid": [
+    {
+      "run_id": "run:demo-1",
+      "display_name": "Publish October newsletter",
+      "workflow_id": "workflow:content",
+      "workflow_version": 3,
+      "status": "waiting",
+      "wait_reason": "human_wait",
+      "goal": "Get the October newsletter approved and published",
+      "created_at": "2026-07-19T08:00:00Z",
+      "updated_at": "2026-07-19T09:30:00Z",
+      "projection_version": 12,
+      "responsibility_count": 1,
+      "primary_responsibility": {"kind": "human", "label": "Human task: approval"},
+      "requires_actor_action": true,
+      "budget_summary": {
+        "total_microunits": 1000000,
+        "reserved_microunits": 100000,
+        "consumed_microunits": 400000,
+        "remaining_microunits": 500000,
+        "overrun": false,
+        "unit": "microunits"
+      }
+    },
+    {
+      "run_id": "run:demo-5",
+      "display_name": "run:demo-5",
+      "workflow_id": "workflow:linear",
+      "workflow_version": 1,
+      "status": "succeeded",
+      "wait_reason": null,
+      "goal": null,
+      "created_at": "2026-07-18T08:00:00Z",
+      "updated_at": "2026-07-18T08:05:00Z",
+      "projection_version": 9,
+      "responsibility_count": 0,
+      "primary_responsibility": null,
+      "requires_actor_action": false,
+      "budget_summary": null
+    }
+  ],
+  "run_summary_invalid": [
+    {"_reason": "unknown wait_reason", "run_id": "run:x", "display_name": "x", "workflow_id": "workflow:w", "workflow_version": 1, "status": "waiting", "wait_reason": "coffee_break", "goal": null, "created_at": "2026-07-19T08:00:00Z", "updated_at": "2026-07-19T08:00:00Z", "projection_version": 1, "responsibility_count": 0, "primary_responsibility": null, "requires_actor_action": false, "budget_summary": null},
+    {"_reason": "missing wait_reason key entirely", "run_id": "run:x", "display_name": "x", "workflow_id": "workflow:w", "workflow_version": 1, "status": "running", "goal": null, "created_at": "2026-07-19T08:00:00Z", "updated_at": "2026-07-19T08:00:00Z", "projection_version": 1, "responsibility_count": 0, "primary_responsibility": null, "requires_actor_action": false, "budget_summary": null}
+  ],
+  "run_query_valid": [
+    {"q": "newsletter", "status": "waiting", "responsibility": "human", "limit": "25"},
+    {"cursor": "b64opaque", "limit": "50"},
+    {}
+  ],
+  "run_query_invalid": [
+    {"_reason": "unknown filter key", "state": "running"},
+    {"_reason": "bad status", "status": "paused"},
+    {"_reason": "non-numeric limit", "limit": "lots"}
+  ]
+}
