@@ -8,7 +8,11 @@ FAMILIES = {
     "start_attempt": "run_node", "complete_attempt": "run_node",
     "fail_attempt": "run_node", "cancel_run": "run_node",
     "cancel_node": "run_node", "advance_graph": "graph",
+    "advance_foreach": "foreach",
     "submit_human_task": "human",
+    "apply_planner_proposal": "planner",
+    "reject_planner_proposal": "planner",
+    "apply_subflow_result": "subflow",
 }
 
 

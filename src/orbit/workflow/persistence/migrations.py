@@ -854,6 +854,18 @@ _MIGRATIONS: tuple[tuple[int, str, str], ...] = (
             ON run_artifact_subjects(subject, run_id);
         """,
     ),
+    (
+        12,
+        "foreach child run binding",
+        """
+        ALTER TABLE foreach_items ADD COLUMN child_run_id TEXT
+            REFERENCES workflow_runs(run_id);
+        CREATE UNIQUE INDEX foreach_item_child_run
+            ON foreach_items(child_run_id) WHERE child_run_id IS NOT NULL;
+        CREATE INDEX foreach_child_terminal_scan
+            ON foreach_items(group_id, status, child_run_id);
+        """,
+    ),
 )
 
 

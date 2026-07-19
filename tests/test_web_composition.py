@@ -357,7 +357,11 @@ class CompositionTests(unittest.TestCase):
         try:
             names = [loop.name for loop in composition.loops]
             self.assertEqual(
-                ["worker-1", "worker-2", "worker-3", "timer-1", "recovery"], names
+                [
+                    "worker-1", "worker-2", "worker-3", "timer-1",
+                    "recovery", "subflow-reconciler", "foreach-reconciler",
+                ],
+                names,
             )
             self.assertEqual(3, len(composition._workers))
             self.assertEqual(3, len({id(w) for w in composition._workers}))
@@ -390,7 +394,7 @@ class HealthEndpointTests(unittest.TestCase):
             checks = response.json()["checks"]
             self.assertTrue(checks["database"]["ok"])
             self.assertTrue(checks["migrations"]["ok"])
-            self.assertEqual(list(range(1, 12)), checks["migrations"]["applied"])
+            self.assertEqual(list(range(1, 13)), checks["migrations"]["applied"])
             self.assertTrue(checks["handlers"]["sealed"])
             self.assertTrue(checks["components"]["ok"])
 

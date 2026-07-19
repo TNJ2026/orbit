@@ -8,6 +8,7 @@ Kernel boundary or introducing nested Units of Work.
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 import secrets
 from typing import Any, Callable, Mapping
 
@@ -24,6 +25,7 @@ from ..domain.graph import (
     EdgeRoute, JoinMergeMode, JoinMode, JoinPolicy, derive_branch_token_id,
     derive_graph_node_run_id, derive_join_group_id,
 )
+from ..domain.foreach import derive_group_id, derive_item_id, stable_aggregate
 from ..domain.graph_persistence import JoinGroupRecord, JoinGroupStatus
 from ..domain.errors import ErrorCategory, ErrorInfo
 from ..domain.ids import EntityId
@@ -52,6 +54,7 @@ from .commands import CommandRouter
 from ..persistence.control import append_control_event, audit
 from ..graph.joins import JoinTokenFact, evaluate_join
 from ..graph.routing import evaluate_route
+from ..planner.context import build_planning_context
 
 
 class _EventBuilder:
@@ -92,6 +95,8 @@ class RuntimeKernel:
         schema_validator: Callable[[str, Any], None] | None = None,
         work_scheduler: Any = None,
         human_task_delivery: Callable[[EntityId, tuple[str, ...], str], None] | None = None,
+        planner_service: Any = None,
+        budget_service: Any = None,
     ) -> None:
         self.uow_factory = uow_factory
         self.workflow_versions = workflow_versions
@@ -102,12 +107,14 @@ class RuntimeKernel:
         self.human_task_delivery = human_task_delivery or (
             lambda task_id, participants, token: None
         )
+        self.planner_service = planner_service
+        self.budget_service = budget_service
         self.command_router = CommandRouter(self)
 
     def handle(self, command: CommandEnvelope) -> CommandResult:
         if command.command_type not in RUNTIME_COMMAND_TYPES:
             return self._rejected("UNKNOWN_COMMAND", f"unsupported command {command.command_type}", command)
-        if command.command_type in {"schedule_node", "advance_graph"} and not command.actor.startswith("system:"):
+        if command.command_type in {"schedule_node", "advance_graph", "apply_planner_proposal"} and not command.actor.startswith("system:"):
             return self._rejected(
                 "POLICY_REJECTED", f"{command.command_type} is a system-only command", command
             )
@@ -236,6 +243,8 @@ class RuntimeKernel:
                 "task_id": str(command.aggregate_id), "decision": decision,
                 "status": "rejected" if decision == "reject" else "completed",
             }
+        if command.command_type == "apply_planner_proposal":
+            return {"proposal_id": command.payload["proposal_id"]}
         return {"run_id": str(command.aggregate_id)}
 
     @staticmethod
@@ -259,6 +268,17 @@ class RuntimeKernel:
             goal.splitlines()[0][:120] if goal is not None else str(command.aggregate_id)
         )
         artifact_inputs = tuple(payload.get("artifact_inputs", ()))
+        budget_microunits = payload.get("budget_microunits")
+        if (
+            isinstance(budget_microunits, bool)
+            or budget_microunits is not None
+            and (not isinstance(budget_microunits, int) or budget_microunits < 0)
+        ):
+            raise ValueError("Run budget must be a non-negative integer")
+        artifact_subjects = tuple(payload.get("artifact_subjects", ()))
+        artifact_scope = tuple(payload.get("artifact_scope", ()))
+        if (artifact_subjects or artifact_scope) and command.actor != "system:subflow":
+            raise ValueError("Artifact ACL transfer is system:subflow-only")
         version_record = self.workflow_versions.get(str(workflow_id), workflow_version.value)
         if version_record is None:
             raise ValueError("WorkflowVersion was not found")
@@ -275,6 +295,46 @@ class RuntimeKernel:
             command.issued_at, command.issued_at, goal, display_name,
         )
         uow.runs.create(run)
+        if budget_microunits is not None:
+            if self.budget_service is None or getattr(uow, "connection", None) is None:
+                raise ValueError("Run budget requires durable Budget persistence")
+            self.budget_service.ensure_account_in_uow(
+                uow.connection, run.run_id, budget_microunits,
+                actor=command.actor, now=command.issued_at,
+            )
+        connection = getattr(uow, "connection", None)
+        if connection is not None and not command.actor.startswith("system:"):
+            connection.execute(
+                "INSERT OR IGNORE INTO run_artifact_subjects(run_id,subject,role,created_at) VALUES (?,?,'owner',?)",
+                (str(run.run_id), command.actor, command.issued_at.isoformat()),
+            )
+        for subject in artifact_subjects:
+            if not isinstance(subject, str) or not subject.strip():
+                raise ValueError("Artifact transfer subject is invalid")
+            if connection is None:
+                raise ValueError("Artifact ACL transfer requires durable persistence")
+            connection.execute(
+                "INSERT OR IGNORE INTO run_artifact_subjects(run_id,subject,role,created_at) VALUES (?,?,'participant',?)",
+                (str(run.run_id), subject, command.issued_at.isoformat()),
+            )
+        for raw_artifact_id in artifact_scope:
+            if connection is None:
+                raise ValueError("Artifact ACL transfer requires durable persistence")
+            artifact_id = EntityId.parse(str(raw_artifact_id))
+            artifact = uow.artifacts.get(artifact_id, committed_only=True)
+            if artifact is None:
+                raise ValueError("Subflow Artifact transfer source is missing")
+            for subject in artifact_subjects:
+                prior = connection.execute(
+                    "SELECT 1 FROM artifact_acl WHERE artifact_id=? AND subject=? AND permission='read'",
+                    (str(artifact_id), subject),
+                ).fetchone()
+                if prior is None:
+                    raise ValueError("Subflow Artifact transfer would expand subject authority")
+                connection.execute(
+                    "INSERT OR IGNORE INTO artifact_acl(artifact_id,subject,permission,granted_by,created_at) VALUES (?,?,'read','system:subflow',?)",
+                    (str(artifact_id), subject, command.issued_at.isoformat()),
+                )
         run_event = events.make(
             run.run_id, 1, "workflow_run_transitioned",
             _transition_payload(
@@ -748,6 +808,99 @@ class RuntimeKernel:
         if run.status in {WorkflowRunStatus.SUCCEEDED, WorkflowRunStatus.FAILED, WorkflowRunStatus.CANCELLED}:
             raise ValueError("WorkflowRun is already terminal")
         ids = []
+        foreach_children = uow.connection.execute(
+            """SELECT g.group_id,i.item_id,i.child_run_id
+                FROM foreach_groups g JOIN foreach_items i ON i.group_id=g.group_id
+                 JOIN workflow_runs child ON child.run_id=i.child_run_id
+                WHERE g.run_id=? AND g.status='running' AND i.status='running'
+                ORDER BY g.group_id,i.item_index""",
+            (str(run.run_id),),
+        ).fetchall()
+        for item in foreach_children:
+            child_run_id = EntityId.parse(item["child_run_id"])
+            child = uow.runs.get(child_run_id)
+            if child.status not in {
+                WorkflowRunStatus.SUCCEEDED, WorkflowRunStatus.FAILED,
+                WorkflowRunStatus.CANCELLED,
+            }:
+                child_command = CommandEnvelope.create(
+                    command_type="cancel_run", aggregate_id=child_run_id,
+                    correlation_id=run.run_id,
+                    expected_version=child.aggregate_version,
+                    idempotency_key=f"foreach-parent-cancel:{item['item_id']}",
+                    actor="system:foreach", issued_at=command.issued_at,
+                    payload={"reason": "foreach_parent_cancelled"},
+                )
+                self._cancel_run(uow, child_command, _EventBuilder(child_command))
+            if self.budget_service is not None:
+                child_budget = uow.connection.execute(
+                    "SELECT consumed_microunits FROM budget_accounts WHERE run_id=?",
+                    (str(child_run_id),),
+                ).fetchone()
+                self.budget_service.settle_transfer_in_uow(
+                    uow.connection,
+                    self.budget_service.derive_reservation_id(
+                        run.run_id, EntityId.parse(item["item_id"]),
+                    ),
+                    0 if child_budget is None else int(child_budget["consumed_microunits"]),
+                    actor=command.actor, now=command.issued_at,
+                )
+        uow.connection.execute(
+            """UPDATE foreach_items SET status='cancelled',
+                   aggregate_version=aggregate_version+1,updated_at=?
+                 WHERE group_id IN (SELECT group_id FROM foreach_groups
+                                     WHERE run_id=? AND status='running')
+                   AND status IN ('pending','ready','running')""",
+            (command.issued_at.isoformat(), str(run.run_id)),
+        )
+        uow.connection.execute(
+            """UPDATE foreach_groups SET status='cancelled',
+                   aggregate_version=aggregate_version+1,updated_at=?
+                 WHERE run_id=? AND status='running'""",
+            (command.issued_at.isoformat(), str(run.run_id)),
+        )
+        linked_children = uow.connection.execute(
+            """SELECT l.* FROM subflow_links l
+                 JOIN workflow_runs child ON child.run_id=l.child_run_id
+                WHERE l.parent_run_id=? AND l.status IN ('starting','running')
+                  AND child.status NOT IN ('succeeded','failed','cancelled')
+                ORDER BY l.link_id""",
+            (str(run.run_id),),
+        ).fetchall()
+        for link in linked_children:
+            propagation = json.loads(link["propagation_policy_json"])
+            if not propagation.get("parent_cancel_to_child", True):
+                continue
+            child_run_id = EntityId.parse(link["child_run_id"])
+            child = uow.runs.get(child_run_id)
+            child_command = CommandEnvelope.create(
+                command_type="cancel_run", aggregate_id=child_run_id,
+                correlation_id=run.run_id,
+                expected_version=child.aggregate_version,
+                idempotency_key=f"subflow-parent-cancel:{link['link_id']}",
+                actor="system:subflow", issued_at=command.issued_at,
+                payload={"reason": "parent_run_cancelled"},
+            )
+            self._cancel_run(uow, child_command, _EventBuilder(child_command))
+            append_control_event(
+                uow.connection, run_id=run.run_id,
+                aggregate_id=EntityId.parse(link["link_id"]),
+                event_type="subflow_link_transitioned",
+                payload={
+                    "from": link["status"], "to": "cancelled",
+                    "child_run_id": link["child_run_id"],
+                    "reason": "parent_run_cancelled",
+                },
+                actor=command.actor,
+                idempotency_key=f"parent-cancel:{command.idempotency_key}",
+                occurred_at=command.issued_at,
+            )
+            uow.connection.execute(
+                """UPDATE subflow_links SET status='cancelled',
+                       aggregate_version=aggregate_version+1,updated_at=?
+                     WHERE link_id=? AND status IN ('starting','running')""",
+                (command.issued_at.isoformat(), link["link_id"]),
+            )
         if self.work_scheduler is not None:
             for job in uow.jobs.list_by_run(run.run_id):
                 if job.status in {JobStatus.READY, JobStatus.LEASED, JobStatus.RUNNING, JobStatus.RETRY_WAIT}:
@@ -926,7 +1079,12 @@ class RuntimeKernel:
         if extra:
             raise ValueError(f"unknown {kind} ports: {sorted(extra)}")
         for port_id, item in value.items():
-            self.schema_validator(by_id[port_id]["schema_id"], item)
+            port = by_id[port_id]
+            if port["data_policy"]["transport"] == PortTransport.ARTIFACT_REF.value:
+                if not isinstance(item, Mapping) or "artifact_id" not in item:
+                    raise ValueError(f"{kind} Artifact port {port_id} requires an artifact_id")
+            else:
+                self.schema_validator(port["schema_id"], item)
 
     def _schedule_graph(
         self, uow, command, events, plan: GraphExecutionPlan, node_id: str,
@@ -978,6 +1136,21 @@ class RuntimeKernel:
             return ids
         if node.kind == "human":
             ids.extend(self._activate_human_controller(
+                uow, command, events, plan, ready_record, input_value,
+            ))
+            return ids
+        if node.kind == "agentic":
+            ids.extend(self._activate_agentic_controller(
+                uow, command, events, plan, ready_record,
+            ))
+            return ids
+        if node.kind == "foreach":
+            ids.extend(self._activate_foreach_controller(
+                uow, command, events, plan, ready_record, input_value,
+            ))
+            return ids
+        if node.kind == "subflow":
+            ids.extend(self._activate_subflow_controller(
                 uow, command, events, plan, ready_record, input_value,
             ))
             return ids
@@ -1113,6 +1286,402 @@ class RuntimeKernel:
         events.human_deliveries.append((task_id, participants, token))
         return ids
 
+    def _activate_agentic_controller(self, uow, command, events, plan, ready_record):
+        if self.planner_service is None:
+            raise ValueError("agentic node requires a configured Planner provider")
+        node = plan.node(ready_record.node_id)
+        config = dict(node.config)
+        row = uow.connection.execute(
+            "SELECT goal FROM workflow_runs WHERE run_id=?", (str(plan.run_id),)
+        ).fetchone()
+        goal = "" if row is None or row["goal"] is None else str(row["goal"])
+        if not goal.strip():
+            raise ValueError("agentic Run requires a non-empty goal")
+        runtime_nodes = [
+            {"node_id": item.node_id, "status": item.status.value,
+             "generation": item.generation}
+            for item in uow.node_runs.list_by_run(plan.run_id)
+        ]
+        context = build_planning_context(
+            run_id=plan.run_id, plan_version=plan.plan_version, goal=goal,
+            graph_summary={
+                "status": "waiting", "plan_version": plan.plan_version.value,
+                "nodes": runtime_nodes, "tokens": [], "joins": [],
+                "waiting_reason": f"planner:{ready_record.node_run_id}",
+            },
+            available_capabilities=tuple(config.get("capabilities", ())),
+            remaining_limits=dict(config.get("remaining_limits", {})),
+        )
+        attempt = self.planner_service.request_decision_in_uow(
+            uow, context,
+            prompt_hash=definition_hash({
+                "node_id": node.node_id, "config": config,
+                "workflow_definition_hash": plan.workflow_definition_hash.value,
+            }),
+            capability_manifest_hash=definition_hash(
+                tuple(sorted(config.get("capabilities", ())))
+            ),
+            model_id=str(config.get("model_id", "default")),
+            provider_id=str(config.get("provider_id", "trusted-cli")),
+            now=command.issued_at,
+        )
+        running = events.make(
+            ready_record.node_run_id, ready_record.aggregate_version.value + 1,
+            "node_run_transitioned",
+            _transition_payload(
+                "node_run", NodeRunStatus.READY, NodeRunStatus.RUNNING,
+                run_id=str(plan.run_id), node_id=ready_record.node_id,
+            ),
+        )
+        waiting = events.make(
+            ready_record.node_run_id, ready_record.aggregate_version.value + 2,
+            "node_run_transitioned",
+            _transition_payload(
+                "node_run", NodeRunStatus.RUNNING, NodeRunStatus.WAITING,
+                run_id=str(plan.run_id), node_id=ready_record.node_id,
+            ),
+        )
+        uow.events.append(
+            plan.run_id, ready_record.node_run_id,
+            ready_record.aggregate_version, (running, waiting),
+        )
+        uow.node_runs.update(
+            replace(
+                ready_record, status=NodeRunStatus.WAITING,
+                aggregate_version=AggregateVersion(
+                    ready_record.aggregate_version.value + 2
+                ), updated_at=command.issued_at,
+            ),
+            ready_record.aggregate_version,
+        )
+        ids = [running.event_id, waiting.event_id]
+        run = uow.runs.get(plan.run_id)
+        if run.status is WorkflowRunStatus.RUNNING:
+            run_event = events.make(
+                run.run_id, run.aggregate_version.value + 1,
+                "workflow_run_transitioned",
+                _transition_payload(
+                    "workflow_run", WorkflowRunStatus.RUNNING,
+                    WorkflowRunStatus.WAITING, reason="planner_wait",
+                ),
+            )
+            uow.events.append(run.run_id, run.run_id, run.aggregate_version, (run_event,))
+            uow.runs.update(
+                replace(run, status=WorkflowRunStatus.WAITING,
+                        aggregate_version=run.aggregate_version.next(),
+                        updated_at=command.issued_at),
+                run.aggregate_version,
+            )
+            ids.append(run_event.event_id)
+        return ids
+
+    def _activate_foreach_controller(
+        self, uow, command, events, plan, ready_record, input_value,
+    ):
+        node = plan.node(ready_record.node_id)
+        config = dict(node.config)
+        items = input_value.get(config["items_port"])
+        if not isinstance(items, (list, tuple)):
+            raise ValueError("Foreach items port must contain an array")
+        if len(items) > 100_000:
+            raise ValueError("Foreach item limit exceeded")
+        if self.budget_service is None:
+            raise ValueError("Foreach requires a configured Budget service")
+        item_budget = int(config["item_budget_microunits"])
+        self.budget_service.ensure_account_in_uow(
+            uow.connection, plan.run_id, item_budget * len(items),
+            actor=command.actor, now=command.issued_at,
+        )
+        checksum = definition_hash(tuple(items)).value
+        group_id = derive_group_id(
+            plan.run_id, node.node_id, checksum, plan.plan_version,
+        )
+        append_control_event(
+            uow.connection, run_id=plan.run_id, aggregate_id=group_id,
+            event_type="foreach_group_created",
+            payload={
+                "item_count": len(items), "source_checksum": checksum,
+                "plan_version": plan.plan_version.value,
+                "node_run_id": str(ready_record.node_run_id),
+            },
+            actor=command.actor, idempotency_key=checksum,
+            occurred_at=command.issued_at,
+        )
+        uow.connection.execute(
+            """INSERT INTO foreach_groups(
+                   group_id,run_id,node_run_id,source_checksum,plan_version,
+                   status,failure_policy,concurrency_limit,item_count,
+                   aggregate_json,aggregate_checksum,aggregate_version,
+                   created_at,updated_at
+               ) VALUES (?,?,?,?,?,'running',?,?,?,NULL,NULL,1,?,?)""",
+            (
+                str(group_id), str(plan.run_id), str(ready_record.node_run_id),
+                checksum, plan.plan_version.value,
+                config.get("failure_policy", "fail_fast"),
+                int(config.get("concurrency_limit", 8)), len(items),
+                command.issued_at.isoformat(), command.issued_at.isoformat(),
+            ),
+        )
+        for index, value in enumerate(items):
+            key = str(index)
+            item_id = derive_item_id(
+                group_id, key, index, checksum, plan.plan_version,
+            )
+            uow.connection.execute(
+                """INSERT INTO foreach_items(
+                       item_id,group_id,run_id,item_key,item_index,status,
+                       input_json,output_json,error_json,retry_count,
+                       aggregate_version,created_at,updated_at,child_run_id
+                   ) VALUES (?,?,?,?,?,'pending',?,NULL,NULL,0,0,?,?,NULL)""",
+                (
+                    str(item_id), str(group_id), str(plan.run_id), key, index,
+                    canonical_json(value), command.issued_at.isoformat(),
+                    command.issued_at.isoformat(),
+                ),
+            )
+        running = events.make(
+            ready_record.node_run_id, ready_record.aggregate_version.value + 1,
+            "node_run_transitioned",
+            _transition_payload(
+                "node_run", NodeRunStatus.READY, NodeRunStatus.RUNNING,
+                run_id=str(plan.run_id), node_id=ready_record.node_id,
+            ),
+        )
+        waiting = events.make(
+            ready_record.node_run_id, ready_record.aggregate_version.value + 2,
+            "node_run_transitioned",
+            _transition_payload(
+                "node_run", NodeRunStatus.RUNNING, NodeRunStatus.WAITING,
+                run_id=str(plan.run_id), node_id=ready_record.node_id,
+            ),
+        )
+        uow.events.append(
+            plan.run_id, ready_record.node_run_id,
+            ready_record.aggregate_version, (running, waiting),
+        )
+        uow.node_runs.update(
+            replace(
+                ready_record, status=NodeRunStatus.WAITING,
+                aggregate_version=AggregateVersion(
+                    ready_record.aggregate_version.value + 2
+                ), updated_at=command.issued_at,
+            ),
+            ready_record.aggregate_version,
+        )
+        ids = [running.event_id, waiting.event_id]
+        run = uow.runs.get(plan.run_id)
+        if run.status is WorkflowRunStatus.RUNNING:
+            run_event = events.make(
+                run.run_id, run.aggregate_version.value + 1,
+                "workflow_run_transitioned",
+                _transition_payload(
+                    "workflow_run", WorkflowRunStatus.RUNNING,
+                    WorkflowRunStatus.WAITING, reason="foreach_wait",
+                ),
+            )
+            uow.events.append(
+                run.run_id, run.run_id, run.aggregate_version, (run_event,)
+            )
+            uow.runs.update(
+                replace(
+                    run, status=WorkflowRunStatus.WAITING,
+                    aggregate_version=run.aggregate_version.next(),
+                    updated_at=command.issued_at,
+                ),
+                run.aggregate_version,
+            )
+            ids.append(run_event.event_id)
+        return ids
+
+    def _activate_subflow_controller(
+        self, uow, command, events, plan, ready_record, input_value,
+    ):
+        node = plan.node(ready_record.node_id)
+        config = dict(node.config)
+        child_run_id = derived_id("run", ready_record.node_run_id, "subflow")
+        prior_depth = uow.connection.execute(
+            "SELECT recursion_depth FROM subflow_links WHERE child_run_id=?",
+            (str(plan.run_id),),
+        ).fetchone()
+        recursion_depth = 1 if prior_depth is None else int(prior_depth[0]) + 1
+        if recursion_depth > 16:
+            raise ValueError("Subflow recursion limit exceeded")
+        artifact_ids = []
+        for port in node.inputs:
+            if port["data_policy"]["transport"] != PortTransport.ARTIFACT_REF.value:
+                continue
+            raw = input_value.get(port["id"])
+            if not isinstance(raw, Mapping) or "artifact_id" not in raw:
+                raise ValueError("Subflow Artifact input requires an artifact_id")
+            artifact_id = EntityId.parse(str(raw["artifact_id"]))
+            artifact = uow.artifacts.get(artifact_id, committed_only=True)
+            if artifact is None or artifact.schema_id != port["schema_id"]:
+                raise ValueError("Subflow Artifact input is missing or has the wrong schema")
+            allowed = (
+                artifact.visibility is ArtifactVisibility.RUN
+                and artifact.run_id == plan.run_id
+                or artifact.visibility is ArtifactVisibility.WORKFLOW
+                and artifact.workflow_id == plan.workflow_id
+                or artifact.visibility is ArtifactVisibility.NODE
+                and artifact.scope_id == ready_record.node_run_id
+            )
+            if not allowed:
+                raise ValueError("Subflow Artifact visibility denies the parent NodeRun")
+            artifact_ids.append(artifact_id)
+        parent_subjects = [
+            row[0] for row in uow.connection.execute(
+                "SELECT subject FROM run_artifact_subjects WHERE run_id=? ORDER BY subject",
+                (str(plan.run_id),),
+            )
+        ]
+        artifact_subjects = [
+            subject for subject in parent_subjects
+            if all(uow.connection.execute(
+                "SELECT 1 FROM artifact_acl WHERE artifact_id=? AND subject=? AND permission='read'",
+                (str(artifact_id), subject),
+            ).fetchone() is not None for artifact_id in artifact_ids)
+        ]
+        child_command = CommandEnvelope.create(
+            command_type="start_run", aggregate_id=child_run_id,
+            correlation_id=plan.run_id, expected_version=AggregateVersion(0),
+            idempotency_key=f"subflow-start:{ready_record.node_run_id}",
+            actor="system:subflow", issued_at=command.issued_at,
+            payload={
+                "workflow_id": config["workflow_id"],
+                "workflow_version": int(config["workflow_version"]),
+                "definition_hash": config["definition_hash"],
+                "input": dict(input_value),
+                "artifact_subjects": artifact_subjects,
+                "artifact_scope": [str(item) for item in artifact_ids],
+            },
+        )
+        child_events = _EventBuilder(child_command)
+        self._start_run(uow, child_command, child_events)
+        child_plan = self._load_plan(uow, child_run_id, 1)
+        if (
+            len(child_plan.entry_node_ids) != 1
+            or len(child_plan.terminal_node_ids) != 1
+        ):
+            raise ValueError("Subflow child requires one entry and one terminal")
+        child_entry = child_plan.node(child_plan.entry_node_ids[0])
+        child_terminal = child_plan.node(child_plan.terminal_node_ids[0])
+        def port_contract(ports):
+            return {item["id"]: item["schema_id"] for item in ports}
+        if port_contract(node.inputs) != port_contract(child_entry.inputs):
+            raise ValueError("Subflow parent inputs do not match child entry")
+        if port_contract(node.outputs) != port_contract(child_terminal.inputs):
+            raise ValueError("Subflow parent outputs do not match child terminal")
+        link_hash = definition_hash({
+            "parent_run_id": str(plan.run_id),
+            "child_run_id": str(child_run_id),
+            "parent_node_run_id": str(ready_record.node_run_id),
+        })
+        link_id = EntityId(
+            "subflow_link", link_hash.value.removeprefix("sha256:")
+        )
+        append_control_event(
+            uow.connection, run_id=plan.run_id, aggregate_id=link_id,
+            event_type="subflow_link_created",
+            payload={
+                "child_run_id": str(child_run_id),
+                "workflow_id": config["workflow_id"],
+                "workflow_version": int(config["workflow_version"]),
+                "recursion_depth": recursion_depth,
+                "parent_node_run_id": str(ready_record.node_run_id),
+            },
+            actor=command.actor, idempotency_key=link_hash.value,
+            occurred_at=command.issued_at,
+        )
+        propagation = {
+            "parent_cancel_to_child": config.get("parent_cancel_to_child", True),
+            "child_failure": config.get("child_failure", "fail_parent"),
+            "child_unknown": "wait",
+        }
+        uow.connection.execute(
+            """INSERT INTO subflow_links(
+                   link_id,parent_run_id,child_run_id,parent_node_run_id,
+                   workflow_id,workflow_version,status,correlation_id,
+                   propagation_policy_json,input_mapping_json,output_mapping_json,
+                   artifact_scope_json,recursion_depth,aggregate_version,
+                   created_at,updated_at
+               ) VALUES (?,?,?,?,?,?,'running',?,?,?,?,?,?,0,?,?)""",
+            (
+                str(link_id), str(plan.run_id), str(child_run_id),
+                str(ready_record.node_run_id), config["workflow_id"],
+                int(config["workflow_version"]), str(plan.run_id),
+                canonical_json(propagation), canonical_json({"kind": "identity"}),
+                canonical_json({"kind": "identity"}),
+                canonical_json([str(item) for item in artifact_ids]),
+                recursion_depth, command.issued_at.isoformat(),
+                command.issued_at.isoformat(),
+            ),
+        )
+        if artifact_ids:
+            audit(
+                uow.connection, run_id=plan.run_id, actor=command.actor,
+                action="subflow.artifact_acl_transfer", target_id=str(link_id),
+                decision="allowed",
+                details={
+                    "child_run_id": str(child_run_id),
+                    "artifact_count": len(artifact_ids),
+                    "subject_count": len(artifact_subjects),
+                },
+                occurred_at=command.issued_at,
+            )
+        running = events.make(
+            ready_record.node_run_id, ready_record.aggregate_version.value + 1,
+            "node_run_transitioned",
+            _transition_payload(
+                "node_run", NodeRunStatus.READY, NodeRunStatus.RUNNING,
+                run_id=str(plan.run_id), node_id=ready_record.node_id,
+            ),
+        )
+        waiting = events.make(
+            ready_record.node_run_id, ready_record.aggregate_version.value + 2,
+            "node_run_transitioned",
+            _transition_payload(
+                "node_run", NodeRunStatus.RUNNING, NodeRunStatus.WAITING,
+                run_id=str(plan.run_id), node_id=ready_record.node_id,
+            ),
+        )
+        uow.events.append(
+            plan.run_id, ready_record.node_run_id,
+            ready_record.aggregate_version, (running, waiting),
+        )
+        uow.node_runs.update(
+            replace(
+                ready_record, status=NodeRunStatus.WAITING,
+                aggregate_version=AggregateVersion(
+                    ready_record.aggregate_version.value + 2
+                ), updated_at=command.issued_at,
+            ),
+            ready_record.aggregate_version,
+        )
+        ids = [running.event_id, waiting.event_id]
+        run = uow.runs.get(plan.run_id)
+        if run.status is WorkflowRunStatus.RUNNING:
+            run_event = events.make(
+                run.run_id, run.aggregate_version.value + 1,
+                "workflow_run_transitioned",
+                _transition_payload(
+                    "workflow_run", WorkflowRunStatus.RUNNING,
+                    WorkflowRunStatus.WAITING, reason="subflow_wait",
+                ),
+            )
+            uow.events.append(
+                run.run_id, run.run_id, run.aggregate_version, (run_event,)
+            )
+            uow.runs.update(
+                replace(
+                    run, status=WorkflowRunStatus.WAITING,
+                    aggregate_version=run.aggregate_version.next(),
+                    updated_at=command.issued_at,
+                ),
+                run.aggregate_version,
+            )
+            ids.append(run_event.event_id)
+        return ids
+
     def _submit_human_task(self, uow, command, events):
         row = uow.connection.execute(
             "SELECT * FROM human_tasks WHERE task_id=?",
@@ -1207,9 +1776,9 @@ class RuntimeKernel:
         uow.node_runs.update(finished_node, node.aggregate_version)
         ids = [node_event.event_id]
         other_waiting = uow.connection.execute(
-            """SELECT 1 FROM human_tasks WHERE run_id=? AND task_id<>?
-               AND status IN ('waiting','claimed') LIMIT 1""",
-            (str(node.run_id), row["task_id"]),
+            """SELECT 1 FROM node_runs WHERE run_id=? AND node_run_id<>?
+               AND status='waiting' LIMIT 1""",
+            (str(node.run_id), str(node.node_run_id)),
         ).fetchone()
         if run.status is WorkflowRunStatus.WAITING and other_waiting is None:
             run_event = events.make(
@@ -1247,6 +1816,761 @@ class RuntimeKernel:
             node.run_id,
             {"task_id": row["task_id"], "decision": decision, "status": status},
         )
+
+    def _apply_planner_proposal(self, uow, command, events):
+        node = uow.node_runs.get(command.aggregate_id)
+        if node is None:
+            raise ValueError("Planner NodeRun was not found")
+        self._check_version(node, command)
+        if node.status is not NodeRunStatus.WAITING:
+            raise ValueError("Planner NodeRun is not waiting")
+        row = uow.connection.execute(
+            """SELECT p.*,a.context_json FROM planner_proposals p
+                 JOIN planner_attempts a ON a.attempt_id=p.attempt_id
+                WHERE p.proposal_id=?""",
+            (str(command.payload["proposal_id"]),),
+        ).fetchone()
+        if row is None or row["run_id"] != str(node.run_id):
+            raise ValueError("Planner Proposal was not found for this Run")
+        action = json.loads(row["action_json"])
+        kind, arguments = action["kind"], action["arguments"]
+        if row["status"] != "protocol_accepted" and not (
+            kind == "dispatch" and row["status"] == "consumed"
+        ):
+            raise ValueError("Planner Proposal is not ready to apply")
+        context = json.loads(row["context_json"])
+        if context["graph_summary"].get("waiting_reason") != f"planner:{node.node_run_id}":
+            raise ValueError("Planner Proposal targets a different Agentic node")
+        source_plan = self._load_plan(
+            uow, node.run_id, node.source_plan_version.value,
+        )
+        plan_node = source_plan.node(node.node_id)
+        if plan_node.kind != "agentic":
+            raise ValueError("Planner Proposal target is not an Agentic node")
+        plan = source_plan
+        if kind == "finish":
+            output = dict(arguments["outputs"])
+            self._validate_ports(plan_node.outputs, output, "output")
+            target, route = NodeRunStatus.SUCCEEDED, EdgeRoute.SUCCESS
+            source_value = output
+        elif kind == "fail":
+            target, route = NodeRunStatus.FAILED, EdgeRoute.ERROR
+            source_value = {"error": {
+                "code": arguments["code"], "message": arguments["message"],
+                "category": "permanent_error", "source": "planner",
+            }}
+        elif kind == "dispatch":
+            patch_row = uow.connection.execute(
+                """SELECT result_plan_version FROM plan_patches
+                    WHERE proposal_id=? AND run_id=? AND status='committed'""",
+                (row["proposal_id"], str(node.run_id)),
+            ).fetchone()
+            if patch_row is None:
+                raise ValueError("Planner dispatch requires a committed PlanPatch")
+            result_version = int(patch_row["result_plan_version"])
+            if command.payload.get("plan_version") != result_version:
+                raise ValueError("Planner dispatch PlanVersion does not match committed patch")
+            plan = self._load_plan(uow, node.run_id, result_version)
+            output = dict(arguments["inputs"])
+            self._validate_ports(plan_node.outputs, output, "output")
+            target, route = NodeRunStatus.SUCCEEDED, EdgeRoute.SUCCESS
+            source_value = output
+        else:
+            raise ValueError(f"Planner action {kind!r} requires the PlanPatch/Human reconciler")
+        node_event = events.make(
+            node.node_run_id, node.aggregate_version.value + 1,
+            "node_run_transitioned",
+            _transition_payload(
+                "node_run", NodeRunStatus.WAITING, target,
+                run_id=str(node.run_id), node_id=node.node_id,
+            ),
+        )
+        uow.events.append(node.run_id, node.node_run_id, node.aggregate_version, (node_event,))
+        finished = replace(
+            node, status=target, aggregate_version=node.aggregate_version.next(),
+            updated_at=command.issued_at,
+        )
+        uow.node_runs.update(finished, node.aggregate_version)
+        if kind != "dispatch":
+            uow.connection.execute(
+                "UPDATE planner_proposals SET status='consumed' WHERE proposal_id=?"
+                " AND status='protocol_accepted'",
+                (row["proposal_id"],),
+            )
+        ids = [node_event.event_id]
+        run = uow.runs.get(node.run_id)
+        other_waiting = uow.connection.execute(
+            """SELECT 1 FROM node_runs WHERE run_id=? AND node_run_id<>?
+               AND status='waiting' LIMIT 1""",
+            (str(node.run_id), str(node.node_run_id)),
+        ).fetchone()
+        if run.status is WorkflowRunStatus.WAITING and other_waiting is None:
+            run_event = events.make(
+                run.run_id, run.aggregate_version.value + 1,
+                "workflow_run_transitioned",
+                _transition_payload(
+                    "workflow_run", WorkflowRunStatus.WAITING,
+                    WorkflowRunStatus.RUNNING, reason="planner_proposal_applied",
+                ),
+            )
+            uow.events.append(run.run_id, run.run_id, run.aggregate_version, (run_event,))
+            uow.runs.update(
+                replace(run, status=WorkflowRunStatus.RUNNING,
+                        aggregate_version=run.aggregate_version.next(),
+                        updated_at=command.issued_at),
+                run.aggregate_version,
+            )
+            ids.append(run_event.event_id)
+        ids.extend(self._propagate_graph(
+            uow, command, events, plan, finished, source_value, route=route,
+        ))
+        audit(
+            uow.connection, run_id=node.run_id, actor=command.actor,
+            action="planner.apply", target_id=row["proposal_id"], decision="allowed",
+            details={"node_run_id": str(node.node_run_id), "action": kind},
+            occurred_at=command.issued_at,
+        )
+        return ids, finished.aggregate_version, node.run_id, {
+            "proposal_id": row["proposal_id"], "action": kind,
+            "status": target.value,
+        }
+
+    def _reject_planner_proposal(self, uow, command, events):
+        if not command.actor.startswith("system:"):
+            raise ValueError("Planner proposal rejection is system-only")
+        node = uow.node_runs.get(command.aggregate_id)
+        if node is None:
+            raise ValueError("Planner NodeRun was not found")
+        self._check_version(node, command)
+        if node.status is not NodeRunStatus.WAITING:
+            raise ValueError("Planner NodeRun is not waiting")
+        row = uow.connection.execute(
+            """SELECT p.*,a.context_json FROM planner_proposals p
+                 JOIN planner_attempts a ON a.attempt_id=p.attempt_id
+                WHERE p.proposal_id=?""",
+            (str(command.payload["proposal_id"]),),
+        ).fetchone()
+        if row is None or row["run_id"] != str(node.run_id):
+            raise ValueError("Planner Proposal was not found for this Run")
+        if row["status"] != "protocol_accepted":
+            raise ValueError("Planner Proposal is not ready to reject")
+        context = json.loads(row["context_json"])
+        if context["graph_summary"].get("waiting_reason") != f"planner:{node.node_run_id}":
+            raise ValueError("Planner Proposal targets a different Agentic node")
+        error = dict(command.payload["error"])
+        validation = json.loads(row["validation_json"])
+        validation = {
+            **(validation if isinstance(validation, dict) else {}),
+            "application": {"accepted": False, "error": error},
+        }
+        uow.connection.execute(
+            """UPDATE planner_proposals SET status='protocol_rejected',
+                   validation_json=? WHERE proposal_id=? AND status='protocol_accepted'""",
+            (canonical_json(validation), row["proposal_id"]),
+        )
+        append_control_event(
+            uow.connection, run_id=node.run_id,
+            aggregate_id=EntityId.parse(row["proposal_id"]),
+            event_type="planner_proposal_application_rejected",
+            payload={"node_run_id": str(node.node_run_id), "error": error},
+            actor=command.actor,
+            idempotency_key=f"reject:{row['proposal_id']}",
+            occurred_at=command.issued_at,
+        )
+        node_event = events.make(
+            node.node_run_id, node.aggregate_version.value + 1,
+            "node_run_transitioned",
+            _transition_payload(
+                "node_run", NodeRunStatus.WAITING, NodeRunStatus.FAILED,
+                run_id=str(node.run_id), node_id=node.node_id,
+            ),
+        )
+        uow.events.append(
+            node.run_id, node.node_run_id, node.aggregate_version, (node_event,)
+        )
+        finished = replace(
+            node, status=NodeRunStatus.FAILED,
+            aggregate_version=node.aggregate_version.next(),
+            updated_at=command.issued_at,
+        )
+        uow.node_runs.update(finished, node.aggregate_version)
+        ids = [node_event.event_id]
+        run = uow.runs.get(node.run_id)
+        other_waiting = uow.connection.execute(
+            """SELECT 1 FROM node_runs WHERE run_id=? AND node_run_id<>?
+               AND status='waiting' LIMIT 1""",
+            (str(node.run_id), str(node.node_run_id)),
+        ).fetchone()
+        if run.status is WorkflowRunStatus.WAITING and other_waiting is None:
+            run_event = events.make(
+                run.run_id, run.aggregate_version.value + 1,
+                "workflow_run_transitioned",
+                _transition_payload(
+                    "workflow_run", WorkflowRunStatus.WAITING,
+                    WorkflowRunStatus.RUNNING, reason="planner_proposal_rejected",
+                ),
+            )
+            uow.events.append(
+                run.run_id, run.run_id, run.aggregate_version, (run_event,)
+            )
+            uow.runs.update(
+                replace(
+                    run, status=WorkflowRunStatus.RUNNING,
+                    aggregate_version=run.aggregate_version.next(),
+                    updated_at=command.issued_at,
+                ),
+                run.aggregate_version,
+            )
+            ids.append(run_event.event_id)
+        plan = self._load_plan(uow, node.run_id, node.source_plan_version.value)
+        ids.extend(self._propagate_graph(
+            uow, command, events, plan, finished,
+            {"error": error}, route=EdgeRoute.ERROR,
+        ))
+        audit(
+            uow.connection, run_id=node.run_id, actor=command.actor,
+            action="planner.reject", target_id=row["proposal_id"],
+            decision="denied", details={"error": error},
+            occurred_at=command.issued_at,
+        )
+        return ids, finished.aggregate_version, node.run_id, {
+            "proposal_id": row["proposal_id"], "status": "protocol_rejected",
+        }
+
+    def _apply_subflow_result(self, uow, command, events):
+        if not command.actor.startswith("system:"):
+            raise ValueError("Subflow result apply is system-only")
+        node = uow.node_runs.get(command.aggregate_id)
+        if node is None:
+            raise ValueError("Subflow parent NodeRun was not found")
+        self._check_version(node, command)
+        if node.status is not NodeRunStatus.WAITING:
+            raise ValueError("Subflow parent NodeRun is not waiting")
+        link = uow.connection.execute(
+            "SELECT * FROM subflow_links WHERE link_id=? AND parent_node_run_id=?",
+            (str(command.payload["link_id"]), str(node.node_run_id)),
+        ).fetchone()
+        if link is None or link["parent_run_id"] != str(node.run_id):
+            raise ValueError("Subflow link was not found for this parent")
+        child = uow.runs.get(EntityId.parse(link["child_run_id"]))
+        if child is None or child.status not in {
+            WorkflowRunStatus.SUCCEEDED, WorkflowRunStatus.FAILED,
+            WorkflowRunStatus.CANCELLED,
+        }:
+            raise ValueError("Subflow child is not terminal")
+        plan = self._load_plan(uow, node.run_id, node.source_plan_version.value)
+        plan_node = plan.node(node.node_id)
+        if plan_node.kind != "subflow":
+            raise ValueError("Subflow link parent is not a subflow node")
+        if child.status is WorkflowRunStatus.SUCCEEDED:
+            child_plan_version = uow.connection.execute(
+                "SELECT MAX(plan_version) FROM execution_plans WHERE run_id=?",
+                (str(child.run_id),),
+            ).fetchone()[0]
+            child_plan = self._load_plan(
+                uow, child.run_id, int(child_plan_version),
+            )
+            terminals = [
+                item for item in uow.node_runs.list_by_run(child.run_id)
+                if item.node_id in child_plan.terminal_node_ids
+                and item.status is NodeRunStatus.SUCCEEDED
+            ]
+            if len(terminals) != 1:
+                raise ValueError("Subflow child must have one completed terminal")
+            output = {
+                item.port_id: item.data
+                for item in uow.values.list_by_owner(
+                    DataOwnerKind.NODE_INPUT, terminals[0].node_run_id,
+                )
+            }
+            prepared = uow.connection.execute(
+                """SELECT payload_json FROM run_events
+                    WHERE aggregate_id=? AND event_type='node_input_prepared'
+                    ORDER BY aggregate_sequence DESC LIMIT 1""",
+                (str(terminals[0].node_run_id),),
+            ).fetchone()
+            prepared_input = (
+                {} if prepared is None
+                else dict(json.loads(prepared["payload_json"]).get("input", {}))
+            )
+            output.update({
+                port["id"]: prepared_input[port["id"]]
+                for port in plan_node.outputs
+                if port["data_policy"]["transport"] == PortTransport.ARTIFACT_REF.value
+                and port["id"] in prepared_input
+            })
+            self._validate_ports(plan_node.outputs, output, "output")
+            returned_artifacts = []
+            for port in plan_node.outputs:
+                if port["data_policy"]["transport"] != PortTransport.ARTIFACT_REF.value:
+                    continue
+                raw = output.get(port["id"])
+                if not isinstance(raw, Mapping) or "artifact_id" not in raw:
+                    raise ValueError("Subflow Artifact output requires an artifact_id")
+                artifact_id = EntityId.parse(str(raw["artifact_id"]))
+                artifact = uow.artifacts.get(artifact_id, committed_only=True)
+                if artifact is None or artifact.schema_id != port["schema_id"]:
+                    raise ValueError("Subflow Artifact output is missing or has the wrong schema")
+                returned_artifacts.append(artifact_id)
+            if returned_artifacts:
+                scope = set(json.loads(link["artifact_scope_json"]))
+                scope.update(str(item) for item in returned_artifacts)
+                uow.connection.execute(
+                    "UPDATE subflow_links SET artifact_scope_json=? WHERE link_id=?",
+                    (canonical_json(sorted(scope)), link["link_id"]),
+                )
+                audit(
+                    uow.connection, run_id=node.run_id, actor=command.actor,
+                    action="subflow.artifact_acl_return",
+                    target_id=link["link_id"], decision="allowed",
+                    details={"artifact_count": len(returned_artifacts)},
+                    occurred_at=command.issued_at,
+                )
+            target, route, link_status = (
+                NodeRunStatus.SUCCEEDED, EdgeRoute.SUCCESS, "succeeded",
+            )
+            source_value = output
+        else:
+            target, route = NodeRunStatus.FAILED, EdgeRoute.ERROR
+            link_status = (
+                "cancelled" if child.status is WorkflowRunStatus.CANCELLED
+                else "failed"
+            )
+            source_value = {"error": {
+                "code": "subflow_child_terminal",
+                "category": "permanent_error", "source": "subflow",
+                "message": f"child Run ended {child.status.value}",
+            }}
+        node_event = events.make(
+            node.node_run_id, node.aggregate_version.value + 1,
+            "node_run_transitioned",
+            _transition_payload(
+                "node_run", NodeRunStatus.WAITING, target,
+                run_id=str(node.run_id), node_id=node.node_id,
+            ),
+        )
+        uow.events.append(
+            node.run_id, node.node_run_id, node.aggregate_version, (node_event,)
+        )
+        finished = replace(
+            node, status=target, aggregate_version=node.aggregate_version.next(),
+            updated_at=command.issued_at,
+        )
+        uow.node_runs.update(finished, node.aggregate_version)
+        uow.connection.execute(
+            """UPDATE subflow_links SET status=?,aggregate_version=aggregate_version+1,
+                   updated_at=? WHERE link_id=? AND status='running'""",
+            (link_status, command.issued_at.isoformat(), link["link_id"]),
+        )
+        ids = [node_event.event_id]
+        run = uow.runs.get(node.run_id)
+        other_waiting = uow.connection.execute(
+            """SELECT 1 FROM node_runs WHERE run_id=? AND node_run_id<>?
+               AND status='waiting' LIMIT 1""",
+            (str(node.run_id), str(node.node_run_id)),
+        ).fetchone()
+        if run.status is WorkflowRunStatus.WAITING and other_waiting is None:
+            run_event = events.make(
+                run.run_id, run.aggregate_version.value + 1,
+                "workflow_run_transitioned",
+                _transition_payload(
+                    "workflow_run", WorkflowRunStatus.WAITING,
+                    WorkflowRunStatus.RUNNING, reason="subflow_terminal",
+                ),
+            )
+            uow.events.append(
+                run.run_id, run.run_id, run.aggregate_version, (run_event,)
+            )
+            uow.runs.update(
+                replace(
+                    run, status=WorkflowRunStatus.RUNNING,
+                    aggregate_version=run.aggregate_version.next(),
+                    updated_at=command.issued_at,
+                ),
+                run.aggregate_version,
+            )
+            ids.append(run_event.event_id)
+        policy = json.loads(link["propagation_policy_json"])
+        if target is NodeRunStatus.FAILED and policy["child_failure"] == "fail_parent":
+            ids.extend(self._fail_graph_run(
+                uow, command, events, node.run_id, "subflow_child_failed",
+            ))
+        else:
+            ids.extend(self._propagate_graph(
+                uow, command, events, plan, finished, source_value, route=route,
+            ))
+        audit(
+            uow.connection, run_id=node.run_id, actor=command.actor,
+            action="subflow.apply", target_id=link["link_id"],
+            decision="allowed",
+            details={"child_run_id": link["child_run_id"], "status": link_status},
+            occurred_at=command.issued_at,
+        )
+        return ids, finished.aggregate_version, node.run_id, {
+            "link_id": link["link_id"], "child_run_id": link["child_run_id"],
+            "status": link_status,
+        }
+
+    def _advance_foreach(self, uow, command, events):
+        if not command.actor.startswith("system:"):
+            raise ValueError("Foreach advance is system-only")
+        group = uow.connection.execute(
+            "SELECT * FROM foreach_groups WHERE group_id=?",
+            (str(command.aggregate_id),),
+        ).fetchone()
+        if group is None:
+            raise ValueError("Foreach group was not found")
+        if int(group["aggregate_version"]) != command.expected_version.value:
+            raise ConcurrencyConflictError(
+                command.aggregate_id, command.expected_version.value,
+                int(group["aggregate_version"]),
+            )
+        if group["status"] != "running":
+            raise ValueError("Foreach group is terminal")
+        parent = uow.node_runs.get(EntityId.parse(group["node_run_id"]))
+        if parent is None or parent.status is not NodeRunStatus.WAITING:
+            raise ValueError("Foreach parent NodeRun is not waiting")
+        plan = self._load_plan(uow, parent.run_id, parent.source_plan_version.value)
+        plan_node = plan.node(parent.node_id)
+        if plan_node.kind != "foreach":
+            raise ValueError("Foreach group parent is not a foreach node")
+        config = dict(plan_node.config)
+        ids = []
+
+        running_items = uow.connection.execute(
+            "SELECT * FROM foreach_items WHERE group_id=? AND status='running' ORDER BY item_index",
+            (group["group_id"],),
+        ).fetchall()
+        for item in running_items:
+            child = uow.runs.get(EntityId.parse(item["child_run_id"]))
+            if child is None or child.status not in {
+                WorkflowRunStatus.SUCCEEDED, WorkflowRunStatus.FAILED,
+                WorkflowRunStatus.CANCELLED,
+            }:
+                continue
+            if child.status is WorkflowRunStatus.SUCCEEDED:
+                child_plan_version = uow.connection.execute(
+                    "SELECT MAX(plan_version) FROM execution_plans WHERE run_id=?",
+                    (str(child.run_id),),
+                ).fetchone()[0]
+                child_plan = self._load_plan(
+                    uow, child.run_id, int(child_plan_version),
+                )
+                terminals = [
+                    node for node in uow.node_runs.list_by_run(child.run_id)
+                    if node.node_id in child_plan.terminal_node_ids
+                    and node.status is NodeRunStatus.SUCCEEDED
+                ]
+                if len(terminals) != 1:
+                    raise ValueError("Foreach child must have one completed terminal")
+                result = uow.values.get_by_owner_port(
+                    DataOwnerKind.NODE_INPUT, terminals[0].node_run_id,
+                    config["result_port"],
+                )
+                if result is None:
+                    raise ValueError("Foreach child result port was not recorded")
+                status, output, error = "succeeded", result.data, None
+            else:
+                status, output = "failed", None
+                error = {
+                    "code": "foreach_child_terminal",
+                    "message": f"child Run ended {child.status.value}",
+                    "child_run_id": str(child.run_id),
+                }
+            child_budget = uow.connection.execute(
+                "SELECT consumed_microunits FROM budget_accounts WHERE run_id=?",
+                (str(child.run_id),),
+            ).fetchone()
+            reservation_id = self.budget_service.derive_reservation_id(
+                parent.run_id, EntityId.parse(item["item_id"]),
+            )
+            self.budget_service.settle_transfer_in_uow(
+                uow.connection, reservation_id,
+                0 if child_budget is None else int(child_budget["consumed_microunits"]),
+                actor=command.actor, now=command.issued_at,
+            )
+            append_control_event(
+                uow.connection, run_id=parent.run_id,
+                aggregate_id=EntityId.parse(item["item_id"]),
+                event_type="foreach_item_transitioned",
+                payload={"from": "running", "to": status,
+                         "group_id": group["group_id"]},
+                actor=command.actor,
+                idempotency_key=f"terminal:{child.run_id}:{child.aggregate_version.value}",
+                occurred_at=command.issued_at,
+            )
+            uow.connection.execute(
+                """UPDATE foreach_items SET status=?,output_json=?,error_json=?,
+                       aggregate_version=aggregate_version+1,updated_at=?
+                     WHERE item_id=? AND status='running'""",
+                (
+                    status, None if output is None else canonical_json(output),
+                    None if error is None else canonical_json(error),
+                    command.issued_at.isoformat(), item["item_id"],
+                ),
+            )
+
+        failed = uow.connection.execute(
+            "SELECT 1 FROM foreach_items WHERE group_id=? AND status='failed' LIMIT 1",
+            (group["group_id"],),
+        ).fetchone() is not None
+        if failed and group["failure_policy"] == "fail_fast":
+            active = uow.connection.execute(
+                "SELECT * FROM foreach_items WHERE group_id=? AND status='running' ORDER BY item_index",
+                (group["group_id"],),
+            ).fetchall()
+            for item in active:
+                child_run_id = EntityId.parse(item["child_run_id"])
+                child = uow.runs.get(child_run_id)
+                if child.status not in {
+                    WorkflowRunStatus.SUCCEEDED, WorkflowRunStatus.FAILED,
+                    WorkflowRunStatus.CANCELLED,
+                }:
+                    cancel = CommandEnvelope.create(
+                        command_type="cancel_run", aggregate_id=child_run_id,
+                        correlation_id=parent.run_id,
+                        expected_version=child.aggregate_version,
+                        idempotency_key=f"foreach-fail-fast:{item['item_id']}",
+                        actor="system:foreach", issued_at=command.issued_at,
+                        payload={"reason": "foreach_fail_fast"},
+                    )
+                    self._cancel_run(uow, cancel, _EventBuilder(cancel))
+                child_budget = uow.connection.execute(
+                    "SELECT consumed_microunits FROM budget_accounts WHERE run_id=?",
+                    (str(child_run_id),),
+                ).fetchone()
+                self.budget_service.settle_transfer_in_uow(
+                    uow.connection,
+                    self.budget_service.derive_reservation_id(
+                        parent.run_id, EntityId.parse(item["item_id"]),
+                    ),
+                    0 if child_budget is None else int(child_budget["consumed_microunits"]),
+                    actor=command.actor, now=command.issued_at,
+                )
+            uow.connection.execute(
+                """UPDATE foreach_items SET status='cancelled',
+                       aggregate_version=aggregate_version+1,updated_at=?
+                     WHERE group_id=? AND status IN ('pending','ready','running')""",
+                (command.issued_at.isoformat(), group["group_id"]),
+            )
+
+        active_count = uow.connection.execute(
+            "SELECT COUNT(*) FROM foreach_items WHERE group_id=? AND status='running'",
+            (group["group_id"],),
+        ).fetchone()[0]
+        capacity = max(0, int(group["concurrency_limit"]) - int(active_count))
+        pending = uow.connection.execute(
+            "SELECT * FROM foreach_items WHERE group_id=? AND status IN ('pending','ready')"
+            " ORDER BY item_index LIMIT ?",
+            (group["group_id"], capacity),
+        ).fetchall()
+        for item in pending:
+            item_id = EntityId.parse(item["item_id"])
+            account = uow.connection.execute(
+                "SELECT total_microunits,reserved_microunits,consumed_microunits FROM budget_accounts WHERE run_id=?",
+                (str(parent.run_id),),
+            ).fetchone()
+            required_budget = int(config["item_budget_microunits"])
+            remaining_budget = (
+                -1 if account is None else int(account["total_microunits"])
+                - int(account["reserved_microunits"])
+                - int(account["consumed_microunits"])
+            )
+            if remaining_budget < required_budget:
+                if active_count == 0:
+                    uow.connection.execute(
+                        "UPDATE workflow_runs SET status='budget_exhausted', aggregate_version=aggregate_version+1, updated_at=? WHERE run_id=? AND status IN ('running','waiting')",
+                        (command.issued_at.isoformat(), str(parent.run_id)),
+                    )
+                break
+            child_run_id = derived_id("run", item_id, "foreach")
+            child_command = CommandEnvelope.create(
+                command_type="start_run", aggregate_id=child_run_id,
+                correlation_id=parent.run_id, expected_version=AggregateVersion(0),
+                idempotency_key=f"foreach-start:{item_id}",
+                actor="system:foreach", issued_at=command.issued_at,
+                payload={
+                    "workflow_id": config["workflow_id"],
+                    "workflow_version": int(config["workflow_version"]),
+                    "definition_hash": config["definition_hash"],
+                    "input": {config["item_port"]: json.loads(item["input_json"])},
+                    "budget_microunits": int(config["item_budget_microunits"]),
+                },
+            )
+            self.budget_service.reserve_in_uow(
+                uow.connection, parent.run_id, item_id,
+                required_budget,
+                actor=command.actor, now=command.issued_at,
+            )
+            self._start_run(uow, child_command, _EventBuilder(child_command))
+            child_plan = self._load_plan(uow, child_run_id, 1)
+            if len(child_plan.entry_node_ids) != 1 or len(child_plan.terminal_node_ids) != 1:
+                raise ValueError("Foreach child requires one entry and one terminal")
+            entry = child_plan.node(child_plan.entry_node_ids[0])
+            terminal = child_plan.node(child_plan.terminal_node_ids[0])
+            if config["item_port"] not in {port["id"] for port in entry.inputs}:
+                raise ValueError("Foreach item port is not a child entry input")
+            if config["result_port"] not in {port["id"] for port in terminal.inputs}:
+                raise ValueError("Foreach result port is not a child terminal input")
+            append_control_event(
+                uow.connection, run_id=parent.run_id, aggregate_id=item_id,
+                event_type="foreach_item_transitioned",
+                payload={"from": item["status"], "to": "running",
+                         "group_id": group["group_id"],
+                         "child_run_id": str(child_run_id)},
+                actor=command.actor, idempotency_key=f"start:{child_run_id}",
+                occurred_at=command.issued_at,
+            )
+            uow.connection.execute(
+                """UPDATE foreach_items SET status='running',child_run_id=?,
+                       aggregate_version=aggregate_version+1,updated_at=?
+                     WHERE item_id=? AND status IN ('pending','ready')""",
+                (str(child_run_id), command.issued_at.isoformat(), item["item_id"]),
+            )
+            active_count += 1
+
+        remaining = uow.connection.execute(
+            "SELECT 1 FROM foreach_items WHERE group_id=?"
+            " AND status IN ('pending','ready','running') LIMIT 1",
+            (group["group_id"],),
+        ).fetchone()
+        next_group_version = command.expected_version.next()
+        if remaining is not None:
+            progress = events.make(
+                command.aggregate_id, next_group_version.value,
+                "foreach_advanced",
+                {"run_id": str(parent.run_id), "group_id": group["group_id"],
+                 "status": "running", "item_count": int(group["item_count"])},
+            )
+            uow.events.append(
+                parent.run_id, command.aggregate_id,
+                command.expected_version, (progress,),
+            )
+            ids.append(progress.event_id)
+            uow.connection.execute(
+                """UPDATE foreach_groups SET aggregate_version=?,updated_at=?
+                     WHERE group_id=? AND aggregate_version=?""",
+                (
+                    next_group_version.value, command.issued_at.isoformat(),
+                    group["group_id"], command.expected_version.value,
+                ),
+            )
+            return ids, next_group_version, parent.run_id, {
+                "group_id": group["group_id"], "status": "running",
+            }
+
+        rows = uow.connection.execute(
+            """SELECT item_index,item_key,status,output_json,error_json
+                 FROM foreach_items WHERE group_id=? ORDER BY item_index""",
+            (group["group_id"],),
+        ).fetchall()
+        aggregate = stable_aggregate(tuple(
+            (
+                int(row["item_index"]), row["item_key"], row["status"],
+                None if row["output_json"] is None else json.loads(row["output_json"]),
+                None if row["error_json"] is None else json.loads(row["error_json"]),
+            )
+            for row in rows
+        ))
+        has_failure = any(row["status"] != "succeeded" for row in rows)
+        group_status = (
+            "partial" if has_failure and group["failure_policy"] == "partial_success"
+            else "failed" if has_failure else "completed"
+        )
+        aggregate_checksum = definition_hash(aggregate).value
+        progress = events.make(
+            command.aggregate_id, next_group_version.value,
+            "foreach_advanced",
+            {"run_id": str(parent.run_id), "group_id": group["group_id"],
+             "status": group_status, "item_count": len(rows)},
+        )
+        uow.events.append(
+            parent.run_id, command.aggregate_id,
+            command.expected_version, (progress,),
+        )
+        ids.append(progress.event_id)
+        append_control_event(
+            uow.connection, run_id=parent.run_id,
+            aggregate_id=command.aggregate_id, event_type="foreach_aggregated",
+            payload={"status": group_status, "checksum": aggregate_checksum},
+            actor=command.actor, idempotency_key=aggregate_checksum,
+            occurred_at=command.issued_at,
+        )
+        uow.connection.execute(
+            """UPDATE foreach_groups SET status=?,aggregate_json=?,
+                   aggregate_checksum=?,aggregate_version=?,updated_at=?
+                 WHERE group_id=? AND aggregate_version=?""",
+            (
+                group_status, canonical_json(aggregate), aggregate_checksum,
+                next_group_version.value, command.issued_at.isoformat(),
+                group["group_id"], command.expected_version.value,
+            ),
+        )
+        output = {config["output_port"]: aggregate}
+        target = (
+            NodeRunStatus.FAILED if group_status == "failed"
+            else NodeRunStatus.SUCCEEDED
+        )
+        route = EdgeRoute.ERROR if target is NodeRunStatus.FAILED else EdgeRoute.SUCCESS
+        if target is NodeRunStatus.SUCCEEDED:
+            self._validate_ports(plan_node.outputs, output, "output")
+            source_value = output
+        else:
+            source_value = {"error": {
+                "code": "foreach_failed", "message": "one or more items failed",
+                "category": "permanent_error", "source": "foreach",
+            }}
+        node_event = events.make(
+            parent.node_run_id, parent.aggregate_version.value + 1,
+            "node_run_transitioned",
+            _transition_payload(
+                "node_run", NodeRunStatus.WAITING, target,
+                run_id=str(parent.run_id), node_id=parent.node_id,
+            ),
+        )
+        uow.events.append(
+            parent.run_id, parent.node_run_id, parent.aggregate_version, (node_event,)
+        )
+        finished = replace(
+            parent, status=target, aggregate_version=parent.aggregate_version.next(),
+            updated_at=command.issued_at,
+        )
+        uow.node_runs.update(finished, parent.aggregate_version)
+        ids.append(node_event.event_id)
+        run = uow.runs.get(parent.run_id)
+        other_waiting = uow.connection.execute(
+            """SELECT 1 FROM node_runs WHERE run_id=? AND node_run_id<>?
+               AND status='waiting' LIMIT 1""",
+            (str(parent.run_id), str(parent.node_run_id)),
+        ).fetchone()
+        if run.status is WorkflowRunStatus.WAITING and other_waiting is None:
+            run_event = events.make(
+                run.run_id, run.aggregate_version.value + 1,
+                "workflow_run_transitioned",
+                _transition_payload(
+                    "workflow_run", WorkflowRunStatus.WAITING,
+                    WorkflowRunStatus.RUNNING, reason="foreach_aggregated",
+                ),
+            )
+            uow.events.append(
+                run.run_id, run.run_id, run.aggregate_version, (run_event,)
+            )
+            uow.runs.update(
+                replace(
+                    run, status=WorkflowRunStatus.RUNNING,
+                    aggregate_version=run.aggregate_version.next(),
+                    updated_at=command.issued_at,
+                ),
+                run.aggregate_version,
+            )
+            ids.append(run_event.event_id)
+        ids.extend(self._propagate_graph(
+            uow, command, events, plan, finished, source_value, route=route,
+        ))
+        return ids, next_group_version, parent.run_id, {
+            "group_id": group["group_id"], "status": group_status,
+            "item_count": len(rows),
+        }
 
     def _execute_graph_controller(
         self, uow, command, events, plan, ready_record, input_value,
@@ -1392,7 +2716,7 @@ class RuntimeKernel:
         ready_controllers = [
             item for item in uow.node_runs.list_by_run(run.run_id)
             if item.status is NodeRunStatus.READY
-            and plan.node(item.node_id).kind in {"human", "decision", "join", "terminal"}
+            and plan.node(item.node_id).kind in {"human", "agentic", "foreach", "subflow", "decision", "join", "terminal"}
         ]
         for node in sorted(ready_controllers, key=lambda item: (item.generation, item.node_id, str(item.node_run_id))):
             if events.graph_reactions >= self.MAX_GRAPH_REACTIONS_PER_COMMAND:
@@ -1410,6 +2734,18 @@ class RuntimeKernel:
             events.graph_reactions += 1
             if plan.node(node.node_id).kind == "human":
                 ids.extend(self._activate_human_controller(
+                    uow, command, events, plan, node, prepared,
+                ))
+            elif plan.node(node.node_id).kind == "agentic":
+                ids.extend(self._activate_agentic_controller(
+                    uow, command, events, plan, node,
+                ))
+            elif plan.node(node.node_id).kind == "foreach":
+                ids.extend(self._activate_foreach_controller(
+                    uow, command, events, plan, node, prepared,
+                ))
+            elif plan.node(node.node_id).kind == "subflow":
+                ids.extend(self._activate_subflow_controller(
                     uow, command, events, plan, node, prepared,
                 ))
             else:
@@ -1611,12 +2947,14 @@ class RuntimeKernel:
 
     def _fail_graph_run(self, uow, command, events, run_id, reason):
         run = uow.runs.get(run_id)
-        if run.status is not WorkflowRunStatus.RUNNING:
+        if run.status not in {
+            WorkflowRunStatus.RUNNING, WorkflowRunStatus.WAITING,
+        }:
             return []
         event = events.make(
             run_id, run.aggregate_version.value + 1, "workflow_run_transitioned",
             _transition_payload(
-                "workflow_run", WorkflowRunStatus.RUNNING,
+                "workflow_run", run.status,
                 WorkflowRunStatus.FAILED, reason=reason,
             ),
         )

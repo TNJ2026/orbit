@@ -1,6 +1,16 @@
 # Unwired capabilities
 
-**Status**: static-runtime migration gates closed; dynamic structure support remains a later milestone
+> **2026-07-19 status update:** this file preserves the original M0 audit and
+> its evidence. Its statements that `agentic`, `foreach` and `subflow` have no
+> DSL/Kernel path are now superseded: all three have published-workflow E2E,
+> supervised reconcilers and bounded read models. The dynamic Gates are now
+> closed. Subflow Artifact transfer preserves the
+> parent read-ACL intersection without authority expansion, Foreach item child
+> Runs receive atomically transferred parent budget, and Planner calls reserve and settle durable
+> Run budget before/after provider execution; current delivery status is maintained in
+> [the Runtime UI delivery plan](../ui/runtime-ui-prototype-delivery-plan.md).
+
+**Status**: migration and dynamic-structure release gates closed
 **Origin**: closing M0 blocker B5 ("Step 11 Foreach/Subflow runtime gap")
 **Revised**: 2026-07-19, after review found this document itself was wrong
 

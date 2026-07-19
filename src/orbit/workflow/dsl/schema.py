@@ -94,7 +94,7 @@ _SCHEMA: dict[str, Any] = {
             "required": ["id", "kind"],
             "properties": {
                 "id": {"$ref": "#/$defs/id"},
-                "kind": {"enum": ["action", "human", "decision", "join", "terminal", "extension"]},
+                "kind": {"enum": ["action", "human", "agentic", "foreach", "subflow", "decision", "join", "terminal", "extension"]},
                 "inputs": _array_of("#/$defs/port"),
                 "outputs": _array_of("#/$defs/port"),
                 "handler": {"$ref": "#/$defs/handler"},

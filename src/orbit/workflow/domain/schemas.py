@@ -413,6 +413,14 @@ RUNTIME_COMMAND_PAYLOAD_SCHEMAS = {
             "definition_hash": _HASH, "input": {"type": "object"},
             "goal": {"type": "string", "minLength": 1, "maxLength": 10000},
             "artifact_inputs": {"type": "array", "items": {"type": "object"}},
+            "artifact_subjects": {
+                "type": "array", "items": {"type": "string", "minLength": 1},
+                "uniqueItems": True,
+            },
+            "artifact_scope": {
+                "type": "array", "items": _ID, "uniqueItems": True,
+            },
+            "budget_microunits": {"type": "integer", "minimum": 0},
         },
     ),
     "schedule-node": _object_schema(
@@ -435,6 +443,15 @@ RUNTIME_COMMAND_PAYLOAD_SCHEMAS = {
     "cancel-run": _object_schema([], {"reason": {"type": "string"}}),
     "cancel-node": _object_schema([], {"reason": {"type": "string"}}),
     "advance-graph": _object_schema([], {"plan_version": _REVISION}),
+    "apply-planner-proposal": _object_schema(
+        ["proposal_id"],
+        {"proposal_id": _ID, "plan_version": _REVISION},
+    ),
+    "reject-planner-proposal": _object_schema(
+        ["proposal_id", "error"], {"proposal_id": _ID, "error": {"type": "object"}},
+    ),
+    "apply-subflow-result": _object_schema(["link_id"], {"link_id": _ID}),
+    "advance-foreach": _object_schema([], {}),
     "submit-human-task": _object_schema(
         ["submission_token", "decision"],
         {
@@ -520,6 +537,14 @@ RUNTIME_EVENT_PAYLOAD_SCHEMAS = {
             "run_id": _ID, "policy_id": {"type": "string", "minLength": 1},
             "scope_key": {"type": "string", "minLength": 1},
             "value": _REVISION, "limit": _REVISION,
+        },
+    ),
+    "foreach-advanced": _object_schema(
+        ["run_id", "group_id", "status", "item_count"],
+        {
+            "run_id": _ID, "group_id": _ID,
+            "status": {"enum": ["running", "completed", "partial", "failed"]},
+            "item_count": {"type": "integer", "minimum": 0},
         },
     ),
 }
@@ -681,7 +706,7 @@ EXECUTION_PLAN_NODE_SCHEMA = _object_schema(
     ],
     {
         "node_id": {"type": "string", "minLength": 1},
-        "kind": {"enum": ["action", "human", "decision", "join", "terminal"]},
+        "kind": {"enum": ["action", "human", "agentic", "foreach", "subflow", "decision", "join", "terminal"]},
         "handler_name": {"type": ["string", "null"]},
         "handler_version": {"type": ["string", "null"]},
         "handler_manifest_fingerprint": {**_HASH, "type": ["string", "null"]},

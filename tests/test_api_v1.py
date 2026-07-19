@@ -24,6 +24,7 @@ from orbit.workflow.artifacts.local_cas import LocalCASBackend
 from orbit.workflow.application.human_service import HumanTaskService
 from orbit.workflow.domain.human import HumanTaskKind
 from orbit.workflow.domain.ids import EntityId
+from orbit.workflow.persistence.database import connect_workflow_database
 from tests.test_web_composition import (
     AsgiHarness, SCHEMAS, publish_linear_workflow, transform_registration,
 )
@@ -421,6 +422,36 @@ class PlanApiTests(ApiTestCase):
         with AsgiHarness(self.app) as client:
             response = client.get("/api/v1/runs/run:missing/plan", actor="reader")
             self.assertEqual(404, response.status_code)
+
+    def test_historical_overlay_and_dynamic_views_are_real_routes(self) -> None:
+        with AsgiHarness(self.app) as client:
+            run_id = self._run(client)
+            with connect_workflow_database(self.db) as db:
+                head = db.execute(
+                    "SELECT MAX(global_position) FROM run_events WHERE run_id=?", (run_id,)
+                ).fetchone()[0]
+            historical = client.get(
+                f"/api/v1/runs/{run_id}/plan/overlay?as_of_global_position={head}",
+                actor="reader",
+            )
+            self.assertEqual(200, historical.status_code, historical.text)
+            self.assertEqual(head, historical.json()["data"]["as_of_global_position"])
+            future = client.get(
+                f"/api/v1/runs/{run_id}/plan/overlay?as_of_global_position={head + 1}",
+                actor="reader",
+            )
+            self.assertEqual(400, future.status_code)
+            for suffix in ("planner-decisions", "foreach", "subflows"):
+                response = client.get(f"/api/v1/runs/{run_id}/{suffix}", actor="reader")
+                self.assertEqual(200, response.status_code, response.text)
+                self.assertEqual([], response.json()["data"]["items"])
+            self.assertEqual(
+                403,
+                client.get(
+                    f"/api/v1/runs/{run_id}/foreach/foreach_group:missing/items",
+                    actor="reader",
+                ).status_code,
+            )
 
 
 class DataApiTests(ApiTestCase):
@@ -832,10 +863,14 @@ class CapabilityTests(ApiTestCase):
             self.assertEqual(
                 "agent_discovery_disabled", caps["planner"]["reason"]
             )
-            self.assertFalse(caps["foreach"]["available"])
+            self.assertFalse(caps["dynamic_plan_patch"]["available"])
+            self.assertFalse(caps["planner_dispatcher"]["available"])
             self.assertEqual(
-                "not_reachable_from_dsl", caps["foreach"]["reason"]
+                "agent_discovery_disabled", caps["planner_dispatcher"]["reason"]
             )
+            self.assertTrue(caps["foreach"]["available"])
+            self.assertTrue(caps["subflow"]["available"])
+            self.assertTrue(caps["history_overlay"]["available"])
             writer = client.get("/api/v1/capabilities", actor="writer").json()["data"]
             self.assertTrue(writer["permissions"]["start_run"])
             self.assertTrue(writer["permissions"]["ops_read"])

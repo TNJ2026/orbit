@@ -15,6 +15,7 @@
 .panel-title { font-weight: 600; }
 .panel-body { padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
 .virtual-window { max-height: 34rem; overflow: auto; overscroll-behavior: contain; }
+.foreach-grid { margin-top: var(--space-3); display: grid; gap: var(--space-2); }
 .eyebrow { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
 
 .table-scroll { overflow-x: auto; }

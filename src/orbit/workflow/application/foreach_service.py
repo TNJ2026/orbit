@@ -37,7 +37,14 @@ class ForeachService:
             for index,(key,value) in enumerate(zip(key_values,values)):
                 item_id=derive_item_id(group_id,key,index,checksum,plan_version)
                 rows.append((str(item_id),str(group_id),str(run_id),key,index,"pending",canonical_json(value),None,None,0,0,now.isoformat(),now.isoformat()))
-            db.executemany("INSERT INTO foreach_items VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",rows)
+            db.executemany(
+                """INSERT INTO foreach_items(
+                       item_id,group_id,run_id,item_key,item_index,status,
+                       input_json,output_json,error_json,retry_count,
+                       aggregate_version,created_at,updated_at
+                   ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                rows,
+            )
             audit(db,run_id=run_id,actor=actor,action="foreach.create",target_id=str(group_id),decision="allowed",details={"items":len(values)},occurred_at=now);db.commit();return group_id
 
     def claim_ready(self,group_id:EntityId,*,limit:int,actor:str,now:datetime)->tuple[EntityId,...]:
@@ -73,4 +80,3 @@ class ForeachService:
             status="partial" if value["partial"] and group["failure_policy"]=="partial_success" else "failed" if any(row["status"] in {"failed","unknown"} for row in rows) else "completed"
             append_control_event(db,run_id=EntityId.parse(group["run_id"]),aggregate_id=group_id,event_type="foreach_aggregated",payload={"status":status,"checksum":checksum},actor=actor,idempotency_key=checksum,occurred_at=now)
             db.execute("UPDATE foreach_groups SET status=?,aggregate_json=?,aggregate_checksum=?,aggregate_version=aggregate_version+1,updated_at=? WHERE group_id=?",(status,canonical_json(value),checksum,now.isoformat(),str(group_id)));db.commit();return dict(value)
-

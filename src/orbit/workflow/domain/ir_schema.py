@@ -94,7 +94,7 @@ _IR_SCHEMA: dict[str, Any] = {
             "required": ["id", "kind", "inputs", "outputs", "handler", "config", "policies", "extension"],
             "properties": {
                 "id": {"type": "string"},
-                "kind": {"enum": ["action", "human", "decision", "join", "terminal", "extension"]},
+                "kind": {"enum": ["action", "human", "agentic", "foreach", "subflow", "decision", "join", "terminal", "extension"]},
                 "inputs": _array("#/$defs/port"),
                 "outputs": _array("#/$defs/port"),
                 "handler": {"oneOf": [{"$ref": "#/$defs/handler"}, {"type": "null"}]},

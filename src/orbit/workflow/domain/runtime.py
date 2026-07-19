@@ -49,7 +49,7 @@ class CommandResult:
 
 
 RUNTIME_COMMAND_TYPES = frozenset(
-    {"start_run", "schedule_node", "start_attempt", "complete_attempt", "fail_attempt", "cancel_node", "cancel_run", "advance_graph", "submit_human_task"}
+    {"start_run", "schedule_node", "start_attempt", "complete_attempt", "fail_attempt", "cancel_node", "cancel_run", "advance_graph", "advance_foreach", "submit_human_task", "apply_planner_proposal", "reject_planner_proposal", "apply_subflow_result"}
 )
 
 RUNTIME_EVENT_VERSIONS = MappingProxyType(
@@ -64,6 +64,7 @@ RUNTIME_EVENT_VERSIONS = MappingProxyType(
         "branch_token_transitioned": 1,
         "join_decided": 1,
         "control_counter_incremented": 1,
+        "foreach_advanced": 1,
     }
 )
 
@@ -72,7 +73,7 @@ _COMMAND_FIELDS = MappingProxyType(
     {
         "start_run": (
             {"workflow_id", "workflow_version", "definition_hash"},
-            {"input", "artifact_inputs", "goal"},
+            {"input", "artifact_inputs", "artifact_subjects", "artifact_scope", "budget_microunits", "goal"},
         ),
         "schedule_node": ({"run_id", "node_id"}, {"plan_version", "input"}),
         "start_attempt": (set(), set()),
@@ -81,9 +82,13 @@ _COMMAND_FIELDS = MappingProxyType(
         "cancel_run": (set(), {"reason"}),
         "cancel_node": (set(), {"reason"}),
         "advance_graph": (set(), {"plan_version"}),
+        "advance_foreach": (set(), set()),
         "submit_human_task": (
             {"submission_token", "decision"}, {"value"},
         ),
+        "apply_planner_proposal": ({"proposal_id"}, {"plan_version"}),
+        "reject_planner_proposal": ({"proposal_id", "error"}, set()),
+        "apply_subflow_result": ({"link_id"}, set()),
     }
 )
 
@@ -102,6 +107,7 @@ def validate_runtime_command_payload(command_type: str, payload: Mapping[str, An
     object_fields = {
         "start_run": ("input",), "schedule_node": ("input",),
         "complete_attempt": ("output",), "fail_attempt": ("error",),
+        "reject_planner_proposal": ("error",),
     }.get(command_type, ())
     for field in object_fields:
         if field in payload and not isinstance(payload[field], Mapping):
@@ -112,6 +118,8 @@ def validate_runtime_command_payload(command_type: str, payload: Mapping[str, An
     if command_type == "schedule_node" and "plan_version" in payload:
         if not isinstance(payload["plan_version"], int) or isinstance(payload["plan_version"], bool):
             raise ValueError("$.payload.plan_version must be an integer")
+    if command_type in {"apply_planner_proposal", "reject_planner_proposal"} and not str(payload["proposal_id"]).startswith("proposal:"):
+        raise ValueError("$.payload.proposal_id must be a Proposal id")
 
 
 def validate_runtime_event_payload(event_type: str, payload: Mapping[str, Any]) -> None:
@@ -128,6 +136,7 @@ def validate_runtime_event_payload(event_type: str, payload: Mapping[str, Any]) 
         "branch_token_transitioned": {"machine", "from", "to", "run_id", "edge_id", "target_node_id", "target_generation"},
         "join_decided": {"run_id", "join_group_id", "decision"},
         "control_counter_incremented": {"run_id", "policy_id", "scope_key", "value", "limit"},
+        "foreach_advanced": {"run_id", "group_id", "status", "item_count"},
     }[event_type]
     missing = required - set(payload)
     if missing:
@@ -146,6 +155,7 @@ def validate_runtime_event_payload(event_type: str, payload: Mapping[str, Any]) 
         "branch_token_transitioned": {"scope"},
         "join_decided": {"input"},
         "control_counter_incremented": set(),
+        "foreach_advanced": set(),
     }[event_type]
     extra = set(payload) - required - optional
     if extra:

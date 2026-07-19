@@ -28,10 +28,15 @@ from ..workflow.application.durable_runtime_service import (
     DurableRuntimeApplicationService,
 )
 from ..workflow.application.handler_runtime_service import HandlerRuntimeBuilder
+from ..workflow.application.plan_service import PlanService
 from ..workflow.catalogs import InMemorySchemaCatalog
 from ..workflow.persistence.database import connect_workflow_database
 from ..workflow.persistence.migrations import migrate_workflow_database
-from ..workflow.worker.runtime import PlannerDispatcher, TimerDispatcher, WorkerRuntime
+from ..workflow.worker.runtime import (
+    ForeachReconciler, PlannerDispatcher, PlannerProposalReconciler,
+    SubflowReconciler,
+    TimerDispatcher, WorkerRuntime,
+)
 from .schema_guard import MixedSchemaError, assert_runtime_schema
 
 
@@ -158,6 +163,9 @@ class RuntimeComposition:
             connection.close()
         self.tables = assert_runtime_schema(self.db_path)
 
+        from ..workflow.application.budget_service import BudgetService
+        self.budget_service = BudgetService(self.db_path)
+
         self.schema_catalog = InMemorySchemaCatalog(dict(schemas or {}))
         builder = HandlerRuntimeBuilder(
             self.schema_catalog, secret_values=dict(secret_values or {})
@@ -179,6 +187,8 @@ class RuntimeComposition:
             execution_registry=self.handler_registry,
             artifact_backend=artifact_backend,
             human_task_delivery=self.human_delivery.deliver,
+            planner_service=planner_service,
+            budget_service=self.budget_service,
         )
 
         self.loops: list[BackgroundLoop] = []
@@ -214,13 +224,32 @@ class RuntimeComposition:
         loops.append(
             BackgroundLoop("recovery", self._recovery_pass, max(self.poll_seconds, 5.0))
         )
+        subflows = SubflowReconciler(self.service, clock=self.clock)
+        loops.append(BackgroundLoop(
+            "subflow-reconciler", subflows.run_once, self.poll_seconds,
+        ))
+        foreach = ForeachReconciler(self.service, clock=self.clock)
+        loops.append(BackgroundLoop(
+            "foreach-reconciler", foreach.run_once, self.poll_seconds,
+        ))
         if self.planner_service is not None:
             planner = PlannerDispatcher(
-                self.planner_service, worker_id="planner-1", clock=self.clock
+                self.planner_service, worker_id="planner-1", clock=self.clock,
+                budget_service=self.budget_service,
             )
             loops.append(
                 BackgroundLoop("planner-1", planner.run_once, self.poll_seconds)
             )
+            reconciler = PlannerProposalReconciler(
+                self.planner_service, self.service, clock=self.clock,
+                execution_registry=self.handler_registry,
+                plan_service_factory=lambda **options: PlanService(
+                    self.db_path, **options
+                ),
+            )
+            loops.append(BackgroundLoop(
+                "planner-proposals", reconciler.run_once, self.poll_seconds
+            ))
             loops.append(
                 BackgroundLoop(
                     "planner-recovery", self._planner_recovery_pass,
@@ -238,8 +267,12 @@ class RuntimeComposition:
         )
 
     def _planner_recovery_pass(self) -> bool:
-        report = self.planner_service.recovery.scan_once(self.clock())
-        return bool(report.parsed_responses or report.expired_unknown)
+        now = self.clock()
+        report = self.planner_service.recovery.scan_once(now)
+        settled = self.budget_service.reconcile_planner_reservations(
+            actor="planner-recovery", now=now,
+        )
+        return bool(report.parsed_responses or report.expired_unknown or settled)
 
     def start(self) -> None:
         if self._started:
@@ -425,6 +458,17 @@ def create_app(
             if artifact_backend is not None
             else {"available": False, "reason": "artifact_store_not_configured"}
         ),
+        "planner_dispatcher": (
+            {"available": True}
+            if planner_service is not None
+            else {
+                "available": False,
+                "reason": (
+                    "no_planner_provider" if discover_agents
+                    else "agent_discovery_disabled"
+                ),
+            }
+        ),
         "planner": (
             {"available": True}
             if planner_service is not None
@@ -436,13 +480,25 @@ def create_app(
                 ),
             }
         ),
+        "dynamic_plan_patch": (
+            {"available": True}
+            if planner_service is not None
+            and composition.handler_summary.handler_count > 0
+            else {
+                "available": False,
+                "reason": (
+                    "planner_not_configured"
+                    if planner_service is None else "no_registered_handlers"
+                ),
+            }
+        ),
         "agent_handlers": {
             "available": bool(agent_catalog),
             **({} if agent_catalog else {"reason": "no_discovered_agents"}),
         },
-        "foreach": {"available": False, "reason": "not_reachable_from_dsl"},
-        "subflow": {"available": False, "reason": "not_reachable_from_dsl"},
-        "history_overlay": {"available": False, "reason": "not_implemented"},
+        "foreach": {"available": True},
+        "subflow": {"available": True},
+        "history_overlay": {"available": True},
         "workflow_generation": (
             {"available": True}
             if workflow_generator is not None

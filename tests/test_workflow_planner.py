@@ -7,6 +7,7 @@ import tempfile
 import unittest
 
 from orbit.workflow.application.planner_service import PlannerApplicationService
+from orbit.workflow.application.budget_service import BudgetService
 from orbit.workflow.application.runtime_service import RuntimeApplicationService
 from orbit.workflow.catalogs import InMemoryHandlerCatalog, InMemorySchemaCatalog
 from orbit.workflow.domain.envelopes import CommandEnvelope
@@ -265,6 +266,87 @@ class PlannerTestCase(unittest.TestCase):
         self.assertEqual(1, counters[("planner_unknown_preserved", ())])
         self.assertNotIn(("planner_completed", ()), counters)
 
+    def test_dispatcher_reserves_and_settles_declared_planner_budget(self):
+        context = build_planning_context(
+            run_id=self.run_id, plan_version=Revision(1), goal="finish",
+            graph_summary={"status": "waiting", "plan_version": 1},
+            available_capabilities=["finish"],
+            remaining_limits={"cost_microunits": 100},
+        )
+        provider = FakePlannerProvider([
+            PlannerProviderResponse(
+                proposal_raw(self.run_id), "paid-request", PlannerUsage(2, 1, 35)
+            )
+        ])
+        service = PlannerApplicationService(self.path, provider=provider)
+        service.request_decision(
+            context, prompt_hash=HASH_A, capability_manifest_hash=HASH_B,
+            model_id="fake-model", provider_id="fake", now=NOW,
+        )
+        budget = BudgetService(self.path)
+
+        self.assertTrue(PlannerDispatcher(
+            service, clock=lambda: NOW, budget_service=budget,
+        ).run_once())
+
+        account = budget.get_account(self.run_id)
+        self.assertEqual(100, account.total_microunits)
+        self.assertEqual(35, account.consumed_microunits)
+        self.assertEqual(0, account.reserved_microunits)
+        self.assertEqual(1, len(provider.calls))
+
+    def test_dispatcher_does_not_call_provider_without_remaining_budget(self):
+        context = build_planning_context(
+            run_id=self.run_id, plan_version=Revision(1), goal="finish",
+            graph_summary={"status": "waiting", "plan_version": 1},
+            available_capabilities=["finish"],
+            remaining_limits={"cost_microunits": 10},
+        )
+        provider = FakePlannerProvider([])
+        service = PlannerApplicationService(self.path, provider=provider)
+        attempt = service.request_decision(
+            context, prompt_hash=HASH_A, capability_manifest_hash=HASH_B,
+            model_id="fake-model", provider_id="fake", now=NOW,
+        )
+        budget = BudgetService(self.path)
+        budget.open_account(self.run_id, 0, actor="test", now=NOW)
+
+        dispatcher = PlannerDispatcher(
+            service, clock=lambda: NOW, budget_service=budget,
+        )
+        self.assertTrue(dispatcher.run_once())
+
+        self.assertEqual([], provider.calls)
+        failed = service.get_attempt(attempt.attempt_id)
+        self.assertIs(PlannerAttemptStatus.FAILED, failed.status)
+        self.assertEqual("planner_budget_unavailable", failed.error["code"])
+
+    def test_recovery_settles_planner_reservation_left_after_response(self):
+        provider = FakePlannerProvider([
+            PlannerProviderResponse(
+                proposal_raw(self.run_id), "recovered-paid", PlannerUsage(1, 1, 27)
+            )
+        ])
+        service = PlannerApplicationService(self.path, provider=provider)
+        attempt = self.request(service)
+        budget = BudgetService(self.path)
+        budget.open_account(self.run_id, 80, actor="test", now=NOW)
+        budget.reserve(
+            self.run_id, attempt.attempt_id, 80, actor="planner-1", now=NOW
+        )
+        claim = service.claim("planner-1", NOW)
+        service.execute_claimed(claim, NOW)
+
+        self.assertEqual(1, budget.reconcile_planner_reservations(
+            actor="planner-recovery", now=NOW,
+        ))
+        account = budget.get_account(self.run_id)
+        self.assertEqual(27, account.consumed_microunits)
+        self.assertEqual(0, account.reserved_microunits)
+        self.assertEqual(0, budget.reconcile_planner_reservations(
+            actor="planner-recovery", now=NOW,
+        ))
+
     def test_invalid_response_is_rejected_and_duplicate_request_is_idempotent(self):
         provider = FakePlannerProvider([PlannerProviderResponse("not json")])
         service = PlannerApplicationService(self.path, provider=provider)
@@ -319,7 +401,7 @@ class PlannerTestCase(unittest.TestCase):
         with connect_workflow_database(self.path) as connection:
             versions = [row[0] for row in connection.execute("SELECT version FROM workflow_schema_migrations ORDER BY version")]
             tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        self.assertEqual(list(range(1, 12)), versions)
+        self.assertEqual(list(range(1, 13)), versions)
         self.assertTrue({"planner_attempts", "planner_proposals"}.issubset(tables))
 
         sqlite_service = PlannerApplicationService(self.path)

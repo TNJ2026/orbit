@@ -187,8 +187,13 @@ export class Api {
     return this.get(`/api/v1/runs/${encodeURIComponent(runId)}/plan${suffix}`);
   }
 
-  planOverlay(runId, planVersion) {
-    const suffix = planVersion === undefined ? "" : `?plan_version=${planVersion}`;
+  planOverlay(runId, planVersion, asOfGlobalPosition) {
+    const params = new URLSearchParams();
+    if (planVersion !== undefined) params.set("plan_version", String(planVersion));
+    if (asOfGlobalPosition !== undefined && asOfGlobalPosition !== null) {
+      params.set("as_of_global_position", String(asOfGlobalPosition));
+    }
+    const suffix = params.size ? `?${params}` : "";
     return this.get(
       `/api/v1/runs/${encodeURIComponent(runId)}/plan/overlay${suffix}`,
     );
@@ -199,6 +204,35 @@ export class Api {
       base_version: String(baseVersion), target_version: String(targetVersion),
     });
     return this.get(`/api/v1/runs/${encodeURIComponent(runId)}/plan/diff?${params}`);
+  }
+
+  plannerDecisions(runId, cursor) {
+    const params = new URLSearchParams({ limit: "50" });
+    if (cursor) params.set("cursor", cursor);
+    return this.get(
+      `/api/v1/runs/${encodeURIComponent(runId)}/planner-decisions?${params}`,
+    );
+  }
+
+  foreachGroups(runId, cursor) {
+    const params = new URLSearchParams({ limit: "50" });
+    if (cursor) params.set("cursor", cursor);
+    return this.get(`/api/v1/runs/${encodeURIComponent(runId)}/foreach?${params}`);
+  }
+
+  foreachItems(runId, groupId, cursor) {
+    const params = new URLSearchParams({ limit: "50" });
+    if (cursor) params.set("cursor", cursor);
+    return this.get(
+      `/api/v1/runs/${encodeURIComponent(runId)}/foreach/`
+      + `${encodeURIComponent(groupId)}/items?${params}`,
+    );
+  }
+
+  subflows(runId, cursor) {
+    const params = new URLSearchParams({ limit: "50" });
+    if (cursor) params.set("cursor", cursor);
+    return this.get(`/api/v1/runs/${encodeURIComponent(runId)}/subflows?${params}`);
   }
 
   graph(runId, planVersion) {

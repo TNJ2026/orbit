@@ -56,7 +56,10 @@ def reduce_run_view(state: Mapping[str, Any], stored: StoredEvent) -> dict[str, 
         "timers": dict(state.get("timers", {})),
         "usage": dict(state.get("usage", {})),
     }
-    for key in ("tokens", "joins", "routes", "counters", "planner_attempts", "planner_proposals", "advanced"):
+    for key in (
+        "tokens", "joins", "routes", "counters", "foreach",
+        "planner_attempts", "planner_proposals", "advanced",
+    ):
         if key in state:
             result[key] = dict(state.get(key, {}))
     event = stored.envelope
@@ -154,6 +157,11 @@ def reduce_run_view(state: Mapping[str, Any], stored: StoredEvent) -> dict[str, 
         result.setdefault("counters", {})[str(event.aggregate_id)] = {
             "policy_id": event.payload["policy_id"], "scope_key": event.payload["scope_key"],
             "value": event.payload["value"], "limit": event.payload["limit"],
+        }
+    elif event.event_type == "foreach_advanced":
+        result.setdefault("foreach", {})[str(event.aggregate_id)] = {
+            "status": event.payload["status"],
+            "item_count": event.payload["item_count"],
         }
     elif event.event_type == "planner_decision_requested":
         result.setdefault("planner_attempts", {})[str(event.aggregate_id)] = {

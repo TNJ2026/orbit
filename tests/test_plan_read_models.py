@@ -263,6 +263,43 @@ class OverlayTests(PlanReadModelTestCase):
         self.insert_node_run("collect", plan_version=1, status="running")
         self.assertEqual(3, self.service.overlay(self.run_id)["nodes"][0]["expected_version"])
 
+    def test_historical_overlay_replays_only_events_at_or_before_the_cursor(self) -> None:
+        self.two_node_plan()
+        self.insert_node_run("collect", plan_version=1, status="succeeded", attempts=1)
+        node_run_id = "node_run:collect:1:1"
+        with connect_workflow_database(self.db) as connection:
+            events = (
+                ("event:history-1", node_run_id, 1, "node_run_transitioned", {"node_id": "collect", "from": "pending", "to": "ready", "plan_version": 1}),
+                ("event:history-2", "attempt:collect:1:1:0", 1, "attempt_transitioned", {"node_run_id": node_run_id, "from": "created", "to": "running"}),
+                ("event:history-3", node_run_id, 2, "node_run_transitioned", {"node_id": "collect", "from": "ready", "to": "running"}),
+                ("event:history-4", node_run_id, 3, "node_run_transitioned", {"node_id": "collect", "from": "running", "to": "succeeded"}),
+            )
+            positions = []
+            for event_id, aggregate_id, sequence, event_type, payload in events:
+                cursor = connection.execute(
+                    "INSERT INTO run_events(event_id,run_id,aggregate_id,aggregate_sequence,"
+                    "event_type,event_version,correlation_id,causation_id,occurred_at,payload_json)"
+                    " VALUES (?,?,?,?,?,1,?,?,?,?)",
+                    (event_id, RUN, aggregate_id, sequence, event_type, RUN,
+                     "command:history", NOW, json.dumps(payload)),
+                )
+                positions.append(cursor.lastrowid)
+            connection.commit()
+
+        running = self.service.overlay(
+            self.run_id, plan_version=1, as_of_global_position=positions[2]
+        )
+        self.assertEqual("running", running["nodes"][0]["status"])
+        self.assertEqual(1, running["nodes"][0]["attempts"])
+        self.assertEqual(positions[2], running["as_of_global_position"])
+        current = self.service.overlay(self.run_id)
+        self.assertEqual("succeeded", current["nodes"][0]["status"])
+
+    def test_historical_overlay_rejects_a_future_cursor(self) -> None:
+        self.two_node_plan()
+        with self.assertRaisesRegex(ValueError, "beyond the Run event head"):
+            self.service.overlay(self.run_id, as_of_global_position=1)
+
 
 class DiffTests(PlanReadModelTestCase):
     def test_an_added_node_is_reported(self) -> None:

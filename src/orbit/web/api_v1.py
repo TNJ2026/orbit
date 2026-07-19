@@ -27,6 +27,7 @@ from ..workflow.api.artifact_read_models import (
     ArtifactNotVisible, ArtifactReadModelService, PREVIEW_LIMIT_BYTES,
 )
 from ..workflow.api.plan_read_models import PlanNotFound, PlanReadModelService
+from ..workflow.api.dynamic_read_models import DynamicReadModelService
 from ..workflow.api.read_models import ReadModelService
 from ..workflow.api.workflow_catalog import WorkflowCatalogReadModelService
 from ..workflow.api.routes import (
@@ -134,6 +135,7 @@ def build_api_v1(
     artifact_backend = artifact_backend or getattr(durable_service, "artifact_backend", None)
     runs = RunApplicationService(path, durable_service)
     plans = PlanReadModelService(path)
+    dynamic_reads = DynamicReadModelService(path)
     workflow_reads = WorkflowCatalogReadModelService(
         path, schema_catalog or InMemorySchemaCatalog({})
     )
@@ -372,9 +374,12 @@ def build_api_v1(
         if isinstance(actor, JSONResponse):
             return actor
         try:
+            raw_position = request.query_params.get("as_of_global_position")
+            as_of = None if raw_position is None else int(raw_position)
             payload = plans.overlay(
                 EntityId.parse(request.path_params["run_id"]),
                 plan_version=_plan_version(request),
+                as_of_global_position=as_of,
             )
         except PlanNotFound as exc:
             return error("not_found", str(exc), 404)
@@ -401,6 +406,23 @@ def build_api_v1(
         except PlanNotFound as exc:
             return error("not_found", str(exc), 404)
         return JSONResponse(envelope(payload))
+
+    async def foreach_items(request: Request) -> JSONResponse:
+        actor = authenticate(request, SENSITIVE_SCOPE)
+        if isinstance(actor, JSONResponse):
+            return actor
+        try:
+            cursor, limit = read_params(request)
+            items, next_cursor = dynamic_reads.foreach_items(
+                EntityId.parse(request.path_params["run_id"]),
+                EntityId.parse(request.path_params["group_id"]),
+                cursor=cursor, limit=limit,
+            )
+        except CursorError as exc:
+            return error("invalid_cursor", str(exc))
+        except ValueError as exc:
+            return error("not_found", str(exc), 404)
+        return JSONResponse(envelope({"items": items}, next_cursor=next_cursor))
 
     async def run_graph(request: Request) -> JSONResponse:
         """Server-projected graph facts; clients must not replay events."""
@@ -1258,6 +1280,22 @@ def build_api_v1(
         Route("/api/v1/runs/{run_id}/plan", plan_definition, methods=["GET"]),
         Route("/api/v1/runs/{run_id}/plan/overlay", plan_overlay, methods=["GET"]),
         Route("/api/v1/runs/{run_id}/plan/diff", plan_diff, methods=["GET"]),
+        Route(
+            "/api/v1/runs/{run_id}/planner-decisions",
+            _paged_read(dynamic_reads.planner_decisions), methods=["GET"],
+        ),
+        Route(
+            "/api/v1/runs/{run_id}/foreach",
+            _paged_read(dynamic_reads.foreach_groups), methods=["GET"],
+        ),
+        Route(
+            "/api/v1/runs/{run_id}/foreach/{group_id}/items",
+            foreach_items, methods=["GET"],
+        ),
+        Route(
+            "/api/v1/runs/{run_id}/subflows",
+            _paged_read(dynamic_reads.subflows), methods=["GET"],
+        ),
         Route("/api/v1/runs/{run_id}/graph", run_graph, methods=["GET"]),
         Route("/api/v1/runs/{run_id}/budget", add_budget, methods=["POST"]),
         Route("/api/v1/inbox", inbox, methods=["GET"]),

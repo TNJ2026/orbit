@@ -47,21 +47,36 @@ class PlannerApplicationService:
         capability_manifest_hash: DefinitionHash, model_id: str,
         provider_id: str, now: datetime,
     ) -> PlannerAttemptRecord:
+        with self.uow_factory() as uow:
+            created = self.request_decision_in_uow(
+                uow, context, prompt_hash=prompt_hash,
+                capability_manifest_hash=capability_manifest_hash,
+                model_id=model_id, provider_id=provider_id, now=now,
+            )
+            uow.commit()
+            return created
+
+    def request_decision_in_uow(
+        self, uow, context: PlanningContext, *, prompt_hash: DefinitionHash,
+        capability_manifest_hash: DefinitionHash, model_id: str,
+        provider_id: str, now: datetime,
+    ) -> PlannerAttemptRecord:
+        """Create a request inside the Kernel transaction that caused it."""
+
         fingerprint = planner_request_fingerprint(
             context, prompt_hash=prompt_hash,
             capability_manifest_hash=capability_manifest_hash,
             model_id=model_id, provider_id=provider_id,
         )
-        with self.uow_factory() as uow:
-            if uow.runs.get(context.run_id) is None:
-                raise ValueError("Planner Run was not found")
-            prior = uow.planner_attempts.list_by_run(context.run_id)
-            duplicate = next((item for item in prior if item.request_fingerprint == fingerprint), None)
-            if duplicate is not None:
-                return duplicate
-            number = Revision(len(prior) + 1)
-            attempt_id = derive_planner_attempt_id(context.run_id, number, fingerprint)
-            initial = PlannerAttemptRecord(
+        if uow.runs.get(context.run_id) is None:
+            raise ValueError("Planner Run was not found")
+        prior = uow.planner_attempts.list_by_run(context.run_id)
+        duplicate = next((item for item in prior if item.request_fingerprint == fingerprint), None)
+        if duplicate is not None:
+            return duplicate
+        number = Revision(len(prior) + 1)
+        attempt_id = derive_planner_attempt_id(context.run_id, number, fingerprint)
+        initial = PlannerAttemptRecord(
                 attempt_id=attempt_id, run_id=context.run_id,
                 attempt_number=number, status=PlannerAttemptStatus.REQUESTED,
                 context=context, prompt_hash=prompt_hash,
@@ -72,8 +87,8 @@ class PlannerApplicationService:
                 proposal_id=None, error=None, lease_owner=None,
                 lease_token_hash=None, fencing_token=0, lease_expires_at=None,
                 aggregate_version=AggregateVersion(0), created_at=now, updated_at=now,
-            )
-            event = planner_event(
+        )
+        event = planner_event(
                 attempt=initial, ordinal=1, event_type="planner_decision_requested", now=now,
                 payload={
                     "run_id": str(context.run_id), "attempt_number": number.value,
@@ -83,12 +98,11 @@ class PlannerApplicationService:
                     "model_id": model_id, "provider_id": provider_id,
                     "request_fingerprint": fingerprint.value,
                 },
-            )
-            uow.events.append(context.run_id, attempt_id, AggregateVersion(0), (event,))
-            created = replace(initial, aggregate_version=AggregateVersion(1))
-            uow.planner_attempts.create(created)
-            uow.commit()
-            return created
+        )
+        uow.events.append(context.run_id, attempt_id, AggregateVersion(0), (event,))
+        created = replace(initial, aggregate_version=AggregateVersion(1))
+        uow.planner_attempts.create(created)
+        return created
 
     def claim(self, worker_id: str, now: datetime, *, lease_ttl=timedelta(seconds=60)) -> PlannerClaim | None:
         if not worker_id.strip() or lease_ttl <= timedelta(0) or lease_ttl > timedelta(minutes=10):

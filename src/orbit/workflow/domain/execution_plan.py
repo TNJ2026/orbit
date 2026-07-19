@@ -59,7 +59,7 @@ class PlanNode:
     def __post_init__(self) -> None:
         if not self.node_id.strip():
             raise ValueError("plan node_id is required")
-        if self.kind not in {"action", "human", "decision", "join", "terminal"}:
+        if self.kind not in {"action", "human", "agentic", "foreach", "subflow", "decision", "join", "terminal"}:
             raise ValueError(f"unsupported plan node kind: {self.kind}")
         if self.kind == "action" and (not self.handler_name or not self.handler_version):
             raise ValueError("action plan nodes require an exact handler")

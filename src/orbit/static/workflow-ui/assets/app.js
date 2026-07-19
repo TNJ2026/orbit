@@ -452,7 +452,7 @@ async function renderRun(root, runId, activeTab = "overview") {
   root.append(tabContent);
   try {
     let content;
-    if (activeTab === "overview") content = overviewPanel(summary, responsibilities);
+    if (activeTab === "overview") content = await overviewPanel(runId, summary, responsibilities);
     else if (activeTab === "plan") content = await planPanel(runId);
     else if (activeTab === "graph") content = await graphPanel(runId);
     else if (activeTab === "data") content = await dataPanel(runId);
@@ -541,8 +541,8 @@ function budgetView(budget) {
   return view;
 }
 
-function overviewPanel(summary, responsibilities) {
-  return el("section", { class: "panel" }, [
+async function overviewPanel(runId, summary, responsibilities) {
+  const panel = el("section", { class: "panel" }, [
     el("div", { class: "panel-head" }, [
       el("div", { class: "panel-title", text: i18n.t("run.tab.overview") }),
     ]),
@@ -556,6 +556,117 @@ function overviewPanel(summary, responsibilities) {
       ]),
     ]),
   ]);
+  const [subflowResponse, foreachResponse] = await Promise.all([
+    api.subflows(runId), api.foreachGroups(runId),
+  ]);
+  const links = subflowResponse.data.items;
+  if (links.length) {
+    const body = panel.querySelector(".panel-body");
+    body.append(el("div", { class: "eyebrow", text: i18n.t("subflow.title") }));
+    for (const link of links) {
+      const isParent = link.parent_run_id === runId;
+      const related = isParent ? link.child_run_id : link.parent_run_id;
+      body.append(el("div", { class: "data-item" }, [
+        el("div", { class: "actions" }, [
+          pill(link.status),
+          el("span", {
+            class: "muted",
+            text: i18n.t(isParent ? "subflow.child" : "subflow.parent"),
+          }),
+          el("button", {
+            class: "button mono", text: related,
+            onclick: () => navigate({ view: "run", runId: related }),
+          }),
+        ]),
+        el("div", { class: "muted", text: i18n.t("subflow.depth", {
+          depth: i18n.number(link.recursion_depth),
+        }) }),
+      ]));
+    }
+  }
+  const groups = foreachResponse.data.items;
+  if (groups.length) {
+    const body = panel.querySelector(".panel-body");
+    body.append(el("div", { class: "eyebrow", text: i18n.t("foreach.title") }));
+    for (const group of groups) {
+      const items = el("div", {});
+      const loadItems = async () => {
+        items.replaceChildren(el("div", { class: "muted", text: i18n.t("loading") }));
+        try {
+          const grid = el("div", {
+            class: "virtual-window foreach-grid", role: "grid",
+            "aria-label": i18n.t("foreach.items"),
+          });
+          const notice = el("div", { class: "banner info", hidden: "hidden" });
+          const more = el("button", {
+            class: "button", text: i18n.t("action.loadMore"),
+          });
+          let cursor = null;
+          let rendered = 0;
+          let omitted = 0;
+          const nextPage = async () => {
+            more.disabled = true;
+            try {
+              const response = await api.foreachItems(runId, group.group_id, cursor);
+              for (const item of response.data.items) {
+                grid.insertBefore(el("div", { class: "actions", role: "row" }, [
+                  el("span", { class: "mono", role: "gridcell", text: item.item_key }),
+                  el("span", { role: "gridcell" }, [pill(item.status)]),
+                  ...(item.child_run_id ? [el("button", {
+                    class: "button mono", role: "gridcell", text: item.child_run_id,
+                    onclick: () => navigate({ view: "run", runId: item.child_run_id }),
+                  })] : []),
+                ]), more);
+                rendered += 1;
+              }
+              while (rendered > 200) {
+                const candidate = [...grid.children].find(
+                  (child) => child !== notice && child !== more,
+                );
+                if (!candidate) break;
+                candidate.remove();
+                rendered -= 1;
+                omitted += 1;
+              }
+              if (omitted) {
+                notice.textContent = i18n.t("foreach.windowed", {
+                  count: i18n.number(omitted),
+                });
+                notice.hidden = false;
+              }
+              cursor = response.next_cursor;
+              more.hidden = !cursor;
+            } finally {
+              more.disabled = false;
+            }
+          };
+          more.addEventListener("click", () => nextPage().catch(reportError));
+          grid.append(notice, more);
+          items.replaceChildren(grid);
+          await nextPage();
+        } catch (error) {
+          items.replaceChildren(dataState(el, i18n, "error", { onRetry: loadItems }));
+        }
+      };
+      body.append(el("div", { class: "data-item" }, [
+        el("div", { class: "actions" }, [
+          el("span", { class: "mono", text: group.group_id }),
+          pill(group.status),
+          el("span", { class: "muted", text: i18n.t("foreach.progress", {
+            done: i18n.number(group.counts.succeeded + group.counts.failed),
+            total: i18n.number(group.item_count),
+          }) }),
+          el("button", { class: "button", text: i18n.t("foreach.items"), onclick: loadItems }),
+        ]),
+        el("div", { class: "muted", text: i18n.t("foreach.policy", {
+          policy: group.failure_policy,
+          concurrency: i18n.number(group.concurrency_limit),
+        }) }),
+        items,
+      ]));
+    }
+  }
+  return panel;
 }
 
 function errorItem(item) {
@@ -688,7 +799,7 @@ async function planPanel(runId) {
   }
 
   const versions = definition.available_versions || [definition.plan_version];
-  const state = { version: definition.plan_version, view: "definition" };
+  const state = { version: definition.plan_version, view: "definition", asOf: null };
 
   const tabs = el("div", { class: "actions" });
   const content = el("div", {});
@@ -701,14 +812,16 @@ async function planPanel(runId) {
     try {
       if (state.view === "definition") content.replaceChildren(await planDefinitionView(runId, state));
       else if (state.view === "overlay") content.replaceChildren(await planOverlayView(runId, state));
-      else content.replaceChildren(await planDiffView(runId, state, versions));
+      else if (state.view === "diff") content.replaceChildren(await planDiffView(runId, state, versions));
+      else content.replaceChildren(await plannerDecisionsView(runId));
     } catch (error) {
       content.replaceChildren();
       reportError(error);
     }
   };
+  state.redraw = draw;
 
-  for (const view of ["definition", "overlay", "diff"]) {
+  for (const view of ["definition", "overlay", "diff", "decisions"]) {
     if (view === "diff" && versions.length < 2) continue;
     tabs.append(
       el("button", {
@@ -747,6 +860,58 @@ async function planPanel(runId) {
   return panel;
 }
 
+async function plannerDecisionsView(runId) {
+  const response = await api.plannerDecisions(runId);
+  const items = response.data.items;
+  const list = el("div", {}, [
+    el("div", { class: "eyebrow", text: i18n.t("plan.decisions.title") }),
+  ]);
+  if (!items.length) {
+    list.append(el("div", { class: "muted", text: i18n.t("plan.decisions.empty") }));
+    return list;
+  }
+  for (const item of items) {
+    const proposal = item.proposal;
+    const patch = item.patch;
+    const policy = item.policy;
+    list.append(el("div", { class: "data-item" }, [
+      el("div", { class: "actions" }, [
+        el("span", { class: "mono", text: `#${item.attempt_number}` }),
+        pill(item.status),
+        el("span", { class: "muted", text: `${item.provider_id} · ${item.model_id}` }),
+        ...(item.usage ? [el("span", {
+          class: "muted",
+          text: i18n.t("plan.decisions.cost", {
+            cost: i18n.number(item.usage.cost_microunits),
+          }),
+        })] : []),
+      ]),
+      ...(proposal ? [
+        el("div", { class: "actions" }, [
+          el("span", { class: "mono", text: proposal.proposal_id }),
+          pill(proposal.action.kind),
+          pill(proposal.status),
+        ]),
+        el("div", { text: proposal.reason }),
+      ] : []),
+      ...(patch ? [el("div", {
+        class: "muted mono",
+        text: i18n.t("plan.decisions.patch", {
+          status: patch.status,
+          version: patch.result_plan_version ?? "—",
+        }),
+      })] : []),
+      ...(policy ? [el("div", {
+        class: "muted",
+        text: i18n.t(
+          policy.allowed ? "plan.decisions.policy.allowed" : "plan.decisions.policy.denied",
+        ),
+      })] : []),
+    ]));
+  }
+  return list;
+}
+
 async function planDefinitionView(runId, state) {
   const definition = (await api.planDefinition(runId, state.version)).data;
   const list = el("div", {}, [
@@ -777,12 +942,41 @@ async function planDefinitionView(runId, state) {
 }
 
 async function planOverlayView(runId, state) {
-  const overlay = (await api.planOverlay(runId, state.version)).data;
+  const overlay = (await api.planOverlay(runId, state.version, state.asOf)).data;
+  const position = el("input", {
+    type: "number", min: "0", inputmode: "numeric",
+    value: state.asOf === null ? "" : String(state.asOf),
+    placeholder: i18n.t("plan.overlay.history.position"),
+    "aria-label": i18n.t("plan.overlay.history.position"),
+  });
+  const historyControls = el("div", { class: "actions" }, [
+    position,
+    el("button", {
+      class: "button", text: i18n.t("plan.overlay.history.apply"),
+      onclick: () => {
+        if (!position.value.length || Number(position.value) < 0) return;
+        state.asOf = Number(position.value);
+        state.redraw();
+      },
+    }),
+    el("button", {
+      class: "button", text: i18n.t("plan.overlay.history.current"),
+      onclick: () => { state.asOf = null; state.redraw(); },
+    }),
+  ]);
   const list = el("div", {}, [
     el("div", {
       class: "eyebrow",
       text: i18n.t("plan.overlay.for", { version: overlay.plan_version }),
     }),
+    historyControls,
+    ...(overlay.as_of_global_position === null ? [] : [el("div", {
+      class: "muted mono",
+      text: i18n.t("plan.overlay.history.asOf", {
+        position: i18n.number(overlay.as_of_global_position),
+        head: i18n.number(overlay.event_head),
+      }),
+    })]),
   ]);
   if (!overlay.nodes.length) {
     list.append(el("div", { class: "muted", text: i18n.t("plan.overlay.empty") }));

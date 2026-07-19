@@ -24,6 +24,7 @@ from ..runtime.recovery import RuntimeRecovery
 from ..runtime.durable_recovery import DurableRecoveryScanner
 from ..runtime.snapshot_coordinator import SnapshotCoordinator
 from ..runtime.work_scheduler import DurableWorkScheduler
+from .budget_service import BudgetService
 
 
 def _time(value: datetime) -> str:
@@ -135,11 +136,14 @@ class DurableRuntimeApplicationService:
         artifact_backend=None,
         uow_factory=None,
         human_task_delivery=None,
+        planner_service=None,
+        budget_service=None,
     ) -> None:
         self.path = Path(path)
         self.execution_registry = execution_registry
         self.artifact_backend = artifact_backend
         self.workflow_versions = SQLiteWorkflowVersionStore(self.path)
+        self.budget_service = budget_service or BudgetService(self.path)
         # Injectable so the memory adapter can be driven through the same
         # service the production one uses. Assigning `service.uow_factory`
         # afterwards does not work — the kernel, scheduler and recovery
@@ -163,6 +167,8 @@ class DurableRuntimeApplicationService:
             snapshot_coordinator=self.snapshots, schema_validator=schema_validator,
             work_scheduler=self.scheduler,
             human_task_delivery=human_task_delivery,
+            planner_service=planner_service,
+            budget_service=self.budget_service,
         )
         self.recovery = RuntimeRecovery(self.uow_factory)
         self.durable_recovery = DurableRecoveryScanner(self)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from types import MappingProxyType
 from typing import Any, Mapping
 
@@ -246,7 +247,7 @@ def analyze_dsl(
             diagnostics.append(
                 _diagnostic(document, "DSL_HANDLER_NOT_FOUND", "action node requires a handler", node_path + ("handler",))
             )
-        elif kind in {"human", "decision", "join", "terminal"} and handler_ref is not None:
+        elif kind in {"human", "agentic", "foreach", "subflow", "decision", "join", "terminal"} and handler_ref is not None:
             diagnostics.append(
                 _diagnostic(document, "DSL_HANDLER_NOT_FOUND", f"{kind} node cannot declare a handler", node_path + ("handler",))
             )
@@ -304,62 +305,258 @@ def analyze_dsl(
             config = node.get("config", {})
             outputs = node.get("outputs", [])
             if len(outputs) != 1:
-                diagnostics.append(
-                    _diagnostic(
-                        document, "DSL_PORT_INCOMPATIBLE",
-                        "human node requires exactly one result output",
-                        node_path + ("outputs",),
-                    )
-                )
+                diagnostics.append(_diagnostic(
+                    document, "DSL_PORT_INCOMPATIBLE",
+                    "human node requires exactly one result output",
+                    node_path + ("outputs",),
+                ))
             else:
-                # A submission always emits {"decision": ..., "value": ...}
-                # (value may be null). A port schema that rejects that shape
-                # would publish fine and then fail every submit, leaving the
-                # task answerable by no one — so it is a publish-time error.
                 output_schema = schemas.get(outputs[0].get("schema_id", ""))
                 if output_schema is not None:
                     sample = {"decision": "approve", "value": None}
-                    if any(
-                        Draft202012Validator(to_primitive(output_schema)).iter_errors(sample)
-                    ):
-                        diagnostics.append(
-                            _diagnostic(
-                                document, "DSL_PORT_INCOMPATIBLE",
-                                "human output port schema must accept the submission result {decision, value}",
-                                node_path + ("outputs", 0, "schema_id"),
-                            )
-                        )
-            task_kind = config.get("task_kind")
-            if task_kind != "approval":
-                diagnostics.append(
-                    _diagnostic(
-                        document, "DSL_SCHEMA_ERROR",
-                        "static human config.task_kind must be approval",
-                        node_path + ("config", "task_kind"),
-                    )
-                )
+                    if any(Draft202012Validator(to_primitive(output_schema)).iter_errors(sample)):
+                        diagnostics.append(_diagnostic(
+                            document, "DSL_PORT_INCOMPATIBLE",
+                            "human output port schema must accept the submission result {decision, value}",
+                            node_path + ("outputs", 0, "schema_id"),
+                        ))
+            if config.get("task_kind") != "approval":
+                diagnostics.append(_diagnostic(
+                    document, "DSL_SCHEMA_ERROR",
+                    "static human config.task_kind must be approval",
+                    node_path + ("config", "task_kind"),
+                ))
             participants = config.get("participants", [])
             if (
-                not isinstance(participants, list)
-                or not participants
+                not isinstance(participants, list) or not participants
                 or any(not isinstance(actor, str) or not actor.strip() for actor in participants)
                 or len(set(participants)) != len(participants)
             ):
-                diagnostics.append(
-                    _diagnostic(
-                        document, "DSL_SCHEMA_ERROR",
-                        "human config.participants must contain unique actor names",
-                        node_path + ("config", "participants"),
-                    )
-                )
+                diagnostics.append(_diagnostic(
+                    document, "DSL_SCHEMA_ERROR",
+                    "human config.participants must contain unique actor names",
+                    node_path + ("config", "participants"),
+                ))
             if config.get("quorum", "any") != "any":
-                diagnostics.append(
-                    _diagnostic(
+                diagnostics.append(_diagnostic(
+                    document, "DSL_SCHEMA_ERROR",
+                    "static human nodes currently require quorum 'any'",
+                    node_path + ("config", "quorum"),
+                ))
+        if kind == "agentic":
+            config = node.get("config", {})
+            allowed = {
+                "model_id", "provider_id", "capabilities", "remaining_limits",
+                "mutable_nodes",
+            }
+            extra = set(config) - allowed
+            if extra:
+                diagnostics.append(_diagnostic(
+                    document, "DSL_SCHEMA_ERROR",
+                    f"agentic config has unknown fields: {sorted(extra)}",
+                    node_path + ("config",),
+                ))
+            for field in ("model_id", "provider_id"):
+                if field in config and (
+                    not isinstance(config[field], str) or not config[field].strip()
+                ):
+                    diagnostics.append(_diagnostic(
                         document, "DSL_SCHEMA_ERROR",
-                        "static human nodes currently require quorum 'any'",
-                        node_path + ("config", "quorum"),
-                    )
+                        f"agentic config.{field} must be a non-empty string",
+                        node_path + ("config", field),
+                    ))
+            capabilities = config.get("capabilities", [])
+            if (
+                not isinstance(capabilities, list)
+                or any(not isinstance(item, str) or not item.strip() for item in capabilities)
+                or len(set(capabilities)) != len(capabilities)
+            ):
+                diagnostics.append(_diagnostic(
+                    document, "DSL_SCHEMA_ERROR",
+                    "agentic config.capabilities must contain unique non-empty strings",
+                    node_path + ("config", "capabilities"),
+                ))
+            limits = config.get("remaining_limits", {})
+            if not isinstance(limits, dict) or any(
+                isinstance(value, bool) or not isinstance(value, int) or value < 0
+                for value in limits.values()
+            ):
+                diagnostics.append(_diagnostic(
+                    document, "DSL_SCHEMA_ERROR",
+                    "agentic config.remaining_limits must contain non-negative integers",
+                    node_path + ("config", "remaining_limits"),
+                ))
+            elif (
+                isinstance(limits.get("cost_microunits"), bool)
+                or not isinstance(limits.get("cost_microunits"), int)
+                or limits["cost_microunits"] <= 0
+            ):
+                diagnostics.append(_diagnostic(
+                    document, "DSL_SCHEMA_ERROR",
+                    "agentic config.remaining_limits.cost_microunits must be a positive integer",
+                    node_path + ("config", "remaining_limits", "cost_microunits"),
+                ))
+            mutable_nodes = config.get("mutable_nodes", [])
+            if (
+                not isinstance(mutable_nodes, list)
+                or len(mutable_nodes) > 1
+                or any(
+                    not isinstance(item, str) or not item.strip()
+                    for item in mutable_nodes
                 )
+                or len(set(mutable_nodes)) != len(mutable_nodes)
+            ):
+                diagnostics.append(_diagnostic(
+                    document, "DSL_SCHEMA_ERROR",
+                    "agentic config.mutable_nodes must contain at most one unique node id",
+                    node_path + ("config", "mutable_nodes"),
+                ))
+            for mutable_index, mutable_id in enumerate(mutable_nodes):
+                target = node_by_id.get(mutable_id)
+                if target is None:
+                    diagnostics.append(_diagnostic(
+                        document, "DSL_REFERENCE_NOT_FOUND",
+                        f"mutable node {mutable_id!r} is not defined",
+                        node_path + ("config", "mutable_nodes", mutable_index),
+                    ))
+                elif mutable_id == node["id"] or target["kind"] in {
+                    "agentic", "human", "foreach", "subflow", "terminal",
+                }:
+                    diagnostics.append(_diagnostic(
+                        document, "DSL_SCHEMA_ERROR",
+                        "agentic mutable node must be a non-controller, non-terminal placeholder",
+                        node_path + ("config", "mutable_nodes", mutable_index),
+                    ))
+        if kind == "subflow":
+            config = node.get("config", {})
+            required = {"workflow_id", "workflow_version", "definition_hash"}
+            allowed = required | {"child_failure", "parent_cancel_to_child"}
+            missing = required - set(config)
+            extra = set(config) - allowed
+            if missing or extra:
+                diagnostics.append(_diagnostic(
+                    document, "DSL_SCHEMA_ERROR",
+                    f"subflow config requires {sorted(required)} and no other fields",
+                    node_path + ("config",),
+                ))
+            workflow_id = config.get("workflow_id")
+            if not isinstance(workflow_id, str) or not workflow_id.startswith("workflow:"):
+                diagnostics.append(_diagnostic(
+                    document, "DSL_SCHEMA_ERROR",
+                    "subflow config.workflow_id must be a workflow EntityId",
+                    node_path + ("config", "workflow_id"),
+                ))
+            version = config.get("workflow_version")
+            if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+                diagnostics.append(_diagnostic(
+                    document, "DSL_SCHEMA_ERROR",
+                    "subflow config.workflow_version must be positive",
+                    node_path + ("config", "workflow_version"),
+                ))
+            digest = config.get("definition_hash")
+            if (
+                not isinstance(digest, str)
+                or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None
+            ):
+                diagnostics.append(_diagnostic(
+                    document, "DSL_SCHEMA_ERROR",
+                    "subflow config.definition_hash must be a sha256 hash",
+                    node_path + ("config", "definition_hash"),
+                ))
+            if config.get("child_failure", "fail_parent") not in {
+                "fail_parent", "route_error",
+            }:
+                diagnostics.append(_diagnostic(
+                    document, "DSL_SCHEMA_ERROR",
+                    "subflow config.child_failure is invalid",
+                    node_path + ("config", "child_failure"),
+                ))
+            if not isinstance(config.get("parent_cancel_to_child", True), bool):
+                diagnostics.append(_diagnostic(
+                    document, "DSL_SCHEMA_ERROR",
+                    "subflow config.parent_cancel_to_child must be boolean",
+                    node_path + ("config", "parent_cancel_to_child"),
+                ))
+        if kind == "foreach":
+            config = node.get("config", {})
+            required = {
+                "workflow_id", "workflow_version", "definition_hash",
+                "items_port", "item_port", "result_port", "output_port",
+                "item_budget_microunits",
+            }
+            allowed = required | {"failure_policy", "concurrency_limit"}
+            if required - set(config) or set(config) - allowed:
+                diagnostics.append(_diagnostic(
+                    document, "DSL_SCHEMA_ERROR",
+                    f"foreach config requires {sorted(required)} and no other fields",
+                    node_path + ("config",),
+                ))
+            workflow_id = config.get("workflow_id")
+            if not isinstance(workflow_id, str) or not workflow_id.startswith("workflow:"):
+                diagnostics.append(_diagnostic(
+                    document, "DSL_SCHEMA_ERROR",
+                    "foreach config.workflow_id must be a workflow EntityId",
+                    node_path + ("config", "workflow_id"),
+                ))
+            version = config.get("workflow_version")
+            if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+                diagnostics.append(_diagnostic(
+                    document, "DSL_SCHEMA_ERROR",
+                    "foreach config.workflow_version must be positive",
+                    node_path + ("config", "workflow_version"),
+                ))
+            digest = config.get("definition_hash")
+            if (
+                not isinstance(digest, str)
+                or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None
+            ):
+                diagnostics.append(_diagnostic(
+                    document, "DSL_SCHEMA_ERROR",
+                    "foreach config.definition_hash must be a sha256 hash",
+                    node_path + ("config", "definition_hash"),
+                ))
+            input_ids = {item["id"] for item in node.get("inputs", [])}
+            output_ids = {item["id"] for item in node.get("outputs", [])}
+            for field, declared in (("items_port", input_ids), ("output_port", output_ids)):
+                value = config.get(field)
+                if not isinstance(value, str) or value not in declared:
+                    diagnostics.append(_diagnostic(
+                        document, "DSL_REFERENCE_NOT_FOUND",
+                        f"foreach config.{field} must reference a declared port",
+                        node_path + ("config", field),
+                    ))
+            for field in ("item_port", "result_port"):
+                if not isinstance(config.get(field), str) or not config.get(field).strip():
+                    diagnostics.append(_diagnostic(
+                        document, "DSL_SCHEMA_ERROR",
+                        f"foreach config.{field} must be a non-empty port id",
+                        node_path + ("config", field),
+                    ))
+            if config.get("failure_policy", "fail_fast") not in {
+                "fail_fast", "continue", "partial_success",
+            }:
+                diagnostics.append(_diagnostic(
+                    document, "DSL_SCHEMA_ERROR", "foreach failure policy is invalid",
+                    node_path + ("config", "failure_policy"),
+                ))
+            concurrency = config.get("concurrency_limit", 8)
+            if isinstance(concurrency, bool) or not isinstance(concurrency, int) or not 1 <= concurrency <= 1000:
+                diagnostics.append(_diagnostic(
+                    document, "DSL_SCHEMA_ERROR",
+                    "foreach concurrency_limit must be between 1 and 1000",
+                    node_path + ("config", "concurrency_limit"),
+                ))
+            item_budget = config.get("item_budget_microunits")
+            if (
+                isinstance(item_budget, bool)
+                or not isinstance(item_budget, int)
+                or item_budget <= 0
+            ):
+                diagnostics.append(_diagnostic(
+                    document, "DSL_SCHEMA_ERROR",
+                    "foreach item_budget_microunits must be a positive integer",
+                    node_path + ("config", "item_budget_microunits"),
+                ))
         for policy_index, policy_id in enumerate(node.get("policies", [])):
             if policy_id not in policy_ids:
                 diagnostics.append(

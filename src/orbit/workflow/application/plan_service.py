@@ -26,8 +26,8 @@ class PolicyRejectedError(PermissionError): pass
 
 
 class PlanService:
-    def __init__(self, path: Path | str, *, rules: Iterable[PolicyRule], limits: DynamicDagLimits = DynamicDagLimits(), runtime_service=None) -> None:
-        self.path = Path(path); self.policy = PolicyValidator(rules); self.limits = limits; self.runtime_service=runtime_service
+    def __init__(self, path: Path | str, *, rules: Iterable[PolicyRule], limits: DynamicDagLimits = DynamicDagLimits(), runtime_service=None, capability_resolver=None) -> None:
+        self.path = Path(path); self.policy = PolicyValidator(rules); self.limits = limits; self.runtime_service=runtime_service; self.capability_resolver=capability_resolver
 
     @staticmethod
     def required_capabilities(patch: PlanPatch) -> tuple[str, ...]:
@@ -38,12 +38,23 @@ class PlanService:
                 values.update(config.get("capabilities", ()))
         return tuple(sorted(values))
 
+    def _required_capabilities(self, patch: PlanPatch) -> tuple[str, ...]:
+        values = set(self.required_capabilities(patch))
+        if self.capability_resolver is not None:
+            for operation in patch.operations:
+                if operation.kind in {
+                    PatchOperationKind.ADD_NODE,
+                    PatchOperationKind.REPLACE_PENDING_NODE,
+                } and operation.value and operation.value.get("kind") == "action":
+                    values.update(self.capability_resolver(operation.value))
+        return tuple(sorted(values))
+
     def validate(self, patch: PlanPatch, region: AgenticRegion, *, approvals: Iterable[str] = ()) -> tuple[GraphExecutionPlan, PolicyDecision]:
         with connect_workflow_database(self.path, read_only=True) as db:
             base = self._load_plan(db, patch.run_id, patch.base_plan_version.value)
             statuses = {row["node_id"]: NodeRunStatus(row["status"]) for row in db.execute("SELECT node_id,status FROM node_runs WHERE run_id=?", (str(patch.run_id),))}
             validate_patch(base, patch, region, statuses, self.limits)
-            decision = self.policy.validate(run_id=patch.run_id, patch_id=patch.patch_id, capabilities=self.required_capabilities(patch), approvals=approvals, context={"base_plan_hash": definition_hash(base).value})
+            decision = self.policy.validate(run_id=patch.run_id, patch_id=patch.patch_id, capabilities=self._required_capabilities(patch), approvals=approvals, context={"base_plan_hash": definition_hash(base).value})
             return compile_patch(base, patch, region, statuses, self.limits), decision
 
     def commit(self, patch: PlanPatch, region: AgenticRegion, *, actor: str, now: datetime) -> GraphExecutionPlan:
@@ -61,7 +72,7 @@ class PlanService:
             statuses = {row["node_id"]: NodeRunStatus(row["status"]) for row in db.execute("SELECT node_id,status FROM node_runs WHERE run_id=?", (str(patch.run_id),))}
             approvals = tuple(row[0] for row in db.execute("SELECT capability_scope FROM human_tasks WHERE run_id=? AND kind='approval' AND status='completed' AND capability_scope IS NOT NULL", (str(patch.run_id),)))
             plan = compile_patch(base, patch, region, statuses, self.limits)
-            decision = self.policy.validate(run_id=patch.run_id, patch_id=patch.patch_id, capabilities=self.required_capabilities(patch), approvals=approvals, context={"base_plan_hash": definition_hash(base).value})
+            decision = self.policy.validate(run_id=patch.run_id, patch_id=patch.patch_id, capabilities=self._required_capabilities(patch), approvals=approvals, context={"base_plan_hash": definition_hash(base).value})
             if existing is None:
                 db.execute("INSERT INTO plan_patches VALUES (?,?,?,?,NULL,'validated',?,?,?,?,?,?)", (str(patch.patch_id),str(patch.proposal_id),str(patch.run_id),patch.base_plan_version.value,patch.reason,canonical_json(to_primitive(patch)),patch.content_hash.value,0,now.isoformat(),now.isoformat()))
             db.execute("INSERT OR IGNORE INTO policy_decisions VALUES (?,?,?,?,?,?,?,?,?,?)", (str(decision.decision_id),str(patch.run_id),str(patch.patch_id),decision.input_hash.value,decision.rule_set_version,int(decision.allowed),int(decision.requires_approval),canonical_json(decision.results),canonical_json(decision.reasons),now.isoformat()))

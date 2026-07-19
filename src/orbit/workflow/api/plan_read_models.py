@@ -168,7 +168,8 @@ class PlanReadModelService:
     # -- overlay ----------------------------------------------------------
 
     def overlay(
-        self, run_id: EntityId, *, plan_version: int | None = None
+        self, run_id: EntityId, *, plan_version: int | None = None,
+        as_of_global_position: int | None = None,
     ) -> dict[str, Any]:
         """What happened to each node, keyed by node id.
 
@@ -177,11 +178,17 @@ class PlanReadModelService:
         different plan version than the one it drew.
         """
 
+        if as_of_global_position is not None and as_of_global_position < 0:
+            raise ValueError("as_of_global_position must be non-negative")
         with connect_workflow_database(self.path, read_only=True) as connection:
             plan = _plan_row(connection, str(run_id), plan_version)
             if plan is None:
                 raise PlanNotFound(f"no plan for {run_id}")
             resolved = int(plan["plan_version"])
+            if as_of_global_position is not None:
+                return self._historical_overlay(
+                    connection, run_id, resolved, as_of_global_position
+                )
             rows = connection.execute(
                 "SELECT node_id, node_run_id, status, generation, aggregate_version,"
                 " updated_at FROM node_runs"
@@ -204,6 +211,7 @@ class PlanReadModelService:
         return {
             "run_id": str(run_id),
             "plan_version": resolved,
+            "as_of_global_position": None,
             "nodes": [
                 {
                     "node_id": row["node_id"],
@@ -219,6 +227,67 @@ class PlanReadModelService:
                 }
                 for row in rows
             ],
+        }
+
+    @staticmethod
+    def _historical_overlay(connection, run_id, plan_version, position):
+        """Project node/attempt facts from the event log at one stable cursor.
+
+        Node identity metadata is immutable and may be read from ``node_runs``;
+        status, version and attempt count are reconstructed solely from events
+        at or before the requested global position.
+        """
+
+        head = connection.execute(
+            "SELECT COALESCE(MAX(global_position), 0) FROM run_events WHERE run_id=?",
+            (str(run_id),),
+        ).fetchone()[0]
+        if position > int(head):
+            raise ValueError("as_of_global_position is beyond the Run event head")
+        metadata = {
+            row["node_run_id"]: row
+            for row in connection.execute(
+                "SELECT node_run_id,node_id,source_plan_version,generation"
+                " FROM node_runs WHERE run_id=?",
+                (str(run_id),),
+            )
+        }
+        nodes: dict[str, dict[str, Any]] = {}
+        attempts: dict[str, set[str]] = {}
+        for event in connection.execute(
+            "SELECT global_position,aggregate_id,aggregate_sequence,event_type,"
+            " occurred_at,payload_json FROM run_events"
+            " WHERE run_id=? AND global_position<=? ORDER BY global_position",
+            (str(run_id), position),
+        ):
+            payload = json.loads(event["payload_json"])
+            if event["event_type"] == "node_run_transitioned":
+                item = metadata.get(event["aggregate_id"])
+                if item is None or int(item["source_plan_version"]) != plan_version:
+                    continue
+                nodes[event["aggregate_id"]] = {
+                    "node_id": item["node_id"],
+                    "node_run_id": event["aggregate_id"],
+                    "status": payload["to"],
+                    "generation": int(item["generation"]),
+                    "attempts": 0,
+                    "expected_version": int(event["aggregate_sequence"]),
+                    "updated_at": event["occurred_at"],
+                }
+            elif event["event_type"] == "attempt_transitioned":
+                node_run_id = payload.get("node_run_id")
+                if node_run_id in metadata:
+                    attempts.setdefault(node_run_id, set()).add(event["aggregate_id"])
+        for node_run_id, entry in nodes.items():
+            entry["attempts"] = len(attempts.get(node_run_id, ()))
+        return {
+            "run_id": str(run_id),
+            "plan_version": plan_version,
+            "as_of_global_position": position,
+            "event_head": int(head),
+            "nodes": sorted(
+                nodes.values(), key=lambda item: (item["node_id"], item["generation"])
+            ),
         }
 
     # -- diff -------------------------------------------------------------
