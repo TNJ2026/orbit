@@ -31,7 +31,7 @@ from ..workflow.application.handler_runtime_service import HandlerRuntimeBuilder
 from ..workflow.catalogs import InMemorySchemaCatalog
 from ..workflow.persistence.database import connect_workflow_database
 from ..workflow.persistence.migrations import migrate_workflow_database
-from ..workflow.worker.runtime import TimerDispatcher, WorkerRuntime
+from ..workflow.worker.runtime import PlannerDispatcher, TimerDispatcher, WorkerRuntime
 from .schema_guard import MixedSchemaError, assert_runtime_schema
 
 
@@ -131,11 +131,13 @@ class RuntimeComposition:
         poll_seconds: float = DEFAULT_POLL_SECONDS,
         clock: Callable[[], datetime] = utc_now,
         artifact_backend: Any = None,
+        planner_service: Any = None,
     ) -> None:
         self.db_path = Path(db_path)
         self.clock = clock
         self.worker_count = max(1, int(worker_count))
         self.poll_seconds = poll_seconds
+        self.planner_service = planner_service
 
         # A file carrying legacy tables is refused before anything is wired:
         # continuing would mean serving a database whose semantics are half
@@ -204,6 +206,19 @@ class RuntimeComposition:
         loops.append(
             BackgroundLoop("recovery", self._recovery_pass, max(self.poll_seconds, 5.0))
         )
+        if self.planner_service is not None:
+            planner = PlannerDispatcher(
+                self.planner_service, worker_id="planner-1", clock=self.clock
+            )
+            loops.append(
+                BackgroundLoop("planner-1", planner.run_once, self.poll_seconds)
+            )
+            loops.append(
+                BackgroundLoop(
+                    "planner-recovery", self._planner_recovery_pass,
+                    max(self.poll_seconds, 5.0),
+                )
+            )
         return loops
 
     def _recovery_pass(self) -> bool:
@@ -213,6 +228,10 @@ class RuntimeComposition:
             or report.expired_timer_leases
             or report.materialized_jobs
         )
+
+    def _planner_recovery_pass(self) -> bool:
+        report = self.planner_service.recovery.scan_once(self.clock())
+        return bool(report.parsed_responses or report.expired_unknown)
 
     def start(self) -> None:
         if self._started:
@@ -344,6 +363,7 @@ def create_app(
         poll_seconds=poll_seconds,
         clock=clock,
         artifact_backend=artifact_backend,
+        planner_service=planner_service,
     )
 
     @asynccontextmanager
@@ -406,5 +426,5 @@ def create_app(
     app.state.runtime = composition
     # None when discovery is off or found nothing; adapters must treat the
     # planner as optional rather than assume it.
-    app.state.planner = planner_service
+    app.state.planner = composition.planner_service
     return app

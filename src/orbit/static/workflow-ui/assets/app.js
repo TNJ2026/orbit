@@ -69,6 +69,8 @@ async function promptAndExecute(allowed, onDone) {
     payload = await budgetDialog();
   } else if (allowed.payload_schema.startsWith("run-cancel")) {
     payload = { reason: "cancelled from the console" };
+  } else if (allowed.payload_schema.startsWith("recovery-apply")) {
+    payload = await recoveryDialog(allowed);
   }
   if (payload === null) return;
 
@@ -176,6 +178,23 @@ function budgetDialog() {
     ]),
   ]);
   return dialogResult(dialog, () => ({ amount_microunits: Number(amount.value) }));
+}
+
+function recoveryDialog(allowed) {
+  const dialog = el("dialog", { "aria-label": i18n.t("recovery.title") }, [
+    el("form", { method: "dialog" }, [
+      el("h2", { text: i18n.t("recovery.title") }),
+      el("p", { text: i18n.t("recovery.confirm") }),
+      el("div", { class: "mono muted", text: allowed.action_id }),
+      el("div", { class: "actions" }, [
+        el("button", { class: "button", value: "cancel", text: i18n.t("action.cancel") }),
+        el("button", {
+          class: "button primary", value: "confirm", text: i18n.t("action.apply"),
+        }),
+      ]),
+    ]),
+  ]);
+  return dialogResult(dialog, () => ({ action_ids: [allowed.action_id] }));
 }
 
 /* ------------------------------------------------------------------- views */
@@ -312,6 +331,8 @@ async function renderRun(root, runId) {
 
   root.append(await planPanel(runId));
 
+  root.append(await dataPanel(runId));
+
   root.append(await pagedPanel(runId, "timeline", "run.timeline", (item) =>
     el("div", { class: "actions" }, [
       el("span", { class: "mono muted", text: i18n.dateTime(item.occurred_at) }),
@@ -334,6 +355,41 @@ async function renderRun(root, runId) {
       el("div", { class: "muted mono", text: i18n.dateTime(item.occurred_at) }),
     ]);
   }));
+}
+
+async function dataPanel(runId) {
+  return pagedPanel(runId, "data", "run.data", (item) => {
+    const lineage = el("div", { class: "muted mono", hidden: "hidden" });
+    const button = el("button", {
+      class: "button",
+      text: i18n.t("run.data.lineage"),
+      onclick: async () => {
+        try {
+          const response = await api.lineage(runId, item.data_id);
+          const links = response.data.links;
+          lineage.textContent = links.length
+            ? links.map((link) => `${link.type}: ${link.source_id} → ${link.target_id}`).join(" · ")
+            : i18n.t("run.data.lineage.empty");
+          lineage.hidden = false;
+        } catch (error) {
+          reportError(error);
+        }
+      },
+    });
+    const value = item.kind === "value" && item.value !== null
+      ? JSON.stringify(item.value)
+      : `${item.content_type || item.schema_id} · ${i18n.number(item.size_bytes)} B`;
+    return el("div", { class: "data-item" }, [
+      el("div", { class: "actions" }, [
+        el("span", { class: "mono", text: item.data_id }),
+        el("span", { class: "pill", text: i18n.t(`run.data.kind.${item.kind}`) }),
+        button,
+      ]),
+      el("div", { text: `${item.port_id}: ${value}` }),
+      el("div", { class: "muted mono", text: item.checksum }),
+      lineage,
+    ]);
+  });
 }
 
 /** The plan, in three separately-labelled views.
@@ -620,7 +676,10 @@ async function renderOps(root) {
         }),
         ...(findings.length
           ? findings.map((finding) =>
-              el("div", { class: "mono", text: `${finding.code} · ${finding.entity_id}` }),
+              el("div", { class: "actions" }, [
+                el("span", { class: "mono", text: `${finding.code} · ${finding.entity_id}` }),
+                ...commandButtons(finding.allowed_commands || [], () => render()),
+              ]),
             )
           : [el("div", { class: "muted", text: i18n.t("ops.recovery.empty") })]),
       ]),
@@ -652,8 +711,15 @@ async function renderOps(root) {
 /* ------------------------------------------------------------- new run flow */
 
 async function newRunDialog() {
-  const catalog = await api.listRuns({ limit: 1 }).catch(() => null);
-  const workflow = el("input", { type: "text", id: "newRunWorkflow", required: "required" });
+  const catalog = await api.workflowCatalog().catch(() => null);
+  const entries = catalog ? catalog.data.workflows : [];
+  const workflow = el("input", {
+    type: "text", id: "newRunWorkflow", required: "required", list: "workflowOptions",
+  });
+  const options = el("datalist", { id: "workflowOptions" });
+  for (const entry of entries) {
+    options.append(el("option", { value: entry.workflow_id }));
+  }
   const goal = el("input", { type: "text", id: "newRunGoal" });
   const input = el("textarea", { id: "newRunInput", text: "{}" });
   const problem = el("div", { class: "banner error", hidden: "hidden" });
@@ -665,6 +731,7 @@ async function newRunDialog() {
       el("div", { class: "field" }, [
         el("label", { for: "newRunWorkflow", text: i18n.t("newRun.workflow") }),
         workflow,
+        options,
         el("small", { class: "muted", text: i18n.t("newRun.workflow.hint") }),
       ]),
       el("div", { class: "field" }, [
@@ -707,8 +774,17 @@ async function newRunDialog() {
     return;
   }
 
+  const entry = entries.find((item) => item.workflow_id === body.workflow_id);
+  const allowed = entry && entry.allowed_commands[0];
+  if (!allowed) {
+    announce(i18n.t("newRun.workflow.invalid"), "error");
+    return;
+  }
+
   try {
-    const started = await api.startRun(body, `run.start:${body.workflow_id}:${Date.now()}`);
+    const started = await api.execute(
+      allowed, body, `run.start:${body.workflow_id}:${Date.now()}`,
+    );
     announce(i18n.t("newRun.started", { runId: started.data.run_id }));
     navigate({ view: "run", runId: started.data.run_id });
   } catch (error) {

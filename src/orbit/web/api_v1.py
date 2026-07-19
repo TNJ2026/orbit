@@ -32,6 +32,7 @@ from ..workflow.application.foreach_service import ForeachService
 from ..workflow.application.human_service import HumanTaskService
 from ..workflow.application.run_service import RunApplicationService, RunStartError
 from ..workflow.domain.ids import EntityId
+from ..workflow.persistence.database import connect_workflow_database
 from ..workflow.recovery.manager import RecoveryManager
 
 
@@ -171,9 +172,9 @@ def build_api_v1(
             return error("not_found", str(exc), 404)
         return JSONResponse(envelope({"responsibilities": items}))
 
-    def _paged_read(loader):
+    def _paged_read(loader, scope: str = READ_SCOPE):
         async def handler(request: Request) -> JSONResponse:
-            actor = authenticate(request, READ_SCOPE)
+            actor = authenticate(request, scope)
             if isinstance(actor, JSONResponse):
                 return actor
             try:
@@ -265,6 +266,19 @@ def build_api_v1(
             return error("invalid_request", str(exc))
         return JSONResponse(envelope({"items": items}, next_cursor=next_cursor))
 
+    async def data_lineage(request: Request) -> JSONResponse:
+        actor = authenticate(request, SENSITIVE_SCOPE)
+        if isinstance(actor, JSONResponse):
+            return actor
+        try:
+            payload = reads.lineage(
+                EntityId.parse(request.path_params["run_id"]),
+                EntityId.parse(request.path_params["data_id"]),
+            )
+        except ValueError as exc:
+            return error("not_found", str(exc), 404)
+        return JSONResponse(envelope(payload))
+
     async def handler_catalog(request: Request) -> JSONResponse:
         """Installed handlers for the authoring UI.
 
@@ -297,6 +311,40 @@ def build_api_v1(
         return JSONResponse(
             envelope({"handlers": handlers, "agents": list(agent_catalog)})
         )
+
+    async def workflow_catalog(request: Request) -> JSONResponse:
+        actor = authenticate(request, READ_SCOPE)
+        if isinstance(actor, JSONResponse):
+            return actor
+        may_start = guard.allows(actor, WRITE_SCOPE)
+        with connect_workflow_database(path, read_only=True) as connection:
+            rows = connection.execute(
+                """SELECT workflow_id, version, definition_hash
+                   FROM workflow_versions current
+                   WHERE version = (
+                     SELECT MAX(version) FROM workflow_versions
+                     WHERE workflow_id = current.workflow_id
+                   )
+                   ORDER BY workflow_id"""
+            ).fetchall()
+        workflows = [
+            {
+                "workflow_id": row["workflow_id"],
+                "latest_version": row["version"],
+                "definition_hash": row["definition_hash"],
+                "allowed_commands": ([{
+                    "command": "run.start",
+                    "label": "Start run",
+                    "method": "POST",
+                    "href": "/api/v1/runs",
+                    "target_aggregate_id": row["workflow_id"],
+                    "expected_version": 0,
+                    "payload_schema": "run-start/1.0",
+                }] if may_start else []),
+            }
+            for row in rows
+        ]
+        return JSONResponse(envelope({"workflows": workflows}))
 
     # -- writes -----------------------------------------------------------
 
@@ -457,6 +505,20 @@ def build_api_v1(
                             "expected_version": finding.expected_version,
                             "safe_to_apply": finding.safe_to_apply,
                             "details": finding.details,
+                            "allowed_commands": (
+                                [{
+                                    "command": "recovery.apply",
+                                    "label": "Apply recovery",
+                                    "method": "POST",
+                                    "href": "/api/v1/recovery/apply",
+                                    "target_aggregate_id": finding.entity_id,
+                                    "expected_version": finding.expected_version,
+                                    "payload_schema": "recovery-apply/1.0",
+                                    "action_id": finding.action_id,
+                                }]
+                                if finding.safe_to_apply
+                                and guard.allows(actor, WRITE_SCOPE) else []
+                            ),
                         }
                         for finding in report.findings
                     ],
@@ -502,6 +564,14 @@ def build_api_v1(
         ),
         Route("/api/v1/runs/{run_id}/timeline", _paged_read(reads.timeline), methods=["GET"]),
         Route("/api/v1/runs/{run_id}/errors", _paged_read(reads.errors), methods=["GET"]),
+        Route(
+            "/api/v1/runs/{run_id}/data",
+            _paged_read(reads.data, SENSITIVE_SCOPE), methods=["GET"],
+        ),
+        Route(
+            "/api/v1/runs/{run_id}/data/{data_id}/lineage", data_lineage,
+            methods=["GET"],
+        ),
         Route("/api/v1/runs/{run_id}/cancel", cancel_run, methods=["POST"]),
         Route("/api/v1/runs/{run_id}/plan", plan_definition, methods=["GET"]),
         Route("/api/v1/runs/{run_id}/plan/overlay", plan_overlay, methods=["GET"]),
@@ -517,4 +587,5 @@ def build_api_v1(
         Route("/api/v1/recovery", recovery_scan, methods=["GET"]),
         Route("/api/v1/recovery/apply", recovery_apply, methods=["POST"]),
         Route("/api/v1/handler-catalog", handler_catalog, methods=["GET"]),
+        Route("/api/v1/workflows", workflow_catalog, methods=["GET"]),
     ]

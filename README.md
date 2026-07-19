@@ -30,8 +30,9 @@ workflow definition ──▶ plan ──▶ jobs ──▶ handlers
 orbit runs **static** workflow graphs: a published workflow compiles to a plan
 whose shape does not change while it runs. Dynamic planning — foreach groups,
 subflows and agentic regions that rewrite their own graph — is implemented in
-the domain and service layers but is not reachable from a running system: the
-DSL has no syntax for it and no loop drives the planner. See
+the domain and service layers but is not reachable from a published workflow:
+the Planner dispatcher is supervised by the composition root, but the DSL and
+kernel do not yet create Planner attempts or structural nodes. See
 [docs/migration/unwired-capabilities.md](docs/migration/unwired-capabilities.md).
 
 ## Table of Contents
@@ -149,12 +150,15 @@ in the body.
 | `GET /api/v1/runs/{id}/responsibilities` | What the run is waiting on, plus the commands you may issue. |
 | `GET /api/v1/runs/{id}/timeline` | The event log. |
 | `GET /api/v1/runs/{id}/errors` | Failures, as a projection rather than a filtered timeline. |
+| `GET /api/v1/runs/{id}/data` | Inline values and committed Artifact metadata. |
+| `GET /api/v1/runs/{id}/data/{data_id}/lineage` | Run-scoped Value or Artifact lineage. |
 | `GET /api/v1/runs/{id}/plan` | Plan definition: nodes, handlers, edges. No run state. |
 | `GET /api/v1/runs/{id}/plan/overlay` | Run state per node, stamped with its plan version. |
 | `GET /api/v1/runs/{id}/plan/diff` | What changed between two plan versions. |
 | `GET /api/v1/inbox` | Everything waiting on a person, across all runs. |
 | `GET /api/v1/recovery` | What the runtime believes is stuck. |
 | `GET /api/v1/handler-catalog` | Installed handlers and discovered agent CLIs. |
+| `GET /api/v1/workflows` | Published workflows and authorised `start_run` commands. |
 | `POST /api/v1/runs` | Start a run. |
 | `POST /api/v1/runs/{id}/cancel` | Cancel at a known version. |
 | `POST /api/v1/runs/{id}/budget` | Grant more budget. |

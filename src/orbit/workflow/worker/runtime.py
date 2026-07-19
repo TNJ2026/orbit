@@ -144,3 +144,27 @@ class TimerDispatcher:
         self.service.fire_timer(claimed, self.clock())
         self._increment("timer_fired")
         return True
+
+
+class PlannerDispatcher:
+    """Claim and execute one durable Planner attempt."""
+
+    def __init__(self, service, *, worker_id="planner-1", clock, metrics=None):
+        self.service = service
+        self.worker_id = worker_id
+        self.clock = clock
+        self.metrics = metrics or InMemoryMetrics()
+
+    def _increment(self, name):
+        try: self.metrics.increment(name)
+        except Exception: pass
+
+    def run_once(self):
+        self._increment("planner_heartbeat")
+        claimed = self.service.claim(self.worker_id, self.clock())
+        if claimed is None:
+            self._increment("planner_empty")
+            return False
+        self.service.execute_claimed(claimed, self.clock())
+        self._increment("planner_completed")
+        return True

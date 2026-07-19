@@ -302,6 +302,125 @@ class ReadModelService:
         )
         return errors, next_cursor
 
+    def data(
+        self, run_id: EntityId, *, cursor: str | None = None, limit: int = 50
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """Inline Values and committed Artifact metadata for one Run.
+
+        Blob keys are intentionally excluded. Reading Artifact contents is a
+        separate capability; the HTTP adapter still requires its sensitive
+        read scope because inline Values may contain user data.
+        """
+
+        after = str(decode_cursor(cursor).get("data_id", ""))
+        with connect_workflow_database(self.path, read_only=True) as connection:
+            if connection.execute(
+                "SELECT 1 FROM workflow_runs WHERE run_id = ?", (str(run_id),)
+            ).fetchone() is None:
+                raise ValueError(f"run not found: {run_id}")
+            rows = connection.execute(
+                """
+                SELECT * FROM (
+                    SELECT value_id AS data_id, 'value' AS kind, owner_kind,
+                           owner_id, port_id, schema_id, data_json, checksum,
+                           size_bytes, NULL AS content_type, NULL AS visibility,
+                           'committed' AS status, created_at
+                    FROM "values" WHERE run_id = ? AND value_id > ?
+                    UNION ALL
+                    SELECT artifact_id AS data_id, 'artifact' AS kind,
+                           producer_type AS owner_kind, producer_id AS owner_id,
+                           output_port_id AS port_id, schema_id, NULL AS data_json,
+                           checksum, size_bytes, content_type, visibility, status,
+                           created_at
+                    FROM artifacts
+                    WHERE run_id = ? AND artifact_id > ? AND status = 'committed'
+                ) ORDER BY data_id LIMIT ?
+                """,
+                (str(run_id), after, str(run_id), after, limit),
+            ).fetchall()
+        import json as _json
+
+        items = [
+            {
+                "data_id": row["data_id"],
+                "kind": row["kind"],
+                "owner_kind": row["owner_kind"],
+                "owner_id": row["owner_id"],
+                "port_id": row["port_id"],
+                "schema_id": row["schema_id"],
+                "value": None if row["data_json"] is None else _json.loads(row["data_json"]),
+                "checksum": row["checksum"],
+                "size_bytes": row["size_bytes"],
+                "content_type": row["content_type"],
+                "visibility": row["visibility"],
+                "status": row["status"],
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
+        next_cursor = (
+            encode_cursor({"data_id": items[-1]["data_id"]})
+            if len(items) == limit else None
+        )
+        return items, next_cursor
+
+    def lineage(self, run_id: EntityId, data_id: EntityId) -> dict[str, Any]:
+        """Lineage edges for a Value or committed Artifact, scoped to its Run."""
+
+        with connect_workflow_database(self.path, read_only=True) as connection:
+            if data_id.kind == "artifact":
+                item = connection.execute(
+                    "SELECT artifact_id AS data_id, output_port_id AS port_id,"
+                    " producer_type AS owner_kind, producer_id AS owner_id"
+                    " FROM artifacts WHERE artifact_id = ? AND run_id = ?"
+                    " AND status = 'committed'",
+                    (str(data_id), str(run_id)),
+                ).fetchone()
+                rows = connection.execute(
+                    "SELECT link_id, link_type, target_id, created_at"
+                    " FROM artifact_links WHERE artifact_id = ? AND run_id = ?"
+                    " ORDER BY link_id",
+                    (str(data_id), str(run_id)),
+                ).fetchall()
+                links = [
+                    {
+                        "link_id": row["link_id"], "type": row["link_type"],
+                        "source_id": str(data_id), "target_id": row["target_id"],
+                        "created_at": row["created_at"],
+                    }
+                    for row in rows
+                ]
+            elif data_id.kind == "value":
+                item = connection.execute(
+                    "SELECT value_id AS data_id, port_id, owner_kind, owner_id"
+                    " FROM \"values\" WHERE value_id = ? AND run_id = ?",
+                    (str(data_id), str(run_id)),
+                ).fetchone()
+                rows = connection.execute(
+                    "SELECT link_id, link_type, source_value_id, target_value_id,"
+                    " created_at FROM value_links WHERE run_id = ? AND"
+                    " (source_value_id = ? OR target_value_id = ?) ORDER BY link_id",
+                    (str(run_id), str(data_id), str(data_id)),
+                ).fetchall()
+                links = [
+                    {
+                        "link_id": row["link_id"], "type": row["link_type"],
+                        "source_id": row["source_value_id"],
+                        "target_id": row["target_value_id"],
+                        "created_at": row["created_at"],
+                    }
+                    for row in rows
+                ]
+            else:
+                raise ValueError("lineage requires a value or artifact id")
+        if item is None:
+            raise ValueError(f"data not found in run: {data_id}")
+        return {
+            "data_id": item["data_id"], "kind": data_id.kind,
+            "owner_kind": item["owner_kind"], "owner_id": item["owner_id"],
+            "port_id": item["port_id"], "links": links,
+        }
+
     # -- inbox ------------------------------------------------------------
 
     def inbox(

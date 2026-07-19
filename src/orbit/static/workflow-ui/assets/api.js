@@ -125,6 +125,12 @@ export class Api {
     return this.get(`/api/v1/runs/${encodeURIComponent(runId)}/${kind}?${params}`);
   }
 
+  lineage(runId, dataId) {
+    return this.get(
+      `/api/v1/runs/${encodeURIComponent(runId)}/data/${encodeURIComponent(dataId)}/lineage`,
+    );
+  }
+
   /* Plan reads are three calls on purpose. The server keeps definition,
      overlay and diff apart, and merging them here would put the distinction
      back at the mercy of the client. */
@@ -158,6 +164,10 @@ export class Api {
     return this.get("/api/v1/handler-catalog");
   }
 
+  workflowCatalog() {
+    return this.get("/api/v1/workflows");
+  }
+
   recovery() {
     return this.get("/api/v1/recovery");
   }
@@ -166,24 +176,4 @@ export class Api {
     return this.get("/health/ready");
   }
 
-  /** The Bootstrap Command — the contract's single hardcoded mutation.
-   *
-   * `allowed_commands[]` hangs off an existing aggregate. A run that does not
-   * exist yet has none, so no read model can advertise its start. See
-   * docs/ui/agent-workflow-ui-api-contract.md §4.2.1; §4.2.2 retires this
-   * exception once a Workflow Catalog can advertise start_run.
-   *
-   * Nothing else in this file may construct a mutation path.
-   */
-  startRun(body, intent) {
-    const scope = intent || "run.start";
-    if (!this.pendingKeys.has(scope)) this.pendingKeys.set(scope, newIdempotencyKey());
-    return this.request("POST", "/api/v1/runs", {
-      body,
-      idempotencyKey: this.pendingKeys.get(scope),
-    }).then((result) => {
-      this.pendingKeys.delete(scope);
-      return result;
-    });
-  }
 }

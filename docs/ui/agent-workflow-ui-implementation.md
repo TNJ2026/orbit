@@ -1,8 +1,8 @@
 # Agent Workflow UI 可实施设计
 
-> 文档状态：Implementable UI/UX Design Draft（[U0 Backend/API Gate](agent-workflow-ui-api-contract.md) 未完成，禁止直接进入页面开发）
+> 文档状态：Implemented UI/UX Baseline（静态图产品范围；动态 Foreach/Subflow/Agentic UI 后续）
 > 定位：把 [Future Agent Workflow UI 设计理念](Future%20Agent%20Workflow%20UI%20设计理念.md) 的愿景，落成对齐 Step 1–12 durable runtime 的可实施设计。
-> 姊妹文档：[agent-workflow-ui-api-contract.md](agent-workflow-ui-api-contract.md)（Runtime UI API 契约与 U0 Gate）、[workflow-list-view-design.md](../workflow-list-view-design.md)（图的列表替代）、[workflow-prompt-authoring-design.md](../workflow-prompt-authoring-design.md)（提示词生成工作流）。
+> 姊妹文档：[agent-workflow-ui-api-contract.md](agent-workflow-ui-api-contract.md)（Runtime UI API 契约与 U0 Gate）。
 > 铁律（沿用 Step 12）：**UI 只渲染 Event-derived 状态，只提交后端明确授权的 Command，绝不自建第二状态机，绝不从日志或 Event 自行投影状态。** 每个 mutation 使用统一 Command Envelope，并携带 `Idempotency-Key` + `Expected-Version`；暂不满足该契约的端点必须先在 U0 修正。
 
 ## 0. 本设计与理念文档的差异

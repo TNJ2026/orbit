@@ -5,20 +5,12 @@ approving from the inbox, granting budget to an exhausted run, cancelling a
 run parked on a person, the plan panel's definition/overlay split, the ops
 page, and a failed run's error panel.
 
-What is NOT covered, and why — M7 gate 7 asks for the full "New Goal →
-execute → wait for a person → submit → succeed" journey plus recovery and
-artifacts:
-
-* **Artifacts** have no UI at all, so there is nothing to drive.
-* **Recovery apply** has no UI affordance: the ops page lists findings and
-  offers no button, so an operator cannot apply one from the browser.
-* The journey is exercised in two pieces — a run started from the dialog, and
-  an approval completed from the inbox — because no published workflow parks
-  itself on a person. The HumanTask is created by the test.
-
-An earlier version of this file claimed all of that was covered. It was not,
-and a test named for a flow it does not exercise is worse than a missing one:
-it turns a gap into a green tick. See docs/migration/unwired-capabilities.md.
+Artifact metadata and lineage are inspected from Run detail, and recovery is
+applied from an actual finding on the Ops page.  The Human journey is still
+exercised in two pieces — a run started from the dialog, and an approval
+completed from the inbox — because the static Workflow DSL does not yet have a
+Human node kind.  The HumanTask is therefore created through its production
+application service rather than by a test-only fake.
 
 playwright is a test-only dependency (`pip install -e '.[dev]'` plus
 `playwright install chromium`). The suite skips when it is missing rather than
@@ -27,7 +19,7 @@ failing, so a plain checkout still runs green.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import socket
 import tempfile
@@ -178,6 +170,48 @@ class LocaleTests(BrowserE2ETestCase):
                 text = page.inner_text("body")
                 leaked = re.findall(r"\b(?:runs|run|inbox|ops|action|plan)\.[a-z][\w.]+", text)
                 self.assertEqual([], leaked, f"untranslated keys: {leaked}")
+
+
+class AccessibilityAndResponsiveTests(BrowserE2ETestCase):
+    def test_keyboard_reaches_the_skip_link_and_main_navigation(self) -> None:
+        page = self.open("en-US")
+        page.keyboard.press("Tab")
+        self.assertIn("skip-link", page.locator(":focus").get_attribute("class") or "")
+        page.keyboard.press("Tab")
+        self.assertEqual("runs", page.locator(":focus").get_attribute("data-view"))
+
+    def test_mobile_viewport_has_no_page_level_horizontal_overflow(self) -> None:
+        context = self.browser.new_context(
+            locale="en-US", viewport={"width": 390, "height": 844}
+        )
+        self.addCleanup(context.close)
+        page = context.new_page()
+        page.goto(f"{self.base}/ui/")
+        page.wait_for_selector("#content")
+        self.assertTrue(page.evaluate(
+            "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+        ))
+
+    def test_default_text_meets_wcag_aa_contrast(self) -> None:
+        page = self.open("en-US")
+        ratio = page.evaluate("""
+          () => {
+            const rgb = value => value.match(/[0-9.]+/g).slice(0, 3).map(Number);
+            const luminance = value => {
+              const channels = rgb(value).map(v => {
+                v /= 255;
+                return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+              });
+              return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
+            };
+            const style = getComputedStyle(document.body);
+            const foreground = luminance(style.color);
+            const background = luminance(style.backgroundColor);
+            return (Math.max(foreground, background) + 0.05) /
+                   (Math.min(foreground, background) + 0.05);
+          }
+        """)
+        self.assertGreaterEqual(ratio, 4.5)
 
 
 class NewRunTests(BrowserE2ETestCase):
@@ -409,31 +443,33 @@ class PlanAndRecoveryTests(BrowserE2ETestCase):
         self.assertIn("handler", errors)
 
 
-class UnbuiltSurfaceTests(BrowserE2ETestCase):
-    """Absences the M7 gate asks for, pinned so they cannot be forgotten.
+class DataAndRecoverySurfaceTests(BrowserE2ETestCase):
+    def test_run_data_and_lineage_are_visible(self) -> None:
+        run_id = self.start_run("browser-data")
+        page = self.open("en-US", path=f"/ui/#/runs/{run_id}")
+        page.wait_for_selector("text=Data and artifacts")
+        page.get_by_role("button", name="Show lineage").first.click()
+        page.wait_for_selector("text=No lineage links recorded.")
 
-    These assert the gap, not the feature. When the surface is built they
-    fail, which is the point: the reminder is in the suite rather than in a
-    document nobody re-reads.
-    """
-
-    def test_there_is_no_artifact_view_yet(self) -> None:
-        page = self.open("en-US")
-        views = page.eval_on_selector_all(
-            ".nav-button", "nodes => nodes.map(n => n.dataset.view)"
+    def test_an_expired_human_finding_is_applied_from_ops(self) -> None:
+        run_id = self.start_run("browser-recovery-apply")
+        now = datetime.now(timezone.utc)
+        task_id, _token = HumanTaskService(self.db).create(
+            EntityId.parse(run_id), HumanTaskKind.APPROVAL,
+            {"question": "expired?"}, actor="local", now=now,
+            participants=["local"], deadline_at=now - timedelta(seconds=1),
         )
-        self.assertEqual(["runs", "inbox", "ops"], views)
-        self.assertNotIn("artifact", page.inner_text("body").lower())
-
-    def test_the_ops_page_offers_no_way_to_apply_a_recovery(self) -> None:
-        """Findings are listed; applying one is API-only."""
 
         page = self.open("en-US", path="/ui/#/ops")
-        page.wait_for_selector("text=Recovery scan")
-        buttons = page.eval_on_selector_all(
-            "#content button", "nodes => nodes.map(n => n.textContent.trim())"
+        apply = page.get_by_role("button", name="Apply recovery").first
+        apply.wait_for(timeout=15000)
+        apply.click()
+        page.get_by_role("button", name="Apply", exact=True).click()
+        page.wait_for_function(
+            "id => fetch('/api/v1/inbox').then(r => r.json())"
+            ".then(b => !b.data.items.some(item => item.task_id === id))",
+            arg=str(task_id), timeout=15000,
         )
-        self.assertEqual([], [b for b in buttons if "ecover" in b or "pply" in b])
 
 
 class RefreshTests(BrowserE2ETestCase):

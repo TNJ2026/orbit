@@ -19,8 +19,8 @@
 
 orbit 运行的是**静态**工作流图：发布的工作流编译成一份计划，运行期间形状不变。
 动态规划——foreach 组、subflow、能改写自身图的 agentic region——在领域层和
-service 层已实现，但从运行中的系统不可达：DSL 没有对应语法，也没有循环驱动
-planner。详见
+service 层已实现，但已发布工作流仍无法触达：组合根已经监管 Planner dispatcher，
+但 DSL 和 Kernel 尚不会创建 Planner attempt 或结构节点。详见
 [docs/migration/unwired-capabilities.md](docs/migration/unwired-capabilities.md)。
 
 ## 目录
@@ -123,12 +123,15 @@ orbit workflow publish  <file> --catalog <catalog.json> --expected-version N [--
 | `GET /api/v1/runs/{id}/responsibilities` | 运行在等什么，以及你能下哪些命令 |
 | `GET /api/v1/runs/{id}/timeline` | 事件日志 |
 | `GET /api/v1/runs/{id}/errors` | 失败投影（不是过滤后的时间线） |
+| `GET /api/v1/runs/{id}/data` | 内联值和已提交 Artifact 元数据 |
+| `GET /api/v1/runs/{id}/data/{data_id}/lineage` | Run 范围内的 Value 或 Artifact 血缘 |
 | `GET /api/v1/runs/{id}/plan` | 计划定义：节点、Handler、边。不含运行状态 |
 | `GET /api/v1/runs/{id}/plan/overlay` | 每个节点的运行状态，标注所属计划版本 |
 | `GET /api/v1/runs/{id}/plan/diff` | 两个计划版本之间的差异 |
 | `GET /api/v1/inbox` | 跨所有运行、等人处理的事项 |
 | `GET /api/v1/recovery` | Runtime 认为卡住的东西 |
 | `GET /api/v1/handler-catalog` | 已装 Handler 和发现到的 agent CLI |
+| `GET /api/v1/workflows` | 已发布工作流及获授权的 `start_run` 命令 |
 | `POST /api/v1/runs` | 开始一个运行 |
 | `POST /api/v1/runs/{id}/cancel` | 在已知版本上取消 |
 | `POST /api/v1/runs/{id}/budget` | 追加预算 |

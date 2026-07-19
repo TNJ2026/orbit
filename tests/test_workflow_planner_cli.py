@@ -249,6 +249,15 @@ class AppWiringTest(unittest.TestCase):
         self.assertIsNotNone(planner)
         self.assertIsInstance(planner.provider, TrustedCliPlannerProvider)
         self.assertEqual(planner.provider.command, ("/usr/bin/true",))
+        app.state.runtime.start()
+        try:
+            names = {loop.name for loop in app.state.runtime.loops}
+            self.assertIn("planner-1", names)
+            self.assertIn("planner-recovery", names)
+            ready, checks = app.state.runtime.readiness()
+            self.assertTrue(ready, checks)
+        finally:
+            self.assertEqual([], app.state.runtime.stop())
 
     def test_discovery_that_finds_nothing_leaves_the_planner_off(self):
         from orbit.web.app import create_app

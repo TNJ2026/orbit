@@ -1,6 +1,7 @@
 # Unwired capabilities
 
-**Status**: open — M7 is **not** passed
+**Status**: open scope record — static-runtime migration code gates pass except the
+single-workflow Human browser journey; dynamic structure support remains a later milestone
 **Origin**: closing M0 blocker B5 ("Step 11 Foreach/Subflow runtime gap")
 **Revised**: 2026-07-19, after review found this document itself was wrong
 
@@ -24,12 +25,14 @@ command.
 | --- | --- | --- | --- | --- |
 | Foreach group / item | `application/foreach_service.py` | 6 | ❌ | ❌ (only recovery) |
 | Subflow link | `application/subflow_service.py` | 6 | ❌ | ❌ |
-| Planner / Agentic Region | `application/planner_service.py` | 10 | ❌ | ❌ |
+| Planner / Agentic Region | `application/planner_service.py` | 10+ | ❌ | dispatcher ✅; request creation ❌ |
 | PlanPatch (dynamic DAG) | `application/plan_service.py` | 9 | — | ❌ |
 
 "Built and tested" is not an overstatement — these have event catalogs,
-reducers, repositories, migrations, integrity checks and contract tests. What
-none of them has is a caller in a running `orbit serve`.
+reducers, repositories, migrations, integrity checks and contract tests. The
+Planner dispatcher and recovery loop are now supervised by `orbit serve`, but
+no published static workflow creates a Planner request. Foreach, Subflow and
+PlanPatch still have no production caller.
 
 ## The evidence
 
@@ -63,20 +66,18 @@ Foreach, Subflow and Planner facts are *control-plane events*
 commands. Nothing in `kernel_families.py` creates a foreach group when a node
 is scheduled, because no node kind says to.
 
-### 3. Nothing drives the planner
+### 3. The planner is driven, but no static workflow requests it
 
 ```bash
 grep -rn "request_decision" src/orbit/ | grep -v planner_service.py
 grep -n "planner" src/orbit/web/app.py
 ```
 
-Both are empty. `PlannerApplicationService.request_decision()` has no caller,
-and the composition root starts workers, a timer dispatcher and a recovery
-scanner — no planner loop. `PlannerRecoveryScanner` exists and is tested, but
-nothing constructs it outside tests.
-
-Consequence: even if a workflow could declare an Agentic Region, the planner
-attempt it created would never be claimed, and the run would wait forever.
+`PlannerApplicationService.request_decision()` still has no caller originating
+from a published workflow. When trusted Agent discovery supplies a provider,
+however, the composition root now starts `planner-1` and `planner-recovery`;
+persisted attempts are claimed, executed and recovered. The remaining gap is
+the DSL/kernel producer, not dispatch or lifecycle management.
 
 ### 4. Foreach is reachable only backwards, through recovery
 
@@ -109,11 +110,11 @@ The plan does require both:
 
 | Plan | Requirement | Reality |
 | --- | --- | --- |
-| M2, task 1 (line 283ff) | the composition root manages Worker, Timer, **Planner** and Recovery | `_build_loops()` starts workers, a timer and recovery. No planner loop. |
+| M2, task 1 (line 283ff) | the composition root manages Worker, Timer, **Planner** and Recovery | ✅ fixed: provider discovery wires supervised Planner dispatch and recovery loops. |
 | M3, task 17 (line 321) | discovery results are policy-checked and registered **before the registry is sealed** | ✅ **fixed.** Discovery now runs ahead of `RuntimeComposition`, and each granted agent is registered as `AgentHandler(TrustedCliAgentClient(...))`. |
 
-So **P1-1 (planner dispatcher) and P1-2 (agent handlers) are migration
-defects**, not future scope. P1-2 is now closed; P1-1 remains open.
+So **P1-1 (planner dispatcher) and P1-2 (agent handlers) were migration
+defects**, not future scope. Both are now closed.
 
 Genuinely out of scope: DSL syntax for foreach, subflow and agentic regions,
 and the kernel scheduling that would drive them. No plan task asks for those.
@@ -138,9 +139,9 @@ Not a patch. Roughly a further milestone:
    and its items, respect the concurrency limit, and aggregate deterministically
    on completion; a subflow node has to start and link a child run and
    propagate cancellation and failure.
-3. **Planner loop in the composition root** — a background loop that claims
-   planner attempts, calls the provider, and commits PlanPatches, plus the
-   `PlannerRecoveryScanner` alongside the durable one.
+3. **Planner request production** — scheduling an Agentic Region must persist a
+   PlanningContext/attempt for the already-wired dispatcher; accepted proposals
+   must then enter the PlanPatch policy boundary.
 4. **Capability and budget policy** — an agentic region's planner calls cost
    money and can enlarge the graph; both need to sit inside the existing budget
    and capability gates rather than beside them.
@@ -153,22 +154,19 @@ of the system with the strongest replay and determinism guarantees.
 
 ## Recommendation
 
-**M7 is not passed.** An earlier revision of this document and of the release
-notes said it was. Gate 7 (browser E2E over budget, recovery and artifacts) was
-claimed on the strength of a test named
-`test_a_budget_grant_from_the_ui_moves_the_account` that opened the account
-from the backend and never touched the UI, alongside a module docstring listing
-coverage that did not exist. That has been corrected: the budget grant is now
-driven through the browser, and the two genuine absences — no artifact UI, no
-recovery-apply affordance — are pinned by tests that assert the gap.
+The defects found by the M7 re-audit are now closed: budget grant, Artifact
+metadata/lineage, per-finding Recovery Apply and responsive/accessibility checks
+are driven through the browser; discovered Agent handlers register before seal;
+Planner dispatch/recovery is supervised; every browser mutation, including
+`start_run`, comes from a server-advertised AllowedCommand; and all CLI entry
+points use the cutover gate.
 
-Before the runtime can be called releasable:
-
-1. Wire the planner loop into the composition root (plan M2 task 1).
-2. Register discovered agents before the registry seals (plan M3 task 17).
-3. Close the P2 contract violations: budget expected-version, per-finding
-   recovery apply, the hardcoded `start_run` endpoint, and the cutover check
-   that only guards `serve`.
+One M7 scenario remains deliberately unclaimed: a single published workflow
+cannot yet enter a HumanTask because the static DSL has no Human node kind.
+Human creation, inbox submission and run resume are production services and
+browser-tested, but the journey is split at that missing authoring construct.
+Either add a static Human node/handler or explicitly revise the M7 scenario
+before declaring the complete migration released.
 
 Foreach, subflow and agentic DSL support remain out of scope and deserve their
 own plan.

@@ -11,7 +11,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from orbit.web.api_v1 import Authorizer, READ_SCOPE, WRITE_SCOPE
+from orbit.web.api_v1 import Authorizer, READ_SCOPE, SENSITIVE_SCOPE, WRITE_SCOPE
 from orbit.web.app import create_app
 from orbit.workflow.api.dto import (
     CursorError, decode_cursor, encode_cursor, envelope, page_size,
@@ -79,6 +79,7 @@ class ApiTestCase(unittest.TestCase):
         self.scopes = {
             "reader": [READ_SCOPE],
             "writer": [READ_SCOPE, WRITE_SCOPE],
+            "sensitive": [READ_SCOPE, SENSITIVE_SCOPE],
             "nobody": [],
         }
         self.app = create_app(
@@ -320,6 +321,41 @@ class PlanApiTests(ApiTestCase):
             self.assertEqual(404, response.status_code)
 
 
+class DataApiTests(ApiTestCase):
+    def test_run_data_is_paged_and_lineage_is_run_scoped(self) -> None:
+        with AsgiHarness(self.app) as client:
+            run_id = client.post(
+                "/api/v1/runs", actor="writer", key="data-run",
+                body={"workflow_id": "workflow:linear", "input": {"value": 7}},
+            ).json()["data"]["run_id"]
+            response = client.get(
+                f"/api/v1/runs/{run_id}/data?limit=1", actor="sensitive"
+            )
+            self.assertEqual(200, response.status_code, response.text)
+            items = response.json()["data"]["items"]
+            self.assertEqual(1, len(items))
+            self.assertEqual("value", items[0]["kind"])
+            self.assertNotIn("blob_key", items[0])
+
+            lineage = client.get(
+                f"/api/v1/runs/{run_id}/data/{items[0]['data_id']}/lineage",
+                actor="sensitive",
+            )
+            self.assertEqual(200, lineage.status_code, lineage.text)
+            self.assertEqual(items[0]["data_id"], lineage.json()["data"]["data_id"])
+
+    def test_data_reads_require_scope_and_matching_run(self) -> None:
+        with AsgiHarness(self.app) as client:
+            self.assertEqual(
+                403,
+                client.get("/api/v1/runs/run:missing/data", actor="reader").status_code,
+            )
+            self.assertEqual(
+                400,
+                client.get("/api/v1/runs/run:missing/data", actor="sensitive").status_code,
+            )
+
+
 class CatalogTests(ApiTestCase):
     def test_handler_catalog_exposes_identity_not_commands(self) -> None:
         with AsgiHarness(self.app) as client:
@@ -334,6 +370,27 @@ class CatalogTests(ApiTestCase):
             serialised = repr(entry)
             for forbidden in ("command", "argv", "path", "secret_value"):
                 self.assertNotIn(forbidden, serialised.lower())
+
+    def test_workflow_catalog_advertises_start_only_to_writers(self) -> None:
+        with AsgiHarness(self.app) as client:
+            reader = client.get("/api/v1/workflows", actor="reader")
+            self.assertEqual(200, reader.status_code, reader.text)
+            self.assertEqual([], reader.json()["data"]["workflows"][0]["allowed_commands"])
+
+            writer = client.get("/api/v1/workflows", actor="writer")
+            entry = writer.json()["data"]["workflows"][0]
+            command = entry["allowed_commands"][0]
+            self.assertEqual("run.start", command["command"])
+            started = client.post(
+                command["href"], actor="writer", key="catalog-start",
+                body={
+                    "workflow_id": entry["workflow_id"],
+                    "workflow_version": entry["latest_version"],
+                    "expected_version": command["expected_version"],
+                    "input": {"value": 3},
+                },
+            )
+            self.assertEqual(200, started.status_code, started.text)
 
 
 class InboxTests(ApiTestCase):
@@ -557,6 +614,10 @@ class RecoveryCommandTests(ApiTestCase):
             scan = client.get("/api/v1/recovery", actor="reader")
             self.assertEqual(200, scan.status_code, scan.text)
             self.assertIn("findings", scan.json()["data"])
+            self.assertTrue(all(
+                not item["allowed_commands"]
+                for item in scan.json()["data"]["findings"]
+            ))
 
             denied = self.apply(client, ["X:y:1"], actor="reader", key="r1")
             self.assertEqual(403, denied.status_code)
