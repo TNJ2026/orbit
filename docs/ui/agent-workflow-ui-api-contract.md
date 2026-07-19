@@ -181,6 +181,28 @@ UI 通过 `allowed_commands[]` 获得 method、href、payload schema、Expected 
 每条附带 `start_run` 的 AllowedCommand。当前 UI 让用户手工输入 `workflow_id`，
 既是可用性问题，也是这条例外存在的原因。归属 Goal/Catalog UI 里程碑。
 
+#### 4.2.3 Recovery Apply（逐 finding）
+
+`POST /api/v1/recovery/apply` 接收 `action_ids: string[]` —— 操作者**勾选**的那些 finding，
+不接收分页参数。对整个扫描结果一把梭是错的形状：操作者判断的是他们看过的那一份列表，
+重新扫描会把他们没看过的新 finding 也一起执行掉。空列表和缺字段一律拒绝。
+
+`action_id` 形如 `code:entity:expected_version`，**它本身就是 CAS token**。
+实体在扫描之后变动过，其 action_id 随之改变，因此该项返回 `stale` 而不是拿一个
+操作者从未见过的版本去执行。
+
+每项独立报告 outcome：
+
+| outcome | 含义 |
+|---|---|
+| `applied` | 已执行 |
+| `stale` | 当前扫描不再报告该 finding（实体已变动或已消失） |
+| `unsafe` | `safe_to_apply=false`，转人工接管 |
+| `failed` | 执行抛错，带异常类型 |
+
+单项失败不影响其余项——半执行状态比完整报告的部分失败更难排查。
+**每一项都写审计**，包括没执行的：「为什么这条没恢复」是操作者的下一个问题。
+
 ### 4.3 幂等与冲突
 
 | 情况 | HTTP/Code | UI 行为 |

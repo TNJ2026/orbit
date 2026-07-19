@@ -14,7 +14,7 @@ takeover rather than an error.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import tempfile
 import unittest
@@ -94,6 +94,86 @@ class RecoveryWiringTests(unittest.TestCase):
         report = self.built_manager().scan(NOW)
         self.assertEqual((), report.findings)
         self.assertEqual(0, report.scanned_runs)
+
+
+class PerFindingApplyTests(RecoveryWiringTests):
+    """Applying is a selection, not a sweep."""
+
+    def expired_human_task(self) -> str:
+        """A finding that is genuinely safe to auto-apply."""
+
+        from orbit.workflow.application.human_service import HumanTaskService
+        from orbit.workflow.domain.human import HumanTaskKind
+        from orbit.workflow.domain.ids import EntityId
+
+        with connect_workflow_database(self.db) as connection:
+            connection.execute(
+                "INSERT INTO workflow_definitions(workflow_id, name, created_at,"
+                " created_by) VALUES ('workflow:r', 'R', ?, 'test')",
+                (NOW.isoformat(),),
+            )
+            connection.execute(
+                "INSERT INTO workflow_versions(workflow_id, version, definition_hash,"
+                " dsl_version, ir_version, compiler_version, canonical_ir_json,"
+                " source_format, source_text, catalog_fingerprint, created_at, created_by)"
+                " VALUES ('workflow:r', 1, 'sha256:r', '1.0', '1.1', '1.0', '{}',"
+                " 'json', NULL, 'sha256:c', ?, 'test')",
+                (NOW.isoformat(),),
+            )
+            connection.execute(
+                "INSERT INTO workflow_runs(run_id, workflow_id, workflow_version,"
+                " definition_hash, status, aggregate_version, correlation_id,"
+                " created_at, updated_at)"
+                " VALUES (?, 'workflow:r', 1, 'sha256:r', 'waiting', 1, ?, ?, ?)",
+                (RUN, RUN, NOW.isoformat(), NOW.isoformat()),
+            )
+            connection.commit()
+
+        HumanTaskService(self.db).create(
+            EntityId.parse(RUN), HumanTaskKind.APPROVAL, {"q": "?"},
+            actor="test", now=NOW,
+            deadline_at=NOW - timedelta(hours=1),
+        )
+        return RUN
+
+    def findings(self, manager):
+        return {f.action_id: f for f in manager.scan(NOW).findings}
+
+    def test_a_selected_finding_is_applied(self) -> None:
+        self.expired_human_task()
+        manager = self.built_manager()
+        found = self.findings(manager)
+        expired = [k for k in found if k.startswith("EXPIRED_HUMAN")]
+        self.assertTrue(expired, f"no applicable finding to test with: {list(found)}")
+
+        results = manager.apply_findings([expired[0]], NOW)
+        self.assertEqual(["applied"], [r.outcome for r in results])
+        self.assertNotIn(expired[0], self.findings(manager), "the finding survived")
+
+    def test_an_unselected_finding_is_left_alone(self) -> None:
+        self.expired_human_task()
+        manager = self.built_manager()
+        before = self.findings(manager)
+        self.assertTrue(before)
+
+        manager.apply_findings(["NOTHING:matches:1"], NOW)
+        self.assertEqual(set(before), set(self.findings(manager)))
+
+    def test_a_stale_version_in_the_action_id_does_not_apply(self) -> None:
+        """The id embeds the version, so it is the compare-and-set token."""
+
+        self.expired_human_task()
+        manager = self.built_manager()
+        real = next(iter(self.findings(manager)))
+        code, entity, version = real.rsplit(":", 2)
+        stale = f"{code}:{entity}:{int(version) + 5}"
+
+        results = manager.apply_findings([stale], NOW)
+        self.assertEqual(["stale"], [r.outcome for r in results])
+        self.assertIn(real, self.findings(manager))
+
+    def test_an_empty_selection_does_nothing(self) -> None:
+        self.assertEqual((), self.built_manager().apply_findings([], NOW))
 
 
 def _finding_specs(manager: RecoveryManager):

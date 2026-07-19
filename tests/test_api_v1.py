@@ -546,22 +546,77 @@ class BudgetCommandTests(ApiTestCase):
 
 
 class RecoveryCommandTests(ApiTestCase):
+    def apply(self, client, action_ids, *, actor="writer", key="r"):
+        return client.post(
+            "/api/v1/recovery/apply", actor=actor, key=key,
+            body={"action_ids": action_ids},
+        )
+
     def test_scan_is_a_read_and_apply_is_a_write(self) -> None:
         with AsgiHarness(self.app) as client:
             scan = client.get("/api/v1/recovery", actor="reader")
             self.assertEqual(200, scan.status_code, scan.text)
             self.assertIn("findings", scan.json()["data"])
 
-            denied = client.post(
-                "/api/v1/recovery/apply", actor="reader", key="r1", body={}
-            )
+            denied = self.apply(client, ["X:y:1"], actor="reader", key="r1")
             self.assertEqual(403, denied.status_code)
 
-            applied = client.post(
-                "/api/v1/recovery/apply", actor="writer", key="r2", body={}
-            )
-            self.assertEqual(200, applied.status_code, applied.text)
-            self.assertEqual([], applied.json()["data"]["failed"])
+    def test_applying_a_whole_scan_is_refused(self) -> None:
+        """The operator judged a list they saw; a rescan is a different list."""
+
+        with AsgiHarness(self.app) as client:
+            for body in ({}, {"action_ids": []}, {"limit": 100}):
+                with self.subTest(body=body):
+                    response = client.post(
+                        "/api/v1/recovery/apply", actor="writer", key=str(body),
+                        body=body,
+                    )
+                    self.assertEqual(409, response.status_code)
+                    self.assertIn("action_ids", response.json()["error"]["message"])
+
+    def test_a_finding_that_no_longer_exists_is_stale_not_applied(self) -> None:
+        with AsgiHarness(self.app) as client:
+            response = self.apply(client, ["UNKNOWN_ATTEMPT:attempt:x:7"], key="r2")
+            self.assertEqual(200, response.status_code, response.text)
+            results = response.json()["data"]["results"]
+            self.assertEqual(1, len(results))
+            self.assertEqual("stale", results[0]["outcome"])
+
+    def test_each_selection_is_reported_separately(self) -> None:
+        with AsgiHarness(self.app) as client:
+            response = self.apply(client, ["A:b:1", "C:d:2"], key="r3")
+            outcomes = [item["action_id"] for item in response.json()["data"]["results"]]
+            self.assertEqual(["A:b:1", "C:d:2"], outcomes)
+
+    def test_malformed_selections_are_refused(self) -> None:
+        with AsgiHarness(self.app) as client:
+            for selection in ([""], [None], ["ok", 7], "not-a-list"):
+                with self.subTest(selection=selection):
+                    response = client.post(
+                        "/api/v1/recovery/apply", actor="writer",
+                        key=str(selection), body={"action_ids": selection},
+                    )
+                    self.assertEqual(409, response.status_code)
+
+    def test_every_selection_is_audited_including_refusals(self) -> None:
+        """"Why was this not recovered" is the next question an operator asks."""
+
+        from orbit.workflow.persistence.database import connect_workflow_database
+
+        with AsgiHarness(self.app) as client:
+            self.apply(client, ["GONE:entity:1"], key="r4")
+
+        with connect_workflow_database(self.db, read_only=True) as connection:
+            rows = [
+                dict(row)
+                for row in connection.execute(
+                    "SELECT target_id, decision FROM audit_records"
+                    " WHERE action = 'recovery.apply'"
+                )
+            ]
+        self.assertEqual(
+            [{"target_id": "GONE:entity:1", "decision": "stale"}], rows
+        )
 
 
 class SurfaceTests(ApiTestCase):

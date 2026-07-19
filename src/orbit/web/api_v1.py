@@ -468,18 +468,27 @@ def build_api_v1(
         )
 
     async def recovery_apply(request: Request) -> JSONResponse:
+        """Apply the findings the operator selected — not the whole scan.
+
+        `action_id` is the compare-and-set token: it embeds the version the
+        scan reported, so a finding whose entity has moved on comes back
+        `stale` instead of being acted on with a version nobody saw.
+        """
+
         def command(body: Mapping[str, Any], actor: str, key: str) -> Mapping[str, Any]:
-            report = recovery.scan(
-                now(), after_run_id=str(body.get("after_run_id", "")),
-                limit=int(body.get("limit", 100)), apply=True,
-            )
-            return {
-                "applied": list(report.applied_action_ids),
-                "failed": [
-                    {"action_id": action, "error": reason}
-                    for action, reason in report.failed_actions
-                ],
-            }
+            selected = body.get("action_ids")
+            if not isinstance(selected, list) or not selected:
+                raise ValueError(
+                    "action_ids must list the findings to apply; applying an"
+                    " entire scan would act on findings the operator never saw"
+                )
+            if not all(isinstance(item, str) and item.strip() for item in selected):
+                raise ValueError("every action_id must be a non-empty string")
+            if len(selected) > 200:
+                raise ValueError("too many findings in one request")
+
+            results = recovery.apply_findings(selected, now(), actor=actor)
+            return {"results": [result.to_dict() for result in results]}
 
         return await mutate(request, WRITE_SCOPE, "recovery.apply", command)
 

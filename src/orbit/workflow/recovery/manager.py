@@ -6,9 +6,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from time import monotonic
+from typing import Sequence
 
 from ..domain.human import HumanTaskKind
 from ..domain.ids import EntityId
+from ..persistence.control import audit
 from ..persistence.database import connect_workflow_database
 
 
@@ -24,6 +26,18 @@ class RecoveryFinding:
     @property
     def action_id(self) -> str:
         return f"{self.code}:{self.entity_id}:{self.expected_version}"
+
+
+@dataclass(frozen=True)
+class AppliedFinding:
+    """What happened to one selected finding."""
+
+    action_id: str
+    outcome: str          # applied | stale | unsafe | failed
+    detail: str = ""
+
+    def to_dict(self) -> dict[str, str]:
+        return {"action_id": self.action_id, "outcome": self.outcome, "detail": self.detail}
 
 
 @dataclass(frozen=True)
@@ -96,6 +110,81 @@ class RecoveryManager:
             tuple(applied),
             tuple(failed),
         )
+
+    def apply_findings(
+        self,
+        action_ids: Sequence[str],
+        now: datetime,
+        *,
+        actor: str = "system:recovery",
+        limit: int = 1000,
+    ) -> tuple[AppliedFinding, ...]:
+        """Apply exactly the findings an operator selected, one at a time.
+
+        Applying a whole scan is the wrong shape for a human decision: the
+        operator saw a list, judged some of it, and chose. Re-running the scan
+        would also act on findings that appeared *after* they looked.
+
+        `action_id` doubles as the compare-and-set token — it is
+        `code:entity:expected_version`, so an entity that moved on since the
+        scan produces a different id and is reported `stale` rather than being
+        acted on with a version the operator never saw.
+
+        Each selection succeeds or fails on its own. One bad finding does not
+        abandon the rest, because a half-applied recovery is worse to reason
+        about than a fully reported partial one.
+        """
+
+        if not action_ids:
+            return ()
+        current = {
+            finding.action_id: finding
+            for finding in self.scan(now, limit=limit).findings
+        }
+
+        results: list[AppliedFinding] = []
+        for action_id in action_ids:
+            finding = current.get(action_id)
+            if finding is None:
+                results.append(
+                    AppliedFinding(action_id, "stale", "no longer reported by a scan")
+                )
+                continue
+            if not finding.safe_to_apply:
+                self._create_manual_takeover(finding, now)
+                results.append(
+                    AppliedFinding(action_id, "unsafe", "escalated for manual takeover")
+                )
+                continue
+            try:
+                self._apply_finding(finding, now)
+            except Exception as exc:  # noqa: BLE001 - reported per finding
+                results.append(
+                    AppliedFinding(action_id, "failed", type(exc).__name__)
+                )
+                continue
+            results.append(AppliedFinding(action_id, "applied"))
+
+        self._audit_applications(results, actor=actor, now=now)
+        return tuple(results)
+
+    def _audit_applications(
+        self, results: Sequence[AppliedFinding], *, actor: str, now: datetime
+    ) -> None:
+        """One audit row per selection, including the ones that did not apply.
+
+        A refusal is as much a fact as an application: "why was this not
+        recovered" is the question an operator asks next.
+        """
+
+        with connect_workflow_database(self.path) as connection:
+            for result in results:
+                audit(
+                    connection, run_id=None, actor=actor, action="recovery.apply",
+                    target_id=result.action_id, decision=result.outcome,
+                    details={"detail": result.detail}, occurred_at=now,
+                )
+            connection.commit()
 
     @staticmethod
     def _find_for_run(connection, run_id: str, now: datetime) -> list[RecoveryFinding]:
