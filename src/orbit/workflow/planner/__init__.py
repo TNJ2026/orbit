@@ -1,6 +1,7 @@
 """Planner protocol, context, provider and evaluation services."""
 
 from .context import build_planning_context
+from .cli_provider import TrustedCliPlannerProvider
 from .provider import (
     CallablePlannerProvider, FakePlannerProvider, PlannerPermanentError,
     PlannerProvider, PlannerProviderResponse, PlannerTransientError,
@@ -13,5 +14,5 @@ __all__ = [
     "PlannerProviderResponse", "PlannerEvalCase", "PlannerEvalHarness",
     "PlannerEvalReport",
     "CallablePlannerProvider", "PlannerTransientError", "PlannerPermanentError",
-    "PlannerUnknownResultError",
+    "PlannerUnknownResultError", "TrustedCliPlannerProvider",
 ]

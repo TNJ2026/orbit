@@ -92,6 +92,36 @@ def agent_handlers(
     return tuple(registrations), tuple(names)
 
 
+def planner_provider_from_agents(
+    agents: Sequence[Any],
+    *,
+    preferred: str | None = None,
+    timeout_seconds: int = 300,
+):
+    """Pick the discovered CLI that will act as the planner, or None.
+
+    Same trust rule as `agent_handlers`: the command is built here from the
+    executable that discovery resolved through the in-code allowlist, so no
+    workflow, plan or request body ever contributes an argument to it. With
+    `preferred` unset the first discovered agent wins — discovery order is the
+    allowlist order, which is a reviewed choice rather than an accident. A
+    `preferred` name that was not discovered yields None rather than a silent
+    fallback to a different CLI than the operator named.
+    """
+
+    from ..workflow.planner import TrustedCliPlannerProvider
+
+    if preferred is not None:
+        chosen = next((agent for agent in agents if agent.name == preferred), None)
+    else:
+        chosen = next(iter(agents), None)
+    if chosen is None:
+        return None
+    return TrustedCliPlannerProvider(
+        (chosen.executable_path,), timeout_seconds=timeout_seconds
+    )
+
+
 # -- optional development tooling -------------------------------------------
 #
 # Registered only when the operator asks for it. A non-development workflow

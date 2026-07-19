@@ -306,12 +306,13 @@ def create_app(
     # up visible in the catalog and uncallable from a workflow.
     agent_catalog: Sequence[Mapping[str, Any]] = ()
     registrations = list(handlers)
+    planner_service = None
     if discover_agents:
         from ..workflow.catalogs.agent_discovery import (
             catalog_entries, discover_agent_clis,
         )
 
-        from .builtin_handlers import agent_handlers
+        from .builtin_handlers import agent_handlers, planner_provider_from_agents
 
         discovered = discover_agent_clis()
         agent_catalog = catalog_entries(discovered)
@@ -319,6 +320,20 @@ def create_app(
             discovered, allowed_capabilities=agent_capabilities
         )
         registrations.extend(agent_registrations)
+
+        # The planner rides on the same discovery pass and the same trust
+        # rule: its command is the resolved executable, chosen here, never
+        # supplied by a request. No discovered CLI simply means no planner —
+        # the Runtime runs fine without one.
+        planner_provider = planner_provider_from_agents(discovered)
+        if planner_provider is not None:
+            from ..workflow.application.planner_service import (
+                PlannerApplicationService,
+            )
+
+            planner_service = PlannerApplicationService(
+                db_path, provider=planner_provider
+            )
 
     composition = RuntimeComposition(
         db_path,
@@ -389,4 +404,7 @@ def create_app(
     routes.extend(extra_routes)
     app = Starlette(routes=routes, lifespan=lifespan)
     app.state.runtime = composition
+    # None when discovery is off or found nothing; adapters must treat the
+    # planner as optional rather than assume it.
+    app.state.planner = planner_service
     return app
