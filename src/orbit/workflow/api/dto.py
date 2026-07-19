@@ -153,8 +153,13 @@ def budget_summary(budget: Mapping[str, Any] | None) -> dict[str, Any] | None:
     }
 
 
-def run_summary(row: Mapping[str, Any], responsibilities: Sequence[Mapping[str, Any]],
-                budget: Mapping[str, Any] | None) -> dict[str, Any]:
+def run_summary(
+    row: Mapping[str, Any],
+    responsibilities: Sequence[Mapping[str, Any]],
+    budget: Mapping[str, Any] | None,
+    *,
+    can_act: bool = False,
+) -> dict[str, Any]:
     """List-row shape.
 
     The primary responsibility is embedded so a run list never has to call the
@@ -163,12 +168,32 @@ def run_summary(row: Mapping[str, Any], responsibilities: Sequence[Mapping[str, 
     """
 
     primary = responsibilities[0] if responsibilities else None
+    raw_status = row["status"]
+    status = {
+        "created": "pending",
+        "budget_exhausted": "waiting",
+        "waiting_for_budget": "waiting",
+    }.get(raw_status, raw_status)
+    wait_reason = None
+    if raw_status in {"budget_exhausted", "waiting_for_budget"}:
+        wait_reason = "budget_wait"
+    elif primary is not None:
+        if primary["kind"] == "human":
+            wait_reason = "human_wait"
+        elif primary["kind"] == "timer":
+            wait_reason = "timer_wait"
+        elif primary["kind"] == "job" and primary.get("status") == "retry_wait":
+            wait_reason = "retry_wait"
+        elif primary.get("status") == "unknown":
+            wait_reason = "unknown_wait"
     return {
         "run_id": row["run_id"],
         "display_name": row.get("display_name") or row["run_id"],
         "workflow_id": row["workflow_id"],
         "workflow_version": row["workflow_version"],
-        "status": row["status"],
+        "status": status,
+        "wait_reason": wait_reason,
+        "goal": row.get("goal"),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
         "projection_version": row["aggregate_version"],
@@ -180,7 +205,7 @@ def run_summary(row: Mapping[str, Any], responsibilities: Sequence[Mapping[str, 
                 "label": primary.get("label") or primary.get("detail") or primary["kind"],
             }
         ),
-        "requires_actor_action": any(
+        "requires_actor_action": can_act and any(
             item["kind"] in {"human", "budget"} for item in responsibilities
         ),
         "budget_summary": budget_summary(budget),

@@ -32,6 +32,9 @@ class PackageContentTests(unittest.TestCase):
         for asset in (
             "app.css", "app.js", "api.js", "i18n.js",
             "i18n.zh-CN.json", "i18n.en-US.json",
+            "router.js", "components/command-dialog.js",
+            "components/data-state.js", "styles/tokens.css",
+            "styles/shell.css", "styles/components.css", "styles/views.css",
         ):
             with self.subTest(asset=asset):
                 self.assertTrue(root.joinpath("assets", asset).is_file())
@@ -59,6 +62,10 @@ class LegacyRemovalTests(unittest.TestCase):
         for asset in REMOVED_ASSETS:
             with self.subTest(asset=asset):
                 self.assertFalse(ORBIT.joinpath(asset).is_file())
+
+    def test_platform_metadata_does_not_ship_as_an_asset(self) -> None:
+        for path in Path(str(ORBIT)).rglob("*"):
+            self.assertNotIn(path.name, {".DS_Store", "Thumbs.db"})
 
     def test_no_legacy_config_template_ships(self) -> None:
         """`workflow.json` was the legacy engine's config; nothing writes it."""

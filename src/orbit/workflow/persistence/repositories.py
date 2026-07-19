@@ -82,14 +82,16 @@ class SQLiteWorkflowRunRepository(_Repository):
             """
             INSERT INTO workflow_runs(
                 run_id, workflow_id, workflow_version, definition_hash, status,
-                aggregate_version, correlation_id, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                aggregate_version, correlation_id, created_at, updated_at, goal,
+                display_name
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 str(record.run_id), str(record.workflow_id), record.workflow_version.value,
                 record.definition_hash.value, record.status.value,
                 record.aggregate_version.value, str(record.correlation_id),
                 _time(record.created_at), _time(record.updated_at),
+                record.goal, record.display_name or str(record.run_id),
             ),
         )
         self._write("after_run_create")
@@ -105,7 +107,7 @@ class SQLiteWorkflowRunRepository(_Repository):
             Revision(row["workflow_version"]), DefinitionHash(row["definition_hash"]),
             WorkflowRunStatus(row["status"]), AggregateVersion(row["aggregate_version"]),
             EntityId.parse(row["correlation_id"]), _datetime(row["created_at"]),
-            _datetime(row["updated_at"]),
+            _datetime(row["updated_at"]), row["goal"], row["display_name"],
         )
 
     def update(self, record: WorkflowRunRecord, expected: AggregateVersion) -> None:

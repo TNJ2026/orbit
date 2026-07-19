@@ -254,6 +254,10 @@ class RuntimeKernel:
         workflow_version = Revision(int(payload["workflow_version"]))
         expected_hash = DefinitionHash(str(payload["definition_hash"]))
         initial_input = dict(_require_object(payload.get("input", {}), "input"))
+        goal = str(payload.get("goal", "")).strip() or None
+        display_name = (
+            goal.splitlines()[0][:120] if goal is not None else str(command.aggregate_id)
+        )
         artifact_inputs = tuple(payload.get("artifact_inputs", ()))
         version_record = self.workflow_versions.get(str(workflow_id), workflow_version.value)
         if version_record is None:
@@ -268,7 +272,7 @@ class RuntimeKernel:
         run = WorkflowRunRecord(
             command.aggregate_id, workflow_id, workflow_version, expected_hash,
             WorkflowRunStatus.CREATED, AggregateVersion(0), command.correlation_id,
-            command.issued_at, command.issued_at,
+            command.issued_at, command.issued_at, goal, display_name,
         )
         uow.runs.create(run)
         run_event = events.make(
@@ -277,7 +281,7 @@ class RuntimeKernel:
                 "workflow_run", WorkflowRunStatus.CREATED, WorkflowRunStatus.RUNNING,
                 workflow_id=str(workflow_id), workflow_version=workflow_version.value,
                 definition_hash=expected_hash.value, plan_id=str(plan_id), plan_version=1,
-                input=initial_input,
+                input=initial_input, **({"goal": goal} if goal is not None else {}),
                 **({"artifact_refs": [str(item["artifact_id"]) for item in artifact_inputs]} if artifact_inputs else {}),
             ),
         )

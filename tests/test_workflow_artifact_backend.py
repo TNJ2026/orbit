@@ -31,6 +31,22 @@ class LocalCASBackendTests(unittest.TestCase):
         self.backend._path(receipt.blob_key).write_bytes(b"abd")
         with self.assertRaises(BlobIntegrityError): self.backend.read(receipt.blob_key)
 
+    def test_verified_stream_uses_one_rewound_descriptor_and_rejects_corruption(self):
+        receipt = self.backend.write(b"a" * (2 * 1024 * 1024), max_size_bytes=2 * 1024 * 1024)
+        source = self.backend.open_verified_stream(
+            receipt.blob_key, receipt.checksum, receipt.size_bytes
+        )
+        try:
+            self.assertEqual(0, source.tell())
+            self.assertEqual(receipt.size_bytes, len(source.read()))
+        finally:
+            source.close()
+        self.backend._path(receipt.blob_key).write_bytes(b"b" * receipt.size_bytes)
+        with self.assertRaises(BlobIntegrityError):
+            self.backend.open_verified_stream(
+                receipt.blob_key, receipt.checksum, receipt.size_bytes
+            )
+
     def test_fault_before_rename_leaves_no_final_blob(self):
         def fail(point):
             if point == "before_artifact_rename": raise RuntimeError("kill")

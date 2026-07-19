@@ -17,6 +17,7 @@ failing, so a plain checkout still runs green.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
 from pathlib import Path
 import socket
 import tempfile
@@ -31,10 +32,12 @@ except ImportError:  # pragma: no cover - exercised by the skip
     sync_playwright = None
 
 from orbit.web.app import create_app
-from orbit.web.local_identity import local_authorizer, loopback_authenticator
+from orbit.web.api_v1 import Authorizer, WRITE_SCOPE
+from orbit.web.local_identity import LOCAL_ACTOR, LOCAL_SCOPES, loopback_authenticator
 from orbit.workflow.application.budget_service import BudgetService
 from orbit.workflow.application.human_service import HumanTaskService
 from orbit.workflow.application.run_service import RunApplicationService
+from orbit.workflow.artifacts.local_cas import LocalCASBackend
 from orbit.workflow.domain.human import HumanTaskKind
 from orbit.workflow.domain.ids import EntityId
 from tests.test_web_composition import (
@@ -62,12 +65,20 @@ class BrowserE2ETestCase(unittest.TestCase):
 
         cls.temp = tempfile.TemporaryDirectory()
         cls.db = Path(cls.temp.name) / "runtime.db"
+        cls.artifact_backend = LocalCASBackend(Path(cls.temp.name) / "artifacts")
+        # Mutable only inside this test process: it lets a browser load an
+        # advertised command and then lose authority before submission, which
+        # proves the server re-checks scope at the command boundary.
+        cls.scopes = set(LOCAL_SCOPES)
         app = create_app(
             cls.db,
             handlers=[transform_registration()], schemas=SCHEMAS,
             worker_count=2, poll_seconds=0.02,
             authenticator=loopback_authenticator,
-            authorizer=local_authorizer(),
+            authorizer=Authorizer(
+                lambda actor: tuple(cls.scopes) if actor == LOCAL_ACTOR else ()
+            ),
+            artifact_backend=cls.artifact_backend,
             serve_ui=True,
         )
         cls.app = app
@@ -123,6 +134,13 @@ class BrowserE2ETestCase(unittest.TestCase):
             actor="local", idempotency_key=key,
         ).run_id
 
+    def start_goal(self, key: str, goal: str) -> str:
+        service = RunApplicationService(self.db, self.app_service())
+        return service.start_run(
+            workflow_id="workflow:linear", inputs={"value": 1}, goal=goal,
+            actor="local", idempotency_key=key,
+        ).run_id
+
     def app_service(self):
         from orbit.workflow.application.durable_runtime_service import (
             DurableRuntimeApplicationService,
@@ -143,10 +161,26 @@ class BrowserE2ETestCase(unittest.TestCase):
             time.sleep(0.1)
         self.fail(f"{run_id} never reached {status}")
 
+    def complete_goal_wizard(
+        self, page, workflow_id: str, *, goal: str, inputs: dict[str, object]
+    ) -> None:
+        page.check(f'input[name="workflow"][value="{workflow_id}"]')
+        page.click('[data-wizard-next]')
+        page.fill("#newRunGoal", goal)
+        for port_id, value in inputs.items():
+            control = f"#newRunInput-{port_id}"
+            if isinstance(value, bool):
+                page.set_checked(control, value)
+            else:
+                page.fill(control, str(value))
+        page.click('[data-wizard-next]')
+        page.click('[data-wizard-next]')
+        page.click("#newGoalStart")
+
 
 class LocaleTests(BrowserE2ETestCase):
     def test_the_browser_language_picks_the_locale(self) -> None:
-        for locale, expected in (("zh-CN", "运行"), ("en-US", "Runs")):
+        for locale, expected in (("zh-CN", "首页"), ("en-US", "Home")):
             with self.subTest(locale=locale):
                 page = self.open(locale)
                 self.assertEqual(locale, page.get_attribute("html", "lang"))
@@ -156,7 +190,7 @@ class LocaleTests(BrowserE2ETestCase):
         page = self.open("en-US")
         page.select_option("#localeSelect", "zh-CN")
         page.wait_for_function("() => document.documentElement.lang === 'zh-CN'")
-        self.assertIn("运行", page.inner_text("#viewTitle"))
+        self.assertIn("首页", page.inner_text("#viewTitle"))
         self.assertIn("待办", page.inner_text(".sidebar"))
 
     def test_no_key_leaks_into_the_page_in_either_locale(self) -> None:
@@ -168,17 +202,27 @@ class LocaleTests(BrowserE2ETestCase):
             with self.subTest(locale=locale):
                 page = self.open(locale)
                 text = page.inner_text("body")
-                leaked = re.findall(r"\b(?:runs|run|inbox|ops|action|plan)\.[a-z][\w.]+", text)
+                leaked = re.findall(
+                    r"\b(?:home|goals|workflows|newRun|runs|run|inbox|ops|action|plan|wait|responsibility)\.[a-z][\w.]+",
+                    text,
+                )
                 self.assertEqual([], leaked, f"untranslated keys: {leaked}")
 
 
 class AccessibilityAndResponsiveTests(BrowserE2ETestCase):
+    def test_shell_shows_the_authenticated_actor(self) -> None:
+        page = self.open("en-US")
+        page.wait_for_function("() => document.querySelector('#actorChip').textContent === 'local'")
+        self.assertIn("local", page.get_attribute("#actorChip", "title"))
+
     def test_keyboard_reaches_the_skip_link_and_main_navigation(self) -> None:
         page = self.open("en-US")
         page.keyboard.press("Tab")
         self.assertIn("skip-link", page.locator(":focus").get_attribute("class") or "")
         page.keyboard.press("Tab")
-        self.assertEqual("runs", page.locator(":focus").get_attribute("data-view"))
+        self.assertEqual("globalSearch", page.locator(":focus").get_attribute("id"))
+        page.keyboard.press("Tab")
+        self.assertEqual("home", page.locator(":focus").get_attribute("data-view"))
 
     def test_mobile_viewport_has_no_page_level_horizontal_overflow(self) -> None:
         context = self.browser.new_context(
@@ -191,6 +235,21 @@ class AccessibilityAndResponsiveTests(BrowserE2ETestCase):
         self.assertTrue(page.evaluate(
             "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
         ))
+
+    def test_mobile_navigation_opens_as_a_drawer_and_esc_closes_it(self) -> None:
+        context = self.browser.new_context(
+            locale="en-US", viewport={"width": 390, "height": 844}
+        )
+        self.addCleanup(context.close)
+        page = context.new_page()
+        page.goto(f"{self.base}/ui/")
+        page.click("#navToggle")
+        self.assertEqual("true", page.get_attribute("#navToggle", "aria-expanded"))
+        self.assertEqual("true", page.get_attribute("body", "data-nav-open"))
+        page.keyboard.press("Escape")
+        self.assertEqual("false", page.get_attribute("#navToggle", "aria-expanded"))
+        self.assertEqual("navToggle", page.locator(":focus").get_attribute("id"))
+        self.assertTrue(page.locator("#sidebar").evaluate("node => node.inert"))
 
     def test_default_text_meets_wcag_aa_contrast(self) -> None:
         page = self.open("en-US")
@@ -214,20 +273,148 @@ class AccessibilityAndResponsiveTests(BrowserE2ETestCase):
         self.assertGreaterEqual(ratio, 4.5)
 
 
+class DiscoveryViewsTests(BrowserE2ETestCase):
+    def test_home_uses_dashboard_facts_and_global_search_uses_the_server(self) -> None:
+        phrase = "Reconcile lunar invoices"
+        run_id = self.start_goal("browser-discovery-search", phrase)
+        page = self.open("en-US")
+        page.wait_for_function(
+            "id => fetch('/api/v1/dashboard').then(r => r.json())"
+            ".then(b => b.data.recent_runs.some(run => run.run_id === id))",
+            arg=run_id,
+        )
+        page.reload()
+        page.wait_for_selector(".stat-grid")
+        self.assertIn(phrase, page.inner_text(".recent-list"))
+
+        page.fill("#globalSearch", "lunar invoices")
+        page.press("#globalSearch", "Enter")
+        page.wait_for_function("() => location.hash === '#/runs'")
+        page.wait_for_selector("tbody tr")
+        self.assertIn(phrase, page.inner_text("tbody"))
+
+    def test_goal_deep_link_shows_the_projection_and_opens_the_run(self) -> None:
+        phrase = "Prepare quarterly launch brief"
+        run_id = self.start_goal("browser-goal-detail", phrase)
+        page = self.open("en-US", path=f"/ui/#/goals/{run_id}")
+        page.wait_for_selector(".goal-detail")
+        self.assertIn(phrase, page.inner_text(".goal-detail"))
+        self.assertIn("workflow:linear", page.inner_text(".goal-detail"))
+        page.click(".goal-detail >> text=Open run")
+        page.wait_for_function("id => location.hash === `#/runs/${encodeURIComponent(id)}`", arg=run_id)
+
+
+class WorkflowCatalogTests(BrowserE2ETestCase):
+    def test_catalog_card_opens_the_immutable_definition(self) -> None:
+        page = self.open("en-US", path="/ui/#/workflows")
+        card = page.locator(".workflow-card", has_text="Linear")
+        card.wait_for()
+        self.assertIn("4 nodes", card.inner_text())
+        card.locator(".workflow-card-main").click()
+        page.wait_for_selector(".workflow-detail .definition-list")
+        detail = page.inner_text(".workflow-detail")
+        self.assertIn("workflow:linear", detail.lower())
+        self.assertIn("collect", detail)
+        self.assertIn("transform@1.0.0", detail)
+
+    def test_catalog_network_failure_is_not_reported_as_invalid_workflow(self) -> None:
+        page = self.open("en-US")
+        page.route("**/api/v1/workflows", lambda route: route.abort())
+        page.click("#newRun")
+        page.wait_for_selector("#liveRegion.error")
+        self.assertIn("catalog is unavailable", page.inner_text("#liveRegion"))
+        self.assertNotIn("Choose a published workflow", page.inner_text("#liveRegion"))
+
+    def test_unsupported_input_schema_falls_back_to_validated_json(self) -> None:
+        page = self.open("en-US")
+
+        def force_json_mode(route):
+            response = route.fetch()
+            payload = response.json()
+            for entry in payload["data"]["workflows"]:
+                entry["input_mode"] = "json"
+            route.fulfill(response=response, json=payload)
+
+        page.route("**/api/v1/workflows", force_json_mode)
+        page.click("#newRun")
+        page.check('input[name="workflow"][value="workflow:linear"]')
+        page.click('[data-wizard-next]')
+        page.wait_for_selector("#newRunInput")
+        self.assertIn("complete JSON object", page.inner_text(".wizard-content"))
+        page.fill("#newRunGoal", "Exercise JSON fallback")
+        page.fill("#newRunInput", "{not json")
+        page.click('[data-wizard-next]')
+        page.wait_for_selector(".wizard-problem:not([hidden])")
+        self.assertIn("valid JSON object", page.inner_text(".wizard-problem"))
+
+    def test_workflow_removed_after_review_is_reported_before_mutation(self) -> None:
+        page = self.open("en-US")
+        calls = {"count": 0}
+
+        def catalog(route):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                route.continue_()
+            else:
+                route.fulfill(
+                    status=200, content_type="application/json",
+                    body=json.dumps({
+                        "schema_version": "1.0", "data": {"workflows": []},
+                        "next_cursor": None,
+                    }),
+                )
+
+        page.route("**/api/v1/workflows", catalog)
+        page.click("#newRun")
+        page.wait_for_selector("dialog[open]")
+        self.complete_goal_wizard(
+            page, "workflow:linear", goal="A workflow that may disappear",
+            inputs={"value": 7},
+        )
+        page.wait_for_selector(".wizard-problem:not([hidden])")
+        self.assertIn("no longer available", page.inner_text(".wizard-problem"))
+        self.assertTrue(page.is_visible("dialog[open]"))
+
+    def test_new_workflow_version_requires_a_fresh_review(self) -> None:
+        page = self.open("en-US")
+        calls = {"count": 0}
+
+        def catalog(route):
+            calls["count"] += 1
+            response = route.fetch()
+            payload = response.json()
+            if calls["count"] > 1:
+                next(
+                    entry for entry in payload["data"]["workflows"]
+                    if entry["workflow_id"] == "workflow:linear"
+                )["latest_version"] = 2
+            route.fulfill(response=response, json=payload)
+
+        page.route("**/api/v1/workflows", catalog)
+        page.click("#newRun")
+        self.complete_goal_wizard(
+            page, "workflow:linear", goal="Review a pinned version",
+            inputs={"value": 9},
+        )
+        page.wait_for_selector("#liveRegion.error")
+        self.assertIn("changed after review", page.inner_text("#liveRegion"))
+        self.assertFalse(page.is_visible("dialog[open]"))
+
+
 class NewRunTests(BrowserE2ETestCase):
     def test_a_run_started_from_the_dialog_reaches_its_detail_page(self) -> None:
         page = self.open("en-US")
         page.click("#newRun")
         page.wait_for_selector("dialog[open]")
-        page.fill("#newRunWorkflow", "workflow:linear")
-        page.fill("#newRunInput", '{"value": 3}')
-        page.click("dialog button[value=confirm]")
+        self.complete_goal_wizard(
+            page, "workflow:linear", goal="Verify the launch", inputs={"value": 3}
+        )
 
         page.wait_for_function("() => location.hash.startsWith('#/runs/run')")
-        self.assertIn("Started run", page.inner_text("#liveRegion"))
+        self.assertIn("Started goal", page.inner_text("#liveRegion"))
         page.wait_for_selector("text=Open responsibilities")
 
-    def test_invalid_json_is_reported_and_nothing_starts(self) -> None:
+    def test_required_schema_input_is_reported_and_nothing_starts(self) -> None:
         page = self.open("en-US")
         before = page.evaluate(
             "() => fetch('/api/v1/runs?limit=200').then(r => r.json())"
@@ -235,12 +422,13 @@ class NewRunTests(BrowserE2ETestCase):
         )
         page.click("#newRun")
         page.wait_for_selector("dialog[open]")
-        page.fill("#newRunWorkflow", "workflow:linear")
-        page.fill("#newRunInput", "{not json")
-        page.click("dialog button[value=confirm]")
+        page.check('input[name="workflow"][value="workflow:linear"]')
+        page.click('[data-wizard-next]')
+        page.fill("#newRunGoal", "Needs a valid input")
+        page.click('[data-wizard-next]')
 
-        page.wait_for_selector("#liveRegion.error")
-        self.assertIn("valid JSON", page.inner_text("#liveRegion"))
+        self.assertTrue(page.is_visible("dialog[open]"))
+        self.assertFalse(page.evaluate("document.querySelector('#newRunInput-value').checkValidity()"))
         after = page.evaluate(
             "() => fetch('/api/v1/runs?limit=200').then(r => r.json())"
             ".then(b => b.data.runs.length)"
@@ -255,9 +443,10 @@ class HumanTaskTests(BrowserE2ETestCase):
                 page = self.open(locale)
                 page.click("#newRun")
                 page.wait_for_selector("dialog[open]")
-                page.fill("#newRunWorkflow", "workflow:human")
-                page.fill("#newRunInput", '{"value": 3}')
-                page.click("dialog button[value=confirm]")
+                self.complete_goal_wizard(
+                    page, "workflow:human", goal="Review the transformed value",
+                    inputs={"value": 3},
+                )
                 page.wait_for_function("() => location.hash.startsWith('#/runs/run')")
                 run_id = page.evaluate(
                     "() => decodeURIComponent(location.hash.split('/')[2])"
@@ -294,6 +483,12 @@ class HumanTaskTests(BrowserE2ETestCase):
                 page.click("#humanTokenFetch")
                 page.wait_for_function(
                     "() => document.querySelector('#humanToken').value.length > 0"
+                )
+                issued_token = page.input_value("#humanToken")
+                self.assertNotIn(issued_token, page.url)
+                self.assertNotIn(
+                    issued_token,
+                    page.evaluate("() => JSON.stringify({...localStorage})"),
                 )
                 if locale == "en-US":
                     # Plan B4: malformed JSON stays inside the form — the
@@ -364,6 +559,74 @@ class BudgetTests(BrowserE2ETestCase):
             arg=run_id, timeout=15000,
         )
 
+    def test_a_browser_retry_with_the_same_key_tops_up_once(self) -> None:
+        """A duplicate HTTP delivery replays one command, not two grants."""
+
+        run_id = self.exhausted_run("browser-budget-duplicate")
+        page = self.open("en-US", path=f"/ui/#/runs/{run_id}")
+        results = page.evaluate(
+            """async id => {
+              const projection = await fetch(
+                `/api/v1/runs/${encodeURIComponent(id)}/responsibilities`
+              ).then(r => r.json());
+              const command = projection.data.responsibilities
+                .flatMap(item => item.allowed_commands || [])
+                .find(item => item.command === 'budget.add');
+              const options = {
+                method: command.method,
+                headers: {
+                  'content-type': 'application/json',
+                  'idempotency-key': 'browser-duplicate-delivery',
+                },
+                body: JSON.stringify({
+                  expected_version: command.expected_version,
+                  amount_microunits: 500,
+                }),
+              };
+              const first = await fetch(command.href, options);
+              const second = await fetch(command.href, options);
+              return [first.status, second.status];
+            }""",
+            run_id,
+        )
+        self.assertEqual([200, 200], results)
+        self.assertEqual(1_500, self.account_total(page, run_id))
+
+    def test_a_stale_advertised_command_refreshes_after_409(self) -> None:
+        run_id = self.exhausted_run("browser-budget-conflict")
+        page = self.open("en-US", path=f"/ui/#/runs/{run_id}")
+        grant = page.locator("button", has_text="Add budget").first
+        grant.wait_for(timeout=15000)
+        version = page.evaluate(
+            """async id => {
+              const response = await fetch(
+                `/api/v1/runs/${encodeURIComponent(id)}/responsibilities`
+              ).then(r => r.json());
+              return response.data.responsibilities
+                .flatMap(item => item.allowed_commands || [])
+                .find(item => item.command === 'budget.add').expected_version;
+            }""",
+            run_id,
+        )
+        BudgetService(self.db).add_budget(
+            EntityId.parse(run_id), 100, expected_version=version, actor="local",
+            now=datetime.now(timezone.utc), idempotency_key="budget-conflict-winner",
+        )
+
+        grant.click()
+        page.fill("#budgetAmount", "500")
+        page.click("dialog button[value=confirm]")
+        page.wait_for_function(
+            "() => document.querySelector('#liveRegion').textContent"
+            ".includes('changed after you loaded it')",
+            timeout=15000,
+        )
+        page.wait_for_function(
+            "() => ![...document.querySelectorAll('button')]"
+            ".some(button => button.textContent === 'Add budget')",
+            timeout=15000,
+        )
+
     def test_the_grant_button_is_translated(self) -> None:
         run_id = self.exhausted_run("browser-budget-zh")
         page = self.open("zh-CN", path=f"/ui/#/runs/{run_id}")
@@ -413,6 +676,9 @@ class CancelTests(BrowserE2ETestCase):
         cancel.wait_for(timeout=15000)
         self.assertEqual("Cancel run", cancel.inner_text())
         cancel.click()
+        page.locator("dialog[open]").get_by_role(
+            "button", name="Cancel run", exact=True
+        ).click()
 
         page.wait_for_function(
             "id => fetch(`/api/v1/runs/${encodeURIComponent(id)}`)"
@@ -427,11 +693,27 @@ class CancelTests(BrowserE2ETestCase):
         cancel.wait_for(timeout=15000)
         self.assertEqual("取消运行", cancel.inner_text())
 
+    def test_scope_is_rechecked_after_a_command_was_advertised(self) -> None:
+        run_id = self.parked_run("browser-cancel-forbidden")
+        page = self.open("en-US", path=f"/ui/#/runs/{run_id}")
+        cancel = page.locator("button.danger").first
+        cancel.wait_for(timeout=15000)
+
+        self.scopes.remove(WRITE_SCOPE)
+        self.addCleanup(self.scopes.add, WRITE_SCOPE)
+        cancel.click()
+        page.locator("dialog[open]").get_by_role(
+            "button", name="Cancel run", exact=True
+        ).click()
+        page.wait_for_selector("#liveRegion:not([hidden])")
+        self.assertIn("not allowed", page.inner_text("#liveRegion"))
+
 
 class PlanAndRecoveryTests(BrowserE2ETestCase):
     def test_the_plan_panel_keeps_definition_and_overlay_apart(self) -> None:
         run_id = self.start_run("browser-plan")
         page = self.open("en-US", path=f"/ui/#/runs/{run_id}")
+        page.click('[data-run-tab="plan"]')
         page.wait_for_selector("button[data-view=definition]")
 
         definition = page.inner_text("button[data-view=definition] >> xpath=../..")
@@ -445,13 +727,33 @@ class PlanAndRecoveryTests(BrowserE2ETestCase):
         self.assertIn("run state for plan v1", overlay)
         self.assertIn("generation 1", overlay)
 
-    def test_the_ops_page_reports_health_and_recovery(self) -> None:
+    def test_the_ops_page_reports_factual_operational_sections(self) -> None:
         page = self.open("en-US", path="/ui/#/ops")
-        page.wait_for_selector("text=Runtime health")
+        page.wait_for_selector("text=Integrity")
         text = page.inner_text("#content")
-        self.assertIn("Ready", text)
+        self.assertIn("SQLite quick-check passed", text)
         self.assertIn("Scanned", text)
-        self.assertIn("Installed handlers", text)
+        self.assertIn("Capacity", text)
+        self.assertIn("Durable state", text)
+
+    def test_agents_are_registration_facts_not_fake_health(self) -> None:
+        page = self.open("en-US", path="/ui/#/agents")
+        page.wait_for_selector("text=Registered handlers")
+        text = page.inner_text("#content")
+        self.assertIn("does not collect heartbeats", text)
+        self.assertIn("transform", text)
+        self.assertNotIn("Online", text)
+        self.assertNotIn("P95", text)
+
+    def test_settings_persist_refresh_interval_locally(self) -> None:
+        page = self.open("en-US", path="/ui/#/settings")
+        select = page.get_by_label("Live refresh interval")
+        select.wait_for(timeout=15000)
+        select.select_option("30")
+        self.assertEqual(
+            "30", page.evaluate("localStorage.getItem('orbit.refreshSeconds')")
+        )
+        self.assertIn("Server configuration (read-only)", page.inner_text("#content"))
 
     def test_a_failed_run_is_diagnosable_from_the_errors_panel(self) -> None:
         """The panel an operator opens when something breaks must say why."""
@@ -465,6 +767,7 @@ class PlanAndRecoveryTests(BrowserE2ETestCase):
         page = self.open("en-US", path=f"/ui/#/runs/{run_id}")
         self.wait_for_status(page, run_id, "failed")
         page.reload()
+        page.click('[data-run-tab="errors"]')
         page.wait_for_selector("text=is not of type", timeout=15000)
 
         errors = page.inner_text("#content")
@@ -476,6 +779,7 @@ class DataAndRecoverySurfaceTests(BrowserE2ETestCase):
     def test_run_data_and_lineage_are_visible(self) -> None:
         run_id = self.start_run("browser-data")
         page = self.open("en-US", path=f"/ui/#/runs/{run_id}")
+        page.click('[data-run-tab="data"]')
         page.wait_for_selector("text=Data and artifacts")
         page.get_by_role("button", name="Show lineage").first.click()
         page.wait_for_selector("text=No lineage links recorded.")
@@ -500,6 +804,106 @@ class DataAndRecoverySurfaceTests(BrowserE2ETestCase):
             arg=str(task_id), timeout=15000,
         )
 
+    def test_a_stale_recovery_selection_reports_partial_failure(self) -> None:
+        run_id = self.start_run("browser-recovery-stale")
+        now = datetime.now(timezone.utc)
+        task_id, _token = HumanTaskService(self.db).create(
+            EntityId.parse(run_id), HumanTaskKind.APPROVAL,
+            {"question": "stale recovery?"}, actor="local", now=now,
+            participants=["local"], deadline_at=now - timedelta(seconds=1),
+        )
+
+        page = self.open("en-US", path="/ui/#/ops")
+        row = page.locator(".actions", has_text=str(task_id))
+        apply = row.get_by_role("button", name="Apply recovery")
+        apply.wait_for(timeout=15000)
+
+        applied = page.evaluate(
+            """async runId => {
+              const scan = await fetch('/api/v1/recovery').then(r => r.json());
+              const finding = scan.data.findings.find(item => item.run_id === runId);
+              const response = await fetch('/api/v1/recovery/apply', {
+                method: 'POST',
+                headers: {
+                  'content-type': 'application/json',
+                  'idempotency-key': 'browser-recovery-winner',
+                },
+                body: JSON.stringify({
+                  expected_version: finding.expected_version,
+                  action_ids: [finding.action_id],
+                }),
+              });
+              return response.status;
+            }""",
+            run_id,
+        )
+        self.assertEqual(200, applied)
+
+        apply.click()
+        page.get_by_role("button", name="Apply", exact=True).click()
+        page.wait_for_function(
+            "() => document.querySelector('#liveRegion').textContent"
+            ".includes('could not be applied')",
+            timeout=15000,
+        )
+        self.assertIn("1 of 1", page.inner_text("#liveRegion"))
+
+
+class ArtifactCatalogTests(BrowserE2ETestCase):
+    def artifact(self) -> str:
+        from orbit.workflow.persistence.database import connect_workflow_database
+
+        run_id = self.start_run("browser-artifact")
+        receipt = self.artifact_backend.write(
+            b"reviewable artifact text", max_size_bytes=1024
+        )
+        artifact_id = f"artifact:{receipt.checksum.value.removeprefix('sha256:')}"
+        with connect_workflow_database(self.db) as connection:
+            event_id = connection.execute(
+                "SELECT event_id FROM run_events WHERE run_id=? ORDER BY global_position LIMIT 1",
+                (run_id,),
+            ).fetchone()[0]
+            now = "2026-01-01T00:00:00+00:00"
+            connection.execute(
+                "INSERT INTO artifacts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    artifact_id, run_id, "workflow:linear", "attempt", "attempt:browser",
+                    "node_run:browser", "report", "schema:text", "text/plain",
+                    receipt.checksum.value, receipt.size_bytes, receipt.blob_key,
+                    "run", run_id, "committed", now, now, event_id,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO artifact_acl VALUES (?,'local','read','local',?)",
+                (artifact_id, now),
+            )
+            connection.execute(
+                "INSERT INTO artifact_links VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    "artifact_link:browser-producer", "workflow:linear", run_id,
+                    artifact_id, "producer", "attempt:browser", event_id, now,
+                ),
+            )
+            connection.commit()
+        return artifact_id
+
+    def test_catalog_detail_lineage_preview_and_reload(self) -> None:
+        artifact_id = self.artifact()
+        page = self.open("en-US", path="/ui/#/artifacts")
+        page.wait_for_selector("text=report")
+        page.locator(".artifact-card-main").first.click()
+        page.wait_for_function(
+            "id => location.hash === `#/artifacts/${encodeURIComponent(id)}`",
+            arg=artifact_id,
+        )
+        page.wait_for_selector(".artifact-detail .panel-title")
+        self.assertIn("attempt:browser", page.inner_text("#content"))
+        page.get_by_role("button", name="Load text preview").click()
+        page.wait_for_selector("text=reviewable artifact text")
+        page.reload()
+        page.wait_for_selector("text=Producer and consumer lineage")
+        self.assertIn(artifact_id, page.inner_text("#content"))
+
 
 class RefreshTests(BrowserE2ETestCase):
     def test_a_reload_restores_the_page_from_the_server(self) -> None:
@@ -518,7 +922,11 @@ class RefreshTests(BrowserE2ETestCase):
         self.assertIn(run_id, after)
 
     def test_no_console_errors_on_any_view(self) -> None:
-        for path in ("/ui/", "/ui/#/inbox", "/ui/#/ops"):
+        for path in (
+            "/ui/", "/ui/#/goals", "/ui/#/workflows", "/ui/#/runs",
+            "/ui/#/inbox", "/ui/#/artifacts", "/ui/#/agents",
+            "/ui/#/ops", "/ui/#/settings",
+        ):
             with self.subTest(path=path):
                 context = self.browser.new_context(locale="en-US")
                 page = context.new_page()
@@ -536,6 +944,110 @@ class RefreshTests(BrowserE2ETestCase):
                 page.wait_for_selector("#content")
                 page.wait_for_timeout(800)
                 self.assertEqual([], errors)
+
+
+class ReleaseHardeningTests(BrowserE2ETestCase):
+    def test_all_primary_views_fit_the_mobile_viewport(self) -> None:
+        context = self.browser.new_context(
+            locale="en-US", viewport={"width": 360, "height": 800}
+        )
+        self.addCleanup(context.close)
+        page = context.new_page()
+        for view in (
+            "home", "goals", "workflows", "runs", "inbox", "artifacts",
+            "agents", "ops", "settings",
+        ):
+            with self.subTest(view=view):
+                page.goto(f"{self.base}/ui/#/{view}")
+                page.wait_for_function(
+                    "() => document.querySelector('#content').childElementCount > 0"
+                    " && !document.querySelector('#content .loading')"
+                )
+                overflow = page.evaluate(
+                    "() => document.documentElement.scrollWidth - window.innerWidth"
+                )
+                self.assertLessEqual(overflow, 1, f"{view} overflows by {overflow}px")
+
+    def test_run_detail_with_long_identity_fits_mobile(self) -> None:
+        run_id = self.start_run("browser-mobile-run-detail")
+        context = self.browser.new_context(
+            locale="en-US", viewport={"width": 360, "height": 800}
+        )
+        self.addCleanup(context.close)
+        page = context.new_page()
+        page.goto(f"{self.base}/ui/#/runs/{run_id}")
+        page.wait_for_selector(".run-hero")
+        overflow = page.evaluate(
+            "() => document.documentElement.scrollWidth - window.innerWidth"
+        )
+        self.assertLessEqual(overflow, 1, f"Run detail overflows by {overflow}px")
+
+    def test_keyboard_closes_dialog_and_restores_focus(self) -> None:
+        page = self.open("en-US")
+        trigger = page.locator("#newRun")
+        trigger.focus()
+        page.keyboard.press("Enter")
+        page.wait_for_selector("dialog[open]")
+        page.keyboard.press("Escape")
+        page.wait_for_selector("dialog", state="detached")
+        self.assertEqual("newRun", page.evaluate("document.activeElement.id"))
+
+    def test_mobile_navigation_closes_with_escape(self) -> None:
+        context = self.browser.new_context(
+            locale="en-US", viewport={"width": 360, "height": 800}
+        )
+        self.addCleanup(context.close)
+        page = context.new_page()
+        page.goto(f"{self.base}/ui/")
+        page.click("#navToggle")
+        self.assertEqual("true", page.get_attribute("#navToggle", "aria-expanded"))
+        page.keyboard.press("Escape")
+        self.assertEqual("false", page.get_attribute("#navToggle", "aria-expanded"))
+        self.assertEqual("navToggle", page.evaluate("document.activeElement.id"))
+
+    def test_network_failure_is_localised_and_retryable(self) -> None:
+        page = self.open("en-US")
+        failing = {"value": True}
+
+        def network(route):
+            if failing["value"]:
+                route.abort()
+            else:
+                route.continue_()
+
+        page.route("**/api/v1/runs?*", network)
+        page.click('[data-view="runs"]')
+        page.wait_for_selector("#content .data-state.error")
+        self.assertIn("Cannot reach the runtime", page.inner_text("#content"))
+        failing["value"] = False
+        page.get_by_role("button", name="Try again").click()
+        page.wait_for_selector("#content .panel")
+
+    def test_service_unavailable_is_locatable_and_retryable(self) -> None:
+        page = self.open("en-US", path="/ui/#/runs")
+        failing = {"value": True}
+
+        def unavailable(route):
+            if failing["value"]:
+                route.fulfill(
+                    status=503, content_type="application/json",
+                    body=json.dumps({
+                        "error": {
+                            "code": "temporarily_unavailable",
+                            "message": "projection is rebuilding", "details": {},
+                        }
+                    }),
+                )
+            else:
+                route.continue_()
+
+        page.route("**/api/v1/dashboard", unavailable)
+        page.click('[data-view="home"]')
+        page.wait_for_selector("#content .data-state.error")
+        self.assertIn("projection is rebuilding", page.inner_text("#content"))
+        failing["value"] = False
+        page.get_by_role("button", name="Try again").click()
+        page.wait_for_selector("#content .home-hero")
 
 
 if __name__ == "__main__":

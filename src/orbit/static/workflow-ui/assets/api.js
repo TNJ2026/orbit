@@ -104,11 +104,20 @@ export class Api {
     }
   }
 
-  listRuns({ cursor, limit = 25, activeOnly = false } = {}) {
+  listRuns({
+    cursor, limit = 25, activeOnly = false, q = "", status = "", responsibility = "",
+  } = {}) {
     const params = new URLSearchParams({ limit: String(limit) });
     if (cursor) params.set("cursor", cursor);
     if (activeOnly) params.set("active", "true");
+    if (q.trim()) params.set("q", q.trim());
+    if (status) params.set("status", status);
+    if (responsibility) params.set("responsibility", responsibility);
     return this.get(`/api/v1/runs?${params}`);
+  }
+
+  dashboard() {
+    return this.get("/api/v1/dashboard");
   }
 
   runSummary(runId) {
@@ -129,6 +138,44 @@ export class Api {
     return this.get(
       `/api/v1/runs/${encodeURIComponent(runId)}/data/${encodeURIComponent(dataId)}/lineage`,
     );
+  }
+
+  artifacts({ cursor, q = "", runId = "", contentType = "", limit = 25 } = {}) {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (cursor) params.set("cursor", cursor);
+    if (q.trim()) params.set("q", q.trim());
+    if (runId.trim()) params.set("run_id", runId.trim());
+    if (contentType.trim()) params.set("content_type", contentType.trim());
+    return this.get(`/api/v1/artifacts?${params}`);
+  }
+
+  artifact(artifactId) {
+    return this.get(`/api/v1/artifacts/${encodeURIComponent(artifactId)}`);
+  }
+
+  artifactLineage(artifactId) {
+    return this.get(`/api/v1/artifacts/${encodeURIComponent(artifactId)}/lineage`);
+  }
+
+  async artifactPreview(artifactId) {
+    const path = `/api/v1/artifacts/${encodeURIComponent(artifactId)}/content`;
+    let response;
+    try {
+      response = await fetch(`${this.base}${path}`, { credentials: "same-origin" });
+    } catch (cause) {
+      throw new ApiError(0, "network_error", String(cause));
+    }
+    if (!response.ok) {
+      let payload = null;
+      try { payload = await response.json(); } catch { /* handled below */ }
+      const failure = payload?.error || {};
+      throw new ApiError(response.status, failure.code, failure.message);
+    }
+    return response.text();
+  }
+
+  artifactDownloadUrl(artifactId) {
+    return `${this.base}/api/v1/artifacts/${encodeURIComponent(artifactId)}/content?download=true`;
   }
 
   /* Plan reads are three calls on purpose. The server keeps definition,
@@ -154,10 +201,19 @@ export class Api {
     return this.get(`/api/v1/runs/${encodeURIComponent(runId)}/plan/diff?${params}`);
   }
 
+  graph(runId, planVersion) {
+    const suffix = planVersion === undefined ? "" : `?plan_version=${planVersion}`;
+    return this.get(`/api/v1/runs/${encodeURIComponent(runId)}/graph${suffix}`);
+  }
+
   inbox(cursor) {
     const params = new URLSearchParams({ limit: "25" });
     if (cursor) params.set("cursor", cursor);
     return this.get(`/api/v1/inbox?${params}`);
+  }
+
+  capabilities() {
+    return this.get("/api/v1/capabilities");
   }
 
   handlerCatalog() {
@@ -168,12 +224,24 @@ export class Api {
     return this.get("/api/v1/workflows");
   }
 
+  workflowDetail(workflowId, version) {
+    const params = new URLSearchParams();
+    if (version !== undefined) params.set("version", String(version));
+    const suffix = params.size ? `?${params}` : "";
+    return this.get(`/api/v1/workflows/${encodeURIComponent(workflowId)}${suffix}`);
+  }
+
   recovery() {
     return this.get("/api/v1/recovery");
   }
 
-  health() {
-    return this.get("/health/ready");
+  opsStatus() {
+    return this.get("/api/v1/ops/status");
+  }
+
+  live(cursor) {
+    const suffix = cursor ? `?cursor=${encodeURIComponent(cursor)}` : "";
+    return this.get(`/api/v1/live${suffix}`);
   }
 
 }

@@ -25,7 +25,13 @@ def catalog(locale: str) -> dict[str, str]:
 
 
 def source_files() -> list[Path]:
-    return [UI_ROOT / "index.html", *sorted(ASSETS.glob("*.js"))]
+    return [UI_ROOT / "index.html", *sorted(ASSETS.rglob("*.js"))]
+
+
+def stylesheet_source() -> str:
+    return "\n".join(
+        path.read_text(encoding="utf-8") for path in sorted(ASSETS.rglob("*.css"))
+    )
 
 
 class CatalogTests(unittest.TestCase):
@@ -61,6 +67,14 @@ class CatalogTests(unittest.TestCase):
             len(shared), 3, f"untranslated zh-CN entries: {sorted(shared)}"
         )
 
+    def test_replaced_ops_and_shell_terms_are_not_kept_as_dead_keys(self) -> None:
+        keys = set(catalog("en-US"))
+        self.assertTrue({
+            "action.newRun", "action.retry", "newRun.workflow.hint",
+            "ops.agents", "ops.agents.empty", "ops.handlers", "ops.health",
+            "ops.health.notReady", "ops.health.ready",
+        }.isdisjoint(keys))
+
 
 class SourceTests(unittest.TestCase):
     def test_every_key_used_in_source_exists(self) -> None:
@@ -79,6 +93,8 @@ class SourceTests(unittest.TestCase):
         for key in (
             "run.timeline.empty", "run.errors.empty", "runs.title", "inbox.title",
             "ops.title", "run.title", "human.decision.approve", "human.decision.reject",
+            "state.loading", "state.empty", "state.error", "state.stale",
+            "state.pending", "state.retry",
         ):
             with self.subTest(key=key):
                 self.assertIn(key, known)
@@ -95,7 +111,7 @@ class SourceTests(unittest.TestCase):
         """No status-to-next-status table, and no invented mutation endpoints."""
 
         joined = "\n".join(
-            path.read_text(encoding="utf-8") for path in ASSETS.glob("*.js")
+            path.read_text(encoding="utf-8") for path in ASSETS.rglob("*.js")
         )
         for forbidden in ("succeeded ->", "TRANSITIONS", "nextStatus", "advanceRun"):
             with self.subTest(forbidden=forbidden):
@@ -115,7 +131,9 @@ class SourceTests(unittest.TestCase):
 
     def test_new_run_distinguishes_catalog_failure_from_invalid_workflow(self) -> None:
         app_js = (ASSETS / "app.js").read_text(encoding="utf-8")
-        self.assertIn('catalog === null ? "newRun.catalog.unavailable"', app_js)
+        self.assertIn('announce(i18n.t("newRun.catalog.unavailable")', app_js)
+        self.assertIn('fail("newRun.workflow.invalid")', app_js)
+        self.assertIn('fail("newRun.workflow.unavailable")', app_js)
 
     def test_no_mock_data_survives(self) -> None:
         joined = "\n".join(path.read_text(encoding="utf-8") for path in source_files())
@@ -179,7 +197,7 @@ class ErrorRenderingTests(unittest.TestCase):
         self.assertIn("item.payload && item.payload.error", self.app_js)
 
     def test_the_error_renderer_surfaces_more_than_a_message(self) -> None:
-        start = self.app_js.index('pagedPanel(runId, "errors"')
+        start = self.app_js.index("function errorItem")
         section = self.app_js[start:start + 900]
         for field in ("error.message", "error.category", "error.source"):
             with self.subTest(field=field):
@@ -199,12 +217,62 @@ class AccessibilityTests(unittest.TestCase):
         self.assertIn('data-i18n-label="locale.switch"', self.index)
 
     def test_focus_is_visible(self) -> None:
-        css = (ASSETS / "app.css").read_text(encoding="utf-8")
+        css = stylesheet_source()
         self.assertIn(":focus-visible", css)
 
+    def test_text_tokens_meet_wcag_aa_contrast(self) -> None:
+        """Body and muted text remain readable on both page and panel surfaces."""
+
+        tokens = (ASSETS / "styles/tokens.css").read_text(encoding="utf-8")
+
+        def block(selector: str) -> str:
+            match = re.search(rf"{re.escape(selector)}\s*\{{(.*?)\}}", tokens, re.S)
+            self.assertIsNotNone(match, selector)
+            return match.group(1)
+
+        def variables(source: str) -> dict[str, str]:
+            return dict(re.findall(r"--([\w-]+):\s*(#[0-9a-fA-F]{6})", source))
+
+        def luminance(hex_color: str) -> float:
+            channels = [int(hex_color[index:index + 2], 16) / 255 for index in (1, 3, 5)]
+            linear = [
+                channel / 12.92 if channel <= 0.04045
+                else ((channel + 0.055) / 1.055) ** 2.4
+                for channel in channels
+            ]
+            return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+        def contrast(left: str, right: str) -> float:
+            bright, dark = sorted((luminance(left), luminance(right)), reverse=True)
+            return (bright + 0.05) / (dark + 0.05)
+
+        dark = variables(block(":root"))
+        light = {**dark, **variables(block('html[data-theme="light"]'))}
+        for theme, palette in (("dark", dark), ("light", light)):
+            for foreground in ("text", "muted"):
+                for background in ("bg", "panel"):
+                    with self.subTest(theme=theme, foreground=foreground, background=background):
+                        self.assertGreaterEqual(
+                            contrast(palette[foreground], palette[background]), 4.5
+                        )
+
     def test_the_layout_responds_to_small_screens(self) -> None:
-        css = (ASSETS / "app.css").read_text(encoding="utf-8")
+        css = stylesheet_source()
         self.assertIn("@media (max-width", css)
+
+    def test_mobile_navigation_is_a_real_drawer(self) -> None:
+        css = stylesheet_source()
+        self.assertIn('body[data-nav-open="true"] .sidebar', css)
+        self.assertIn('id="navToggle"', self.index)
+        self.assertIn('aria-controls="sidebar"', self.index)
+
+
+class CapacityRenderingTests(unittest.TestCase):
+    def test_large_inline_values_are_bounded_before_entering_the_dom(self) -> None:
+        app_js = (ASSETS / "app.js").read_text(encoding="utf-8")
+        self.assertIn("rawValue.length <= 500", app_js)
+        self.assertIn("rawValue.slice(0, 500)", app_js)
+        self.assertIn("i18n.number(item.size_bytes)", app_js)
 
 
 if __name__ == "__main__":

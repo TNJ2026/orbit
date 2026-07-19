@@ -11,18 +11,23 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from orbit.web.api_v1 import Authorizer, READ_SCOPE, SENSITIVE_SCOPE, WRITE_SCOPE
+from orbit.web.api_v1 import (
+    OPS_READ_SCOPE, OPS_WRITE_SCOPE, READ_SCOPE, SENSITIVE_SCOPE, WRITE_SCOPE,
+    Authorizer,
+)
 from orbit.web.app import create_app
 from orbit.workflow.api.dto import (
     CursorError, decode_cursor, encode_cursor, envelope, page_size,
 )
 from orbit.workflow.application.budget_service import BudgetService
+from orbit.workflow.artifacts.local_cas import LocalCASBackend
 from orbit.workflow.application.human_service import HumanTaskService
 from orbit.workflow.domain.human import HumanTaskKind
 from orbit.workflow.domain.ids import EntityId
 from tests.test_web_composition import (
     AsgiHarness, SCHEMAS, publish_linear_workflow, transform_registration,
 )
+from tests.test_ui_contract_goldens import validator as ui_contract_validator
 
 
 class CursorTests(unittest.TestCase):
@@ -76,11 +81,14 @@ class ApiTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.db = Path(self.temp.name) / "runtime.db"
+        self.artifact_backend = LocalCASBackend(Path(self.temp.name) / "artifacts")
         self.scopes = {
             "reader": [READ_SCOPE],
-            "writer": [READ_SCOPE, WRITE_SCOPE],
-            "second-writer": [READ_SCOPE, WRITE_SCOPE],
+            "writer": [READ_SCOPE, WRITE_SCOPE, OPS_READ_SCOPE, OPS_WRITE_SCOPE],
+            "second-writer": [READ_SCOPE, WRITE_SCOPE, OPS_READ_SCOPE, OPS_WRITE_SCOPE],
+            "ops-reader": [READ_SCOPE, OPS_READ_SCOPE],
             "sensitive": [READ_SCOPE, SENSITIVE_SCOPE],
+            "other-sensitive": [READ_SCOPE, SENSITIVE_SCOPE],
             "nobody": [],
         }
         self.app = create_app(
@@ -89,6 +97,7 @@ class ApiTestCase(unittest.TestCase):
             worker_count=1, poll_seconds=0.02,
             authenticator=lambda request: request.headers.get("x-orbit-actor"),
             authorizer=Authorizer(lambda actor: self.scopes.get(actor, [])),
+            artifact_backend=self.artifact_backend,
         )
         publish_linear_workflow(self.db)
 
@@ -255,6 +264,98 @@ class PaginationTests(ApiTestCase):
             self.assertIn("correlation_id", page["data"]["items"][0])
 
 
+class RunDiscoveryTests(ApiTestCase):
+    def _start(self, client, key: str, goal: str) -> str:
+        response = client.post(
+            "/api/v1/runs", actor="writer", key=key,
+            body={
+                "workflow_id": "workflow:linear",
+                "input": {"value": 0},
+                "goal": goal,
+            },
+        )
+        self.assertEqual(200, response.status_code, response.text)
+        return response.json()["data"]["run_id"]
+
+    def test_goal_is_projected_into_summary_and_server_search(self) -> None:
+        with AsgiHarness(self.app) as client:
+            run_id = self._start(
+                client, "goal-search", "Market expansion brief\nEvidence backed",
+            )
+            summary = client.get(f"/api/v1/runs/{run_id}", actor="writer").json()["data"]
+            self.assertEqual("Market expansion brief", summary["display_name"])
+            self.assertEqual(
+                "Market expansion brief\nEvidence backed", summary["goal"]
+            )
+
+            result = client.get(
+                "/api/v1/runs?q=MARKET%20EXPANSION", actor="writer"
+            ).json()["data"]["runs"]
+            self.assertEqual([run_id], [item["run_id"] for item in result])
+            errors = sorted(
+                ui_contract_validator("run-summary.schema.json").iter_errors(result[0]),
+                key=str,
+            )
+            self.assertEqual([], errors, f"endpoint drifted from RunSummary 2.0: {errors}")
+
+    def test_actor_action_is_authorised_and_sorted_before_recency(self) -> None:
+        with AsgiHarness(self.app) as client:
+            actionable = self._start(client, "actionable", "Needs approval")
+            HumanTaskService(self.db).create(
+                EntityId.parse(actionable), HumanTaskKind.APPROVAL,
+                {"question": "ship?"}, actor="writer",
+                now=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                participants=["writer"],
+            )
+            newer = self._start(client, "newer", "Newer ordinary run")
+
+            writer_runs = client.get("/api/v1/runs", actor="writer").json()["data"]["runs"]
+            self.assertEqual(actionable, writer_runs[0]["run_id"])
+            self.assertTrue(writer_runs[0]["requires_actor_action"])
+
+            reader_runs = client.get("/api/v1/runs", actor="reader").json()["data"]["runs"]
+            self.assertTrue(all(not item["requires_actor_action"] for item in reader_runs))
+            self.assertIn(newer, {item["run_id"] for item in reader_runs})
+
+            human = client.get(
+                "/api/v1/runs?responsibility=human", actor="writer"
+            ).json()["data"]["runs"]
+            self.assertEqual([actionable], [item["run_id"] for item in human])
+
+    def test_cursor_is_bound_to_the_query_and_unknown_params_are_rejected(self) -> None:
+        with AsgiHarness(self.app) as client:
+            self._start(client, "market-one", "Market one")
+            self._start(client, "market-two", "Market two")
+            first = client.get(
+                "/api/v1/runs?q=market&limit=1", actor="writer"
+            ).json()
+            self.assertIsNotNone(first["next_cursor"])
+            mismatch = client.get(
+                f"/api/v1/runs?q=other&limit=1&cursor={first['next_cursor']}",
+                actor="writer",
+            )
+            self.assertEqual(400, mismatch.status_code)
+            self.assertEqual("invalid_request", mismatch.json()["error"]["code"])
+            unknown = client.get("/api/v1/runs?sort=client", actor="writer")
+            self.assertEqual(400, unknown.status_code)
+
+    def test_dashboard_counts_and_attention_are_actor_aware(self) -> None:
+        with AsgiHarness(self.app) as client:
+            run_id = self._start(client, "dashboard", "Dashboard goal")
+            HumanTaskService(self.db).create(
+                EntityId.parse(run_id), HumanTaskKind.APPROVAL,
+                {"question": "ship?"}, actor="writer",
+                now=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                participants=["writer"],
+            )
+            writer = client.get("/api/v1/dashboard", actor="writer").json()["data"]
+            reader = client.get("/api/v1/dashboard", actor="reader").json()["data"]
+            self.assertEqual(1, writer["counts"]["total"])
+            self.assertEqual(1, writer["attention_count"])
+            self.assertEqual(0, reader["attention_count"])
+            self.assertEqual(run_id, writer["recent_runs"][0]["run_id"])
+
+
 class PlanApiTests(ApiTestCase):
     def _run(self, client):
         return client.post(
@@ -357,6 +458,139 @@ class DataApiTests(ApiTestCase):
             )
 
 
+class ArtifactApiTests(ApiTestCase):
+    def _artifact(self, client, *, content=b"hello artifact", subject="sensitive"):
+        from orbit.workflow.persistence.database import connect_workflow_database
+
+        run_id = client.post(
+            "/api/v1/runs", actor="writer", key=f"artifact-{len(content)}",
+            body={"workflow_id": "workflow:linear", "input": {"value": 7}},
+        ).json()["data"]["run_id"]
+        receipt = self.artifact_backend.write(content, max_size_bytes=len(content))
+        artifact_id = f"artifact:{receipt.checksum.value.removeprefix('sha256:')}"
+        with connect_workflow_database(self.db) as connection:
+            event_id = connection.execute(
+                "SELECT event_id FROM run_events WHERE run_id=? ORDER BY global_position LIMIT 1",
+                (run_id,),
+            ).fetchone()[0]
+            now = "2026-01-01T00:00:00+00:00"
+            connection.execute(
+                "INSERT INTO artifacts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    artifact_id, run_id, "workflow:linear", "attempt", "attempt:test",
+                    "node_run:test", "report", "schema:text", "text/plain",
+                    receipt.checksum.value, receipt.size_bytes, receipt.blob_key,
+                    "run", run_id, "committed", now, now, event_id,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO artifact_acl VALUES (?,?,'read','writer',?)",
+                (artifact_id, subject, now),
+            )
+            for kind, target in (("producer", "attempt:test"), ("consumer", "node_run:next")):
+                connection.execute(
+                    "INSERT INTO artifact_links VALUES (?,?,?,?,?,?,?,?)",
+                    (
+                        f"artifact_link:{kind}-{len(content)}", "workflow:linear", run_id,
+                        artifact_id, kind, target, event_id, now,
+                    ),
+                )
+            connection.commit()
+        return run_id, artifact_id, receipt.blob_key
+
+    def test_list_detail_and_lineage_use_the_same_acl(self) -> None:
+        with AsgiHarness(self.app) as client:
+            run_id, artifact_id, _blob = self._artifact(client)
+            visible = client.get("/api/v1/artifacts", actor="sensitive")
+            self.assertEqual(200, visible.status_code, visible.text)
+            self.assertEqual([artifact_id], [
+                item["artifact_id"] for item in visible.json()["data"]["artifacts"]
+            ])
+            filtered = client.get(
+                f"/api/v1/artifacts?run_id={run_id}&content_type=text/plain",
+                actor="sensitive",
+            )
+            self.assertEqual(1, len(filtered.json()["data"]["artifacts"]))
+            detail = client.get(f"/api/v1/artifacts/{artifact_id}", actor="sensitive")
+            self.assertEqual(200, detail.status_code, detail.text)
+            self.assertNotIn("blob_key", detail.json()["data"])
+            lineage = client.get(
+                f"/api/v1/artifacts/{artifact_id}/lineage", actor="sensitive"
+            ).json()["data"]
+            self.assertEqual(1, len(lineage["producers"]))
+            self.assertEqual(1, len(lineage["consumers"]))
+
+    def test_unauthorized_and_missing_ids_are_indistinguishable(self) -> None:
+        from orbit.workflow.persistence.database import connect_workflow_database
+
+        with AsgiHarness(self.app) as client:
+            _run_id, artifact_id, _blob = self._artifact(client)
+            denied = client.get(f"/api/v1/artifacts/{artifact_id}", actor="reader")
+            missing = client.get(
+                f"/api/v1/artifacts/artifact:{'f' * 64}", actor="reader"
+            )
+            self.assertEqual(404, denied.status_code)
+            self.assertEqual(denied.json(), missing.json())
+            self.assertEqual([], client.get(
+                "/api/v1/artifacts", actor="reader"
+            ).json()["data"]["artifacts"])
+            with connect_workflow_database(self.db, read_only=True) as connection:
+                audits = connection.execute(
+                    "SELECT action,target_id,decision FROM audit_records"
+                    " WHERE actor='reader' ORDER BY occurred_at,audit_id"
+                ).fetchall()
+            denied_audits = [row for row in audits if row["decision"] == "denied"]
+            self.assertGreaterEqual(len(denied_audits), 2)
+            self.assertTrue(all(
+                row["target_id"].startswith("artifact_ref_hash:")
+                for row in denied_audits
+            ))
+
+    def test_preview_is_explicit_and_blob_missing_is_visible_only_after_acl(self) -> None:
+        with AsgiHarness(self.app) as client:
+            _run_id, artifact_id, blob_key = self._artifact(client)
+            preview = client.get(
+                f"/api/v1/artifacts/{artifact_id}/content", actor="sensitive"
+            )
+            self.assertEqual(200, preview.status_code, preview.text)
+            self.assertEqual("hello artifact", preview.text)
+            self.artifact_backend.delete(blob_key)
+            missing_blob = client.get(
+                f"/api/v1/artifacts/{artifact_id}/content", actor="sensitive"
+            )
+            self.assertEqual(410, missing_blob.status_code)
+            self.assertEqual("blob_missing", missing_blob.json()["error"]["code"])
+            denied = client.get(
+                f"/api/v1/artifacts/{artifact_id}/content", actor="other-sensitive"
+            )
+            public_missing = client.get(
+                f"/api/v1/artifacts/artifact:{'f' * 64}/content",
+                actor="other-sensitive",
+            )
+            self.assertEqual(404, denied.status_code)
+            self.assertEqual(denied.json(), public_missing.json())
+
+    def test_large_text_is_not_loaded_as_a_preview(self) -> None:
+        with AsgiHarness(self.app) as client:
+            _run_id, artifact_id, _blob = self._artifact(client, content=b"x" * 70000)
+            response = client.get(
+                f"/api/v1/artifacts/{artifact_id}/content", actor="sensitive"
+            )
+            self.assertEqual(413, response.status_code)
+            self.assertEqual("preview_too_large", response.json()["error"]["code"])
+            self.artifact_backend.read = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("streaming download must not call read()")
+            )
+            download = client.get(
+                f"/api/v1/artifacts/{artifact_id}/content?download=true",
+                actor="sensitive",
+            )
+            self.assertEqual(200, download.status_code)
+            self.assertEqual(70000, len(download.text))
+            self.assertEqual("70000", download.headers["content-length"])
+            self.assertEqual("nosniff", download.headers["x-content-type-options"])
+
+
 class CatalogTests(ApiTestCase):
     def test_handler_catalog_exposes_identity_not_commands(self) -> None:
         with AsgiHarness(self.app) as client:
@@ -366,6 +600,11 @@ class CatalogTests(ApiTestCase):
             self.assertEqual(1, len(handlers))
             entry = handlers[0]
             self.assertEqual("transform", entry["name"])
+            self.assertEqual("registered", entry["registration_status"])
+            self.assertIsNone(entry["recent_attempt"])
+            self.assertEqual(
+                "registration_only", response.json()["data"]["status_semantics"]
+            )
             self.assertIn("manifest_fingerprint", entry)
             # Nothing here may be pasteable into a shell.
             serialised = repr(entry)
@@ -380,6 +619,11 @@ class CatalogTests(ApiTestCase):
 
             writer = client.get("/api/v1/workflows", actor="writer")
             entry = writer.json()["data"]["workflows"][0]
+            self.assertEqual("Linear", entry["name"])
+            self.assertEqual("structured", entry["input_mode"])
+            self.assertEqual("value", entry["inputs"][0]["id"])
+            self.assertEqual("integer", entry["inputs"][0]["schema"]["type"])
+            self.assertEqual(4, entry["summary"]["node_count"])
             command = entry["allowed_commands"][0]
             self.assertEqual("run.start", command["command"])
             started = client.post(
@@ -393,6 +637,24 @@ class CatalogTests(ApiTestCase):
             )
             self.assertEqual(200, started.status_code, started.text)
 
+    def test_workflow_definition_read_is_versioned_and_actor_shaped(self) -> None:
+        with AsgiHarness(self.app) as client:
+            reader = client.get(
+                "/api/v1/workflows/workflow:linear?version=1", actor="reader"
+            )
+            self.assertEqual(200, reader.status_code, reader.text)
+            detail = reader.json()["data"]
+            self.assertEqual("workflow:linear", detail["workflow_id"])
+            self.assertEqual(1, detail["latest_version"])
+            self.assertEqual("workflow:linear", detail["definition"]["workflow_id"])
+            self.assertEqual([], detail["allowed_commands"])
+
+            missing = client.get(
+                "/api/v1/workflows/workflow:linear?version=99", actor="writer"
+            )
+            self.assertEqual(404, missing.status_code)
+            self.assertEqual("not_found", missing.json()["error"]["code"])
+
 
 class CapabilityTests(ApiTestCase):
     def test_capabilities_declare_absence_with_a_reason(self) -> None:
@@ -401,7 +663,12 @@ class CapabilityTests(ApiTestCase):
             self.assertEqual(401, client.get("/api/v1/capabilities").status_code)
             response = client.get("/api/v1/capabilities", actor="reader")
             self.assertEqual(200, response.status_code, response.text)
-            caps = response.json()["data"]["capabilities"]
+            data = response.json()["data"]
+            self.assertEqual("reader", data["actor"])
+            self.assertFalse(data["permissions"]["start_run"])
+            self.assertFalse(data["permissions"]["ops_read"])
+            self.assertFalse(data["permissions"]["ops_write"])
+            caps = data["capabilities"]
             self.assertTrue(caps["static_graph"]["available"])
             self.assertTrue(caps["human_tasks"]["available"])
             # This composition runs without discovery: absent features carry
@@ -414,6 +681,50 @@ class CapabilityTests(ApiTestCase):
             self.assertEqual(
                 "not_reachable_from_dsl", caps["foreach"]["reason"]
             )
+            writer = client.get("/api/v1/capabilities", actor="writer").json()["data"]
+            self.assertTrue(writer["permissions"]["start_run"])
+            self.assertTrue(writer["permissions"]["ops_read"])
+            self.assertTrue(writer["permissions"]["ops_write"])
+
+
+class OperationsReadTests(ApiTestCase):
+    def test_ops_status_has_independent_acl_and_factual_sections(self) -> None:
+        with AsgiHarness(self.app) as client:
+            self.assertEqual(
+                403, client.get("/api/v1/ops/status", actor="reader").status_code
+            )
+            response = client.get("/api/v1/ops/status", actor="ops-reader")
+            self.assertEqual(200, response.status_code, response.text)
+            data = response.json()["data"]
+            self.assertEqual("ok", data["integrity"]["status"])
+            self.assertIn("ready_jobs", data["capacity"])
+            self.assertFalse(data["capacity"]["benchmark"]["available"])
+            self.assertIn("jobs_by_status", data["durable"])
+            self.assertEqual(1, data["server_config"]["worker_count"])
+
+            # quick_check walks the whole file, so its verdict is cached: a
+            # second read within the TTL reports the same checked_at rather
+            # than paying for another full scan.
+            again = client.get("/api/v1/ops/status", actor="ops-reader")
+            self.assertEqual(
+                data["integrity"]["checked_at"],
+                again.json()["data"]["integrity"]["checked_at"],
+            )
+
+    def test_live_cursor_is_opaque_and_reports_changes(self) -> None:
+        with AsgiHarness(self.app) as client:
+            initial = client.get("/api/v1/live", actor="reader").json()["data"]
+            self.assertFalse(initial["changed"])
+            self.assertNotIn("event_position", initial["cursor"])
+            started = client.post(
+                "/api/v1/runs", actor="writer", key="live-cursor-run",
+                body={"workflow_id": "workflow:linear", "input": {"value": 1}},
+            )
+            self.assertEqual(200, started.status_code, started.text)
+            changed = client.get(
+                f"/api/v1/live?cursor={initial['cursor']}", actor="reader"
+            ).json()["data"]
+            self.assertTrue(changed["changed"])
 
 
 class InboxTests(ApiTestCase):
@@ -537,11 +848,27 @@ class HumanTaskCommandTests(ApiTestCase):
 
     def test_inbox_advertises_the_token_command(self) -> None:
         with AsgiHarness(self.app) as client:
-            self._run_with_task(client)
+            _run_id, task_id, _token = self._run_with_task(client)
             items = client.get("/api/v1/inbox", actor="writer").json()["data"]["items"]
             human = next(item for item in items if item["kind"] == "human")
             commands = {command["command"] for command in human["allowed_commands"]}
             self.assertIn("human.token", commands)
+            token = next(
+                command for command in human["allowed_commands"]
+                if command["command"] == "human.token"
+            )
+            self.assertEqual(task_id, token["target_aggregate_id"])
+
+    def test_inbox_does_not_advertise_human_commands_to_an_unrelated_writer(self) -> None:
+        with AsgiHarness(self.app) as client:
+            self._run_with_task(client)
+            body = client.get("/api/v1/inbox", actor="second-writer").json()["data"]
+            human = next(item for item in body["items"] if item["kind"] == "human")
+            self.assertFalse(human["requires_actor_action"])
+            self.assertEqual([], human["allowed_commands"])
+            self.assertIn("quorum", human)
+            errors = list(ui_contract_validator("inbox-item.schema.json").iter_errors(human))
+            self.assertEqual([], errors)
 
     def test_a_run_parked_on_a_person_can_still_be_cancelled(self) -> None:
         """Answering an approval and abandoning the run are different acts.
@@ -552,6 +879,7 @@ class HumanTaskCommandTests(ApiTestCase):
 
         with AsgiHarness(self.app) as client:
             run_id, _task_id, _token = self._run_with_task(client)
+            self.app.state.runtime.stop()
             items = client.get(
                 f"/api/v1/runs/{run_id}/responsibilities", actor="writer"
             ).json()["data"]["responsibilities"]
@@ -571,7 +899,14 @@ class HumanTaskCommandTests(ApiTestCase):
                 c for c in human["allowed_commands"] if c["command"] == "run.cancel"
             )
             self.assertEqual(run_id, cancel["target_aggregate_id"])
-            self.assertNotEqual(human["expected_version"], cancel["expected_version"])
+            from orbit.workflow.persistence.database import connect_workflow_database
+
+            with connect_workflow_database(self.db, read_only=True) as connection:
+                command_version = connection.execute(
+                    "SELECT COALESCE(MAX(aggregate_sequence), 0) FROM run_events"
+                    " WHERE aggregate_id=?", (run_id,),
+                ).fetchone()[0]
+            self.assertEqual(command_version, cancel["expected_version"])
 
     def test_task_appears_in_the_inbox(self) -> None:
         with AsgiHarness(self.app) as client:
@@ -693,6 +1028,15 @@ class BudgetCommandTests(ApiTestCase):
             )
             self.assertEqual(f"budget_account:{run_id}", command["target_aggregate_id"])
 
+            inbox = client.get("/api/v1/inbox", actor="writer").json()["data"]
+            budget_item = next(item for item in inbox["items"] if item["kind"] == "budget")
+            self.assertEqual(run_id, budget_item["run_id"])
+            self.assertTrue(budget_item["requires_actor_action"])
+            self.assertEqual(inbox["action_count"], inbox["total_count"])
+            self.assertEqual(
+                [], list(ui_contract_validator("inbox-item.schema.json").iter_errors(budget_item))
+            )
+
             # Using exactly what was advertised must work.
             applied = client.post(
                 f"/api/v1/runs/{run_id}/budget", actor="writer", key="b6",
@@ -713,7 +1057,10 @@ class RecoveryCommandTests(ApiTestCase):
 
     def test_scan_is_a_read_and_apply_is_a_write(self) -> None:
         with AsgiHarness(self.app) as client:
-            scan = client.get("/api/v1/recovery", actor="reader")
+            self.assertEqual(
+                403, client.get("/api/v1/recovery", actor="reader").status_code
+            )
+            scan = client.get("/api/v1/recovery", actor="ops-reader")
             self.assertEqual(200, scan.status_code, scan.text)
             self.assertIn("findings", scan.json()["data"])
             self.assertTrue(all(
@@ -721,7 +1068,7 @@ class RecoveryCommandTests(ApiTestCase):
                 for item in scan.json()["data"]["findings"]
             ))
 
-            denied = self.apply(client, ["X:y:1"], actor="reader", key="r1")
+            denied = self.apply(client, ["X:y:1"], actor="ops-reader", key="r1")
             self.assertEqual(403, denied.status_code)
 
     def test_applying_a_whole_scan_is_refused(self) -> None:

@@ -12,10 +12,24 @@
 
 import { Api, ApiError } from "./api.js";
 import { I18n, LOCALES, preferredLocale } from "./i18n.js";
+import { Router } from "./router.js";
+import {
+  budgetDialog, cancelRunDialog, humanSubmitDialog, recoveryDialog,
+} from "./components/command-dialog.js";
+import { dataState } from "./components/data-state.js";
 
 const api = new Api();
 let i18n;
-let route = { view: "runs", runId: null };
+let router;
+let route = { view: "home", runId: null };
+let mayStartRun = false;
+let shellFacts = null;
+let liveCursor = null;
+let refreshTimer = null;
+let rendering = false;
+const runFilters = { q: "", status: "", responsibility: "", activeOnly: false };
+const goalFilters = { q: "", status: "" };
+const artifactFilters = { q: "", runId: "", contentType: "" };
 
 const el = (tag, props = {}, children = []) => {
   const node = document.createElement(tag);
@@ -70,22 +84,35 @@ function commandButtons(commands, onDone) {
 
 /** Collect whatever the command's payload schema needs, then send it once. */
 async function promptAndExecute(allowed, onDone, siblings = []) {
+  const context = { api, el, i18n, reportError };
   let payload = {};
   if (allowed.payload_schema.startsWith("human-submit")) {
-    payload = await humanSubmitDialog(allowed, siblings);
+    payload = await humanSubmitDialog(context, allowed, siblings);
   } else if (allowed.payload_schema.startsWith("budget-add")) {
-    payload = await budgetDialog();
+    payload = await budgetDialog(context);
   } else if (allowed.payload_schema.startsWith("run-cancel")) {
-    payload = { reason: "cancelled from the console" };
+    payload = await cancelRunDialog(context);
   } else if (allowed.payload_schema.startsWith("recovery-apply")) {
-    payload = await recoveryDialog(allowed);
+    payload = await recoveryDialog(context, allowed);
+  } else {
+    announce(i18n.t("command.schemaUnsupported", { schema: allowed.payload_schema }), "error");
+    return;
   }
   if (payload === null) return;
 
-  announce("");
+  announce(i18n.t("state.pending"), "info");
   try {
-    await api.execute(allowed, payload);
-    announce(i18n.t("command.accepted", { command: i18n.command(allowed) }));
+    const response = await api.execute(allowed, payload);
+    const outcomes = response?.data?.results || [];
+    const failed = outcomes.filter((item) => item.outcome !== "applied");
+    await onDone();
+    if (failed.length) {
+      announce(i18n.t("command.partial", {
+        failed: i18n.number(failed.length), total: i18n.number(outcomes.length),
+      }), "error");
+    } else {
+      announce(i18n.t("command.accepted", { command: i18n.command(allowed) }));
+    }
   } catch (error) {
     const failure = reportError(error);
     // A conflict is not a dead end: reload so the operator sees the state that
@@ -93,178 +120,184 @@ async function promptAndExecute(allowed, onDone, siblings = []) {
     if (failure.requiresRefresh) await onDone();
     return;
   }
-  await onDone();
-}
-
-/** Show `dialog` and resolve to `collect()` on confirm, or null on dismiss.
- *
- * The result is taken from the form's `submit` event rather than the dialog's
- * `close` event: a `method="dialog"` form does not fire `close` in every
- * browser, and a confirm that silently resolves to nothing looks exactly like
- * a command that did not work.
- */
-function dialogResult(dialog, collect, validate) {
-  return new Promise((resolve) => {
-    let settled = false;
-    const settle = (value) => {
-      if (settled) return;
-      settled = true;
-      dialog.remove();
-      resolve(value);
-    };
-
-    dialog.querySelector("form").addEventListener("submit", (event) => {
-      const confirmed = (event.submitter && event.submitter.value) === "confirm";
-      // Validation runs before the native close: a failed check keeps the
-      // dialog open with the input intact, instead of throwing out of the
-      // deferred settle where nothing can catch or display it.
-      if (confirmed && validate && !validate()) {
-        event.preventDefault();
-        return;
-      }
-      // Let the native method="dialog" close run first, then settle.
-      setTimeout(() => settle(confirmed ? collect() : null), 0);
-    });
-    // Esc and backdrop dismissal never reach the form.
-    dialog.addEventListener("close", () => setTimeout(() => settle(null), 0));
-
-    document.body.append(dialog);
-    dialog.showModal();
-  });
-}
-
-function humanSubmitDialog(allowed, siblings = []) {
-  const decision = allowed.command.endsWith("reject") ? "reject" : "approve";
-  const token = el("input", { type: "text", id: "humanToken", required: "required" });
-  const value = el("textarea", { id: "humanValue" });
-  const valueError = el("div", {
-    class: "banner error", id: "humanValueError", hidden: "hidden", role: "alert",
-  });
-  // The token retrieval command, when the server advertises one. Fetching
-  // rotates the stored hash, so the submit must then carry the bumped
-  // expected_version — patched onto `allowed` from the response.
-  const tokenCommand = siblings.find((item) => item.command === "human.token");
-  const fetchToken = tokenCommand
-    ? el("button", {
-        type: "button",
-        class: "button",
-        id: "humanTokenFetch",
-        text: i18n.t("human.token.fetch"),
-        onclick: async () => {
-          try {
-            const response = await api.execute(tokenCommand, {});
-            token.value = response.data.submission_token;
-            allowed.expected_version = response.data.expected_version;
-            tokenCommand.expected_version = response.data.expected_version;
-          } catch (error) {
-            reportError(error);
-          }
-        },
-      })
-    : null;
-  const dialog = el("dialog", { "aria-label": i18n.t("human.title") }, [
-    el("form", { method: "dialog" }, [
-      el("h2", { text: i18n.t("human.title") }),
-      el("p", {
-        class: "muted",
-        text: `${i18n.t("human.decision")}: ${i18n.t(`human.decision.${decision}`)}`,
-      }),
-      el("div", { class: "field" }, [
-        el("label", { for: "humanToken", text: i18n.t("human.token") }),
-        token,
-        ...(fetchToken ? [fetchToken] : []),
-        el("small", { class: "muted", text: i18n.t("human.token.hint") }),
-      ]),
-      el("div", { class: "field" }, [
-        el("label", { for: "humanValue", text: i18n.t("human.value") }),
-        value,
-        valueError,
-      ]),
-      el("div", { class: "actions" }, [
-        el("button", { class: "button", value: "cancel", text: i18n.t("action.cancel") }),
-        el("button", {
-          class: "button primary",
-          value: "confirm",
-          text: i18n.t("action.submit"),
-        }),
-      ]),
-    ]),
-  ]);
-  // Parsed inside the submit event (plan B4): a bad value marks the field,
-  // keeps the dialog open with the input intact, and never throws out of the
-  // deferred settle where it would surface as an uncaught error.
-  let parsedValue = null;
-  const validate = () => {
-    valueError.hidden = true;
-    value.removeAttribute("aria-invalid");
-    if (!value.value.trim()) {
-      parsedValue = null;
-      return true;
-    }
-    try {
-      parsedValue = JSON.parse(value.value);
-      return true;
-    } catch {
-      valueError.textContent = i18n.t("human.value.invalid");
-      valueError.hidden = false;
-      value.setAttribute("aria-invalid", "true");
-      value.focus();
-      return false;
-    }
-  };
-  return dialogResult(
-    dialog,
-    () => ({ submission_token: token.value, decision, value: parsedValue }),
-    validate,
-  );
-}
-
-function budgetDialog() {
-  const amount = el("input", { type: "number", id: "budgetAmount", min: "1", value: "1000" });
-  const dialog = el("dialog", { "aria-label": i18n.t("budget.title") }, [
-    el("form", { method: "dialog" }, [
-      el("h2", { text: i18n.t("budget.title") }),
-      el("div", { class: "field" }, [
-        el("label", {
-          for: "budgetAmount",
-          text: i18n.t("budget.amount", { unit: "microunits" }),
-        }),
-        amount,
-      ]),
-      el("div", { class: "actions" }, [
-        el("button", { class: "button", value: "cancel", text: i18n.t("action.cancel") }),
-        el("button", {
-          class: "button primary",
-          value: "confirm",
-          text: i18n.t("action.submit"),
-        }),
-      ]),
-    ]),
-  ]);
-  return dialogResult(dialog, () => ({ amount_microunits: Number(amount.value) }));
-}
-
-function recoveryDialog(allowed) {
-  const dialog = el("dialog", { "aria-label": i18n.t("recovery.title") }, [
-    el("form", { method: "dialog" }, [
-      el("h2", { text: i18n.t("recovery.title") }),
-      el("p", { text: i18n.t("recovery.confirm") }),
-      el("div", { class: "mono muted", text: allowed.action_id }),
-      el("div", { class: "actions" }, [
-        el("button", { class: "button", value: "cancel", text: i18n.t("action.cancel") }),
-        el("button", {
-          class: "button primary", value: "confirm", text: i18n.t("action.apply"),
-        }),
-      ]),
-    ]),
-  ]);
-  return dialogResult(dialog, () => ({ action_ids: [allowed.action_id] }));
 }
 
 /* ------------------------------------------------------------------- views */
 
+function runName(run) {
+  return run.display_name || run.goal || run.run_id;
+}
+
+function waitText(run) {
+  if (run.primary_responsibility) {
+    return run.primary_responsibility.label
+      || i18n.t(`responsibility.${run.primary_responsibility.kind}`);
+  }
+  if (run.wait_reason) return i18n.t(`wait.${run.wait_reason}`);
+  return i18n.t("wait.none");
+}
+
+function statusSelect(value, onChange, labelKey = "runs.filter.status") {
+  const select = el("select", { "aria-label": i18n.t(labelKey), onchange: onChange });
+  for (const status of ["", "pending", "running", "waiting", "succeeded", "failed", "cancelled"]) {
+    select.append(el("option", {
+      value: status,
+      ...(status === value ? { selected: "selected" } : {}),
+      text: status ? i18n.status(status) : i18n.t("runs.filter.allStatuses"),
+    }));
+  }
+  return select;
+}
+
+async function renderHome(root) {
+  const dashboard = (await api.dashboard()).data;
+  root.append(
+    el("section", { class: "home-hero panel" }, [
+      el("div", {}, [
+        el("div", { class: "eyebrow", text: i18n.t("home.eyebrow") }),
+        el("h2", { text: i18n.t("home.heading") }),
+        el("p", { class: "muted", text: i18n.t("home.description") }),
+      ]),
+      mayStartRun ? el("button", {
+        class: "button primary", text: i18n.t("action.newGoal"), onclick: newRunDialog,
+      }) : null,
+    ]),
+  );
+
+  const stats = el("section", { class: "stat-grid", "aria-label": i18n.t("home.overview") });
+  for (const [key, value] of Object.entries({
+    total: dashboard.counts.total,
+    active: dashboard.counts.active,
+    waiting: dashboard.counts.waiting,
+    failed: dashboard.counts.failed,
+  })) {
+    stats.append(el("article", { class: `stat-card ${key}` }, [
+      el("div", { class: "stat-value", text: i18n.number(value) }),
+      el("div", { class: "muted", text: i18n.t(`home.stat.${key}`) }),
+    ]));
+  }
+  root.append(stats);
+
+  const recent = dashboard.recent_runs || [];
+  root.append(el("div", { class: "home-grid" }, [
+    el("section", { class: "panel attention-panel" }, [
+      el("div", { class: "panel-head" }, [
+        el("div", { class: "panel-title", text: i18n.t("home.attention") }),
+        el("span", { class: "pill waiting", text: i18n.number(dashboard.attention_count) }),
+      ]),
+      el("div", { class: "panel-body" }, [
+        el("p", { class: "muted", text: i18n.t(
+          dashboard.attention_count ? "home.attention.body" : "home.attention.empty",
+        ) }),
+        el("button", {
+          class: "button", text: i18n.t("action.openInbox"),
+          onclick: () => navigate({ view: "inbox", runId: null }),
+        }),
+      ]),
+    ]),
+    el("section", { class: "panel" }, [
+      el("div", { class: "panel-head" }, [
+        el("div", { class: "panel-title", text: i18n.t("home.recent") }),
+        el("button", {
+          class: "button", text: i18n.t("action.viewAll"),
+          onclick: () => navigate({ view: "goals", runId: null }),
+        }),
+      ]),
+      el("div", { class: "panel-body recent-list" }, recent.length
+        ? recent.map((run) => el("button", {
+            class: "recent-run",
+            onclick: () => navigate({ view: "goal", runId: run.run_id }),
+          }, [
+            el("span", {}, [
+              el("strong", { text: runName(run) }),
+              el("span", { class: "muted mono", text: run.workflow_id }),
+            ]),
+            pill(run.status),
+          ]))
+        : [el("div", { class: "muted", text: i18n.t("goals.empty") })]),
+    ]),
+  ]));
+}
+
+async function renderGoals(root, selectedRunId = null) {
+  const response = await api.listRuns({ limit: 25, q: goalFilters.q, status: goalFilters.status });
+  const runs = response.data.runs;
+  let selected = selectedRunId ? runs.find((item) => item.run_id === selectedRunId) : runs[0];
+  if (selectedRunId && !selected) selected = (await api.runSummary(selectedRunId)).data;
+
+  const search = el("input", {
+    type: "search", value: goalFilters.q, placeholder: i18n.t("goals.search.placeholder"),
+    "aria-label": i18n.t("goals.search.label"),
+  });
+  const filters = el("form", { class: "filter-bar", onsubmit: (event) => {
+    event.preventDefault();
+    goalFilters.q = search.value.trim();
+    render();
+  } }, [
+    search,
+    statusSelect(goalFilters.status, (event) => {
+      goalFilters.status = event.target.value;
+      render();
+    }, "goals.filter.status"),
+    el("button", { class: "button", type: "submit", text: i18n.t("action.search") }),
+  ]);
+  root.append(filters);
+
+  const list = el("div", { class: "goal-list", "aria-label": i18n.t("goals.list") });
+  for (const run of runs) {
+    list.append(el("button", {
+      class: `goal-row${run.run_id === selected?.run_id ? " selected" : ""}`,
+      "aria-current": run.run_id === selected?.run_id ? "true" : null,
+      onclick: () => navigate({ view: "goal", runId: run.run_id }),
+    }, [
+      el("span", { class: "goal-row-main" }, [
+        el("strong", { text: runName(run) }),
+        el("span", { class: "muted", text: waitText(run) }),
+      ]),
+      pill(run.status),
+    ]));
+  }
+  if (!runs.length) list.append(el("div", { class: "empty", text: i18n.t("goals.empty") }));
+
+  const detail = el("section", { class: "panel goal-detail" });
+  if (!selected) {
+    detail.append(el("div", { class: "empty", text: i18n.t("goals.select") }));
+  } else {
+    const budget = selected.budget_summary;
+    detail.append(
+      el("div", { class: "panel-head" }, [
+        el("div", {}, [
+          el("div", { class: "eyebrow", text: i18n.t("goals.detail") }),
+          el("div", { class: "panel-title", text: runName(selected) }),
+        ]),
+        pill(selected.status),
+      ]),
+      el("div", { class: "panel-body" }, [
+        el("p", { class: selected.goal ? "goal-copy" : "muted", text: selected.goal || i18n.t("goals.noDescription") }),
+        el("dl", { class: "fact-grid" }, [
+          el("div", {}, [el("dt", { text: i18n.t("run.workflow") }), el("dd", { text: `${selected.workflow_id} · v${selected.workflow_version}` })]),
+          el("div", {}, [el("dt", { text: i18n.t("goals.waitingOn") }), el("dd", { text: waitText(selected) })]),
+          el("div", {}, [el("dt", { text: i18n.t("runs.column.updated") }), el("dd", { text: i18n.dateTime(selected.updated_at) })]),
+          budget ? el("div", {}, [
+            el("dt", { text: i18n.t("run.budget") }),
+            el("dd", { text: i18n.t("run.budget.used", {
+              used: i18n.number(budget.consumed_microunits), total: i18n.number(budget.total_microunits), unit: budget.unit,
+            }) }),
+          ]) : null,
+        ]),
+        el("div", { class: "actions" }, [
+          el("button", {
+            class: "button primary", text: i18n.t("action.openRun"),
+            onclick: () => navigate({ view: "run", runId: selected.run_id }),
+          }),
+        ]),
+      ]),
+    );
+  }
+  root.append(el("div", { class: "goals-layout" }, [list, detail]));
+}
+
 async function renderRuns(root) {
-  const activeOnly = document.getElementById("activeOnly")?.checked || false;
   const body = el("tbody");
   const table = el("table", {}, [
     el("thead", {}, [
@@ -272,23 +305,55 @@ async function renderRuns(root) {
         el("th", { text: i18n.t("runs.column.run") }),
         el("th", { text: i18n.t("runs.column.workflow") }),
         el("th", { text: i18n.t("runs.column.status") }),
+        el("th", { text: i18n.t("runs.column.responsibility") }),
         el("th", { text: i18n.t("runs.column.updated") }),
       ]),
     ]),
     body,
   ]);
+  const search = el("input", {
+    type: "search", value: runFilters.q,
+    placeholder: i18n.t("runs.search.placeholder"), "aria-label": i18n.t("runs.search.label"),
+  });
+  const responsibility = el("select", {
+    "aria-label": i18n.t("runs.filter.responsibility"), onchange: (event) => {
+      runFilters.responsibility = event.target.value;
+      render();
+    },
+  });
+  // Recovery becomes selectable with API-3/P5's durable responsibility
+  // projection. The frozen API-1 vocabulary accepts it now, but showing an
+  // always-empty filter would promise a capability this deployment lacks.
+  for (const value of ["", "human", "budget", "unknown"]) {
+    responsibility.append(el("option", {
+      value, ...(value === runFilters.responsibility ? { selected: "selected" } : {}),
+      text: value ? i18n.t(`responsibility.${value}`) : i18n.t("runs.filter.allResponsibilities"),
+    }));
+  }
+  root.append(el("form", { class: "filter-bar", onsubmit: (event) => {
+    event.preventDefault();
+    runFilters.q = search.value.trim();
+    render();
+  } }, [
+    search,
+    statusSelect(runFilters.status, (event) => {
+      runFilters.status = event.target.value;
+      render();
+    }),
+    responsibility,
+    el("label", { class: "check-field" }, [
+      el("input", {
+        type: "checkbox", ...(runFilters.activeOnly ? { checked: "checked" } : {}),
+        onchange: (event) => { runFilters.activeOnly = event.target.checked; render(); },
+      }),
+      el("span", { text: i18n.t("runs.activeOnly") }),
+    ]),
+    el("button", { class: "button", type: "submit", text: i18n.t("action.search") }),
+  ]));
   const panel = el("section", { class: "panel" }, [
     el("div", { class: "panel-head" }, [
       el("div", { class: "panel-title", text: i18n.t("runs.title") }),
-      el("label", {}, [
-        el("input", {
-          type: "checkbox",
-          id: "activeOnly",
-          ...(activeOnly ? { checked: "checked" } : {}),
-          onchange: () => render(),
-        }),
-        el("span", { text: ` ${i18n.t("runs.activeOnly")}` }),
-      ]),
+      el("span", { class: "muted", text: i18n.t("runs.orderHint") }),
     ]),
     el("div", { class: "table-scroll" }, [table]),
   ]);
@@ -298,20 +363,21 @@ async function renderRuns(root) {
   const more = el("button", { class: "button", text: i18n.t("action.loadMore") });
 
   const page = async () => {
-    const response = await api.listRuns({ cursor, activeOnly });
+    const response = await api.listRuns({ cursor, ...runFilters });
     for (const run of response.data.runs) {
       body.append(
         el("tr", {}, [
           el("td", {}, [
             el("button", {
               class: "button id-button",
-              text: run.run_id,
+              text: runName(run),
               title: run.run_id,
               onclick: () => navigate({ view: "run", runId: run.run_id }),
             }),
           ]),
           el("td", { text: run.workflow_id }),
           el("td", {}, [pill(run.status)]),
+          el("td", { class: run.requires_actor_action ? "needs-action" : "", text: waitText(run) }),
           el("td", { text: i18n.dateTime(run.updated_at) }),
         ]),
       );
@@ -328,7 +394,7 @@ async function renderRuns(root) {
   await page();
 }
 
-async function renderRun(root, runId) {
+async function renderRun(root, runId, activeTab = "overview") {
   let summary;
   try {
     summary = (await api.runSummary(runId)).data;
@@ -338,87 +404,222 @@ async function renderRun(root, runId) {
     return;
   }
 
-  const reload = () => navigate({ view: "run", runId });
+  const reload = () => navigate({ view: "run", runId, tab: activeTab });
   const budget = summary.budget_summary;
   root.append(
-    el("section", { class: "panel" }, [
-      el("div", { class: "panel-head" }, [
+    el("section", { class: "run-hero panel" }, [
+      el("div", { class: "panel-head run-hero-head" }, [
         el("div", {}, [
           el("div", { class: "eyebrow", text: i18n.t("run.title") }),
-          el("div", { class: "panel-title mono", text: summary.run_id }),
+          el("h2", { text: runName(summary) }),
+          el("div", { class: "mono muted", text: summary.run_id }),
         ]),
         pill(summary.status),
       ]),
       el("div", { class: "panel-body" }, [
-        el("div", { text: `${i18n.t("run.workflow")}: ${summary.workflow_id}` }),
-        el("div", {
-          text: `${i18n.t("run.version")}: ${i18n.number(summary.workflow_version)}`,
-        }),
-        budget
-          ? el("div", {
-              text: i18n.t("run.budget.used", {
-                used: i18n.number(budget.consumed_microunits),
-                total: i18n.number(budget.total_microunits),
-                unit: budget.unit,
-              }),
-            })
-          : null,
+        el("div", { class: "run-hero-meta" }, [
+          el("span", { text: `${summary.workflow_id} · v${i18n.number(summary.workflow_version)}` }),
+          el("span", { text: i18n.t("run.updated", { time: i18n.dateTime(summary.updated_at) }) }),
+        ]),
       ]),
     ]),
   );
 
-  const responsibilities = (await api.responsibilities(runId)).data.responsibilities;
-  const list = el("div", { class: "panel-body" });
-  for (const item of responsibilities) {
-    list.append(
-      el("div", { class: "actions" }, [
+  let responsibilities = [];
+  let responsibilitiesError = null;
+  try {
+    responsibilities = (await api.responsibilities(runId)).data.responsibilities;
+  } catch (error) {
+    responsibilitiesError = error;
+  }
+  root.append(whyPanel(summary, responsibilities, responsibilitiesError, budget, reload));
+
+  const tabs = el("nav", { class: "run-tabs", "aria-label": i18n.t("run.tabs.label") });
+  for (const tab of ["overview", "timeline", "plan", "graph", "data", "errors"]) {
+    tabs.append(el("button", {
+      class: `run-tab${tab === activeTab ? " active" : ""}`,
+      "aria-current": tab === activeTab ? "page" : null,
+      "data-run-tab": tab,
+      text: i18n.t(`run.tab.${tab}`),
+      onclick: () => navigate({ view: "run", runId, tab }),
+    }));
+  }
+  root.append(tabs);
+
+  const tabContent = el("section", { class: "run-tab-content", "data-active-tab": activeTab }, [
+    dataState(el, i18n, "loading"),
+  ]);
+  root.append(tabContent);
+  try {
+    let content;
+    if (activeTab === "overview") content = overviewPanel(summary, responsibilities);
+    else if (activeTab === "plan") content = await planPanel(runId);
+    else if (activeTab === "graph") content = await graphPanel(runId);
+    else if (activeTab === "data") content = await dataPanel(runId);
+    else if (activeTab === "timeline") content = await pagedPanel(runId, "timeline", "run.timeline", (item) =>
+      el("div", { class: "timeline-item" }, [
+        el("span", { class: "mono muted", text: i18n.dateTime(item.occurred_at) }),
+        el("strong", { text: item.type }),
+        el("span", { class: "mono muted", text: item.aggregate_id }),
+      ]));
+    else content = await pagedPanel(runId, "errors", "run.errors", errorItem);
+    tabContent.replaceChildren(content);
+  } catch (error) {
+    tabContent.replaceChildren(dataState(el, i18n, "error", {
+      message: error instanceof ApiError
+        ? i18n.t(error.messageKey, { message: error.message }) : null,
+      onRetry: reload,
+    }));
+    reportError(error);
+  }
+}
+
+function whyPanel(summary, responsibilities, failure, budget, reload) {
+  const responsibilityList = el("div", { class: "responsibility-list" }, [
+    el("div", { class: "eyebrow", text: i18n.t("run.responsibilities") }),
+  ]);
+  if (failure) {
+    responsibilityList.append(dataState(el, i18n, "error", { onRetry: reload }));
+  } else if (!responsibilities.length) {
+    const reason = summary.wait_reason
+      ? i18n.t(`wait.${summary.wait_reason}`)
+      : i18n.t(`run.why.${summary.status}`);
+    responsibilityList.append(el("p", {
+      class: "muted", text: reason,
+    }));
+  } else {
+    for (const item of responsibilities) {
+      responsibilityList.append(el("div", { class: "responsibility-row" }, [
         el("div", {}, [
-          el("div", { text: item.label }),
+          el("strong", { text: item.label }),
           el("div", { class: "muted mono", text: item.responsibility_id }),
         ]),
         pill(item.status),
-        ...commandButtons(item.allowed_commands, reload),
-      ]),
-    );
+        el("div", { class: "actions" }, commandButtons(item.allowed_commands, reload)),
+      ]));
+    }
   }
-  if (!responsibilities.length) {
-    list.append(el("div", { class: "muted", text: i18n.t("run.responsibilities.empty") }));
-  }
-  root.append(
-    el("section", { class: "panel" }, [
-      el("div", { class: "panel-head" }, [
-        el("div", { class: "panel-title", text: i18n.t("run.responsibilities") }),
+  return el("section", { class: "why-panel panel" }, [
+    el("div", { class: "panel-head" }, [
+      el("div", {}, [
+        el("div", { class: "eyebrow", text: i18n.t("run.why.eyebrow") }),
+        el("div", { class: "panel-title", text: i18n.t("run.why.title") }),
       ]),
-      list,
     ]),
+    el("div", { class: "panel-body why-grid" }, [responsibilityList, budgetView(budget)]),
+  ]);
+}
+
+function budgetView(budget) {
+  const view = el("div", { class: "budget-view" }, [
+    el("div", { class: "eyebrow", text: i18n.t("run.budget") }),
+  ]);
+  if (!budget) {
+    view.append(el("p", { class: "muted", text: i18n.t("run.budget.none") }));
+    return view;
+  }
+  const total = Math.max(0, budget.total_microunits);
+  const denominator = Math.max(total, budget.consumed_microunits + budget.reserved_microunits, 1);
+  const width = (value) => `${Math.max(0, Math.min(100, (value / denominator) * 100))}%`;
+  view.append(
+    el("div", { class: "budget-bar", role: "img", "aria-label": i18n.t("run.budget.used", {
+      used: i18n.number(budget.consumed_microunits), total: i18n.number(total), unit: budget.unit,
+    }) }, [
+      el("span", { class: "consumed", style: `width:${width(budget.consumed_microunits)}` }),
+      el("span", { class: "reserved", style: `width:${width(budget.reserved_microunits)}` }),
+    ]),
+    el("div", { class: "budget-legend" }, [
+      el("span", { text: i18n.t("run.budget.consumed", { value: i18n.number(budget.consumed_microunits) }) }),
+      el("span", { text: i18n.t("run.budget.reserved", { value: i18n.number(budget.reserved_microunits) }) }),
+      el("span", { text: i18n.t("run.budget.remaining", { value: i18n.number(budget.remaining_microunits) }) }),
+    ]),
+    el("div", { class: "muted", text: i18n.t("run.budget.used", {
+      used: i18n.number(budget.consumed_microunits), total: i18n.number(total), unit: budget.unit,
+    }) }),
+    budget.overrun ? el("div", { class: "banner error", text: i18n.t("run.budget.overrun") }) : null,
   );
+  return view;
+}
 
-  root.append(await planPanel(runId));
-
-  root.append(await dataPanel(runId));
-
-  root.append(await pagedPanel(runId, "timeline", "run.timeline", (item) =>
-    el("div", { class: "actions" }, [
-      el("span", { class: "mono muted", text: i18n.dateTime(item.occurred_at) }),
-      el("span", { text: item.type }),
-      el("span", { class: "mono muted", text: item.aggregate_id }),
+function overviewPanel(summary, responsibilities) {
+  return el("section", { class: "panel" }, [
+    el("div", { class: "panel-head" }, [
+      el("div", { class: "panel-title", text: i18n.t("run.tab.overview") }),
     ]),
-  ));
-  root.append(await pagedPanel(runId, "errors", "run.errors", (item) => {
-    // The error lives in the event payload, not at the top level: an error
-    // entry is an event, and flattening it here would hide the fields an
-    // operator needs (category, code, which node) behind a bare message.
-    const error = (item.payload && item.payload.error) || {};
-    const where = (item.payload && item.payload.node_run_id) || item.aggregate_id;
-    return el("div", {}, [
-      el("div", { text: error.message || error.code || item.type }),
-      el("div", {
-        class: "muted mono",
-        text: [error.category, error.source, where].filter(Boolean).join(" · "),
-      }),
-      el("div", { class: "muted mono", text: i18n.dateTime(item.occurred_at) }),
-    ]);
-  }));
+    el("div", { class: "panel-body" }, [
+      el("p", { class: summary.goal ? "goal-copy" : "muted", text: summary.goal || i18n.t("goals.noDescription") }),
+      el("dl", { class: "fact-grid" }, [
+        el("div", {}, [el("dt", { text: i18n.t("run.workflow") }), el("dd", { class: "mono", text: summary.workflow_id })]),
+        el("div", {}, [el("dt", { text: i18n.t("run.version") }), el("dd", { text: i18n.number(summary.workflow_version) })]),
+        el("div", {}, [el("dt", { text: i18n.t("run.status") }), el("dd", {}, [pill(summary.status)])]),
+        el("div", {}, [el("dt", { text: i18n.t("run.responsibilities") }), el("dd", { text: i18n.number(responsibilities.length) })]),
+      ]),
+    ]),
+  ]);
+}
+
+function errorItem(item) {
+  const error = (item.payload && item.payload.error) || {};
+  const where = (item.payload && item.payload.node_run_id) || item.aggregate_id;
+  return el("div", { class: "error-item" }, [
+    el("strong", { text: error.message || error.code || item.type }),
+    el("div", { class: "muted mono", text: [error.category, error.source, where].filter(Boolean).join(" · ") }),
+    el("div", { class: "muted mono", text: i18n.dateTime(item.occurred_at) }),
+  ]);
+}
+
+async function graphPanel(runId) {
+  const graph = (await api.graph(runId)).data;
+  const definition = graph.definition;
+  const overlay = graph.runtime_overlay;
+  const statuses = new Map();
+  for (const node of overlay.nodes) {
+    const current = statuses.get(node.node_id);
+    if (!current || node.generation >= current.generation) statuses.set(node.node_id, node);
+  }
+  const positions = new Map(definition.layout.positions.map((item) => [item.node_id, item]));
+  const maxDepth = Math.max(0, ...definition.layout.positions.map((item) => item.depth));
+  const canvas = el("div", {
+    class: `graph-canvas ${definition.layout.mode}`,
+    style: `grid-template-columns:repeat(${maxDepth + 1},minmax(150px,1fr))`,
+  });
+  for (const node of definition.nodes) {
+    const position = positions.get(node.node_id) || { depth: 0, lane: 0 };
+    const runtime = statuses.get(node.node_id);
+    canvas.append(el("article", {
+      class: `graph-node${runtime ? ` ${runtime.status}` : ""}`,
+      style: `grid-column:${position.depth + 1};grid-row:${position.lane + 1}`,
+    }, [
+      el("div", { class: "graph-node-head" }, [
+        el("strong", { class: "mono", text: node.node_id }),
+        runtime ? pill(runtime.status) : el("span", { class: "pill", text: i18n.t("graph.notStarted") }),
+      ]),
+      el("span", { class: "muted", text: node.kind }),
+      runtime ? el("span", { class: "muted", text: i18n.t("plan.overlay.counts", {
+        generation: i18n.number(runtime.generation), attempts: i18n.number(runtime.attempts),
+      }) }) : null,
+    ]));
+  }
+  return el("section", { class: "panel graph-panel" }, [
+    el("div", { class: "panel-head" }, [
+      el("div", {}, [
+        el("div", { class: "panel-title", text: i18n.t("run.tab.graph") }),
+        el("div", { class: "muted", text: i18n.t("graph.scopes", { version: graph.plan_version }) }),
+      ]),
+      el("span", { class: "pill", text: definition.layout.mode }),
+    ]),
+    el("div", { class: "panel-body graph-body" }, [
+      canvas,
+      el("div", { class: "graph-edges" }, definition.edges.map((edge) =>
+        el("span", { class: "mono", text: `${edge.from} → ${edge.to}${edge.back_edge ? ` · ${i18n.t("graph.loop")}` : ""}` }),
+      )),
+      el("div", { class: "graph-facts" }, [
+        el("span", { text: i18n.t("graph.branches", { count: i18n.number(overlay.branch_tokens.length) }) }),
+        el("span", { text: i18n.t("graph.joins", { count: i18n.number(overlay.join_groups.length) }) }),
+        el("span", { text: i18n.t("graph.counters", { count: i18n.number(overlay.control_counters.length) }) }),
+      ]),
+    ]),
+  ]);
 }
 
 async function dataPanel(runId) {
@@ -548,7 +749,12 @@ async function planPanel(runId) {
 
 async function planDefinitionView(runId, state) {
   const definition = (await api.planDefinition(runId, state.version)).data;
-  const list = el("div", {});
+  const list = el("div", {}, [
+    el("div", {
+      class: "eyebrow",
+      text: i18n.t("plan.definition.version", { version: definition.plan_version }),
+    }),
+  ]);
   for (const node of definition.nodes) {
     list.append(
       el("div", { class: "actions" }, [
@@ -634,22 +840,43 @@ async function planDiffView(runId, state, versions) {
 
 /** A cursor-paged section. Paging is the server's; the UI only carries tokens. */
 async function pagedPanel(runId, kind, titleKey, renderItem) {
-  const body = el("div", { class: "panel-body" });
+  // Keep a bounded scroll window: cursor pages can be arbitrarily large, but
+  // the DOM remains capped while the server remains the source of truth.
+  const body = el("div", { class: "panel-body virtual-window", role: "log" });
   const more = el("button", { class: "button", text: i18n.t("action.loadMore") });
+  const windowNotice = el("div", { class: "banner info", hidden: "hidden" });
   let cursor = null;
+  let rendered = 0;
+  let omitted = 0;
 
   const page = async () => {
     const response = await api.runPage(runId, kind, cursor);
-    for (const item of response.data.items) body.insertBefore(renderItem(item), more);
+    for (const item of response.data.items) {
+      body.insertBefore(renderItem(item), more);
+      rendered += 1;
+    }
+    while (rendered > 200) {
+      const candidate = [...body.children].find(
+        (child) => child !== windowNotice && child !== more,
+      );
+      if (!candidate) break;
+      candidate.remove();
+      rendered -= 1;
+      omitted += 1;
+    }
+    if (omitted) {
+      windowNotice.textContent = i18n.t("run.windowed", { count: i18n.number(omitted) });
+      windowNotice.hidden = false;
+    }
     cursor = response.next_cursor;
     more.hidden = !cursor;
-    if (body.children.length === 1) {
+    if (rendered === 0) {
       body.insertBefore(el("div", { class: "muted", text: i18n.t(`${titleKey}.empty`) }), more);
     }
   };
 
   more.addEventListener("click", () => page().catch(reportError));
-  body.append(more);
+  body.append(windowNotice, more);
   const panel = el("section", { class: "panel" }, [
     el("div", { class: "panel-head" }, [
       el("div", { class: "panel-title", text: i18n.t(titleKey) }),
@@ -665,24 +892,19 @@ async function renderInbox(root) {
   const items = response.data.items;
   const body = el("tbody");
   for (const item of items) {
-    body.append(
-      el("tr", {}, [
-        el("td", { text: item.label }),
-        el("td", {}, [
-          el("button", {
-            class: "button id-button",
-            text: item.run_id,
-            title: item.run_id,
-            onclick: () => navigate({ view: "run", runId: item.run_id }),
-          }),
-        ]),
-        el("td", {}, [pill(item.status)]),
-        el("td", {}, [
-          el("div", { class: "actions" }, commandButtons(item.allowed_commands, () => render())),
-        ]),
-      ]),
-    );
+    body.append(inboxRow(item));
   }
+  let cursor = response.next_cursor;
+  const more = el("button", {
+    class: "button", text: i18n.t("action.loadMore"),
+    ...(cursor ? {} : { hidden: "hidden" }),
+    onclick: async () => {
+      const next = await api.inbox(cursor);
+      for (const item of next.data.items) body.append(inboxRow(item));
+      cursor = next.next_cursor;
+      more.hidden = !cursor;
+    },
+  });
   const panel = el("section", { class: "panel" }, [
     el("div", { class: "panel-head" }, [
       el("div", { class: "panel-title", text: i18n.t("inbox.title") }),
@@ -702,35 +924,203 @@ async function renderInbox(root) {
           ]),
         ])
       : el("div", { class: "empty", text: i18n.t("inbox.empty") }),
+    more,
   ]);
   root.append(panel);
-  document.getElementById("inboxCount").textContent = items.length ? String(items.length) : "";
+  const count = response.data.action_count || 0;
+  document.getElementById("inboxCount").textContent = count ? String(count) : "";
+}
+
+function inboxRow(item) {
+  return el("tr", {}, [
+        el("td", {}, [
+          el("div", { class: "actions" }, [
+            el("span", { class: "pill", text: i18n.t(`responsibility.${item.kind}`) }),
+            el("strong", { text: item.label }),
+          ]),
+          item.deadline_at ? el("div", { class: "muted", text: i18n.t("inbox.deadline", {
+            time: i18n.dateTime(item.deadline_at),
+          }) }) : null,
+          item.quorum ? el("div", { class: "muted", text: i18n.t("inbox.quorum", {
+            submitted: i18n.number(item.quorum.submitted), required: i18n.number(item.quorum.count),
+          }) }) : null,
+          el("div", { class: "muted mono", text: i18n.t("inbox.source", {
+            source: item.item_id,
+          }) }),
+        ]),
+        el("td", {}, [
+          el("button", {
+            class: "button id-button",
+            text: item.run_id,
+            title: item.run_id,
+            onclick: () => navigate({ view: "run", runId: item.run_id }),
+          }),
+        ]),
+        el("td", {}, [pill(item.status)]),
+        el("td", {}, [
+          el("div", { class: "actions" }, commandButtons(item.allowed_commands, () => render())),
+        ]),
+      ]);
+}
+
+async function refreshInboxCount() {
+  try {
+    const response = await api.inbox();
+    const count = response.data.action_count || 0;
+    document.getElementById("inboxCount").textContent = count ? String(count) : "";
+  } catch {
+    // A badge is supplementary; the destination keeps its own error boundary.
+  }
+}
+
+async function renderArtifacts(root, selectedArtifactId = null) {
+  const search = el("input", {
+    type: "search", value: artifactFilters.q,
+    placeholder: i18n.t("artifacts.search.placeholder"),
+    "aria-label": i18n.t("artifacts.search.label"),
+  });
+  const run = el("input", {
+    value: artifactFilters.runId, placeholder: i18n.t("artifacts.filter.run"),
+    "aria-label": i18n.t("artifacts.filter.run"),
+  });
+  const type = el("input", {
+    value: artifactFilters.contentType,
+    placeholder: i18n.t("artifacts.filter.contentType"),
+    "aria-label": i18n.t("artifacts.filter.contentType"),
+  });
+  root.append(el("form", { class: "filter-bar", onsubmit: (event) => {
+    event.preventDefault();
+    artifactFilters.q = search.value.trim();
+    artifactFilters.runId = run.value.trim();
+    artifactFilters.contentType = type.value.trim();
+    render();
+  } }, [
+    search, run, type,
+    el("button", { class: "button", type: "submit", text: i18n.t("action.search") }),
+  ]));
+
+  const grid = el("section", { class: "artifact-grid", "aria-label": i18n.t("artifacts.list") });
+  let cursor = null;
+  const more = el("button", { class: "button", text: i18n.t("action.loadMore") });
+  const load = async () => {
+    const response = await api.artifacts({ cursor, ...artifactFilters });
+    for (const item of response.data.artifacts) {
+      grid.append(artifactCard(item));
+    }
+    cursor = response.next_cursor;
+    more.hidden = !cursor;
+    if (!grid.children.length) {
+      grid.append(el("div", { class: "empty panel", text: i18n.t("artifacts.empty") }));
+    }
+  };
+  more.addEventListener("click", () => load().catch(reportError));
+  root.append(grid, more);
+  await load();
+  if (selectedArtifactId) await renderArtifactDetail(root, selectedArtifactId);
+}
+
+function artifactCard(item) {
+  return el("article", { class: "artifact-card panel" }, [
+    el("button", {
+      class: "artifact-card-main",
+      onclick: () => navigate({ view: "artifact", artifactId: item.artifact_id, runId: null }),
+    }, [
+      el("span", { class: "pill", text: item.content_type }),
+      el("strong", { class: "mono", text: item.output_port_id }),
+      el("span", { class: "muted", text: i18n.t("artifacts.size", {
+        size: i18n.number(item.size_bytes),
+      }) }),
+      el("span", { class: "muted mono", text: item.artifact_id }),
+      el("span", { class: "muted mono", text: `${item.run_id} · ${item.producer_id}` }),
+    ]),
+  ]);
+}
+
+async function renderArtifactDetail(root, artifactId) {
+  const panel = el("section", { class: "panel artifact-detail" }, [dataState(el, i18n, "loading")]);
+  root.append(panel);
+  try {
+    const [detailResponse, lineageResponse] = await Promise.all([
+      api.artifact(artifactId), api.artifactLineage(artifactId),
+    ]);
+    const item = detailResponse.data;
+    const lineage = lineageResponse.data;
+    const preview = el("pre", { class: "artifact-preview", hidden: "hidden" });
+    const links = [
+      ...lineage.producers, ...lineage.consumers, ...lineage.derived_from,
+    ];
+    panel.replaceChildren(
+      el("div", { class: "panel-head" }, [
+        el("div", {}, [
+          el("div", { class: "eyebrow", text: i18n.t("artifacts.detail") }),
+          el("div", { class: "panel-title mono", text: item.artifact_id }),
+        ]),
+        el("button", {
+          class: "button", text: i18n.t("action.close"),
+          onclick: () => navigate({ view: "artifacts", runId: null }),
+        }),
+      ]),
+      el("div", { class: "panel-body" }, [
+        el("dl", { class: "fact-grid" }, [
+          el("div", {}, [el("dt", { text: i18n.t("artifacts.run") }), el("dd", { class: "mono", text: item.run_id })]),
+          el("div", {}, [el("dt", { text: i18n.t("artifacts.type") }), el("dd", { text: item.content_type })]),
+          el("div", {}, [el("dt", { text: i18n.t("artifacts.sizeLabel") }), el("dd", { text: i18n.number(item.size_bytes) })]),
+          el("div", {}, [el("dt", { text: i18n.t("artifacts.producer") }), el("dd", { class: "mono", text: item.producer_id })]),
+        ]),
+        el("div", { class: "actions" }, [
+          item.previewable ? el("button", {
+            class: "button", text: i18n.t("artifacts.preview"),
+            onclick: async () => {
+              try {
+                preview.textContent = await api.artifactPreview(item.artifact_id);
+                preview.hidden = false;
+              } catch (error) { reportError(error); }
+            },
+          }) : null,
+          el("a", {
+            class: "button", href: api.artifactDownloadUrl(item.artifact_id),
+            text: i18n.t("artifacts.download"), download: "",
+          }),
+        ]),
+        preview,
+        el("div", { class: "eyebrow", text: i18n.t("artifacts.lineage") }),
+        ...(links.length ? links.map((link) => el("div", {
+          class: "lineage-row mono", text: `${link.type}: ${link.source_id} → ${link.target_id}`,
+        })) : [el("div", { class: "muted", text: i18n.t("artifacts.lineage.empty") })]),
+      ]),
+    );
+  } catch (error) {
+    panel.replaceChildren(dataState(el, i18n, "error", {
+      message: error instanceof ApiError
+        ? i18n.t(error.messageKey, { message: error.message }) : null,
+      onRetry: () => renderArtifactDetail(root, artifactId),
+    }));
+    reportError(error);
+  }
 }
 
 async function renderOps(root) {
-  const [health, recovery, catalog] = await Promise.all([
-    api.health().catch(() => null),
-    api.recovery().catch(() => null),
-    api.handlerCatalog().catch(() => null),
+  const [statusResponse, recoveryResponse] = await Promise.all([
+    api.opsStatus(), api.recovery(),
   ]);
+  const status = statusResponse.data;
+  const recovery = recoveryResponse.data;
 
   root.append(
     el("section", { class: "panel" }, [
       el("div", { class: "panel-head" }, [
-        el("div", { class: "panel-title", text: i18n.t("ops.health") }),
-        pill(health && health.status === "ready" ? "succeeded" : "failed"),
+        el("div", { class: "panel-title", text: i18n.t("ops.integrity") }),
+        pill(status.integrity.status === "ok" ? "succeeded" : "failed"),
       ]),
       el("div", { class: "panel-body" }, [
-        el("div", {
-          text: i18n.t(
-            health && health.status === "ready" ? "ops.health.ready" : "ops.health.notReady",
-          ),
-        }),
+        el("div", { text: i18n.t("ops.integrity.summary", {
+          version: i18n.number(status.integrity.migration_version),
+        }) }),
       ]),
     ]),
   );
 
-  const findings = recovery ? recovery.data.findings : [];
+  const findings = recovery.findings;
   root.append(
     el("section", { class: "panel" }, [
       el("div", { class: "panel-head" }, [
@@ -740,7 +1130,7 @@ async function renderOps(root) {
         el("div", {
           class: "muted",
           text: i18n.t("ops.recovery.scanned", {
-            count: i18n.number(recovery ? recovery.data.scanned_runs : 0),
+            count: i18n.number(recovery.scanned_runs),
           }),
         }),
         ...(findings.length
@@ -755,160 +1145,502 @@ async function renderOps(root) {
     ]),
   );
 
-  const handlers = catalog ? catalog.data.handlers : [];
-  const agents = catalog ? catalog.data.agents || [] : [];
-  root.append(
-    el("section", { class: "panel" }, [
-      el("div", { class: "panel-head" }, [
-        el("div", { class: "panel-title", text: i18n.t("ops.handlers") }),
-      ]),
-      el("div", { class: "panel-body" }, [
-        ...handlers.map((handler) =>
-          el("div", { class: "mono", text: `${handler.name} ${handler.version}` }),
-        ),
-        el("div", { class: "eyebrow", text: i18n.t("ops.agents") }),
-        ...(agents.length
-          ? agents.map((agent) =>
-              el("div", { class: "mono", text: `${agent.name} ${agent.version}` }),
-            )
-          : [el("div", { class: "muted", text: i18n.t("ops.agents.empty") })]),
-      ]),
+  root.append(el("section", { class: "stat-grid" }, [
+    el("article", { class: "stat-card" }, [
+      el("div", { class: "panel-title", text: i18n.t("ops.capacity") }),
+      el("div", { class: "stat-value", text: i18n.number(status.capacity.ready_jobs) }),
+      el("div", { class: "muted", text: i18n.t("ops.capacity.ready") }),
+      el("div", { class: "muted", text: i18n.t("ops.capacity.workers", {
+        count: i18n.number(status.capacity.configured_workers || 0),
+      }) }),
     ]),
-  );
+    el("article", { class: "stat-card" }, [
+      el("div", { class: "panel-title", text: i18n.t("ops.durable") }),
+      el("div", { class: "stat-value", text: i18n.number(status.durable.active_leases) }),
+      el("div", { class: "muted", text: i18n.t("ops.durable.leases") }),
+      el("div", { class: "muted", text: i18n.t("ops.durable.unknown", {
+        count: i18n.number(status.durable.unknown_external_results),
+      }) }),
+    ]),
+  ]));
 }
 
-/* ------------------------------------------------------------- new run flow */
-
-async function newRunDialog() {
-  const catalog = await api.workflowCatalog().catch(() => null);
-  const entries = catalog ? catalog.data.workflows : [];
-  const workflow = el("input", {
-    type: "text", id: "newRunWorkflow", required: "required", list: "workflowOptions",
-  });
-  const options = el("datalist", { id: "workflowOptions" });
-  for (const entry of entries) {
-    options.append(el("option", { value: entry.workflow_id }));
-  }
-  const goal = el("input", { type: "text", id: "newRunGoal" });
-  const input = el("textarea", { id: "newRunInput", text: "{}" });
-  const problem = el("div", { class: "banner error", hidden: "hidden" });
-
-  const dialog = el("dialog", { "aria-label": i18n.t("newRun.title") }, [
-    el("form", { method: "dialog" }, [
-      el("h2", { text: i18n.t("newRun.title") }),
-      problem,
-      el("div", { class: "field" }, [
-        el("label", { for: "newRunWorkflow", text: i18n.t("newRun.workflow") }),
-        workflow,
-        options,
-        el("small", { class: "muted", text: i18n.t("newRun.workflow.hint") }),
-      ]),
-      el("div", { class: "field" }, [
-        el("label", { for: "newRunGoal", text: i18n.t("newRun.goal") }),
-        goal,
-      ]),
-      el("div", { class: "field" }, [
-        el("label", { for: "newRunInput", text: i18n.t("newRun.input") }),
-        input,
-      ]),
-      el("div", { class: "actions" }, [
-        el("button", { class: "button", value: "cancel", text: i18n.t("action.cancel") }),
-        el("button", {
-          class: "button primary",
-          value: "confirm",
-          text: i18n.t("newRun.submit"),
-        }),
-      ]),
+async function renderAgents(root) {
+  const catalog = (await api.handlerCatalog()).data;
+  root.append(el("div", { class: "banner info", text: i18n.t("agents.registrationOnly") }));
+  root.append(el("section", { class: "panel" }, [
+    el("div", { class: "panel-head" }, [
+      el("div", { class: "panel-title", text: i18n.t("agents.handlers") }),
     ]),
-  ]);
-  if (catalog === null) {
-    problem.textContent = i18n.t("newRun.catalog.unavailable");
-    problem.hidden = false;
-  }
+    el("div", { class: "panel-body" }, catalog.handlers.length
+      ? catalog.handlers.map((handler) => {
+        const attempt = handler.recent_attempt;
+        return el("article", { class: "data-card" }, [
+          el("div", { class: "panel-title mono", text: `${handler.name} ${handler.version}` }),
+          el("div", { class: "muted", text: i18n.t("agents.registered") }),
+          el("div", { text: (handler.capabilities || []).join(", ") || i18n.t("agents.noCapabilities") }),
+          el("div", { class: "muted mono", text: attempt
+            ? `${attempt.status} · ${attempt.run_id} · ${i18n.dateTime(attempt.occurred_at)}`
+            : i18n.t("agents.noAttempts") }),
+        ]);
+      })
+      : [el("div", { class: "muted", text: i18n.t("agents.empty") })]),
+  ]));
+  root.append(el("section", { class: "panel" }, [
+    el("div", { class: "panel-head" }, [
+      el("div", { class: "panel-title", text: i18n.t("agents.discovered") }),
+    ]),
+    el("div", { class: "panel-body" }, catalog.agents.length
+      ? catalog.agents.map((agent) =>
+        el("div", { class: "mono", text: `${agent.name} ${agent.version}` }))
+      : [el("div", { class: "muted", text: i18n.t("agents.discovered.empty") })]),
+  ]));
+}
 
-  // The wizard keeps nothing server-side: the whole thing resolves to exactly
-  // one start_run, and closing the dialog leaves no draft behind.
-  const body = await dialogResult(dialog, () => {
-    let parsed;
-    try {
-      parsed = JSON.parse(input.value || "{}");
-    } catch {
-      return { invalid: true };
+function refreshSeconds() {
+  const value = Number(localStorage.getItem("orbit.refreshSeconds") || 15);
+  return Number.isFinite(value) && value >= 5 && value <= 300 ? value : 15;
+}
+
+function scheduleLivePolling() {
+  // A timeout chain rather than an interval, so failures can back off:
+  // doubling up to five minutes instead of repainting the error banner every
+  // tick of an outage. The first failure is announced; repeats stay quiet
+  // until a success resets the cadence.
+  if (refreshTimer) clearTimeout(refreshTimer);
+  let failures = 0;
+  const delaySeconds = () =>
+    Math.min(300, refreshSeconds() * 2 ** failures);
+  const tick = async () => {
+    if (!document.hidden && !rendering && !document.querySelector("dialog[open]")) {
+      try {
+        const live = (await api.live(liveCursor)).data;
+        liveCursor = live.cursor;
+        failures = 0;
+        if (live.changed) await render();
+      } catch (error) {
+        // Programming errors must stay loud; only transport failures back off.
+        if (!(error instanceof ApiError)) throw error;
+        failures += 1;
+        if (failures === 1) reportError(error);
+      }
     }
-    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return { invalid: true };
-    }
-    return { workflow_id: workflow.value.trim(), goal: goal.value, input: parsed };
+    refreshTimer = setTimeout(tick, delaySeconds() * 1000);
+  };
+  refreshTimer = setTimeout(tick, delaySeconds() * 1000);
+}
+
+async function renderSettings(root) {
+  const status = shellFacts?.permissions?.ops_read ? (await api.opsStatus()).data : null;
+  const interval = el("select", { "aria-label": i18n.t("settings.refresh") });
+  for (const seconds of [5, 15, 30, 60, 300]) interval.append(el("option", {
+    value: String(seconds), text: i18n.t("settings.seconds", { count: seconds }),
+    ...(seconds === refreshSeconds() ? { selected: "selected" } : {}),
+  }));
+  interval.addEventListener("change", () => {
+    localStorage.setItem("orbit.refreshSeconds", interval.value);
+    scheduleLivePolling();
+    announce(i18n.t("settings.saved"));
   });
-  if (body === null) return;
-  if (body.invalid) {
-    announce(i18n.t("newRun.input.invalid"), "error");
-    return;
-  }
+  root.append(el("section", { class: "panel" }, [
+    el("div", { class: "panel-head" }, [el("div", {
+      class: "panel-title", text: i18n.t("settings.preferences"),
+    })]),
+    el("div", { class: "panel-body" }, [
+      el("label", { class: "settings-row" }, [
+        el("span", { text: i18n.t("settings.refresh") }), interval,
+      ]),
+      el("div", { class: "muted", text: i18n.t("settings.localOnly") }),
+    ]),
+  ]));
+  root.append(el("section", { class: "panel" }, [
+    el("div", { class: "panel-head" }, [el("div", {
+      class: "panel-title", text: i18n.t("settings.server"),
+    })]),
+    el("div", { class: "panel-body mono", text: status
+      ? i18n.t("settings.server.summary", {
+        workers: status.server_config.worker_count,
+        poll: status.server_config.poll_seconds,
+        artifacts: String(status.server_config.artifact_store_configured),
+      })
+      : i18n.t("settings.server.restricted") }),
+  ]));
+}
 
-  const entry = entries.find((item) => item.workflow_id === body.workflow_id);
-  const allowed = entry && entry.allowed_commands[0];
-  if (!allowed) {
-    announce(
-      i18n.t(catalog === null ? "newRun.catalog.unavailable" : "newRun.workflow.invalid"),
-      "error",
-    );
-    return;
-  }
+/* ------------------------------------------------ workflow catalog / wizard */
 
+async function renderWorkflows(root) {
+  const entries = (await api.workflowCatalog()).data.workflows;
+  const cards = el("section", { class: "workflow-grid", "aria-label": i18n.t("workflows.list") });
+  const detail = el("section", { class: "panel workflow-detail" }, [
+    el("div", { class: "empty", text: i18n.t("workflows.select") }),
+  ]);
+
+  const showDetail = async (entry) => {
+    detail.replaceChildren(dataState(el, i18n, "loading"));
+    try {
+      const value = (await api.workflowDetail(entry.workflow_id, entry.latest_version)).data;
+      const definition = value.definition;
+      detail.replaceChildren(
+        el("div", { class: "panel-head" }, [
+          el("div", {}, [
+            el("div", { class: "eyebrow", text: `${value.workflow_id} · v${value.latest_version}` }),
+            el("div", { class: "panel-title", text: value.name }),
+          ]),
+          value.allowed_commands.length ? el("button", {
+            class: "button primary", text: i18n.t("action.newGoal"),
+            onclick: () => newRunDialog(value.workflow_id),
+          }) : null,
+        ]),
+        el("div", { class: "panel-body" }, [
+          el("p", { class: value.description ? "" : "muted", text: value.description || i18n.t("workflows.noDescription") }),
+          el("dl", { class: "fact-grid" }, [
+            el("div", {}, [el("dt", { text: i18n.t("workflows.nodes") }), el("dd", { text: i18n.number(value.summary.node_count) })]),
+            el("div", {}, [el("dt", { text: i18n.t("workflows.inputs") }), el("dd", { text: i18n.number(value.inputs.length) })]),
+          ]),
+          el("div", { class: "eyebrow", text: i18n.t("workflows.definition") }),
+          el("div", { class: "definition-list" }, definition.nodes.map((node) =>
+            el("div", { class: "actions" }, [
+              el("span", { class: "mono", text: node.id }),
+              el("span", { class: "pill", text: node.kind }),
+              node.handler ? el("span", { class: "muted mono", text: `${node.handler.name}@${node.handler.version}` }) : null,
+            ]),
+          )),
+        ]),
+      );
+    } catch (error) {
+      detail.replaceChildren(dataState(el, i18n, "error", { onRetry: () => showDetail(entry) }));
+      reportError(error);
+    }
+  };
+
+  for (const entry of entries) {
+    cards.append(el("article", { class: "workflow-card panel" }, [
+      el("button", { class: "workflow-card-main", onclick: () => showDetail(entry) }, [
+        el("span", { class: "eyebrow", text: `${entry.workflow_id} · v${entry.latest_version}` }),
+        el("strong", { text: entry.name }),
+        el("span", { class: "muted", text: entry.description || i18n.t("workflows.noDescription") }),
+        el("span", { class: "workflow-meta", text: i18n.t("workflows.summary", {
+          nodes: i18n.number(entry.summary.node_count), inputs: i18n.number(entry.inputs.length),
+        }) }),
+      ]),
+      entry.allowed_commands.length ? el("button", {
+        class: "button", text: i18n.t("action.newGoal"),
+        onclick: () => newRunDialog(entry.workflow_id),
+      }) : null,
+    ]));
+  }
+  if (!entries.length) cards.append(el("div", { class: "empty panel", text: i18n.t("workflows.empty") }));
+  if (entries.length) await showDetail(entries[0]);
+  root.append(el("div", { class: "workflows-layout" }, [cards, detail]));
+}
+
+function generatedInputSupported(entry) {
+  const simple = new Set(["string", "integer", "number", "boolean"]);
+  return entry.input_mode === "structured" && entry.inputs.every((port) => {
+    const schema = port.schema || {};
+    return Array.isArray(schema.enum) || simple.has(schema.type);
+  });
+}
+
+function inputField(port, value) {
+  const schema = port.schema || {};
+  let control;
+  if (Array.isArray(schema.enum)) {
+    control = el("select", { id: `newRunInput-${port.id}`, "data-port": port.id });
+    if (!port.required && !port.has_default) {
+      control.append(el("option", { value: "", text: i18n.t("newRun.input.notSet") }));
+    }
+    for (const option of schema.enum) control.append(el("option", {
+      value: JSON.stringify(option), text: String(option),
+      ...(Object.is(option, value) ? { selected: "selected" } : {}),
+    }));
+  } else if (schema.type === "boolean") {
+    control = el("input", {
+      type: "checkbox", id: `newRunInput-${port.id}`, "data-port": port.id,
+      "data-type": "boolean", ...(value === true ? { checked: "checked" } : {}),
+    });
+  } else {
+    control = el("input", {
+      type: ["integer", "number"].includes(schema.type) ? "number" : "text",
+      id: `newRunInput-${port.id}`, "data-port": port.id, "data-type": schema.type || "string",
+      ...(schema.minimum !== undefined ? { min: schema.minimum } : {}),
+      ...(schema.maximum !== undefined ? { max: schema.maximum } : {}),
+      ...(schema.minLength !== undefined ? { minlength: schema.minLength } : {}),
+      ...(schema.maxLength !== undefined ? { maxlength: schema.maxLength } : {}),
+      ...(schema.pattern !== undefined ? { pattern: schema.pattern } : {}),
+      ...(["integer", "number"].includes(schema.type)
+        ? { step: schema.type === "number" ? "any" : "1" } : {}),
+      ...(value !== undefined && value !== null ? { value: String(value) } : {}),
+      ...(port.required ? { required: "required" } : {}),
+    });
+  }
+  return el("div", { class: "field" }, [
+    el("label", { for: `newRunInput-${port.id}`, text: port.description || port.id }),
+    control,
+    el("small", { class: "muted mono", text: port.schema_id }),
+  ]);
+}
+
+function readGeneratedInputs(container, entry) {
+  const result = {};
+  for (const port of entry.inputs) {
+    const control = container.querySelector(`[data-port="${CSS.escape(port.id)}"]`);
+    if (!control) continue;
+    if (control.tagName === "SELECT" && control.value === "" && !port.required) continue;
+    else if (control.tagName === "SELECT") result[port.id] = JSON.parse(control.value);
+    else if (control.dataset.type === "boolean") result[port.id] = control.checked;
+    else if (!control.value && !port.required) continue;
+    else if (control.dataset.type === "integer") result[port.id] = Number.parseInt(control.value, 10);
+    else if (control.dataset.type === "number") result[port.id] = Number(control.value);
+    else result[port.id] = control.value;
+  }
+  return result;
+}
+
+async function newRunDialog(preselectedWorkflowId = null) {
+  let catalog;
   try {
-    const started = await api.execute(
-      allowed, body, `run.start:${body.workflow_id}:${Date.now()}`,
-    );
-    announce(i18n.t("newRun.started", { runId: started.data.run_id }));
-    navigate({ view: "run", runId: started.data.run_id });
+    catalog = await api.workflowCatalog();
   } catch (error) {
     reportError(error);
+    announce(i18n.t("newRun.catalog.unavailable"), "error");
+    return;
   }
+  const entries = catalog.data.workflows;
+  const state = {
+    step: 0,
+    workflowId: entries.some((item) => item.workflow_id === preselectedWorkflowId)
+      ? preselectedWorkflowId : null,
+    goal: "",
+    input: {},
+    intent: `run.start:${crypto.randomUUID ? crypto.randomUUID() : Date.now()}`,
+  };
+  const dialog = el("dialog", { class: "goal-wizard", "aria-label": i18n.t("newRun.title") });
+  const form = el("form", { method: "dialog" });
+  dialog.append(form);
+  document.body.append(dialog);
+
+  const fail = (key, values = {}) => {
+    const problem = form.querySelector(".wizard-problem");
+    problem.textContent = i18n.t(key, values);
+    problem.hidden = false;
+  };
+  const selectedEntry = () => entries.find((item) => item.workflow_id === state.workflowId);
+
+  const draw = () => {
+    const entry = selectedEntry();
+    const steps = el("ol", { class: "wizard-steps", "aria-label": i18n.t("newRun.steps") });
+    for (let index = 0; index < 4; index += 1) {
+      steps.append(el("li", {
+        class: index === state.step ? "active" : index < state.step ? "done" : "",
+        "aria-current": index === state.step ? "step" : null,
+        text: `${index + 1}. ${i18n.t(`newRun.step.${index + 1}`)}`,
+      }));
+    }
+    const content = el("div", { class: "wizard-content" });
+    if (state.step === 0) {
+      content.append(el("h3", { text: i18n.t("newRun.select.heading") }));
+      const choices = el("div", { class: "wizard-workflows" });
+      for (const item of entries) {
+        choices.append(el("label", { class: `wizard-workflow${item.workflow_id === state.workflowId ? " selected" : ""}` }, [
+          el("input", {
+            type: "radio", name: "workflow", value: item.workflow_id,
+            ...(item.workflow_id === state.workflowId ? { checked: "checked" } : {}),
+            onchange: () => { state.workflowId = item.workflow_id; draw(); },
+          }),
+          el("span", {}, [el("strong", { text: item.name }), el("small", { class: "muted mono", text: `${item.workflow_id} · v${item.latest_version}` })]),
+          el("span", { class: "muted", text: item.description || i18n.t("workflows.noDescription") }),
+        ]));
+      }
+      if (!entries.length) choices.append(el("div", { class: "empty", text: i18n.t("workflows.empty") }));
+      content.append(choices);
+    } else if (state.step === 1) {
+      content.append(el("h3", { text: i18n.t("newRun.inputs.heading") }));
+      content.append(el("div", { class: "field" }, [
+        el("label", { for: "newRunGoal", text: i18n.t("newRun.goal") }),
+        el("textarea", { id: "newRunGoal", required: "required", text: state.goal }),
+      ]));
+      const inputArea = el("div", { id: "newRunInputs", class: "wizard-inputs" });
+      if (generatedInputSupported(entry)) {
+        for (const port of entry.inputs) {
+          const value = Object.prototype.hasOwnProperty.call(state.input, port.id)
+            ? state.input[port.id] : port.has_default ? port.default : undefined;
+          inputArea.append(inputField(port, value));
+        }
+        if (!entry.inputs.length) inputArea.append(el("div", { class: "muted", text: i18n.t("newRun.input.none") }));
+      } else {
+        inputArea.append(
+          el("div", { class: "banner info", text: i18n.t("newRun.input.jsonFallback") }),
+          el("div", { class: "field" }, [
+            el("label", { for: "newRunInput", text: i18n.t("newRun.input") }),
+            el("textarea", { id: "newRunInput", text: JSON.stringify(state.input, null, 2) }),
+          ]),
+        );
+      }
+      content.append(inputArea);
+    } else if (state.step === 2) {
+      content.append(
+        el("h3", { text: i18n.t("newRun.review.heading") }),
+        el("dl", { class: "review-list" }, [
+          el("div", {}, [el("dt", { text: i18n.t("newRun.workflow") }), el("dd", { text: `${entry.name} · v${entry.latest_version}` })]),
+          el("div", {}, [el("dt", { text: i18n.t("newRun.goal") }), el("dd", { text: state.goal })]),
+          el("div", {}, [el("dt", { text: i18n.t("newRun.input") }), el("dd", { class: "mono", text: JSON.stringify(state.input, null, 2) })]),
+        ]),
+      );
+    } else {
+      content.append(
+        el("h3", { text: i18n.t("newRun.start.heading") }),
+        el("p", { class: "muted", text: i18n.t("newRun.start.body", { workflow: entry.name, version: entry.latest_version }) }),
+      );
+    }
+
+    const problem = el("div", { class: "banner error wizard-problem", hidden: "hidden" });
+    const actions = el("div", { class: "actions wizard-actions" }, [
+      el("button", { class: "button", value: "cancel", text: i18n.t("action.cancel") }),
+      state.step > 0 ? el("button", {
+        class: "button", type: "button", text: i18n.t("action.back"),
+        onclick: () => { state.step -= 1; draw(); },
+      }) : null,
+      state.step < 3 ? el("button", {
+        class: "button primary", type: "button", "data-wizard-next": "true",
+        text: i18n.t("action.next"), onclick: () => {
+          if (state.step === 0) {
+            if (!entry) return fail("newRun.workflow.invalid");
+            if (!entry.allowed_commands.length) return fail("newRun.workflow.forbidden");
+          }
+          if (state.step === 1) {
+            const goal = form.querySelector("#newRunGoal");
+            if (!goal.value.trim()) return fail("newRun.goal.required");
+            if (!goal.reportValidity()) return;
+            state.goal = goal.value.trim();
+            if (generatedInputSupported(entry)) {
+              if (!form.reportValidity()) return;
+              state.input = readGeneratedInputs(form, entry);
+            } else {
+              try {
+                const value = JSON.parse(form.querySelector("#newRunInput").value || "{}");
+                if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error();
+                state.input = value;
+              } catch {
+                return fail("newRun.input.invalid");
+              }
+            }
+          }
+          state.step += 1;
+          draw();
+        },
+      }) : el("button", {
+        class: "button primary", type: "button", id: "newGoalStart",
+        text: i18n.t("newRun.submit"), onclick: async (event) => {
+          event.currentTarget.disabled = true;
+          problem.hidden = true;
+          try {
+            // Refetch immediately before mutation. If the published workflow or
+            // the actor's permission changed, do not submit a stale command.
+            const fresh = (await api.workflowCatalog()).data.workflows.find(
+              (item) => item.workflow_id === state.workflowId,
+            );
+            if (!fresh) return fail("newRun.workflow.unavailable");
+            if (fresh.latest_version !== entry.latest_version) {
+              dialog.close();
+              announce(i18n.t("newRun.workflow.changed"), "error");
+              return;
+            }
+            const allowed = fresh.allowed_commands[0];
+            if (!allowed) return fail("newRun.workflow.forbidden");
+            const started = await api.execute(allowed, {
+              workflow_id: fresh.workflow_id,
+              workflow_version: fresh.latest_version,
+              goal: state.goal,
+              input: state.input,
+            }, state.intent);
+            dialog.close();
+            announce(i18n.t("newRun.started", { runId: started.data.run_id }));
+            navigate({ view: "run", runId: started.data.run_id });
+          } catch (error) {
+            if (error instanceof ApiError && error.requiresRefresh) {
+              dialog.close();
+              announce(i18n.t("newRun.workflow.changed"), "error");
+            } else {
+              fail(
+                error instanceof ApiError ? error.messageKey : "error.generic",
+                { message: error.message || String(error) },
+              );
+              reportError(error);
+            }
+          } finally {
+            if (event.currentTarget.isConnected) event.currentTarget.disabled = false;
+          }
+        },
+      }),
+    ]);
+    form.replaceChildren(el("h2", { text: i18n.t("newRun.title") }), steps, problem, content, actions);
+  };
+
+  dialog.addEventListener("close", () => dialog.remove(), { once: true });
+  draw();
+  dialog.showModal();
 }
 
 /* ------------------------------------------------------------------- shell */
 
 function navigate(next) {
   route = next;
-  const hash = next.view === "run" ? `#/runs/${encodeURIComponent(next.runId)}` : `#/${next.view}`;
-  if (location.hash !== hash) location.hash = hash;
-  else render();
-}
-
-function readRoute() {
-  const parts = location.hash.replace(/^#\/?/, "").split("/");
-  if (parts[0] === "runs" && parts[1]) {
-    return { view: "run", runId: decodeURIComponent(parts[1]) };
-  }
-  if (["runs", "inbox", "ops"].includes(parts[0])) return { view: parts[0], runId: null };
-  return { view: "runs", runId: null };
+  router.navigate(next);
 }
 
 async function render() {
+  if (rendering) return;
+  rendering = true;
   const root = document.getElementById("content");
   root.replaceChildren();
-  root.append(el("div", { class: "muted", text: i18n.t("loading") }));
+  root.append(dataState(el, i18n, "loading"));
 
   for (const button of document.querySelectorAll(".nav-button")) {
-    const active = button.dataset.view === route.view || (route.view === "run" && button.dataset.view === "runs");
+    const section = route.view === "run" ? "runs"
+      : route.view === "goal" ? "goals"
+        : route.view === "artifact" ? "artifacts" : route.view;
+    const active = button.dataset.view === section;
     if (active) button.setAttribute("aria-current", "page");
     else button.removeAttribute("aria-current");
   }
   document.getElementById("viewTitle").textContent = i18n.t(
-    route.view === "run" ? "run.title" : `${route.view}.title`,
+    route.view === "run" ? "run.title"
+      : route.view === "goal" ? "goals.title"
+        : route.view === "artifact" ? "artifacts.title" : `${route.view}.title`,
   );
 
   try {
     const fresh = el("div", { class: "content" });
-    if (route.view === "run") await renderRun(fresh, route.runId);
+    if (route.view === "home") await renderHome(fresh);
+    else if (route.view === "goal") await renderGoals(fresh, route.runId);
+    else if (route.view === "goals") await renderGoals(fresh);
+    else if (route.view === "workflows") await renderWorkflows(fresh);
+    else if (route.view === "run") await renderRun(fresh, route.runId, route.tab || "overview");
     else if (route.view === "inbox") await renderInbox(fresh);
+    else if (route.view === "artifacts") await renderArtifacts(fresh);
+    else if (route.view === "artifact") await renderArtifacts(fresh, route.artifactId);
+    else if (route.view === "agents") await renderAgents(fresh);
     else if (route.view === "ops") await renderOps(fresh);
+    else if (route.view === "settings") await renderSettings(fresh);
     else await renderRuns(fresh);
     root.replaceChildren(...fresh.childNodes);
+    if (route.view !== "inbox") await refreshInboxCount();
   } catch (error) {
-    root.replaceChildren();
+    // The failure lives where the data would have been, with a retry —
+    // not only in the transient banner (plan P1 error state).
+    root.replaceChildren(
+      dataState(el, i18n, "error", {
+        message: error instanceof ApiError
+          ? i18n.t(error.messageKey, { message: error.message })
+          : null,
+        onRetry: () => render(),
+      }),
+    );
     reportError(error);
+  } finally {
+    rendering = false;
   }
 }
 
@@ -920,6 +1652,13 @@ function applyStaticText() {
   }
   for (const node of document.querySelectorAll("[data-i18n-label]")) {
     node.setAttribute("aria-label", i18n.t(node.dataset.i18nLabel));
+  }
+  for (const node of document.querySelectorAll("[data-i18n-placeholder]")) {
+    node.setAttribute("placeholder", i18n.t(node.dataset.i18nPlaceholder));
+  }
+  const actor = document.getElementById("actorChip");
+  if (actor.textContent) {
+    actor.title = i18n.t("actor.signedIn", { actor: actor.textContent });
   }
 }
 
@@ -933,6 +1672,11 @@ async function setLocale(locale) {
 
 async function boot() {
   i18n = await I18n.load(preferredLocale());
+  router = new Router((next) => {
+    route = next;
+    render();
+  });
+  route = router.route;
 
   const select = document.getElementById("localeSelect");
   for (const locale of LOCALES) {
@@ -949,22 +1693,56 @@ async function boot() {
   });
   document.documentElement.dataset.theme = localStorage.getItem("orbit.theme") || "dark";
 
+  try {
+    shellFacts = (await api.capabilities()).data;
+    document.getElementById("actorChip").textContent = shellFacts.actor;
+    mayStartRun = Boolean(shellFacts.permissions && shellFacts.permissions.start_run);
+    document.getElementById("newRun").hidden = !mayStartRun;
+  } catch (error) {
+    reportError(error);
+  }
+
+  const sidebar = document.getElementById("sidebar");
+  const navToggle = document.getElementById("navToggle");
+  const navBackdrop = document.getElementById("navBackdrop");
+  const compactNavigation = matchMedia("(max-width: 860px)");
+  const setNavOpen = (open, restoreFocus = false) => {
+    document.body.dataset.navOpen = open ? "true" : "false";
+    navToggle.setAttribute("aria-expanded", String(open));
+    const hidden = !open && compactNavigation.matches;
+    sidebar.setAttribute("aria-hidden", String(hidden));
+    sidebar.inert = hidden;
+    if (restoreFocus) navToggle.focus();
+  };
+  navToggle.addEventListener("click", () => setNavOpen(document.body.dataset.navOpen !== "true"));
+  navBackdrop.addEventListener("click", () => setNavOpen(false, true));
+  compactNavigation.addEventListener("change", () => setNavOpen(false));
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && document.body.dataset.navOpen === "true") {
+      setNavOpen(false, true);
+    }
+  });
+  setNavOpen(false);
+
   document.getElementById("newRun").addEventListener("click", () => newRunDialog());
   document.getElementById("refresh").addEventListener("click", () => render());
+  window.addEventListener("orbit:refresh", () => render());
+  scheduleLivePolling();
+  document.getElementById("globalSearchForm").addEventListener("submit", (event) => {
+    event.preventDefault();
+    runFilters.q = document.getElementById("globalSearch").value.trim();
+    navigate({ view: "runs", runId: null });
+  });
   for (const button of document.querySelectorAll(".nav-button")) {
     button.addEventListener("click", () => {
       // A message about the page you just left is noise on the next one.
       announce("");
+      setNavOpen(false, compactNavigation.matches);
       navigate({ view: button.dataset.view, runId: null });
     });
   }
-  window.addEventListener("hashchange", () => {
-    route = readRoute();
-    render();
-  });
 
   applyStaticText();
-  route = readRoute();
   await render();
 }
 

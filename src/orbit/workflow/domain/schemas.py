@@ -411,6 +411,7 @@ RUNTIME_COMMAND_PAYLOAD_SCHEMAS = {
         {
             "workflow_id": _ID, "workflow_version": _REVISION,
             "definition_hash": _HASH, "input": {"type": "object"},
+            "goal": {"type": "string", "minLength": 1, "maxLength": 10000},
             "artifact_inputs": {"type": "array", "items": {"type": "object"}},
         },
     ),
@@ -459,6 +460,7 @@ RUNTIME_EVENT_PAYLOAD_SCHEMAS = {
             "workflow_version": _REVISION, "definition_hash": _HASH,
             "plan_id": _ID, "plan_version": _REVISION,
             "input": {"type": "object"},
+            "goal": {"type": "string", "minLength": 1, "maxLength": 10000},
             "artifact_refs": {"type": "array", "items": _ID, "uniqueItems": True},
             "reason": {"type": "string"},
         },

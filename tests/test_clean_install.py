@@ -96,8 +96,16 @@ class CleanInstallTests(unittest.TestCase):
             "orbit/static/workflow-ui/assets/api.js",
             "orbit/static/workflow-ui/assets/i18n.js",
             "orbit/static/workflow-ui/assets/app.css",
+            "orbit/static/workflow-ui/assets/router.js",
+            "orbit/static/workflow-ui/assets/components/command-dialog.js",
+            "orbit/static/workflow-ui/assets/components/data-state.js",
+            "orbit/static/workflow-ui/assets/styles/tokens.css",
+            "orbit/static/workflow-ui/assets/styles/shell.css",
+            "orbit/static/workflow-ui/assets/styles/components.css",
+            "orbit/static/workflow-ui/assets/styles/views.css",
             "orbit/static/workflow-ui/assets/i18n.zh-CN.json",
             "orbit/static/workflow-ui/assets/i18n.en-US.json",
+            "orbit/static/workflow-ui/assets/favicon.svg",
         ):
             with self.subTest(asset=asset):
                 self.assertIn(asset, names)
@@ -174,6 +182,16 @@ class CleanInstallTests(unittest.TestCase):
                 self.fail("installed server never became ready")
 
             with urllib.request.urlopen(f"{base}/ui/", timeout=5) as response:
+                self.assertEqual(200, response.status)
+                self.assertIn(b"Orbit Runtime", response.read())
+            with urllib.request.urlopen(
+                f"{base}/ui/assets/router.js", timeout=5
+            ) as response:
+                self.assertEqual(200, response.status)
+                self.assertIn(b"KNOWN_VIEWS", response.read())
+            # Hash routes are intentionally client-side; a refresh requests
+            # /ui/ again, which must remain the stable SPA fallback.
+            with urllib.request.urlopen(f"{base}/ui/index.html", timeout=5) as response:
                 self.assertEqual(200, response.status)
                 self.assertIn(b"Orbit Runtime", response.read())
             with urllib.request.urlopen(f"{base}/api/v1/runs", timeout=5) as response:

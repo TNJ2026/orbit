@@ -14,7 +14,7 @@ dependencies = [
 # Test-only. playwright is never imported by the package; the browser suite
 # skips when it is absent, so a plain install stays four dependencies deep.
 [project.optional-dependencies]
-dev = ["playwright>=1.45"]
+dev = ["playwright>=1.45", "Pillow>=10"]
 
 [project.scripts]
 orbit = "orbit.__main__:main"
@@ -29,7 +29,7 @@ path = "src/orbit/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/orbit"]
-# Non-Python resources (the Web UI and vendored dagre bundle)
+# Non-Python resources (the modular Web UI)
 # are loaded via importlib.resources at runtime. hatchling already ships every
 # non-ignored file under the package tree, so they are included automatically —
 # a force-include table here only duplicates them and makes the wheel build fail

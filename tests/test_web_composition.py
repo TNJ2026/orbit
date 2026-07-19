@@ -110,9 +110,17 @@ class AsgiHarness:
 
         async def call():
             messages = []
+            delivered = False
 
             async def receive():
-                return {"type": "http.request", "body": raw, "more_body": False}
+                nonlocal delivered
+                if not delivered:
+                    delivered = True
+                    return {"type": "http.request", "body": raw, "more_body": False}
+                # StreamingResponse cancels its disconnect listener when the
+                # body finishes. Blocking here models a connected client and
+                # avoids starving the body task with repeated request frames.
+                await asyncio.Event().wait()
 
             async def send(message):
                 messages.append(message)
@@ -132,11 +140,17 @@ class AsgiHarness:
                 receive, send,
             )
             status = next(m["status"] for m in messages if m["type"] == "http.response.start")
+            start = next(m for m in messages if m["type"] == "http.response.start")
+            response_headers = {
+                key.decode().lower(): value.decode()
+                for key, value in start.get("headers", [])
+            }
             body = b"".join(
                 m.get("body", b"") for m in messages if m["type"] == "http.response.body"
             )
             return SimpleNamespace(
                 status_code=status, text=body.decode(),
+                headers=response_headers,
                 json=lambda: json.loads(body.decode()),
             )
 
@@ -376,7 +390,7 @@ class HealthEndpointTests(unittest.TestCase):
             checks = response.json()["checks"]
             self.assertTrue(checks["database"]["ok"])
             self.assertTrue(checks["migrations"]["ok"])
-            self.assertEqual(list(range(1, 10)), checks["migrations"]["applied"])
+            self.assertEqual(list(range(1, 12)), checks["migrations"]["applied"])
             self.assertTrue(checks["handlers"]["sealed"])
             self.assertTrue(checks["components"]["ok"])
 

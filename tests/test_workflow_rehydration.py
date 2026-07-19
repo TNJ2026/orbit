@@ -121,7 +121,10 @@ class RehydrationTests(unittest.TestCase):
                 ("workflow:flow", 1, "sha256:" + "a" * 64, "1.0", "1.0", "1.0", "{}", "json", None, "sha256:" + "b" * 64, "2026-07-17T00:00:00Z", "test"),
             )
             connection.execute(
-                "INSERT INTO workflow_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                """INSERT INTO workflow_runs (
+                       run_id, workflow_id, workflow_version, definition_hash,
+                       status, aggregate_version, correlation_id, created_at, updated_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 ("run:r1", "workflow:flow", 1, "sha256:" + "a" * 64, "created", 0, "run:r1", "2026-07-17T00:00:00Z", "2026-07-17T00:00:00Z"),
             )
             connection.commit()

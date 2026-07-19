@@ -319,7 +319,7 @@ class PlannerTestCase(unittest.TestCase):
         with connect_workflow_database(self.path) as connection:
             versions = [row[0] for row in connection.execute("SELECT version FROM workflow_schema_migrations ORDER BY version")]
             tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        self.assertEqual(list(range(1, 10)), versions)
+        self.assertEqual(list(range(1, 12)), versions)
         self.assertTrue({"planner_attempts", "planner_proposals"}.issubset(tables))
 
         sqlite_service = PlannerApplicationService(self.path)

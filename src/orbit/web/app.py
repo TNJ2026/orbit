@@ -317,6 +317,7 @@ def create_app(
     extra_routes: Sequence[Route | Mount] = (),
     authenticator: Callable[[Any], str | None] | None = None,
     authorizer: Any = None,
+    rate_limiter: Any = None,
     serve_ui: bool = False,
     discover_agents: bool = False,
     agent_capabilities: Sequence[str] | None = None,
@@ -408,6 +409,11 @@ def create_app(
     capabilities = {
         "static_graph": {"available": True},
         "human_tasks": {"available": True},
+        "artifacts": (
+            {"available": True}
+            if artifact_backend is not None
+            else {"available": False, "reason": "artifact_store_not_configured"}
+        ),
         "planner": (
             {"available": True}
             if planner_service is not None
@@ -434,8 +440,15 @@ def create_app(
         *build_api_v1(
             composition.db_path, composition.service,
             authenticator=authenticator, authorizer=authorizer,
+            rate_limiter=rate_limiter,
             agent_catalog=agent_catalog,
             capabilities=capabilities,
+            schema_catalog=composition.schema_catalog,
+            artifact_backend=artifact_backend,
+            operational_config={
+                "worker_count": worker_count,
+                "poll_seconds": poll_seconds,
+            },
         ),
         # The MCP surface is a second protocol over the same application
         # services and the same identity, not a second implementation.

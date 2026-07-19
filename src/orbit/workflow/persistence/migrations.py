@@ -824,6 +824,36 @@ _MIGRATIONS: tuple[tuple[int, str, str], ...] = (
         CREATE INDEX audit_run_time ON audit_records(run_id, occurred_at, audit_id);
         """,
     ),
+    (
+        10,
+        "run discovery projection",
+        """
+        ALTER TABLE workflow_runs ADD COLUMN goal TEXT;
+        ALTER TABLE workflow_runs ADD COLUMN display_name TEXT;
+        UPDATE workflow_runs SET display_name = run_id WHERE display_name IS NULL;
+        CREATE INDEX workflow_runs_discovery
+            ON workflow_runs(updated_at DESC, run_id ASC);
+        CREATE INDEX workflow_runs_status_discovery
+            ON workflow_runs(status, updated_at DESC, run_id ASC);
+        """,
+    ),
+    (
+        11,
+        "actor scoped artifact catalog",
+        """
+        CREATE TABLE run_artifact_subjects (
+            run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),
+            subject TEXT NOT NULL,
+            role TEXT NOT NULL CHECK (role IN ('owner', 'participant')),
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (run_id, subject)
+        );
+        CREATE INDEX artifact_acl_subject
+            ON artifact_acl(subject, permission, artifact_id);
+        CREATE INDEX run_artifact_subject_actor
+            ON run_artifact_subjects(subject, run_id);
+        """,
+    ),
 )
 
 

@@ -201,5 +201,79 @@ class ProjectionConsistencyTests(CapacityTestCase):
                 )
 
 
+class UiReadCapacityTests(CapacityTestCase):
+    """P9 UI read shapes: large catalogs stay cursor-bounded."""
+
+    def test_one_thousand_runs_page_without_gaps_or_duplicates(self) -> None:
+        first = self.start(0)
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc).isoformat()
+        with connect_workflow_database(self.db) as connection:
+            source = connection.execute(
+                "SELECT workflow_id,workflow_version,definition_hash FROM workflow_runs"
+                " WHERE run_id=?", (first,),
+            ).fetchone()
+            connection.execute("BEGIN IMMEDIATE")
+            connection.executemany(
+                "INSERT INTO workflow_runs(run_id,workflow_id,workflow_version,"
+                "definition_hash,status,aggregate_version,correlation_id,created_at,"
+                "updated_at,goal,display_name) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                [
+                    (
+                        f"run:catalog-{index:04d}", source["workflow_id"],
+                        source["workflow_version"], source["definition_hash"],
+                        "succeeded", 0, f"run:catalog-{index:04d}", now, now,
+                        f"Catalog goal {index}", f"Catalog run {index}",
+                    )
+                    for index in range(1, 1_000)
+                ],
+            )
+            connection.commit()
+
+        seen: list[str] = []
+        cursor = None
+        while True:
+            items, cursor = self.reads.list_runs(cursor=cursor, limit=200)
+            seen.extend(item["run_id"] for item in items)
+            if cursor is None:
+                break
+        self.assertEqual(1_000, len(seen))
+        self.assertEqual(1_000, len(set(seen)))
+
+    def test_ten_thousand_timeline_events_page_in_global_order(self) -> None:
+        run_id = self.start(0)
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc).isoformat()
+        with connect_workflow_database(self.db) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.executemany(
+                "INSERT INTO run_events(event_id,run_id,aggregate_id,"
+                "aggregate_sequence,event_type,event_version,correlation_id,"
+                "causation_id,occurred_at,payload_json) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                [
+                    (
+                        f"event:capacity-{index:05d}", run_id,
+                        f"capacity_event:{index:05d}", 1, "CapacityObserved", 1,
+                        run_id, f"event:capacity-cause-{index:05d}", now, "{}",
+                    )
+                    for index in range(10_000)
+                ],
+            )
+            connection.commit()
+
+        from orbit.workflow.domain.ids import EntityId
+
+        seen: list[int] = []
+        cursor = None
+        while True:
+            items, cursor = self.reads.timeline(
+                EntityId.parse(run_id), cursor=cursor, limit=200
+            )
+            seen.extend(item["position"] for item in items)
+            if cursor is None:
+                break
+        self.assertGreaterEqual(len(seen), 10_000)
+        self.assertEqual(seen, sorted(seen))
+        self.assertEqual(len(seen), len(set(seen)))
+
+
 if __name__ == "__main__":
     unittest.main()

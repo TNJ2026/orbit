@@ -227,7 +227,12 @@ class RunLifecycleE2E(unittest.TestCase):
     def test_the_ui_is_served_and_self_contained(self) -> None:
         for path in (
             "/ui/", "/ui/assets/app.js", "/ui/assets/api.js", "/ui/assets/i18n.js",
-            "/ui/assets/app.css", "/ui/assets/i18n.zh-CN.json",
+            "/ui/assets/app.css", "/ui/assets/router.js",
+            "/ui/assets/components/command-dialog.js",
+            "/ui/assets/components/data-state.js",
+            "/ui/assets/styles/tokens.css", "/ui/assets/styles/shell.css",
+            "/ui/assets/styles/components.css", "/ui/assets/styles/views.css",
+            "/ui/assets/i18n.zh-CN.json",
             "/ui/assets/i18n.en-US.json",
         ):
             with self.subTest(path=path):

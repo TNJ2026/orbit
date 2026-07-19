@@ -200,6 +200,15 @@ class SQLiteArtifactRepository(_SQLiteDataRepository):
         """, (_time(record.committed_at), str(record.created_event_id), str(record.artifact_id)))
         if cursor.rowcount != 1:
             raise IntegrityViolationError("Artifact stage was concurrently changed")
+        # Initial read authority follows durable Run membership. The grant is
+        # committed in the same UoW as Artifact metadata, so a catalog reader
+        # can never observe a committed Artifact before its ACL exists.
+        self.connection.execute(
+            "INSERT OR IGNORE INTO artifact_acl(artifact_id, subject, permission, granted_by, created_at)"
+            " SELECT ?, subject, 'read', 'system:artifact-commit', ?"
+            " FROM run_artifact_subjects WHERE run_id=?",
+            (str(record.artifact_id), _time(record.committed_at), str(record.run_id)),
+        )
 
     def abandon(self, artifact_id) -> None:
         cursor = self._write(

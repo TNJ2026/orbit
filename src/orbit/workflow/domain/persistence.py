@@ -154,6 +154,8 @@ class WorkflowRunRecord:
     correlation_id: EntityId
     created_at: datetime
     updated_at: datetime
+    goal: str | None = None
+    display_name: str | None = None
 
     def __post_init__(self) -> None:
         _kind(self.run_id, "run")
@@ -161,6 +163,10 @@ class WorkflowRunRecord:
         _kind(self.correlation_id, "run")
         _aware(self.created_at, "created_at")
         _aware(self.updated_at, "updated_at")
+        if self.goal is not None and not self.goal.strip():
+            raise ValueError("run goal must be non-empty when present")
+        if self.display_name is not None and not self.display_name.strip():
+            raise ValueError("run display_name must be non-empty when present")
 
 
 @dataclass(frozen=True)

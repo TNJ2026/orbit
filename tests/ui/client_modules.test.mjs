@@ -19,6 +19,8 @@ const assets = resolve(here, "../../src/orbit/static/workflow-ui/assets");
 
 const { Api, ApiError } = await import(`${assets}/api.js`);
 const { I18n, preferredLocale, LOCALES } = await import(`${assets}/i18n.js`);
+const { readRoute, routeHash } = await import(`${assets}/router.js`);
+const { dataState } = await import(`${assets}/components/data-state.js`);
 
 function catalog(locale) {
   return JSON.parse(readFileSync(`${assets}/i18n.${locale}.json`, "utf8"));
@@ -54,9 +56,12 @@ test("http statuses map to distinct message keys", async () => {
   const cases = [
     [401, null, "error.unauthenticated"],
     [403, null, "error.forbidden"],
+    [404, null, "error.generic"],
     [409, null, "error.conflict"],
     [409, "command_in_progress", "error.commandInProgress"],
+    [422, null, "error.generic"],
     [429, null, "error.rateLimited"],
+    [503, null, "error.generic"],
     [500, null, "error.generic"],
   ];
   for (const [status, code, expected] of cases) {
@@ -148,6 +153,68 @@ test("a command posts the server's href and expected version verbatim", async ()
     expected_version: 3,
     reason: "because",
   });
+});
+
+test("capabilities reads the shell identity and deployment facts endpoint", async () => {
+  const calls = stubFetch([{ status: 200, body: { data: { actor: "local" } } }]);
+  const response = await new Api().capabilities();
+  assert.equal(calls[0].url, "/api/v1/capabilities");
+  assert.equal(response.data.actor, "local");
+});
+
+test("workflow detail encodes identity and pins the requested version", async () => {
+  const calls = stubFetch([{ status: 200, body: { data: {} } }]);
+  await new Api().workflowDetail("workflow:launch plan", 3);
+  assert.equal(calls[0].url, "/api/v1/workflows/workflow%3Alaunch%20plan?version=3");
+});
+
+test("ops and live reads use their versioned API views", async () => {
+  const calls = stubFetch([
+    { status: 200, body: { data: {} } },
+    { status: 200, body: { data: {} } },
+  ]);
+  const api = new Api();
+  await api.opsStatus();
+  await api.live("opaque+/=");
+  assert.equal(calls[0].url, "/api/v1/ops/status");
+  assert.equal(calls[1].url, "/api/v1/live?cursor=opaque%2B%2F%3D");
+});
+
+/* -- shell primitives ---------------------------------------------------- */
+
+test("router parses deep links and serialises navigation", () => {
+  assert.deepEqual(readRoute("#/runs/run%3A7"), { view: "run", runId: "run:7" });
+  assert.deepEqual(readRoute("#/goals/run%3A7"), { view: "goal", runId: "run:7" });
+  assert.deepEqual(readRoute("#/artifacts/artifact%3A7"), {
+    view: "artifact", artifactId: "artifact:7", runId: null,
+  });
+  assert.deepEqual(readRoute("#/inbox"), { view: "inbox", runId: null });
+  assert.deepEqual(readRoute("#/workflows"), { view: "workflows", runId: null });
+  assert.deepEqual(readRoute("#/agents"), { view: "agents", runId: null });
+  assert.deepEqual(readRoute("#/settings"), { view: "settings", runId: null });
+  assert.deepEqual(readRoute("#/not-a-view"), { view: "home", runId: null });
+  assert.equal(routeHash({ view: "run", runId: "run:7" }), "#/runs/run%3A7");
+  assert.equal(routeHash({ view: "goal", runId: "run:7" }), "#/goals/run%3A7");
+  assert.equal(
+    routeHash({ view: "artifact", artifactId: "artifact:7" }),
+    "#/artifacts/artifact%3A7",
+  );
+  assert.equal(routeHash({ view: "ops", runId: null }), "#/ops");
+  assert.equal(routeHash({ view: "agents", runId: null }), "#/agents");
+  assert.equal(routeHash({ view: "settings", runId: null }), "#/settings");
+});
+
+test("generic data states carry text roles and retry actions", () => {
+  const el = (tag, props = {}, children = []) => ({ tag, props, children });
+  const i18n = { t: (key) => key };
+  for (const kind of ["loading", "empty", "error", "stale", "pending"]) {
+    const state = dataState(el, i18n, kind);
+    assert.equal(state.props.class, `data-state ${kind}`);
+    assert.equal(state.props.role, kind === "error" ? "alert" : "status");
+    assert.equal(state.children[0].props.text, `state.${kind}`);
+  }
+  const retriable = dataState(el, i18n, "error", { onRetry: () => {} });
+  assert.equal(retriable.children[1].children[0].props.text, "state.retry");
 });
 
 /* -- i18n ----------------------------------------------------------------- */

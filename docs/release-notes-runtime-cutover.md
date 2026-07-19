@@ -95,23 +95,27 @@ url = "http://127.0.0.1:8848/mcp"
 
 ## Open capability
 
-- **Dynamic planning has no DSL syntax.** Foreach groups, subflows and agentic
-  regions have domain models, services, persistence and contract tests, but no
-  node kind expresses them. This is out of the migration's scope and needs its
-  own plan; it is listed here so nobody discovers it by writing a workflow that
-  will not compile.
+- **P8 dynamic UI capabilities remain conditional.** Planner decisions and
+  dynamic Plan patches do not yet have a frozen production View API; Foreach,
+  Subflow and historical Overlay are not reachable from the published static
+  DSL/Kernel path. Their persistence or application services do not count as a
+  released UI capability. The `/api/v1/capabilities` response remains the
+  authority for whether a deployment provides each family.
 
 ## Non-blocking validation limits
 
 - **Windows is untested.** Development tooling assumes POSIX process groups.
-- **No visual-regression baseline.** The browser suite drives real interactions
-  in both locales, but nothing compares rendered pixels between releases;
-  contrast and focus order are covered by static asset guards.
+- **Visual baselines are reference-platform-bound.** Playwright covers three
+  Shell viewports and both themes; the reference desktop additionally covers
+  all nine primary pages, the New Goal dialog, Run detail, empty Inbox and
+  service-error states. Baseline metadata records the OS/architecture; other
+  platforms skip loudly until a fixed CI image is selected rather than
+  comparing incompatible font rasterisation.
 
 ## Testing
 
 ```bash
-python -m unittest discover -s tests          # 739 tests
+python -m unittest discover -s tests          # full Runtime/API/UI suite
 node --test tests/ui/client_modules.test.mjs  # client modules, needs node
 uv pip install -e '.[dev]' && python -m playwright install chromium
 ```
@@ -144,17 +148,43 @@ Ran 45 tests in 2.146s — OK
 Ran 14 tests in 8.421s — OK
 
 .venv/bin/python -m unittest discover -s tests
-Ran 739 tests in 52.036s — OK
+Ran 800 tests in 72.998s — OK
 ```
 
 The browser suite (`tests/test_browser_e2e.py`) drives a real Chromium against
-a real server: locale selection and switching, the new-run dialog, approving
-from the inbox, granting budget to an exhausted run, cancelling a run parked on
-a person, the plan panel's definition/overlay split, data and lineage, applying
-a recovery finding from the ops page, and a failed run's error panel. The Human
-workflow is driven end to end in both `zh-CN` and `en-US`, and locale-specific
-controls have bilingual assertions. The suite skips when playwright is absent,
-so a plain checkout still runs green.
+a real server: all nine primary pages, locale switching, the four-step New Goal
+dialog, Human/Budget/Cancel/Recovery commands, conflict and permission races,
+Run Plan/Data/Error views, Artifact lineage, Agents/Ops/Settings, reload,
+mobile overflow, keyboard focus restoration, 503/offline retry and console
+errors. The Human workflow is driven end to end in both `zh-CN` and `en-US`.
+The suite skips when Playwright is absent, so a plain install does not acquire
+a browser dependency.
+
+The clean-install gate builds a wheel, installs it into an empty environment,
+starts that installed `orbit serve`, and reads `/ui/`, a packaged ES module and
+the authenticated `/api/v1` surface. It does not import UI files from the
+checkout.
+
+### P9 Runtime UI release gate execution record — 2026-07-19
+
+| Release gate | Evidence executed | Result |
+| --- | --- | --- |
+| Bilingual, accessibility and responsive behavior | Catalog parity/placeholder checks, WCAG AA text-token contrast, keyboard dialog focus restoration, Escape-operated mobile drawer, and all nine primary views at 360×800 without horizontal overflow. | ✅ Pass |
+| Visual stability | Reference-platform PNG + metadata baselines cover Shell at 360/768/1280 in both themes, all nine primary pages at desktop in both themes, and dialog, Run Detail, empty Inbox and 503 states. | ✅ Pass |
+| Capacity and failure recovery | Stable cursor tests page through 1,000 Runs and 10,000 Timeline events; large inline values are bounded before DOM insertion. Chromium verifies network loss and 503 are localised and retryable; restart, stale projection, permission and conflict suites remain green. | ✅ Pass |
+| Installed artifact | The clean-install suite builds a wheel, installs an empty venv, starts that installed `orbit serve`, and reads the packaged UI entry, router module, SPA fallback and authenticated API. Packaging rejects `.DS_Store`/`Thumbs.db`. | ✅ Pass |
+| Browser audit | Real Chromium visits all nine primary pages with zero console errors and covers deep-link refresh, mobile navigation, both locales, commands, permission/conflict races, and local retry states. | ✅ Pass |
+| Documentation and capability truth | Release notes and runbook describe the shipped UI and operating path; P8 dynamic capability families remain explicitly conditional and are not counted as static UI completion. | ✅ Pass |
+
+Current release verification:
+
+```text
+.venv/bin/python -m unittest discover -s tests
+Ran 800 tests in 72.998s — OK
+
+node --test tests/ui/*.test.mjs
+20 tests — pass 20, fail 0
+```
 
 ## Verifying an install
 

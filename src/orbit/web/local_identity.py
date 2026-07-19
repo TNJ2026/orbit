@@ -16,11 +16,16 @@ from typing import Sequence
 
 from starlette.requests import Request
 
-from .api_v1 import READ_SCOPE, SENSITIVE_SCOPE, WRITE_SCOPE, Authorizer
+from .api_v1 import (
+    OPS_READ_SCOPE, OPS_WRITE_SCOPE, READ_SCOPE, SENSITIVE_SCOPE, WRITE_SCOPE,
+    Authorizer,
+)
 
 
 LOCAL_ACTOR = "local"
-LOCAL_SCOPES: tuple[str, ...] = (READ_SCOPE, WRITE_SCOPE, SENSITIVE_SCOPE)
+LOCAL_SCOPES: tuple[str, ...] = (
+    READ_SCOPE, WRITE_SCOPE, SENSITIVE_SCOPE, OPS_READ_SCOPE, OPS_WRITE_SCOPE,
+)
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 
 

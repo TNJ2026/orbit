@@ -45,8 +45,16 @@ class CapabilityService:
                 if scope.startswith(row["scope"]) and permission in json.loads(row["permissions_json"]):return EntityId.parse(row["capability_id"])
         raise CapabilityDenied("capability denied")
     def grant_artifact(self,artifact_id:EntityId,subject:str,permission:str,*,actor:str,now:datetime)->None:
-        with connect_workflow_database(self.path) as db:db.execute("INSERT OR IGNORE INTO artifact_acl VALUES (?,?,?,?,?)",(str(artifact_id),subject,permission,actor,now.isoformat()))
+        with connect_workflow_database(self.path) as db:
+            row=db.execute("SELECT run_id FROM artifacts WHERE artifact_id=?",(str(artifact_id),)).fetchone()
+            if row is None:raise CapabilityDenied("Artifact unavailable")
+            db.execute("INSERT OR IGNORE INTO artifact_acl VALUES (?,?,?,?,?)",(str(artifact_id),subject,permission,actor,now.isoformat()))
+            audit(
+                db, run_id=EntityId.parse(row["run_id"]), actor=actor,
+                action="artifact.acl.grant", target_id=str(artifact_id),
+                decision="allowed", details={"subject":subject,"permission":permission},
+                occurred_at=now,
+            )
     def authorize_artifact(self,artifact_id:EntityId,subject:str,permission:str)->None:
         with connect_workflow_database(self.path,read_only=True) as db:
             if db.execute("SELECT 1 FROM artifact_acl WHERE artifact_id=? AND subject=? AND permission=?",(str(artifact_id),subject,permission)).fetchone() is None:raise CapabilityDenied("Artifact ACL denied")
-

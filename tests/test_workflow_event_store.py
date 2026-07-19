@@ -62,7 +62,10 @@ class WorkflowEventStoreTests(unittest.TestCase):
             )
             uow.connection.execute(
                 """
-                INSERT INTO workflow_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO workflow_runs (
+                    run_id, workflow_id, workflow_version, definition_hash,
+                    status, aggregate_version, correlation_id, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     "run:r1", "workflow:flow", 1, "sha256:" + "a" * 64,

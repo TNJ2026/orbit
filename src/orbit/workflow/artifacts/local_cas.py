@@ -149,6 +149,44 @@ class LocalCASBackend:
             raise BlobIntegrityError("Artifact Blob checksum mismatch")
         return content
 
+    def open_verified_stream(self, blob_key: str, checksum, size_bytes: int):
+        """Return one verified, rewound file descriptor for streaming.
+
+        Verification and delivery use the same open descriptor, avoiding the
+        validate-path-then-reopen race of a conventional file response.
+        """
+        path = self._path(blob_key)
+        try:
+            source = path.open("rb")
+        except FileNotFoundError:
+            raise BlobIntegrityError("Artifact Blob is missing") from None
+        try:
+            before = os.fstat(source.fileno())
+            if before.st_size != int(size_bytes):
+                raise BlobIntegrityError("Artifact Blob size mismatch")
+            digest = hashlib.sha256()
+            count = 0
+            while True:
+                chunk = source.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+                count += len(chunk)
+            after = os.fstat(source.fileno())
+            if count != int(size_bytes) or (
+                before.st_size, before.st_mtime_ns
+            ) != (after.st_size, after.st_mtime_ns):
+                raise BlobIntegrityError("Artifact Blob changed during verification")
+            actual = f"sha256:{digest.hexdigest()}"
+            expected = getattr(checksum, "value", str(checksum))
+            if actual != blob_key or actual != expected:
+                raise BlobIntegrityError("Artifact Blob checksum mismatch")
+            source.seek(0)
+            return source
+        except Exception:
+            source.close()
+            raise
+
     def verify(self, blob_key, checksum, size_bytes) -> bool:
         try:
             content = self.read(blob_key, max_size_bytes=size_bytes)

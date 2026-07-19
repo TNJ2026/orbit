@@ -1,0 +1,5 @@
+{
+  "name": "orbit-runtime-ui-tests",
+  "private": true,
+  "type": "module"
+}

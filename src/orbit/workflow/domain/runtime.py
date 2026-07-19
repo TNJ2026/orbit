@@ -70,7 +70,10 @@ RUNTIME_EVENT_VERSIONS = MappingProxyType(
 
 _COMMAND_FIELDS = MappingProxyType(
     {
-        "start_run": ({"workflow_id", "workflow_version", "definition_hash"}, {"input", "artifact_inputs"}),
+        "start_run": (
+            {"workflow_id", "workflow_version", "definition_hash"},
+            {"input", "artifact_inputs", "goal"},
+        ),
         "schedule_node": ({"run_id", "node_id"}, {"plan_version", "input"}),
         "start_attempt": (set(), set()),
         "complete_attempt": ({"output"}, {"artifact_refs"}),
@@ -132,7 +135,7 @@ def validate_runtime_event_payload(event_type: str, payload: Mapping[str, Any]) 
     optional = {
         "workflow_run_transitioned": {
             "workflow_id", "workflow_version", "definition_hash", "plan_id",
-            "plan_version", "input", "artifact_refs", "reason",
+            "plan_version", "input", "goal", "artifact_refs", "reason",
         },
         "node_run_transitioned": {"run_id", "plan_version", "generation", "activation_key"},
         "attempt_transitioned": {"run_id"},

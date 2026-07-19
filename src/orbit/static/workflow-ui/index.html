@@ -4,35 +4,70 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Orbit Runtime</title>
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="assets/app.css">
 </head>
 <body>
   <a class="skip-link" href="#content" data-i18n="app.skipToContent">Skip to main content</a>
   <div class="app">
-    <aside class="sidebar">
+    <aside class="sidebar" id="sidebar">
       <div class="brand">
         <div data-i18n="app.title">Orbit Runtime</div>
         <div class="brand-sub" data-i18n="app.subtitle">Mission control</div>
       </div>
+      <form class="search-slot" id="globalSearchForm" role="search">
+        <label class="sr-only" for="globalSearch" data-i18n="search.label">Search runs</label>
+        <input id="globalSearch" type="search" data-i18n-placeholder="search.placeholder" placeholder="Search goals and runs">
+      </form>
       <nav class="nav" data-i18n-label="nav.label" aria-label="Main navigation">
-        <button class="nav-button" data-view="runs" aria-current="page">
-          <span data-i18n="nav.runs">Runs</span>
-        </button>
-        <button class="nav-button" data-view="inbox">
-          <span data-i18n="nav.inbox">Inbox</span>
-          <span class="nav-count" id="inboxCount"></span>
-        </button>
-        <button class="nav-button" data-view="ops">
-          <span data-i18n="nav.ops">Ops</span>
-        </button>
+        <div class="nav-group">
+          <div class="nav-group-title" data-i18n="nav.group.discover">Discover</div>
+          <button class="nav-button" data-view="home" aria-current="page">
+            <span data-i18n="nav.home">Home</span>
+          </button>
+          <button class="nav-button" data-view="goals">
+            <span data-i18n="nav.goals">Goals</span>
+          </button>
+          <button class="nav-button" data-view="workflows">
+            <span data-i18n="nav.workflows">Workflows</span>
+          </button>
+        </div>
+        <div class="nav-group">
+          <div class="nav-group-title" data-i18n="nav.group.operate">Operate</div>
+          <button class="nav-button" data-view="runs">
+            <span data-i18n="nav.runs">Runs</span>
+          </button>
+          <button class="nav-button" data-view="inbox">
+            <span data-i18n="nav.inbox">Inbox</span>
+            <span class="nav-count" id="inboxCount"></span>
+          </button>
+          <button class="nav-button" data-view="artifacts">
+            <span data-i18n="nav.artifacts">Artifacts</span>
+          </button>
+        </div>
+        <div class="nav-group">
+          <div class="nav-group-title" data-i18n="nav.group.admin">Admin</div>
+          <button class="nav-button" data-view="agents">
+            <span data-i18n="nav.agents">Agents</span>
+          </button>
+          <button class="nav-button" data-view="ops">
+            <span data-i18n="nav.ops">Ops</span>
+          </button>
+          <button class="nav-button" data-view="settings">
+            <span data-i18n="nav.settings">Settings</span>
+          </button>
+        </div>
       </nav>
     </aside>
 
+    <button class="nav-backdrop" id="navBackdrop" data-i18n-label="nav.close" aria-label="Close navigation" tabindex="-1"></button>
     <main class="main">
       <header class="topbar">
+        <button class="button nav-toggle" id="navToggle" aria-controls="sidebar" aria-expanded="false" data-i18n-label="nav.toggle" aria-label="Open navigation">☰</button>
         <h1 id="viewTitle">Runs</h1>
+        <span class="actor-chip" id="actorChip" data-i18n-label="actor.label" aria-label="Signed-in actor"></span>
         <button class="button" id="refresh" data-i18n="action.refresh">Refresh</button>
-        <button class="button primary" id="newRun" data-i18n="action.newRun">New run</button>
+        <button class="button primary" id="newRun" data-i18n="action.newGoal" hidden>New goal</button>
         <select id="localeSelect" data-i18n-label="locale.switch" aria-label="Change language"></select>
         <button class="button" id="themeToggle" data-i18n-label="theme.toggle" aria-label="Toggle theme">◐</button>
       </header>

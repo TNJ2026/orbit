@@ -63,6 +63,65 @@ def _node_definition(node: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _definition_edges(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Normalize linear 1.1 and static-graph 1.2 edges for read clients."""
+
+    if plan.get("schema_version") == "1.2":
+        return [
+            {
+                "edge_id": edge["edge_id"],
+                "from": edge["source_node_id"],
+                "to": edge["target_node_id"],
+                "route": edge["route"],
+                "priority": edge["priority"],
+                "back_edge": bool(edge["back_edge"]),
+                "policy_ref": edge.get("policy_ref"),
+            }
+            for edge in plan.get("edges") or ()
+        ]
+    successors = plan.get("successors") or {}
+    return [
+        {"from": source, "to": target}
+        for source, target in sorted(successors.items())
+        if target
+    ]
+
+
+def _layout(nodes: list[dict[str, Any]], edges: list[dict[str, Any]]) -> dict[str, Any]:
+    """A deterministic, definition-only layout hint for the static UI.
+
+    Depth is derived from authored forward edges, never runtime events. Back
+    edges are excluded so loops cannot make the layout cyclic.
+    """
+
+    node_ids = [node["node_id"] for node in nodes]
+    depth = {node_id: 0 for node_id in node_ids}
+    incoming = {node_id: [] for node_id in node_ids}
+    outgoing = {node_id: [] for node_id in node_ids}
+    for edge in edges:
+        if edge.get("back_edge"):
+            continue
+        if edge["from"] in outgoing and edge["to"] in incoming:
+            outgoing[edge["from"]].append(edge["to"])
+            incoming[edge["to"]].append(edge["from"])
+    for node_id in node_ids:
+        if incoming[node_id]:
+            depth[node_id] = max(depth[parent] + 1 for parent in incoming[node_id])
+    widths: dict[int, int] = {}
+    positions = []
+    for node_id in node_ids:
+        layer = depth[node_id]
+        lane = widths.get(layer, 0)
+        widths[layer] = lane + 1
+        positions.append({"node_id": node_id, "depth": layer, "lane": lane})
+    branched = any(len(targets) > 1 for targets in outgoing.values())
+    joined = any(len(sources) > 1 for sources in incoming.values())
+    return {
+        "mode": "branching" if branched or joined else "outline",
+        "positions": positions,
+    }
+
+
 class PlanReadModelService:
     def __init__(self, path: Path | str) -> None:
         self.path = Path(path)
@@ -88,7 +147,7 @@ class PlanReadModelService:
             ]
 
         plan = json.loads(row["canonical_plan_json"])
-        successors = plan.get("successors") or {}
+        edges = _definition_edges(plan)
         return {
             "run_id": str(run_id),
             "plan_id": row["plan_id"],
@@ -99,12 +158,10 @@ class PlanReadModelService:
             "definition_hash": row["definition_hash"],
             "entry_node_id": plan.get("entry_node_id"),
             "terminal_node_id": plan.get("terminal_node_id"),
+            "entry_node_ids": plan.get("entry_node_ids") or [plan.get("entry_node_id")],
+            "terminal_node_ids": plan.get("terminal_node_ids") or [plan.get("terminal_node_id")],
             "nodes": [_node_definition(node) for node in plan.get("nodes") or ()],
-            "edges": [
-                {"from": source, "to": target}
-                for source, target in sorted(successors.items())
-                if target
-            ],
+            "edges": edges,
             "available_versions": versions,
         }
 
@@ -209,4 +266,116 @@ class PlanReadModelService:
             "identical": (
                 base_nodes == target_nodes and base_edges == target_edges
             ),
+        }
+
+    # -- graph ------------------------------------------------------------
+
+    def graph(
+        self, run_id: EntityId, *, plan_version: int | None = None
+    ) -> dict[str, Any]:
+        """Static definition plus explicit current projection facts.
+
+        The two halves stay separate in the DTO. In particular, this method
+        does not infer branch or join state by replaying the timeline.
+        """
+
+        definition = self.definition(run_id, plan_version=plan_version)
+        overlay = self.overlay(run_id, plan_version=definition["plan_version"])
+        with connect_workflow_database(self.path, read_only=True) as connection:
+            run = connection.execute(
+                "SELECT aggregate_version FROM workflow_runs WHERE run_id = ?",
+                (str(run_id),),
+            ).fetchone()
+            tokens = connection.execute(
+                "SELECT token_id, source_node_run_id, status, aggregate_version,"
+                " scope_json, created_at, updated_at FROM branch_tokens"
+                " WHERE run_id = ? ORDER BY created_at, token_id",
+                (str(run_id),),
+            ).fetchall()
+            joins = connection.execute(
+                "SELECT join_group_id, node_id, generation, policy_json,"
+                " participant_edge_ids_json, status, decision_json,"
+                " aggregate_version, created_at, updated_at FROM join_groups"
+                " WHERE run_id = ? ORDER BY join_group_id",
+                (str(run_id),),
+            ).fetchall()
+            counters = connection.execute(
+                "SELECT counter_id, policy_id, scope_key, value, limit_value,"
+                " aggregate_version, updated_at FROM graph_control_counters"
+                " WHERE run_id = ? ORDER BY counter_id",
+                (str(run_id),),
+            ).fetchall()
+
+        plan_version_value = definition["plan_version"]
+        branch_tokens = []
+        for row in tokens:
+            scope = json.loads(row["scope_json"])
+            if scope.get("plan_version", plan_version_value) != plan_version_value:
+                continue
+            branch_tokens.append({
+                "token_id": row["token_id"],
+                "source_node_run_id": row["source_node_run_id"],
+                "edge_id": scope.get("edge_id"),
+                "target_node_id": scope.get("target_node_id"),
+                "target_generation": scope.get("target_generation"),
+                "branch_group": scope.get("branch_group"),
+                "status": row["status"],
+                "expected_version": int(row["aggregate_version"]),
+                "updated_at": row["updated_at"],
+            })
+        join_groups = [
+            {
+                "join_group_id": row["join_group_id"],
+                "node_id": row["node_id"],
+                "generation": int(row["generation"]),
+                "policy": json.loads(row["policy_json"]),
+                "participant_edge_ids": json.loads(row["participant_edge_ids_json"]),
+                "status": row["status"],
+                "decision": None if row["decision_json"] is None else json.loads(row["decision_json"]),
+                "expected_version": int(row["aggregate_version"]),
+                "updated_at": row["updated_at"],
+            }
+            for row in joins
+        ]
+        control_counters = [
+            {
+                "counter_id": row["counter_id"],
+                "policy_id": row["policy_id"],
+                "scope_key": row["scope_key"],
+                "value": int(row["value"]),
+                "limit": int(row["limit_value"]),
+                "expected_version": int(row["aggregate_version"]),
+                "updated_at": row["updated_at"],
+            }
+            for row in counters
+        ]
+        versions = [
+            int(run["aggregate_version"]),
+            *(node["expected_version"] for node in overlay["nodes"]),
+            *(item["expected_version"] for item in branch_tokens),
+            *(item["expected_version"] for item in join_groups),
+            *(item["expected_version"] for item in control_counters),
+        ]
+        nodes = definition["nodes"]
+        edges = definition["edges"]
+        return {
+            "run_id": str(run_id),
+            "plan_version": plan_version_value,
+            "projection_version": max(versions),
+            "definition": {
+                "scope": "immutable",
+                "plan_schema_version": definition["plan_schema_version"],
+                "definition_hash": definition["definition_hash"],
+                "nodes": nodes,
+                "edges": edges,
+                "layout": _layout(nodes, edges),
+            },
+            "runtime_overlay": {
+                "scope": "current",
+                "plan_version": overlay["plan_version"],
+                "nodes": overlay["nodes"],
+                "branch_tokens": branch_tokens,
+                "join_groups": join_groups,
+                "control_counters": control_counters,
+            },
         }
