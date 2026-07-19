@@ -6,11 +6,8 @@ run parked on a person, the plan panel's definition/overlay split, the ops
 page, and a failed run's error panel.
 
 Artifact metadata and lineage are inspected from Run detail, and recovery is
-applied from an actual finding on the Ops page.  The Human journey is still
-exercised in two pieces — a run started from the dialog, and an approval
-completed from the inbox — because the static Workflow DSL does not yet have a
-Human node kind.  The HumanTask is therefore created through its production
-application service rather than by a test-only fake.
+applied from an actual finding on the Ops page.  The Human journey is one
+published static workflow: Transform action -> Human controller -> terminal.
 
 playwright is a test-only dependency (`pip install -e '.[dev]'` plus
 `playwright install chromium`). The suite skips when it is missing rather than
@@ -41,7 +38,8 @@ from orbit.workflow.application.run_service import RunApplicationService
 from orbit.workflow.domain.human import HumanTaskKind
 from orbit.workflow.domain.ids import EntityId
 from tests.test_web_composition import (
-    SCHEMAS, publish_linear_workflow, transform_registration,
+    SCHEMAS, publish_human_workflow, publish_linear_workflow,
+    transform_registration,
 )
 
 
@@ -72,7 +70,9 @@ class BrowserE2ETestCase(unittest.TestCase):
             authorizer=local_authorizer(),
             serve_ui=True,
         )
+        cls.app = app
         publish_linear_workflow(cls.db)
+        publish_human_workflow(cls.db)
 
         port = free_port()
         cls.base = f"http://127.0.0.1:{port}"
@@ -252,17 +252,38 @@ class HumanTaskTests(BrowserE2ETestCase):
     def test_an_approval_is_completed_from_the_inbox_in_both_locales(self) -> None:
         for index, locale in enumerate(LOCALES):
             with self.subTest(locale=locale):
-                run_id = self.start_run(f"browser-human-{index}")
-                task_id, token = HumanTaskService(self.db).create(
-                    EntityId.parse(run_id), HumanTaskKind.APPROVAL, {"q": f"ship {index}?"},
-                    actor="local", now=datetime.now(timezone.utc), participants=["local"],
+                page = self.open(locale)
+                page.click("#newRun")
+                page.wait_for_selector("dialog[open]")
+                page.fill("#newRunWorkflow", "workflow:human")
+                page.fill("#newRunInput", '{"value": 3}')
+                page.click("dialog button[value=confirm]")
+                page.wait_for_function("() => location.hash.startsWith('#/runs/run')")
+                run_id = page.evaluate(
+                    "() => decodeURIComponent(location.hash.split('/')[2])"
+                )
+                self.wait_for_status(page, run_id, "waiting")
+                page.wait_for_function(
+                    "id => fetch('/api/v1/inbox?limit=200').then(r => r.json())"
+                    ".then(b => b.data.items.some(item => item.run_id === id))",
+                    arg=run_id, timeout=15000,
                 )
 
                 # The inbox identifies an item by its run and its label — the
                 # task id is addressing data, not something the row displays.
-                page = self.open(locale, path="/ui/#/inbox")
+                page.click('[data-view="inbox"]')
+                page.wait_for_function("() => location.hash === '#/inbox'")
                 row = page.locator("tr", has_text=run_id)
                 row.wait_for(timeout=15000)
+
+                with self.app.state.runtime.service.uow_factory() as uow:
+                    task_row = uow.connection.execute(
+                        "SELECT task_id FROM human_tasks WHERE run_id=?",
+                        (run_id,),
+                    ).fetchone()
+                task_id = EntityId.parse(task_row["task_id"])
+                token = self.app.state.runtime.human_delivery.take(task_id, "local")
+                self.assertIsNotNone(token)
 
                 # The first button is whatever the server advertised first;
                 # the test must not assume which command that is.
@@ -284,6 +305,7 @@ class HumanTaskTests(BrowserE2ETestCase):
                     "id => !document.body.innerText.includes(id)", arg=run_id,
                     timeout=15000,
                 )
+                self.wait_for_status(page, run_id, "succeeded")
 
 
 class BudgetTests(BrowserE2ETestCase):

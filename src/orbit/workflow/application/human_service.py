@@ -74,6 +74,14 @@ class HumanTaskService:
             deadline_at=deadline_at,
         )
 
+    def linked_node_run_id(self, task_id: EntityId) -> EntityId | None:
+        with connect_workflow_database(self.path, read_only=True) as db:
+            row = self._get(db, task_id)
+            return (
+                None if row["node_run_id"] is None
+                else EntityId.parse(row["node_run_id"])
+            )
+
     def claim(self, task_id: EntityId, *, actor: str, expected_version: int, now: datetime) -> None:
         with connect_workflow_database(self.path) as db:
             db.execute("BEGIN IMMEDIATE")
@@ -87,6 +95,10 @@ class HumanTaskService:
         if decision not in {"approve", "reject", "provide_input", "withdraw"}: raise ValueError("invalid HumanTask decision")
         with connect_workflow_database(self.path) as db:
             db.execute("BEGIN IMMEDIATE"); row = self._get(db, task_id)
+            if row["node_run_id"] is not None:
+                raise ValueError(
+                    "linked HumanTask must be submitted through the Runtime command boundary"
+                )
             if row["aggregate_version"] != expected_version: raise ValueError("HumanTask version conflict")
             if row["status"] not in {"waiting", "claimed"}: raise ValueError("HumanTask is terminal")
             if submission_token_hash(token) != row["submission_token_hash"]: raise PermissionError("invalid submission token")

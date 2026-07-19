@@ -10,6 +10,7 @@ import unittest
 from orbit.workflow.application.runtime_service import RuntimeApplicationService
 from orbit.workflow.catalogs import HandlerManifest, InMemoryHandlerCatalog, InMemorySchemaCatalog
 from orbit.workflow.application.durable_runtime_service import DurableRuntimeApplicationService
+from orbit.workflow.application.human_delivery import InMemoryHumanTaskDelivery
 from orbit.workflow.domain.durable_execution import ExecutionSafety
 from orbit.workflow.domain.handlers import ResourceProfile
 from orbit.workflow.domain.envelopes import CommandEnvelope
@@ -173,6 +174,94 @@ class GraphRuntimeE2ETests(unittest.TestCase):
         summary = service.get_graph_summary(run_id)
         self.assertEqual({"yes", "choose"}, {item["node_id"] for item in summary["nodes"]})
         self.assertEqual({"completed", "not_selected"}, {item["status"] for item in summary["tokens"]})
+
+    def test_static_human_controller_waits_and_resumes_the_graph(self):
+        dsl = {
+            "dsl_version": "1.2",
+            "metadata": {"id": "human_graph", "name": "Human"},
+            "nodes": [
+                {
+                    "id": "approve", "kind": "human",
+                    "inputs": PORT("value"), "outputs": PORT("value"),
+                    "config": {
+                        "task_kind": "approval", "participants": ["operator"],
+                        "quorum": "any",
+                    },
+                },
+                {"id": "done", "kind": "terminal", "inputs": PORT("value")},
+            ],
+            "edges": [{
+                "id": "approved",
+                "from": {"node": "approve", "port": "value"},
+                "to": {"node": "done", "port": "value"},
+            }],
+            "entry": ["approve"], "terminals": ["done"],
+        }
+        temp = tempfile.TemporaryDirectory(); self.addCleanup(temp.cleanup)
+        path = Path(temp.name) / "human.db"
+        compiled = compile_graph(dsl)
+        SQLiteWorkflowVersionStore(path).publish(
+            compiled, expected_latest_version=0, source_format="json",
+            source_text=None, actor="test",
+        )
+        delivery = InMemoryHumanTaskDelivery()
+        service = DurableRuntimeApplicationService(
+            path, human_task_delivery=delivery.deliver,
+        )
+        run_id = EntityId("run", "human")
+        started = service.submit(CommandEnvelope(
+            EntityId("command", "human-start"), "start_run", run_id, run_id,
+            AggregateVersion(0), "human-start", "starter", NOW,
+            {
+                "workflow_id": compiled.ir.workflow_id,
+                "workflow_version": 1,
+                "definition_hash": compiled.definition_hash.value,
+                "input": {"value": 1},
+            },
+        ))
+        self.assertEqual("applied", started.disposition.value, started.diagnostics)
+        self.assertIs(WorkflowRunStatus.WAITING, service.get_run(run_id).status)
+        with service.uow_factory() as uow:
+            row = uow.connection.execute(
+                "SELECT task_id,node_run_id,aggregate_version FROM human_tasks"
+                " WHERE run_id=?", (str(run_id),),
+            ).fetchone()
+        self.assertIsNotNone(row["node_run_id"])
+        task_id = EntityId.parse(row["task_id"])
+        token = delivery.take(task_id, "operator")
+        self.assertIsNotNone(token)
+
+        service.durable_recovery.scan_once(NOW)
+        self.assertIs(WorkflowRunStatus.WAITING, service.get_run(run_id).status)
+        with self.assertRaises(PermissionError):
+            service.submit_human_task(
+                task_id, run_id, row["aggregate_version"], token=token,
+                decision="approve", value=None, actor="intruder",
+                idempotency_key="intruder", now=NOW,
+            )
+
+        # The recipient already owns the delivered token; a fresh Runtime
+        # instance can resume the durable wait after process restart.
+        restarted = DurableRuntimeApplicationService(path)
+        submitted = restarted.submit_human_task(
+            task_id, run_id, row["aggregate_version"], token=token,
+            decision="approve", value={"note": "ship"}, actor="operator",
+            idempotency_key="approve-human", now=NOW,
+        )
+
+        self.assertEqual("completed", submitted["status"])
+        replayed = restarted.submit_human_task(
+            task_id, run_id, row["aggregate_version"], token=token,
+            decision="approve", value={"note": "ship"}, actor="operator",
+            idempotency_key="approve-human", now=NOW,
+        )
+        self.assertEqual("completed", replayed["status"])
+        self.assertIs(WorkflowRunStatus.SUCCEEDED, restarted.get_run(run_id).status)
+        summary = RuntimeApplicationService(path).get_graph_summary(run_id)
+        self.assertEqual(
+            {"approve": "succeeded", "done": "succeeded"},
+            {item["node_id"]: item["status"] for item in summary["nodes"]},
+        )
 
     def test_parallel_join_opens_once_and_is_recoverable(self):
         dsl = {

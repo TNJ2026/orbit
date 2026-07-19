@@ -443,8 +443,22 @@ def build_api_v1(
             decision = str(body.get("decision", ""))
             if not token:
                 raise ValueError("submission_token is required")
+            parsed_task_id = EntityId.parse(task_id)
+            node_run_id = humans.linked_node_run_id(parsed_task_id)
+            if node_run_id is not None:
+                with connect_workflow_database(path, read_only=True) as connection:
+                    row = connection.execute(
+                        "SELECT run_id FROM human_tasks WHERE task_id=?",
+                        (task_id,),
+                    ).fetchone()
+                return durable_service.submit_human_task(
+                    parsed_task_id, EntityId.parse(row["run_id"]),
+                    _required_version(body), token=token, decision=decision,
+                    value=body.get("value"), actor=actor,
+                    idempotency_key=key, now=now(),
+                )
             status = humans.submit(
-                EntityId.parse(task_id), token, decision, body.get("value"),
+                parsed_task_id, token, decision, body.get("value"),
                 actor=actor, expected_version=_required_version(body), now=now(),
             )
             return {"task_id": task_id, "decision": decision, "status": status.value}

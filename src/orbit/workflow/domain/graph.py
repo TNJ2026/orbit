@@ -24,6 +24,7 @@ GRAPH_SCHEMA_VERSION = SchemaVersion("1.2")
 
 class GraphNodeKind(str, Enum):
     ACTION = "action"
+    HUMAN = "human"
     DECISION = "decision"
     JOIN = "join"
     TERMINAL = "terminal"

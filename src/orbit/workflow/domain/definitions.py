@@ -81,7 +81,7 @@ class IRNode:
 
     def __post_init__(self) -> None:
         _required(self.id, "node id")
-        if self.kind not in {"action", "decision", "join", "terminal", "extension"}:
+        if self.kind not in {"action", "human", "decision", "join", "terminal", "extension"}:
             raise ValueError(f"unsupported IR node kind: {self.kind}")
         if self.route_mode is not None and self.route_mode not in {"exclusive", "parallel"}:
             raise ValueError("route_mode must be exclusive or parallel")

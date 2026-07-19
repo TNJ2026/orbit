@@ -1,7 +1,6 @@
 # Unwired capabilities
 
-**Status**: open scope record — static-runtime migration code gates pass except the
-single-workflow Human browser journey; dynamic structure support remains a later milestone
+**Status**: static-runtime migration gates closed; dynamic structure support remains a later milestone
 **Origin**: closing M0 blocker B5 ("Step 11 Foreach/Subflow runtime gap")
 **Revised**: 2026-07-19, after review found this document itself was wrong
 
@@ -87,6 +86,15 @@ something else created — and nothing else does.
 
 ## What was fixed while investigating
 
+The final M7 gap is closed by the static `human` controller. DSL 1.2 compiles
+Human nodes into ExecutionPlan 1.2 without assigning a Handler or Job. The
+Kernel creates the linked HumanTask and moves Run/NodeRun to `waiting` in one
+transaction; an authorised `submit_human_task` command completes the task,
+records the Human result, resumes the Run and routes the graph in one second
+transaction. Recovery treats an active HumanTask as a durable responsibility,
+and the bilingual browser test now drives a published
+Transform -> Human -> Terminal workflow without constructing a task directly.
+
 `RecoveryManager` declared `ORPHAN_FOREACH` safe to auto-apply, but
 `build_api_v1` constructed it with only the human service. `POST
 /api/v1/recovery/apply` therefore raised
@@ -161,12 +169,11 @@ Planner dispatch/recovery is supervised; every browser mutation, including
 `start_run`, comes from a server-advertised AllowedCommand; and all CLI entry
 points use the cutover gate.
 
-One M7 scenario remains deliberately unclaimed: a single published workflow
-cannot yet enter a HumanTask because the static DSL has no Human node kind.
-Human creation, inbox submission and run resume are production services and
-browser-tested, but the journey is split at that missing authoring construct.
-Either add a static Human node/handler or explicitly revise the M7 scenario
-before declaring the complete migration released.
+The M7 single-workflow Human scenario is now claimed: a published static
+workflow reaches a HumanTask, is submitted from Inbox, resumes its Human node
+and succeeds in both supported locales. The Human node is deliberately a
+Kernel controller rather than a Handler, so a long human wait never occupies a
+Job lease.
 
 Foreach, subflow and agentic DSL support remain out of scope and deserve their
 own plan.

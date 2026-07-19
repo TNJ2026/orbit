@@ -25,7 +25,9 @@ from orbit.web.app import RuntimeComposition, HandlerRegistration, create_app
 from orbit.web.schema_guard import (
     LEGACY_TABLES, MixedSchemaError, assert_runtime_schema, table_names,
 )
-from orbit.workflow.catalogs import HandlerManifest
+from orbit.workflow.catalogs import (
+    HandlerManifest, InMemoryHandlerCatalog, InMemorySchemaCatalog,
+)
 from orbit.workflow.domain.definitions import CompiledWorkflow
 from orbit.workflow.domain.durable_execution import ExecutionSafety
 from orbit.workflow.domain.envelopes import CommandEnvelope
@@ -39,6 +41,7 @@ from orbit.workflow.domain.definitions import (
     IREdge, IRHandlerRef, IRNode, IRPort, WorkflowIR,
 )
 from orbit.workflow.persistence.workflow_versions import SQLiteWorkflowVersionStore
+from orbit.workflow.dsl import compile_source
 
 
 NOW = datetime(2026, 7, 17, tzinfo=timezone.utc)
@@ -200,6 +203,57 @@ def publish_linear_workflow(db_path: Path) -> tuple[str, object]:
         actor="m2-test",
     )
     return "workflow:linear", digest
+
+
+def publish_human_workflow(db_path: Path) -> tuple[str, object]:
+    """Published action -> HumanTask -> terminal workflow used by M7."""
+
+    dsl = {
+        "dsl_version": "1.2",
+        "metadata": {"id": "human", "name": "Human approval"},
+        "nodes": [
+            {
+                "id": "transform", "kind": "action",
+                "inputs": [{"id": "value", "schema_id": "example://integer/1.0"}],
+                "outputs": [{"id": "value", "schema_id": "example://integer/1.0"}],
+                "handler": {"name": "transform", "version": "1.0.0"},
+            },
+            {
+                "id": "approve", "kind": "human",
+                "inputs": [{"id": "value", "schema_id": "example://integer/1.0"}],
+                "outputs": [{"id": "result", "schema_id": "schema://object/1.0"}],
+                "config": {
+                    "task_kind": "approval", "participants": ["local"],
+                    "quorum": "any",
+                },
+            },
+            {
+                "id": "done", "kind": "terminal",
+                "inputs": [{"id": "result", "schema_id": "schema://object/1.0"}],
+            },
+        ],
+        "edges": [
+            {
+                "id": "transformed", "from": {"node": "transform", "port": "value"},
+                "to": {"node": "approve", "port": "value"},
+            },
+            {
+                "id": "approved", "from": {"node": "approve", "port": "result"},
+                "to": {"node": "done", "port": "result"},
+            },
+        ],
+        "entry": ["transform"], "terminals": ["done"],
+    }
+    registration = transform_registration()
+    compiled = compile_source(
+        json.dumps(dsl), InMemoryHandlerCatalog([registration.manifest]),
+        InMemorySchemaCatalog(SCHEMAS), source_format="json",
+    )
+    SQLiteWorkflowVersionStore(db_path).publish(
+        compiled, expected_latest_version=0, source_format="json",
+        source_text=json.dumps(dsl), actor="m7-test",
+    )
+    return "workflow:human", compiled.definition_hash
 
 
 def start_run_command(run_id: EntityId, digest) -> CommandEnvelope:

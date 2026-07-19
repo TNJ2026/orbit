@@ -66,7 +66,14 @@ class RuntimeApplicationService:
                 for attempt in uow.attempts.list_by_node_run(node.node_run_id)
             )
             waiting_reason = None
-            if any(item.status is AttemptStatus.UNKNOWN_EXTERNAL_RESULT for item in attempts):
+            human_waiting = uow.connection.execute(
+                """SELECT 1 FROM human_tasks WHERE run_id=?
+                   AND status IN ('waiting','claimed') LIMIT 1""",
+                (str(run_id),),
+            ).fetchone()
+            if human_waiting is not None:
+                waiting_reason = "human_wait"
+            elif any(item.status is AttemptStatus.UNKNOWN_EXTERNAL_RESULT for item in attempts):
                 waiting_reason = "unknown_wait"
             elif any(item.status is JobStatus.RETRY_WAIT for item in jobs):
                 waiting_reason = "retry_wait"

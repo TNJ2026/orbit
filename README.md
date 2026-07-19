@@ -3,12 +3,14 @@
 [简体中文](./README.zh-CN.md) | **English**
 
 > A local workflow runtime for agent work. A workflow is a static graph; a run
-> advances by appending events to a log, and every node is executed by a handler
-> that was registered before the runtime started. Restart it mid-run and it
+> advances by appending events to a log. Action nodes use handlers registered
+> before startup; deterministic controllers handle routing, joins and durable
+> HumanTask waits. Restart it mid-run and it
 > picks up exactly where it was, because the log — not a process — is the state.
 
 ```
 workflow definition ──▶ plan ──▶ jobs ──▶ handlers
+                           └────▶ HumanTask controllers
                                    │
         event log (SQLite) ◀───────┘──▶ read models ──▶ /api/v1, /mcp, /ui
 ```
@@ -28,7 +30,9 @@ workflow definition ──▶ plan ──▶ jobs ──▶ handlers
 ## Scope
 
 orbit runs **static** workflow graphs: a published workflow compiles to a plan
-whose shape does not change while it runs. Dynamic planning — foreach groups,
+whose shape does not change while it runs. Static `human` nodes create durable
+approval tasks and resume graph routing after an authorised submission.
+Dynamic planning — foreach groups,
 subflows and agentic regions that rewrite their own graph — is implemented in
 the domain and service layers but is not reachable from a published workflow:
 the Planner dispatcher is supervised by the composition root, but the DSL and

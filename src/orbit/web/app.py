@@ -132,12 +132,19 @@ class RuntimeComposition:
         clock: Callable[[], datetime] = utc_now,
         artifact_backend: Any = None,
         planner_service: Any = None,
+        human_delivery: Any = None,
     ) -> None:
         self.db_path = Path(db_path)
         self.clock = clock
         self.worker_count = max(1, int(worker_count))
         self.poll_seconds = poll_seconds
         self.planner_service = planner_service
+        if human_delivery is None:
+            from ..workflow.application.human_delivery import (
+                InMemoryHumanTaskDelivery,
+            )
+            human_delivery = InMemoryHumanTaskDelivery()
+        self.human_delivery = human_delivery
 
         # A file carrying legacy tables is refused before anything is wired:
         # continuing would mean serving a database whose semantics are half
@@ -171,6 +178,7 @@ class RuntimeComposition:
             self.db_path,
             execution_registry=self.handler_registry,
             artifact_backend=artifact_backend,
+            human_task_delivery=self.human_delivery.deliver,
         )
 
         self.loops: list[BackgroundLoop] = []
@@ -305,6 +313,7 @@ def create_app(
     poll_seconds: float = DEFAULT_POLL_SECONDS,
     clock: Callable[[], datetime] = utc_now,
     artifact_backend: Any = None,
+    human_delivery: Any = None,
     extra_routes: Sequence[Route | Mount] = (),
     authenticator: Callable[[Any], str | None] | None = None,
     authorizer: Any = None,
@@ -364,6 +373,7 @@ def create_app(
         clock=clock,
         artifact_backend=artifact_backend,
         planner_service=planner_service,
+        human_delivery=human_delivery,
     )
 
     @asynccontextmanager

@@ -246,7 +246,7 @@ def analyze_dsl(
             diagnostics.append(
                 _diagnostic(document, "DSL_HANDLER_NOT_FOUND", "action node requires a handler", node_path + ("handler",))
             )
-        elif kind in {"decision", "join", "terminal"} and handler_ref is not None:
+        elif kind in {"human", "decision", "join", "terminal"} and handler_ref is not None:
             diagnostics.append(
                 _diagnostic(document, "DSL_HANDLER_NOT_FOUND", f"{kind} node cannot declare a handler", node_path + ("handler",))
             )
@@ -300,6 +300,47 @@ def analyze_dsl(
             diagnostics.append(
                 _diagnostic(document, "DSL_UNSUPPORTED_VERSION", "extension node requires an extension envelope", node_path + ("extension",))
             )
+        if kind == "human":
+            config = node.get("config", {})
+            if len(node.get("outputs", [])) != 1:
+                diagnostics.append(
+                    _diagnostic(
+                        document, "DSL_PORT_INCOMPATIBLE",
+                        "human node requires exactly one result output",
+                        node_path + ("outputs",),
+                    )
+                )
+            task_kind = config.get("task_kind")
+            if task_kind != "approval":
+                diagnostics.append(
+                    _diagnostic(
+                        document, "DSL_SCHEMA_ERROR",
+                        "static human config.task_kind must be approval",
+                        node_path + ("config", "task_kind"),
+                    )
+                )
+            participants = config.get("participants", [])
+            if (
+                not isinstance(participants, list)
+                or not participants
+                or any(not isinstance(actor, str) or not actor.strip() for actor in participants)
+                or len(set(participants)) != len(participants)
+            ):
+                diagnostics.append(
+                    _diagnostic(
+                        document, "DSL_SCHEMA_ERROR",
+                        "human config.participants must contain unique actor names",
+                        node_path + ("config", "participants"),
+                    )
+                )
+            if config.get("quorum", "any") != "any":
+                diagnostics.append(
+                    _diagnostic(
+                        document, "DSL_SCHEMA_ERROR",
+                        "static human nodes currently require quorum 'any'",
+                        node_path + ("config", "quorum"),
+                    )
+                )
         for policy_index, policy_id in enumerate(node.get("policies", [])):
             if policy_id not in policy_ids:
                 diagnostics.append(

@@ -60,6 +60,14 @@ class DurableRuntimeKernel(RuntimeKernel):
                 )(uow, command, builder)
                 uow.receipts.record(run_id, command, tuple(event_ids), command.issued_at)
                 uow.commit()
+            for task_id, participants, token in builder.human_deliveries:
+                try:
+                    self.human_task_delivery(task_id, participants, token)
+                except Exception as exc:
+                    self._log(
+                        "human_task_delivery_failed",
+                        {"task_id": str(task_id), "error_type": type(exc).__name__},
+                    )
             if self.snapshot_coordinator is not None:
                 try:
                     self.snapshot_coordinator.consider(run_id)

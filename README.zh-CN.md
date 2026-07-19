@@ -2,10 +2,11 @@
 
 **简体中文** | [English](./README.md)
 
-> 本地 agent 工作流 Runtime。工作流是一张静态图；一次运行靠往事件日志里追加事件推进，每个节点由启动前就注册好的 Handler 执行。中途重启也能接着跑——状态在日志里，不在进程里。
+> 本地 agent 工作流 Runtime。工作流是一张静态图；一次运行靠往事件日志里追加事件推进。Action 节点由启动前注册的 Handler 执行，路由、Join 和持久化 HumanTask 等待由确定性 Controller 推进。中途重启也能接着跑——状态在日志里，不在进程里。
 
 ```
 工作流定义 ──▶ 计划 ──▶ Job ──▶ Handler
+                    └──▶ HumanTask Controller
                         │
    事件日志（SQLite）◀───┘──▶ 读模型 ──▶ /api/v1、/mcp、/ui
 ```
@@ -18,6 +19,7 @@
 ## 适用范围
 
 orbit 运行的是**静态**工作流图：发布的工作流编译成一份计划，运行期间形状不变。
+静态 `human` 节点会创建持久化审批任务，并在获授权提交后恢复图路由。
 动态规划——foreach 组、subflow、能改写自身图的 agentic region——在领域层和
 service 层已实现，但已发布工作流仍无法触达：组合根已经监管 Planner dispatcher，
 但 DSL 和 Kernel 尚不会创建 Planner attempt 或结构节点。详见

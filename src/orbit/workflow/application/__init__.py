@@ -12,6 +12,7 @@ from .durable_runtime_service import (
 from .planner_service import PlannerApplicationService, PlannerClaim
 from .plan_service import PlanService, PlanConflictError, PolicyRejectedError
 from .human_service import HumanTaskService
+from .human_delivery import InMemoryHumanTaskDelivery
 from .budget_service import BudgetService
 from .foreach_service import ForeachService
 from .subflow_service import SubflowService
@@ -25,6 +26,7 @@ __all__ = [
     "load_catalogs",
     "PlannerApplicationService", "PlannerClaim",
     "PlanService", "PlanConflictError", "PolicyRejectedError",
-    "HumanTaskService", "BudgetService", "ForeachService", "SubflowService",
+    "HumanTaskService", "InMemoryHumanTaskDelivery", "BudgetService",
+    "ForeachService", "SubflowService",
     "RunViewService",
 ]

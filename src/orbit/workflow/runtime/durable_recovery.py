@@ -66,7 +66,7 @@ class DurableRecoveryScanner:
                     if isinstance(plan, GraphExecutionPlan):
                         graph_controllers = {
                             item.node_id for item in plan.nodes
-                            if item.kind in {"decision", "join", "terminal"}
+                            if item.kind in {"human", "decision", "join", "terminal"}
                         }
                 unknown_nodes = set()
                 for node in nodes:

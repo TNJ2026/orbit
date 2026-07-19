@@ -434,6 +434,16 @@ RUNTIME_COMMAND_PAYLOAD_SCHEMAS = {
     "cancel-run": _object_schema([], {"reason": {"type": "string"}}),
     "cancel-node": _object_schema([], {"reason": {"type": "string"}}),
     "advance-graph": _object_schema([], {"plan_version": _REVISION}),
+    "submit-human-task": _object_schema(
+        ["submission_token", "decision"],
+        {
+            "submission_token": {"type": "string", "minLength": 1},
+            "decision": {
+                "enum": ["approve", "reject", "provide_input", "withdraw"]
+            },
+            "value": {},
+        },
+    ),
 }
 
 _TRANSITION_BASE = {
@@ -669,7 +679,7 @@ EXECUTION_PLAN_NODE_SCHEMA = _object_schema(
     ],
     {
         "node_id": {"type": "string", "minLength": 1},
-        "kind": {"enum": ["action", "decision", "join", "terminal"]},
+        "kind": {"enum": ["action", "human", "decision", "join", "terminal"]},
         "handler_name": {"type": ["string", "null"]},
         "handler_version": {"type": ["string", "null"]},
         "handler_manifest_fingerprint": {**_HASH, "type": ["string", "null"]},

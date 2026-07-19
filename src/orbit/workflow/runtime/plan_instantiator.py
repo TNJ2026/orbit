@@ -128,7 +128,7 @@ def _instantiate_graph_plan(
     nodes = []
     for node_id in ordered:
         item = by_id[node_id]
-        if item.kind not in {"action", "decision", "join", "terminal"}:
+        if item.kind not in {"action", "human", "decision", "join", "terminal"}:
             raise UnsupportedPlanShapeError(f"unsupported node kind {item.kind}: {node_id}")
         handler = item.handler
         config = dict(to_primitive(item.config))

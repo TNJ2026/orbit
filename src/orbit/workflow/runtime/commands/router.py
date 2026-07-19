@@ -8,6 +8,7 @@ FAMILIES = {
     "start_attempt": "run_node", "complete_attempt": "run_node",
     "fail_attempt": "run_node", "cancel_run": "run_node",
     "cancel_node": "run_node", "advance_graph": "graph",
+    "submit_human_task": "human",
 }
 
 
@@ -21,4 +22,3 @@ class CommandRouter:
     def dispatch(self, context):
         command_family(context.command.command_type)
         return getattr(self.owner, f"_{context.command.command_type}")(context.uow, context.command, context.events)
-

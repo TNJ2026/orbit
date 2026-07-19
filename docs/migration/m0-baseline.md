@@ -16,7 +16,7 @@
 
 | 项 | 值 |
 |---|---:|
-| 全量测试 | **732 passed** |
+| 全量测试 | **739 passed** |
 | 耗时 | ~11.9s |
 | 编译检查 | 通过 |
 
@@ -176,7 +176,7 @@ M1B 的估算依据：从 6,903 行 `server.py` 中识别进程/取消/日志/Gi
 
 方案 M0 任务 3 要求"将 Step 10–12 的未完成项与 UI U0 缺口合并成阻断清单"。该表述写于此前红灯语境，现已变化：
 
-- 当前全量 **732 passed**，无失败。
+- 当前全量 **739 passed**，无失败。
 - `plan_patch` 等契约的 Draft→Stable 升级已走 [ADR-002](../adr/002-plan-patch-stable.md) 显式程序，Step 1 golden 同步更新。
 - Step 10–12 补充测试文件（`test_workflow_step10_agentic.py` / `step11_structures` / `step12_api` / `step12_recovery` / `step12_sandbox`）共 31 个测试已就位。
 
@@ -204,7 +204,7 @@ M1B 的估算依据：从 6,903 行 `server.py` 中识别进程/取消/日志/Gi
 
 | Gate 条件 | 状态 | 证据 |
 |---|---|---|
-| 新 Runtime 当前测试基线可重复 | ✅ | 732 passed，命令见 §1 |
+| 新 Runtime 当前测试基线可重复 | ✅ | 739 passed，命令见 §1 |
 | 未完成能力没有被文档标记为 Completed | ✅ | §9 复核：Step 10–12 与测试事实一致，ADR-002 走了显式升级程序 |
 | 每个旧能力都有删除或替代归属 | ✅ | §5 逐 Test ID 281/281；§6 外部集成 8/8；§7 三项能力归属 |
 | 本文可由 Git 跟踪、Diff 和评审 | ✅ | `.gitignore` 放行规范文档集（迁移方案 + 实现规划 + 2 UI 契约 + 2 ADR + `docs/migration/`） |

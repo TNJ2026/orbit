@@ -134,6 +134,7 @@ class DurableRuntimeApplicationService:
         execution_registry=None,
         artifact_backend=None,
         uow_factory=None,
+        human_task_delivery=None,
     ) -> None:
         self.path = Path(path)
         self.execution_registry = execution_registry
@@ -161,6 +162,7 @@ class DurableRuntimeApplicationService:
             self.uow_factory, self.workflow_versions,
             snapshot_coordinator=self.snapshots, schema_validator=schema_validator,
             work_scheduler=self.scheduler,
+            human_task_delivery=human_task_delivery,
         )
         self.recovery = RuntimeRecovery(self.uow_factory)
         self.durable_recovery = DurableRecoveryScanner(self)
@@ -220,6 +222,22 @@ class DurableRuntimeApplicationService:
                 )
 
     def submit(self, command): return self.kernel.handle(command)
+
+    def submit_human_task(
+        self, task_id, run_id, expected_version, *, token, decision, value,
+        actor, idempotency_key, now,
+    ):
+        result = self.submit(CommandEnvelope(
+            new_id("command"), "submit_human_task", task_id, run_id,
+            AggregateVersion(expected_version), idempotency_key, actor, now,
+            {"submission_token": token, "decision": decision, "value": value},
+        ))
+        if result.disposition.value == "rejected":
+            diagnostic = result.diagnostics[0]
+            if diagnostic.code == "POLICY_REJECTED":
+                raise PermissionError(diagnostic.message)
+            raise ValueError(diagnostic.message)
+        return dict(result.summary)
 
     def get_run(self, run_id):
         with self.uow_factory() as uow: return uow.runs.get(run_id)

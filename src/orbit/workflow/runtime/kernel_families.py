@@ -8,6 +8,7 @@ Kernel boundary or introducing nested Units of Work.
 from __future__ import annotations
 
 from dataclasses import replace
+import secrets
 from typing import Any, Callable, Mapping
 
 from ..data.mapping import evaluate_mapping
@@ -26,6 +27,7 @@ from ..domain.graph import (
 from ..domain.graph_persistence import JoinGroupRecord, JoinGroupStatus
 from ..domain.errors import ErrorCategory, ErrorInfo
 from ..domain.ids import EntityId
+from ..domain.human import submission_token_hash
 from ..domain.persistence import (
     AttemptRecord, BranchTokenRecord, ConcurrencyConflictError, ExecutionPlanRecord,
     IdempotencyConflictError, IntegrityViolationError, NodeRunRecord,
@@ -47,6 +49,7 @@ from .events import derived_id, runtime_event
 from .plan_instantiator import UnsupportedPlanShapeError, instantiate_execution_plan
 from .kernel_context import KernelContext
 from .commands import CommandRouter
+from ..persistence.control import append_control_event, audit
 from ..graph.joins import JoinTokenFact, evaluate_join
 from ..graph.routing import evaluate_route
 
@@ -56,6 +59,7 @@ class _EventBuilder:
         self.command = command
         self.ordinal = 0
         self.graph_reactions = 0
+        self.human_deliveries = []
 
     def make(self, aggregate_id, sequence, event_type, payload):
         self.ordinal += 1
@@ -87,6 +91,7 @@ class RuntimeKernel:
         logger: Callable[[str, Mapping[str, Any]], None] | None = None,
         schema_validator: Callable[[str, Any], None] | None = None,
         work_scheduler: Any = None,
+        human_task_delivery: Callable[[EntityId, tuple[str, ...], str], None] | None = None,
     ) -> None:
         self.uow_factory = uow_factory
         self.workflow_versions = workflow_versions
@@ -94,6 +99,9 @@ class RuntimeKernel:
         self.logger = logger or (lambda message, fields: None)
         self.schema_validator = schema_validator or (lambda schema_id, value: None)
         self.work_scheduler = work_scheduler
+        self.human_task_delivery = human_task_delivery or (
+            lambda task_id, participants, token: None
+        )
         self.command_router = CommandRouter(self)
 
     def handle(self, command: CommandEnvelope) -> CommandResult:
@@ -122,6 +130,14 @@ class RuntimeKernel:
                 )
                 uow.receipts.record(run_id, command, tuple(event_ids), command.issued_at)
                 uow.commit()
+            for task_id, participants, token in builder.human_deliveries:
+                try:
+                    self.human_task_delivery(task_id, participants, token)
+                except Exception as exc:
+                    self._log(
+                        "human_task_delivery_failed",
+                        {"task_id": str(task_id), "error_type": type(exc).__name__},
+                    )
             result = CommandResult(
                 CommandResultDisposition.APPLIED, tuple(event_ids), version,
                 summary=summary,
@@ -157,6 +173,8 @@ class RuntimeKernel:
                     retryable=True, details={"error_type": type(exc).__name__},
                 ),),
             )
+        except PermissionError as exc:
+            return self._rejected("POLICY_REJECTED", str(exc), command)
         except (ValueError, KeyError) as exc:
             return self._rejected("VALIDATION_FAILED", str(exc), command)
         except Exception as exc:
@@ -203,6 +221,12 @@ class RuntimeKernel:
             return {"node_run_id": str(command.aggregate_id), "status": "cancelled"}
         if command.command_type == "schedule_node":
             return {"node_run_id": str(command.aggregate_id)}
+        if command.command_type == "submit_human_task":
+            decision = command.payload["decision"]
+            return {
+                "task_id": str(command.aggregate_id), "decision": decision,
+                "status": "rejected" if decision == "reject" else "completed",
+            }
         return {"run_id": str(command.aggregate_id)}
 
     @staticmethod
@@ -787,6 +811,26 @@ class RuntimeKernel:
                 uow.events.append(run.run_id, node.node_run_id, node.aggregate_version, (event,))
                 uow.node_runs.update(replace(node, status=NodeRunStatus.CANCELLED, aggregate_version=node.aggregate_version.next(), updated_at=command.issued_at), node.aggregate_version)
                 ids.append(event.event_id)
+        human_rows = uow.connection.execute(
+            "SELECT * FROM human_tasks WHERE run_id=? AND status IN ('waiting','claimed')",
+            (str(run.run_id),),
+        ).fetchall()
+        for row in human_rows:
+            append_control_event(
+                uow.connection, run_id=run.run_id,
+                aggregate_id=EntityId.parse(row["task_id"]),
+                event_type="human_task_cancelled",
+                payload={"reason": str(command.payload.get("reason", "cancelled"))},
+                actor=command.actor,
+                idempotency_key=f"cancel-run:{command.idempotency_key}",
+                occurred_at=command.issued_at,
+            )
+            uow.connection.execute(
+                """UPDATE human_tasks SET status='cancelled',
+                     submission_token_hash='used',aggregate_version=aggregate_version+1,
+                     updated_at=? WHERE task_id=?""",
+                (command.issued_at.isoformat(), row["task_id"]),
+            )
         event = events.make(
             run.run_id, run.aggregate_version.value + 1, "workflow_run_transitioned",
             _transition_payload("workflow_run", run.status, WorkflowRunStatus.CANCELLED, reason=str(command.payload.get("reason", "cancelled"))),
@@ -877,8 +921,10 @@ class RuntimeKernel:
     ):
         node = plan.node(node_id)
         run = uow.runs.get(plan.run_id)
-        if run is None or run.status is not WorkflowRunStatus.RUNNING:
-            raise ValueError("Graph nodes require a running Run")
+        if run is None or run.status not in {
+            WorkflowRunStatus.RUNNING, WorkflowRunStatus.WAITING,
+        }:
+            raise ValueError("Graph nodes require a running or waiting Run")
         node_run_id = derive_graph_node_run_id(
             plan.run_id, plan.plan_version, node_id, generation, activation_key,
         )
@@ -917,6 +963,11 @@ class RuntimeKernel:
             if self.work_scheduler is not None:
                 ids.extend(self.work_scheduler.create_for_node(uow, command, events, ready_record))
             return ids
+        if node.kind == "human":
+            ids.extend(self._activate_human_controller(
+                uow, command, events, plan, ready_record, input_value,
+            ))
+            return ids
         if events.graph_reactions >= self.MAX_GRAPH_REACTIONS_PER_COMMAND:
             # The READY controller is a durable continuation. Recovery submits
             # AdvanceGraph, which resumes from node_input_prepared without
@@ -927,6 +978,259 @@ class RuntimeKernel:
             uow, command, events, plan, ready_record, input_value,
         ))
         return ids
+
+    def _activate_human_controller(
+        self, uow, command, events, plan, ready_record, input_value,
+    ):
+        node = plan.node(ready_record.node_id)
+        config = dict(node.config)
+        participants = tuple(sorted(set(config.get("participants", ()))))
+        if not participants:
+            raise ValueError("human node requires participants")
+        kind = config.get("task_kind")
+        if kind != "approval":
+            raise ValueError("static human node task_kind must be approval")
+        payload = {
+            "node_id": node.node_id,
+            "node_run_id": str(ready_record.node_run_id),
+            "input": dict(input_value),
+        }
+        request_hash = definition_hash({
+            "run": str(plan.run_id), "node_run": str(ready_record.node_run_id),
+            "kind": kind, "payload": payload, "participants": participants,
+            "quorum": "any", "count": 1,
+        })
+        task_id = EntityId(
+            "human_task", request_hash.value.removeprefix("sha256:")
+        )
+        token = secrets.token_urlsafe(32)
+        human_event = append_control_event(
+            uow.connection, run_id=plan.run_id, aggregate_id=task_id,
+            event_type="human_task_created",
+            payload={
+                "kind": kind, "request_hash": request_hash.value,
+                "node_run_id": str(ready_record.node_run_id),
+            },
+            actor=command.actor,
+            idempotency_key=f"activate:{ready_record.node_run_id}",
+            occurred_at=command.issued_at,
+        )
+        uow.connection.execute(
+            """INSERT INTO human_tasks(
+                 task_id,run_id,node_run_id,kind,status,request_hash,
+                 capability_scope,submission_token_hash,actor,payload_json,
+                 result_json,deadline_at,aggregate_version,created_at,updated_at,
+                 assignee,role,form_schema_json,quorum_kind,quorum_count,
+                 reminder_interval_seconds,escalation_policy_json,claimed_by,revision
+               ) VALUES (?,?,?,?,'waiting',?,NULL,?,?,?,NULL,NULL,1,?,?,NULL,NULL,
+                         NULL,'any',1,NULL,NULL,NULL,1)""",
+            (
+                str(task_id), str(plan.run_id), str(ready_record.node_run_id),
+                kind, request_hash.value, submission_token_hash(token),
+                command.actor, canonical_json(payload),
+                command.issued_at.isoformat(), command.issued_at.isoformat(),
+            ),
+        )
+        for participant in participants:
+            uow.connection.execute(
+                "INSERT INTO human_task_participants(task_id,actor,revision) VALUES (?,?,1)",
+                (str(task_id), participant),
+            )
+        running = events.make(
+            ready_record.node_run_id, ready_record.aggregate_version.value + 1,
+            "node_run_transitioned",
+            _transition_payload(
+                "node_run", NodeRunStatus.READY, NodeRunStatus.RUNNING,
+                run_id=str(plan.run_id), node_id=ready_record.node_id,
+            ),
+        )
+        waiting = events.make(
+            ready_record.node_run_id, ready_record.aggregate_version.value + 2,
+            "node_run_transitioned",
+            _transition_payload(
+                "node_run", NodeRunStatus.RUNNING, NodeRunStatus.WAITING,
+                run_id=str(plan.run_id), node_id=ready_record.node_id,
+            ),
+        )
+        uow.events.append(
+            plan.run_id, ready_record.node_run_id,
+            ready_record.aggregate_version, (running, waiting),
+        )
+        uow.node_runs.update(
+            replace(
+                ready_record, status=NodeRunStatus.WAITING,
+                aggregate_version=AggregateVersion(
+                    ready_record.aggregate_version.value + 2
+                ),
+                updated_at=command.issued_at,
+            ),
+            ready_record.aggregate_version,
+        )
+        run = uow.runs.get(plan.run_id)
+        # Control events use their own deterministic command identity; Runtime
+        # command receipts therefore list only events caused by this command.
+        ids = [running.event_id, waiting.event_id]
+        if run.status is WorkflowRunStatus.RUNNING:
+            run_event = events.make(
+                run.run_id, run.aggregate_version.value + 1,
+                "workflow_run_transitioned",
+                _transition_payload(
+                    "workflow_run", WorkflowRunStatus.RUNNING,
+                    WorkflowRunStatus.WAITING, reason="human_wait",
+                ),
+            )
+            uow.events.append(
+                run.run_id, run.run_id, run.aggregate_version, (run_event,)
+            )
+            uow.runs.update(
+                replace(
+                    run, status=WorkflowRunStatus.WAITING,
+                    aggregate_version=run.aggregate_version.next(),
+                    updated_at=command.issued_at,
+                ),
+                run.aggregate_version,
+            )
+            ids.append(run_event.event_id)
+        audit(
+            uow.connection, run_id=plan.run_id, actor=command.actor,
+            action="human.create", target_id=str(task_id), decision="allowed",
+            details={"node_run_id": str(ready_record.node_run_id)},
+            occurred_at=command.issued_at,
+        )
+        events.human_deliveries.append((task_id, participants, token))
+        return ids
+
+    def _submit_human_task(self, uow, command, events):
+        row = uow.connection.execute(
+            "SELECT * FROM human_tasks WHERE task_id=?",
+            (str(command.aggregate_id),),
+        ).fetchone()
+        if row is None or row["node_run_id"] is None:
+            raise ValueError("linked HumanTask was not found")
+        if row["aggregate_version"] != command.expected_version.value:
+            raise ValueError("HumanTask version conflict")
+        if row["status"] not in {"waiting", "claimed"}:
+            raise ValueError("HumanTask is terminal")
+        if submission_token_hash(command.payload["submission_token"]) != row["submission_token_hash"]:
+            raise PermissionError("invalid submission token")
+        participant = uow.connection.execute(
+            "SELECT 1 FROM human_task_participants WHERE task_id=? AND actor=?",
+            (row["task_id"], command.actor),
+        ).fetchone()
+        if participant is None:
+            raise PermissionError("actor is not a HumanTask participant")
+        decision = command.payload["decision"]
+        value = command.payload.get("value")
+        if decision == "withdraw":
+            raise ValueError("static Human node does not support withdraw")
+        status = "rejected" if decision == "reject" else "completed"
+        human_event = append_control_event(
+            uow.connection, run_id=EntityId.parse(row["run_id"]),
+            aggregate_id=command.aggregate_id,
+            event_type="human_task_submitted",
+            payload={
+                "actor": command.actor, "decision": decision,
+                "status": status, "value": value,
+                "node_run_id": row["node_run_id"],
+            },
+            actor=command.actor, idempotency_key=command.idempotency_key,
+            occurred_at=command.issued_at,
+        )
+        uow.connection.execute(
+            """UPDATE human_tasks SET status=?,actor=?,result_json=?,
+                 submission_token_hash='used',aggregate_version=aggregate_version+1,
+                 updated_at=? WHERE task_id=? AND aggregate_version=?""",
+            (
+                status, command.actor,
+                canonical_json({"decision": decision, "value": value}),
+                command.issued_at.isoformat(), row["task_id"],
+                command.expected_version.value,
+            ),
+        )
+        uow.connection.execute(
+            """UPDATE human_task_participants SET decision=?,value_json=?,
+                 submitted_at=?,revision=revision+1 WHERE task_id=? AND actor=?""",
+            (
+                decision, canonical_json(value), command.issued_at.isoformat(),
+                row["task_id"], command.actor,
+            ),
+        )
+        node = uow.node_runs.get(EntityId.parse(row["node_run_id"]))
+        if node is None or node.status is not NodeRunStatus.WAITING:
+            raise ValueError("HumanTask NodeRun is not waiting")
+        run = uow.runs.get(node.run_id)
+        plan = self._load_plan(uow, node.run_id, node.source_plan_version.value)
+        plan_node = plan.node(node.node_id)
+        if len(plan_node.outputs) != 1:
+            raise ValueError("human node requires exactly one output port")
+        output = {
+            plan_node.outputs[0]["id"]: {
+                "decision": decision, "value": value,
+            }
+        }
+        self._validate_ports(plan_node.outputs, output, "output")
+        target = (
+            NodeRunStatus.FAILED if status == "rejected"
+            else NodeRunStatus.SUCCEEDED
+        )
+        node_event = events.make(
+            node.node_run_id, node.aggregate_version.value + 1,
+            "node_run_transitioned",
+            _transition_payload(
+                "node_run", NodeRunStatus.WAITING, target,
+                run_id=str(node.run_id), node_id=node.node_id,
+            ),
+        )
+        uow.events.append(
+            node.run_id, node.node_run_id, node.aggregate_version, (node_event,)
+        )
+        finished_node = replace(
+            node, status=target, aggregate_version=node.aggregate_version.next(),
+            updated_at=command.issued_at,
+        )
+        uow.node_runs.update(finished_node, node.aggregate_version)
+        ids = [node_event.event_id]
+        other_waiting = uow.connection.execute(
+            """SELECT 1 FROM human_tasks WHERE run_id=? AND task_id<>?
+               AND status IN ('waiting','claimed') LIMIT 1""",
+            (str(node.run_id), row["task_id"]),
+        ).fetchone()
+        if run.status is WorkflowRunStatus.WAITING and other_waiting is None:
+            run_event = events.make(
+                run.run_id, run.aggregate_version.value + 1,
+                "workflow_run_transitioned",
+                _transition_payload(
+                    "workflow_run", WorkflowRunStatus.WAITING,
+                    WorkflowRunStatus.RUNNING, reason="human_submitted",
+                ),
+            )
+            uow.events.append(
+                run.run_id, run.run_id, run.aggregate_version, (run_event,)
+            )
+            uow.runs.update(
+                replace(
+                    run, status=WorkflowRunStatus.RUNNING,
+                    aggregate_version=run.aggregate_version.next(),
+                    updated_at=command.issued_at,
+                ),
+                run.aggregate_version,
+            )
+            ids.append(run_event.event_id)
+        route = EdgeRoute.ERROR if status == "rejected" else EdgeRoute.SUCCESS
+        ids.extend(self._propagate_graph(
+            uow, command, events, plan, finished_node, output, route=route,
+        ))
+        audit(
+            uow.connection, run_id=node.run_id, actor=command.actor,
+            action="human.submit", target_id=row["task_id"], decision=decision,
+            details={"status": status, "node_run_id": row["node_run_id"]},
+            occurred_at=command.issued_at,
+        )
+        return (
+            ids, AggregateVersion(command.expected_version.value + 1),
+            node.run_id,
+            {"task_id": row["task_id"], "decision": decision, "status": status},
+        )
 
     def _execute_graph_controller(
         self, uow, command, events, plan, ready_record, input_value,
@@ -1072,7 +1376,7 @@ class RuntimeKernel:
         ready_controllers = [
             item for item in uow.node_runs.list_by_run(run.run_id)
             if item.status is NodeRunStatus.READY
-            and plan.node(item.node_id).kind in {"decision", "join", "terminal"}
+            and plan.node(item.node_id).kind in {"human", "decision", "join", "terminal"}
         ]
         for node in sorted(ready_controllers, key=lambda item: (item.generation, item.node_id, str(item.node_run_id))):
             if events.graph_reactions >= self.MAX_GRAPH_REACTIONS_PER_COMMAND:
@@ -1088,9 +1392,14 @@ class RuntimeKernel:
             if prepared is None:
                 raise ValueError("Graph continuation input is missing")
             events.graph_reactions += 1
-            ids.extend(self._execute_graph_controller(
-                uow, command, events, plan, node, prepared,
-            ))
+            if plan.node(node.node_id).kind == "human":
+                ids.extend(self._activate_human_controller(
+                    uow, command, events, plan, node, prepared,
+                ))
+            else:
+                ids.extend(self._execute_graph_controller(
+                    uow, command, events, plan, node, prepared,
+                ))
         for group in uow.joins.list_by_run(run.run_id, waiting_only=True):
             ids.extend(self._consider_join(uow, command, events, plan, group.node_id))
         if not ids:
@@ -1105,7 +1414,15 @@ class RuntimeKernel:
                 item.status in {TimerStatus.SCHEDULED, TimerStatus.LEASED}
                 for item in uow.timers.list_by_run(run.run_id)
             )
-            if not waiting_join and not active_job and not active_timer:
+            active_human = uow.connection.execute(
+                """SELECT 1 FROM human_tasks WHERE run_id=?
+                   AND status IN ('waiting','claimed') LIMIT 1""",
+                (str(run.run_id),),
+            ).fetchone() is not None
+            if (
+                not waiting_join and not active_job and not active_timer
+                and not active_human
+            ):
                 ids.extend(self._fail_graph_run(
                     uow, command, events, run.run_id, "graph_stalled",
                 ))

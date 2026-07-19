@@ -49,7 +49,7 @@ class CommandResult:
 
 
 RUNTIME_COMMAND_TYPES = frozenset(
-    {"start_run", "schedule_node", "start_attempt", "complete_attempt", "fail_attempt", "cancel_node", "cancel_run", "advance_graph"}
+    {"start_run", "schedule_node", "start_attempt", "complete_attempt", "fail_attempt", "cancel_node", "cancel_run", "advance_graph", "submit_human_task"}
 )
 
 RUNTIME_EVENT_VERSIONS = MappingProxyType(
@@ -78,6 +78,9 @@ _COMMAND_FIELDS = MappingProxyType(
         "cancel_run": (set(), {"reason"}),
         "cancel_node": (set(), {"reason"}),
         "advance_graph": (set(), {"plan_version"}),
+        "submit_human_task": (
+            {"submission_token", "decision"}, {"value"},
+        ),
     }
 )
 
