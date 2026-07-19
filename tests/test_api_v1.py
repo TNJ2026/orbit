@@ -656,6 +656,161 @@ class CatalogTests(ApiTestCase):
             self.assertEqual("not_found", missing.json()["error"]["code"])
 
 
+class WorkflowAuthoringApiTests(ApiTestCase):
+    """Prompt → draft → publish, all through advertised commands."""
+
+    GENERATED = {
+        "dsl_version": "1.2",
+        "metadata": {"id": "prompted", "name": "Prompted"},
+        "nodes": [
+            {
+                "id": "work", "kind": "action",
+                "inputs": [{"id": "value", "schema_id": "example://integer/1.0"}],
+                "outputs": [{"id": "value", "schema_id": "example://integer/1.0"}],
+                "handler": {"name": "transform", "version": "1.0.0"},
+            },
+            {
+                "id": "done", "kind": "terminal",
+                "inputs": [{"id": "value", "schema_id": "example://integer/1.0"}],
+            },
+        ],
+        "edges": [{
+            "id": "flow", "from": {"node": "work", "port": "value"},
+            "to": {"node": "done", "port": "value"},
+        }],
+        "entry": ["work"], "terminals": ["done"],
+    }
+
+    def app_with_generator(self, responses):
+        import json as json_module
+
+        queue = list(responses)
+        return create_app(
+            self.db,
+            handlers=[transform_registration()], schemas=SCHEMAS,
+            worker_count=1, poll_seconds=0.02,
+            authenticator=lambda request: request.headers.get("x-orbit-actor"),
+            authorizer=Authorizer(lambda actor: self.scopes.get(actor, [])),
+            workflow_generator=lambda prompt: queue.pop(0),
+        )
+
+    def test_generate_then_publish_through_the_advertised_command(self) -> None:
+        import json as json_module
+
+        app = self.app_with_generator([json_module.dumps(self.GENERATED)])
+        with AsgiHarness(app) as client:
+            catalog = client.get("/api/v1/workflows", actor="writer").json()["data"]
+            generate = next(
+                c for c in catalog["allowed_commands"]
+                if c["command"] == "workflow.generate"
+            )
+
+            drafted = client.post(
+                generate["href"], actor="writer", key="gen-1",
+                body={"instruction": "one transform then done"},
+            )
+            self.assertEqual(200, drafted.status_code, drafted.text)
+            draft = drafted.json()["data"]
+            self.assertEqual("workflow:prompted", draft["workflow_id"])
+            self.assertEqual(2, draft["node_count"])
+            publish = draft["allowed_commands"][0]
+            self.assertEqual("workflow.publish", publish["command"])
+            self.assertEqual(0, publish["expected_version"])
+
+            published = client.post(
+                publish["href"], actor="writer", key="pub-1",
+                body={
+                    "source": draft["source"],
+                    "expected_version": publish["expected_version"],
+                },
+            )
+            self.assertEqual(200, published.status_code, published.text)
+            self.assertEqual(1, published.json()["data"]["version"])
+
+            # The published workflow immediately appears in the catalog with a
+            # start command — the wizard can run it with no further plumbing.
+            entries = client.get(
+                "/api/v1/workflows", actor="writer"
+            ).json()["data"]["workflows"]
+            entry = next(
+                item for item in entries
+                if item["workflow_id"] == "workflow:prompted"
+            )
+            self.assertEqual(
+                "run.start", entry["allowed_commands"][0]["command"]
+            )
+
+    def test_generation_failure_returns_diagnostics_not_a_500(self) -> None:
+        app = self.app_with_generator(["nonsense"] * 3)
+        with AsgiHarness(app) as client:
+            response = client.post(
+                "/api/v1/workflows/generate", actor="writer", key="gen-bad",
+                body={"instruction": "??"},
+            )
+            self.assertEqual(409, response.status_code, response.text)
+            self.assertIn("GENERATION_PROTOCOL", response.json()["error"]["message"])
+
+    def test_generate_is_absent_without_a_generator(self) -> None:
+        with AsgiHarness(self.app) as client:
+            catalog = client.get("/api/v1/workflows", actor="writer").json()["data"]
+            self.assertEqual([], catalog["allowed_commands"])
+            response = client.post(
+                "/api/v1/workflows/generate", actor="writer", key="gen-off",
+                body={"instruction": "flow"},
+            )
+            self.assertEqual(503, response.status_code)
+            caps = client.get(
+                "/api/v1/capabilities", actor="writer"
+            ).json()["data"]["capabilities"]
+            self.assertFalse(caps["workflow_generation"]["available"])
+
+    def test_publish_rejects_a_source_that_names_a_different_workflow(self) -> None:
+        import json as json_module
+
+        app = self.app_with_generator([json_module.dumps(self.GENERATED)])
+        with AsgiHarness(app) as client:
+            drafted = client.post(
+                "/api/v1/workflows/generate", actor="writer", key="gen-2",
+                body={"instruction": "flow"},
+            ).json()["data"]
+            response = client.post(
+                "/api/v1/workflows/workflow:someone-else/versions",
+                actor="writer", key="pub-2",
+                body={"source": drafted["source"], "expected_version": 0},
+            )
+            self.assertEqual(409, response.status_code)
+            self.assertIn("route names", response.json()["error"]["message"])
+            # Nothing was persisted by the refused publish.
+            entries = client.get(
+                "/api/v1/workflows", actor="reader"
+            ).json()["data"]["workflows"]
+            self.assertNotIn(
+                "workflow:prompted", [item["workflow_id"] for item in entries]
+            )
+
+    def test_publish_conflict_and_reader_denial(self) -> None:
+        import json as json_module
+
+        app = self.app_with_generator([json_module.dumps(self.GENERATED)])
+        with AsgiHarness(app) as client:
+            drafted = client.post(
+                "/api/v1/workflows/generate", actor="writer", key="gen-3",
+                body={"instruction": "flow"},
+            ).json()["data"]
+            stale = client.post(
+                "/api/v1/workflows/workflow:prompted/versions",
+                actor="writer", key="pub-3",
+                body={"source": drafted["source"], "expected_version": 7},
+            )
+            self.assertEqual(409, stale.status_code)
+            denied = client.post(
+                "/api/v1/workflows/workflow:prompted/versions",
+                actor="reader", key="pub-4",
+                body={"source": drafted["source"], "expected_version": 0},
+            )
+            self.assertEqual(403, denied.status_code)
+
+
 class CapabilityTests(ApiTestCase):
     def test_capabilities_declare_absence_with_a_reason(self) -> None:
         """Plan API-7: the client never learns 'not provided' from a 404."""

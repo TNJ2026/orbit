@@ -22,5 +22,8 @@ class InMemorySchemaCatalog:
     def get(self, schema_id: str) -> Mapping[str, Any] | None:
         return self._schemas.get(schema_id)
 
+    def ids(self) -> tuple[str, ...]:
+        return tuple(self._schemas)
+
     def compatible(self, source_schema_id: str, target_schema_id: str) -> bool:
         return source_schema_id == target_schema_id and source_schema_id in self._schemas

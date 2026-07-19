@@ -1270,7 +1270,22 @@ async function renderSettings(root) {
 /* ------------------------------------------------ workflow catalog / wizard */
 
 async function renderWorkflows(root) {
-  const entries = (await api.workflowCatalog()).data.workflows;
+  const catalog = (await api.workflowCatalog()).data;
+  const entries = catalog.workflows;
+  // Generation appears only when the server advertised it: capability off or
+  // read-only actor simply means the button does not exist.
+  const generateCommand = (catalog.allowed_commands || []).find(
+    (item) => item.command === "workflow.generate",
+  );
+  if (generateCommand) {
+    root.append(el("div", { class: "actions" }, [
+      el("button", {
+        class: "button primary", id: "generateWorkflow",
+        text: i18n.t("generate.action"),
+        onclick: () => generateWorkflowDialog(generateCommand),
+      }),
+    ]));
+  }
   const cards = el("section", { class: "workflow-grid", "aria-label": i18n.t("workflows.list") });
   const detail = el("section", { class: "panel workflow-detail" }, [
     el("div", { class: "empty", text: i18n.t("workflows.select") }),
@@ -1396,6 +1411,147 @@ function readGeneratedInputs(container, entry) {
     else result[port.id] = control.value;
   }
   return result;
+}
+
+/** Describe → draft → publish. The draft is the compiler-validated source the
+ * server returned; publishing executes the AllowedCommand advertised on that
+ * draft, so the dialog never invents a URL or an expected version. */
+function generateWorkflowDialog(generateCommand) {
+  const dialog = el("dialog", { "aria-label": i18n.t("generate.title") });
+  const form = el("form", { method: "dialog" });
+  dialog.append(form);
+  let draft = null;
+  let busy = false;
+
+  const draw = () => {
+    const problem = el("div", { class: "banner error", hidden: "hidden", role: "alert" });
+    const actions = el("div", { class: "actions" }, [
+      el("button", { class: "button", value: "cancel", text: i18n.t("action.cancel") }),
+    ]);
+    const body = [el("h2", { text: i18n.t("generate.title") }), problem];
+
+    if (!draft) {
+      const instruction = el("textarea", {
+        id: "generateInstruction", required: "required", maxlength: "4000",
+        placeholder: i18n.t("generate.instructionPh"),
+      });
+      body.push(
+        el("div", { class: "field" }, [
+          el("label", { for: "generateInstruction", text: i18n.t("generate.instruction") }),
+          instruction,
+          el("small", { class: "muted", text: i18n.t("generate.hint") }),
+        ]),
+      );
+      const generate = el("button", {
+        type: "button", class: "button primary", id: "generateSubmit",
+        text: i18n.t("generate.action"),
+        onclick: async () => {
+          if (busy || !instruction.value.trim()) return;
+          busy = true;
+          generate.disabled = true;
+          generate.textContent = i18n.t("generate.generating");
+          problem.hidden = true;
+          try {
+            const response = await api.execute(
+              generateCommand, { instruction: instruction.value.trim() },
+              `workflow.generate:${Date.now()}`,
+            );
+            draft = response.data;
+            draw();
+          } catch (error) {
+            problem.textContent = describeGenerationFailure(error);
+            problem.hidden = false;
+          } finally {
+            busy = false;
+            generate.disabled = false;
+            generate.textContent = i18n.t("generate.action");
+          }
+        },
+      });
+      actions.append(generate);
+    } else {
+      const document_ = JSON.parse(draft.source);
+      body.push(
+        el("div", { class: "eyebrow", text: `${draft.workflow_id} · ${draft.definition_hash.slice(0, 19)}…` }),
+        el("p", { class: "muted", text: i18n.t("generate.preview", {
+          nodes: i18n.number(draft.node_count),
+          attempts: i18n.number(draft.attempts),
+        }) }),
+        el("div", { class: "definition-list" }, document_.nodes.map((node) =>
+          el("div", { class: "actions" }, [
+            el("span", { class: "mono", text: node.id }),
+            el("span", { class: "pill", text: node.kind }),
+            node.handler ? el("span", { class: "muted mono", text: `${node.handler.name}@${node.handler.version}` }) : null,
+          ]),
+        )),
+        el("details", {}, [
+          el("summary", { class: "muted", text: i18n.t("generate.source") }),
+          el("pre", { class: "artifact-preview", text: draft.source }),
+        ]),
+      );
+      const publishCommand = (draft.allowed_commands || []).find(
+        (item) => item.command === "workflow.publish",
+      );
+      const back = el("button", {
+        type: "button", class: "button", text: i18n.t("generate.back"),
+        onclick: () => { draft = null; draw(); },
+      });
+      actions.append(back);
+      if (publishCommand) {
+        actions.append(el("button", {
+          type: "button", class: "button primary", id: "generatePublish",
+          text: i18n.t("generate.publish"),
+          onclick: async () => {
+            if (busy) return;
+            busy = true;
+            problem.hidden = true;
+            try {
+              const published = await api.execute(
+                publishCommand, { source: draft.source },
+                `workflow.publish:${draft.definition_hash}`,
+              );
+              dialog.close();
+              announce(i18n.t("generate.published", {
+                workflowId: published.data.workflow_id,
+                version: i18n.number(published.data.version),
+              }));
+              await render();
+            } catch (error) {
+              problem.textContent = describeGenerationFailure(error);
+              problem.hidden = false;
+            } finally {
+              busy = false;
+            }
+          },
+        }));
+      }
+    }
+
+    actions.querySelector("button[value=cancel]").textContent = i18n.t("action.cancel");
+    form.replaceChildren(...body, actions);
+  };
+
+  dialog.addEventListener("close", () => dialog.remove(), { once: true });
+  document.body.append(dialog);
+  draw();
+  dialog.showModal();
+}
+
+/** Generation failures carry the compiler's findings as JSON; show the
+ * finding codes rather than a wall of serialized diagnostics. */
+function describeGenerationFailure(error) {
+  if (!(error instanceof ApiError)) throw error;
+  try {
+    const payload = JSON.parse(error.message);
+    const codes = (payload.diagnostics || [])
+      .map((item) => item.code)
+      .filter(Boolean);
+    return codes.length
+      ? i18n.t("generate.failed", { codes: codes.join(", ") })
+      : payload.message || error.message;
+  } catch {
+    return i18n.t(error.messageKey, { message: error.message });
+  }
 }
 
 async function newRunDialog(preselectedWorkflowId = null) {

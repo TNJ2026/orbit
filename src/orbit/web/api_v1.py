@@ -43,6 +43,7 @@ from ..workflow.catalogs.schemas import InMemorySchemaCatalog
 from ..workflow.domain.ids import EntityId
 from ..workflow.domain.versions import DefinitionHash
 from ..workflow.artifacts.local_cas import BlobIntegrityError
+from ..workflow.authoring import AuthoringUnavailableError
 from ..workflow.persistence.database import connect_workflow_database
 from ..workflow.persistence.control import audit as persist_audit
 from ..workflow.recovery.manager import RecoveryManager
@@ -122,6 +123,8 @@ def build_api_v1(
     schema_catalog=None,
     artifact_backend=None,
     operational_config: Mapping[str, Any] | None = None,
+    authoring_service=None,
+    workflow_publisher=None,
 ) -> list[Route]:
     """Routes for `/api/v1`, ready to mount on the composition root."""
 
@@ -811,7 +814,126 @@ def build_api_v1(
                     "expected_version": 0,
                     "payload_schema": "run-start/1.0",
                 }] if may_start else [])
-        return JSONResponse(envelope({"workflows": workflows}))
+        # Generation is a catalog-level act — there is no aggregate yet — so
+        # its command is advertised beside the list, not on an entry.
+        catalog_commands = ([{
+            "command": "workflow.generate",
+            "label": "Generate workflow",
+            "method": "POST",
+            "href": "/api/v1/workflows/generate",
+            "target_aggregate_id": "workflow_catalog",
+            "expected_version": 0,
+            "payload_schema": "workflow-generate/1.0",
+        }] if authoring_service is not None and may_start else [])
+        return JSONResponse(envelope({
+            "workflows": workflows,
+            "allowed_commands": catalog_commands,
+        }))
+
+    def _publish_command(workflow_id: str, expected_latest_version: int) -> dict[str, Any]:
+        return {
+            "command": "workflow.publish",
+            "label": "Publish workflow",
+            "method": "POST",
+            "href": f"/api/v1/workflows/{quote(workflow_id, safe=':')}/versions",
+            "target_aggregate_id": workflow_id,
+            "expected_version": expected_latest_version,
+            "payload_schema": "workflow-publish/1.0",
+        }
+
+    async def workflow_generate(request: Request) -> JSONResponse:
+        """Natural language → validated DSL draft. Never publishes.
+
+        The draft comes back with the compiler's verdict and a server-advertised
+        publish command carrying the current latest version, so the confirming
+        click stays inside the AllowedCommand discipline like every other
+        mutation.
+        """
+        if authoring_service is None:
+            return error(
+                "generation_unavailable",
+                "no generation-capable agent CLI was discovered", 503,
+            )
+
+        def command(body: Mapping[str, Any], actor: str, key: str) -> Mapping[str, Any]:
+            from ..workflow.authoring import AuthoringFailedError
+
+            instruction = str(body.get("instruction", ""))
+            try:
+                outcome = authoring_service.generate(instruction)
+            except AuthoringFailedError as exc:
+                # A model that cannot satisfy the compiler is a client-visible
+                # result, not a server fault: return the findings for repair.
+                raise ValueError(json.dumps({
+                    "message": str(exc),
+                    "diagnostics": list(exc.diagnostics),
+                }, ensure_ascii=False))
+            existing = {
+                item["workflow_id"]: item["latest_version"]
+                for item in workflow_reads.list()
+            }
+            latest = existing.get(outcome.workflow_id, 0)
+            return {
+                "source": outcome.source,
+                "workflow_id": outcome.workflow_id,
+                "definition_hash": outcome.definition_hash,
+                "node_count": outcome.node_count,
+                "attempts": outcome.attempts,
+                "latest_version": latest,
+                "allowed_commands": [
+                    _publish_command(outcome.workflow_id, latest)
+                ],
+            }
+
+        return await mutate(request, WRITE_SCOPE, "workflow.generate", command)
+
+    async def workflow_publish(request: Request) -> JSONResponse:
+        if workflow_publisher is None:
+            return error(
+                "publish_unavailable", "workflow publishing is not wired", 503,
+            )
+        workflow_id = request.path_params["workflow_id"]
+
+        def command(body: Mapping[str, Any], actor: str, key: str) -> Mapping[str, Any]:
+            from ..workflow.dsl import DiagnosticError
+            from ..workflow.persistence import PublishConflictError
+
+            source = body.get("source")
+            if not isinstance(source, str) or not source.strip():
+                raise ValueError("source is required")
+            expected = _required_version(body)
+            # Compile-and-check before any write: a body that fails validation
+            # or compiles to a different workflow than the route names must
+            # leave nothing behind.
+            try:
+                compiled = workflow_publisher.compile_workflow(
+                    source, source_name="<api>", source_format="json",
+                )
+            except DiagnosticError as exc:
+                raise ValueError(json.dumps({
+                    "message": "workflow source failed validation",
+                    "diagnostics": [item.to_dict() for item in exc.diagnostics],
+                }, ensure_ascii=False))
+            if compiled.ir.workflow_id != workflow_id:
+                raise ValueError(
+                    f"source declares {compiled.ir.workflow_id}, route names {workflow_id}"
+                )
+            try:
+                record = workflow_publisher.publish_workflow(
+                    source, source_name="<api>", source_format="json",
+                    expected_latest_version=expected, actor=actor,
+                )
+            except PublishConflictError as exc:
+                raise ValueError(
+                    f"publish conflict: expected {exc.expected}, actual {exc.actual}"
+                )
+            return {
+                "workflow_id": record.workflow_id,
+                "version": record.version.value,
+                "definition_hash": record.definition_hash.value,
+            }
+
+        return await mutate(request, WRITE_SCOPE, "workflow.publish", command)
 
     async def workflow_detail(request: Request) -> JSONResponse:
         actor = authenticate(request, READ_SCOPE)
@@ -867,6 +989,8 @@ def build_api_v1(
             return error("forbidden", str(exc), 403)
         except BudgetVersionConflict as exc:
             return error("version_conflict", str(exc), 409)
+        except AuthoringUnavailableError as exc:
+            return error("generation_unavailable", str(exc), 503)
         except (RunStartError, ValueError) as exc:
             return error("invalid_command", str(exc), 409)
         record_audit(actor, action, {"path": request.url.path, "key": key})
@@ -1153,8 +1277,15 @@ def build_api_v1(
         Route("/api/v1/live", live_cursor, methods=["GET"]),
         Route("/api/v1/ops/status", ops_status, methods=["GET"]),
         Route("/api/v1/workflows", workflow_catalog, methods=["GET"]),
+        # /generate before /{workflow_id}: Starlette matches in order, and the
+        # literal segment must not be captured as a workflow id.
+        Route("/api/v1/workflows/generate", workflow_generate, methods=["POST"]),
         Route(
             "/api/v1/workflows/{workflow_id}", workflow_detail, methods=["GET"]
+        ),
+        Route(
+            "/api/v1/workflows/{workflow_id}/versions", workflow_publish,
+            methods=["POST"],
         ),
         Route("/api/v1/capabilities", capability_read, methods=["GET"]),
     ]

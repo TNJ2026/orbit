@@ -28,3 +28,4 @@ docs/ui/*
 # Visual regression scratch output (baselines themselves are committed)
 tests/visual_baselines/*.actual.png
 tests/visual_baselines/*.diff.png
+!docs/ui/workflow-prompt-authoring.md

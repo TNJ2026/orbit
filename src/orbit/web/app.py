@@ -321,6 +321,7 @@ def create_app(
     serve_ui: bool = False,
     discover_agents: bool = False,
     agent_capabilities: Sequence[str] | None = None,
+    workflow_generator: Callable[[str], str] | None = None,
 ) -> Starlette:
     """Build the Runtime application.
 
@@ -362,6 +363,16 @@ def create_app(
 
             planner_service = PlannerApplicationService(
                 db_path, provider=planner_provider
+            )
+
+        # Workflow generation rides the same discovery result: same trust
+        # rule, same first-discovered-CLI choice as the planner. An explicit
+        # `workflow_generator` (tests, embedders) takes precedence below.
+        if workflow_generator is None and discovered:
+            from ..workflow.authoring import TrustedCliDslGenerator
+
+            workflow_generator = TrustedCliDslGenerator(
+                (discovered[0].executable_path,)
             )
 
     composition = RuntimeComposition(
@@ -432,7 +443,57 @@ def create_app(
         "foreach": {"available": False, "reason": "not_reachable_from_dsl"},
         "subflow": {"available": False, "reason": "not_reachable_from_dsl"},
         "history_overlay": {"available": False, "reason": "not_implemented"},
+        "workflow_generation": (
+            {"available": True}
+            if workflow_generator is not None
+            else {
+                "available": False,
+                "reason": (
+                    "no_generation_agent" if discover_agents
+                    else "agent_discovery_disabled"
+                ),
+            }
+        ),
     }
+
+    # Authoring shares the sealed registry's manifests and the composition's
+    # schema catalog, so a generated draft can only reference what a published
+    # workflow could. Publishing goes through the same definition service the
+    # CLI uses — one validation path, two entrances.
+    from ..workflow.application.workflows import (
+        WorkflowCatalogs, WorkflowDefinitionService,
+    )
+    from ..workflow.catalogs import InMemoryHandlerCatalog
+    from ..workflow.catalogs.extensions import InMemoryExtensionRegistry
+    from ..workflow.persistence.workflow_versions import SQLiteWorkflowVersionStore
+
+    manifests = [entry.manifest for entry in composition.handler_registry.entries()]
+    authoring_catalogs = WorkflowCatalogs(
+        InMemoryHandlerCatalog(manifests),
+        composition.schema_catalog,
+        InMemoryExtensionRegistry(),
+    )
+    workflow_publisher = WorkflowDefinitionService(
+        authoring_catalogs, SQLiteWorkflowVersionStore(composition.db_path)
+    )
+    authoring_service = None
+    if workflow_generator is not None:
+        from ..workflow.authoring import WorkflowAuthoringService
+
+        authoring_service = WorkflowAuthoringService(
+            authoring_catalogs.handlers,
+            composition.schema_catalog,
+            workflow_generator,
+            handler_facts=[
+                {
+                    "name": manifest.name, "version": manifest.version,
+                    "node_kinds": list(manifest.node_kinds),
+                    "inputs": dict(manifest.inputs),
+                    "outputs": dict(manifest.outputs),
+                }
+                for manifest in manifests
+            ],
+        )
 
     routes: list[Route | Mount] = [
         Route("/health/live", health_live, methods=["GET"]),
@@ -445,6 +506,8 @@ def create_app(
             capabilities=capabilities,
             schema_catalog=composition.schema_catalog,
             artifact_backend=artifact_backend,
+            authoring_service=authoring_service,
+            workflow_publisher=workflow_publisher,
             operational_config={
                 "worker_count": worker_count,
                 "poll_seconds": poll_seconds,

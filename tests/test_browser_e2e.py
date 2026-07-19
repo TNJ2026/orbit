@@ -60,6 +60,11 @@ class BrowserE2ETestCase(unittest.TestCase):
     """One server and one browser for the whole class; a page per test."""
 
     @classmethod
+    def extra_app_kwargs(cls) -> dict:
+        """Subclass hook for composition extras (e.g. a fake generator)."""
+        return {}
+
+    @classmethod
     def setUpClass(cls) -> None:
         import uvicorn
 
@@ -80,6 +85,7 @@ class BrowserE2ETestCase(unittest.TestCase):
             ),
             artifact_backend=cls.artifact_backend,
             serve_ui=True,
+            **cls.extra_app_kwargs(),
         )
         cls.app = app
         publish_linear_workflow(cls.db)
@@ -399,6 +405,79 @@ class WorkflowCatalogTests(BrowserE2ETestCase):
         page.wait_for_selector("#liveRegion.error")
         self.assertIn("changed after review", page.inner_text("#liveRegion"))
         self.assertFalse(page.is_visible("dialog[open]"))
+
+
+GENERATED_WORKFLOW = {
+    "dsl_version": "1.2",
+    "metadata": {"id": "prompted", "name": "Prompted flow"},
+    "nodes": [
+        {
+            "id": "work", "kind": "action",
+            "inputs": [{"id": "value", "schema_id": "example://integer/1.0"}],
+            "outputs": [{"id": "value", "schema_id": "example://integer/1.0"}],
+            "handler": {"name": "transform", "version": "1.0.0"},
+        },
+        {
+            "id": "done", "kind": "terminal",
+            "inputs": [{"id": "value", "schema_id": "example://integer/1.0"}],
+        },
+    ],
+    "edges": [{
+        "id": "flow", "from": {"node": "work", "port": "value"},
+        "to": {"node": "done", "port": "value"},
+    }],
+    "entry": ["work"], "terminals": ["done"],
+}
+
+
+class GenerateWorkflowTests(BrowserE2ETestCase):
+    """描述 → 生成 → 预览 → 发布 → 运行, entirely through the browser.
+
+    The model is a scripted fake wired through the composition's generator
+    seam; everything else — validation, the advertised publish command, the
+    catalog refresh and the run — is the production path.
+    """
+
+    @classmethod
+    def extra_app_kwargs(cls) -> dict:
+        return {
+            "workflow_generator": lambda prompt: json.dumps(GENERATED_WORKFLOW),
+        }
+
+    def test_a_described_workflow_is_published_and_runs(self) -> None:
+        page = self.open("zh-CN", path="/ui/#/workflows")
+        page.click("#generateWorkflow")
+        page.wait_for_selector("dialog[open]")
+        page.fill("#generateInstruction", "先转换输入，然后结束")
+        page.click("#generateSubmit")
+
+        # Preview: the draft names the workflow and its nodes before anything
+        # is written.
+        page.wait_for_selector("#generatePublish")
+        # The eyebrow style upper-cases the id visually; compare content.
+        preview = page.inner_text("dialog[open]").lower()
+        self.assertIn("workflow:prompted", preview)
+        self.assertIn("transform@1.0.0", preview)
+
+        page.click("#generatePublish")
+        page.wait_for_selector(".workflow-card:has-text('Prompted flow')")
+
+        # The published workflow starts a run through the ordinary wizard.
+        page.locator(
+            ".workflow-card", has_text="Prompted flow"
+        ).locator(".workflow-card-main").click()
+        page.wait_for_selector(".workflow-detail .definition-list")
+        page.locator(".workflow-detail button", has_text="新建目标").click()
+        page.wait_for_selector("dialog[open]")
+        self.complete_goal_wizard(
+            page, "workflow:prompted", goal="试运行生成的工作流",
+            inputs={"value": 5},
+        )
+        page.wait_for_function("() => location.hash.startsWith('#/runs/run')")
+        run_id = page.evaluate(
+            "() => decodeURIComponent(location.hash.split('/')[2])"
+        )
+        self.wait_for_status(page, run_id, "succeeded")
 
 
 class NewRunTests(BrowserE2ETestCase):
