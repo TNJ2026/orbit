@@ -103,7 +103,7 @@ async function promptAndExecute(allowed, onDone, siblings = []) {
  * browser, and a confirm that silently resolves to nothing looks exactly like
  * a command that did not work.
  */
-function dialogResult(dialog, collect) {
+function dialogResult(dialog, collect, validate) {
   return new Promise((resolve) => {
     let settled = false;
     const settle = (value) => {
@@ -115,6 +115,13 @@ function dialogResult(dialog, collect) {
 
     dialog.querySelector("form").addEventListener("submit", (event) => {
       const confirmed = (event.submitter && event.submitter.value) === "confirm";
+      // Validation runs before the native close: a failed check keeps the
+      // dialog open with the input intact, instead of throwing out of the
+      // deferred settle where nothing can catch or display it.
+      if (confirmed && validate && !validate()) {
+        event.preventDefault();
+        return;
+      }
       // Let the native method="dialog" close run first, then settle.
       setTimeout(() => settle(confirmed ? collect() : null), 0);
     });
@@ -130,6 +137,9 @@ function humanSubmitDialog(allowed, siblings = []) {
   const decision = allowed.command.endsWith("reject") ? "reject" : "approve";
   const token = el("input", { type: "text", id: "humanToken", required: "required" });
   const value = el("textarea", { id: "humanValue" });
+  const valueError = el("div", {
+    class: "banner error", id: "humanValueError", hidden: "hidden", role: "alert",
+  });
   // The token retrieval command, when the server advertises one. Fetching
   // rotates the stored hash, so the submit must then carry the bumped
   // expected_version — patched onto `allowed` from the response.
@@ -168,6 +178,7 @@ function humanSubmitDialog(allowed, siblings = []) {
       el("div", { class: "field" }, [
         el("label", { for: "humanValue", text: i18n.t("human.value") }),
         value,
+        valueError,
       ]),
       el("div", { class: "actions" }, [
         el("button", { class: "button", value: "cancel", text: i18n.t("action.cancel") }),
@@ -179,11 +190,33 @@ function humanSubmitDialog(allowed, siblings = []) {
       ]),
     ]),
   ]);
-  return dialogResult(dialog, () => ({
-    submission_token: token.value,
-    decision,
-    value: value.value ? JSON.parse(value.value) : null,
-  }));
+  // Parsed inside the submit event (plan B4): a bad value marks the field,
+  // keeps the dialog open with the input intact, and never throws out of the
+  // deferred settle where it would surface as an uncaught error.
+  let parsedValue = null;
+  const validate = () => {
+    valueError.hidden = true;
+    value.removeAttribute("aria-invalid");
+    if (!value.value.trim()) {
+      parsedValue = null;
+      return true;
+    }
+    try {
+      parsedValue = JSON.parse(value.value);
+      return true;
+    } catch {
+      valueError.textContent = i18n.t("human.value.invalid");
+      valueError.hidden = false;
+      value.setAttribute("aria-invalid", "true");
+      value.focus();
+      return false;
+    }
+  };
+  return dialogResult(
+    dialog,
+    () => ({ submission_token: token.value, decision, value: parsedValue }),
+    validate,
+  );
 }
 
 function budgetDialog() {

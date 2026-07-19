@@ -36,6 +36,7 @@
   "human.token.fetch": "Get token",
   "command.human.token": "Get token",
   "human.value": "Value (JSON, optional)",
+  "human.value.invalid": "Value must be valid JSON — fix it or clear the field",
   "inbox.column.actions": "Actions",
   "inbox.column.item": "Item",
   "inbox.column.run": "Run",

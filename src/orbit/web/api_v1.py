@@ -160,13 +160,26 @@ def build_api_v1(
             envelope(summary, projection_version=summary["projection_version"])
         )
 
+    def _command_factory(actor: str):
+        """Commands are authorised before they are advertised (plan B1).
+
+        A reader who cannot execute a mutation must not be shown its button:
+        an inbox full of buttons that 403 teaches people the UI lies. The
+        server still re-checks scope on submission — this only shapes what is
+        offered.
+        """
+        if guard.allows(actor, WRITE_SCOPE):
+            return None  # read model default: full command set
+        return lambda record, *, run_id, run_version: ()
+
     async def run_responsibilities(request: Request) -> JSONResponse:
         actor = authenticate(request, READ_SCOPE)
         if isinstance(actor, JSONResponse):
             return actor
         try:
             items = reads.responsibilities(
-                EntityId.parse(request.path_params["run_id"])
+                EntityId.parse(request.path_params["run_id"]),
+                command_factory=_command_factory(actor),
             )
         except ValueError as exc:
             return error("not_found", str(exc), 404)
@@ -261,7 +274,10 @@ def build_api_v1(
             return actor
         try:
             cursor, limit = read_params(request)
-            items, next_cursor = reads.inbox(cursor=cursor, limit=limit)
+            items, next_cursor = reads.inbox(
+                cursor=cursor, limit=limit,
+                command_factory=_command_factory(actor),
+            )
         except CursorError as exc:
             return error("invalid_cursor", str(exc))
         except ValueError as exc:

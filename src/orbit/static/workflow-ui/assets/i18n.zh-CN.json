@@ -36,6 +36,7 @@
   "human.token.fetch": "获取令牌",
   "command.human.token": "获取令牌",
   "human.value": "内容（JSON，可选）",
+  "human.value.invalid": "内容必须是有效 JSON——请修正或清空该字段",
   "inbox.column.actions": "操作",
   "inbox.column.item": "事项",
   "inbox.column.run": "运行",

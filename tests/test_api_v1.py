@@ -516,7 +516,7 @@ class HumanTaskCommandTests(ApiTestCase):
     def test_inbox_advertises_the_token_command(self) -> None:
         with AsgiHarness(self.app) as client:
             self._run_with_task(client)
-            items = client.get("/api/v1/inbox", actor="reader").json()["data"]["items"]
+            items = client.get("/api/v1/inbox", actor="writer").json()["data"]["items"]
             human = next(item for item in items if item["kind"] == "human")
             commands = {command["command"] for command in human["allowed_commands"]}
             self.assertIn("human.token", commands)
@@ -531,7 +531,7 @@ class HumanTaskCommandTests(ApiTestCase):
         with AsgiHarness(self.app) as client:
             run_id, _task_id, _token = self._run_with_task(client)
             items = client.get(
-                f"/api/v1/runs/{run_id}/responsibilities", actor="reader"
+                f"/api/v1/runs/{run_id}/responsibilities", actor="writer"
             ).json()["data"]["responsibilities"]
             human = next(item for item in items if item["kind"] == "human")
             commands = {command["command"] for command in human["allowed_commands"]}
@@ -542,7 +542,7 @@ class HumanTaskCommandTests(ApiTestCase):
         with AsgiHarness(self.app) as client:
             run_id, _task_id, _token = self._run_with_task(client)
             items = client.get(
-                f"/api/v1/runs/{run_id}/responsibilities", actor="reader"
+                f"/api/v1/runs/{run_id}/responsibilities", actor="writer"
             ).json()["data"]["responsibilities"]
             human = next(item for item in items if item["kind"] == "human")
             cancel = next(
@@ -556,6 +556,34 @@ class HumanTaskCommandTests(ApiTestCase):
             _run, task_id, _token = self._run_with_task(client)
             items = client.get("/api/v1/inbox", actor="reader").json()["data"]["items"]
             self.assertIn(task_id, [item["task_id"] for item in items])
+
+    def test_read_only_actors_are_not_shown_write_commands(self) -> None:
+        """Plan B1: a button that will 403 must never be advertised.
+
+        Readers still see the responsibilities themselves — visibility is a
+        read concern — but every command list they receive is empty.
+        """
+        with AsgiHarness(self.app) as client:
+            run_id, _task_id, _token = self._run_with_task(client)
+
+            inbox = client.get("/api/v1/inbox", actor="reader").json()["data"]["items"]
+            self.assertTrue(inbox)
+            self.assertTrue(all(item["allowed_commands"] == [] for item in inbox))
+
+            items = client.get(
+                f"/api/v1/runs/{run_id}/responsibilities", actor="reader"
+            ).json()["data"]["responsibilities"]
+            self.assertTrue(items)
+            self.assertTrue(all(item["allowed_commands"] == [] for item in items))
+
+            # The same projections offer the full command set to a writer.
+            writer_inbox = client.get(
+                "/api/v1/inbox", actor="writer"
+            ).json()["data"]["items"]
+            human = next(item for item in writer_inbox if item["kind"] == "human")
+            commands = {c["command"] for c in human["allowed_commands"]}
+            self.assertIn("human.submit.approve", commands)
+            self.assertIn("human.token", commands)
 
 
 class BudgetCommandTests(ApiTestCase):
@@ -635,7 +663,7 @@ class BudgetCommandTests(ApiTestCase):
             )
 
             items = client.get(
-                f"/api/v1/runs/{run_id}/responsibilities", actor="reader"
+                f"/api/v1/runs/{run_id}/responsibilities", actor="writer"
             ).json()["data"]["responsibilities"]
             entry = next(item for item in items if item["kind"] == "budget")
             command = next(

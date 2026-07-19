@@ -295,6 +295,15 @@ class HumanTaskTests(BrowserE2ETestCase):
                 page.wait_for_function(
                     "() => document.querySelector('#humanToken').value.length > 0"
                 )
+                if locale == "en-US":
+                    # Plan B4: malformed JSON stays inside the form — the
+                    # dialog remains open, the field is marked, input is kept.
+                    page.fill("#humanValue", "{not json")
+                    page.click("dialog button[value=confirm]")
+                    page.wait_for_selector("#humanValueError:not([hidden])")
+                    self.assertTrue(page.is_visible("dialog[open]"))
+                    self.assertEqual("{not json", page.input_value("#humanValue"))
+                    page.fill("#humanValue", "")
                 page.click("dialog button[value=confirm]")
 
                 # The row leaves the inbox because the server stopped listing
