@@ -78,13 +78,17 @@ class ReadModelService:
 
     def _budget(self, connection, run_id: str) -> dict[str, Any] | None:
         row = connection.execute(
-            "SELECT total_microunits, reserved_microunits, consumed_microunits"
-            " FROM budget_accounts WHERE run_id = ?",
+            "SELECT total_microunits, reserved_microunits, consumed_microunits,"
+            " aggregate_version FROM budget_accounts WHERE run_id = ?",
             (run_id,),
         ).fetchone()
         if row is None:
             return None
         return {
+            # The account's own version. A budget command targets
+            # budget_account:<run>, so advertising the run's version here would
+            # hand the client a number that belongs to a different aggregate.
+            "aggregate_version": row["aggregate_version"],
             "total": row["total_microunits"],
             "reserved": row["reserved_microunits"],
             "consumed": row["consumed_microunits"],
@@ -215,11 +219,12 @@ class ReadModelService:
                 label="Budget exhausted",
                 status="blocked",
                 detail=None,
-                expected_version=run["aggregate_version"],
+                expected_version=budget["aggregate_version"],
                 allowed_commands=tuple(
                     factory(
                         {"kind": "budget", "id": str(run_id), "status": "blocked",
-                         "aggregate_version": run["aggregate_version"], "detail": None},
+                         "aggregate_version": budget["aggregate_version"],
+                         "detail": None},
                         run_id=str(run_id), run_version=run["aggregate_version"],
                     )
                 ),

@@ -95,13 +95,17 @@ class Step10AgenticTests(unittest.TestCase):
 
     def test_budget_add_is_service_level_idempotent(self):
         service = BudgetService(self.path)
-        service.open_account(self.run_id, 100, actor="owner", now=NOW)
+        opened = service.open_account(self.run_id, 100, actor="owner", now=NOW)
         first = service.add_budget(
-            self.run_id, 50, actor="owner", now=NOW,
-            idempotency_key="api-command-1",
+            self.run_id, 50, expected_version=opened.version.value,
+            actor="owner", now=NOW, idempotency_key="api-command-1",
         )
+        # The replay deliberately passes the *stale* version: the grant already
+        # happened, so the account has moved on, and rejecting the retry of a
+        # command that succeeded would be the wrong answer.
         second = service.add_budget(
-            self.run_id, 50, actor="owner", now=NOW + timedelta(seconds=10),
+            self.run_id, 50, expected_version=opened.version.value,
+            actor="owner", now=NOW + timedelta(seconds=10),
             idempotency_key="api-command-1",
         )
         self.assertEqual(first, second)
@@ -113,9 +117,34 @@ class Step10AgenticTests(unittest.TestCase):
         self.assertEqual(1, count)
         with self.assertRaisesRegex(ValueError, "different amount"):
             service.add_budget(
-                self.run_id, 51, actor="owner", now=NOW,
-                idempotency_key="api-command-1",
+                self.run_id, 51, expected_version=opened.version.value,
+                actor="owner", now=NOW, idempotency_key="api-command-1",
             )
+
+    def test_budget_add_refuses_a_stale_expected_version(self):
+        """Two operators granting from the same view must not both land."""
+
+        from orbit.workflow.application.budget_service import BudgetVersionConflict
+
+        service = BudgetService(self.path)
+        opened = service.open_account(self.run_id, 100, actor="owner", now=NOW)
+        stale = opened.version.value
+
+        service.add_budget(
+            self.run_id, 50, expected_version=stale, actor="owner", now=NOW,
+            idempotency_key="first-grant",
+        )
+        with self.assertRaises(BudgetVersionConflict):
+            service.add_budget(
+                self.run_id, 50, expected_version=stale, actor="other", now=NOW,
+                idempotency_key="second-grant",
+            )
+        with connect_workflow_database(self.path, read_only=True) as connection:
+            total = connection.execute(
+                "SELECT total_microunits FROM budget_accounts WHERE run_id=?",
+                (str(self.run_id),),
+            ).fetchone()[0]
+        self.assertEqual(150, total, "the refused grant still landed")
 
     def test_concurrent_reservations_do_not_oversell(self):
         service = BudgetService(self.path)

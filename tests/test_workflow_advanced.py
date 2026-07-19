@@ -97,7 +97,7 @@ class AdvancedWorkflowTest(unittest.TestCase):
         same=service.report_usage(reservation.reservation_id,1,50,actor="worker",now=NOW);self.assertEqual(50,same.consumed_microunits)
         over=service.report_usage(reservation.reservation_id,2,130,actor="worker",now=NOW);self.assertTrue(over.exhausted)
         settled=service.settle(reservation.reservation_id,actor="worker",now=NOW);self.assertEqual(0,settled.reserved_microunits)
-        restored=service.add_budget(self.run_id,100,actor="owner",now=NOW);self.assertEqual(70,restored.remaining_microunits)
+        restored=service.add_budget(self.run_id,100,expected_version=settled.version.value,actor="owner",now=NOW);self.assertEqual(70,restored.remaining_microunits)
         other=service.reserve(self.run_id,EntityId("attempt","b"),20,actor="worker",now=NOW);released=service.release(other.reservation_id,actor="worker",now=NOW);self.assertEqual(70,released.remaining_microunits)
 
     def test_single_human_model_quorum_form_deadline_and_one_time_token(self):

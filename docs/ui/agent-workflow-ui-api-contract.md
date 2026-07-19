@@ -140,7 +140,15 @@ Authorization: ...
 Idempotency-Key: <client generated UUID>
 ```
 
-Budget、Workflow Publish、Human Submit 和后续命令必须统一 Expected Version 语义；当前不接收 Expected Version 的端点需在 U0.2 修正。
+Budget、Workflow Publish、Human Submit 和后续命令统一 Expected Version 语义。
+
+**Budget（已修正）**：`POST /api/v1/runs/{id}/budget` 要求 `expected_version`，
+且该版本属于 `budget_account:<run_id>` 聚合，**不是 Run 的版本**——两者各自计数，
+混用会在账户有过预留或用量上报后立刻冲突。Responsibility 广告的
+`budget.add` AllowedCommand 已携带正确版本，客户端原样回传即可。
+
+版本过期返回 `409 version_conflict`。幂等重放（相同 Key、相同金额）**不**校验版本：
+该笔授予已经发生，账户版本必然已经前进，此时拒绝等于拒绝一条已成功命令的重试。
 
 ### 4.2 命令发现
 

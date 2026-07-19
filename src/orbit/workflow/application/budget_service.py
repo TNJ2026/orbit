@@ -14,6 +14,10 @@ from ..persistence.control import append_control_event, audit
 from ..persistence.database import connect_workflow_database
 
 
+class BudgetVersionConflict(ValueError):
+    """The caller acted on a budget account that has since moved on."""
+
+
 def _entry(kind: str, *parts: object) -> str:
     return "ledger_entry:" + hashlib.sha256("|".join(map(str, (kind, *parts))).encode()).hexdigest()
 
@@ -105,9 +109,17 @@ class BudgetService:
             db.execute("UPDATE budget_reservations SET status='released',updated_at=? WHERE reservation_id=?",(now.isoformat(),str(reservation_id)));db.execute("UPDATE budget_accounts SET reserved_microunits=reserved_microunits-?,aggregate_version=aggregate_version+1,updated_at=? WHERE run_id=?",(row["reserved_microunits"],now.isoformat(),str(run_id)));db.execute("INSERT OR IGNORE INTO budget_ledger_entries VALUES (?, ?, ?, 'released', ?, NULL, ?, '{}')",(_entry("release",reservation_id),str(run_id),str(reservation_id),row["reserved_microunits"],now.isoformat()));db.commit();return self._account(db.execute("SELECT * FROM budget_accounts WHERE run_id=?",(str(run_id),)).fetchone())
 
     def add_budget(
-        self, run_id: EntityId, amount: int, *, actor: str, now: datetime,
-        idempotency_key: str | None = None,
+        self, run_id: EntityId, amount: int, *, expected_version: int, actor: str,
+        now: datetime, idempotency_key: str | None = None,
     ) -> BudgetAccountRecord:
+        """Top the account up, refusing if it moved since the caller looked.
+
+        `expected_version` is required rather than optional: two operators
+        looking at the same exhausted run would otherwise both grant, and the
+        second grant would silently stack on top of the first instead of
+        telling its author that the situation had changed.
+        """
+
         if amount <= 0: raise ValueError("additional budget must be positive")
         key = idempotency_key or f"legacy:{amount}:{now.isoformat()}"
         if not key.strip():
@@ -120,6 +132,10 @@ class BudgetService:
                 (entry_id,),
             ).fetchone()
             if prior is not None:
+                # Replay is checked before the version, and deliberately does
+                # not check it: this grant already happened, so the account has
+                # moved past the version the caller is holding. Comparing here
+                # would reject the retry of a command that succeeded.
                 if prior["amount_microunits"] != amount:
                     raise ValueError("Budget idempotency key reused with different amount")
                 return self._account(
@@ -127,9 +143,19 @@ class BudgetService:
                         "SELECT * FROM budget_accounts WHERE run_id = ?", (str(run_id),)
                     ).fetchone()
                 )
+            current = db.execute(
+                "SELECT aggregate_version FROM budget_accounts WHERE run_id = ?",
+                (str(run_id),),
+            ).fetchone()
+            if current is None: raise ValueError("budget account not found")
+            if current["aggregate_version"] != expected_version:
+                raise BudgetVersionConflict(
+                    f"budget account is at version {current['aggregate_version']},"
+                    f" not {expected_version}"
+                )
             append_control_event(db, run_id=run_id, aggregate_id=EntityId("budget_account", run_id.value), event_type="budget_added", payload={"amount_microunits": amount}, actor=actor, idempotency_key=f"add:{key}", occurred_at=now)
-            cursor = db.execute("UPDATE budget_accounts SET total_microunits=total_microunits+?, aggregate_version=aggregate_version+1, updated_at=? WHERE run_id=?", (amount, now.isoformat(), str(run_id)))
-            if cursor.rowcount != 1: raise ValueError("budget account not found")
+            cursor = db.execute("UPDATE budget_accounts SET total_microunits=total_microunits+?, aggregate_version=aggregate_version+1, updated_at=? WHERE run_id=? AND aggregate_version=?", (amount, now.isoformat(), str(run_id), expected_version))
+            if cursor.rowcount != 1: raise BudgetVersionConflict("budget account changed concurrently")
             db.execute(
                 "INSERT INTO budget_ledger_entries VALUES (?, ?, NULL, 'budget_added', ?, NULL, ?, ?)",
                 (

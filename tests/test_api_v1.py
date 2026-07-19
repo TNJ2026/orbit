@@ -455,19 +455,27 @@ class BudgetCommandTests(ApiTestCase):
             "/api/v1/runs", actor="writer", key="budget-run",
             body={"workflow_id": "workflow:linear", "input": {"value": 0}},
         ).json()["data"]["run_id"]
-        BudgetService(self.db).open_account(
+        self.account = BudgetService(self.db).open_account(
             EntityId.parse(run_id), 1_000, actor="writer",
             now=datetime(2026, 1, 1, tzinfo=timezone.utc),
         )
         return run_id
 
+    def grant(self, client, run_id, *, key, amount=500, version=None):
+        return client.post(
+            f"/api/v1/runs/{run_id}/budget", actor="writer", key=key,
+            body={
+                "amount_microunits": amount,
+                "expected_version": (
+                    self.account.version.value if version is None else version
+                ),
+            },
+        )
+
     def test_grant_reports_the_unit_with_the_numbers(self) -> None:
         with AsgiHarness(self.app) as client:
             run_id = self._run_with_account(client)
-            response = client.post(
-                f"/api/v1/runs/{run_id}/budget", actor="writer", key="b1",
-                body={"amount_microunits": 500},
-            )
+            response = self.grant(client, run_id, key="b1")
             self.assertEqual(200, response.status_code, response.text)
             budget = response.json()["data"]["budget"]
             self.assertEqual(1_500, budget["total_microunits"])
@@ -476,13 +484,65 @@ class BudgetCommandTests(ApiTestCase):
     def test_a_retried_grant_tops_up_once(self) -> None:
         with AsgiHarness(self.app) as client:
             run_id = self._run_with_account(client)
-            body = {"amount_microunits": 500}
-            client.post(f"/api/v1/runs/{run_id}/budget", actor="writer", key="b2", body=body)
-            again = client.post(
-                f"/api/v1/runs/{run_id}/budget", actor="writer", key="b2", body=body
-            )
+            self.grant(client, run_id, key="b2")
+            again = self.grant(client, run_id, key="b2")
             self.assertEqual(200, again.status_code)
             self.assertEqual(1_500, again.json()["data"]["budget"]["total_microunits"])
+
+    def test_a_grant_without_a_version_is_refused(self) -> None:
+        """The contract requires it; silently defaulting would defeat the point."""
+
+        with AsgiHarness(self.app) as client:
+            run_id = self._run_with_account(client)
+            response = client.post(
+                f"/api/v1/runs/{run_id}/budget", actor="writer", key="b3",
+                body={"amount_microunits": 500},
+            )
+            self.assertEqual(409, response.status_code)
+            self.assertIn("expected_version", response.json()["error"]["message"])
+
+    def test_a_stale_version_is_a_version_conflict(self) -> None:
+        with AsgiHarness(self.app) as client:
+            run_id = self._run_with_account(client)
+            self.grant(client, run_id, key="b4")
+            second = self.grant(client, run_id, key="b5")
+            self.assertEqual(409, second.status_code)
+            self.assertEqual("version_conflict", second.json()["error"]["code"])
+
+    def test_the_advertised_command_carries_the_account_version(self) -> None:
+        """Not the run's — they are different aggregates on different clocks."""
+
+        with AsgiHarness(self.app) as client:
+            run_id = self._run_with_account(client)
+            # Exhaust it so the budget responsibility is advertised at all.
+            budget = BudgetService(self.db)
+            reservation = budget.reserve(
+                EntityId.parse(run_id), EntityId("attempt", "f" * 64), 1_000,
+                actor="writer", now=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            )
+            budget.report_usage(
+                reservation.reservation_id, 1, 1_000, actor="writer",
+                now=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            )
+
+            items = client.get(
+                f"/api/v1/runs/{run_id}/responsibilities", actor="reader"
+            ).json()["data"]["responsibilities"]
+            entry = next(item for item in items if item["kind"] == "budget")
+            command = next(
+                c for c in entry["allowed_commands"] if c["command"] == "budget.add"
+            )
+            self.assertEqual(f"budget_account:{run_id}", command["target_aggregate_id"])
+
+            # Using exactly what was advertised must work.
+            applied = client.post(
+                f"/api/v1/runs/{run_id}/budget", actor="writer", key="b6",
+                body={
+                    "amount_microunits": 250,
+                    "expected_version": command["expected_version"],
+                },
+            )
+            self.assertEqual(200, applied.status_code, applied.text)
 
 
 class RecoveryCommandTests(ApiTestCase):

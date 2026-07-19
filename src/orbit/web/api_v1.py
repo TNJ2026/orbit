@@ -25,7 +25,9 @@ from ..workflow.api.routes import (
     ApiCommandExecutor, CommandInProgress, IdempotencyConflict, RateLimiter,
     RequestTooLarge, _bounded_json,
 )
-from ..workflow.application.budget_service import BudgetService
+from ..workflow.application.budget_service import (
+    BudgetService, BudgetVersionConflict,
+)
 from ..workflow.application.foreach_service import ForeachService
 from ..workflow.application.human_service import HumanTaskService
 from ..workflow.application.run_service import RunApplicationService, RunStartError
@@ -322,6 +324,8 @@ def build_api_v1(
             return error("command_in_progress", str(exc), 409)
         except PermissionError as exc:
             return error("forbidden", str(exc), 403)
+        except BudgetVersionConflict as exc:
+            return error("version_conflict", str(exc), 409)
         except (RunStartError, ValueError) as exc:
             return error("invalid_command", str(exc), 409)
         record_audit(actor, action, {"path": request.url.path, "key": key})
@@ -405,7 +409,12 @@ def build_api_v1(
             if amount is None:
                 raise ValueError("amount_microunits is required")
             account = budgets.add_budget(
-                EntityId.parse(run_id), int(amount), actor=actor, now=now(),
+                EntityId.parse(run_id), int(amount),
+                # The account's own version, not the run's — the allowed
+                # command carries it as `expected_version` against
+                # `budget_account:<run>`.
+                expected_version=_required_version(body),
+                actor=actor, now=now(),
                 # The caller's key is the ledger key, so a retried grant tops
                 # the account up once rather than once per delivery.
                 idempotency_key=key,
