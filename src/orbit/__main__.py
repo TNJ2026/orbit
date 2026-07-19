@@ -12,7 +12,7 @@ import uvicorn
 
 from . import __version__
 from .platform.cutover import (
-    ACKNOWLEDGE_FLAG, CutoverRequired, ensure_cutover_acknowledged,
+    ACKNOWLEDGE_FLAG, CutoverRequired, ensure_cutover_acknowledged, read_marker,
 )
 from .platform.projects import (
     project_db_path,
@@ -22,15 +22,27 @@ from .platform.projects import (
 )
 
 
-def _runtime_db_path(explicit: str | None) -> str:
-    """Resolve the runtime database.
+def _runtime_db_path(explicit: str | None, *, acknowledged: bool = False) -> str:
+    """Resolve the runtime database, gating on the cutover acknowledgement.
 
-    Every command that touches the default database goes through here, so the
-    path rule cannot drift between `serve`, `workflow publish` and `db check`.
+    Every command that touches the default database goes through here, so
+    neither the path rule nor the gate can drift between `serve`, `workflow
+    publish`, `run start` and `db check`. Putting the gate anywhere else is how
+    `orbit workflow publish` came to write a fresh `runtime.db` for a project
+    whose legacy data had never been acknowledged.
+
+    An explicit `--db` is not gated: the gate protects the *default* path,
+    where abandoning pre-migration data would otherwise be silent. Naming a
+    database on the command line is already an explicit choice of which one.
     """
 
     if explicit:
         return explicit
+    try:
+        ensure_cutover_acknowledged(acknowledged=acknowledged)
+    except CutoverRequired as exc:
+        print(str(exc), flush=True)
+        raise SystemExit(exc.exit_code) from None
     return str(project_db_path(resolve_project_root()))
 
 
@@ -226,23 +238,20 @@ def _serve(args) -> None:
 
     project_root = resolve_project_root()
 
-    # Before anything is opened: a project carrying pre-migration data does not
-    # start until someone has said, once, that abandoning it is intended.
-    try:
-        marker = ensure_cutover_acknowledged(
-            acknowledged=args.acknowledge_discard_legacy_data
-        )
-    except CutoverRequired as exc:
-        print(str(exc), flush=True)
-        raise SystemExit(exc.exit_code) from None
-    if marker is not None and args.acknowledge_discard_legacy_data:
-        print(
-            f"cutover acknowledged at {marker.acknowledged_at}; "
-            "legacy files are left untouched",
-            flush=True,
-        )
+    # `serve` is the one command that can *grant* the acknowledgement; the gate
+    # itself lives in _runtime_db_path so every other command is covered too.
+    db_path = _runtime_db_path(
+        args.db, acknowledged=args.acknowledge_discard_legacy_data
+    )
+    if args.acknowledge_discard_legacy_data:
+        marker = read_marker()
+        if marker is not None:
+            print(
+                f"cutover acknowledged at {marker.acknowledged_at}; "
+                "legacy files are left untouched",
+                flush=True,
+            )
 
-    db_path = _runtime_db_path(args.db)
     handlers = list(builtin_handlers())
     if args.dev_tools:
         # Opt-in on purpose: this is the only switch that lets a workflow run a

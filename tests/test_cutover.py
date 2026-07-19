@@ -152,6 +152,115 @@ class AcknowledgementTests(CutoverTestCase):
         self.assertIsNone(read_marker(self.project, self.state))
 
 
+class EveryCliIsGatedTests(unittest.TestCase):
+    """The gate has to cover every command that opens the default database.
+
+    It used to live only in `_serve`, so `orbit workflow publish` would
+    happily create a fresh runtime.db for a project whose legacy data had
+    never been acknowledged — the explicit confirmation bypassed by the first
+    command a user is likely to run.
+    """
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.home = Path(self.temp.name) / "home"
+        self.project = Path(self.temp.name) / "project"
+        (self.project / ".git").mkdir(parents=True)
+        self.plant_legacy()
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def plant_legacy(self) -> Path:
+        from orbit.platform.projects import project_id, project_slug
+
+        slug = project_slug(self.project)
+        digest = project_id(self.project)
+        path = self.home / ".orbit" / "projects" / f"{slug}-{digest}" / "messages.db"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"legacy")
+        return path
+
+    def cli(self, *args: str) -> subprocess.CompletedProcess:
+        """Run from inside the project, with the planted HOME.
+
+        The timeout is short on purpose: a gated command exits immediately, so
+        if the gate ever regresses `serve` fails here in seconds instead of
+        blocking the suite for two minutes while a server it should never have
+        started waits for connections.
+        """
+
+        return subprocess.run(
+            [sys.executable, "-m", "orbit", *args],
+            capture_output=True, text=True, cwd=str(self.project), timeout=20,
+            env={
+                "PYTHONPATH": str(ROOT / "src"),
+                "PATH": "/usr/bin:/bin",
+                "HOME": str(self.home),
+            },
+        )
+
+    def test_every_default_database_command_refuses(self) -> None:
+        # `workflow publish` is the motivating case: it is the first command a
+        # user runs, and it created runtime.db behind the gate's back.
+        import json as _json
+
+        from tests.test_cli_matrix import CATALOG, VALID_DSL
+
+        workflow = self.project / "w.json"
+        workflow.write_text(_json.dumps(VALID_DSL), encoding="utf-8")
+        catalog = self.project / "c.json"
+        catalog.write_text(_json.dumps(CATALOG), encoding="utf-8")
+
+        for args in (
+            ("serve", "--port", "0"),
+            ("db", "check"),
+            ("run", "inspect", "run:x"),
+            ("run", "start", "workflow:x"),
+            (
+                "workflow", "publish", str(workflow),
+                "--catalog", str(catalog), "--expected-version", "0",
+            ),
+        ):
+            with self.subTest(args=args):
+                result = self.cli(*args)
+                self.assertEqual(
+                    EXIT_NEEDS_ACKNOWLEDGEMENT, result.returncode,
+                    f"{args} was not gated:\n{result.stdout}{result.stderr}",
+                )
+                self.assertIn("pre-migration data", result.stdout)
+
+    def test_the_refusal_names_the_flag_that_clears_it(self) -> None:
+        result = self.cli("db", "check")
+        self.assertIn(ACKNOWLEDGE_FLAG, result.stdout)
+
+    def test_an_explicit_db_is_not_gated(self) -> None:
+        """`--db` is already an explicit choice of which database to use.
+
+        The gate protects the default path, where abandoning pre-migration
+        data would otherwise be silent.
+        """
+
+        elsewhere = Path(self.temp.name) / "explicit.db"
+        result = self.cli("db", "check", "--db", str(elsewhere))
+        self.assertNotEqual(EXIT_NEEDS_ACKNOWLEDGEMENT, result.returncode)
+        self.assertIn("no database at", result.stderr)
+
+    def test_acknowledging_once_unblocks_the_other_commands(self) -> None:
+        granted = self.cli("serve", ACKNOWLEDGE_FLAG, "--help")
+        self.assertEqual(0, granted.returncode, granted.stderr)
+
+        # --help exits before the gate, so grant it through a real resolution.
+        from orbit.platform.cutover import ensure_cutover_acknowledged
+
+        ensure_cutover_acknowledged(
+            acknowledged=True, project_dir=self.project,
+            base_dir=self.home / ".orbit" / "projects",
+        )
+        result = self.cli("db", "check")
+        self.assertNotEqual(EXIT_NEEDS_ACKNOWLEDGEMENT, result.returncode, result.stdout)
+
+
 class ServeCliTests(unittest.TestCase):
     """The gate is reachable from the command line, and advertised in help."""
 
