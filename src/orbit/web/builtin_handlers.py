@@ -19,7 +19,9 @@ from typing import Any, Mapping, Sequence
 from ..workflow.catalogs import HandlerManifest
 from ..workflow.domain.durable_execution import ExecutionSafety
 from ..workflow.domain.handlers import ResourceProfile
+from ..workflow.catalogs.agent_discovery import registrable_agents
 from ..workflow.handlers import TransformHandler
+from ..workflow.handlers.agent import AgentHandler, TrustedCliAgentClient
 from ..workflow.handlers.dev_tools import (
     CAPABILITY_PROCESS_RUN, CAPABILITY_WORKSPACE_READ, CAPABILITY_WORKSPACE_WRITE,
     DEFAULT_TIMEOUT_SECONDS, VerifyProfile, WorkspaceRunner, register_dev_tools,
@@ -47,6 +49,47 @@ def builtin_handlers() -> Sequence[HandlerRegistration]:
     return (
         HandlerRegistration(TRANSFORM_MANIFEST, TransformHandler(), "transform@1.0.0"),
     )
+
+
+# -- discovered agent CLIs ---------------------------------------------------
+
+
+def agent_handlers(
+    agents: Sequence[Any],
+    *,
+    allowed_capabilities: Sequence[str] | None = None,
+    timeout_seconds: int = 1800,
+) -> tuple[Sequence[HandlerRegistration], tuple[str, ...]]:
+    """Turn discovered agent CLIs into registrations, or nothing.
+
+    Discovery on its own only fills a catalog: it tells the UI which CLIs
+    exist. Until these registrations reach the registry *before it seals*, a
+    workflow can see an installed agent and be unable to call it — which is
+    the state the migration plan's M3 task 17 exists to prevent.
+
+    The command is owned by TrustedCliAgentClient's constructor, built here
+    from the executable discovery resolved. No workflow, plan or planner can
+    contribute an argument to it.
+    """
+
+    registrations: list[HandlerRegistration] = []
+    names: list[str] = []
+    for agent, manifest in registrable_agents(
+        agents, allowed_capabilities=allowed_capabilities
+    ):
+        registrations.append(
+            HandlerRegistration(
+                manifest,
+                AgentHandler(
+                    TrustedCliAgentClient(
+                        (agent.executable_path,), timeout_seconds=timeout_seconds
+                    )
+                ),
+                f"{manifest.name}@{manifest.version}",
+            )
+        )
+        names.append(manifest.name)
+    return tuple(registrations), tuple(names)
 
 
 # -- optional development tooling -------------------------------------------

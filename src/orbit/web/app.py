@@ -291,6 +291,7 @@ def create_app(
     authorizer: Any = None,
     serve_ui: bool = False,
     discover_agents: bool = False,
+    agent_capabilities: Sequence[str] | None = None,
 ) -> Starlette:
     """Build the Runtime application.
 
@@ -299,9 +300,29 @@ def create_app(
     `app.state.runtime` rather than by importing anything from the old engine.
     """
 
+    # Discovery runs *before* the composition, because the composition seals
+    # the handler registry in its constructor. Registering afterwards is not
+    # merely late — it is impossible, and that is how discovered agents ended
+    # up visible in the catalog and uncallable from a workflow.
+    agent_catalog: Sequence[Mapping[str, Any]] = ()
+    registrations = list(handlers)
+    if discover_agents:
+        from ..workflow.catalogs.agent_discovery import (
+            catalog_entries, discover_agent_clis,
+        )
+
+        from .builtin_handlers import agent_handlers
+
+        discovered = discover_agent_clis()
+        agent_catalog = catalog_entries(discovered)
+        agent_registrations, _names = agent_handlers(
+            discovered, allowed_capabilities=agent_capabilities
+        )
+        registrations.extend(agent_registrations)
+
     composition = RuntimeComposition(
         db_path,
-        handlers=handlers,
+        handlers=registrations,
         schemas=schemas,
         secret_values=secret_values,
         worker_count=worker_count,
@@ -335,17 +356,6 @@ def create_app(
 
     from .api_v1 import build_api_v1
     from .mcp import build_mcp
-
-    agent_catalog: Sequence[Mapping[str, Any]] = ()
-    if discover_agents:
-        # Discovery is opt-in because it shells out to probe versions. In M3 it
-        # only populates the authoring catalog — no Agent CLI is registered as
-        # an executable handler until M5 provides the adapter.
-        from ..workflow.catalogs.agent_discovery import (
-            catalog_entries, discover_agent_clis,
-        )
-
-        agent_catalog = catalog_entries(discover_agent_clis())
 
     routes: list[Route | Mount] = [
         Route("/health/live", health_live, methods=["GET"]),

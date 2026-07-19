@@ -110,11 +110,10 @@ The plan does require both:
 | Plan | Requirement | Reality |
 | --- | --- | --- |
 | M2, task 1 (line 283ff) | the composition root manages Worker, Timer, **Planner** and Recovery | `_build_loops()` starts workers, a timer and recovery. No planner loop. |
-| M3, task 17 (line 321) | discovery results are policy-checked and registered **before the registry is sealed** | `builder.build()` seals at `app.py:164`; `discover_agent_clis()` runs at line 348. The order makes registration structurally impossible. |
+| M3, task 17 (line 321) | discovery results are policy-checked and registered **before the registry is sealed** | ✅ **fixed.** Discovery now runs ahead of `RuntimeComposition`, and each granted agent is registered as `AgentHandler(TrustedCliAgentClient(...))`. |
 
 So **P1-1 (planner dispatcher) and P1-2 (agent handlers) are migration
-defects**, not future scope. `agent_discovery.registrable_agents()` — the
-policy-checked manifest conversion — exists and has no caller.
+defects**, not future scope. P1-2 is now closed; P1-1 remains open.
 
 Genuinely out of scope: DSL syntax for foreach, subflow and agentic regions,
 and the kernel scheduling that would drive them. No plan task asks for those.

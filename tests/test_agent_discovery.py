@@ -7,6 +7,9 @@ become an executable, an argument or a path.
 
 from __future__ import annotations
 
+from pathlib import Path
+import shutil
+import tempfile
 from types import SimpleNamespace
 import unittest
 
@@ -153,6 +156,115 @@ class PolicyTests(unittest.TestCase):
         )
         self.assertEqual(1, len(pairs))
         self.assertEqual("agent.claude", pairs[0][1].name)
+
+
+class RegistrationTests(unittest.TestCase):
+    """Discovery has to end in a registration, before the registry seals.
+
+    The migration plan's M3 task 17 requires it, and for a while the code did
+    the opposite: the composition sealed the registry in its constructor and
+    discovery ran afterwards, so an installed agent appeared in the UI catalog
+    and could never be invoked by a workflow. "Registered later" is not a
+    weaker version of this — a sealed registry cannot be added to at all.
+    """
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.db = Path(self.temp.name) / "runtime.db"
+        # A real executable: the registry runs each handler's preflight before
+        # sealing, and TrustedCliAgentClient refuses a CLI that is not on PATH.
+        # That check is the point — a registry must not seal around a handler
+        # that cannot run — so the fixture satisfies it rather than mocking it.
+        self.executable = shutil.which("true") or "/usr/bin/true"
+        self.agent = DiscoveredAgent(CLAUDE, self.executable, "2.1.3")
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def test_a_registry_refuses_to_seal_around_a_missing_cli(self) -> None:
+        """Preflight is what keeps "registered" from meaning "unusable"."""
+
+        from orbit.web.app import RuntimeComposition
+        from orbit.web.builtin_handlers import BUILTIN_SCHEMAS, agent_handlers
+
+        absent = DiscoveredAgent(CLAUDE, "/nonexistent/claude", "2.1.3")
+        registrations, _ = agent_handlers([absent])
+        with self.assertRaises(RuntimeError) as caught:
+            RuntimeComposition(
+                self.db, handlers=registrations, schemas=BUILTIN_SCHEMAS,
+            )
+        self.assertIn("preflight", str(caught.exception))
+
+    def test_a_discovered_agent_becomes_a_registration(self) -> None:
+        from orbit.web.builtin_handlers import agent_handlers
+
+        registrations, names = agent_handlers([self.agent])
+        self.assertEqual(("agent.claude",), names)
+        self.assertEqual("agent.claude", registrations[0].manifest.name)
+
+    def test_the_registration_carries_the_discovered_executable(self) -> None:
+        """The command is constructor-owned; nothing else may supply it."""
+
+        from orbit.web.builtin_handlers import agent_handlers
+
+        registrations, _ = agent_handlers([self.agent])
+        client = registrations[0].implementation.client
+        self.assertEqual((self.executable,), client.command)
+
+    def test_an_ungranted_capability_produces_no_registration(self) -> None:
+        from orbit.web.builtin_handlers import agent_handlers
+
+        registrations, names = agent_handlers([self.agent], allowed_capabilities=[])
+        self.assertEqual((), registrations)
+        self.assertEqual((), names)
+
+    def test_the_composition_can_resolve_a_registered_agent(self) -> None:
+        """End of the chain: sealed registry, resolvable by fingerprint."""
+
+        from orbit.web.app import RuntimeComposition
+        from orbit.web.builtin_handlers import BUILTIN_SCHEMAS, agent_handlers
+
+        registrations, _ = agent_handlers([self.agent])
+        composition = RuntimeComposition(
+            self.db, handlers=registrations, schemas=BUILTIN_SCHEMAS,
+        )
+        try:
+            self.assertTrue(composition.handler_registry.sealed)
+            manifest = registrations[0].manifest
+            entry = composition.handler_registry.resolve(
+                manifest.name, manifest.version,
+                expected_manifest_fingerprint=manifest.fingerprint,
+            )
+            self.assertEqual(manifest.fingerprint, entry.manifest.fingerprint)
+        finally:
+            composition.stop()
+
+    def test_discovery_runs_before_the_registry_seals(self) -> None:
+        """Ordering, asserted on the real create_app rather than by reading it."""
+
+        from unittest.mock import patch
+
+        from orbit.web.app import create_app
+        from orbit.web.builtin_handlers import BUILTIN_SCHEMAS
+
+        with patch(
+            "orbit.workflow.catalogs.agent_discovery.discover_agent_clis",
+            return_value=(self.agent,),
+        ):
+            app = create_app(
+                self.db, schemas=BUILTIN_SCHEMAS, discover_agents=True,
+            )
+        composition = app.state.runtime
+        try:
+            registered = {
+                entry.manifest.name for entry in composition.handler_registry.entries()
+            }
+            self.assertIn(
+                "agent.claude", registered,
+                "the agent was discovered but never reached the sealed registry",
+            )
+        finally:
+            composition.stop()
 
 
 class CatalogExposureTests(unittest.TestCase):
