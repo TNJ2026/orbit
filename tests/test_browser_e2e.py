@@ -1,9 +1,24 @@
-"""M7 gate 7: the UI, driven by a real browser, in both languages.
+"""The UI, driven by a real browser, in both languages.
 
-Everything else tests the UI's inputs and outputs — the API it calls, the
-modules it imports, the strings it ships. This drives the actual page: clicks,
-dialogs, locale switching, and the four flows the gate names — budget, cancel,
-recovery and artifacts.
+What is covered here: locale selection and switching, the new-run dialog,
+approving from the inbox, granting budget to an exhausted run, cancelling a
+run parked on a person, the plan panel's definition/overlay split, the ops
+page, and a failed run's error panel.
+
+What is NOT covered, and why — M7 gate 7 asks for the full "New Goal →
+execute → wait for a person → submit → succeed" journey plus recovery and
+artifacts:
+
+* **Artifacts** have no UI at all, so there is nothing to drive.
+* **Recovery apply** has no UI affordance: the ops page lists findings and
+  offers no button, so an operator cannot apply one from the browser.
+* The journey is exercised in two pieces — a run started from the dialog, and
+  an approval completed from the inbox — because no published workflow parks
+  itself on a person. The HumanTask is created by the test.
+
+An earlier version of this file claimed all of that was covered. It was not,
+and a test named for a flow it does not exercise is worse than a missing one:
+it turns a gap into a green tick. See docs/migration/unwired-capabilities.md.
 
 playwright is a test-only dependency (`pip install -e '.[dev]'` plus
 `playwright install chromium`). The suite skips when it is missing rather than
@@ -238,24 +253,64 @@ class HumanTaskTests(BrowserE2ETestCase):
 
 
 class BudgetTests(BrowserE2ETestCase):
-    def test_a_budget_grant_from_the_ui_moves_the_account(self) -> None:
-        run_id = self.start_run("browser-budget")
+    def exhausted_run(self, key: str, total: int = 1_000) -> str:
+        """A run whose budget is spent, which is when the UI offers a grant.
+
+        The "Add budget" command is advertised on an exhausted account, so
+        driving a real grant from the browser needs a real exhaustion first.
+        """
+
+        run_id = self.start_run(key)
+        now = datetime.now(timezone.utc)
         budget = BudgetService(self.db)
-        budget.open_account(
-            EntityId.parse(run_id), 1_000, actor="local",
-            now=datetime.now(timezone.utc),
+        budget.open_account(EntityId.parse(run_id), total, actor="local", now=now)
+        reservation = budget.reserve(
+            EntityId.parse(run_id), EntityId("attempt", key.encode().hex().ljust(64, "0")[:64]),
+            total, actor="local", now=now,
         )
+        budget.report_usage(
+            reservation.reservation_id, 1, total, actor="local", now=now
+        )
+        return run_id
 
-        page = self.open("en-US", path=f"/ui/#/runs/{run_id}")
-        page.wait_for_selector("text=Budget")
-        self.assertIn("microunits", page.inner_text("#content"))
-
-        total = page.evaluate(
+    def account_total(self, page, run_id: str) -> int:
+        return page.evaluate(
             "id => fetch(`/api/v1/runs/${encodeURIComponent(id)}`).then(r => r.json())"
             ".then(b => b.data.budget_summary.total_microunits)",
             run_id,
         )
-        self.assertEqual(1_000, total)
+
+    def test_a_grant_made_in_the_browser_moves_the_account(self) -> None:
+        """The actual gate: click the advertised button, top the account up."""
+
+        run_id = self.exhausted_run("browser-budget-grant")
+        page = self.open("en-US", path=f"/ui/#/runs/{run_id}")
+        self.assertEqual(1_000, self.account_total(page, run_id))
+
+        grant = page.locator("button", has_text="Add budget").first
+        grant.wait_for(timeout=15000)
+        grant.click()
+
+        page.wait_for_selector("dialog[open]")
+        page.fill("#budgetAmount", "500")
+        page.click("dialog button[value=confirm]")
+
+        page.wait_for_function(
+            "id => fetch(`/api/v1/runs/${encodeURIComponent(id)}`).then(r => r.json())"
+            ".then(b => b.data.budget_summary.total_microunits === 1500)",
+            arg=run_id, timeout=15000,
+        )
+
+    def test_the_grant_button_is_translated(self) -> None:
+        run_id = self.exhausted_run("browser-budget-zh")
+        page = self.open("zh-CN", path=f"/ui/#/runs/{run_id}")
+        grant = page.locator("button", has_text="追加预算").first
+        grant.wait_for(timeout=15000)
+
+    def test_an_exhausted_run_says_so(self) -> None:
+        run_id = self.exhausted_run("browser-budget-exhausted")
+        page = self.open("en-US", path=f"/ui/#/runs/{run_id}")
+        page.wait_for_selector("text=Budget exhausted", timeout=15000)
 
     def test_the_budget_unit_is_shown_with_the_number(self) -> None:
         """A number without its unit is how microunits get read as dollars."""
@@ -352,6 +407,33 @@ class PlanAndRecoveryTests(BrowserE2ETestCase):
         errors = page.inner_text("#content")
         self.assertIn("validation_error", errors)
         self.assertIn("handler", errors)
+
+
+class UnbuiltSurfaceTests(BrowserE2ETestCase):
+    """Absences the M7 gate asks for, pinned so they cannot be forgotten.
+
+    These assert the gap, not the feature. When the surface is built they
+    fail, which is the point: the reminder is in the suite rather than in a
+    document nobody re-reads.
+    """
+
+    def test_there_is_no_artifact_view_yet(self) -> None:
+        page = self.open("en-US")
+        views = page.eval_on_selector_all(
+            ".nav-button", "nodes => nodes.map(n => n.dataset.view)"
+        )
+        self.assertEqual(["runs", "inbox", "ops"], views)
+        self.assertNotIn("artifact", page.inner_text("body").lower())
+
+    def test_the_ops_page_offers_no_way_to_apply_a_recovery(self) -> None:
+        """Findings are listed; applying one is API-only."""
+
+        page = self.open("en-US", path="/ui/#/ops")
+        page.wait_for_selector("text=Recovery scan")
+        buttons = page.eval_on_selector_all(
+            "#content button", "nodes => nodes.map(n => n.textContent.trim())"
+        )
+        self.assertEqual([], [b for b in buttons if "ecover" in b or "pply" in b])
 
 
 class RefreshTests(BrowserE2ETestCase):

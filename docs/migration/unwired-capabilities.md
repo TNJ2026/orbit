@@ -1,14 +1,22 @@
 # Unwired capabilities
 
-**Status**: open, as of the M7 release gate
+**Status**: open — M7 is **not** passed
 **Origin**: closing M0 blocker B5 ("Step 11 Foreach/Subflow runtime gap")
+**Revised**: 2026-07-19, after review found this document itself was wrong
 
-The migration (M0–M7) replaced the legacy engine with the durable runtime and
-is complete against its own task list. This document records something that
-review surfaced and the migration plan never covered: a layer of capability
-that is **built and tested but cannot be reached from a running system**.
+The migration replaced the legacy engine with the durable runtime, and the
+static-graph half of that works end to end. This document records a layer of
+capability that is **built and tested but cannot be reached from a running
+system** — and, in two cases, was required by the migration plan and simply
+not wired.
 
-It is written to be verified, not believed. Every claim below has a command.
+The first revision of this file said the plan "never covered" any of it. That
+was wrong; §"What is a migration defect" below has the plan's own line numbers.
+Getting this wrong is not a footnote: it moved two defects into the
+out-of-scope column, which is exactly how they would have shipped.
+
+Everything here is written to be verified, not believed. Every claim has a
+command.
 
 ## Summary
 
@@ -90,20 +98,35 @@ list, so a new finding cannot be added without wiring it.
 which needs a person. That is `safe=False` in the scanner and is pinned by a
 test so it does not later look like the same oversight.
 
-## Why this is not a migration defect
+## What is a migration defect, and what is out of scope
 
-The migration plan's task lists (M0–M7) never included "add foreach to the
-DSL" or "run a planner loop". Its subject was replacing the legacy engine, and
-that is done: publish, execute, human intervention, budget, recovery,
-observability, the bilingual UI, MCP and the CLI all work end to end on static
-graphs.
+**Corrected 2026-07-19.** An earlier revision of this document claimed the
+migration plan "never included run a planner loop". That was wrong, and the
+error mattered: it reclassified two of the plan's own requirements as
+out-of-scope future work.
 
-The honest description of today's system is: **a complete runtime for static
-workflow graphs, with the dynamic-planning layer implemented but not
-energised.**
+The plan does require both:
 
-The one thing that *was* a migration miss is B5. The M0 baseline assigned it to
-M5; M5 was declared done after the git/verify tools without revisiting it.
+| Plan | Requirement | Reality |
+| --- | --- | --- |
+| M2, task 1 (line 283ff) | the composition root manages Worker, Timer, **Planner** and Recovery | `_build_loops()` starts workers, a timer and recovery. No planner loop. |
+| M3, task 17 (line 321) | discovery results are policy-checked and registered **before the registry is sealed** | `builder.build()` seals at `app.py:164`; `discover_agent_clis()` runs at line 348. The order makes registration structurally impossible. |
+
+So **P1-1 (planner dispatcher) and P1-2 (agent handlers) are migration
+defects**, not future scope. `agent_discovery.registrable_agents()` — the
+policy-checked manifest conversion — exists and has no caller.
+
+Genuinely out of scope: DSL syntax for foreach, subflow and agentic regions,
+and the kernel scheduling that would drive them. No plan task asks for those.
+
+**B5** is a third, separate miss: the M0 baseline assigned it to M5, and M5 was
+declared done after the git/verify tools without revisiting it.
+
+The honest description of today's system: **a runtime for static workflow
+graphs.** Dynamic planning is implemented at the domain and service layers and
+cannot be reached — partly because the DSL has no syntax for it (out of scope),
+and partly because the composition root never wires what the plan told it to
+(a defect).
 
 ## What energising it would take
 
@@ -131,9 +154,22 @@ of the system with the strongest replay and determinism guarantees.
 
 ## Recommendation
 
-Ship the runtime as it stands, with this gap stated in the release notes.
-Nothing here is a correctness risk for what the system actually does today —
-these capabilities are unreachable, not broken. Energising them is a product
-decision about whether orbit is a static workflow runtime or an agentic one,
-and it deserves its own plan rather than being absorbed into a migration that
-has met its own gates.
+**M7 is not passed.** An earlier revision of this document and of the release
+notes said it was. Gate 7 (browser E2E over budget, recovery and artifacts) was
+claimed on the strength of a test named
+`test_a_budget_grant_from_the_ui_moves_the_account` that opened the account
+from the backend and never touched the UI, alongside a module docstring listing
+coverage that did not exist. That has been corrected: the budget grant is now
+driven through the browser, and the two genuine absences — no artifact UI, no
+recovery-apply affordance — are pinned by tests that assert the gap.
+
+Before the runtime can be called releasable:
+
+1. Wire the planner loop into the composition root (plan M2 task 1).
+2. Register discovered agents before the registry seals (plan M3 task 17).
+3. Close the P2 contract violations: budget expected-version, per-finding
+   recovery apply, the hardcoded `start_run` endpoint, and the cutover check
+   that only guards `serve`.
+
+Foreach, subflow and agentic DSL support remain out of scope and deserve their
+own plan.
