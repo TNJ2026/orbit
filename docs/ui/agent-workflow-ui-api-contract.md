@@ -10,7 +10,7 @@
 
 1. 服务端 Event/projection 是唯一状态源。
 2. Read DTO 版本化、分页并携带 projection version。
-3. UI 只提交后端返回的 `allowed_commands[]`。
+3. UI 只提交后端返回的 `allowed_commands[]`，唯一例外见 §4.2.1 Bootstrap Command。
 4. 所有 Read/Command 都先认证再授权；敏感读取可审计。
 5. 每个 mutation 使用 `Idempotency-Key`、Expected Version 和稳定错误码。
 6. Plan Definition 与 Runtime Overlay 是两个独立维度。
@@ -152,6 +152,26 @@ UI 通过 `allowed_commands[]` 获得 method、href、payload schema、Expected 
 - run.cancel
 - recovery.takeover
 - recovery.apply
+
+#### 4.2.1 Bootstrap Command（唯一例外）
+
+`allowed_commands[]` 是挂在某个既有聚合上的授权快照。**开始一个新 Run 时没有聚合可挂**——Run 还不存在，因此没有任何 Read Model 能广告它。
+
+因此 `POST /api/v1/runs` 是契约中**唯一**允许客户端直接构造的 mutation 路径，称为 Bootstrap Command。它受同样的约束：认证、授权 scope、`Idempotency-Key`。它没有 Expected Version，因为不存在要比较的版本。
+
+约束：
+
+- 例外只有这一条。任何其他 mutation 端点被客户端硬编码都是违约。
+- `tests/test_ui_assets.py::test_mutations_only_travel_through_allowed_commands`
+  以「客户端字面量集合 == `{("POST", "/api/v1/runs")}`」的形式钉住，多一条就红。
+- 这是**当前**状态，不是终局。Workflow Catalog 端点（见 §4.2.2）落地后，
+  `start_run` 应作为 catalog 条目的 AllowedCommand 返回，本例外随之删除。
+
+#### 4.2.2 Workflow Catalog（未实现）
+
+消除 Bootstrap 例外需要一个可发现的工作流目录：列出已发布的 workflow 及其版本，
+每条附带 `start_run` 的 AllowedCommand。当前 UI 让用户手工输入 `workflow_id`，
+既是可用性问题，也是这条例外存在的原因。归属 Goal/Catalog UI 里程碑。
 
 ### 4.3 幂等与冲突
 

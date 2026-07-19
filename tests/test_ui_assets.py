@@ -102,10 +102,17 @@ class SourceTests(unittest.TestCase):
                 self.assertNotIn(forbidden, joined)
 
     def test_mutations_only_travel_through_allowed_commands(self) -> None:
-        """Every POST path in the client comes from the server, except start_run.
+        """Every mutation path in the client comes from the server.
 
-        `POST /api/v1/runs` is the one command with no prior aggregate to hang
-        an allowed_commands entry on, so it is the single permitted literal.
+        The single exception is the Bootstrap Command defined in
+        `docs/ui/agent-workflow-ui-api-contract.md` §4.2.1: starting a run has
+        no prior aggregate to hang an `allowed_commands[]` entry on, so
+        `POST /api/v1/runs` is the one literal a client may construct.
+
+        This is an exact-equality assertion, not a membership one — a second
+        hardcoded endpoint fails here rather than quietly joining the
+        exception. The exception is meant to disappear once a Workflow Catalog
+        endpoint can advertise `start_run` (contract §4.2.2).
         """
 
         api_js = (ASSETS / "api.js").read_text(encoding="utf-8")

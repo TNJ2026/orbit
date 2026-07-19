@@ -166,7 +166,15 @@ export class Api {
     return this.get("/health/ready");
   }
 
-  /** Starting a run is the one command with no prior aggregate to reference. */
+  /** The Bootstrap Command — the contract's single hardcoded mutation.
+   *
+   * `allowed_commands[]` hangs off an existing aggregate. A run that does not
+   * exist yet has none, so no read model can advertise its start. See
+   * docs/ui/agent-workflow-ui-api-contract.md §4.2.1; §4.2.2 retires this
+   * exception once a Workflow Catalog can advertise start_run.
+   *
+   * Nothing else in this file may construct a mutation path.
+   */
   startRun(body, intent) {
     const scope = intent || "run.start";
     if (!this.pendingKeys.has(scope)) this.pendingKeys.set(scope, newIdempotencyKey());
