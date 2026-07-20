@@ -17,6 +17,7 @@ from orbit.workflow.catalogs.agent_discovery import (
     TRUSTED_AGENT_CLIS, AgentCliSpec, AgentDiscoveryError, DiscoveredAgent,
     agent_manifest, catalog_entries, discover_agent_clis, registrable_agents,
 )
+from orbit.workflow.cli_environment import trusted_cli_environment
 from orbit.workflow.domain.durable_execution import ExecutionSafety
 
 
@@ -55,6 +56,16 @@ class SpecValidationTests(unittest.TestCase):
 
 
 class DiscoveryTests(unittest.TestCase):
+    def test_trusted_cli_environment_keeps_identity_but_not_provider_tokens(self) -> None:
+        environment = trusted_cli_environment({
+            "PATH": "/bin", "HOME": "/home/operator", "USER": "operator",
+            "LOGNAME": "operator", "ANTHROPIC_API_KEY": "must-not-leak",
+        })
+        self.assertEqual({
+            "PATH": "/bin", "HOME": "/home/operator", "USER": "operator",
+            "LOGNAME": "operator",
+        }, environment)
+
     def test_only_installed_clis_are_reported(self) -> None:
         found = discover_agent_clis(
             TRUSTED_AGENT_CLIS,
@@ -106,8 +117,11 @@ class DiscoveryTests(unittest.TestCase):
 
         discover_agent_clis((CLAUDE,), which=fake_which({"claude"}), runner=record)
         self.assertEqual(["/usr/local/bin/claude", "--version"], seen["argv"])
-        # No inherited credentials in a probe.
-        self.assertEqual({"PATH", "HOME"}, set(seen["env"]))
+        # No inherited credentials in a probe; USER/LOGNAME are OS identity,
+        # required by Keychain-backed CLIs rather than provider tokens.
+        self.assertEqual(
+            {"PATH", "HOME", "USER", "LOGNAME"}, set(seen["env"])
+        )
 
 
 class ManifestTests(unittest.TestCase):

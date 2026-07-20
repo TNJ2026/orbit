@@ -85,10 +85,15 @@ orbit <command> --help
 | `--host` | `127.0.0.1` | 绑定地址 |
 | `--port` | `8848` | 端口 |
 | `--db` | 按项目 | 数据库路径，默认 `~/.orbit/projects/<project>/runtime.db` |
+| `--artifact-root` | 数据库旁 | 本地内容寻址 Artifact 目录，默认位于所选数据库旁的 `artifacts/` |
 | `--runner-concurrency` | `5` | 进程内 worker 的并行度 |
 | `--no-agent-discovery` | 关 | 启动时不探测已安装的 agent CLI |
 | `--dev-tools` | 关 | 注册可信的 git / verify 工具（见下） |
 | `--acknowledge-discard-legacy-data` | 关 | 一次性的 cutover 确认（见下） |
+
+Artifact 存储默认启用。其 `staging/` 与 `blobs/` 目录必须可写且位于同一
+文件系统。备份时应同时备份 Runtime 数据库与该目录：元数据位于 SQLite，
+不可变内容位于 Artifact 根目录。
 
 ### `orbit run`
 

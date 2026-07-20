@@ -546,6 +546,7 @@ def create_app(
                     "node_kinds": list(manifest.node_kinds),
                     "inputs": dict(manifest.inputs),
                     "outputs": dict(manifest.outputs),
+                    "config_schema": dict(manifest.config_schema),
                 }
                 for manifest in manifests
             ],

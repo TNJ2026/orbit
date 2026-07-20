@@ -105,10 +105,16 @@ Start the runtime.
 | `--host` | `127.0.0.1` | Bind address. |
 | `--port` | `8848` | Port. |
 | `--db` | per-project | Database path; defaults to `~/.orbit/projects/<project>/runtime.db`. |
+| `--artifact-root` | beside database | Local content-addressed Artifact directory; defaults to `artifacts/` beside the selected database. |
 | `--runner-concurrency` | `5` | Jobs the in-process workers run in parallel. |
 | `--no-agent-discovery` | off | Skip probing for installed agent CLIs. |
 | `--dev-tools` | off | Register the trusted git and verify tools (see below). |
 | `--acknowledge-discard-legacy-data` | off | One-time cutover acknowledgement (see below). |
+
+The Artifact store is enabled by default. Its `staging/` and `blobs/`
+directories must be writable and on the same filesystem. Back up the Runtime
+database and this directory together; metadata lives in SQLite while immutable
+content lives under the Artifact root.
 
 ### `orbit run`
 

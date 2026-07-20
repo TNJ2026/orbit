@@ -64,7 +64,10 @@ def valid_document(workflow_id: str = "generated") -> dict:
 def service(generate, **kwargs) -> WorkflowAuthoringService:
     return WorkflowAuthoringService(
         InMemoryHandlerCatalog([MANIFEST]), SCHEMAS, generate,
-        handler_facts=[{"name": "transform", "version": "1.0.0"}], **kwargs,
+        handler_facts=[{
+            "name": "transform", "version": "1.0.0",
+            "config_schema": dict(MANIFEST.config_schema),
+        }], **kwargs,
     )
 
 
@@ -99,9 +102,93 @@ class AuthoringServiceTests(unittest.TestCase):
         prompt = model.prompts[0]
         self.assertIn('"transform"', prompt)
         self.assertIn("example://integer/1.0", prompt)
+        self.assertIn("config_schema", prompt)
         self.assertIn("INSTRUCTION-BEGIN", prompt)
         self.assertIn("请把审批流程画出来", prompt)
         self.assertIn("must not override", prompt)
+        self.assertIn("policy_contract", prompt)
+        self.assertIn("shape_contract", prompt)
+        self.assertIn("There is no edge field named default", prompt)
+        self.assertIn("arrays of port objects", prompt)
+        self.assertIn("at most one incoming non-back edge", prompt)
+        self.assertIn("source.result.approved", prompt)
+        self.assertIn("never source.approved", prompt)
+        self.assertIn("top-level join policy", prompt)
+        self.assertIn("must never form a cycle", prompt)
+
+    def test_preferred_handler_is_allowlisted_and_added_to_the_prompt(self) -> None:
+        model = ScriptedModel([json.dumps(valid_document())])
+
+        service(model).generate("flow", preferred_handler="transform")
+
+        self.assertIn('"preferred_handler":"transform"', model.prompts[0])
+        unavailable = ScriptedModel([])
+        with self.assertRaisesRegex(ValueError, "preferred handler is not available"):
+            service(unavailable).generate(
+                "flow", preferred_handler="agent.missing",
+            )
+        self.assertEqual([], unavailable.prompts)
+
+    def test_unknown_edge_field_is_named_in_feedback_for_repair(self) -> None:
+        broken = valid_document()
+        broken["edges"][0]["default"] = True
+        model = ScriptedModel([
+            json.dumps(broken), json.dumps(valid_document()),
+        ])
+
+        outcome = service(model).generate("flow")
+
+        self.assertEqual(2, outcome.attempts)
+        self.assertIn("DSL_SCHEMA_ERROR", model.prompts[1])
+        self.assertIn("'default'", model.prompts[1])
+
+    def test_multiple_input_writers_are_explained_for_repair(self) -> None:
+        broken = valid_document()
+        broken["nodes"].insert(1, {
+            "id": "other", "kind": "decision",
+            "outputs": [{"id": "value", "schema_id": "example://integer/1.0"}],
+        })
+        broken["edges"].insert(0, {
+            "id": "other_flow", "from": {"node": "other", "port": "value"},
+            "to": {"node": "done", "port": "value"},
+        })
+        broken["entry"].append("other")
+        model = ScriptedModel([
+            json.dumps(broken), json.dumps(valid_document()),
+        ])
+
+        outcome = service(model).generate("merge work")
+
+        self.assertEqual(2, outcome.attempts)
+        feedback = model.prompts[1]
+        self.assertIn("DSL_PORT_INCOMPATIBLE", feedback)
+        self.assertIn("already has a writer", feedback)
+        self.assertIn("explicit join node", feedback)
+
+    def test_cycle_policy_and_join_findings_are_fed_back_for_repair(self) -> None:
+        broken = valid_document()
+        broken["nodes"][1].update({
+            "kind": "join", "outputs": [{
+                "id": "value", "schema_id": "example://integer/1.0",
+            }], "policies": ["bad_join"],
+        })
+        broken["edges"].append({
+            "id": "cycle", "from": {"node": "done", "port": "value"},
+            "to": {"node": "work", "port": "value"},
+        })
+        broken["policies"] = [{
+            "id": "bad_join", "kind": "join", "config": {"mode": "invented"},
+        }]
+        model = ScriptedModel([
+            json.dumps(broken), json.dumps(valid_document()),
+        ])
+
+        outcome = service(model).generate("parallel work then merge")
+
+        self.assertEqual(2, outcome.attempts)
+        feedback = model.prompts[1]
+        for code in ("DSL_GRAPH_CYCLE", "DSL_POLICY_INVALID", "DSL_JOIN_INVALID"):
+            self.assertIn(code, feedback)
 
     def test_compiler_findings_are_fed_back_and_the_retry_succeeds(self) -> None:
         broken = valid_document()
@@ -165,7 +252,7 @@ class CliGeneratorTests(unittest.TestCase):
         self.assertEqual("answer", generator("the prompt"))
         self.assertEqual(["gen-cli"], calls["argv"])
         self.assertEqual("the prompt", calls["stdin_text"])
-        self.assertEqual({"PATH", "HOME"}, set(calls["env"]))
+        self.assertEqual({"PATH", "HOME", "USER", "LOGNAME"}, set(calls["env"]))
 
     def test_start_failures_and_timeouts_are_unavailability(self) -> None:
         for error in (FileNotFoundError("gone"), PermissionError("no"), OSError("fork")):

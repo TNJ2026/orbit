@@ -23,10 +23,10 @@ silent second call.
 from __future__ import annotations
 
 from dataclasses import dataclass
-import os
 from typing import Any, Callable, Mapping, Sequence
 
 from ...platform import process as process_port
+from ..cli_environment import trusted_cli_environment
 from ..domain.planner import PlannerUsage, PlanningContext
 from ..domain.serialization import canonical_json, to_primitive
 from .provider import (
@@ -83,12 +83,7 @@ class TrustedCliPlannerProvider:
         self.timeout_seconds = timeout_seconds
         self.max_response_bytes = max_response_bytes
         self.environment = dict(
-            environment
-            if environment is not None
-            else {
-                "PATH": os.environ.get("PATH", ""),
-                "HOME": os.environ.get("HOME", ""),
-            }
+            environment if environment is not None else trusted_cli_environment()
         )
         self.runner = runner
         self.redactor = redactor

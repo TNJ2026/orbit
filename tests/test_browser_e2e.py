@@ -189,6 +189,16 @@ class LocaleTests(BrowserE2ETestCase):
         for locale, expected in (("zh-CN", "首页"), ("en-US", "Home")):
             with self.subTest(locale=locale):
                 page = self.open(locale)
+                # boot applies the negotiated locale only after the async
+                # catalog, capability, and runtime-card loads; wait for that
+                # instead of racing it (same pattern as the switching test).
+                page.wait_for_function(
+                    f"() => document.documentElement.lang === '{locale}'"
+                )
+                page.wait_for_function(
+                    "() => document.querySelector('#viewTitle')?.textContent"
+                    f".includes('{expected}')"
+                )
                 self.assertEqual(locale, page.get_attribute("html", "lang"))
                 self.assertIn(expected, page.inner_text("#viewTitle"))
 
@@ -196,6 +206,11 @@ class LocaleTests(BrowserE2ETestCase):
         page = self.open("en-US")
         page.select_option("#localeSelect", "zh-CN")
         page.wait_for_function("() => document.documentElement.lang === 'zh-CN'")
+        # setLocale updates the static shell before awaiting the async view
+        # render. Waiting only on <html lang> races that second phase.
+        page.wait_for_function(
+            "() => document.querySelector('#viewTitle')?.textContent.includes('首页')"
+        )
         self.assertIn("首页", page.inner_text("#viewTitle"))
         self.assertIn("待办", page.inner_text(".sidebar"))
 
@@ -353,6 +368,64 @@ class WorkflowCatalogTests(BrowserE2ETestCase):
         page.wait_for_selector(".wizard-problem:not([hidden])")
         self.assertIn("valid JSON object", page.inner_text(".wizard-problem"))
 
+    def test_agent_goal_binding_hides_json_and_builds_the_input(self) -> None:
+        page = self.open("en-US")
+
+        def advertise_goal_binding(route):
+            response = route.fetch()
+            payload = response.json()
+            for entry in payload["data"]["workflows"]:
+                if entry["workflow_id"] != "workflow:linear":
+                    continue
+                entry["input_mode"] = "structured"
+                entry["inputs"] = [{
+                    "id": "prompt", "schema_id": "schema://object/1.0",
+                    "required": True, "has_default": False, "default": None,
+                    "description": "", "schema": {"type": "object"},
+                    "transport": "inline",
+                }]
+                entry["goal_binding"] = {
+                    "source": "run.goal", "node_id": "collect",
+                    "input_id": "prompt", "property": "goal",
+                    "value_shape": "object",
+                }
+            route.fulfill(response=response, json=payload)
+
+        captured = {}
+
+        def capture_start(route):
+            if route.request.method != "POST":
+                return route.continue_()
+            captured.update(route.request.post_data_json)
+            route.fulfill(
+                status=200, content_type="application/json",
+                body=json.dumps({
+                    "schema_version": "1.0", "projection_version": None,
+                    "data": {"run_id": "run:goal-bound"}, "next_cursor": None,
+                }),
+            )
+
+        page.route("**/api/v1/workflows", advertise_goal_binding)
+        page.route("**/api/v1/runs", capture_start)
+        page.click("#newRun")
+        page.check('input[name="workflow"][value="workflow:linear"]')
+        page.click("[data-wizard-next]")
+        self.assertIn("no JSON is required", page.inner_text(".wizard-content"))
+        self.assertFalse(page.locator("#newRunInput").is_visible())
+        page.fill("#newRunGoal", "Build a release dashboard")
+        page.click("details.advanced-input summary")
+        page.fill("#newRunInput", '{"prompt":{"context":"game"}}')
+        page.click("[data-wizard-next]")
+        self.assertIn("Automatically bound to input prompt", page.inner_text(".wizard-content"))
+        page.click("[data-wizard-next]")
+        page.click("#newGoalStart")
+        page.wait_for_function("() => location.hash.includes('goal-bound')")
+        self.assertEqual("Build a release dashboard", captured["goal"])
+        self.assertEqual(
+            {"goal": "Build a release dashboard", "context": "game"},
+            captured["input"]["prompt"],
+        )
+
     def test_workflow_removed_after_review_is_reported_before_mutation(self) -> None:
         page = self.open("en-US")
         calls = {"count": 0}
@@ -478,6 +551,109 @@ class GenerateWorkflowTests(BrowserE2ETestCase):
             "() => decodeURIComponent(location.hash.split('/')[2])"
         )
         self.wait_for_status(page, run_id, "succeeded")
+
+    def test_default_and_per_node_agent_can_be_changed_before_publish(self) -> None:
+        page = self.open("en-US", path="/ui/#/workflows")
+        captured = {"generate": None, "validate": None}
+        agent_source = {
+            "dsl_version": "1.2",
+            "metadata": {"id": "agent-prompted", "name": "Agent prompted"},
+            "nodes": [
+                {
+                    "id": "work", "kind": "action",
+                    "inputs": [{"id": "prompt", "schema_id": "schema://object/1.0"}],
+                    "outputs": [{"id": "result", "schema_id": "schema://object/1.0"}],
+                    "handler": {"name": "agent.claude", "version": "1.0.0"},
+                    "config": {"prompt": "Do the work"},
+                },
+                {
+                    "id": "done", "kind": "terminal",
+                    "inputs": [{"id": "result", "schema_id": "schema://object/1.0"}],
+                },
+            ],
+            "edges": [{
+                "id": "flow", "from": {"node": "work", "port": "result"},
+                "to": {"node": "done", "port": "result"},
+            }],
+            "entry": ["work"], "terminals": ["done"],
+        }
+
+        def handlers(route):
+            response = route.fetch()
+            payload = response.json()
+            payload["data"]["handlers"].extend([
+                {
+                    "name": "agent.claude", "version": "1.0.0",
+                    "registration_status": "registered",
+                    "capabilities": ["agent.invoke"],
+                },
+                {
+                    "name": "agent.codex", "version": "2.0.0",
+                    "registration_status": "registered",
+                    "capabilities": ["agent.invoke"],
+                },
+            ])
+            route.fulfill(response=response, json=payload)
+
+        def commands(source, definition_hash):
+            return [
+                {
+                    "command": "workflow.publish", "method": "POST",
+                    "href": "/api/v1/workflows/workflow:agent-prompted/versions",
+                    "target_aggregate_id": "workflow:agent-prompted",
+                    "expected_version": 0,
+                },
+                {
+                    "command": "workflow.validate", "method": "POST",
+                    "href": "/api/v1/workflows/validate",
+                    "target_aggregate_id": "workflow:agent-prompted",
+                    "expected_version": 0,
+                },
+            ]
+
+        def generate(route):
+            captured["generate"] = route.request.post_data_json
+            source = json.dumps(agent_source)
+            route.fulfill(status=200, content_type="application/json", body=json.dumps({
+                "schema_version": "1.0", "projection_version": None,
+                "data": {
+                    "source": source, "workflow_id": "workflow:agent-prompted",
+                    "definition_hash": "sha256:first", "node_count": 2,
+                    "attempts": 1, "latest_version": 0,
+                    "allowed_commands": commands(source, "sha256:first"),
+                },
+                "next_cursor": None,
+            }))
+
+        def validate(route):
+            captured["validate"] = route.request.post_data_json
+            source = captured["validate"]["source"]
+            route.fulfill(status=200, content_type="application/json", body=json.dumps({
+                "schema_version": "1.0", "projection_version": None,
+                "data": {
+                    "source": source, "workflow_id": "workflow:agent-prompted",
+                    "definition_hash": "sha256:edited", "node_count": 2,
+                    "latest_version": 0,
+                    "allowed_commands": commands(source, "sha256:edited"),
+                },
+                "next_cursor": None,
+            }))
+
+        page.route("**/api/v1/handler-catalog", handlers)
+        page.route("**/api/v1/workflows/generate", generate)
+        page.route("**/api/v1/workflows/validate", validate)
+        page.click("#generateWorkflow")
+        page.wait_for_selector("#generateDefaultAgent")
+        page.select_option("#generateDefaultAgent", "agent.codex")
+        page.fill("#generateInstruction", "Build with agents")
+        page.click("#generateSubmit")
+        page.wait_for_selector(".draft-agent-select")
+        self.assertEqual("agent.codex", captured["generate"]["default_agent"])
+        page.select_option(".draft-agent-select", "agent.codex")
+        page.wait_for_selector("#generatePublish")
+        edited = json.loads(captured["validate"]["source"])
+        self.assertEqual("agent.codex", edited["nodes"][0]["handler"]["name"])
+        self.assertEqual("2.0.0", edited["nodes"][0]["handler"]["version"])
 
 
 class NewRunTests(BrowserE2ETestCase):

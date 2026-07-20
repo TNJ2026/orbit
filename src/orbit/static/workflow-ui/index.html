@@ -12,8 +12,11 @@
   <div class="app">
     <aside class="sidebar" id="sidebar">
       <div class="brand">
-        <div data-i18n="app.title">Orbit Runtime</div>
-        <div class="brand-sub" data-i18n="app.subtitle">Mission control</div>
+        <div class="brand-mark" aria-hidden="true"></div>
+        <div class="brand-copy">
+          <div data-i18n="app.title">Orbit Runtime</div>
+          <div class="brand-sub" data-i18n="app.subtitle">Mission control</div>
+        </div>
       </div>
       <form class="search-slot" id="globalSearchForm" role="search">
         <label class="sr-only" for="globalSearch" data-i18n="search.label">Search runs</label>
@@ -23,48 +26,70 @@
         <div class="nav-group">
           <div class="nav-group-title" data-i18n="nav.group.discover">Discover</div>
           <button class="nav-button" data-view="home" aria-current="page">
+            <span class="nav-icon" aria-hidden="true">⌂</span>
             <span data-i18n="nav.home">Home</span>
           </button>
           <button class="nav-button" data-view="goals">
+            <span class="nav-icon" aria-hidden="true">◉</span>
             <span data-i18n="nav.goals">Goals</span>
           </button>
           <button class="nav-button" data-view="workflows">
+            <span class="nav-icon" aria-hidden="true">⌘</span>
             <span data-i18n="nav.workflows">Workflows</span>
           </button>
         </div>
         <div class="nav-group">
           <div class="nav-group-title" data-i18n="nav.group.operate">Operate</div>
           <button class="nav-button" data-view="runs">
+            <span class="nav-icon" aria-hidden="true">◎</span>
             <span data-i18n="nav.runs">Runs</span>
           </button>
           <button class="nav-button" data-view="inbox">
+            <span class="nav-icon" aria-hidden="true">▣</span>
             <span data-i18n="nav.inbox">Inbox</span>
             <span class="nav-count" id="inboxCount"></span>
           </button>
           <button class="nav-button" data-view="artifacts">
+            <span class="nav-icon" aria-hidden="true">◇</span>
             <span data-i18n="nav.artifacts">Artifacts</span>
           </button>
         </div>
         <div class="nav-group">
           <div class="nav-group-title" data-i18n="nav.group.admin">Admin</div>
           <button class="nav-button" data-view="agents">
+            <span class="nav-icon" aria-hidden="true">∆</span>
             <span data-i18n="nav.agents">Agents</span>
           </button>
           <button class="nav-button" data-view="ops">
+            <span class="nav-icon" aria-hidden="true">⌁</span>
             <span data-i18n="nav.ops">Ops</span>
           </button>
           <button class="nav-button" data-view="settings">
+            <span class="nav-icon" aria-hidden="true">⚙</span>
             <span data-i18n="nav.settings">Settings</span>
           </button>
         </div>
       </nav>
+      <div class="sidebar-foot">
+        <div class="runtime-card" id="runtimeCard">
+          <div class="runtime-line">
+            <span class="live-dot" id="runtimeDot" aria-hidden="true"></span>
+            <strong id="runtimeStatus" data-i18n="shell.runtime.checking">Checking runtime…</strong>
+          </div>
+          <div class="runtime-line muted"><span id="runtimeDetail"></span></div>
+        </div>
+      </div>
     </aside>
 
     <button class="nav-backdrop" id="navBackdrop" data-i18n-label="nav.close" aria-label="Close navigation" tabindex="-1"></button>
     <main class="main">
       <header class="topbar">
         <button class="button nav-toggle" id="navToggle" aria-controls="sidebar" aria-expanded="false" data-i18n-label="nav.toggle" aria-label="Open navigation">☰</button>
-        <h1 id="viewTitle">Runs</h1>
+        <div class="breadcrumb">
+          <span data-i18n="shell.breadcrumb.root">Orbit</span>
+          <span class="crumb-sep" aria-hidden="true">/</span>
+          <h1 id="viewTitle">Runs</h1>
+        </div>
         <span class="actor-chip" id="actorChip" data-i18n-label="actor.label" aria-label="Signed-in actor"></span>
         <button class="button" id="refresh" data-i18n="action.refresh">Refresh</button>
         <button class="button primary" id="newRun" data-i18n="action.newGoal" hidden>New goal</button>

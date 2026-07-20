@@ -26,6 +26,7 @@ import shutil
 import subprocess
 from typing import Callable, Iterable, Mapping, Sequence
 
+from ..cli_environment import trusted_cli_environment
 from ..domain.durable_execution import ExecutionSafety
 from ..domain.handlers import ResourceProfile
 from .handlers import HandlerManifest
@@ -105,7 +106,7 @@ def _probe_version(
             # A version probe has no business reading the project or inheriting
             # credentials, so it runs from a neutral cwd with a bare env.
             cwd=os.path.expanduser("~"),
-            env={"PATH": os.environ.get("PATH", ""), "HOME": os.environ.get("HOME", "")},
+            env=trusted_cli_environment(),
         )
     except (OSError, subprocess.SubprocessError):
         return None

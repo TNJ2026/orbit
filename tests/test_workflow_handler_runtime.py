@@ -186,6 +186,29 @@ class HandlerRuntimeContractTests(unittest.TestCase):
         self.assertEqual({"value": 7}, response.output)
         self.assertEqual("cli-1", response.provider_request_id)
 
+    def test_trusted_cli_agent_gets_identity_without_shell_secrets(self):
+        script = (
+            "import json,os; json.dump({'output': {"
+            "'user': os.environ.get('USER'), "
+            "'logname': os.environ.get('LOGNAME'), "
+            "'leak': os.environ.get('ANTHROPIC_API_KEY')}}, __import__('sys').stdout)"
+        )
+        client = TrustedCliAgentClient(
+            (sys.executable, "-c", script), timeout_seconds=5,
+            environment={
+                "PATH": "/usr/bin:/bin", "HOME": "/tmp",
+                "USER": "orbit-user", "LOGNAME": "orbit-user",
+            },
+        )
+        context = SimpleNamespace(
+            request=SimpleNamespace(attempt_id=EntityId("attempt", "identity"))
+        )
+        response = client.execute(AgentRequest({}, {}, "key"), context)
+        self.assertEqual(
+            {"user": "orbit-user", "logname": "orbit-user", "leak": None},
+            response.output,
+        )
+
     def test_trusted_cli_cancel_terminates_and_reports_unknown(self):
         client = TrustedCliAgentClient(
             (sys.executable, "-c", "import time; time.sleep(10)"),

@@ -66,9 +66,47 @@ class WorkflowCatalogReadModelService:
             })
         return ports, "structured" if structured else "json"
 
+    @staticmethod
+    def _goal_binding(
+        ir: Mapping[str, Any], inputs: list[dict[str, Any]],
+    ) -> dict[str, str] | None:
+        """Project the conventional Agent ingress as an explicit UI fact.
+
+        The browser must not guess from a port called ``prompt``.  Orbit owns
+        the built-in ``agent.*`` handler contract, so the catalog can safely
+        advertise when a single object input accepts the Run goal envelope.
+        """
+
+        entries = list(ir.get("entry") or ())
+        if len(entries) != 1 or len(inputs) != 1:
+            return None
+        node = next(
+            (item for item in ir.get("nodes") or () if item.get("id") == entries[0]),
+            None,
+        )
+        handler = None if node is None else node.get("handler")
+        port = inputs[0]
+        schema = port.get("schema") or {}
+        if (
+            not isinstance(handler, Mapping)
+            or not str(handler.get("name", "")).startswith("agent.")
+            or port.get("id") != "prompt"
+            or schema.get("type") != "object"
+            or port.get("transport") != "inline"
+        ):
+            return None
+        return {
+            "source": "run.goal",
+            "node_id": entries[0],
+            "input_id": "prompt",
+            "property": "goal",
+            "value_shape": "object",
+        }
+
     def _entry(self, row, *, include_definition: bool) -> dict[str, Any]:
         ir = json.loads(row["canonical_ir_json"])
         inputs, input_mode = self._inputs(ir)
+        goal_binding = self._goal_binding(ir, inputs)
         item = {
             "workflow_id": row["workflow_id"],
             "name": ir["name"],
@@ -79,6 +117,7 @@ class WorkflowCatalogReadModelService:
             "created_at": row["created_at"],
             "input_mode": input_mode,
             "inputs": inputs,
+            "goal_binding": goal_binding,
             "summary": self._summary(ir),
         }
         if include_definition:

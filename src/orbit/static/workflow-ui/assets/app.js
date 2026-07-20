@@ -27,6 +27,7 @@ let shellFacts = null;
 let liveCursor = null;
 let refreshTimer = null;
 let rendering = false;
+let renderQueued = false;
 const runFilters = { q: "", status: "", responsibility: "", activeOnly: false };
 const goalFilters = { q: "", status: "" };
 const artifactFilters = { q: "", runId: "", contentType: "" };
@@ -47,6 +48,11 @@ const el = (tag, props = {}, children = []) => {
 
 const pill = (status) =>
   el("span", { class: `pill ${status}`, text: i18n.status(status) });
+
+/* The prototype's status language next to the pill: the dot scans, the pill
+   spells the state out so meaning never rides on colour alone. */
+const statusDot = (status) =>
+  el("span", { class: `status-dot ${status}`, "aria-hidden": "true" });
 
 function announce(message, kind = "info") {
   const region = document.getElementById("liveRegion");
@@ -172,8 +178,8 @@ async function renderHome(root) {
     failed: dashboard.counts.failed,
   })) {
     stats.append(el("article", { class: `stat-card ${key}` }, [
+      el("div", { class: "stat-label", text: i18n.t(`home.stat.${key}`) }),
       el("div", { class: "stat-value", text: i18n.number(value) }),
-      el("div", { class: "muted", text: i18n.t(`home.stat.${key}`) }),
     ]));
   }
   root.append(stats);
@@ -209,7 +215,9 @@ async function renderHome(root) {
             onclick: () => navigate({ view: "goal", runId: run.run_id }),
           }, [
             el("span", {}, [
-              el("strong", { text: runName(run) }),
+              el("strong", { class: "with-dot" }, [
+                statusDot(run.status), el("span", { text: runName(run) }),
+              ]),
               el("span", { class: "muted mono", text: run.workflow_id }),
             ]),
             pill(run.status),
@@ -251,7 +259,9 @@ async function renderGoals(root, selectedRunId = null) {
       onclick: () => navigate({ view: "goal", runId: run.run_id }),
     }, [
       el("span", { class: "goal-row-main" }, [
-        el("strong", { text: runName(run) }),
+        el("strong", { class: "with-dot" }, [
+          statusDot(run.status), el("span", { text: runName(run) }),
+        ]),
         el("span", { class: "muted", text: waitText(run) }),
       ]),
       pill(run.status),
@@ -383,7 +393,9 @@ async function renderRuns(root) {
           }),
           el("td", {
             "data-field": "status", "data-label": i18n.t("runs.column.status"),
-          }, [pill(run.status)]),
+          }, [
+            el("span", { class: "with-dot" }, [statusDot(run.status), pill(run.status)]),
+          ]),
           el("td", {
             "data-field": "responsibility",
             "data-label": i18n.t("runs.column.responsibility"),
@@ -397,14 +409,18 @@ async function renderRuns(root) {
       );
     }
     cursor = response.next_cursor;
-    more.hidden = !cursor;
+    moreWrap.hidden = !cursor;
     if (!body.children.length) {
       panel.append(el("div", { class: "empty", text: i18n.t("runs.empty") }));
     }
   };
 
   more.addEventListener("click", () => page().catch(reportError));
-  panel.append(el("div", { class: "panel-body" }, [more]));
+  // Hidden until a cursor exists: an always-rendered .panel-body reads as an
+  // empty strip under the table.
+  const moreWrap = el("div", { class: "panel-body" }, [more]);
+  moreWrap.hidden = true;
+  panel.append(moreWrap);
   await page();
 }
 
@@ -425,7 +441,10 @@ async function renderRun(root, runId, activeTab = "overview") {
       el("div", { class: "panel-head run-hero-head" }, [
         el("div", {}, [
           el("div", { class: "eyebrow", text: i18n.t("run.title") }),
-          el("h2", { text: runName(summary) }),
+          el("div", { class: "run-hero-title" }, [
+            statusDot(summary.status),
+            el("h2", { text: runName(summary) }),
+          ]),
           el("div", { class: "mono muted", text: summary.run_id }),
         ]),
         pill(summary.status),
@@ -1140,9 +1159,14 @@ async function renderInbox(root) {
 }
 
 function inboxRow(item) {
+  const glyphs = { human: "H", budget: "$", unknown: "?", recovery: "R" };
   return el("tr", {}, [
         el("td", {}, [
-          el("div", { class: "actions" }, [
+          el("div", { class: "actions inbox-item-head" }, [
+            el("span", {
+              class: `inbox-kind ${item.kind}`, "aria-hidden": "true",
+              text: glyphs[item.kind] || "•",
+            }),
             el("span", { class: "pill", text: i18n.t(`responsibility.${item.kind}`) }),
             el("strong", { text: item.label }),
           ]),
@@ -1179,6 +1203,28 @@ async function refreshInboxCount() {
   } catch {
     // A badge is supplementary; the destination keeps its own error boundary.
   }
+}
+
+/* Sidebar health card: the same facts `/health/ready` serves, nothing more.
+   A failed fetch means "degraded" — the card never claims a state the
+   runtime did not report. */
+async function refreshRuntimeCard() {
+  const dot = document.getElementById("runtimeDot");
+  const status = document.getElementById("runtimeStatus");
+  const detail = document.getElementById("runtimeDetail");
+  let health = null;
+  try {
+    health = await api.health();
+  } catch {
+    health = null;
+  }
+  const ready = Boolean(health && health.ok && health.status === "ready");
+  dot.classList.toggle("degraded", !ready);
+  status.textContent = i18n.t(ready ? "shell.runtime.healthy" : "shell.runtime.degraded");
+  const components = health?.checks?.components?.detail;
+  detail.textContent = Array.isArray(components)
+    ? i18n.t("shell.runtime.components", { count: i18n.number(components.length) })
+    : "";
 }
 
 async function renderArtifacts(root, selectedArtifactId = null) {
@@ -1380,13 +1426,22 @@ async function renderAgents(root) {
     el("div", { class: "panel-head" }, [
       el("div", { class: "panel-title", text: i18n.t("agents.handlers") }),
     ]),
-    el("div", { class: "panel-body" }, catalog.handlers.length
+    el("div", { class: "panel-body agents-grid" }, catalog.handlers.length
       ? catalog.handlers.map((handler) => {
         const attempt = handler.recent_attempt;
+        const initials = handler.name.replace(/^handler:/, "").slice(0, 2).toUpperCase();
         return el("article", { class: "data-card" }, [
-          el("div", { class: "panel-title mono", text: `${handler.name} ${handler.version}` }),
-          el("div", { class: "muted", text: i18n.t("agents.registered") }),
-          el("div", { text: (handler.capabilities || []).join(", ") || i18n.t("agents.noCapabilities") }),
+          el("div", { class: "agent-head" }, [
+            el("span", { class: "agent-avatar", "aria-hidden": "true", text: initials }),
+            el("div", {}, [
+              el("div", { class: "panel-title mono", text: `${handler.name} ${handler.version}` }),
+              el("div", { class: "muted", text: i18n.t("agents.registered") }),
+            ]),
+          ]),
+          (handler.capabilities || []).length
+            ? el("div", { class: "capabilities" }, handler.capabilities.map((capability) =>
+                el("span", { class: "capability", text: capability })))
+            : el("div", { class: "muted", text: i18n.t("agents.noCapabilities") }),
           el("div", { class: "muted mono", text: attempt
             ? `${attempt.status} · ${attempt.run_id} · ${i18n.dateTime(attempt.occurred_at)}`
             : i18n.t("agents.noAttempts") }),
@@ -1566,6 +1621,16 @@ function generatedInputSupported(entry) {
   });
 }
 
+function bindGoalInput(entry, goal, input = {}) {
+  const binding = entry.goal_binding;
+  if (!binding) return input;
+  const prior = input[binding.input_id];
+  const envelope = prior && typeof prior === "object" && !Array.isArray(prior)
+    ? { ...prior } : {};
+  envelope[binding.property] = goal;
+  return { ...input, [binding.input_id]: envelope };
+}
+
 function inputField(port, value) {
   const schema = port.schema || {};
   let control;
@@ -1624,15 +1689,66 @@ function readGeneratedInputs(container, entry) {
 /** Describe → draft → publish. The draft is the compiler-validated source the
  * server returned; publishing executes the AllowedCommand advertised on that
  * draft, so the dialog never invents a URL or an expected version. */
-function generateWorkflowDialog(generateCommand) {
+async function generateWorkflowDialog(generateCommand) {
+  let agentHandlers = [];
+  try {
+    const catalog = await api.handlerCatalog();
+    agentHandlers = (catalog.data.handlers || []).filter((item) =>
+      item.registration_status === "registered"
+      && (item.capabilities || []).includes("agent.invoke"),
+    );
+  } catch (error) {
+    reportError(error);
+  }
   const dialog = el("dialog", { "aria-label": i18n.t("generate.title") });
   const form = el("form", { method: "dialog" });
   dialog.append(form);
   let draft = null;
   let busy = false;
+  let validating = false;
+  let draftProblem = "";
+  let instructionText = "";
+  let defaultAgent = agentHandlers[0]?.name || "";
+
+  const switchAgent = async (nodeId, handlerName) => {
+    if (busy || validating) return;
+    const handler = agentHandlers.find((item) => item.name === handlerName);
+    const validateCommand = (draft.allowed_commands || []).find(
+      (item) => item.command === "workflow.validate",
+    );
+    if (!handler || !validateCommand) return;
+    const document_ = JSON.parse(draft.source);
+    const node = document_.nodes.find((item) => item.id === nodeId);
+    if (!node?.handler) return;
+    node.handler = { name: handler.name, version: handler.version };
+    draft = {
+      ...draft,
+      source: JSON.stringify(document_, null, 2),
+      allowed_commands: [validateCommand],
+    };
+    validating = true;
+    draftProblem = "";
+    draw();
+    try {
+      const response = await api.execute(
+        validateCommand, { source: draft.source },
+        `workflow.validate:${Date.now()}`,
+      );
+      draft = { ...draft, ...response.data, attempts: draft.attempts };
+    } catch (error) {
+      draftProblem = describeGenerationFailure(error);
+    } finally {
+      validating = false;
+      draw();
+    }
+  };
 
   const draw = () => {
     const problem = el("div", { class: "banner error", hidden: "hidden", role: "alert" });
+    if (draftProblem) {
+      problem.textContent = draftProblem;
+      problem.hidden = false;
+    }
     const actions = el("div", { class: "actions" }, [
       el("button", { class: "button", value: "cancel", text: i18n.t("action.cancel") }),
     ]);
@@ -1641,7 +1757,7 @@ function generateWorkflowDialog(generateCommand) {
     if (!draft) {
       const instruction = el("textarea", {
         id: "generateInstruction", required: "required", maxlength: "4000",
-        placeholder: i18n.t("generate.instructionPh"),
+        placeholder: i18n.t("generate.instructionPh"), text: instructionText,
       });
       body.push(
         el("div", { class: "field" }, [
@@ -1650,6 +1766,20 @@ function generateWorkflowDialog(generateCommand) {
           el("small", { class: "muted", text: i18n.t("generate.hint") }),
         ]),
       );
+      if (agentHandlers.length) {
+        body.push(el("div", { class: "field" }, [
+          el("label", { for: "generateDefaultAgent", text: i18n.t("generate.defaultAgent") }),
+          el("select", {
+            id: "generateDefaultAgent",
+            onchange: (event) => { defaultAgent = event.target.value; },
+          }, agentHandlers.map((handler) => el("option", {
+            value: handler.name,
+            text: `${handler.name}@${handler.version}`,
+            ...(handler.name === defaultAgent ? { selected: "selected" } : {}),
+          }))),
+          el("small", { class: "muted", text: i18n.t("generate.defaultAgentHint") }),
+        ]));
+      }
       const generate = el("button", {
         type: "button", class: "button primary", id: "generateSubmit",
         text: i18n.t("generate.action"),
@@ -1660,8 +1790,12 @@ function generateWorkflowDialog(generateCommand) {
           generate.textContent = i18n.t("generate.generating");
           problem.hidden = true;
           try {
+            instructionText = instruction.value.trim();
             const response = await api.execute(
-              generateCommand, { instruction: instruction.value.trim() },
+              generateCommand, {
+                instruction: instructionText,
+                ...(defaultAgent ? { default_agent: defaultAgent } : {}),
+              },
               `workflow.generate:${Date.now()}`,
             );
             draft = response.data;
@@ -1685,13 +1819,29 @@ function generateWorkflowDialog(generateCommand) {
           nodes: i18n.number(draft.node_count),
           attempts: i18n.number(draft.attempts),
         }) }),
-        el("div", { class: "definition-list" }, document_.nodes.map((node) =>
-          el("div", { class: "actions" }, [
+        validating ? el("div", {
+          class: "banner info", text: i18n.t("generate.validating"),
+        }) : null,
+        el("div", { class: "definition-list" }, document_.nodes.map((node) => {
+          const editableAgent = node.handler?.name.startsWith("agent.")
+            && agentHandlers.length;
+          return el("div", { class: "actions" }, [
             el("span", { class: "mono", text: node.id }),
             el("span", { class: "pill", text: node.kind }),
-            node.handler ? el("span", { class: "muted mono", text: `${node.handler.name}@${node.handler.version}` }) : null,
-          ]),
-        )),
+            editableAgent ? el("select", {
+              class: "draft-agent-select",
+              "aria-label": i18n.t("generate.nodeAgent", { node: node.id }),
+              disabled: validating ? "disabled" : null,
+              onchange: (event) => switchAgent(node.id, event.target.value),
+            }, agentHandlers.map((handler) => el("option", {
+              value: handler.name,
+              text: `${handler.name}@${handler.version}`,
+              ...(handler.name === node.handler.name ? { selected: "selected" } : {}),
+            }))) : node.handler
+              ? el("span", { class: "muted mono", text: `${node.handler.name}@${node.handler.version}` })
+              : null,
+          ]);
+        })),
         el("details", {}, [
           el("summary", { class: "muted", text: i18n.t("generate.source") }),
           el("pre", { class: "artifact-preview", text: draft.source }),
@@ -1702,7 +1852,8 @@ function generateWorkflowDialog(generateCommand) {
       );
       const back = el("button", {
         type: "button", class: "button", text: i18n.t("generate.back"),
-        onclick: () => { draft = null; draw(); },
+        disabled: validating ? "disabled" : null,
+        onclick: () => { draft = null; draftProblem = ""; draw(); },
       });
       actions.append(back);
       if (publishCommand) {
@@ -1820,13 +1971,29 @@ async function newRunDialog(preselectedWorkflowId = null) {
       if (!entries.length) choices.append(el("div", { class: "empty", text: i18n.t("workflows.empty") }));
       content.append(choices);
     } else if (state.step === 1) {
-      content.append(el("h3", { text: i18n.t("newRun.inputs.heading") }));
+      content.append(el("h3", {
+        text: i18n.t(entry.goal_binding ? "newRun.goal.heading" : "newRun.inputs.heading"),
+      }));
       content.append(el("div", { class: "field" }, [
         el("label", { for: "newRunGoal", text: i18n.t("newRun.goal") }),
         el("textarea", { id: "newRunGoal", required: "required", text: state.goal }),
       ]));
       const inputArea = el("div", { id: "newRunInputs", class: "wizard-inputs" });
-      if (generatedInputSupported(entry)) {
+      if (entry.goal_binding) {
+        inputArea.append(
+          el("div", { class: "banner info", text: i18n.t("newRun.input.goalBound", {
+            input: entry.goal_binding.input_id,
+          }) }),
+          el("details", { class: "advanced-input" }, [
+            el("summary", { text: i18n.t("newRun.input.advanced") }),
+            el("p", { class: "muted", text: i18n.t("newRun.input.advancedHelp") }),
+            el("div", { class: "field" }, [
+              el("label", { for: "newRunInput", text: i18n.t("newRun.input") }),
+              el("textarea", { id: "newRunInput", text: JSON.stringify(state.input, null, 2) }),
+            ]),
+          ]),
+        );
+      } else if (generatedInputSupported(entry)) {
         for (const port of entry.inputs) {
           const value = Object.prototype.hasOwnProperty.call(state.input, port.id)
             ? state.input[port.id] : port.has_default ? port.default : undefined;
@@ -1849,7 +2016,15 @@ async function newRunDialog(preselectedWorkflowId = null) {
         el("dl", { class: "review-list" }, [
           el("div", {}, [el("dt", { text: i18n.t("newRun.workflow") }), el("dd", { text: `${entry.name} · v${entry.latest_version}` })]),
           el("div", {}, [el("dt", { text: i18n.t("newRun.goal") }), el("dd", { text: state.goal })]),
-          el("div", {}, [el("dt", { text: i18n.t("newRun.input") }), el("dd", { class: "mono", text: JSON.stringify(state.input, null, 2) })]),
+          el("div", {}, [
+            el("dt", { text: i18n.t(entry.goal_binding ? "newRun.input.binding" : "newRun.input") }),
+            el("dd", {
+              class: entry.goal_binding ? "" : "mono",
+              text: entry.goal_binding
+                ? i18n.t("newRun.input.goalBoundReview", { input: entry.goal_binding.input_id })
+                : JSON.stringify(state.input, null, 2),
+            }),
+          ]),
         ]),
       );
     } else {
@@ -1878,7 +2053,15 @@ async function newRunDialog(preselectedWorkflowId = null) {
             if (!goal.value.trim()) return fail("newRun.goal.required");
             if (!goal.reportValidity()) return;
             state.goal = goal.value.trim();
-            if (generatedInputSupported(entry)) {
+            if (entry.goal_binding) {
+              try {
+                const value = JSON.parse(form.querySelector("#newRunInput").value || "{}");
+                if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error();
+                state.input = bindGoalInput(entry, state.goal, value);
+              } catch {
+                return fail("newRun.input.invalid");
+              }
+            } else if (generatedInputSupported(entry)) {
               if (!form.reportValidity()) return;
               state.input = readGeneratedInputs(form, entry);
             } else {
@@ -1955,7 +2138,12 @@ function navigate(next) {
 }
 
 async function render() {
-  if (rendering) return;
+  // A render requested mid-flight is coalesced, not dropped: the state (or
+  // locale) it reacted to is not in the in-flight paint.
+  if (rendering) {
+    renderQueued = true;
+    return;
+  }
   rendering = true;
   const root = document.getElementById("content");
   root.replaceChildren();
@@ -1991,6 +2179,7 @@ async function render() {
     else await renderRuns(fresh);
     root.replaceChildren(...fresh.childNodes);
     if (route.view !== "inbox") await refreshInboxCount();
+    refreshRuntimeCard();
   } catch (error) {
     // The failure lives where the data would have been, with a retry —
     // not only in the transient banner (plan P1 error state).
@@ -2005,6 +2194,10 @@ async function render() {
     reportError(error);
   } finally {
     rendering = false;
+    if (renderQueued) {
+      renderQueued = false;
+      await render();
+    }
   }
 }
 
@@ -2107,6 +2300,9 @@ async function boot() {
   }
 
   applyStaticText();
+  // Awaited so the first paint already carries the runtime's own health word.
+  // After applyStaticText: the static catalog must not overwrite the status.
+  await refreshRuntimeCard();
   await render();
 }
 

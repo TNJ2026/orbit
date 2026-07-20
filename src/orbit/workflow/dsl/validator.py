@@ -18,6 +18,14 @@ _VALIDATOR = Draft202012Validator(to_primitive(WORKFLOW_DSL_SCHEMA))
 
 def _message(error: Any) -> str:
     if error.validator == "additionalProperties":
+        instance = error.instance
+        properties = error.schema.get("properties", {})
+        if isinstance(instance, dict) and isinstance(properties, dict):
+            unknown = sorted(set(instance) - set(properties))
+            if unknown:
+                fields = ", ".join(repr(item) for item in unknown)
+                noun = "field is" if len(unknown) == 1 else "fields are"
+                return f"unknown {noun} not allowed: {fields}"
         return "unknown field is not allowed"
     if error.validator == "required":
         missing = error.message.split("'")[1] if "'" in error.message else "field"

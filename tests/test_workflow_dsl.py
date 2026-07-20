@@ -163,6 +163,7 @@ class WorkflowDslSchemaTests(unittest.TestCase):
         diagnostic = raised.exception.diagnostics[0]
         self.assertEqual("DSL_SCHEMA_ERROR", diagnostic.code)
         self.assertEqual("$", diagnostic.json_path)
+        self.assertIn("'surprise'", diagnostic.message)
 
     def test_missing_required_field_path_uses_yaml_source_context(self) -> None:
         document = parse_dsl(

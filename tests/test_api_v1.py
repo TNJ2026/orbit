@@ -22,6 +22,7 @@ from orbit.workflow.api.dto import (
 from orbit.workflow.application.budget_service import BudgetService
 from orbit.workflow.artifacts.local_cas import LocalCASBackend
 from orbit.workflow.application.human_service import HumanTaskService
+from orbit.workflow.api.workflow_catalog import WorkflowCatalogReadModelService
 from orbit.workflow.domain.human import HumanTaskKind
 from orbit.workflow.domain.ids import EntityId
 from orbit.workflow.persistence.database import connect_workflow_database
@@ -64,6 +65,42 @@ class PageSizeTests(unittest.TestCase):
             with self.subTest(bad=bad):
                 with self.assertRaises(ValueError):
                     page_size(bad)
+
+
+class WorkflowCatalogProjectionTests(unittest.TestCase):
+    def test_agent_object_prompt_advertises_goal_binding(self) -> None:
+        ir = {
+            "entry": ["analyze"],
+            "nodes": [{
+                "id": "analyze", "kind": "action",
+                "handler": {"name": "agent.claude", "version": "1.0.0"},
+            }],
+        }
+        inputs = [{
+            "id": "prompt", "schema": {"type": "object"},
+            "transport": "inline",
+        }]
+
+        binding = WorkflowCatalogReadModelService._goal_binding(ir, inputs)
+
+        self.assertEqual("run.goal", binding["source"])
+        self.assertEqual("analyze", binding["node_id"])
+        self.assertEqual("prompt", binding["input_id"])
+        self.assertEqual("goal", binding["property"])
+
+    def test_non_agent_input_does_not_advertise_goal_binding(self) -> None:
+        ir = {
+            "entry": ["transform"],
+            "nodes": [{
+                "id": "transform", "kind": "action",
+                "handler": {"name": "transform", "version": "1.0.0"},
+            }],
+        }
+        inputs = [{
+            "id": "prompt", "schema": {"type": "object"},
+            "transport": "inline",
+        }]
+        self.assertIsNone(WorkflowCatalogReadModelService._goal_binding(ir, inputs))
 
 
 class EnvelopeTests(unittest.TestCase):
@@ -656,6 +693,7 @@ class CatalogTests(ApiTestCase):
             entry = writer.json()["data"]["workflows"][0]
             self.assertEqual("Linear", entry["name"])
             self.assertEqual("structured", entry["input_mode"])
+            self.assertIsNone(entry["goal_binding"])
             self.assertEqual("value", entry["inputs"][0]["id"])
             self.assertEqual("integer", entry["inputs"][0]["schema"]["type"])
             self.assertEqual(4, entry["summary"]["node_count"])
@@ -751,11 +789,34 @@ class WorkflowAuthoringApiTests(ApiTestCase):
             publish = draft["allowed_commands"][0]
             self.assertEqual("workflow.publish", publish["command"])
             self.assertEqual(0, publish["expected_version"])
+            validate = next(
+                item for item in draft["allowed_commands"]
+                if item["command"] == "workflow.validate"
+            )
+
+            edited = json_module.loads(draft["source"])
+            edited["metadata"]["name"] = "Edited before publish"
+            validated = client.post(
+                validate["href"], actor="writer", key="validate-1",
+                body={
+                    "source": json_module.dumps(edited),
+                    "expected_version": validate["expected_version"],
+                },
+            )
+            self.assertEqual(200, validated.status_code, validated.text)
+            validated_draft = validated.json()["data"]
+            self.assertNotEqual(
+                draft["definition_hash"], validated_draft["definition_hash"],
+            )
+            publish = next(
+                item for item in validated_draft["allowed_commands"]
+                if item["command"] == "workflow.publish"
+            )
 
             published = client.post(
                 publish["href"], actor="writer", key="pub-1",
                 body={
-                    "source": draft["source"],
+                    "source": validated_draft["source"],
                     "expected_version": publish["expected_version"],
                 },
             )
@@ -774,6 +835,31 @@ class WorkflowAuthoringApiTests(ApiTestCase):
             self.assertEqual(
                 "run.start", entry["allowed_commands"][0]["command"]
             )
+
+    def test_generation_accepts_an_allowlisted_default_handler(self) -> None:
+        import json as json_module
+
+        prompts = []
+
+        def generate(prompt):
+            prompts.append(prompt)
+            return json_module.dumps(self.GENERATED)
+
+        app = create_app(
+            self.db,
+            handlers=[transform_registration()], schemas=SCHEMAS,
+            worker_count=1, poll_seconds=0.02,
+            authenticator=lambda request: request.headers.get("x-orbit-actor"),
+            authorizer=Authorizer(lambda actor: self.scopes.get(actor, [])),
+            workflow_generator=generate,
+        )
+        with AsgiHarness(app) as client:
+            response = client.post(
+                "/api/v1/workflows/generate", actor="writer", key="gen-default",
+                body={"instruction": "flow", "default_agent": "transform"},
+            )
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertIn('"preferred_handler":"transform"', prompts[0])
 
     def test_generation_failure_returns_diagnostics_not_a_500(self) -> None:
         app = self.app_with_generator(["nonsense"] * 3)

@@ -1,35 +1,62 @@
 /* Generic primitives: buttons, panels, tables, pills, fields, dialogs,
-   banners and the data-state block. Nothing here knows what a run is. */
+   banners and the data-state block. Nothing here knows what a run is.
+   Density and type scale follow the Mission Control prototype. */
 .button {
   background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
-  padding: 8px 12px; cursor: pointer;
+  padding: 7px 11px; cursor: pointer; font-size: 12px; font-weight: 600;
 }
 .button:hover:not(:disabled) { background: var(--panel-3); }
 .button:disabled { opacity: .5; cursor: not-allowed; }
-.button.primary { background: var(--blue); border-color: var(--blue); color: #06121f; font-weight: 600; }
-.button.danger { color: var(--red); border-color: var(--red); }
+.button.primary { background: var(--blue); border-color: var(--blue); color: #06121f; }
+.button.danger { color: var(--red); }
 
-.panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); }
-.panel-head { display: flex; align-items: center; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--line); }
+.panel { background: var(--panel); border: 1px solid var(--line-soft); border-radius: var(--radius); box-shadow: var(--shadow); }
+.panel-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; border-bottom: 1px solid var(--line-soft); }
 .panel-head > * { min-width: 0; }
-.panel-title { font-weight: 600; }
-.panel-body { padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+.panel-title {
+  font-weight: 650; font-size: 13px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.panel-sub { color: var(--muted-2); font-size: 11px; margin-top: 2px; }
+.panel-body { padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; }
+/* display:flex above wins over the UA [hidden] rule, so reassert it. */
+.panel-body[hidden] { display: none; }
 .virtual-window { max-height: 34rem; overflow: auto; overscroll-behavior: contain; }
 .foreach-grid { margin-top: var(--space-3); display: grid; gap: var(--space-2); }
-.eyebrow { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
+.eyebrow {
+  color: var(--muted-2); font-size: 10px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .12em;
+}
 
 .table-scroll { overflow-x: auto; }
-table { width: 100%; border-collapse: collapse; min-width: 560px; }
-th, td { text-align: left; padding: 10px 16px; border-bottom: 1px solid var(--line); }
-th { color: var(--muted); font-size: 12px; font-weight: 600; }
+table { width: 100%; border-collapse: collapse; min-width: 560px; font-size: 12px; }
+th, td { text-align: left; padding: 9px 14px; border-bottom: 1px solid var(--line-soft); }
+th {
+  color: var(--muted-2); font-size: 10px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .08em;
+}
 tbody tr:hover { background: var(--panel-2); }
 td.numeric, th.numeric { text-align: right; font-variant-numeric: tabular-nums; }
 
-.pill { display: inline-block; border-radius: 999px; padding: 2px 10px; font-size: 12px; background: var(--panel-3); color: var(--muted); }
-.pill.running { background: var(--blue-soft); color: var(--blue); }
-.pill.waiting { background: var(--amber-soft); color: var(--amber); }
-.pill.succeeded { background: var(--green-soft); color: var(--green); }
-.pill.failed, .pill.cancelled { background: var(--red-soft); color: var(--red); }
+.pill { display: inline-block; border-radius: 999px; padding: 2px 9px; font-size: 11px; font-weight: 600; background: var(--panel-3); color: var(--muted); }
+.pill.running, .pill.blue { background: var(--blue-soft); color: var(--blue); }
+.pill.waiting, .pill.amber { background: var(--amber-soft); color: var(--amber); }
+.pill.succeeded, .pill.green { background: var(--green-soft); color: var(--green); }
+.pill.failed, .pill.cancelled, .pill.red { background: var(--red-soft); color: var(--red); }
+.pill.purple { background: var(--purple-soft); color: var(--purple); }
+
+/* The prototype's status language: a small dot, active states carry a soft
+   glow. The paired pill still spells the state out, so meaning never rides
+   on colour alone. */
+.status-dot {
+  width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto;
+  display: inline-block; background: var(--muted-2);
+}
+.status-dot.running { background: var(--blue); box-shadow: 0 0 0 4px var(--blue-soft); }
+.status-dot.waiting { background: var(--amber); box-shadow: 0 0 0 4px var(--amber-soft); }
+.status-dot.failed, .status-dot.cancelled { background: var(--red); box-shadow: 0 0 0 4px var(--red-soft); }
+.status-dot.succeeded { background: var(--green); }
+.status-dot.pending { background: var(--muted-2); }
 
 /* Entity ids are content-addressed hashes: show the head, keep the full value
    available on hover and to a screen reader, and never let one blow up a row. */
@@ -45,16 +72,18 @@ td.numeric, th.numeric { text-align: right; font-variant-numeric: tabular-nums; 
 .empty { padding: 24px 16px; color: var(--muted); text-align: center; }
 .actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .field { display: flex; flex-direction: column; gap: 6px; }
+.field label { font-size: 11px; font-weight: 600; }
 .field input, .field textarea, .field select {
-  background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
+  padding: 8px 10px; font-size: 12px;
 }
 .filter-bar input, .filter-bar select {
   background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
-  padding: 8px 10px;
+  padding: 8px 10px; font-size: 12px;
 }
 .field textarea { min-height: 88px; resize: vertical; }
 
-.banner { border-radius: 8px; padding: 10px 14px; border: 1px solid var(--line); }
+.banner { border-radius: 8px; padding: 10px 14px; border: 1px solid var(--line); font-size: 12px; }
 .banner.error { background: var(--red-soft); color: var(--red); border-color: var(--red); }
 .banner.info { background: var(--blue-soft); color: var(--blue); border-color: var(--blue); }
 
@@ -72,12 +101,12 @@ dialog {
   border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel);
   color: var(--text); padding: 0; width: min(520px, 92vw); box-shadow: var(--shadow);
 }
-dialog::backdrop { background: rgba(0, 0, 0, .5); }
+dialog::backdrop { background: rgba(0, 0, 0, .58); }
 /* A short viewport must never push the confirm button out of reach: the body
    scrolls, the actions stay pinned. */
 dialog { max-height: 85vh; display: flex; }
-dialog form { display: flex; flex-direction: column; gap: 12px; padding: 18px; min-height: 0; flex: 1; overflow-y: auto; }
+dialog form { display: flex; flex-direction: column; gap: 12px; padding: 16px 18px; min-height: 0; flex: 1; overflow-y: auto; }
 dialog form .actions {
-  position: sticky; bottom: -18px; margin-top: auto; justify-content: flex-end;
+  position: sticky; bottom: -16px; margin-top: auto; justify-content: flex-end;
   background: var(--panel); padding: 12px 0 0; border-top: 1px solid var(--line);
 }

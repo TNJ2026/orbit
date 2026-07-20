@@ -675,6 +675,7 @@ def analyze_dsl(
                         "DSL_PORT_INCOMPATIBLE",
                         f"input {target_id}.{target_port['id']} already has a writer",
                         edge_path + ("to",),
+                        hint="merge forward branches through an explicit join node before this input",
                     )
                 )
             input_writers[writer_key] = edge["id"]
@@ -721,7 +722,11 @@ def analyze_dsl(
             if len(join_policies) != 1:
                 diagnostics.append(_diagnostic(document, "DSL_JOIN_INVALID", "join node requires exactly one join policy", path + ("policies",)))
         elif degree > 1:
-            diagnostics.append(_diagnostic(document, "DSL_GRAPH_AMBIGUOUS_MERGE", "multiple incoming edges require an explicit join node", path))
+            diagnostics.append(_diagnostic(
+                document, "DSL_GRAPH_AMBIGUOUS_MERGE",
+                "multiple incoming edges require an explicit join node", path,
+                hint="use join mode 'any' for alternatives or 'all' for parallel branches",
+            ))
 
     for index, edge in enumerate(edges):
         if not edge.get("back_edge", False):

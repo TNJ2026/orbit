@@ -10,6 +10,7 @@ from threading import Event, Lock, Thread
 import hashlib
 from typing import Any, Mapping, Protocol, runtime_checkable
 
+from ..cli_environment import trusted_cli_environment
 from ..domain.accounting import UsageSnapshot
 from ..domain.durable_execution import ExecutionSafety
 from ..domain.handlers import (
@@ -64,6 +65,7 @@ class TrustedCliAgentClient:
     def __init__(
         self, command: tuple[str, ...], *, timeout_seconds=3600,
         kill_grace_seconds=2, max_output_bytes=1_048_576,
+        environment: Mapping[str, str] | None = None,
     ) -> None:
         if not command or any(not item for item in command):
             raise ValueError("trusted CLI command is required")
@@ -73,13 +75,16 @@ class TrustedCliAgentClient:
         self.timeout_seconds = timeout_seconds
         self.kill_grace_seconds = kill_grace_seconds
         self.max_output_bytes = max_output_bytes
+        self.environment = dict(
+            environment if environment is not None else trusted_cli_environment()
+        )
         self._lock = Lock()
         self._executions = {}
 
     def execute(self, request, context):
         process = subprocess.Popen(
             self.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.PIPE, env=self.environment,
         )
         execution_ref = f"agent:{context.request.attempt_id}"
         with self._lock:

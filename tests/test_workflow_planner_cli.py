@@ -96,7 +96,9 @@ class CliProviderContractTest(unittest.TestCase):
     def test_environment_is_the_explicit_allowlist_not_the_inherited_shell(self):
         runner = RecordingRunner()
         self.generate(runner)
-        self.assertEqual(set(runner.calls[0]["env"]), {"PATH", "HOME"})
+        self.assertEqual(
+            set(runner.calls[0]["env"]), {"PATH", "HOME", "USER", "LOGNAME"}
+        )
 
     def test_bounds_are_forwarded_to_the_process_port(self):
         runner = RecordingRunner()

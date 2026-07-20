@@ -107,6 +107,10 @@ def compile_document(
                         f"reference {reference!r} is outside this edge scope",
                         "compile",
                         ("edges", index),
+                        hint=(
+                            f"source references on this edge must start with "
+                            f"'source.{source_port['id']}'"
+                        ),
                     )
                     for reference in sorted(set(invalid))
                 ]

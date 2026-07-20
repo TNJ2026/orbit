@@ -863,6 +863,23 @@ def build_api_v1(
             "payload_schema": "workflow-publish/1.0",
         }
 
+    def _validate_command(workflow_id: str, expected_latest_version: int) -> dict[str, Any]:
+        return {
+            "command": "workflow.validate",
+            "label": "Validate workflow draft",
+            "method": "POST",
+            "href": "/api/v1/workflows/validate",
+            "target_aggregate_id": workflow_id,
+            "expected_version": expected_latest_version,
+            "payload_schema": "workflow-validate/1.0",
+        }
+
+    def _draft_commands(workflow_id: str, latest: int) -> list[dict[str, Any]]:
+        return [
+            _publish_command(workflow_id, latest),
+            _validate_command(workflow_id, latest),
+        ]
+
     async def workflow_generate(request: Request) -> JSONResponse:
         """Natural language → validated DSL draft. Never publishes.
 
@@ -881,8 +898,13 @@ def build_api_v1(
             from ..workflow.authoring import AuthoringFailedError
 
             instruction = str(body.get("instruction", ""))
+            preferred_handler = body.get("default_agent")
+            if preferred_handler is not None and not isinstance(preferred_handler, str):
+                raise ValueError("default_agent must be a string")
             try:
-                outcome = authoring_service.generate(instruction)
+                outcome = authoring_service.generate(
+                    instruction, preferred_handler=preferred_handler,
+                )
             except AuthoringFailedError as exc:
                 # A model that cannot satisfy the compiler is a client-visible
                 # result, not a server fault: return the findings for repair.
@@ -902,12 +924,54 @@ def build_api_v1(
                 "node_count": outcome.node_count,
                 "attempts": outcome.attempts,
                 "latest_version": latest,
-                "allowed_commands": [
-                    _publish_command(outcome.workflow_id, latest)
-                ],
+                "allowed_commands": _draft_commands(outcome.workflow_id, latest),
             }
 
         return await mutate(request, WRITE_SCOPE, "workflow.generate", command)
+
+    async def workflow_validate(request: Request) -> JSONResponse:
+        """Compile an edited draft without publishing or changing state."""
+
+        if workflow_publisher is None:
+            return error(
+                "validation_unavailable", "workflow validation is not wired", 503,
+            )
+
+        def command(body: Mapping[str, Any], actor: str, key: str) -> Mapping[str, Any]:
+            from ..workflow.dsl import DiagnosticError
+
+            source = body.get("source")
+            if not isinstance(source, str) or not source.strip():
+                raise ValueError("source is required")
+            expected = _required_version(body)
+            try:
+                compiled = workflow_publisher.validate_workflow(
+                    source, source_name="<api-draft>", source_format="json",
+                )
+            except DiagnosticError as exc:
+                raise ValueError(json.dumps({
+                    "message": "workflow source failed validation",
+                    "diagnostics": [item.to_dict() for item in exc.diagnostics],
+                }, ensure_ascii=False))
+            workflow_id = compiled.ir.workflow_id
+            latest = next((
+                item["latest_version"] for item in workflow_reads.list()
+                if item["workflow_id"] == workflow_id
+            ), 0)
+            if expected != latest:
+                raise ValueError(
+                    f"draft version conflict: expected {expected}, actual {latest}"
+                )
+            return {
+                "source": source,
+                "workflow_id": workflow_id,
+                "definition_hash": compiled.definition_hash.value,
+                "node_count": len(compiled.ir.nodes),
+                "latest_version": latest,
+                "allowed_commands": _draft_commands(workflow_id, latest),
+            }
+
+        return await mutate(request, WRITE_SCOPE, "workflow.validate", command)
 
     async def workflow_publish(request: Request) -> JSONResponse:
         if workflow_publisher is None:
@@ -1315,6 +1379,9 @@ def build_api_v1(
         Route("/api/v1/live", live_cursor, methods=["GET"]),
         Route("/api/v1/ops/status", ops_status, methods=["GET"]),
         Route("/api/v1/workflows", workflow_catalog, methods=["GET"]),
+        Route(
+            "/api/v1/workflows/validate", workflow_validate, methods=["POST"]
+        ),
         # /generate before /{workflow_id}: Starlette matches in order, and the
         # literal segment must not be captured as a workflow id.
         Route("/api/v1/workflows/generate", workflow_generate, methods=["POST"]),

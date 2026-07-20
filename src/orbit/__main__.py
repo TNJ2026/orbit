@@ -46,6 +46,14 @@ def _runtime_db_path(explicit: str | None, *, acknowledged: bool = False) -> str
     return str(project_db_path(resolve_project_root()))
 
 
+def _artifact_root_path(explicit: str | None, db_path: str | Path) -> Path:
+    """Resolve the local CAS beside the selected Runtime database by default."""
+
+    if explicit:
+        return Path(explicit).expanduser().absolute()
+    return Path(db_path).expanduser().absolute().parent / "artifacts"
+
+
 def _add_db_check_arguments(command) -> None:
     command.add_argument("--db", default=None, help="SQLite database path")
     command.add_argument("--run-id", default=None, help="Optional run:<id> scope")
@@ -234,7 +242,8 @@ def _serve(args) -> None:
     from .web.app import create_app
     from .web.builtin_handlers import BUILTIN_SCHEMAS, builtin_handlers
     from .web.local_identity import local_authorizer, loopback_authenticator
-    from .web.schema_guard import MixedSchemaError
+    from .web.schema_guard import MixedSchemaError, assert_runtime_schema
+    from .workflow.artifacts import LocalCASBackend
 
     project_root = resolve_project_root()
 
@@ -251,6 +260,22 @@ def _serve(args) -> None:
                 "legacy files are left untouched",
                 flush=True,
             )
+
+    # Preserve the cutover fail-closed boundary: a refused legacy database must
+    # not create even an empty Artifact directory as a startup side effect.
+    try:
+        assert_runtime_schema(db_path)
+    except MixedSchemaError as exc:
+        raise SystemExit(f"error: {exc}") from None
+
+    artifact_root = _artifact_root_path(args.artifact_root, db_path)
+    try:
+        artifact_backend = LocalCASBackend(artifact_root)
+    except (OSError, ValueError) as exc:
+        raise SystemExit(
+            f"orbit serve: cannot initialize Artifact store at "
+            f"{artifact_root}: {exc}"
+        ) from None
 
     handlers = list(builtin_handlers())
     if args.dev_tools:
@@ -281,6 +306,7 @@ def _serve(args) -> None:
             db_path,
             handlers=handlers,
             schemas=BUILTIN_SCHEMAS,
+            artifact_backend=artifact_backend,
             worker_count=args.runner_concurrency,
             discover_agents=not args.no_agent_discovery,
             serve_ui=True,
@@ -297,7 +323,7 @@ def _serve(args) -> None:
     print(
         f"orbit Runtime listening on http://{args.host}:{args.port}/ui/ "
         f"(health: /health/ready, workers: {args.runner_concurrency}) "
-        f"(db: {db_path})",
+        f"(db: {db_path}, artifacts: {artifact_backend.root})",
         flush=True,
     )
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
@@ -320,6 +346,14 @@ def main() -> None:
         "--db",
         default=None,
         help="SQLite path (default: per-project database under ~/.orbit/projects/)",
+    )
+    serve_cmd.add_argument(
+        "--artifact-root",
+        default=None,
+        help=(
+            "Local content-addressed Artifact directory "
+            "(default: artifacts/ beside the Runtime database)"
+        ),
     )
     serve_cmd.add_argument(
         "--runner-concurrency",

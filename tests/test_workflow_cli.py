@@ -4,11 +4,13 @@ from contextlib import redirect_stdout
 from io import StringIO
 import json
 from pathlib import Path
+import sqlite3
 import tempfile
 import unittest
 from unittest.mock import patch
 
 from orbit.__main__ import main
+from orbit.workflow.artifacts import LocalCASBackend
 from tests.test_workflow_dsl import VALID_DSL
 
 
@@ -105,6 +107,66 @@ class WorkflowCliTests(unittest.TestCase):
         payload = json.loads(output.getvalue())
         self.assertFalse(payload["valid"])
         self.assertTrue(payload["diagnostics"])
+
+    def test_serve_wires_the_configured_artifact_store(self) -> None:
+        artifact_root = Path(self.temp_dir.name) / "custom-artifacts"
+        with (
+            patch("orbit.web.app.create_app") as create_app,
+            patch("orbit.__main__.upsert_project"),
+            patch("orbit.__main__.uvicorn.run"),
+        ):
+            output = self.run_cli(
+                "serve", "--db", str(self.db),
+                "--artifact-root", str(artifact_root),
+                "--no-agent-discovery",
+            )
+
+        backend = create_app.call_args.kwargs["artifact_backend"]
+        self.assertIsInstance(backend, LocalCASBackend)
+        self.assertEqual(artifact_root.absolute(), backend.root)
+        self.assertTrue((artifact_root / "staging").is_dir())
+        self.assertTrue((artifact_root / "blobs" / "sha256").is_dir())
+        self.assertIn(f"artifacts: {artifact_root.absolute()}", output)
+
+    def test_serve_defaults_artifacts_beside_the_selected_database(self) -> None:
+        with (
+            patch("orbit.web.app.create_app") as create_app,
+            patch("orbit.__main__.upsert_project"),
+            patch("orbit.__main__.uvicorn.run"),
+        ):
+            self.run_cli(
+                "serve", "--db", str(self.db), "--no-agent-discovery",
+            )
+
+        backend = create_app.call_args.kwargs["artifact_backend"]
+        self.assertEqual(self.db.parent / "artifacts", backend.root)
+
+    def test_serve_reports_an_unusable_artifact_root_without_a_traceback(self) -> None:
+        invalid_root = Path(self.temp_dir.name) / "not-a-directory"
+        invalid_root.write_text("occupied", encoding="utf-8")
+        with self.assertRaisesRegex(
+            SystemExit, "cannot initialize Artifact store"
+        ):
+            self.run_cli(
+                "serve", "--db", str(self.db),
+                "--artifact-root", str(invalid_root),
+                "--no-agent-discovery",
+            )
+
+    def test_serve_refuses_legacy_schema_before_creating_artifact_store(self) -> None:
+        connection = sqlite3.connect(self.db)
+        connection.execute("CREATE TABLE tasks (id INTEGER PRIMARY KEY)")
+        connection.commit()
+        connection.close()
+        artifact_root = Path(self.temp_dir.name) / "must-not-exist"
+
+        with self.assertRaisesRegex(SystemExit, "legacy engine tables"):
+            self.run_cli(
+                "serve", "--db", str(self.db),
+                "--artifact-root", str(artifact_root),
+                "--no-agent-discovery",
+            )
+        self.assertFalse(artifact_root.exists())
 
 
 if __name__ == "__main__":

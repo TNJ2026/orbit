@@ -278,4 +278,18 @@ export class Api {
     return this.get(`/api/v1/live${suffix}`);
   }
 
+  /* `/health/ready` answers outside the envelope and uses 503 for "not
+     ready" — a degraded runtime is a valid answer here, not an exception. */
+  async health() {
+    let response;
+    try {
+      response = await fetch(`${this.base}/health/ready`, { credentials: "same-origin" });
+    } catch (cause) {
+      throw new ApiError(0, "network_error", String(cause));
+    }
+    let payload = null;
+    try { payload = await response.json(); } catch { /* treated as unknown */ }
+    return { ok: response.ok, status: payload?.status || "unknown", checks: payload?.checks || {} };
+  }
+
 }
