@@ -157,6 +157,8 @@ function statusSelect(value, onChange, labelKey = "runs.filter.status") {
 
 async function renderHome(root) {
   const dashboard = (await api.dashboard()).data;
+  const recent = dashboard.recent_runs || [];
+  const attention = recent.filter((run) => run.requires_actor_action);
   root.append(
     el("section", { class: "home-hero panel" }, [
       el("div", {}, [
@@ -164,9 +166,15 @@ async function renderHome(root) {
         el("h2", { text: i18n.t("home.heading") }),
         el("p", { class: "muted", text: i18n.t("home.description") }),
       ]),
-      mayStartRun ? el("button", {
-        class: "button primary", text: i18n.t("action.newGoal"), onclick: newRunDialog,
-      }) : null,
+      el("div", { class: "home-hero-actions" }, [
+        el("button", {
+          class: "button", text: i18n.t("action.browseWorkflows"),
+          onclick: () => navigate({ view: "workflows", runId: null }),
+        }),
+        mayStartRun ? el("button", {
+          class: "button primary", text: i18n.t("action.newGoal"), onclick: newRunDialog,
+        }) : null,
+      ]),
     ]),
   );
 
@@ -184,26 +192,44 @@ async function renderHome(root) {
   }
   root.append(stats);
 
-  const recent = dashboard.recent_runs || [];
   root.append(el("div", { class: "home-grid" }, [
     el("section", { class: "panel attention-panel" }, [
       el("div", { class: "panel-head" }, [
-        el("div", { class: "panel-title", text: i18n.t("home.attention") }),
+        el("div", {}, [
+          el("div", { class: "panel-title", text: i18n.t("home.attention") }),
+          el("div", { class: "panel-subtitle", text: i18n.t("home.attention.authorized") }),
+        ]),
         el("span", { class: "pill waiting", text: i18n.number(dashboard.attention_count) }),
       ]),
-      el("div", { class: "panel-body" }, [
-        el("p", { class: "muted", text: i18n.t(
+      el("div", { class: "panel-body attention-home-list" }, [
+        ...(attention.length ? attention.slice(0, 3).map((run) => {
+          const kind = run.primary_responsibility?.kind || "human";
+          return el("button", {
+            class: "home-attention-row",
+            onclick: () => navigate({ view: "run", runId: run.run_id }),
+          }, [
+            el("span", { class: `attention-symbol ${kind}`, text: kind === "budget" ? "$" : kind.slice(0, 1).toUpperCase() }),
+            el("span", { class: "attention-copy" }, [
+              el("strong", { text: runName(run) }),
+              el("span", { class: "muted", text: run.primary_responsibility?.label || waitText(run) }),
+            ]),
+            el("span", { class: `pill ${kind}`, text: i18n.t(`responsibility.${kind}`) }),
+          ]);
+        }) : [el("p", { class: "muted", text: i18n.t(
           dashboard.attention_count ? "home.attention.body" : "home.attention.empty",
-        ) }),
+        ) })]),
         el("button", {
-          class: "button", text: i18n.t("action.openInbox"),
+          class: "button attention-open", text: i18n.t("action.openInbox"),
           onclick: () => navigate({ view: "inbox", runId: null }),
         }),
       ]),
     ]),
     el("section", { class: "panel" }, [
       el("div", { class: "panel-head" }, [
-        el("div", { class: "panel-title", text: i18n.t("home.recent") }),
+        el("div", {}, [
+          el("div", { class: "panel-title", text: i18n.t("home.recent") }),
+          el("div", { class: "panel-subtitle", text: i18n.t("home.recent.subtitle") }),
+        ]),
         el("button", {
           class: "button", text: i18n.t("action.viewAll"),
           onclick: () => navigate({ view: "goals", runId: null }),
@@ -218,7 +244,7 @@ async function renderHome(root) {
               el("strong", { class: "with-dot" }, [
                 statusDot(run.status), el("span", { text: runName(run) }),
               ]),
-              el("span", { class: "muted mono", text: run.workflow_id }),
+              el("span", { class: "recent-run-meta muted", text: `${waitText(run)} · ${i18n.dateTime(run.updated_at)}` }),
             ]),
             pill(run.status),
           ]))
@@ -232,6 +258,7 @@ async function renderGoals(root, selectedRunId = null) {
   const runs = response.data.runs;
   let selected = selectedRunId ? runs.find((item) => item.run_id === selectedRunId) : runs[0];
   if (selectedRunId && !selected) selected = (await api.runSummary(selectedRunId)).data;
+  else if (selected) selected = (await api.runSummary(selected.run_id)).data;
 
   const search = el("input", {
     type: "search", value: goalFilters.q, placeholder: i18n.t("goals.search.placeholder"),
@@ -274,26 +301,47 @@ async function renderGoals(root, selectedRunId = null) {
     detail.append(el("div", { class: "empty", text: i18n.t("goals.select") }));
   } else {
     const budget = selected.budget_summary;
+    const primary = selected.primary_responsibility;
+    const budgetPercent = budget && budget.total_microunits > 0
+      ? Math.min(100, Math.round((budget.consumed_microunits / budget.total_microunits) * 100)) : null;
     detail.append(
-      el("div", { class: "panel-head" }, [
+      el("div", { class: "panel-head goal-detail-head" }, [
         el("div", {}, [
           el("div", { class: "eyebrow", text: i18n.t("goals.detail") }),
           el("div", { class: "panel-title", text: runName(selected) }),
+          el("div", { class: "goal-detail-id muted mono", text: selected.run_id }),
         ]),
         pill(selected.status),
       ]),
       el("div", { class: "panel-body" }, [
         el("p", { class: selected.goal ? "goal-copy" : "muted", text: selected.goal || i18n.t("goals.noDescription") }),
+        el("section", { class: `goal-state-card${primary ? " waiting" : ""}` }, [
+          el("div", { class: "eyebrow", text: i18n.t("goals.currentState") }),
+          el("strong", { text: primary?.label || i18n.t(`status.${selected.status}`) }),
+          el("span", { class: "muted", text: primary
+            ? i18n.t("goals.currentState.waiting") : i18n.t("goals.currentState.clear") }),
+        ]),
+        el("div", { class: "goal-section-label eyebrow", text: i18n.t("goals.facts") }),
         el("dl", { class: "fact-grid" }, [
           el("div", {}, [el("dt", { text: i18n.t("run.workflow") }), el("dd", { text: `${selected.workflow_id} · v${selected.workflow_version}` })]),
           el("div", {}, [el("dt", { text: i18n.t("goals.waitingOn") }), el("dd", { text: waitText(selected) })]),
           el("div", {}, [el("dt", { text: i18n.t("runs.column.updated") }), el("dd", { text: i18n.dateTime(selected.updated_at) })]),
+          el("div", {}, [el("dt", { text: i18n.t("goals.planVersion") }), el("dd", { text: selected.plan_version ? `v${i18n.number(selected.plan_version)}` : i18n.t("goals.planVersion.none") })]),
           budget ? el("div", {}, [
             el("dt", { text: i18n.t("run.budget") }),
             el("dd", { text: i18n.t("run.budget.used", {
               used: i18n.number(budget.consumed_microunits), total: i18n.number(budget.total_microunits), unit: budget.unit,
             }) }),
           ]) : null,
+        ]),
+        budgetPercent === null ? null : el("div", { class: "goal-budget" }, [
+          el("div", { class: "goal-budget-label" }, [
+            el("span", { text: i18n.t("goals.budgetUsage") }),
+            el("strong", { text: `${i18n.number(budgetPercent)}%` }),
+          ]),
+          el("div", { class: "goal-progress-bar" }, [
+            el("span", { style: `width:${budgetPercent}%` }),
+          ]),
         ]),
         el("div", { class: "actions" }, [
           el("button", {
@@ -1540,21 +1588,34 @@ async function renderWorkflows(root) {
   const generateCommand = (catalog.allowed_commands || []).find(
     (item) => item.command === "workflow.generate",
   );
-  if (generateCommand) {
-    root.append(el("div", { class: "actions" }, [
-      el("button", {
+  root.append(el("header", { class: "view-intro" }, [
+    el("div", {}, [
+      el("div", { class: "eyebrow", text: i18n.t("workflows.eyebrow") }),
+      el("h2", { text: i18n.t("workflows.heading") }),
+      el("p", { class: "muted", text: i18n.t("workflows.description") }),
+    ]),
+    generateCommand ? el("button", {
         class: "button primary", id: "generateWorkflow",
         text: i18n.t("generate.action"),
         onclick: () => generateWorkflowDialog(generateCommand),
-      }),
-    ]));
-  }
+      }) : null,
+  ]));
   const cards = el("section", { class: "workflow-grid", "aria-label": i18n.t("workflows.list") });
   const detail = el("section", { class: "panel workflow-detail" }, [
     el("div", { class: "empty", text: i18n.t("workflows.select") }),
   ]);
 
-  const showDetail = async (entry) => {
+  let selectedCard = null;
+  const showDetail = async (entry, card = null) => {
+    if (selectedCard) {
+      selectedCard.classList.remove("selected");
+      selectedCard.querySelector(".workflow-card-main")?.removeAttribute("aria-current");
+    }
+    selectedCard = card || cards.querySelector(`[data-workflow-id="${CSS.escape(entry.workflow_id)}"]`);
+    if (selectedCard) {
+      selectedCard.classList.add("selected");
+      selectedCard.querySelector(".workflow-card-main")?.setAttribute("aria-current", "true");
+    }
     detail.replaceChildren(dataState(el, i18n, "loading"));
     try {
       const value = (await api.workflowDetail(entry.workflow_id, entry.latest_version)).data;
@@ -1593,8 +1654,25 @@ async function renderWorkflows(root) {
   };
 
   for (const entry of entries) {
-    cards.append(el("article", { class: "workflow-card panel" }, [
-      el("button", { class: "workflow-card-main", onclick: () => showDetail(entry) }, [
+    const kinds = Object.entries(entry.summary.node_kinds || {});
+    const visualNodes = [];
+    for (const [kind, count] of kinds) {
+      for (let index = 0; index < Math.min(count, 4 - visualNodes.length); index += 1) {
+        visualNodes.push(el("span", {
+          class: `workflow-node ${kind}`, title: kind,
+          text: kind === "terminal" ? "✓" : kind === "human" ? "H" : kind === "decision" ? "?" : kind.slice(0, 1).toUpperCase(),
+        }));
+      }
+      if (visualNodes.length === 4) break;
+    }
+    if (entry.summary.node_count > visualNodes.length) visualNodes.push(el("span", {
+      class: "workflow-node more", text: `+${entry.summary.node_count - visualNodes.length}`,
+    }));
+    const card = el("article", {
+      class: "workflow-card panel", "data-workflow-id": entry.workflow_id,
+    }, [
+      el("button", { class: "workflow-card-main" }, [
+        el("span", { class: "workflow-visual", "aria-hidden": "true" }, visualNodes),
         el("span", { class: "eyebrow", text: `${entry.workflow_id} · v${entry.latest_version}` }),
         el("strong", { text: entry.name }),
         el("span", { class: "muted", text: entry.description || i18n.t("workflows.noDescription") }),
@@ -1606,7 +1684,9 @@ async function renderWorkflows(root) {
         class: "button", text: i18n.t("action.newGoal"),
         onclick: () => newRunDialog(entry.workflow_id),
       }) : null,
-    ]));
+    ]);
+    card.querySelector(".workflow-card-main").addEventListener("click", () => showDetail(entry, card));
+    cards.append(card);
   }
   if (!entries.length) cards.append(el("div", { class: "empty panel", text: i18n.t("workflows.empty") }));
   if (entries.length) await showDetail(entries[0]);

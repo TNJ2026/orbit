@@ -80,6 +80,7 @@
 .home-hero > * { position: relative; z-index: 1; }
 .home-hero h2 { margin: 6px 0; font-size: clamp(22px, 3vw, 28px); letter-spacing: -.02em; }
 .home-hero p { margin: 0; max-width: 62ch; font-size: 12px; }
+.home-hero-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .stat-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
 .stat-card {
   background: var(--panel); border: 1px solid var(--line-soft); border-radius: var(--radius);
@@ -97,6 +98,27 @@
 .stat-card.failed { border-bottom: 3px solid var(--red); }
 .home-grid { display: grid; grid-template-columns: minmax(240px, .8fr) minmax(360px, 1.4fr); gap: 16px; }
 .attention-panel .panel-body { align-items: flex-start; }
+.panel-subtitle { margin-top: 3px; color: var(--muted); font-size: 10px; }
+.attention-home-list { padding: 0; gap: 0; }
+.home-attention-row {
+  width: 100%; display: grid; grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center; gap: 10px; padding: 11px 14px;
+  border: 0; border-bottom: 1px solid var(--line-soft);
+  background: transparent; color: inherit; text-align: left; cursor: pointer;
+}
+.home-attention-row:hover { background: var(--panel-2); }
+.attention-symbol {
+  width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center;
+  background: var(--amber-soft); color: var(--amber); font-size: 11px; font-weight: 800;
+}
+.attention-symbol.budget { background: var(--red-soft); color: var(--red); }
+.attention-symbol.unknown { background: var(--blue-soft); color: var(--blue); }
+.home-attention-row .pill.human { background: var(--amber-soft); color: var(--amber); }
+.home-attention-row .pill.budget { background: var(--red-soft); color: var(--red); }
+.home-attention-row .pill.unknown { background: var(--blue-soft); color: var(--blue); }
+.attention-copy { min-width: 0; display: grid; gap: 3px; }
+.attention-copy strong, .attention-copy span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attention-open { margin: 12px 14px; }
 
 .artifact-grid {
   display: grid;
@@ -126,6 +148,7 @@
 }
 .recent-run:hover { background: var(--panel-2); }
 .recent-run > span:first-child { display: grid; gap: 3px; min-width: 0; }
+.recent-run-meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
 
 .filter-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .filter-bar input[type="search"] { flex: 1 1 260px; min-width: 160px; }
@@ -181,11 +204,28 @@
 .goal-row-main { display: grid; gap: 4px; min-width: 0; }
 .goal-row-main strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .goal-detail { position: sticky; top: 16px; }
+.goal-detail-head { align-items: flex-start; }
+.goal-detail-id { margin-top: 4px; max-width: 52ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
 .goal-copy { line-height: 1.6; white-space: pre-wrap; }
+.goal-state-card {
+  display: grid; gap: 6px; padding: 13px 14px; border: 1px solid var(--line-soft);
+  border-radius: 10px; background: var(--panel-2);
+}
+.goal-state-card.waiting {
+  border-color: color-mix(in srgb, var(--amber) 30%, var(--line));
+  background: color-mix(in srgb, var(--amber-soft) 48%, var(--panel));
+}
+.goal-state-card strong { font-size: 13px; }
+.goal-state-card > span { font-size: 11px; }
+.goal-section-label { margin-top: 4px; }
 .fact-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin: 0; }
 .fact-grid div { padding: 10px; border-radius: 8px; background: var(--panel-2); }
 .fact-grid dt { color: var(--muted); font-size: 11px; }
 .fact-grid dd { margin: 5px 0 0; overflow-wrap: anywhere; font-size: 12px; }
+.goal-budget { display: grid; gap: 8px; }
+.goal-budget-label { display: flex; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 11px; }
+.goal-progress-bar { height: 6px; overflow: hidden; border-radius: 999px; background: var(--panel-3); }
+.goal-progress-bar span { display: block; height: 100%; border-radius: inherit; background: var(--blue); }
 
 @media (max-width: 900px) {
   .stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -207,13 +247,17 @@
   .run-hero-head { align-items: flex-start; }
 }
 
-.workflows-layout {
-  display: grid; grid-template-columns: minmax(300px, .85fr) minmax(440px, 1.3fr);
-  gap: 16px; align-items: start;
+.view-intro {
+  display: flex; align-items: flex-end; justify-content: space-between; gap: 20px;
+  padding: 4px 0 2px;
 }
-.workflow-grid { display: grid; gap: 12px; }
+.view-intro h2 { margin: 5px 0; font-size: clamp(20px, 3vw, 26px); letter-spacing: -.02em; }
+.view-intro p { margin: 0; max-width: 68ch; font-size: 12px; }
+.workflows-layout { display: grid; gap: 16px; align-items: start; }
+.workflow-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 12px; }
 .workflow-card { padding: 0 14px 14px; overflow: hidden; transition: transform .15s ease, border-color .15s ease; }
 .workflow-card:hover { transform: translateY(-2px); border-color: var(--muted-2); }
+.workflow-card.selected { border-color: color-mix(in srgb, var(--blue) 66%, var(--line)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--blue) 24%, transparent); }
 .workflow-card-main {
   display: grid; gap: 7px; width: calc(100% + 28px); margin: 0 -14px 12px;
   padding: 14px; border: 0; border-bottom: 1px solid var(--line-soft);
@@ -222,7 +266,27 @@
 .workflow-card-main:hover { background: var(--panel-2); }
 .workflow-card-main strong { font-size: 15px; }
 .workflow-meta { color: var(--blue); font-size: 12px; }
-.workflow-detail { position: sticky; top: 16px; }
+.workflow-visual {
+  min-height: 58px; display: flex; align-items: center; gap: 0;
+  margin: -14px -14px 6px; padding: 14px;
+  background: linear-gradient(135deg, var(--panel-2), color-mix(in srgb, var(--blue) 5%, var(--panel-3)));
+  border-bottom: 1px solid var(--line-soft);
+}
+.workflow-node {
+  width: 32px; height: 32px; display: grid; place-items: center; position: relative;
+  border: 1px solid var(--line); border-radius: 9px; background: var(--panel);
+  color: var(--blue); font-family: var(--mono); font-size: 11px; font-weight: 700;
+}
+.workflow-node + .workflow-node { margin-left: 17px; }
+.workflow-node + .workflow-node::before {
+  content: ""; position: absolute; right: 100%; top: 50%; width: 18px;
+  border-top: 1px solid var(--muted-2);
+}
+.workflow-node.human { color: var(--amber); }
+.workflow-node.terminal { color: var(--green); }
+.workflow-node.decision { color: var(--purple); }
+.workflow-node.more { color: var(--muted); }
+.workflow-detail { scroll-margin-top: 72px; }
 .definition-list { display: grid; gap: 8px; }
 .definition-list .actions { padding: 8px 0; border-bottom: 1px solid var(--line); }
 
@@ -255,10 +319,12 @@
 .review-list dd { margin: 6px 0 0; white-space: pre-wrap; font-size: 12px; }
 
 @media (max-width: 900px) {
-  .workflows-layout { grid-template-columns: 1fr; }
-  .workflow-detail { position: static; }
+  .workflow-grid { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
 }
 @media (max-width: 520px) {
+  .view-intro { align-items: flex-start; flex-direction: column; }
+  .view-intro .button { width: 100%; min-height: 40px; }
+  .workflow-grid { grid-template-columns: 1fr; }
   .wizard-steps { grid-template-columns: 1fr 1fr; }
   .wizard-content { min-height: 220px; }
 }
