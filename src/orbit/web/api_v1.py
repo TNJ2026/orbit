@@ -39,12 +39,21 @@ from ..workflow.application.budget_service import (
 )
 from ..workflow.application.foreach_service import ForeachService
 from ..workflow.application.human_service import HumanTaskService
-from ..workflow.application.run_service import RunApplicationService, RunStartError
+from ..workflow.application.run_service import (
+    ActiveGoalExistsError,
+    RunApplicationService,
+    RunStartError,
+)
 from ..workflow.catalogs.schemas import InMemorySchemaCatalog
 from ..workflow.domain.ids import EntityId
 from ..workflow.domain.versions import DefinitionHash
 from ..workflow.artifacts.local_cas import BlobIntegrityError
 from ..workflow.authoring import AuthoringUnavailableError
+from ..workflow.application.workflow_draft_service import (
+    DraftAlreadyActiveError, DraftNotFoundError, DraftNotValidatedError,
+    DraftSourceTooLargeError, DraftVersionConflictError, SourceUnavailableError,
+    WorkflowVersionConflictError,
+)
 from ..workflow.persistence.database import connect_workflow_database
 from ..workflow.persistence.control import audit as persist_audit
 from ..workflow.recovery.manager import RecoveryManager
@@ -126,6 +135,8 @@ def build_api_v1(
     operational_config: Mapping[str, Any] | None = None,
     authoring_service=None,
     workflow_publisher=None,
+    draft_service=None,
+    single_goal_mode: bool = True,
 ) -> list[Route]:
     """Routes for `/api/v1`, ready to mount on the composition root."""
 
@@ -133,7 +144,9 @@ def build_api_v1(
     reads = ReadModelService(path)
     artifact_reads = ArtifactReadModelService(path)
     artifact_backend = artifact_backend or getattr(durable_service, "artifact_backend", None)
-    runs = RunApplicationService(path, durable_service)
+    runs = RunApplicationService(
+        path, durable_service, enforce_single_goal=single_goal_mode
+    )
     plans = PlanReadModelService(path)
     dynamic_reads = DynamicReadModelService(path)
     workflow_reads = WorkflowCatalogReadModelService(
@@ -272,8 +285,21 @@ def build_api_v1(
         actor = authenticate(request, READ_SCOPE)
         if isinstance(actor, JSONResponse):
             return actor
+        dashboard_value = reads.dashboard(can_act=guard.allows(actor, WRITE_SCOPE))
+        active = dashboard_value.get("active_goal")
+        if active is not None:
+            active["allowed_commands"] = ([{
+                "command": "run.cancel",
+                "label": "Cancel run",
+                "method": "POST",
+                "href": f"/api/v1/runs/{active['run_id']}/cancel",
+                "target_aggregate_id": active["run_id"],
+                "expected_version": active["projection_version"],
+                "payload_schema": "run-cancel/1.0",
+                "confirmation": "explicit",
+            }] if guard.allows(actor, WRITE_SCOPE) else [])
         return JSONResponse(
-            envelope(reads.dashboard(can_act=guard.allows(actor, WRITE_SCOPE)))
+            envelope(dashboard_value)
         )
 
     async def run_summary(request: Request) -> JSONResponse:
@@ -1045,7 +1071,154 @@ def build_api_v1(
             "expected_version": 0,
             "payload_schema": "run-start/1.0",
         }] if guard.allows(actor, WRITE_SCOPE) else [])
+        if (
+            draft_service is not None
+            and item.get("source_available")
+            and guard.allows(actor, WRITE_SCOPE)
+        ):
+            item["allowed_commands"].append({
+                "command": "workflow.draft.create",
+                "label": "Edit workflow",
+                "method": "POST",
+                "href": f"/api/v1/workflows/{quote(workflow_id, safe=':')}/drafts",
+                "target_aggregate_id": workflow_id,
+                "expected_version": item["latest_version"],
+                "payload_schema": "workflow-draft-create/1.0",
+            })
         return JSONResponse(envelope(item))
+
+    # -- workflow drafts (editor plan §8) ----------------------------------
+
+    def _draft_command(record, command: str, label: str) -> dict[str, Any]:
+        return {
+            "command": f"workflow.draft.{command}",
+            "label": label,
+            "method": "POST",
+            "href": (
+                f"/api/v1/workflow-drafts/{quote(record.draft_id, safe=':')}/{command}"
+            ),
+            "target_aggregate_id": record.draft_id,
+            "expected_version": record.revision,
+            "payload_schema": f"workflow-draft-{command}/1.0",
+        }
+
+    def _draft_dto(record, actor: str) -> dict[str, Any]:
+        commands: list[dict[str, Any]] = []
+        if record.status == "active" and guard.allows(actor, WRITE_SCOPE):
+            commands = [
+                _draft_command(record, "save", "Save"),
+                _draft_command(record, "validate", "Validate"),
+            ]
+            # Publish is advertised only when this exact source passed the
+            # compiler (editor plan §8.2); the server re-checks on submit.
+            if (
+                record.validation_status == "valid"
+                and record.validated_source_hash == record.source_hash
+            ):
+                commands.append(_draft_command(record, "publish", "Publish"))
+            commands.append(_draft_command(record, "discard", "Discard"))
+        return {
+            "draft_id": record.draft_id,
+            "workflow_id": record.workflow_id,
+            "base_version": record.base_version,
+            "actor": record.actor,
+            "source_format": record.source_format,
+            "source": record.source_text,
+            "source_hash": record.source_hash,
+            "validation_status": record.validation_status,
+            "validated_definition_hash": record.validated_definition_hash,
+            "diagnostics": list(record.diagnostics),
+            "revision": record.revision,
+            "status": record.status,
+            "created_at": record.created_at,
+            "updated_at": record.updated_at,
+            "published_version": record.published_version,
+            "allowed_commands": commands,
+        }
+
+    async def workflow_draft_create(request: Request) -> JSONResponse:
+        if draft_service is None:
+            return error("drafts_unavailable", "workflow drafts are not wired", 503)
+        workflow_id = request.path_params["workflow_id"]
+
+        def command(body: Mapping[str, Any], actor: str, key: str) -> Mapping[str, Any]:
+            base = body.get("base_version")
+            record = draft_service.create_or_resume(
+                workflow_id,
+                base_version=None if base is None else int(base),
+                actor=actor, now=now(),
+            )
+            return _draft_dto(record, actor)
+
+        return await mutate(request, WRITE_SCOPE, "workflow.draft.create", command)
+
+    async def workflow_draft_read(request: Request) -> JSONResponse:
+        if draft_service is None:
+            return error("drafts_unavailable", "workflow drafts are not wired", 503)
+        actor = authenticate(request, READ_SCOPE)
+        if isinstance(actor, JSONResponse):
+            return actor
+        from ..workflow.application.workflow_draft_service import DraftNotFoundError
+
+        try:
+            record = draft_service.get(
+                EntityId.parse(request.path_params["draft_id"]),
+                actor=actor, now=now(),
+            )
+        except (DraftNotFoundError, ValueError) as exc:
+            return error("workflow_draft_not_found", str(exc), 404)
+        return JSONResponse(envelope(_draft_dto(record, actor)))
+
+    def _draft_mutation(action: str, invoke) -> Callable:
+        async def handler(request: Request) -> JSONResponse:
+            if draft_service is None:
+                return error(
+                    "drafts_unavailable", "workflow drafts are not wired", 503,
+                )
+            draft_id = request.path_params["draft_id"]
+
+            def command(body: Mapping[str, Any], actor: str, key: str) -> Mapping[str, Any]:
+                return invoke(EntityId.parse(draft_id), body, actor)
+
+            return await mutate(request, WRITE_SCOPE, action, command)
+
+        return handler
+
+    def _draft_save(draft_id, body, actor):
+        source = body.get("source")
+        if not isinstance(source, str):
+            raise ValueError("source is required")
+        record = draft_service.save(
+            draft_id, source, expected_revision=_required_version(body),
+            actor=actor, now=now(),
+        )
+        return _draft_dto(record, actor)
+
+    def _draft_validate(draft_id, body, actor):
+        record = draft_service.validate(
+            draft_id, expected_revision=_required_version(body),
+            actor=actor, now=now(),
+        )
+        return _draft_dto(record, actor)
+
+    def _draft_publish(draft_id, body, actor):
+        record, version = draft_service.publish(
+            draft_id, expected_revision=_required_version(body),
+            actor=actor, now=now(),
+        )
+        return {**_draft_dto(record, actor), "published": version}
+
+    def _draft_discard(draft_id, body, actor):
+        record = draft_service.discard(
+            draft_id, expected_revision=_required_version(body),
+            actor=actor, now=now(),
+        )
+        return _draft_dto(record, actor)
+
+    workflow_draft_save = _draft_mutation("workflow.draft.save", _draft_save)
+    workflow_draft_validate = _draft_mutation("workflow.draft.validate", _draft_validate)
+    workflow_draft_publish = _draft_mutation("workflow.draft.publish", _draft_publish)
+    workflow_draft_discard = _draft_mutation("workflow.draft.discard", _draft_discard)
 
     # -- writes -----------------------------------------------------------
 
@@ -1077,6 +1250,31 @@ def build_api_v1(
             return error("version_conflict", str(exc), 409)
         except AuthoringUnavailableError as exc:
             return error("generation_unavailable", str(exc), 503)
+        except ActiveGoalExistsError as exc:
+            return error(
+                "active_goal_exists", str(exc), 409,
+                active_goal=exc.active_goal,
+            )
+        except DraftNotFoundError as exc:
+            return error("workflow_draft_not_found", str(exc), 404)
+        except DraftVersionConflictError as exc:
+            return error(
+                "draft_version_conflict", str(exc), 409,
+                expected=exc.expected, actual=exc.actual,
+            )
+        except DraftAlreadyActiveError as exc:
+            return error("draft_already_active", str(exc), 409, draft=exc.draft)
+        except DraftNotValidatedError as exc:
+            return error("draft_not_validated", str(exc), 409)
+        except DraftSourceTooLargeError as exc:
+            return error("workflow_source_too_large", str(exc), 413, size=exc.size)
+        except WorkflowVersionConflictError as exc:
+            return error(
+                "workflow_version_conflict", str(exc), 409,
+                base_version=exc.base_version, latest_version=exc.latest_version,
+            )
+        except SourceUnavailableError as exc:
+            return error("source_unavailable", str(exc), 409)
         except (RunStartError, ValueError) as exc:
             return error("invalid_command", str(exc), 409)
         record_audit(actor, action, {"path": request.url.path, "key": key})
@@ -1390,6 +1588,30 @@ def build_api_v1(
         ),
         Route(
             "/api/v1/workflows/{workflow_id}/versions", workflow_publish,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/v1/workflows/{workflow_id}/drafts", workflow_draft_create,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/v1/workflow-drafts/{draft_id}", workflow_draft_read,
+            methods=["GET"],
+        ),
+        Route(
+            "/api/v1/workflow-drafts/{draft_id}/save", workflow_draft_save,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/v1/workflow-drafts/{draft_id}/validate", workflow_draft_validate,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/v1/workflow-drafts/{draft_id}/publish", workflow_draft_publish,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/v1/workflow-drafts/{draft_id}/discard", workflow_draft_discard,
             methods=["POST"],
         ),
         Route("/api/v1/capabilities", capability_read, methods=["GET"]),

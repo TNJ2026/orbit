@@ -258,6 +258,10 @@ export class Api {
     return this.get("/api/v1/workflows");
   }
 
+  workflowDraft(draftId) {
+    return this.get(`/api/v1/workflow-drafts/${encodeURIComponent(draftId)}`);
+  }
+
   workflowDetail(workflowId, version) {
     const params = new URLSearchParams();
     if (version !== undefined) params.set("version", String(version));

@@ -866,6 +866,37 @@ _MIGRATIONS: tuple[tuple[int, str, str], ...] = (
             ON foreach_items(group_id, status, child_run_id);
         """,
     ),
+    (
+        13,
+        "persistent workflow editing drafts",
+        """
+        CREATE TABLE workflow_drafts (
+            draft_id TEXT PRIMARY KEY,
+            workflow_id TEXT NOT NULL REFERENCES workflow_definitions(workflow_id),
+            base_version INTEGER NOT NULL CHECK (base_version >= 1),
+            actor TEXT NOT NULL,
+            source_format TEXT NOT NULL CHECK (source_format IN ('json', 'yaml')),
+            source_text TEXT NOT NULL,
+            source_hash TEXT NOT NULL,
+            validation_status TEXT NOT NULL CHECK (
+                validation_status IN ('dirty', 'valid', 'invalid')
+            ),
+            validated_source_hash TEXT,
+            validated_definition_hash TEXT,
+            diagnostics_json TEXT NOT NULL DEFAULT '[]',
+            revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+            status TEXT NOT NULL CHECK (status IN ('active', 'published', 'discarded')),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            published_version INTEGER,
+            CHECK (draft_id LIKE 'workflow_draft:%')
+        );
+
+        CREATE UNIQUE INDEX workflow_drafts_one_active
+            ON workflow_drafts(workflow_id, actor)
+            WHERE status = 'active';
+        """,
+    ),
 )
 
 

@@ -28,6 +28,7 @@ let liveCursor = null;
 let refreshTimer = null;
 let rendering = false;
 let renderQueued = false;
+let customSelectSequence = 0;
 const runFilters = { q: "", status: "", responsibility: "", activeOnly: false };
 const goalFilters = { q: "", status: "" };
 const artifactFilters = { q: "", runId: "", contentType: "" };
@@ -45,6 +46,137 @@ const el = (tag, props = {}, children = []) => {
   }
   return node;
 };
+
+function syncCustomSelect(select) {
+  const wrapper = select.closest(".custom-select");
+  if (!wrapper) return;
+  const selected = select.selectedOptions[0];
+  const trigger = wrapper.querySelector(".custom-select-trigger");
+  if (select.getAttribute("aria-label")) {
+    select.dataset.customSelectLabel = select.getAttribute("aria-label");
+  }
+  trigger.setAttribute("aria-label", select.dataset.customSelectLabel || "");
+  select.removeAttribute("aria-label");
+  trigger.querySelector(".custom-select-value").textContent = selected?.textContent || "";
+  trigger.disabled = select.disabled;
+  for (const option of wrapper.querySelectorAll(".custom-select-option")) {
+    const active = option.dataset.value === select.value;
+    option.setAttribute("aria-selected", String(active));
+    option.classList.toggle("selected", active);
+  }
+}
+
+function enhanceSelect(select) {
+  if (select.dataset.customSelect === "true") return;
+  select.dataset.customSelect = "true";
+  const label = select.getAttribute("aria-label")
+    || select.labels?.[0]?.textContent.trim() || "";
+  select.dataset.customSelectLabel = label;
+  const listId = `custom-select-${customSelectSequence += 1}`;
+  const wrapper = el("span", { class: "custom-select" });
+  const trigger = el("button", {
+    type: "button", class: "button custom-select-trigger",
+    role: "combobox", "aria-haspopup": "listbox", "aria-expanded": "false",
+    "aria-controls": listId, "aria-label": label,
+  }, [
+    el("span", { class: "custom-select-value" }),
+    el("span", { class: "custom-select-chevron", "aria-hidden": "true", text: "⌄" }),
+  ]);
+  const list = el("span", {
+    class: "custom-select-options", id: listId, role: "listbox",
+    ...(label ? { "aria-label": label } : {}), hidden: "hidden",
+  });
+
+  const close = (restoreFocus = false) => {
+    list.hidden = true;
+    trigger.setAttribute("aria-expanded", "false");
+    wrapper.classList.remove("open");
+    if (restoreFocus) trigger.focus();
+  };
+  const open = (focusSelected = false) => {
+    if (trigger.disabled) return;
+    for (const other of document.querySelectorAll(".custom-select.open")) {
+      if (other !== wrapper) {
+        other.querySelector(".custom-select-options").hidden = true;
+        other.querySelector(".custom-select-trigger").setAttribute("aria-expanded", "false");
+        other.classList.remove("open");
+      }
+    }
+    list.hidden = false;
+    trigger.setAttribute("aria-expanded", "true");
+    wrapper.classList.add("open");
+    if (focusSelected) {
+      (list.querySelector(".custom-select-option.selected") || list.firstElementChild)?.focus();
+    }
+  };
+
+  for (const nativeOption of select.options) {
+    const option = el("button", {
+      type: "button", class: "custom-select-option", role: "option",
+      "data-value": nativeOption.value,
+      "aria-selected": String(nativeOption.selected),
+      ...(nativeOption.disabled ? { disabled: "disabled" } : {}),
+      text: nativeOption.textContent,
+    });
+    option.addEventListener("click", () => {
+      select.value = option.dataset.value;
+      close(true);
+      syncCustomSelect(select);
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    option.addEventListener("keydown", (event) => {
+      const options = [...list.querySelectorAll(".custom-select-option:not(:disabled)")];
+      const index = options.indexOf(option);
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        const delta = event.key === "ArrowDown" ? 1 : -1;
+        options[(index + delta + options.length) % options.length]?.focus();
+      } else if (event.key === "Home" || event.key === "End") {
+        event.preventDefault();
+        options[event.key === "Home" ? 0 : options.length - 1]?.focus();
+      } else if (event.key === "Escape" || event.key === "Tab") {
+        close(event.key === "Escape");
+      }
+    });
+    list.append(option);
+  }
+
+  trigger.addEventListener("click", () => {
+    if (list.hidden) open(false); else close(false);
+  });
+  trigger.addEventListener("keydown", (event) => {
+    if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+      event.preventDefault();
+      open(true);
+    } else if (event.key === "Escape") close(false);
+  });
+  document.addEventListener("pointerdown", (event) => {
+    if (!wrapper.contains(event.target)) close(false);
+  });
+
+  select.parentNode.insertBefore(wrapper, select);
+  wrapper.append(select, trigger, list);
+  select.classList.add("custom-select-native");
+  select.hidden = true;
+  select.setAttribute("tabindex", "-1");
+  select.setAttribute("aria-hidden", "true");
+  select.addEventListener("change", () => syncCustomSelect(select));
+  syncCustomSelect(select);
+}
+
+function installCustomSelects() {
+  document.querySelectorAll("select").forEach(enhanceSelect);
+  const observer = new MutationObserver((records) => {
+    for (const record of records) {
+      for (const node of record.addedNodes) {
+        if (!(node instanceof Element)) continue;
+        if (node.matches("select")) enhanceSelect(node);
+        node.querySelectorAll?.("select").forEach(enhanceSelect);
+      }
+    }
+  });
+  observer.observe(document.body, { childList: true, subtree: true });
+}
 
 const pill = (status) =>
   el("span", { class: `pill ${status}`, text: i18n.status(status) });
@@ -155,102 +287,101 @@ function statusSelect(value, onChange, labelKey = "runs.filter.status") {
   return select;
 }
 
-async function renderHome(root) {
+async function renderHome(root, selectedRunId = null) {
   const dashboard = (await api.dashboard()).data;
-  const recent = dashboard.recent_runs || [];
-  const attention = recent.filter((run) => run.requires_actor_action);
+  const active = dashboard.active_goal;
+  let responsibilities = [];
+  let responsibilityError = null;
+  if (active) {
+    try {
+      responsibilities = (await api.responsibilities(active.run_id)).data.responsibilities;
+    } catch (error) {
+      responsibilityError = error;
+    }
+  }
+  const reload = () => render();
   root.append(
-    el("section", { class: "home-hero panel" }, [
+    el("section", { class: `home-hero panel${active ? " active-goal-hero" : " empty-goal-hero"}` }, [
       el("div", {}, [
-        el("div", { class: "eyebrow", text: i18n.t("home.eyebrow") }),
-        el("h2", { text: i18n.t("home.heading") }),
-        el("p", { class: "muted", text: i18n.t("home.description") }),
+        el("div", { class: "eyebrow", text: i18n.t(active ? "home.active.eyebrow" : "home.empty.eyebrow") }),
+        active ? el("div", { class: "run-hero-title" }, [
+          statusDot(active.status), el("h2", { text: runName(active) }), pill(active.status),
+        ]) : el("h2", { text: i18n.t("home.empty.heading") }),
+        el("p", { class: "muted", text: active
+          ? `${active.workflow_id} · v${i18n.number(active.workflow_version)} · ${i18n.t("run.updated", { time: i18n.dateTime(active.updated_at) })}`
+          : i18n.t("home.empty.description") }),
       ]),
       el("div", { class: "home-hero-actions" }, [
-        el("button", {
+        active ? el("button", {
+          class: "button primary", text: i18n.t("home.active.open"),
+          onclick: () => navigate({ view: "run", runId: active.run_id }),
+        }) : el("button", {
           class: "button", text: i18n.t("action.browseWorkflows"),
           onclick: () => navigate({ view: "workflows", runId: null }),
         }),
-        mayStartRun ? el("button", {
+        mayStartRun && !active ? el("button", {
           class: "button primary", text: i18n.t("action.newGoal"), onclick: newRunDialog,
         }) : null,
+        ...(active ? commandButtons(active.allowed_commands || [], reload) : []),
       ]),
     ]),
   );
 
-  const stats = el("section", { class: "stat-grid", "aria-label": i18n.t("home.overview") });
-  for (const [key, value] of Object.entries({
-    total: dashboard.counts.total,
-    active: dashboard.counts.active,
-    waiting: dashboard.counts.waiting,
-    failed: dashboard.counts.failed,
-  })) {
-    stats.append(el("article", { class: `stat-card ${key}` }, [
-      el("div", { class: "stat-label", text: i18n.t(`home.stat.${key}`) }),
-      el("div", { class: "stat-value", text: i18n.number(value) }),
-    ]));
-  }
-  root.append(stats);
-
-  root.append(el("div", { class: "home-grid" }, [
-    el("section", { class: "panel attention-panel" }, [
+  if (active) root.append(el("div", { class: "home-grid workbench-grid" }, [
+    el("section", { class: "panel attention-panel current-step-panel" }, [
       el("div", { class: "panel-head" }, [
         el("div", {}, [
-          el("div", { class: "panel-title", text: i18n.t("home.attention") }),
-          el("div", { class: "panel-subtitle", text: i18n.t("home.attention.authorized") }),
+          el("div", { class: "panel-title", text: i18n.t("home.active.next") }),
+          el("div", { class: "panel-subtitle", text: i18n.t("home.active.next.subtitle") }),
         ]),
-        el("span", { class: "pill waiting", text: i18n.number(dashboard.attention_count) }),
+        responsibilities.length ? el("span", { class: "pill waiting", text: i18n.number(responsibilities.length) }) : null,
       ]),
-      el("div", { class: "panel-body attention-home-list" }, [
-        ...(attention.length ? attention.slice(0, 3).map((run) => {
-          const kind = run.primary_responsibility?.kind || "human";
-          return el("button", {
-            class: "home-attention-row",
-            onclick: () => navigate({ view: "run", runId: run.run_id }),
-          }, [
+      el("div", { class: "panel-body attention-home-list" }, responsibilityError
+        ? [dataState(el, i18n, "error", { onRetry: reload })]
+        : responsibilities.length ? responsibilities.slice(0, 3).map((item) => {
+          const kind = item.kind || "human";
+          return el("div", { class: "home-attention-row workbench-action" }, [
             el("span", { class: `attention-symbol ${kind}`, text: kind === "budget" ? "$" : kind.slice(0, 1).toUpperCase() }),
             el("span", { class: "attention-copy" }, [
-              el("strong", { text: runName(run) }),
-              el("span", { class: "muted", text: run.primary_responsibility?.label || waitText(run) }),
+              el("strong", { text: item.label }),
+              el("span", { class: "muted", text: item.detail || i18n.t(`responsibility.${kind}`) }),
             ]),
-            el("span", { class: `pill ${kind}`, text: i18n.t(`responsibility.${kind}`) }),
+            el("span", { class: "actions" }, commandButtons(item.allowed_commands || [], reload)),
           ]);
-        }) : [el("p", { class: "muted", text: i18n.t(
-          dashboard.attention_count ? "home.attention.body" : "home.attention.empty",
-        ) })]),
-        el("button", {
-          class: "button attention-open", text: i18n.t("action.openInbox"),
-          onclick: () => navigate({ view: "inbox", runId: null }),
-        }),
-      ]),
+        }) : [el("div", { class: "workbench-running" }, [
+          el("span", { class: "live-dot", "aria-hidden": "true" }),
+          el("div", {}, [
+            el("strong", { text: i18n.t("home.active.running") }),
+            el("p", { class: "muted", text: i18n.t("home.active.running.detail") }),
+          ]),
+        ])]),
     ]),
     el("section", { class: "panel" }, [
       el("div", { class: "panel-head" }, [
         el("div", {}, [
-          el("div", { class: "panel-title", text: i18n.t("home.recent") }),
-          el("div", { class: "panel-subtitle", text: i18n.t("home.recent.subtitle") }),
+          el("div", { class: "panel-title", text: i18n.t("home.active.context") }),
+          el("div", { class: "panel-subtitle", text: i18n.t("home.active.context.subtitle") }),
         ]),
-        el("button", {
-          class: "button", text: i18n.t("action.viewAll"),
-          onclick: () => navigate({ view: "goals", runId: null }),
-        }),
       ]),
-      el("div", { class: "panel-body recent-list" }, recent.length
-        ? recent.map((run) => el("button", {
-            class: "recent-run",
-            onclick: () => navigate({ view: "goal", runId: run.run_id }),
-          }, [
-            el("span", {}, [
-              el("strong", { class: "with-dot" }, [
-                statusDot(run.status), el("span", { text: runName(run) }),
-              ]),
-              el("span", { class: "recent-run-meta muted", text: `${waitText(run)} · ${i18n.dateTime(run.updated_at)}` }),
-            ]),
-            pill(run.status),
-          ]))
-        : [el("div", { class: "muted", text: i18n.t("goals.empty") })]),
+      el("div", { class: "panel-body workbench-facts" }, [
+        el("div", {}, [el("span", { class: "muted", text: i18n.t("home.active.goal") }), el("strong", { text: active.goal || runName(active) })]),
+        el("div", {}, [el("span", { class: "muted", text: i18n.t("home.active.wait") }), el("strong", { text: waitText(active) })]),
+        el("div", {}, [el("span", { class: "muted", text: i18n.t("home.active.started") }), el("strong", { text: i18n.dateTime(active.created_at) })]),
+      ]),
     ]),
   ]));
+
+  const historySection = el("section", { class: "workspace-history" }, [
+    el("div", { class: "section-heading" }, [
+      el("div", {}, [
+        el("div", { class: "eyebrow", text: i18n.t("home.history.eyebrow") }),
+        el("h2", { text: i18n.t("home.history.heading") }),
+        el("p", { class: "muted", text: i18n.t("home.history.description") }),
+      ]),
+    ]),
+  ]);
+  await renderGoals(historySection, selectedRunId);
+  root.append(historySection);
 }
 
 async function renderGoals(root, selectedRunId = null) {
@@ -424,12 +555,12 @@ async function renderRuns(root) {
     const response = await api.listRuns({ cursor, ...runFilters });
     for (const run of response.data.runs) {
       body.append(
-        el("tr", {}, [
+        el("tr", { class: `list-option-row run-list-option${run.requires_actor_action ? " needs-attention" : ""}` }, [
           el("td", {
             "data-field": "run", "data-label": i18n.t("runs.column.run"),
           }, [
             el("button", {
-              class: "button id-button",
+              class: "list-option-link id-button",
               text: runName(run),
               title: run.run_id,
               onclick: () => navigate({ view: "run", runId: run.run_id }),
@@ -1186,7 +1317,7 @@ async function renderInbox(root) {
     ]),
     items.length
       ? el("div", { class: "table-scroll" }, [
-          el("table", {}, [
+          el("table", { class: "inbox-table" }, [
             el("thead", {}, [
               el("tr", {}, [
                 el("th", { text: i18n.t("inbox.column.item") }),
@@ -1208,8 +1339,11 @@ async function renderInbox(root) {
 
 function inboxRow(item) {
   const glyphs = { human: "H", budget: "$", unknown: "?", recovery: "R" };
-  return el("tr", {}, [
-        el("td", {}, [
+  return el("tr", { class: "list-option-row inbox-list-option" }, [
+        el("td", {
+          class: "inbox-item-copy", "data-field": "item",
+          "data-label": i18n.t("inbox.column.item"),
+        }, [
           el("div", { class: "actions inbox-item-head" }, [
             el("span", {
               class: `inbox-kind ${item.kind}`, "aria-hidden": "true",
@@ -1228,16 +1362,16 @@ function inboxRow(item) {
             source: item.item_id,
           }) }),
         ]),
-        el("td", {}, [
+        el("td", { "data-field": "run", "data-label": i18n.t("inbox.column.run") }, [
           el("button", {
-            class: "button id-button",
+            class: "list-option-link id-button",
             text: item.run_id,
             title: item.run_id,
             onclick: () => navigate({ view: "run", runId: item.run_id }),
           }),
         ]),
-        el("td", {}, [pill(item.status)]),
-        el("td", {}, [
+        el("td", { "data-field": "status", "data-label": i18n.t("inbox.column.status") }, [pill(item.status)]),
+        el("td", { "data-field": "actions", "data-label": i18n.t("inbox.column.actions") }, [
           el("div", { class: "actions" }, commandButtons(item.allowed_commands, () => render())),
         ]),
       ]);
@@ -1307,7 +1441,7 @@ async function renderArtifacts(root, selectedArtifactId = null) {
   const load = async () => {
     const response = await api.artifacts({ cursor, ...artifactFilters });
     for (const item of response.data.artifacts) {
-      grid.append(artifactCard(item));
+      grid.append(artifactCard(item, item.artifact_id === selectedArtifactId));
     }
     cursor = response.next_cursor;
     more.hidden = !cursor;
@@ -1321,19 +1455,32 @@ async function renderArtifacts(root, selectedArtifactId = null) {
   if (selectedArtifactId) await renderArtifactDetail(root, selectedArtifactId);
 }
 
-function artifactCard(item) {
-  return el("article", { class: "artifact-card panel" }, [
+function artifactCard(item, selected = false) {
+  const contentType = item.content_type || "application/octet-stream";
+  const subtype = contentType.split("/").pop() || "file";
+  const fileType = subtype === "plain" ? "TXT"
+    : subtype === "json" ? "JSON"
+      : subtype.replace(/^x-/, "").slice(0, 4).toUpperCase();
+  return el("article", { class: `artifact-card panel list-option-card${selected ? " selected" : ""}` }, [
     el("button", {
       class: "artifact-card-main",
+      "aria-current": selected ? "true" : null,
       onclick: () => navigate({ view: "artifact", artifactId: item.artifact_id, runId: null }),
     }, [
-      el("span", { class: "pill", text: item.content_type }),
-      el("strong", { class: "mono", text: item.output_port_id }),
-      el("span", { class: "muted", text: i18n.t("artifacts.size", {
-        size: i18n.number(item.size_bytes),
-      }) }),
-      el("span", { class: "muted mono", text: item.artifact_id }),
-      el("span", { class: "muted mono", text: `${item.run_id} · ${item.producer_id}` }),
+      el("span", { class: "artifact-top" }, [
+        el("span", { class: "file-icon", "aria-hidden": "true", text: fileType }),
+        el("span", { class: "artifact-size", text: i18n.t("artifacts.size", {
+          size: i18n.number(item.size_bytes),
+        }) }),
+      ]),
+      el("strong", { class: "artifact-name", text: item.output_port_id }),
+      el("span", { class: "artifact-meta muted", text: `${item.workflow_id} · ${item.producer_id}` }),
+      el("span", { class: "artifact-id muted mono", text: item.artifact_id }),
+      el("span", { class: "artifact-flow", "aria-hidden": "true" }, [
+        el("span", { text: item.run_id }),
+        el("b", { text: "→" }),
+        el("span", { text: item.output_port_id }),
+      ]),
     ]),
   ]);
 }
@@ -1478,7 +1625,7 @@ async function renderAgents(root) {
       ? catalog.handlers.map((handler) => {
         const attempt = handler.recent_attempt;
         const initials = handler.name.replace(/^handler:/, "").slice(0, 2).toUpperCase();
-        return el("article", { class: "data-card" }, [
+        return el("article", { class: "data-card list-option-card agent-card" }, [
           el("div", { class: "agent-head" }, [
             el("span", { class: "agent-avatar", "aria-hidden": "true", text: initials }),
             el("div", {}, [
@@ -1626,10 +1773,38 @@ async function renderWorkflows(root) {
             el("div", { class: "eyebrow", text: `${value.workflow_id} · v${value.latest_version}` }),
             el("div", { class: "panel-title", text: value.name }),
           ]),
-          value.allowed_commands.length ? el("button", {
-            class: "button primary", text: i18n.t("action.newGoal"),
-            onclick: () => newRunDialog(value.workflow_id),
-          }) : null,
+          el("div", { class: "actions" }, [
+            (() => {
+              const create = value.allowed_commands.find(
+                (item) => item.command === "workflow.draft.create",
+              );
+              return create ? el("button", {
+                class: "button", id: "editWorkflow",
+                text: i18n.t("editor.edit"),
+                onclick: async () => {
+                  try {
+                    const draft = (await api.execute(
+                      create, {}, `workflow.draft.create:${value.workflow_id}`,
+                    )).data;
+                    navigate({
+                      view: "workflowEdit",
+                      workflowId: value.workflow_id,
+                      draftId: draft.draft_id,
+                      runId: null,
+                    });
+                  } catch (error) {
+                    reportError(error);
+                  }
+                },
+              }) : null;
+            })(),
+            value.allowed_commands.some((item) => item.command === "run.start")
+              ? el("button", {
+                  class: "button primary", text: i18n.t("action.newGoal"),
+                  onclick: () => newRunDialog(value.workflow_id),
+                })
+              : null,
+          ]),
         ]),
         el("div", { class: "panel-body" }, [
           el("p", { class: value.description ? "" : "muted", text: value.description || i18n.t("workflows.noDescription") }),
@@ -1691,6 +1866,202 @@ async function renderWorkflows(root) {
   if (!entries.length) cards.append(el("div", { class: "empty panel", text: i18n.t("workflows.empty") }));
   if (entries.length) await showDetail(entries[0]);
   root.append(el("div", { class: "workflows-layout" }, [cards, detail]));
+}
+
+/* --------------------------------------------------------- workflow editor */
+
+/** Source editor over a persistent server-side draft (editor plan P2).
+ *
+ * The server owns everything that matters: revision, validation verdict and
+ * the command set. This view keeps exactly one piece of local state — the
+ * textarea's text — and reconciles it with the draft after every command.
+ * Buttons render from `allowed_commands`; when the server withholds publish,
+ * there is no publish button to mis-click.
+ */
+async function renderWorkflowEditor(root, draftId) {
+  let draft = (await api.workflowDraft(draftId)).data;
+
+  const source = el("textarea", {
+    id: "draftSource", class: "draft-source", spellcheck: "false",
+    "aria-label": i18n.t("editor.source"),
+  });
+  source.value = draft.source;
+  const saveState = el("span", { class: "pill", id: "draftSaveState" });
+  const conflict = el("div", { class: "banner error", hidden: "hidden", role: "alert" });
+  const controls = el("div", { class: "actions", id: "draftControls" });
+  const diagnostics = el("div", { class: "panel-body", id: "draftDiagnostics" });
+
+  let dirtySinceSave = false;
+  let saving = false;
+  let saveTimer = null;
+
+  const command = (name) =>
+    (draft.allowed_commands || []).find((item) => item.command === name);
+
+  const setSaveState = (key) => {
+    saveState.textContent = i18n.t(`editor.state.${key}`);
+    saveState.className = `pill ${key === "conflict" ? "failed" : key === "saved" ? "succeeded" : "waiting"}`;
+  };
+
+  const showConflict = (error) => {
+    conflict.replaceChildren(
+      el("span", { text: i18n.t("editor.conflict", { message: error.message }) }),
+      el("button", {
+        type: "button", class: "button", id: "draftReload",
+        text: i18n.t("editor.reload"),
+        onclick: async () => {
+          draft = (await api.workflowDraft(draft.draft_id)).data;
+          source.value = draft.source;
+          dirtySinceSave = false;
+          conflict.hidden = true;
+          setSaveState("saved");
+          redraw();
+        },
+      }),
+    );
+    conflict.hidden = false;
+    setSaveState("conflict");
+  };
+
+  const runCommand = async (name, payload = {}, intent) => {
+    const allowed = command(name);
+    if (!allowed) return null;
+    try {
+      const response = await api.execute(allowed, payload, intent);
+      draft = response.data;
+      conflict.hidden = true;
+      redraw();
+      return response;
+    } catch (error) {
+      const failure = reportError(error);
+      if (failure.requiresRefresh) showConflict(failure);
+      return null;
+    }
+  };
+
+  const save = async () => {
+    if (saving || !command("workflow.draft.save")) return;
+    saving = true;
+    dirtySinceSave = false;
+    setSaveState("saving");
+    const response = await runCommand(
+      "workflow.draft.save", { source: source.value },
+      `workflow.draft.save:${draft.draft_id}:${Date.now()}`,
+    );
+    saving = false;
+    if (response) setSaveState(dirtySinceSave ? "unsaved" : "saved");
+  };
+
+  source.addEventListener("input", () => {
+    dirtySinceSave = true;
+    setSaveState("unsaved");
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(save, 800);
+  });
+
+  let discardArmed = false;
+  const redraw = () => {
+    controls.replaceChildren();
+    const validate = command("workflow.draft.validate");
+    if (validate) {
+      controls.append(el("button", {
+        class: "button", id: "draftValidate", text: i18n.t("editor.validate"),
+        onclick: () => runCommand(
+          "workflow.draft.validate", {},
+          `workflow.draft.validate:${draft.draft_id}:${draft.revision}`,
+        ),
+      }));
+    }
+    const publish = command("workflow.draft.publish");
+    if (publish) {
+      controls.append(el("button", {
+        class: "button primary", id: "draftPublish", text: i18n.t("editor.publish"),
+        onclick: async () => {
+          const response = await runCommand(
+            "workflow.draft.publish", {},
+            `workflow.draft.publish:${draft.draft_id}`,
+          );
+          if (response) {
+            announce(i18n.t("editor.published", {
+              workflowId: draft.workflow_id,
+              version: i18n.number(response.data.published.version),
+            }));
+            navigate({ view: "workflows", runId: null });
+          }
+        },
+      }));
+    }
+    const discard = command("workflow.draft.discard");
+    if (discard) {
+      controls.append(el("button", {
+        class: "button danger", id: "draftDiscard",
+        text: i18n.t(discardArmed ? "editor.discardConfirm" : "editor.discard"),
+        onclick: async () => {
+          if (!discardArmed) {
+            discardArmed = true;
+            redraw();
+            return;
+          }
+          const response = await runCommand(
+            "workflow.draft.discard", {},
+            `workflow.draft.discard:${draft.draft_id}`,
+          );
+          if (response) {
+            announce(i18n.t("editor.discarded"));
+            navigate({ view: "workflows", runId: null });
+          }
+        },
+      }));
+    }
+    if (draft.status !== "active") {
+      controls.append(el("span", {
+        class: "pill", text: i18n.status(draft.status),
+      }));
+    }
+
+    diagnostics.replaceChildren();
+    if (draft.validation_status === "valid") {
+      diagnostics.append(el("div", {
+        class: "banner info",
+        text: i18n.t("editor.valid", {
+          hash: (draft.validated_definition_hash || "").slice(0, 19),
+        }),
+      }));
+    } else if (draft.diagnostics.length) {
+      for (const item of draft.diagnostics) {
+        diagnostics.append(el("div", { class: "error-item" }, [
+          el("div", { class: "mono", text: `${item.code} ${item.json_path || ""}` }),
+          el("div", { text: item.message }),
+        ]));
+      }
+    } else {
+      diagnostics.append(el("div", {
+        class: "muted", text: i18n.t("editor.notValidated"),
+      }));
+    }
+  };
+
+  root.append(
+    el("section", { class: "panel" }, [
+      el("div", { class: "panel-head" }, [
+        el("div", {}, [
+          el("div", { class: "eyebrow", text: `${draft.workflow_id} · v${draft.base_version}` }),
+          el("div", { class: "panel-title", text: i18n.t("editor.title") }),
+        ]),
+        saveState,
+        controls,
+      ]),
+      el("div", { class: "panel-body" }, [conflict, source]),
+    ]),
+    el("section", { class: "panel" }, [
+      el("div", { class: "panel-head" }, [
+        el("div", { class: "panel-title", text: i18n.t("editor.diagnostics") }),
+      ]),
+      diagnostics,
+    ]),
+  );
+  setSaveState("saved");
+  redraw();
 }
 
 function generatedInputSupported(entry) {
@@ -1994,6 +2365,17 @@ function describeGenerationFailure(error) {
 }
 
 async function newRunDialog(preselectedWorkflowId = null) {
+  try {
+    const active = (await api.dashboard()).data.active_goal;
+    if (active) {
+      announce(i18n.t("newRun.active.exists", { goal: runName(active) }), "info");
+      navigate({ view: "run", runId: active.run_id });
+      return;
+    }
+  } catch (error) {
+    reportError(error);
+    return;
+  }
   let catalog;
   try {
     catalog = await api.workflowCatalog();
@@ -2038,14 +2420,21 @@ async function newRunDialog(preselectedWorkflowId = null) {
       content.append(el("h3", { text: i18n.t("newRun.select.heading") }));
       const choices = el("div", { class: "wizard-workflows" });
       for (const item of entries) {
-        choices.append(el("label", { class: `wizard-workflow${item.workflow_id === state.workflowId ? " selected" : ""}` }, [
+        choices.append(el("label", { class: `wizard-workflow list-option-card${item.workflow_id === state.workflowId ? " selected" : ""}` }, [
           el("input", {
             type: "radio", name: "workflow", value: item.workflow_id,
             ...(item.workflow_id === state.workflowId ? { checked: "checked" } : {}),
             onchange: () => { state.workflowId = item.workflow_id; draw(); },
           }),
-          el("span", {}, [el("strong", { text: item.name }), el("small", { class: "muted mono", text: `${item.workflow_id} · v${item.latest_version}` })]),
-          el("span", { class: "muted", text: item.description || i18n.t("workflows.noDescription") }),
+          el("span", { class: "wizard-workflow-mark", "aria-hidden": "true", text: "⌘" }),
+          el("span", { class: "wizard-workflow-copy" }, [
+            el("strong", { text: item.name }),
+            el("small", { class: "muted mono", text: `${item.workflow_id} · v${item.latest_version}` }),
+            el("span", { class: "muted", text: item.description || i18n.t("workflows.noDescription") }),
+          ]),
+          el("span", { class: "workflow-meta", text: i18n.t("workflows.summary", {
+            nodes: i18n.number(item.summary.node_count), inputs: i18n.number(item.inputs.length),
+          }) }),
         ]));
       }
       if (!entries.length) choices.append(el("div", { class: "empty", text: i18n.t("workflows.empty") }));
@@ -2186,7 +2575,12 @@ async function newRunDialog(preselectedWorkflowId = null) {
             announce(i18n.t("newRun.started", { runId: started.data.run_id }));
             navigate({ view: "run", runId: started.data.run_id });
           } catch (error) {
-            if (error instanceof ApiError && error.requiresRefresh) {
+            if (error instanceof ApiError && error.code === "active_goal_exists") {
+              dialog.close();
+              const active = error.details.active_goal;
+              announce(i18n.t("newRun.active.exists", { goal: active?.display_name || active?.run_id || "" }), "info");
+              if (active?.run_id) navigate({ view: "run", runId: active.run_id });
+            } else if (error instanceof ApiError && error.requiresRefresh) {
               dialog.close();
               announce(i18n.t("newRun.workflow.changed"), "error");
             } else {
@@ -2231,7 +2625,7 @@ async function render() {
 
   for (const button of document.querySelectorAll(".nav-button")) {
     const section = route.view === "run" ? "runs"
-      : route.view === "goal" ? "goals"
+      : route.view === "goal" || route.view === "goals" ? "home"
         : route.view === "artifact" ? "artifacts" : route.view;
     const active = button.dataset.view === section;
     if (active) button.setAttribute("aria-current", "page");
@@ -2239,16 +2633,18 @@ async function render() {
   }
   document.getElementById("viewTitle").textContent = i18n.t(
     route.view === "run" ? "run.title"
-      : route.view === "goal" ? "goals.title"
-        : route.view === "artifact" ? "artifacts.title" : `${route.view}.title`,
+      : route.view === "goal" || route.view === "goals" ? "home.title"
+        : route.view === "artifact" ? "artifacts.title"
+          : route.view === "workflowEdit" ? "editor.title" : `${route.view}.title`,
   );
 
   try {
     const fresh = el("div", { class: "content" });
     if (route.view === "home") await renderHome(fresh);
-    else if (route.view === "goal") await renderGoals(fresh, route.runId);
-    else if (route.view === "goals") await renderGoals(fresh);
+    else if (route.view === "goal") await renderHome(fresh, route.runId);
+    else if (route.view === "goals") await renderHome(fresh);
     else if (route.view === "workflows") await renderWorkflows(fresh);
+    else if (route.view === "workflowEdit") await renderWorkflowEditor(fresh, route.draftId);
     else if (route.view === "run") await renderRun(fresh, route.runId, route.tab || "overview");
     else if (route.view === "inbox") await renderInbox(fresh);
     else if (route.view === "artifacts") await renderArtifacts(fresh);
@@ -2293,6 +2689,7 @@ function applyStaticText() {
   for (const node of document.querySelectorAll("[data-i18n-placeholder]")) {
     node.setAttribute("placeholder", i18n.t(node.dataset.i18nPlaceholder));
   }
+  document.querySelectorAll("select[data-custom-select='true']").forEach(syncCustomSelect);
   const actor = document.getElementById("actorChip");
   if (actor.textContent) {
     actor.title = i18n.t("actor.signedIn", { actor: actor.textContent });
@@ -2303,6 +2700,7 @@ async function setLocale(locale) {
   i18n = await I18n.load(locale);
   i18n.persist();
   document.getElementById("localeSelect").value = locale;
+  syncCustomSelect(document.getElementById("localeSelect"));
   applyStaticText();
   await render();
 }
@@ -2322,6 +2720,7 @@ async function boot() {
   }
   select.value = i18n.locale;
   select.addEventListener("change", (event) => setLocale(event.target.value));
+  installCustomSelects();
 
   document.getElementById("themeToggle").addEventListener("click", () => {
     const next = document.documentElement.dataset.theme === "light" ? "dark" : "light";
@@ -2367,8 +2766,8 @@ async function boot() {
   scheduleLivePolling();
   document.getElementById("globalSearchForm").addEventListener("submit", (event) => {
     event.preventDefault();
-    runFilters.q = document.getElementById("globalSearch").value.trim();
-    navigate({ view: "runs", runId: null });
+    goalFilters.q = document.getElementById("globalSearch").value.trim();
+    navigate({ view: "home", runId: null });
   });
   for (const button of document.querySelectorAll(".nav-button")) {
     button.addEventListener("click", () => {

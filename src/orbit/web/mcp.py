@@ -61,10 +61,13 @@ def build_mcp(
     *,
     authenticator: Callable[[Request], str | None] | None = None,
     authorizer: Authorizer | None = None,
+    single_goal_mode: bool = True,
 ) -> list[Route]:
     path = Path(db_path)
     reads = ReadModelService(path)
-    runs = RunApplicationService(path, durable_service)
+    runs = RunApplicationService(
+        path, durable_service, enforce_single_goal=single_goal_mode
+    )
     guard = authorizer or Authorizer()
 
     tools = (

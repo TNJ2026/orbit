@@ -24,6 +24,7 @@ docs/ui/*
 !docs/ui/agent-workflow-ui-api-contract.md
 !docs/ui/agent-workflow-ui-implementation.md
 !docs/ui/runtime-ui-prototype-delivery-plan.md
+!docs/ui/workflow-editor-implementation-plan.md
 
 # Visual regression scratch output (baselines themselves are committed)
 tests/visual_baselines/*.actual.png

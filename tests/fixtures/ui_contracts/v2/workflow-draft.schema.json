@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "orbit://ui-contracts/workflow-draft/2.0",
+  "title": "WorkflowDraft 2.0",
+  "description": "One actor's persistent editing draft of a workflow (editor plan §8.3). The server owns revision, validation state and the command set; the client never derives publishability. allowed_commands is already authorised for the requesting actor and follows AllowedCommand 2.0 — POST only, which is why save is POST .../save.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "draft_id", "workflow_id", "base_version", "actor", "source_format",
+    "source", "source_hash", "validation_status", "validated_definition_hash",
+    "diagnostics", "revision", "status", "created_at", "updated_at",
+    "published_version", "allowed_commands"
+  ],
+  "properties": {
+    "draft_id": {"type": "string", "pattern": "^workflow_draft:"},
+    "workflow_id": {"type": "string", "pattern": "^workflow:"},
+    "base_version": {"type": "integer", "minimum": 1},
+    "actor": {"type": "string", "minLength": 1},
+    "source_format": {"enum": ["json", "yaml"]},
+    "source": {"type": "string"},
+    "source_hash": {"type": "string", "pattern": "^sha256:"},
+    "validation_status": {
+      "enum": ["dirty", "valid", "invalid"],
+      "description": "Validation is synchronous; there is deliberately no 'validating' state."
+    },
+    "validated_definition_hash": {
+      "type": ["string", "null"],
+      "description": "Definition hash of the last successful validation; null until one succeeds."
+    },
+    "diagnostics": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["code", "message"],
+        "properties": {
+          "code": {"type": "string", "minLength": 1},
+          "message": {"type": "string", "minLength": 1},
+          "json_path": {"type": "string"},
+          "severity": {"enum": ["error", "warning"]}
+        }
+      }
+    },
+    "revision": {
+      "type": "integer", "minimum": 1,
+      "description": "The draft aggregate's expected version; every save/validate/publish/discard bumps it."
+    },
+    "status": {"enum": ["active", "published", "discarded"]},
+    "created_at": {"type": "string", "format": "date-time"},
+    "updated_at": {"type": "string", "format": "date-time"},
+    "published_version": {
+      "type": ["integer", "null"],
+      "description": "Set when status is published. May equal base_version: publishing an unchanged draft is a success that mints no new version."
+    },
+    "allowed_commands": {
+      "type": "array",
+      "items": {"$ref": "allowed-command.schema.json"}
+    }
+  }
+}

@@ -355,6 +355,7 @@ def create_app(
     discover_agents: bool = False,
     agent_capabilities: Sequence[str] | None = None,
     workflow_generator: Callable[[str], str] | None = None,
+    single_goal_mode: bool = True,
 ) -> Starlette:
     """Build the Runtime application.
 
@@ -510,6 +511,7 @@ def create_app(
                 ),
             }
         ),
+        "workflow_editing": {"available": True},
     }
 
     # Authoring shares the sealed registry's manifests and the composition's
@@ -531,6 +533,13 @@ def create_app(
     )
     workflow_publisher = WorkflowDefinitionService(
         authoring_catalogs, SQLiteWorkflowVersionStore(composition.db_path)
+    )
+    from ..workflow.application.workflow_draft_service import (
+        WorkflowDraftApplicationService,
+    )
+
+    draft_service = WorkflowDraftApplicationService(
+        composition.db_path, workflow_publisher
     )
     authoring_service = None
     if workflow_generator is not None:
@@ -565,6 +574,8 @@ def create_app(
             artifact_backend=artifact_backend,
             authoring_service=authoring_service,
             workflow_publisher=workflow_publisher,
+            draft_service=draft_service,
+            single_goal_mode=single_goal_mode,
             operational_config={
                 "worker_count": worker_count,
                 "poll_seconds": poll_seconds,
@@ -575,6 +586,7 @@ def create_app(
         *build_mcp(
             composition.db_path, composition.service,
             authenticator=authenticator, authorizer=authorizer,
+            single_goal_mode=single_goal_mode,
         ),
     ]
 

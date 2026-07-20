@@ -100,7 +100,7 @@ class WorkflowMigrationAndUnitOfWorkTests(unittest.TestCase):
         self.assertTrue({"jobs", "job_leases", "durable_timers"} <= tables)
         self.assertTrue({"planner_attempts", "planner_proposals"} <= tables)
         self.assertIn("human_tasks", tables)
-        self.assertEqual(list(range(1, 13)), versions)
+        self.assertEqual(list(range(1, 14)), versions)
 
     def test_unit_of_work_requires_explicit_commit(self) -> None:
         with SQLiteUnitOfWork(self.path) as uow:

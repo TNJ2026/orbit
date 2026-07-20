@@ -28,6 +28,14 @@ export function readRoute(hash = location.hash) {
   if (parts[0] === "goals" && parts[1]) {
     return { view: "goal", runId: decodeURIComponent(parts[1]) };
   }
+  if (parts[0] === "workflows" && parts[1] && parts[2] === "edit" && parts[3]) {
+    return {
+      view: "workflowEdit",
+      workflowId: decodeURIComponent(parts[1]),
+      draftId: decodeURIComponent(parts[3]),
+      runId: null,
+    };
+  }
   if (parts[0] === "artifacts" && parts[1]) {
     return { view: "artifact", artifactId: decodeURIComponent(parts[1]), runId: null };
   }
@@ -41,6 +49,9 @@ export function routeHash(route) {
     return !route.tab || route.tab === "overview" ? base : `${base}/${route.tab}`;
   }
   if (route.view === "goal") return `#/goals/${encodeURIComponent(route.runId)}`;
+  if (route.view === "workflowEdit") {
+    return `#/workflows/${encodeURIComponent(route.workflowId)}/edit/${encodeURIComponent(route.draftId)}`;
+  }
   if (route.view === "artifact") {
     return `#/artifacts/${encodeURIComponent(route.artifactId)}`;
   }

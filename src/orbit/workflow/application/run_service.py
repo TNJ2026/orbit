@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from contextlib import contextmanager
+import fcntl
 import hashlib
 from pathlib import Path
 from typing import Any, Mapping
@@ -23,6 +25,16 @@ from ..persistence.database import connect_workflow_database
 
 class RunStartError(ValueError):
     """The run could not be started; the message is safe to show a caller."""
+
+
+class ActiveGoalExistsError(RunStartError):
+    """A local workspace already has a foreground Goal in progress."""
+
+    def __init__(self, active_goal: Mapping[str, Any]) -> None:
+        self.active_goal = dict(active_goal)
+        super().__init__(
+            f"active goal already exists: {self.active_goal.get('run_id', 'unknown')}"
+        )
 
 
 @dataclass(frozen=True)
@@ -60,12 +72,44 @@ def derive_run_id(workflow_id: str, version: int, idempotency_key: str) -> Entit
 class RunApplicationService:
     """Start runs and answer "what is this run doing" for every adapter."""
 
-    def __init__(self, path: Path | str, durable_service) -> None:
+    def __init__(
+        self, path: Path | str, durable_service, *, enforce_single_goal: bool = False
+    ) -> None:
         self.path = Path(path)
         self.service = durable_service
         self.reads = ReadModelService(self.path)
+        self.enforce_single_goal = enforce_single_goal
+
+    @contextmanager
+    def _start_guard(self):
+        """Serialize foreground starts across local server and CLI processes."""
+
+        if not self.enforce_single_goal:
+            yield
+            return
+        lock_path = self.path.with_suffix(self.path.suffix + ".goal.lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("a+b") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
     # -- start ------------------------------------------------------------
+
+    def active_goal(self) -> dict[str, Any] | None:
+        """Return the one user-started root Run that owns the local workspace."""
+
+        with connect_workflow_database(self.path, read_only=True) as connection:
+            row = connection.execute(
+                "SELECT run_id,display_name,goal,workflow_id,workflow_version,"
+                " status,aggregate_version,created_at,updated_at"
+                " FROM workflow_runs WHERE run_id=correlation_id"
+                " AND status IN ('created','running','waiting','waiting_for_budget',"
+                " 'budget_exhausted') ORDER BY updated_at DESC,run_id LIMIT 1"
+            ).fetchone()
+        return None if row is None else dict(row)
 
     def resolve_workflow(
         self, workflow_id: str, version: int | None
@@ -133,7 +177,11 @@ class RunApplicationService:
             "start_run", run_id, run_id, AggregateVersion(0),
             f"start_run:{idempotency_key}", actor, issued_at, payload,
         )
-        result = self.service.submit(command)
+        with self._start_guard():
+            active = self.active_goal() if self.enforce_single_goal else None
+            if active is not None and active["run_id"] != str(run_id):
+                raise ActiveGoalExistsError(active)
+            result = self.service.submit(command)
         disposition = result.disposition.value
         if disposition not in {"applied", "replayed"}:
             reasons = "; ".join(

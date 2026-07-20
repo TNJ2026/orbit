@@ -186,7 +186,7 @@ class BrowserE2ETestCase(unittest.TestCase):
 
 class LocaleTests(BrowserE2ETestCase):
     def test_the_browser_language_picks_the_locale(self) -> None:
-        for locale, expected in (("zh-CN", "首页"), ("en-US", "Home")):
+        for locale, expected in (("zh-CN", "工作台"), ("en-US", "Workspace")):
             with self.subTest(locale=locale):
                 page = self.open(locale)
                 # boot applies the negotiated locale only after the async
@@ -204,14 +204,15 @@ class LocaleTests(BrowserE2ETestCase):
 
     def test_switching_locale_retranslates_the_page(self) -> None:
         page = self.open("en-US")
-        page.select_option("#localeSelect", "zh-CN")
+        page.locator("#localeSelect").locator("..").get_by_role("combobox").click()
+        page.get_by_role("option", name="简体中文").click()
         page.wait_for_function("() => document.documentElement.lang === 'zh-CN'")
         # setLocale updates the static shell before awaiting the async view
         # render. Waiting only on <html lang> races that second phase.
         page.wait_for_function(
-            "() => document.querySelector('#viewTitle')?.textContent.includes('首页')"
+            "() => document.querySelector('#viewTitle')?.textContent.includes('工作台')"
         )
-        self.assertIn("首页", page.inner_text("#viewTitle"))
+        self.assertIn("工作台", page.inner_text("#viewTitle"))
         self.assertIn("待办", page.inner_text(".sidebar"))
 
     def test_no_key_leaks_into_the_page_in_either_locale(self) -> None:
@@ -295,6 +296,56 @@ class AccessibilityAndResponsiveTests(BrowserE2ETestCase):
 
 
 class DiscoveryViewsTests(BrowserE2ETestCase):
+    def test_custom_select_matches_button_surface_and_keeps_keyboard_semantics(self) -> None:
+        page = self.open("en-US")
+        trigger = page.locator(".workspace-history .custom-select-trigger")
+        trigger.wait_for()
+        self.assertEqual("combobox", trigger.get_attribute("role"))
+        self.assertEqual("false", trigger.get_attribute("aria-expanded"))
+
+        trigger.click()
+        self.assertEqual("true", trigger.get_attribute("aria-expanded"))
+        page.get_by_role("option", name="Running").click()
+
+        selected = page.locator(".workspace-history .custom-select-trigger")
+        self.assertIn("Running", selected.inner_text())
+        self.assertEqual("running", page.locator(
+            ".workspace-history select"
+        ).input_value())
+
+        selected.click()
+        page.keyboard.press("Escape")
+        self.assertEqual("false", selected.get_attribute("aria-expanded"))
+
+    def test_active_goal_is_the_home_workbench_and_exposes_authorised_action(self) -> None:
+        service = RunApplicationService(self.db, self.app_service())
+        run_id = service.start_run(
+            workflow_id="workflow:human", inputs={"value": 3},
+            goal="Approve the local release", actor="local",
+            idempotency_key="browser-active-workbench",
+        ).run_id
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            summary = service.reads.run_summary(EntityId.parse(run_id))
+            if summary["status"] == "waiting":
+                break
+            time.sleep(0.05)
+        else:
+            self.fail("human workflow never reached waiting")
+
+        try:
+            page = self.open("en-US")
+            page.wait_for_selector(".active-goal-hero")
+            self.assertIn("Approve the local release", page.inner_text(".active-goal-hero"))
+            self.assertIn("Current step and next action", page.inner_text(".current-step-panel"))
+            self.assertTrue(page.locator(".current-step-panel .actions button").count())
+        finally:
+            current = service.reads.run_summary(EntityId.parse(run_id))
+            service.cancel_run(
+                run_id, current["projection_version"], actor="local",
+                idempotency_key="browser-active-workbench-cleanup",
+            )
+
     def test_home_uses_dashboard_facts_and_global_search_uses_the_server(self) -> None:
         phrase = "Reconcile lunar invoices"
         run_id = self.start_goal("browser-discovery-search", phrase)
@@ -305,14 +356,14 @@ class DiscoveryViewsTests(BrowserE2ETestCase):
             arg=run_id,
         )
         page.reload()
-        page.wait_for_selector(".stat-grid")
-        self.assertIn(phrase, page.inner_text(".recent-list"))
+        page.wait_for_selector(".home-hero")
+        self.assertIn(phrase, page.inner_text(".goal-list"))
 
         page.fill("#globalSearch", "lunar invoices")
         page.press("#globalSearch", "Enter")
-        page.wait_for_function("() => location.hash === '#/runs'")
-        page.wait_for_selector("tbody tr")
-        self.assertIn(phrase, page.inner_text("tbody"))
+        page.wait_for_function("() => location.hash === '#/home'")
+        page.wait_for_selector(".goal-row")
+        self.assertIn(phrase, page.inner_text(".goal-list"))
 
     def test_goal_deep_link_shows_the_projection_and_opens_the_run(self) -> None:
         phrase = "Prepare quarterly launch brief"
@@ -643,17 +694,148 @@ class GenerateWorkflowTests(BrowserE2ETestCase):
         page.route("**/api/v1/workflows/generate", generate)
         page.route("**/api/v1/workflows/validate", validate)
         page.click("#generateWorkflow")
-        page.wait_for_selector("#generateDefaultAgent")
-        page.select_option("#generateDefaultAgent", "agent.codex")
+        default_agent = page.locator("#generateDefaultAgent").locator("..")
+        default_agent.get_by_role("combobox").wait_for()
+        default_agent.get_by_role("combobox").click()
+        page.get_by_role("option", name="agent.codex@2.0.0").click()
         page.fill("#generateInstruction", "Build with agents")
         page.click("#generateSubmit")
-        page.wait_for_selector(".draft-agent-select")
+        page.locator(".draft-agent-select").locator("..").get_by_role("combobox").wait_for()
         self.assertEqual("agent.codex", captured["generate"]["default_agent"])
-        page.select_option(".draft-agent-select", "agent.codex")
+        page.locator(".draft-agent-select").locator("..").get_by_role("combobox").click()
+        page.get_by_role("option", name="agent.codex@2.0.0").click()
         page.wait_for_selector("#generatePublish")
         edited = json.loads(captured["validate"]["source"])
         self.assertEqual("agent.codex", edited["nodes"][0]["handler"]["name"])
         self.assertEqual("2.0.0", edited["nodes"][0]["handler"]["version"])
+
+
+class WorkflowEditorTests(BrowserE2ETestCase):
+    """Edit v1 → publish v2 in the browser; a v1 run keeps its version."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        from orbit.workflow.application.workflows import (
+            WorkflowCatalogs, WorkflowDefinitionService,
+        )
+        from orbit.workflow.catalogs import (
+            InMemoryHandlerCatalog, InMemorySchemaCatalog,
+        )
+        from orbit.workflow.catalogs.extensions import InMemoryExtensionRegistry
+        from orbit.workflow.persistence.workflow_versions import (
+            SQLiteWorkflowVersionStore,
+        )
+        from tests.test_workflow_drafts import dsl as editable_dsl
+
+        catalogs = WorkflowCatalogs(
+            InMemoryHandlerCatalog([transform_registration().manifest]),
+            InMemorySchemaCatalog(SCHEMAS),
+            InMemoryExtensionRegistry(),
+        )
+        WorkflowDefinitionService(
+            catalogs, SQLiteWorkflowVersionStore(cls.db)
+        ).publish_workflow(
+            json.dumps(editable_dsl()), source_name="<fixture>",
+            source_format="json", expected_latest_version=0, actor="fixture",
+        )
+
+    def test_editing_publishes_v2_and_the_v1_run_is_untouched(self) -> None:
+        page = self.open("en-US")
+        page.click("#newRun")
+        page.wait_for_selector("dialog[open]")
+        self.complete_goal_wizard(
+            page, "workflow:draftable", goal="Run before editing",
+            inputs={"value": 3},
+        )
+        page.wait_for_function("() => location.hash.startsWith('#/runs/run')")
+        run_id = page.evaluate(
+            "() => decodeURIComponent(location.hash.split('/')[2])"
+        )
+        self.wait_for_status(page, run_id, "succeeded")
+
+        page.goto(f"{self.base}/ui/#/workflows")
+        card = page.locator(".workflow-card", has_text="Draftable")
+        card.wait_for()
+        card.locator(".workflow-card-main").click()
+        page.wait_for_selector("#editWorkflow")
+        page.click("#editWorkflow")
+        page.wait_for_selector("#draftSource")
+
+        edited = json.loads(page.input_value("#draftSource"))
+        edited["metadata"]["name"] = "Draftable, edited"
+        page.fill("#draftSource", json.dumps(edited, indent=2))
+        # Autosave fires at 800 ms; wait for the saved state.
+        page.wait_for_function(
+            "() => document.querySelector('#draftSaveState').textContent === 'Saved'",
+            timeout=15000,
+        )
+        page.click("#draftValidate")
+        page.wait_for_selector("#draftPublish")
+        page.click("#draftPublish")
+
+        page.wait_for_function("() => location.hash === '#/workflows'")
+        page.wait_for_selector(".workflow-card:has-text('Draftable, edited')")
+
+        # The pre-edit run still names v1 — published versions are immutable
+        # and runs pin the version they started with.
+        summary = page.evaluate(
+            "id => fetch(`/api/v1/runs/${encodeURIComponent(id)}`)"
+            ".then(r => r.json()).then(b => b.data)",
+            arg=run_id,
+        )
+        self.assertEqual(1, summary["workflow_version"])
+
+    def test_a_stale_draft_save_shows_the_conflict_recovery_path(self) -> None:
+        page = self.open("en-US", path="/ui/#/workflows")
+        card = page.locator(".workflow-card", has_text="Draftable")
+        card.wait_for()
+        card.locator(".workflow-card-main").click()
+        page.wait_for_selector("#editWorkflow")
+        page.click("#editWorkflow")
+        page.wait_for_selector("#draftSource")
+        draft_id = page.evaluate("() => location.hash.split('/edit/')[1]")
+
+        # A second tab (same actor) bumps the revision server-side.
+        from datetime import datetime, timezone
+
+        from orbit.workflow.application.workflow_draft_service import (
+            WorkflowDraftApplicationService,
+        )
+        from orbit.workflow.application.workflows import (
+            WorkflowCatalogs, WorkflowDefinitionService,
+        )
+        from orbit.workflow.catalogs import (
+            InMemoryHandlerCatalog, InMemorySchemaCatalog,
+        )
+        from orbit.workflow.catalogs.extensions import InMemoryExtensionRegistry
+        from orbit.workflow.domain.ids import EntityId
+
+        catalogs = WorkflowCatalogs(
+            InMemoryHandlerCatalog([transform_registration().manifest]),
+            InMemorySchemaCatalog(SCHEMAS),
+            InMemoryExtensionRegistry(),
+        )
+        service = WorkflowDraftApplicationService(
+            self.db, WorkflowDefinitionService(catalogs, None)
+        )
+        parsed = EntityId.parse(urllib.parse.unquote(draft_id))
+        current = service.get(
+            parsed, actor="local", now=datetime.now(timezone.utc)
+        )
+        service.save(
+            parsed, current.source_text + "\n",
+            expected_revision=current.revision, actor="local",
+            now=datetime.now(timezone.utc),
+        )
+
+        # This tab's next save carries a stale revision.
+        page.fill("#draftSource", "{\"edited\": \"here\"}")
+        page.wait_for_selector("#draftReload", timeout=15000)
+        page.click("#draftReload")
+        page.wait_for_function(
+            "() => document.querySelector('#draftSaveState').textContent === 'Saved'"
+        )
 
 
 class NewRunTests(BrowserE2ETestCase):
@@ -1002,9 +1184,10 @@ class PlanAndRecoveryTests(BrowserE2ETestCase):
 
     def test_settings_persist_refresh_interval_locally(self) -> None:
         page = self.open("en-US", path="/ui/#/settings")
-        select = page.get_by_label("Live refresh interval")
+        select = page.get_by_role("combobox", name="Live refresh interval")
         select.wait_for(timeout=15000)
-        select.select_option("30")
+        select.click()
+        page.get_by_role("option", name="30 seconds").click()
         self.assertEqual(
             "30", page.evaluate("localStorage.getItem('orbit.refreshSeconds')")
         )
@@ -1275,7 +1458,13 @@ class ReleaseHardeningTests(BrowserE2ETestCase):
         page.wait_for_selector("#content .data-state.error")
         self.assertIn("Cannot reach the runtime", page.inner_text("#content"))
         failing["value"] = False
-        page.get_by_role("button", name="Try again").click()
+        # Invoke the currently rendered retry control synchronously. The live
+        # refresh loop may legitimately replace the error state between
+        # Playwright's actionability checks, which made a semantic click flaky
+        # even though the button and its handler were both correct.
+        page.locator("#content .data-state.error button").evaluate(
+            "button => button.click()"
+        )
         page.wait_for_selector("#content .panel")
 
     def test_service_unavailable_is_locatable_and_retryable(self) -> None:

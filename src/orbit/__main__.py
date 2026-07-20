@@ -206,7 +206,8 @@ def _run_command(args) -> None:
 
     db_path = _runtime_db_path(args.db)
     service = RunApplicationService(
-        db_path, DurableRuntimeApplicationService(db_path)
+        db_path, DurableRuntimeApplicationService(db_path),
+        enforce_single_goal=True,
     )
 
     try:

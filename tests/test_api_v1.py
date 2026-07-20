@@ -27,7 +27,8 @@ from orbit.workflow.domain.human import HumanTaskKind
 from orbit.workflow.domain.ids import EntityId
 from orbit.workflow.persistence.database import connect_workflow_database
 from tests.test_web_composition import (
-    AsgiHarness, SCHEMAS, publish_linear_workflow, transform_registration,
+    AsgiHarness, SCHEMAS, publish_human_workflow, publish_linear_workflow,
+    transform_registration,
 )
 from tests.test_ui_contract_goldens import validator as ui_contract_validator
 
@@ -136,6 +137,7 @@ class ApiTestCase(unittest.TestCase):
             authenticator=lambda request: request.headers.get("x-orbit-actor"),
             authorizer=Authorizer(lambda actor: self.scopes.get(actor, [])),
             artifact_backend=self.artifact_backend,
+            single_goal_mode=False,
         )
         publish_linear_workflow(self.db)
 
@@ -186,6 +188,47 @@ class RunLifecycleTests(ApiTestCase):
             data = response.json()["data"]
             self.assertTrue(data["run_id"].startswith("run:"))
             self.assertEqual(1, data["workflow_version"])
+
+    def test_single_goal_mode_preserves_replay_and_rejects_a_second_goal(self) -> None:
+        publish_human_workflow(self.db)
+        app = create_app(
+            self.db,
+            handlers=[transform_registration()], schemas=SCHEMAS,
+            worker_count=1, poll_seconds=0.02,
+            authenticator=lambda request: request.headers.get("x-orbit-actor"),
+            authorizer=Authorizer(lambda actor: self.scopes.get(actor, [])),
+            artifact_backend=self.artifact_backend,
+            single_goal_mode=True,
+        )
+        with AsgiHarness(app) as client:
+            first = client.post(
+                "/api/v1/runs", actor="writer", key="single-first",
+                body={"workflow_id": "workflow:human", "goal": "First goal", "input": {"value": 0}},
+            )
+            self.assertEqual(200, first.status_code, first.text)
+            run_id = first.json()["data"]["run_id"]
+
+            replay = client.post(
+                "/api/v1/runs", actor="writer", key="single-first",
+                body={"workflow_id": "workflow:human", "goal": "First goal", "input": {"value": 0}},
+            )
+            self.assertEqual(200, replay.status_code, replay.text)
+            self.assertEqual(run_id, replay.json()["data"]["run_id"])
+
+            conflict = client.post(
+                "/api/v1/runs", actor="writer", key="single-second",
+                body={"workflow_id": "workflow:linear", "goal": "Second goal", "input": {"value": 0}},
+            )
+            self.assertEqual(409, conflict.status_code, conflict.text)
+            payload = conflict.json()["error"]
+            self.assertEqual("active_goal_exists", payload["code"])
+            self.assertEqual(run_id, payload["details"]["active_goal"]["run_id"])
+
+            dashboard = client.get("/api/v1/dashboard", actor="writer").json()["data"]
+            self.assertEqual(run_id, dashboard["active_goal"]["run_id"])
+            cancel = dashboard["active_goal"]["allowed_commands"][0]
+            self.assertEqual("run.cancel", cancel["command"])
+            self.assertEqual(run_id, cancel["target_aggregate_id"])
 
     def test_same_key_replays_rather_than_starting_twice(self) -> None:
         with AsgiHarness(self.app) as client:
@@ -930,6 +973,186 @@ class WorkflowAuthoringApiTests(ApiTestCase):
                 body={"source": drafted["source"], "expected_version": 0},
             )
             self.assertEqual(403, denied.status_code)
+
+
+class WorkflowDraftApiTests(ApiTestCase):
+    """Edit → save → validate → publish, all through advertised commands."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        # A workflow published from real DSL, source stored — the production
+        # path. The hand-built linear IR has no source and stays as the
+        # degrade case.
+        import json as json_module
+
+        from orbit.workflow.application.workflows import (
+            WorkflowCatalogs, WorkflowDefinitionService,
+        )
+        from orbit.workflow.catalogs import (
+            InMemoryHandlerCatalog, InMemorySchemaCatalog,
+        )
+        from orbit.workflow.catalogs.extensions import InMemoryExtensionRegistry
+        from orbit.workflow.persistence.workflow_versions import (
+            SQLiteWorkflowVersionStore,
+        )
+        from tests.test_workflow_drafts import dsl as editable_dsl
+
+        catalogs = WorkflowCatalogs(
+            InMemoryHandlerCatalog([transform_registration().manifest]),
+            InMemorySchemaCatalog(SCHEMAS),
+            InMemoryExtensionRegistry(),
+        )
+        WorkflowDefinitionService(
+            catalogs, SQLiteWorkflowVersionStore(self.db)
+        ).publish_workflow(
+            json_module.dumps(editable_dsl()), source_name="<fixture>",
+            source_format="json", expected_latest_version=0, actor="fixture",
+        )
+
+    def _edit_command(self, client):
+        detail = client.get(
+            "/api/v1/workflows/workflow:draftable", actor="writer"
+        ).json()["data"]
+        return next(
+            c for c in detail["allowed_commands"]
+            if c["command"] == "workflow.draft.create"
+        ), detail
+
+    def test_detail_advertises_editing_only_to_writers_with_source(self) -> None:
+        with AsgiHarness(self.app) as client:
+            command, detail = self._edit_command(client)
+            self.assertTrue(detail["source_available"])
+            self.assertEqual(detail["latest_version"], command["expected_version"])
+            reader = client.get(
+                "/api/v1/workflows/workflow:draftable", actor="reader"
+            ).json()["data"]
+            self.assertEqual([], [
+                c for c in reader["allowed_commands"]
+                if c["command"] == "workflow.draft.create"
+            ])
+            # The hand-built linear IR was published without source: viewable,
+            # runnable, and honestly not editable.
+            legacy = client.get(
+                "/api/v1/workflows/workflow:linear", actor="writer"
+            ).json()["data"]
+            self.assertFalse(legacy["source_available"])
+            self.assertEqual([], [
+                c for c in legacy["allowed_commands"]
+                if c["command"] == "workflow.draft.create"
+            ])
+
+    def test_full_edit_loop_publishes_the_next_version(self) -> None:
+        import json as json_module
+
+        with AsgiHarness(self.app) as client:
+            command, detail = self._edit_command(client)
+            draft = client.post(
+                command["href"], actor="writer", key="d1", body={},
+            ).json()["data"]
+            self.assertEqual("active", draft["status"])
+            self.assertEqual("dirty", draft["validation_status"])
+            commands = {c["command"] for c in draft["allowed_commands"]}
+            self.assertIn("workflow.draft.save", commands)
+            self.assertNotIn("workflow.draft.publish", commands)
+
+            source = json_module.loads(draft["source"])
+            source["metadata"]["name"] = "Linear, edited"
+            save = next(
+                c for c in draft["allowed_commands"]
+                if c["command"] == "workflow.draft.save"
+            )
+            saved = client.post(
+                save["href"], actor="writer", key="d2",
+                body={
+                    "source": json_module.dumps(source),
+                    "expected_version": save["expected_version"],
+                },
+            ).json()["data"]
+
+            validate = next(
+                c for c in saved["allowed_commands"]
+                if c["command"] == "workflow.draft.validate"
+            )
+            validated = client.post(
+                validate["href"], actor="writer", key="d3",
+                body={"expected_version": validate["expected_version"]},
+            ).json()["data"]
+            self.assertEqual("valid", validated["validation_status"])
+
+            publish = next(
+                c for c in validated["allowed_commands"]
+                if c["command"] == "workflow.draft.publish"
+            )
+            published = client.post(
+                publish["href"], actor="writer", key="d4",
+                body={"expected_version": publish["expected_version"]},
+            )
+            self.assertEqual(200, published.status_code, published.text)
+            data = published.json()["data"]
+            self.assertEqual("published", data["status"])
+            self.assertEqual(2, data["published"]["version"])
+
+            refreshed = client.get(
+                "/api/v1/workflows/workflow:draftable", actor="writer"
+            ).json()["data"]
+            self.assertEqual(2, refreshed["latest_version"])
+            self.assertEqual("Linear, edited", refreshed["name"])
+
+    def test_invalid_source_reports_diagnostics_and_blocks_publish(self) -> None:
+        with AsgiHarness(self.app) as client:
+            command, _ = self._edit_command(client)
+            draft = client.post(
+                command["href"], actor="writer", key="d5", body={},
+            ).json()["data"]
+            saved = client.post(
+                f"/api/v1/workflow-drafts/{draft['draft_id']}/save",
+                actor="writer", key="d6",
+                body={"source": "{\"nope\": true}", "expected_version": draft["revision"]},
+            ).json()["data"]
+            validated = client.post(
+                f"/api/v1/workflow-drafts/{draft['draft_id']}/validate",
+                actor="writer", key="d7",
+                body={"expected_version": saved["revision"]},
+            ).json()["data"]
+            self.assertEqual("invalid", validated["validation_status"])
+            self.assertTrue(validated["diagnostics"])
+            denied = client.post(
+                f"/api/v1/workflow-drafts/{draft['draft_id']}/publish",
+                actor="writer", key="d8",
+                body={"expected_version": validated["revision"]},
+            )
+            self.assertEqual(409, denied.status_code)
+            self.assertEqual(
+                "draft_not_validated", denied.json()["error"]["code"]
+            )
+
+    def test_stale_revision_is_a_typed_conflict(self) -> None:
+        with AsgiHarness(self.app) as client:
+            command, _ = self._edit_command(client)
+            draft = client.post(
+                command["href"], actor="writer", key="d9", body={},
+            ).json()["data"]
+            stale = client.post(
+                f"/api/v1/workflow-drafts/{draft['draft_id']}/save",
+                actor="writer", key="d10",
+                body={"source": "{}", "expected_version": 99},
+            )
+            self.assertEqual(409, stale.status_code)
+            self.assertEqual(
+                "draft_version_conflict", stale.json()["error"]["code"]
+            )
+
+    def test_drafts_are_private_to_their_actor(self) -> None:
+        with AsgiHarness(self.app) as client:
+            command, _ = self._edit_command(client)
+            draft = client.post(
+                command["href"], actor="writer", key="d11", body={},
+            ).json()["data"]
+            other = client.get(
+                f"/api/v1/workflow-drafts/{draft['draft_id']}",
+                actor="second-writer",
+            )
+            self.assertEqual(404, other.status_code)
 
 
 class CapabilityTests(ApiTestCase):

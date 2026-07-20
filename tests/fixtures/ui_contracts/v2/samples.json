@@ -9,7 +9,11 @@
       "label": "Human task: approval",
       "detail": "approval",
       "deadline_at": "2026-07-20T12:00:00Z",
-      "quorum": {"kind": "any", "count": 1, "submitted": 0},
+      "quorum": {
+        "kind": "any",
+        "count": 1,
+        "submitted": 0
+      },
       "requires_actor_action": true,
       "expected_version": 1,
       "allowed_commands": [
@@ -102,9 +106,49 @@
     }
   ],
   "inbox_item_invalid": [
-    {"_reason": "unknown kind", "item_id": "x:1", "kind": "planner", "run_id": "run:r", "status": "waiting", "label": "x", "requires_actor_action": false, "expected_version": 1, "allowed_commands": []},
-    {"_reason": "missing requires_actor_action", "item_id": "human:t", "kind": "human", "run_id": "run:r", "status": "waiting", "label": "x", "expected_version": 1, "allowed_commands": []},
-    {"_reason": "command with mutation URL outside /api/v1", "item_id": "human:t", "kind": "human", "run_id": "run:r", "status": "waiting", "label": "x", "requires_actor_action": true, "expected_version": 1, "allowed_commands": [{"command": "human.submit.approve", "label": "Approve", "method": "POST", "href": "/legacy/submit", "target_aggregate_id": "human_task:t", "expected_version": 1, "payload_schema": "human-submit/1.0", "confirmation": "explicit"}]}
+    {
+      "_reason": "unknown kind",
+      "item_id": "x:1",
+      "kind": "planner",
+      "run_id": "run:r",
+      "status": "waiting",
+      "label": "x",
+      "requires_actor_action": false,
+      "expected_version": 1,
+      "allowed_commands": []
+    },
+    {
+      "_reason": "missing requires_actor_action",
+      "item_id": "human:t",
+      "kind": "human",
+      "run_id": "run:r",
+      "status": "waiting",
+      "label": "x",
+      "expected_version": 1,
+      "allowed_commands": []
+    },
+    {
+      "_reason": "command with mutation URL outside /api/v1",
+      "item_id": "human:t",
+      "kind": "human",
+      "run_id": "run:r",
+      "status": "waiting",
+      "label": "x",
+      "requires_actor_action": true,
+      "expected_version": 1,
+      "allowed_commands": [
+        {
+          "command": "human.submit.approve",
+          "label": "Approve",
+          "method": "POST",
+          "href": "/legacy/submit",
+          "target_aggregate_id": "human_task:t",
+          "expected_version": 1,
+          "payload_schema": "human-submit/1.0",
+          "confirmation": "explicit"
+        }
+      ]
+    }
   ],
   "run_summary_valid": [
     {
@@ -119,7 +163,10 @@
       "updated_at": "2026-07-19T09:30:00Z",
       "projection_version": 12,
       "responsibility_count": 1,
-      "primary_responsibility": {"kind": "human", "label": "Human task: approval"},
+      "primary_responsibility": {
+        "kind": "human",
+        "label": "Human task: approval"
+      },
       "requires_actor_action": true,
       "budget_summary": {
         "total_microunits": 1000000,
@@ -148,17 +195,219 @@
     }
   ],
   "run_summary_invalid": [
-    {"_reason": "unknown wait_reason", "run_id": "run:x", "display_name": "x", "workflow_id": "workflow:w", "workflow_version": 1, "status": "waiting", "wait_reason": "coffee_break", "goal": null, "created_at": "2026-07-19T08:00:00Z", "updated_at": "2026-07-19T08:00:00Z", "projection_version": 1, "responsibility_count": 0, "primary_responsibility": null, "requires_actor_action": false, "budget_summary": null},
-    {"_reason": "missing wait_reason key entirely", "run_id": "run:x", "display_name": "x", "workflow_id": "workflow:w", "workflow_version": 1, "status": "running", "goal": null, "created_at": "2026-07-19T08:00:00Z", "updated_at": "2026-07-19T08:00:00Z", "projection_version": 1, "responsibility_count": 0, "primary_responsibility": null, "requires_actor_action": false, "budget_summary": null}
+    {
+      "_reason": "unknown wait_reason",
+      "run_id": "run:x",
+      "display_name": "x",
+      "workflow_id": "workflow:w",
+      "workflow_version": 1,
+      "status": "waiting",
+      "wait_reason": "coffee_break",
+      "goal": null,
+      "created_at": "2026-07-19T08:00:00Z",
+      "updated_at": "2026-07-19T08:00:00Z",
+      "projection_version": 1,
+      "responsibility_count": 0,
+      "primary_responsibility": null,
+      "requires_actor_action": false,
+      "budget_summary": null
+    },
+    {
+      "_reason": "missing wait_reason key entirely",
+      "run_id": "run:x",
+      "display_name": "x",
+      "workflow_id": "workflow:w",
+      "workflow_version": 1,
+      "status": "running",
+      "goal": null,
+      "created_at": "2026-07-19T08:00:00Z",
+      "updated_at": "2026-07-19T08:00:00Z",
+      "projection_version": 1,
+      "responsibility_count": 0,
+      "primary_responsibility": null,
+      "requires_actor_action": false,
+      "budget_summary": null
+    }
   ],
   "run_query_valid": [
-    {"q": "newsletter", "status": "waiting", "responsibility": "human", "limit": "25"},
-    {"cursor": "b64opaque", "limit": "50"},
+    {
+      "q": "newsletter",
+      "status": "waiting",
+      "responsibility": "human",
+      "limit": "25"
+    },
+    {
+      "cursor": "b64opaque",
+      "limit": "50"
+    },
     {}
   ],
   "run_query_invalid": [
-    {"_reason": "unknown filter key", "state": "running"},
-    {"_reason": "bad status", "status": "paused"},
-    {"_reason": "non-numeric limit", "limit": "lots"}
+    {
+      "_reason": "unknown filter key",
+      "state": "running"
+    },
+    {
+      "_reason": "bad status",
+      "status": "paused"
+    },
+    {
+      "_reason": "non-numeric limit",
+      "limit": "lots"
+    }
+  ],
+  "workflow_draft_valid": [
+    {
+      "draft_id": "workflow_draft:abc123",
+      "workflow_id": "workflow:demo",
+      "base_version": 4,
+      "actor": "local",
+      "source_format": "json",
+      "source": "{\"dsl_version\": \"1.2\"}",
+      "source_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "validation_status": "valid",
+      "validated_definition_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "diagnostics": [],
+      "revision": 7,
+      "status": "active",
+      "created_at": "2026-07-20T08:00:00Z",
+      "updated_at": "2026-07-20T08:12:00Z",
+      "published_version": null,
+      "allowed_commands": [
+        {
+          "command": "workflow.draft.save",
+          "label": "Save",
+          "method": "POST",
+          "href": "/api/v1/workflow-drafts/workflow_draft:abc123/save",
+          "target_aggregate_id": "workflow_draft:abc123",
+          "expected_version": 7,
+          "payload_schema": "workflow-draft-save/1.0",
+          "confirmation": "explicit"
+        },
+        {
+          "command": "workflow.draft.validate",
+          "label": "Validate",
+          "method": "POST",
+          "href": "/api/v1/workflow-drafts/workflow_draft:abc123/validate",
+          "target_aggregate_id": "workflow_draft:abc123",
+          "expected_version": 7,
+          "payload_schema": "workflow-draft-validate/1.0",
+          "confirmation": "explicit"
+        },
+        {
+          "command": "workflow.draft.publish",
+          "label": "Publish",
+          "method": "POST",
+          "href": "/api/v1/workflow-drafts/workflow_draft:abc123/publish",
+          "target_aggregate_id": "workflow_draft:abc123",
+          "expected_version": 7,
+          "payload_schema": "workflow-draft-publish/1.0",
+          "confirmation": "explicit"
+        },
+        {
+          "command": "workflow.draft.discard",
+          "label": "Discard",
+          "method": "POST",
+          "href": "/api/v1/workflow-drafts/workflow_draft:abc123/discard",
+          "target_aggregate_id": "workflow_draft:abc123",
+          "expected_version": 7,
+          "payload_schema": "workflow-draft-discard/1.0",
+          "confirmation": "explicit"
+        }
+      ]
+    },
+    {
+      "draft_id": "workflow_draft:def456",
+      "workflow_id": "workflow:demo",
+      "base_version": 4,
+      "actor": "local",
+      "source_format": "json",
+      "source": "{not yet valid",
+      "source_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "validation_status": "invalid",
+      "validated_definition_hash": null,
+      "diagnostics": [
+        {
+          "code": "DSL_PARSE_ERROR",
+          "message": "invalid JSON",
+          "severity": "error"
+        }
+      ],
+      "revision": 2,
+      "status": "active",
+      "created_at": "2026-07-20T08:00:00Z",
+      "updated_at": "2026-07-20T08:01:00Z",
+      "published_version": null,
+      "allowed_commands": []
+    }
+  ],
+  "workflow_draft_invalid": [
+    {
+      "_reason": "validating state was removed from the model",
+      "draft_id": "workflow_draft:x",
+      "workflow_id": "workflow:w",
+      "base_version": 1,
+      "actor": "local",
+      "source_format": "json",
+      "source": "{}",
+      "source_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "validation_status": "validating",
+      "validated_definition_hash": null,
+      "diagnostics": [],
+      "revision": 1,
+      "status": "active",
+      "created_at": "2026-07-20T08:00:00Z",
+      "updated_at": "2026-07-20T08:00:00Z",
+      "published_version": null,
+      "allowed_commands": []
+    },
+    {
+      "_reason": "PATCH is outside the frozen command contract",
+      "draft_id": "workflow_draft:x",
+      "workflow_id": "workflow:w",
+      "base_version": 1,
+      "actor": "local",
+      "source_format": "json",
+      "source": "{}",
+      "source_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "validation_status": "dirty",
+      "validated_definition_hash": null,
+      "diagnostics": [],
+      "revision": 1,
+      "status": "active",
+      "created_at": "2026-07-20T08:00:00Z",
+      "updated_at": "2026-07-20T08:00:00Z",
+      "published_version": null,
+      "allowed_commands": [
+        {
+          "command": "workflow.draft.save",
+          "label": "Save",
+          "method": "PATCH",
+          "href": "/api/v1/workflow-drafts/workflow_draft:x",
+          "target_aggregate_id": "workflow_draft:x",
+          "expected_version": 1,
+          "payload_schema": "workflow-draft-save/1.0",
+          "confirmation": "explicit"
+        }
+      ]
+    },
+    {
+      "_reason": "missing revision",
+      "draft_id": "workflow_draft:x",
+      "workflow_id": "workflow:w",
+      "base_version": 1,
+      "actor": "local",
+      "source_format": "json",
+      "source": "{}",
+      "source_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "validation_status": "dirty",
+      "validated_definition_hash": null,
+      "diagnostics": [],
+      "status": "active",
+      "created_at": "2026-07-20T08:00:00Z",
+      "updated_at": "2026-07-20T08:00:00Z",
+      "published_version": null,
+      "allowed_commands": []
+    }
   ]
 }

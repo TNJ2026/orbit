@@ -23,6 +23,7 @@ SCHEMA_FILES = (
     "inbox-item.schema.json",
     "run-summary.schema.json",
     "run-query.schema.json",
+    "workflow-draft.schema.json",
 )
 
 
@@ -52,6 +53,7 @@ class FrozenSchemaTests(unittest.TestCase):
             ("inbox-item.schema.json", samples["inbox_item_valid"]),
             ("run-summary.schema.json", samples["run_summary_valid"]),
             ("run-query.schema.json", samples["run_query_valid"]),
+            ("workflow-draft.schema.json", samples["workflow_draft_valid"]),
         )
         for schema_name, values in cases:
             checker = validator(schema_name)
@@ -66,6 +68,7 @@ class FrozenSchemaTests(unittest.TestCase):
             ("inbox-item.schema.json", samples["inbox_item_invalid"]),
             ("run-summary.schema.json", samples["run_summary_invalid"]),
             ("run-query.schema.json", samples["run_query_invalid"]),
+            ("workflow-draft.schema.json", samples["workflow_draft_invalid"]),
         )
         for schema_name, values in cases:
             checker = validator(schema_name)

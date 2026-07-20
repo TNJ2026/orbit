@@ -329,13 +329,23 @@ class ReadModelService:
                 " SUM(CASE WHEN status='succeeded' THEN 1 ELSE 0 END) AS succeeded,"
                 f" {action_expression} AS attention FROM workflow_runs"
             ).fetchone()
+            active_row = connection.execute(
+                "SELECT run_id FROM workflow_runs WHERE run_id=correlation_id"
+                " AND status IN ('created','running','waiting','waiting_for_budget',"
+                " 'budget_exhausted') ORDER BY updated_at DESC,run_id LIMIT 1"
+            ).fetchone()
         recent, _ = self.list_runs(limit=5, can_act=can_act)
+        active_goal = (
+            None if active_row is None
+            else self.run_summary(EntityId.parse(active_row["run_id"]), can_act=can_act)
+        )
         return {
             "counts": {
                 key: int(row[key] or 0)
                 for key in ("total", "active", "waiting", "failed", "succeeded")
             },
             "attention_count": int(row["attention"] or 0),
+            "active_goal": active_goal,
             "recent_runs": recent,
         }
 

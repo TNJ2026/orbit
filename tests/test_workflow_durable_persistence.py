@@ -147,7 +147,7 @@ class DurablePersistenceContractTests(unittest.TestCase):
     def test_integrity_checker_knows_migration_three_tables(self) -> None:
         report = check_database(self.path)
         self.assertTrue(report.ok, report.issues)
-        self.assertEqual(tuple(range(1, 13)), report.migration_versions)
+        self.assertEqual(tuple(range(1, 14)), report.migration_versions)
         counts = dict(report.table_counts)
         self.assertIn("jobs", counts)
         self.assertIn("job_leases", counts)

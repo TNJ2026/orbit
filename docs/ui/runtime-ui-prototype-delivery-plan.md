@@ -3,9 +3,12 @@
 > 文档状态：Executed
 > 基线日期：2026-07-19
 > 执行状态：P0–P9 已完成；动态能力 Gate 已由生产可达链路和浏览器/API 投影关闭
+
+> 本地单 Goal 收口（2026-07-20）：产品默认采用“单 Goal 工作台 + 历史 + 高级模式”。HTTP、MCP 与 CLI 的用户启动入口通过跨进程文件锁串行化，并以根 Run（`run_id = correlation_id`）为前台 Goal；活动 Goal 未终态时，新的不同 Goal 返回 `409 active_goal_exists` 及当前 Goal 投影。同一幂等键仍可安全重放，Subflow/Foreach 子 Run 不受限制。Dashboard 暴露 `active_goal` 和服务端授权的取消命令；首页直接呈现当前目标、等待原因、人工操作与 Runtime 事实，空闲时才展示创建入口。导航收敛为工作台、工作流、历史、设置；Runs、Inbox、Artifacts、Agents、Ops 保留在高级区。
 > 原型基线：[`prototypes/runtime-ui.html`](../../prototypes/runtime-ui.html)
 > 生产入口：`orbit serve` → `/ui`
 > 相关契约：[`agent-workflow-ui-implementation.md`](agent-workflow-ui-implementation.md)、[`agent-workflow-ui-api-contract.md`](agent-workflow-ui-api-contract.md)
+> Workflow 编辑规划：[`workflow-editor-implementation-plan.md`](workflow-editor-implementation-plan.md)
 > 适用范围：将已恢复的 Runtime UI HTML 原型逐步实现为可交付、可审计的生产 UI；本文件不改变 Runtime 领域语义。
 
 ## 1. 目标

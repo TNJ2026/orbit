@@ -36,6 +36,7 @@
 
 .nav { display: flex; flex-direction: column; gap: 16px; }
 .nav-group { display: flex; flex-direction: column; gap: 2px; }
+.nav-settings-group { margin-top: auto; }
 .nav-group-title {
   color: var(--muted-2); font-size: 10px; font-weight: 700;
   text-transform: uppercase; letter-spacing: .12em; padding: 0 10px 6px;

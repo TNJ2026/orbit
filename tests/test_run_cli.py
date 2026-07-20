@@ -55,10 +55,12 @@ class RunCliTests(unittest.TestCase):
         self.assertEqual(first["run_id"], second["run_id"])
         self.assertTrue(second["replayed"])
 
-    def test_without_a_key_each_invocation_is_a_new_run(self) -> None:
+    def test_without_a_key_a_second_foreground_goal_is_rejected(self) -> None:
         first = json.loads(self.start("--json").stdout)
-        second = json.loads(self.start("--json").stdout)
-        self.assertNotEqual(first["run_id"], second["run_id"])
+        second = self.start("--json")
+        self.assertNotEqual(0, second.returncode)
+        self.assertIn(first["run_id"], second.stderr)
+        self.assertIn("active goal already exists", second.stderr)
 
     def test_unknown_workflow_fails_with_a_message_not_a_traceback(self) -> None:
         result = run_cli("run", "start", "workflow:nope", "--db", str(self.db))

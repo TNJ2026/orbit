@@ -196,6 +196,9 @@ class RunLifecycleE2E(unittest.TestCase):
         first = self.start_run("e2e-idem")
         second = self.start_run("e2e-idem")
         self.assertEqual(first, second)
+        self.wait_for(
+            f"/api/v1/runs/{first}", lambda data: data["status"] == "succeeded"
+        )
 
     def test_a_stale_expected_version_is_refused_over_the_wire(self) -> None:
         run_id = self.start_run("e2e-stale")
@@ -204,6 +207,9 @@ class RunLifecycleE2E(unittest.TestCase):
             {"expected_version": 999}, key="e2e-stale-cancel",
         )
         self.assertEqual(409, status, body)
+        self.wait_for(
+            f"/api/v1/runs/{run_id}", lambda data: data["status"] == "succeeded"
+        )
 
     def test_plan_definition_and_overlay_agree_on_node_ids(self) -> None:
         run_id = self.start_run("e2e-plan")

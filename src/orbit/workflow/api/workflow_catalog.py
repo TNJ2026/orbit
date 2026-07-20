@@ -152,4 +152,11 @@ class WorkflowCatalogReadModelService:
                 ).fetchone()
         if row is None:
             raise ValueError(f"workflow version not found: {workflow_id}")
-        return self._entry(row, include_definition=True)
+        item = self._entry(row, include_definition=True)
+        # The author-facing source, distinct from canonical IR (editor plan
+        # §7). Early versions published without source degrade to
+        # source_available=false — viewable and runnable, never "editable".
+        item["source"] = row["source_text"]
+        item["source_format"] = row["source_format"]
+        item["source_available"] = row["source_text"] is not None
+        return item
