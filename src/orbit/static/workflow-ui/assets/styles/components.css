@@ -5,10 +5,24 @@
   background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
   padding: 7px 11px; cursor: pointer; font-size: 12px; font-weight: 600;
 }
-.button:hover:not(:disabled) { background: var(--panel-3); }
+/* Hover has to stay legible on both themes: lift the surface AND the border,
+   because --panel-2 → --panel-3 alone is nearly invisible in the dark. Each
+   variant keeps its own hover so it never inherits the neutral surface — a
+   primary button under the neutral rule kept its near-black label on a dark
+   background and the label disappeared. */
+.button:hover:not(:disabled) {
+  background: var(--hover); border-color: var(--muted-2); color: var(--text);
+}
 .button:disabled { opacity: .5; cursor: not-allowed; }
 .button.primary { background: var(--blue); border-color: var(--blue); color: #06121f; }
+.button.primary:hover:not(:disabled) {
+  background: var(--blue); border-color: var(--text); color: #06121f;
+  box-shadow: 0 0 0 2px var(--blue-soft);
+}
 .button.danger { color: var(--red); }
+.button.danger:hover:not(:disabled) {
+  background: var(--red-soft); border-color: var(--red); color: var(--red);
+}
 
 /* Custom select: the closed control uses the same surface as .button, while
    the option popup stays inside our theme instead of falling back to the
@@ -27,11 +41,17 @@
   justify-content: space-between; gap: 10px; color: var(--text); text-align: left;
 }
 .custom-select-value { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Drawn rather than typed: the ⌄ glyph sits low in its em box, so no amount
+   of flex centring lines it up with the label. Two borders of a rotated square
+   give a chevron whose ink we can place exactly — the ink of a square rotated
+   45° hangs half a diagonal below the box centre, hence the nudge. */
 .custom-select-chevron {
-  flex: 0 0 auto; color: var(--muted); font-size: 14px; line-height: 1;
+  flex: 0 0 auto; width: 6px; height: 6px;
+  border-right: 1.5px solid var(--muted); border-bottom: 1.5px solid var(--muted);
+  transform: translateY(-2px) rotate(45deg);
   transition: transform .14s ease;
 }
-.custom-select.open .custom-select-chevron { transform: rotate(180deg); }
+.custom-select.open .custom-select-chevron { transform: translateY(2px) rotate(-135deg); }
 .custom-select-options {
   position: absolute; z-index: 80; top: calc(100% + 6px); right: 0;
   min-width: max(100%, 170px); max-width: min(320px, 88vw); max-height: 260px;

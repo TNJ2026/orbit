@@ -11,7 +11,7 @@
 .app { display: grid; grid-template-columns: 220px 1fr; min-height: 100vh; }
 .sidebar {
   position: sticky; top: 0; height: 100vh; overflow-y: auto;
-  border-right: 1px solid var(--line-soft); background: var(--panel);
+  border-right: 1px solid var(--line-soft); background: var(--chrome);
   padding: 20px 14px 16px; display: flex; flex-direction: column;
 }
 .brand { display: flex; align-items: center; gap: 10px; padding: 3px 6px 18px; }
@@ -47,7 +47,7 @@
   text-align: left; cursor: pointer; width: 100%;
   color: var(--muted); font-size: 12px;
 }
-.nav-button:hover { background: var(--panel-2); color: var(--text); }
+.nav-button:hover { background: var(--hover); color: var(--text); }
 .nav-button[aria-current="page"] { background: var(--blue-soft); color: var(--blue); font-weight: 600; }
 .nav-icon { width: 18px; height: 18px; display: grid; place-items: center; font-family: var(--mono); font-size: 13px; flex: 0 0 auto; }
 .nav-count {
@@ -80,7 +80,7 @@
 .main { display: flex; flex-direction: column; min-width: 0; }
 .topbar {
   display: flex; align-items: center; gap: 12px; padding: 10px 20px;
-  border-bottom: 1px solid var(--line-soft); background: var(--panel);
+  border-bottom: 1px solid var(--line-soft); background: var(--chrome);
   position: sticky; top: 0; z-index: 9;
 }
 .breadcrumb {
@@ -92,16 +92,6 @@
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .crumb-sep { color: var(--muted-2); }
-.actor-chip {
-  display: inline-flex; align-items: center; gap: 6px;
-  color: var(--muted); font-size: 11px;
-  border: 1px solid var(--line); border-radius: 999px; padding: 4px 10px;
-}
-.actor-chip:empty { display: none; }
-.actor-chip::before {
-  content: ""; width: 16px; height: 16px; border-radius: 50%;
-  background: var(--purple); flex: 0 0 auto;
-}
 .content { padding: 20px; display: flex; flex-direction: column; gap: 16px; }
 .nav-toggle, .nav-backdrop { display: none; }
 
@@ -134,6 +124,5 @@
   }
   body[data-nav-open="true"] .nav-backdrop { display: block; }
   .topbar { flex-wrap: wrap; padding: 10px 12px; position: static; }
-  .actor-chip { max-width: 30vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .content { padding: 14px 12px; }
 }

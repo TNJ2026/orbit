@@ -13,8 +13,6 @@
   "action.search": "搜索",
   "action.submit": "提交",
   "action.viewAll": "查看全部",
-  "actor.label": "当前登录身份",
-  "actor.signedIn": "当前身份：{actor}",
   "agents.empty": "没有已注册的 Agent Handler。",
   "agents.handlers": "已注册 Agent",
   "agents.noAttempts": "尚无持久化执行记录",

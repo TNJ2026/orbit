@@ -13,8 +13,6 @@
   "action.search": "Search",
   "action.submit": "Submit",
   "action.viewAll": "View all",
-  "actor.label": "Signed-in actor",
-  "actor.signedIn": "Signed in as {actor}",
   "agents.empty": "No Agent handlers are registered.",
   "agents.handlers": "Registered agents",
   "agents.noAttempts": "No durable attempt recorded",

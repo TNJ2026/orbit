@@ -234,11 +234,6 @@ class LocaleTests(BrowserE2ETestCase):
 
 
 class AccessibilityAndResponsiveTests(BrowserE2ETestCase):
-    def test_shell_shows_the_authenticated_actor(self) -> None:
-        page = self.open("en-US")
-        page.wait_for_function("() => document.querySelector('#actorChip').textContent === 'local'")
-        self.assertIn("local", page.get_attribute("#actorChip", "title"))
-
     def test_keyboard_reaches_the_skip_link_and_main_navigation(self) -> None:
         page = self.open("en-US")
         page.keyboard.press("Tab")

@@ -83,7 +83,7 @@ function enhanceSelect(select) {
     "aria-controls": listId, "aria-label": label,
   }, [
     el("span", { class: "custom-select-value" }),
-    el("span", { class: "custom-select-chevron", "aria-hidden": "true", text: "⌄" }),
+    el("span", { class: "custom-select-chevron", "aria-hidden": "true" }),
   ]);
   const list = el("span", {
     class: "custom-select-options", id: listId, role: "listbox",
@@ -2882,10 +2882,6 @@ function applyStaticText() {
     node.setAttribute("placeholder", i18n.t(node.dataset.i18nPlaceholder));
   }
   document.querySelectorAll("select[data-custom-select='true']").forEach(syncCustomSelect);
-  const actor = document.getElementById("actorChip");
-  if (actor.textContent) {
-    actor.title = i18n.t("actor.signedIn", { actor: actor.textContent });
-  }
 }
 
 async function setLocale(locale) {
@@ -2923,7 +2919,6 @@ async function boot() {
 
   try {
     shellFacts = (await api.capabilities()).data;
-    document.getElementById("actorChip").textContent = shellFacts.actor;
     mayStartRun = Boolean(shellFacts.permissions && shellFacts.permissions.start_run);
     document.getElementById("newRun").hidden = !mayStartRun;
   } catch (error) {
