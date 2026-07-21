@@ -38,6 +38,7 @@ from orbit.workflow.application.budget_service import BudgetService
 from orbit.workflow.application.human_service import HumanTaskService
 from orbit.workflow.application.run_service import RunApplicationService
 from orbit.workflow.artifacts.local_cas import LocalCASBackend
+from orbit.workflow.api.routes import RateLimiter
 from orbit.workflow.domain.human import HumanTaskKind
 from orbit.workflow.domain.ids import EntityId
 from tests.test_web_composition import (
@@ -84,6 +85,7 @@ class BrowserE2ETestCase(unittest.TestCase):
                 lambda actor: tuple(cls.scopes) if actor == LOCAL_ACTOR else ()
             ),
             artifact_backend=cls.artifact_backend,
+            rate_limiter=RateLimiter(requests=1_000),
             serve_ui=True,
             **cls.extra_app_kwargs(),
         )
@@ -760,6 +762,8 @@ class WorkflowEditorTests(BrowserE2ETestCase):
         card.locator(".workflow-card-main").click()
         page.wait_for_selector("#editWorkflow")
         page.click("#editWorkflow")
+        page.wait_for_selector("[data-editor-tab='source']")
+        page.click("[data-editor-tab='source']")
         page.wait_for_selector("#draftSource")
 
         edited = json.loads(page.input_value("#draftSource"))
@@ -786,6 +790,35 @@ class WorkflowEditorTests(BrowserE2ETestCase):
         )
         self.assertEqual(1, summary["workflow_version"])
 
+    def test_structured_metadata_and_node_forms_save_and_validate(self) -> None:
+        page = self.open("en-US", path="/ui/#/workflows")
+        card = page.locator(".workflow-card", has_text="Draftable")
+        card.wait_for()
+        card.locator(".workflow-card-main").click()
+        page.click("#editWorkflow")
+        page.wait_for_selector("[data-editor-tab='metadata']")
+
+        page.click("[data-editor-tab='metadata']")
+        page.fill("#draftMetadataName", "Draftable, structured")
+        page.fill("#draftMetadataDescription", "Edited without touching JSON")
+        page.fill("#draftMetadataLabels", '{"owner":"local"}')
+        page.click("#draftApplyMetadata")
+        page.wait_for_selector("#draftPublish", timeout=15000)
+        source = json.loads(page.input_value("#draftSource"))
+        self.assertEqual("Draftable, structured", source["metadata"]["name"])
+        self.assertEqual({"owner": "local"}, source["metadata"]["labels"])
+
+        page.click("[data-editor-tab='nodes']")
+        page.locator("#draftNodeHandler").locator("..").get_by_role("combobox").wait_for()
+        self.assertEqual(
+            "transform\u00001.0.0", page.input_value("#draftNodeHandler")
+        )
+        page.fill("#draftNodeConfig", '{"mode":"structured"}')
+        page.click("#draftApplyNode")
+        page.wait_for_selector("#draftPublish", timeout=15000)
+        source = json.loads(page.input_value("#draftSource"))
+        self.assertEqual({"mode": "structured"}, source["nodes"][0]["config"])
+
     def test_a_stale_draft_save_shows_the_conflict_recovery_path(self) -> None:
         page = self.open("en-US", path="/ui/#/workflows")
         card = page.locator(".workflow-card", has_text="Draftable")
@@ -793,6 +826,8 @@ class WorkflowEditorTests(BrowserE2ETestCase):
         card.locator(".workflow-card-main").click()
         page.wait_for_selector("#editWorkflow")
         page.click("#editWorkflow")
+        page.wait_for_selector("[data-editor-tab='source']")
+        page.click("[data-editor-tab='source']")
         page.wait_for_selector("#draftSource")
         draft_id = page.evaluate("() => location.hash.split('/edit/')[1]")
 
@@ -832,10 +867,353 @@ class WorkflowEditorTests(BrowserE2ETestCase):
         # This tab's next save carries a stale revision.
         page.fill("#draftSource", "{\"edited\": \"here\"}")
         page.wait_for_selector("#draftReload", timeout=15000)
+        page.wait_for_selector(".editor-conflict-compare", timeout=15000)
         page.click("#draftReload")
         page.wait_for_function(
             "() => document.querySelector('#draftSaveState').textContent === 'Saved'"
         )
+
+
+class WorkflowEditorP4Tests(BrowserE2ETestCase):
+    """Edge/Policy validation and recovery use an isolated workflow/database."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        from orbit.workflow.application.workflows import (
+            WorkflowCatalogs, WorkflowDefinitionService,
+        )
+        from orbit.workflow.catalogs import (
+            InMemoryHandlerCatalog, InMemorySchemaCatalog,
+        )
+        from orbit.workflow.catalogs.extensions import InMemoryExtensionRegistry
+        from orbit.workflow.persistence.workflow_versions import SQLiteWorkflowVersionStore
+        from tests.test_workflow_drafts import dsl as editable_dsl
+
+        catalogs = WorkflowCatalogs(
+            InMemoryHandlerCatalog([transform_registration().manifest]),
+            InMemorySchemaCatalog(SCHEMAS), InMemoryExtensionRegistry(),
+        )
+        WorkflowDefinitionService(
+            catalogs, SQLiteWorkflowVersionStore(cls.db)
+        ).publish_workflow(
+            json.dumps(editable_dsl("p4-editor", "P4 Editor")),
+            source_name="<fixture>", source_format="json",
+            expected_latest_version=0, actor="fixture",
+        )
+
+    def test_edge_policy_failures_are_located_and_recoverable(self) -> None:
+        page = self.open("en-US", path="/ui/#/workflows")
+        card = page.locator(".workflow-card", has_text="P4 Editor")
+        card.wait_for()
+        card.locator(".workflow-card-main").click()
+        page.locator(
+            ".workflow-detail .eyebrow", has_text="workflow:p4-editor"
+        ).wait_for()
+        page.click("#editWorkflow")
+        page.wait_for_selector("[data-editor-tab='policies']")
+
+        page.click("[data-editor-tab='policies']")
+        page.click("#draftAddPolicy")
+        page.fill("#draftPolicyId", "join_invalid")
+        policy_kind = page.locator("#draftPolicyKind").locator("..")
+        policy_kind.get_by_role("combobox").click()
+        policy_kind.get_by_role("option", name="join", exact=True).click()
+        page.fill("#draftPolicyConfig", '{"mode":"invented"}')
+        page.click("#draftApplyPolicy")
+        policy_error = page.locator(".diagnostic-item", has_text="DSL_POLICY_INVALID")
+        policy_error.wait_for(timeout=15000)
+        policy_error.click()
+        self.assertFalse(page.locator("[data-editor-pane='policies']").is_hidden())
+        page.fill("#draftPolicyConfig", '{"mode":"all"}')
+        page.click("#draftApplyPolicy")
+        page.wait_for_selector("#draftPublish", timeout=15000)
+
+        page.click("[data-editor-tab='edges']")
+        page.fill("#draftEdgeMapping", '{"schema_id":"schema://object/1.0"}')
+        page.click("#draftApplyEdge")
+        port_error = page.locator(".diagnostic-item", has_text="DSL_PORT_INCOMPATIBLE")
+        port_error.wait_for(timeout=15000)
+        port_error.click()
+        self.assertFalse(page.locator("[data-editor-pane='edges']").is_hidden())
+        page.fill("#draftEdgeMapping", "")
+        page.click("#draftApplyEdge")
+        page.wait_for_selector("#draftPublish", timeout=15000)
+
+        page.click("#draftAddEdge")
+        page.fill("#draftEdgeId", "self_cycle")
+        page.click("#draftApplyEdge")
+        cycle = page.locator(".diagnostic-item", has_text="DSL_GRAPH_CYCLE")
+        cycle.wait_for(timeout=15000)
+        cycle.click()
+        page.click("#draftDeleteEdge")
+        page.click("#draftDeleteEdge")
+        page.wait_for_selector("#draftPublish", timeout=15000)
+
+        page.click("[data-editor-tab='nodes']")
+        page.locator("[data-editor-pane='nodes'] .editor-node-list .editor-nav-item").nth(0).click()
+        node_kind = page.locator("#draftNodeKind").locator("..")
+        node_kind.get_by_role("combobox").click()
+        node_kind.get_by_role("option", name="join", exact=True).click()
+        page.click("#draftApplyNode")
+        join_error = page.locator(".diagnostic-item", has_text="DSL_JOIN_INVALID").first
+        join_error.wait_for(timeout=15000)
+        join_error.click()
+        self.assertFalse(page.locator("[data-editor-pane='nodes']").is_hidden())
+        node_kind = page.locator("#draftNodeKind").locator("..")
+        node_kind.get_by_role("combobox").click()
+        node_kind.get_by_role("option", name="action", exact=True).click()
+        handler = page.locator("#draftNodeHandler").locator("..")
+        handler.get_by_role("combobox").click()
+        handler.get_by_role("option", name="transform@1.0.0", exact=True).click()
+        page.click("#draftApplyNode")
+        page.wait_for_selector("#draftPublish", timeout=15000)
+
+
+class WorkflowEditorP5Tests(BrowserE2ETestCase):
+    """Release hardening: accessibility, offline retry and reload recovery."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        from orbit.workflow.application.workflows import (
+            WorkflowCatalogs, WorkflowDefinitionService,
+        )
+        from orbit.workflow.catalogs import (
+            InMemoryHandlerCatalog, InMemorySchemaCatalog,
+        )
+        from orbit.workflow.catalogs.extensions import InMemoryExtensionRegistry
+        from orbit.workflow.persistence.workflow_versions import SQLiteWorkflowVersionStore
+        from tests.test_workflow_drafts import dsl as editable_dsl
+
+        catalogs = WorkflowCatalogs(
+            InMemoryHandlerCatalog([transform_registration().manifest]),
+            InMemorySchemaCatalog(SCHEMAS), InMemoryExtensionRegistry(),
+        )
+        definitions = WorkflowDefinitionService(
+            catalogs, SQLiteWorkflowVersionStore(cls.db)
+        )
+        definitions.publish_workflow(
+            json.dumps(editable_dsl("p5-editor", "P5 Editor")),
+            source_name="<fixture>", source_format="json",
+            expected_latest_version=0, actor="fixture",
+        )
+        definitions.publish_workflow(
+            json.dumps(editable_dsl("p5-editor", "P5 Editor v2")),
+            source_name="<fixture-v2>", source_format="json",
+            expected_latest_version=1, actor="fixture",
+        )
+
+    def test_editor_has_no_console_errors(self) -> None:
+        context = self.browser.new_context(locale="en-US")
+        self.addCleanup(context.close)
+        page = context.new_page()
+        errors: list[str] = []
+        page.on(
+            "console",
+            lambda message: errors.append(message.text) if message.type == "error" else None,
+        )
+        page.on("pageerror", lambda exc: errors.append(str(exc)))
+        page.goto(f"{self.base}/ui/#/workflows")
+        card = page.locator(".workflow-card", has_text="P5 Editor v2")
+        card.wait_for()
+        card.locator(".workflow-card-main").click()
+        page.click("#editWorkflow")
+        page.wait_for_selector("[data-editor-tab='source']")
+        for pane in ("metadata", "nodes", "edges", "policies", "source"):
+            page.click(f"[data-editor-tab='{pane}']")
+        page.wait_for_timeout(800)
+        self.assertEqual([], errors)
+        page.click("#draftDiscard")
+        page.click("#draftDiscard")
+        page.wait_for_function("() => location.hash === '#/workflows'")
+
+    def test_history_can_start_pinned_and_replace_an_active_draft(self) -> None:
+        page = self.open("en-US", path="/ui/#/workflows")
+        card = page.locator(".workflow-card", has_text="P5 Editor v2")
+        card.wait_for()
+        card.locator(".workflow-card-main").click()
+        page.wait_for_selector("#workflowVersionSelect", state="attached")
+        version_picker = page.locator("#workflowVersionSelect").locator("..")
+        version_picker.get_by_role("combobox").click()
+        version_picker.locator("[role='option'][data-value='1']").click()
+        page.wait_for_function(
+            "() => document.querySelector('.workflow-detail .eyebrow')?.textContent.includes('v1')"
+        )
+
+        page.get_by_role("button", name="New goal").last.click()
+        dialog = page.locator("dialog[open]")
+        dialog.wait_for()
+        self.assertIn("v1", dialog.inner_text())
+        self.complete_goal_wizard(
+            page, "workflow:p5-editor", goal="Replay v1", inputs={"value": 3},
+        )
+        page.wait_for_function("() => location.hash.startsWith('#/runs/run')")
+        run_id = page.evaluate("() => decodeURIComponent(location.hash.split('/')[2])")
+        summary = page.evaluate(
+            "id => fetch(`/api/v1/runs/${encodeURIComponent(id)}`)"
+            ".then(response => response.json()).then(body => body.data)",
+            arg=run_id,
+        )
+        self.assertEqual(1, summary["workflow_version"])
+        self.wait_for_status(page, run_id, "succeeded")
+        page.goto(f"{self.base}/ui/#/workflows")
+        card = page.locator(".workflow-card", has_text="P5 Editor v2")
+        card.wait_for()
+        card.locator(".workflow-card-main").click()
+        page.wait_for_selector("#workflowVersionSelect", state="attached")
+        version_picker = page.locator("#workflowVersionSelect").locator("..")
+        version_picker.get_by_role("combobox").click()
+        version_picker.locator("[role='option'][data-value='1']").click()
+        page.wait_for_function(
+            "() => document.querySelector('.workflow-detail .eyebrow')?.textContent.includes('v1')"
+        )
+
+        page.click("#editWorkflow")
+        page.wait_for_selector("#draftSource", state="attached")
+        page.goto(f"{self.base}/ui/#/workflows")
+        card = page.locator(".workflow-card", has_text="P5 Editor v2")
+        card.wait_for()
+        card.locator(".workflow-card-main").click()
+        page.wait_for_selector("#workflowVersionSelect", state="attached")
+        version_picker = page.locator("#workflowVersionSelect").locator("..")
+        version_picker.get_by_role("combobox").click()
+        version_picker.locator("[role='option'][data-value='2']").click()
+        page.click("#editWorkflow")
+        page.wait_for_selector("#replaceActiveDraft")
+        page.click("#replaceActiveDraft")
+        page.wait_for_selector("#draftSource", state="attached")
+        self.assertEqual(
+            "P5 Editor v2", json.loads(page.input_value("#draftSource"))["metadata"]["name"],
+        )
+
+        page.click("#draftDiscard")
+        page.click("#draftDiscard")
+        page.wait_for_function("() => location.hash === '#/workflows'")
+
+    def test_keyboard_offline_retry_and_reload_recovery(self) -> None:
+        page = self.open("en-US", path="/ui/#/workflows")
+        draft_responses: list[str] = []
+        page.on(
+            "response",
+            lambda response: draft_responses.append(
+                f"{response.status} {response.request.method} {response.url}"
+            ) if "/workflow-drafts/" in response.url else None,
+        )
+        card = page.locator(".workflow-card", has_text="P5 Editor")
+        card.wait_for()
+        card.locator(".workflow-card-main").click()
+        page.locator(
+            ".workflow-detail .eyebrow", has_text="workflow:p5-editor"
+        ).wait_for()
+        page.click("#editWorkflow")
+        page.wait_for_selector("[data-editor-tab='outline']")
+
+        first_tab = page.locator("[data-editor-tab='outline']")
+        first_tab.focus()
+        first_tab.press("ArrowRight")
+        self.assertEqual("metadata", page.locator(":focus").get_attribute("data-editor-tab"))
+        self.assertEqual(
+            "true", page.locator("[data-editor-tab='metadata']").get_attribute("aria-selected")
+        )
+        self.assertEqual(
+            "tabpanel", page.locator("[data-editor-pane='metadata']").get_attribute("role")
+        )
+
+        page.click("[data-editor-tab='source']")
+        original = page.input_value("#draftSource")
+        edited = json.loads(original)
+        edited["metadata"]["description"] = "saved after reconnect"
+        page.context.set_offline(True)
+        page.fill("#draftSource", json.dumps(edited, indent=2))
+        page.once("dialog", lambda dialog: dialog.dismiss())
+        page.click("[data-view='home']")
+        self.assertIn("/edit/", page.evaluate("() => location.hash"))
+        self.assertTrue(page.evaluate(
+            "() => { const e = new Event('beforeunload', {cancelable:true}); "
+            "window.dispatchEvent(e); return e.defaultPrevented; }"
+        ))
+        page.wait_for_function(
+            "() => document.querySelector('#draftSaveState').textContent.includes('Offline')",
+            timeout=15000,
+        )
+        page.context.set_offline(False)
+        page.evaluate("() => window.dispatchEvent(new Event('online'))")
+        page.wait_for_function(
+            "() => document.querySelector('#draftSaveState').textContent === 'Saved'",
+            timeout=15000,
+        )
+        page.reload()
+        page.wait_for_selector("[data-editor-tab='source']")
+        page.click("[data-editor-tab='source']")
+        page.wait_for_selector("#draftSource", state="visible")
+        self.assertEqual(
+            "saved after reconnect",
+            json.loads(page.input_value("#draftSource"))["metadata"]["description"],
+        )
+        page.fill("#draftSource", json.dumps(json.loads(page.input_value("#draftSource"))))
+        page.click("#draftFormat")
+        page.wait_for_function(
+            "() => document.querySelector('#draftSaveState').textContent === 'Saved'",
+            timeout=15000,
+        )
+        self.assertTrue(page.input_value("#draftSource").startswith("{\n  \"dsl_version\""))
+
+        page.click("[data-editor-tab='nodes']")
+        page.fill("#draftNodeId", "work_renamed")
+        page.click("#draftApplyNode")
+        try:
+            page.wait_for_selector("#draftPublish", timeout=15000)
+        except Exception as exc:
+            self.fail(
+                f"renamed node did not validate: {page.inner_text('#draftDiagnostics')}\n"
+                f"{page.input_value('#draftSource')}\n{exc}"
+            )
+        renamed = json.loads(page.input_value("#draftSource"))
+        self.assertEqual(["work_renamed"], renamed["entry"])
+        self.assertEqual("work_renamed", renamed["edges"][0]["from"]["node"])
+
+        page.click("#draftAddNode")
+        page.fill("#draftNodeId", "extra_terminal")
+        page.click("#draftApplyNode")
+        page.wait_for_selector(
+            ".diagnostic-item:has-text('DSL_GRAPH_UNREACHABLE')", timeout=15000,
+        )
+        self.assertEqual(1, page.locator(".diagnostic-copy").count())
+        page.wait_for_function(
+            "() => document.querySelector('#draftSaveState').textContent === 'Saved'",
+            timeout=15000,
+        )
+        page.wait_for_selector("#draftDeleteNode", timeout=15000)
+        self.assertIn(
+            "extra_terminal", json.loads(page.input_value("#draftSource"))["terminals"]
+        )
+        page.click("#draftDeleteNode")
+        page.click("#draftDeleteNode")
+        page.wait_for_function(
+            "() => JSON.parse(document.querySelector('#draftSource').value)"
+            ".nodes.every(node => node.id !== 'extra_terminal')",
+            timeout=15000,
+        )
+        try:
+            page.wait_for_function(
+                "() => document.querySelector('#draftSaveState').textContent === 'Saved'",
+                timeout=15000,
+            )
+        except Exception as exc:
+            self.fail(
+                f"deleted node was not saved: {page.inner_text('#draftSaveState')}\n"
+                f"{draft_responses}\n{exc}"
+            )
+        try:
+            page.wait_for_selector("#draftPublish", timeout=15000)
+        except Exception as exc:
+            self.fail(
+                f"deleted node did not restore validity: {page.inner_text('#draftDiagnostics')}\n"
+                f"save={page.inner_text('#draftSaveState')} "
+                f"error={page.locator('#errorBanner').text_content() if page.locator('#errorBanner').count() else ''}\n"
+                f"{page.input_value('#draftSource')}\n{exc}"
+            )
 
 
 class NewRunTests(BrowserE2ETestCase):

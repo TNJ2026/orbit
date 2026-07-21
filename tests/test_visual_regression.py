@@ -21,6 +21,7 @@ P9 expands this to every key page and state (plan §9.2).
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 from pathlib import Path
 import platform
@@ -46,6 +47,7 @@ from orbit.workflow.persistence.database import connect_workflow_database
 from tests.test_web_composition import (
     SCHEMAS, publish_linear_workflow, transform_registration,
 )
+from tests.test_workflow_drafts import dsl as editable_dsl
 
 BASELINES = Path(__file__).parent / "visual_baselines"
 PROTOTYPE = Path(__file__).parent.parent / "prototypes" / "runtime-ui.html"
@@ -159,6 +161,22 @@ class VisualRegressionTests(unittest.TestCase):
             serve_ui=True,
         )
         publish_linear_workflow(cls.db)
+        # Keep discovery baselines stable: the Editor fixture is a draft of
+        # the existing linear workflow, not a second published catalog entry.
+        cls.visual_draft_id = "workflow_draft:visual"
+        source = json.dumps(editable_dsl("linear", "Visual Editor"))
+        source_hash = "sha256:" + hashlib.sha256(source.encode()).hexdigest()
+        now = "2026-01-01T00:00:00+00:00"
+        with connect_workflow_database(cls.db) as connection:
+            connection.execute(
+                "INSERT INTO workflow_drafts VALUES (?,?,?,?,?,?,?,'dirty',"
+                "NULL,NULL,'[]',1,'active',?,?,NULL)",
+                (
+                    cls.visual_draft_id, "workflow:linear", 1, "local", "json",
+                    source, source_hash, now, now,
+                ),
+            )
+            connection.commit()
         cls.visual_run_id = seed_visual_artifact(
             cls.db, cls.app.state.runtime.service, cls.artifact_backend
         )
@@ -210,6 +228,7 @@ class VisualRegressionTests(unittest.TestCase):
     def capture(
         self, url: str, *, theme: str, viewport: dict[str, int], wizard: bool = False,
         ready_selector: str | None = None, fail_path: str | None = None,
+        editor_conflict: bool = False,
     ) -> bytes:
         context = self.browser.new_context(
             viewport=viewport, locale="en-US", timezone_id="UTC",
@@ -226,6 +245,20 @@ class VisualRegressionTests(unittest.TestCase):
                                 "code": "temporarily_unavailable",
                                 "message": "projection is rebuilding",
                                 "details": {},
+                            }
+                        }),
+                    ),
+                )
+            if editor_conflict:
+                context.route(
+                    "**/api/v1/workflow-drafts/*/save",
+                    lambda route: route.fulfill(
+                        status=409, content_type="application/json",
+                        body=json.dumps({
+                            "error": {
+                                "code": "draft_version_conflict",
+                                "message": "the draft changed in another tab",
+                                "details": {"expected": 1, "actual": 2},
                             }
                         }),
                     ),
@@ -251,6 +284,10 @@ class VisualRegressionTests(unittest.TestCase):
                     page.check('input[name="workflow"][value="workflow:linear"]')
                     page.click('[data-wizard-next]')
                     page.wait_for_selector("#newRunGoal")
+                if editor_conflict:
+                    page.click("[data-editor-tab='source']")
+                    page.fill("#draftSource", page.input_value("#draftSource") + " ")
+                    page.wait_for_selector("#draftReload", timeout=15000)
             page.wait_for_timeout(100)  # one settle tick after fonts/layout
             return page.screenshot(full_page=False)
         finally:
@@ -351,6 +388,73 @@ class VisualRegressionTests(unittest.TestCase):
                 self.assert_matches_baseline(
                     f"new-goal-{theme}-1280x800", image, viewport
                 )
+
+    def test_p5_editor_three_viewports_in_both_themes(self) -> None:
+        self._set_visual_draft("dirty")
+        url = f"{self.base}/ui/#/workflows/workflow:linear/edit/{self.visual_draft_id}"
+        for viewport_name, viewport in VIEWPORTS.items():
+            for theme in ("dark", "light"):
+                name = f"editor-{theme}-{viewport_name}"
+                with self.subTest(name=name):
+                    image = self.capture(
+                        url, theme=theme, viewport=viewport,
+                        ready_selector="[data-editor-tab='outline']",
+                    )
+                    self.assert_matches_baseline(name, image, viewport)
+
+    def _set_visual_draft(self, state: str) -> None:
+        source = json.dumps(editable_dsl("linear", "Visual Editor"))
+        diagnostics = []
+        validated_source_hash = None
+        validated_definition_hash = None
+        if state == "empty":
+            document = editable_dsl("linear", "Empty Editor")
+            document["nodes"] = []
+            document["edges"] = []
+            document["entry"] = []
+            document["terminals"] = []
+            source = json.dumps(document)
+        if state == "invalid":
+            diagnostics = [{
+                "code": "DSL_GRAPH_CYCLE", "message": "A cycle requires a loop policy.",
+                "json_path": "$.edges[0]", "severity": "error",
+                "source_range": {"start": {"line": 12, "column": 3}},
+            }]
+        with connect_workflow_database(self.db) as connection:
+            source_hash = connection.execute(
+                "SELECT source_hash FROM workflow_drafts WHERE draft_id=?",
+                (self.visual_draft_id,),
+            ).fetchone()[0]
+            if state == "valid":
+                validated_source_hash = source_hash
+                validated_definition_hash = "sha256:" + "a" * 64
+            connection.execute(
+                "UPDATE workflow_drafts SET source_text=?, validation_status=?, "
+                "validated_source_hash=?, validated_definition_hash=?, diagnostics_json=? "
+                "WHERE draft_id=?",
+                (
+                    source, "valid" if state == "valid" else "invalid" if state == "invalid" else "dirty",
+                    validated_source_hash, validated_definition_hash,
+                    json.dumps(diagnostics), self.visual_draft_id,
+                ),
+            )
+            connection.commit()
+
+    def test_p5_editor_states_in_both_themes(self) -> None:
+        viewport = VIEWPORTS["1280x800"]
+        url = f"{self.base}/ui/#/workflows/workflow:linear/edit/{self.visual_draft_id}"
+        for state in ("empty", "invalid", "valid", "conflict"):
+            self._set_visual_draft("dirty" if state == "conflict" else state)
+            for theme in ("dark", "light"):
+                name = f"editor-{state}-{theme}-1280x800"
+                with self.subTest(name=name):
+                    image = self.capture(
+                        url, theme=theme, viewport=viewport,
+                        ready_selector="[data-editor-tab='outline']",
+                        editor_conflict=state == "conflict",
+                    )
+                    self.assert_matches_baseline(name, image, viewport)
+        self._set_visual_draft("dirty")
 
     def test_p6_artifacts_in_both_themes(self) -> None:
         viewport = VIEWPORTS["1280x800"]

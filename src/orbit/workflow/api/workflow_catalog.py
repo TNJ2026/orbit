@@ -138,6 +138,11 @@ class WorkflowCatalogReadModelService:
 
     def detail(self, workflow_id: str, version: int | None = None) -> dict[str, Any]:
         with connect_workflow_database(self.path, read_only=True) as connection:
+            version_rows = connection.execute(
+                "SELECT version, definition_hash, created_at, created_by, source_text "
+                "FROM workflow_versions WHERE workflow_id = ? ORDER BY version DESC",
+                (workflow_id,),
+            ).fetchall()
             if version is None:
                 row = connection.execute(
                     "SELECT * FROM workflow_versions WHERE workflow_id = ?"
@@ -153,6 +158,18 @@ class WorkflowCatalogReadModelService:
         if row is None:
             raise ValueError(f"workflow version not found: {workflow_id}")
         item = self._entry(row, include_definition=True)
+        item["selected_version"] = int(row["version"])
+        item["latest_version"] = int(version_rows[0]["version"])
+        item["versions"] = [
+            {
+                "version": int(value["version"]),
+                "definition_hash": value["definition_hash"],
+                "created_at": value["created_at"],
+                "created_by": value["created_by"],
+                "source_available": value["source_text"] is not None,
+            }
+            for value in version_rows
+        ]
         # The author-facing source, distinct from canonical IR (editor plan
         # §7). Early versions published without source degrade to
         # source_available=false — viewable and runnable, never "editable".

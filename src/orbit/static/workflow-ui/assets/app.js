@@ -14,6 +14,10 @@ import { Api, ApiError } from "./api.js";
 import { I18n, LOCALES, preferredLocale } from "./i18n.js";
 import { Router } from "./router.js";
 import {
+  compatibleHandlers, diagnosticTarget, formatWorkflowSource, parseWorkflowSource,
+  removeEdge, removeNode, removePolicy, replaceEdge, replaceMetadata, replaceNode, replacePolicy,
+} from "./workflow-editor.js";
+import {
   budgetDialog, cancelRunDialog, humanSubmitDialog, recoveryDialog,
 } from "./components/command-dialog.js";
 import { dataState } from "./components/data-state.js";
@@ -28,6 +32,8 @@ let liveCursor = null;
 let refreshTimer = null;
 let rendering = false;
 let renderQueued = false;
+let activeViewCleanup = null;
+let activeViewLeaveGuard = null;
 let customSelectSequence = 0;
 const runFilters = { q: "", status: "", responsibility: "", activeOnly: false };
 const goalFilters = { q: "", status: "" };
@@ -1675,7 +1681,9 @@ function scheduleLivePolling() {
         const live = (await api.live(liveCursor)).data;
         liveCursor = live.cursor;
         failures = 0;
-        if (live.changed) await render();
+        // An Editor owns unsaved local text. Background projection changes
+        // must never tear down that view; explicit Draft commands redraw it.
+        if (live.changed && route.view !== "workflowEdit") await render();
       } catch (error) {
         // Programming errors must stay loud; only transport failures back off.
         if (!(error instanceof ApiError)) throw error;
@@ -1752,8 +1760,65 @@ async function renderWorkflows(root) {
     el("div", { class: "empty", text: i18n.t("workflows.select") }),
   ]);
 
+  const goToDraft = (workflowId, draftId) => navigate({
+    view: "workflowEdit", workflowId, draftId, runId: null,
+  });
+
+  const resolveDraftCollision = (failure, create, value) => {
+    const existing = failure.details.draft;
+    const dialog = el("dialog", {
+      class: "command-dialog", "aria-label": i18n.t("editor.activeDraftTitle"),
+    });
+    const close = () => { dialog.close(); dialog.remove(); };
+    dialog.append(el("div", { class: "dialog-body" }, [
+      el("h3", { text: i18n.t("editor.activeDraftTitle") }),
+      el("p", { class: "muted", text: i18n.t("editor.activeDraftBody", {
+        active: existing.base_version, requested: value.selected_version,
+      }) }),
+      el("div", { class: "actions" }, [
+        el("button", {
+          type: "button", class: "button", text: i18n.t("action.cancel"), onclick: close,
+        }),
+        el("button", {
+          type: "button", class: "button", id: "continueActiveDraft",
+          text: i18n.t("editor.continueActiveDraft"),
+          onclick: () => { close(); goToDraft(value.workflow_id, existing.draft_id); },
+        }),
+        el("button", {
+          type: "button", class: "button danger", id: "replaceActiveDraft",
+          text: i18n.t("editor.discardCreateVersion", { version: value.selected_version }),
+          onclick: async (event) => {
+            event.currentTarget.disabled = true;
+            try {
+              const current = (await api.workflowDraft(existing.draft_id)).data;
+              const discard = current.allowed_commands.find(
+                (item) => item.command === "workflow.draft.discard",
+              );
+              if (!discard) return;
+              await api.execute(
+                discard, {}, `workflow.draft.discard:${existing.draft_id}:replace`,
+              );
+              const next = (await api.execute(
+                create, { base_version: value.selected_version },
+                `workflow.draft.create:${value.workflow_id}:${value.selected_version}:replace`,
+              )).data;
+              close();
+              goToDraft(value.workflow_id, next.draft_id);
+            } catch (error) {
+              event.currentTarget.disabled = false;
+              reportError(error);
+            }
+          },
+        }),
+      ]),
+    ]));
+    document.body.append(dialog);
+    dialog.addEventListener("close", () => dialog.remove(), { once: true });
+    dialog.showModal();
+  };
+
   let selectedCard = null;
-  const showDetail = async (entry, card = null) => {
+  const showDetail = async (entry, card = null, requestedVersion = undefined) => {
     if (selectedCard) {
       selectedCard.classList.remove("selected");
       selectedCard.querySelector(".workflow-card-main")?.removeAttribute("aria-current");
@@ -1765,12 +1830,25 @@ async function renderWorkflows(root) {
     }
     detail.replaceChildren(dataState(el, i18n, "loading"));
     try {
-      const value = (await api.workflowDetail(entry.workflow_id, entry.latest_version)).data;
+      const value = (await api.workflowDetail(entry.workflow_id, requestedVersion)).data;
       const definition = value.definition;
+      const versionSelect = el("select", {
+        id: "workflowVersionSelect", "aria-label": i18n.t("workflows.versionHistory"),
+      }, value.versions.map((version) => el("option", {
+        value: String(version.version),
+        ...(version.version === value.selected_version ? { selected: "selected" } : {}),
+        text: i18n.t("workflows.versionOption", {
+          version: i18n.number(version.version),
+          date: i18n.dateTime(version.created_at),
+        }),
+      })));
+      versionSelect.addEventListener("change", () => {
+        showDetail(entry, selectedCard, Number(versionSelect.value));
+      });
       detail.replaceChildren(
         el("div", { class: "panel-head" }, [
           el("div", {}, [
-            el("div", { class: "eyebrow", text: `${value.workflow_id} · v${value.latest_version}` }),
+            el("div", { class: "eyebrow", text: `${value.workflow_id} · v${value.selected_version}` }),
             el("div", { class: "panel-title", text: value.name }),
           ]),
           el("div", { class: "actions" }, [
@@ -1784,15 +1862,15 @@ async function renderWorkflows(root) {
                 onclick: async () => {
                   try {
                     const draft = (await api.execute(
-                      create, {}, `workflow.draft.create:${value.workflow_id}`,
+                      create, { base_version: value.selected_version },
+                      `workflow.draft.create:${value.workflow_id}:${value.selected_version}`,
                     )).data;
-                    navigate({
-                      view: "workflowEdit",
-                      workflowId: value.workflow_id,
-                      draftId: draft.draft_id,
-                      runId: null,
-                    });
+                    goToDraft(value.workflow_id, draft.draft_id);
                   } catch (error) {
+                    if (error instanceof ApiError && error.code === "draft_already_active") {
+                      resolveDraftCollision(error, create, value);
+                      return;
+                    }
                     reportError(error);
                   }
                 },
@@ -1801,12 +1879,20 @@ async function renderWorkflows(root) {
             value.allowed_commands.some((item) => item.command === "run.start")
               ? el("button", {
                   class: "button primary", text: i18n.t("action.newGoal"),
-                  onclick: () => newRunDialog(value.workflow_id),
+                  onclick: () => newRunDialog(value.workflow_id, value.selected_version),
                 })
               : null,
           ]),
         ]),
         el("div", { class: "panel-body" }, [
+          el("div", { class: "workflow-version-picker" }, [
+            el("div", { class: "field" }, [
+              el("label", { text: i18n.t("workflows.versionHistory") }), versionSelect,
+            ]),
+            value.selected_version === value.latest_version
+              ? el("span", { class: "pill succeeded", text: i18n.t("workflows.latestVersion") })
+              : el("span", { class: "pill", text: i18n.t("workflows.historicalVersion") }),
+          ]),
           el("p", { class: value.description ? "" : "muted", text: value.description || i18n.t("workflows.noDescription") }),
           el("dl", { class: "fact-grid" }, [
             el("div", {}, [el("dt", { text: i18n.t("workflows.nodes") }), el("dd", { text: i18n.number(value.summary.node_count) })]),
@@ -1870,30 +1956,51 @@ async function renderWorkflows(root) {
 
 /* --------------------------------------------------------- workflow editor */
 
-/** Source editor over a persistent server-side draft (editor plan P2).
+/** Persistent Workflow Editor (editor plan P3).
  *
- * The server owns everything that matters: revision, validation verdict and
- * the command set. This view keeps exactly one piece of local state — the
- * textarea's text — and reconciles it with the draft after every command.
- * Buttons render from `allowed_commands`; when the server withholds publish,
- * there is no publish button to mis-click.
+ * Structured forms only produce candidate JSON. Save, validation, revision
+ * and the command set remain server-owned; a candidate is applied through the
+ * advertised save command and immediately checked by the production compiler.
  */
 async function renderWorkflowEditor(root, draftId) {
-  let draft = (await api.workflowDraft(draftId)).data;
+  const [draftResponse, catalogResponse] = await Promise.all([
+    api.workflowDraft(draftId),
+    api.handlerCatalog().catch(() => ({ data: { handlers: [] } })),
+  ]);
+  let draft = draftResponse.data;
+  const handlers = catalogResponse.data.handlers || [];
 
   const source = el("textarea", {
     id: "draftSource", class: "draft-source", spellcheck: "false",
     "aria-label": i18n.t("editor.source"),
   });
   source.value = draft.source;
-  const saveState = el("span", { class: "pill", id: "draftSaveState" });
+  const saveState = el("span", {
+    class: "pill", id: "draftSaveState", role: "status", "aria-live": "polite",
+  });
   const conflict = el("div", { class: "banner error", hidden: "hidden", role: "alert" });
   const controls = el("div", { class: "actions", id: "draftControls" });
   const diagnostics = el("div", { class: "panel-body", id: "draftDiagnostics" });
+  const editorNav = el("nav", {
+    class: "editor-nav", role: "tablist", "aria-label": i18n.t("editor.sections"),
+  });
+  const editorMain = el("div", { class: "editor-main" });
+  const outlinePane = el("section", { class: "editor-pane", "data-editor-pane": "outline" });
+  const metadataPane = el("section", { class: "editor-pane", "data-editor-pane": "metadata", hidden: "hidden" });
+  const nodesPane = el("section", { class: "editor-pane", "data-editor-pane": "nodes", hidden: "hidden" });
+  const edgesPane = el("section", { class: "editor-pane", "data-editor-pane": "edges", hidden: "hidden" });
+  const policiesPane = el("section", { class: "editor-pane", "data-editor-pane": "policies", hidden: "hidden" });
+  const sourcePane = el("section", { class: "editor-pane", "data-editor-pane": "source", hidden: "hidden" }, [source]);
+  const draftFacts = el("footer", { class: "editor-facts mono" });
 
   let dirtySinceSave = false;
   let saving = false;
   let saveTimer = null;
+  let lastCommandFailure = null;
+  let selectedNode = 0;
+  let selectedEdge = 0;
+  let selectedPolicy = 0;
+  let activePane = "outline";
 
   const command = (name) =>
     (draft.allowed_commands || []).find((item) => item.command === name);
@@ -1903,9 +2010,28 @@ async function renderWorkflowEditor(root, draftId) {
     saveState.className = `pill ${key === "conflict" ? "failed" : key === "saved" ? "succeeded" : "waiting"}`;
   };
 
-  const showConflict = (error) => {
+  const copyText = async (value) => {
+    try {
+      await navigator.clipboard.writeText(value);
+    } catch {
+      const fallback = el("textarea", { readonly: "readonly" });
+      fallback.value = value;
+      document.body.append(fallback);
+      fallback.select();
+      document.execCommand("copy");
+      fallback.remove();
+    }
+    announce(i18n.t("editor.copied"));
+  };
+
+  const showConflict = async (error) => {
+    const localSource = source.value;
     conflict.replaceChildren(
       el("span", { text: i18n.t("editor.conflict", { message: error.message }) }),
+      el("button", {
+        type: "button", class: "button", id: "draftCopyLocal",
+        text: i18n.t("editor.copyLocal"), onclick: () => copyText(localSource),
+      }),
       el("button", {
         type: "button", class: "button", id: "draftReload",
         text: i18n.t("editor.reload"),
@@ -1916,17 +2042,74 @@ async function renderWorkflowEditor(root, draftId) {
           conflict.hidden = true;
           setSaveState("saved");
           redraw();
+          drawStructured();
         },
       }),
     );
     conflict.hidden = false;
     setSaveState("conflict");
+    try {
+      const remote = error.code === "workflow_version_conflict"
+        ? (await api.workflowDetail(draft.workflow_id, error.details.latest_version)).data
+        : (await api.workflowDraft(draft.draft_id)).data;
+      if (remote.source !== undefined && remote.source !== localSource) {
+        const local = el("textarea", { readonly: "readonly", class: "mono" });
+        local.value = localSource;
+        const server = el("textarea", { readonly: "readonly", class: "mono" });
+        server.value = remote.source || "";
+        const comparison = el("details", { class: "editor-conflict-compare" }, [
+          el("summary", { text: i18n.t("editor.compareConflict") }),
+          el("div", { class: "editor-compare-grid" }, [
+            field(i18n.t("editor.localDraft"), local),
+            field(error.code === "workflow_version_conflict"
+              ? i18n.t("editor.latestPublished", { version: error.details.latest_version })
+              : i18n.t("editor.serverDraft"), server),
+          ]),
+        ]);
+        conflict.append(comparison);
+        if (error.code === "workflow_version_conflict") {
+          conflict.append(
+            el("button", {
+              type: "button", class: "button", text: i18n.t("editor.viewLatest"),
+              onclick: () => { comparison.open = true; comparison.scrollIntoView({ block: "nearest" }); },
+            }),
+            el("button", {
+              type: "button", class: "button danger", id: "draftRebaseLatest",
+              text: i18n.t("editor.discardCreateLatest"),
+              onclick: async () => {
+                const discard = command("workflow.draft.discard");
+                const create = remote.allowed_commands?.find(
+                  (item) => item.command === "workflow.draft.create",
+                );
+                if (!discard || !create) return;
+                const removed = await api.execute(
+                  discard, {}, `workflow.draft.discard:${draft.draft_id}:rebase`,
+                );
+                if (!removed) return;
+                const next = await api.execute(
+                  create, { base_version: remote.selected_version },
+                  `workflow.draft.create:${draft.workflow_id}:${remote.selected_version}`,
+                );
+                navigate({
+                  view: "workflowEdit", workflowId: draft.workflow_id,
+                  draftId: next.data.draft_id, runId: null,
+                });
+              },
+            }),
+          );
+        }
+      }
+    } catch {
+      // The conflict itself remains actionable even if the comparison read
+      // races with another update or the connection drops.
+    }
   };
 
   const runCommand = async (name, payload = {}, intent) => {
     const allowed = command(name);
     if (!allowed) return null;
     try {
+      lastCommandFailure = null;
       const response = await api.execute(allowed, payload, intent);
       draft = response.data;
       conflict.hidden = true;
@@ -1934,22 +2117,31 @@ async function renderWorkflowEditor(root, draftId) {
       return response;
     } catch (error) {
       const failure = reportError(error);
+      lastCommandFailure = failure;
       if (failure.requiresRefresh) showConflict(failure);
       return null;
     }
   };
 
   const save = async () => {
-    if (saving || !command("workflow.draft.save")) return;
+    if (saving || !command("workflow.draft.save")) return null;
     saving = true;
-    dirtySinceSave = false;
+    const submittedSource = source.value;
     setSaveState("saving");
     const response = await runCommand(
-      "workflow.draft.save", { source: source.value },
+      "workflow.draft.save", { source: submittedSource },
       `workflow.draft.save:${draft.draft_id}:${Date.now()}`,
     );
     saving = false;
-    if (response) setSaveState(dirtySinceSave ? "unsaved" : "saved");
+    if (response) {
+      dirtySinceSave = source.value !== submittedSource;
+      setSaveState(dirtySinceSave ? "unsaved" : "saved");
+    } else {
+      dirtySinceSave = true;
+      if (lastCommandFailure?.status === 0) setSaveState("offline");
+      else if (!lastCommandFailure?.requiresRefresh) setSaveState("unsaved");
+    }
+    return response;
   };
 
   source.addEventListener("input", () => {
@@ -1959,9 +2151,655 @@ async function renderWorkflowEditor(root, draftId) {
     saveTimer = setTimeout(save, 800);
   });
 
+  const applyCandidate = async (candidate) => {
+    if (saveTimer) clearTimeout(saveTimer);
+    source.value = formatWorkflowSource(candidate);
+    dirtySinceSave = true;
+    setSaveState("unsaved");
+    const saved = await save();
+    if (!saved) return;
+    const checked = await runCommand(
+      "workflow.draft.validate", {},
+      `workflow.draft.validate:${draft.draft_id}:${draft.revision}`,
+    );
+    if (checked) drawStructured();
+  };
+
+  const focusSource = (line, column) => {
+    showPane("source");
+    const lines = source.value.split("\n");
+    const row = Math.max(0, Math.min(lines.length - 1, line - 1));
+    const offset = lines.slice(0, row).reduce((total, value) => total + value.length + 1, 0);
+    const position = Math.min(source.value.length, offset + Math.max(0, column - 1));
+    source.focus();
+    source.setSelectionRange(position, position);
+  };
+
+  const locateDiagnostic = (item, target) => {
+    if (target.pane === "nodes" && target.index !== null) selectedNode = target.index;
+    if (target.pane === "edges" && target.index !== null) selectedEdge = target.index;
+    if (target.pane === "policies" && target.index !== null) selectedPolicy = target.index;
+    if (["nodes", "edges", "policies"].includes(target.pane)) {
+      drawStructured();
+      showPane(target.pane);
+    } else {
+      focusSource(target.line, target.column);
+    }
+    announce(i18n.t("editor.locatedDiagnostic", { code: item.code, path: target.path }));
+  };
+
+  const field = (label, control) => el("div", { class: "field" }, [
+    el("label", { text: label }), control,
+  ]);
+
+  const paneButton = (name, key) => {
+    const paneId = `draft-pane-${name}`;
+    const tabId = `draft-tab-${name}`;
+    const button = el("button", {
+      type: "button", class: "editor-nav-item", id: tabId,
+      role: "tab", tabindex: "-1", "aria-controls": paneId,
+      "aria-selected": "false", "data-editor-tab": name,
+      text: i18n.t(key),
+      onclick: () => showPane(name),
+    });
+    const pane = {
+      outline: outlinePane, metadata: metadataPane, nodes: nodesPane,
+      edges: edgesPane, policies: policiesPane, source: sourcePane,
+    }[name];
+    pane.id = paneId;
+    pane.setAttribute("role", "tabpanel");
+    pane.setAttribute("aria-labelledby", tabId);
+    button.addEventListener("keydown", (event) => {
+      const tabs = [...editorNav.querySelectorAll("[role='tab']")];
+      const index = tabs.indexOf(button);
+      let next = null;
+      if (event.key === "ArrowRight") next = (index + 1) % tabs.length;
+      if (event.key === "ArrowLeft") next = (index - 1 + tabs.length) % tabs.length;
+      if (event.key === "Home") next = 0;
+      if (event.key === "End") next = tabs.length - 1;
+      if (next === null) return;
+      event.preventDefault();
+      showPane(tabs[next].dataset.editorTab);
+      tabs[next].focus();
+    });
+    editorNav.append(button);
+  };
+
+  const showPane = (name) => {
+    activePane = name;
+    for (const pane of editorMain.querySelectorAll("[data-editor-pane]")) {
+      pane.hidden = pane.dataset.editorPane !== name;
+    }
+    for (const button of editorNav.querySelectorAll("[data-editor-tab]")) {
+      const active = button.dataset.editorTab === name;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-selected", String(active));
+      button.setAttribute("tabindex", active ? "0" : "-1");
+    }
+  };
+
+  paneButton("outline", "editor.outline");
+  paneButton("metadata", "editor.metadata");
+  paneButton("nodes", "editor.nodes");
+  paneButton("edges", "editor.edges");
+  paneButton("policies", "editor.policies");
+  paneButton("source", "editor.sourceTab");
+
+  const renderPortEditor = (title, ports, onChange) => {
+    const body = el("div", { class: "editor-port-list" });
+    const repaint = () => {
+      body.replaceChildren();
+      ports.forEach((port, index) => {
+        const id = el("input", { value: port.id || "", "aria-label": i18n.t("editor.portId") });
+        const schema = el("input", { value: port.schema_id || "", "aria-label": i18n.t("editor.schemaId") });
+        id.addEventListener("input", () => { port.id = id.value; onChange(); });
+        schema.addEventListener("input", () => { port.schema_id = schema.value; onChange(); });
+        body.append(el("div", { class: "editor-port-row" }, [
+          id, schema,
+          el("button", {
+            type: "button", class: "button danger", text: i18n.t("editor.remove"),
+            onclick: () => { ports.splice(index, 1); onChange(); repaint(); },
+          }),
+        ]));
+      });
+      body.append(el("button", {
+        type: "button", class: "button", text: i18n.t("editor.addPort"),
+        onclick: () => { ports.push({ id: "port", schema_id: "schema://object/1.0" }); onChange(); repaint(); },
+      }));
+    };
+    repaint();
+    return el("fieldset", { class: "editor-fieldset" }, [
+      el("legend", { text: title }), body,
+    ]);
+  };
+
+  const drawStructured = () => {
+    let document;
+    try {
+      document = parseWorkflowSource(source.value);
+    } catch (error) {
+      const unavailable = el("div", {
+        class: "banner error", text: i18n.t("editor.structuredUnavailable", { message: error.message }),
+      });
+      outlinePane.replaceChildren(unavailable);
+      metadataPane.replaceChildren(unavailable.cloneNode(true));
+      nodesPane.replaceChildren(unavailable.cloneNode(true));
+      edgesPane.replaceChildren(unavailable.cloneNode(true));
+      policiesPane.replaceChildren(unavailable.cloneNode(true));
+      return;
+    }
+
+    outlinePane.replaceChildren(
+      el("div", { class: "editor-section-head" }, [
+        el("div", {}, [
+          el("div", { class: "panel-title", text: document.metadata.name }),
+          el("div", { class: "muted", text: document.metadata.description || i18n.t("workflows.noDescription") }),
+        ]),
+      ]),
+      el("div", { class: "stat-grid editor-stats" }, [
+        el("article", { class: "stat-card" }, [
+          el("div", { class: "stat-value", text: i18n.number(document.nodes.length) }),
+          el("div", { class: "muted", text: i18n.t("editor.nodes") }),
+        ]),
+        el("article", { class: "stat-card" }, [
+          el("div", { class: "stat-value", text: i18n.number((document.edges || []).length) }),
+          el("div", { class: "muted", text: i18n.t("editor.edges") }),
+        ]),
+        el("article", { class: "stat-card" }, [
+          el("div", { class: "stat-value", text: i18n.number((document.policies || []).length) }),
+          el("div", { class: "muted", text: i18n.t("editor.policies") }),
+        ]),
+      ]),
+      el("div", { class: "editor-outline-list" }, document.nodes.map((node, index) =>
+        el("button", {
+          type: "button", class: "list-option-card editor-outline-node",
+          onclick: () => { selectedNode = index; drawStructured(); showPane("nodes"); },
+        }, [
+          el("strong", { class: "mono", text: node.id }),
+          el("span", { class: "pill", text: node.kind }),
+          el("span", { class: "muted mono", text: node.handler
+            ? `${node.handler.name}@${node.handler.version}` : i18n.t("editor.controller") }),
+        ])),
+      ),
+    );
+
+    const name = el("input", { id: "draftMetadataName", value: document.metadata.name });
+    const description = el("textarea", { id: "draftMetadataDescription" });
+    description.value = document.metadata.description || "";
+    const labels = el("textarea", { id: "draftMetadataLabels", class: "mono" });
+    labels.value = JSON.stringify(document.metadata.labels || {}, null, 2);
+    const metadataError = el("div", { class: "banner error", hidden: "hidden", role: "alert" });
+    metadataPane.replaceChildren(
+      el("div", { class: "editor-section-head" }, [
+        el("div", { class: "panel-title", text: i18n.t("editor.metadata") }),
+      ]),
+      metadataError,
+      el("div", { class: "editor-form-grid" }, [
+        field(i18n.t("editor.name"), name),
+        field(i18n.t("editor.description"), description),
+        field(i18n.t("editor.labels"), labels),
+      ]),
+      el("button", {
+        type: "button", class: "button primary", id: "draftApplyMetadata",
+        text: i18n.t("editor.applyValidate"),
+        onclick: async () => {
+          try {
+            const parsedLabels = JSON.parse(labels.value || "{}");
+            if (!name.value.trim() || !parsedLabels || Array.isArray(parsedLabels)
+                || typeof parsedLabels !== "object") throw new Error(i18n.t("editor.metadataInvalid"));
+            metadataError.hidden = true;
+            await applyCandidate(replaceMetadata(document, {
+              name: name.value.trim(), description: description.value,
+              labels: parsedLabels,
+            }));
+          } catch (error) {
+            metadataError.textContent = error.message;
+            metadataError.hidden = false;
+          }
+        },
+      }),
+    );
+
+    if (selectedNode !== null) {
+      selectedNode = Math.min(selectedNode, Math.max(0, document.nodes.length - 1));
+    }
+    const nodeList = el("div", { class: "editor-node-list" });
+    document.nodes.forEach((node, index) => nodeList.append(el("button", {
+      type: "button", class: `editor-nav-item ${index === selectedNode ? "active" : ""}`,
+      text: `${node.id} · ${node.kind}`,
+      onclick: () => { selectedNode = index; drawStructured(); showPane("nodes"); },
+    })));
+    nodeList.append(el("button", {
+      type: "button", class: "button", id: "draftAddNode", text: i18n.t("editor.addNode"),
+      onclick: () => { selectedNode = null; drawStructured(); showPane("nodes"); },
+    }));
+    const original = selectedNode === null ? null : document.nodes[selectedNode];
+    const working = JSON.parse(JSON.stringify(original || {
+      id: `node_${document.nodes.length + 1}`, kind: "terminal", inputs: [], outputs: [],
+    }));
+    working.inputs ||= [];
+    working.outputs ||= [];
+    working.config ||= {};
+    const nodeEditor = el("div", { class: "editor-node-form" });
+    const configFields = el("div", { class: "editor-config-fields" });
+    const handlerField = el("div");
+    const config = el("textarea", { id: "draftNodeConfig", class: "mono" });
+    config.value = JSON.stringify(working.config, null, 2);
+    const nodeError = el("div", { class: "banner error", hidden: "hidden", role: "alert" });
+    const nodeId = el("input", { id: "draftNodeId", value: working.id });
+    const entryNode = el("input", {
+      type: "checkbox",
+      ...((document.entry || []).includes(working.id) ? { checked: "checked" } : {}),
+    });
+    const kind = el("select", { id: "draftNodeKind", "aria-label": i18n.t("editor.kind") },
+      ["action", "human", "agentic", "foreach", "subflow", "decision", "join", "terminal", "extension"].map((value) =>
+        el("option", { value, ...(value === working.kind ? { selected: "selected" } : {}), text: value })));
+    kind.addEventListener("change", () => {
+      working.kind = kind.value;
+      if (working.kind !== "action") delete working.handler;
+      drawHandlerField();
+      drawConfigFields();
+    });
+    nodeEditor.append(
+      field(i18n.t("editor.nodeId"), nodeId),
+      field(i18n.t("editor.kind"), kind),
+      handlerField,
+    );
+
+    const selectedManifest = () => handlers.find((handler) =>
+      handler.name === working.handler?.name && handler.version === working.handler?.version);
+    const drawConfigFields = () => {
+      configFields.replaceChildren();
+      const schema = selectedManifest()?.config_schema || {};
+      const properties = schema.properties || {};
+      const required = new Set(schema.required || []);
+      for (const [name, property] of Object.entries(properties)) {
+        let control;
+        const value = working.config[name];
+        if (Array.isArray(property.enum)) {
+          control = el("select", { "aria-label": name }, property.enum.map((option) =>
+            el("option", {
+              value: String(option), ...(option === value ? { selected: "selected" } : {}),
+              text: String(option),
+            })));
+          control.addEventListener("change", () => { working.config[name] = control.value; });
+        } else if (property.type === "boolean") {
+          control = el("input", { type: "checkbox", ...(value ? { checked: "checked" } : {}) });
+          control.addEventListener("change", () => { working.config[name] = control.checked; });
+        } else {
+          control = el("input", {
+            type: ["integer", "number"].includes(property.type) ? "number" : "text",
+            value: value ?? "", ...(property.minimum !== undefined ? { min: property.minimum } : {}),
+          });
+          control.addEventListener("input", () => {
+            if (control.value === "" && !required.has(name)) delete working.config[name];
+            else working.config[name] = ["integer", "number"].includes(property.type)
+              ? Number(control.value) : control.value;
+            config.value = JSON.stringify(working.config, null, 2);
+          });
+        }
+        control.addEventListener("change", () => {
+          config.value = JSON.stringify(working.config, null, 2);
+        });
+        configFields.append(field(`${name}${required.has(name) ? " *" : ""}`, control));
+      }
+      configFields.hidden = !Object.keys(properties).length;
+    };
+
+    const drawHandlerField = () => {
+      handlerField.replaceChildren();
+      handlerField.hidden = working.kind !== "action";
+      if (working.kind !== "action") return;
+      const compatible = compatibleHandlers(working, handlers);
+      const handlerSelect = el("select", {
+        id: "draftNodeHandler", "aria-label": i18n.t("editor.handler"),
+      }, compatible.map((handler) => el("option", {
+        value: `${handler.name}\u0000${handler.version}`,
+        ...(working.handler?.name === handler.name && working.handler?.version === handler.version
+          ? { selected: "selected" } : {}),
+        text: `${handler.name}@${handler.version}`,
+      })));
+      if (!compatible.length) handlerSelect.append(el("option", {
+        value: "", text: i18n.t("editor.noCompatibleHandlers"), disabled: "disabled",
+      }));
+      handlerSelect.addEventListener("change", () => {
+        const [handlerName, version] = handlerSelect.value.split("\u0000");
+        working.handler = { name: handlerName, version };
+        drawConfigFields();
+      });
+      handlerField.append(field(i18n.t("editor.handler"), handlerSelect));
+    };
+
+    drawHandlerField();
+
+    let portsChanged = false;
+    nodeEditor.append(
+      renderPortEditor(i18n.t("editor.inputs"), working.inputs, () => {
+        portsChanged = true; drawHandlerField();
+      }),
+      renderPortEditor(i18n.t("editor.outputs"), working.outputs, () => {
+        portsChanged = true; drawHandlerField();
+      }),
+    );
+    drawConfigFields();
+    nodeEditor.append(configFields, field(i18n.t("editor.configAdvanced"), config));
+    const routeMode = el("select", { "aria-label": i18n.t("editor.routeMode") }, [
+      el("option", { value: "", text: i18n.t("editor.defaultRouteMode") }),
+      ...["exclusive", "parallel"].map((value) => el("option", {
+        value, ...(working.route_mode === value ? { selected: "selected" } : {}), text: value,
+      })),
+    ]);
+    routeMode.addEventListener("change", () => {
+      if (routeMode.value) working.route_mode = routeMode.value;
+      else delete working.route_mode;
+    });
+    const policyChecks = el("div", { class: "editor-check-grid" },
+      (document.policies || []).map((policy) => {
+        const checkbox = el("input", {
+          type: "checkbox", value: policy.id,
+          ...((working.policies || []).includes(policy.id) ? { checked: "checked" } : {}),
+        });
+        checkbox.addEventListener("change", () => {
+          const selected = new Set(working.policies || []);
+          if (checkbox.checked) selected.add(policy.id); else selected.delete(policy.id);
+          working.policies = [...selected];
+        });
+        return el("label", { class: "editor-check" }, [
+          checkbox, el("span", { text: `${policy.id} · ${policy.kind}` }),
+        ]);
+      }));
+    nodeEditor.append(
+      field(i18n.t("editor.routeMode"), routeMode),
+      el("label", { class: "editor-check" }, [
+        entryNode, el("span", { text: i18n.t("editor.entryNode") }),
+      ]),
+      el("fieldset", { class: "editor-fieldset" }, [
+        el("legend", { text: i18n.t("editor.nodePolicies") }),
+        policyChecks.childElementCount ? policyChecks
+          : el("div", { class: "muted", text: i18n.t("editor.noPolicies") }),
+      ]),
+    );
+    let nodeDeleteArmed = false;
+    const nodeDelete = el("button", {
+      type: "button", class: "button danger", id: "draftDeleteNode",
+      text: i18n.t("editor.deleteNode"),
+      onclick: async () => {
+        if (!nodeDeleteArmed) {
+          nodeDeleteArmed = true;
+          nodeDelete.textContent = i18n.t("editor.deleteConfirm");
+          return;
+        }
+        const removedIndex = selectedNode;
+        selectedNode = Math.max(0, removedIndex - 1);
+        await applyCandidate(removeNode(document, removedIndex));
+      },
+    });
+    nodeEditor.append(el("div", { class: "actions" }, [
+      el("button", {
+        type: "button", class: "button primary", id: "draftApplyNode",
+        text: i18n.t("editor.applyValidate"),
+        onclick: async () => {
+          try {
+            working.id = nodeId.value.trim();
+            if (!working.id) throw new Error(i18n.t("editor.nodeIdRequired"));
+            if (document.nodes.some((node, index) =>
+              node.id === working.id && index !== selectedNode)) {
+              throw new Error(i18n.t("editor.nodeIdDuplicate"));
+            }
+            working.config = JSON.parse(config.value || "{}");
+            if (working.kind === "action") {
+              const compatible = compatibleHandlers(working, handlers);
+              const selected = compatible.find((handler) =>
+                handler.name === working.handler?.name && handler.version === working.handler?.version);
+              if (!selected) throw new Error(portsChanged
+                ? i18n.t("editor.handlerPortsChanged") : i18n.t("editor.handlerRequired"));
+            }
+            nodeError.hidden = true;
+            const replacedIndex = selectedNode;
+            if (selectedNode === null) selectedNode = document.nodes.length;
+            let candidate = replaceNode(document, replacedIndex, working);
+            const entries = new Set(candidate.entry || []);
+            if (entryNode.checked) entries.add(working.id); else entries.delete(working.id);
+            candidate = { ...candidate, entry: [...entries] };
+            await applyCandidate(candidate);
+          } catch (error) {
+            nodeError.textContent = error.message;
+            nodeError.hidden = false;
+          }
+        },
+      }),
+      ...(original ? [nodeDelete] : []),
+    ]));
+    nodesPane.replaceChildren(
+      el("div", { class: "editor-node-layout" }, [nodeList, el("div", {}, [nodeError, nodeEditor])]),
+    );
+
+    const endpointOptions = (direction) => document.nodes.flatMap((node) =>
+      (node[direction] || []).map((port) => ({
+        value: `${node.id}\u0000${port.id}`,
+        label: `${node.id}.${port.id} · ${port.schema_id}`,
+      })));
+    const sourceEndpoints = endpointOptions("outputs");
+    const targetEndpoints = endpointOptions("inputs");
+    const edges = document.edges || [];
+    if (selectedEdge !== null) {
+      selectedEdge = Math.min(selectedEdge, Math.max(0, edges.length - 1));
+    }
+    const edgeList = el("div", { class: "editor-node-list" });
+    edges.forEach((edge, index) => edgeList.append(el("button", {
+      type: "button", class: `editor-nav-item ${index === selectedEdge ? "active" : ""}`,
+      text: `${edge.id} · ${edge.from.node} → ${edge.to.node}`,
+      onclick: () => { selectedEdge = index; drawStructured(); showPane("edges"); },
+    })));
+    edgeList.append(el("button", {
+      type: "button", class: "button", id: "draftAddEdge", text: i18n.t("editor.addEdge"),
+      onclick: () => { selectedEdge = null; drawStructured(); showPane("edges"); },
+    }));
+    const priorEdge = selectedEdge === null ? null : edges[selectedEdge];
+    const edgeWorking = JSON.parse(JSON.stringify(priorEdge || {
+      id: `edge_${edges.length + 1}`,
+      from: { node: sourceEndpoints[0]?.value.split("\u0000")[0] || "", port: sourceEndpoints[0]?.value.split("\u0000")[1] || "" },
+      to: { node: targetEndpoints[0]?.value.split("\u0000")[0] || "", port: targetEndpoints[0]?.value.split("\u0000")[1] || "" },
+    }));
+    const edgeError = el("div", { class: "banner error", hidden: "hidden", role: "alert" });
+    const edgeId = el("input", { id: "draftEdgeId", value: edgeWorking.id });
+    const endpointSelect = (options, selected, label) => el("select", {
+      "aria-label": label,
+    }, options.map((option) => el("option", {
+      value: option.value,
+      ...(option.value === `${selected.node}\u0000${selected.port}` ? { selected: "selected" } : {}),
+      text: option.label,
+    })));
+    const edgeFrom = endpointSelect(sourceEndpoints, edgeWorking.from, i18n.t("editor.edgeFrom"));
+    const edgeTo = endpointSelect(targetEndpoints, edgeWorking.to, i18n.t("editor.edgeTo"));
+    const edgeRoute = el("select", { "aria-label": i18n.t("editor.edgeRoute") },
+      ["success", "error", "timeout", "cancel"].map((value) => el("option", {
+        value, ...(value === (edgeWorking.route || "success") ? { selected: "selected" } : {}), text: value,
+      })));
+    const edgePriority = el("input", { type: "number", min: "0", value: edgeWorking.priority ?? 0 });
+    const edgeBack = el("input", { type: "checkbox", ...(edgeWorking.back_edge ? { checked: "checked" } : {}) });
+    const edgePolicy = el("select", { "aria-label": i18n.t("editor.edgePolicy") }, [
+      el("option", { value: "", text: i18n.t("editor.noPolicy") }),
+      ...(document.policies || []).map((policy) => el("option", {
+        value: policy.id, ...(edgeWorking.policy === policy.id ? { selected: "selected" } : {}),
+        text: `${policy.id} · ${policy.kind}`,
+      })),
+    ]);
+    const edgeCondition = el("textarea", { class: "mono", id: "draftEdgeCondition" });
+    edgeCondition.value = edgeWorking.condition === undefined ? "" : JSON.stringify(edgeWorking.condition, null, 2);
+    const edgeMapping = el("textarea", { class: "mono", id: "draftEdgeMapping" });
+    edgeMapping.value = edgeWorking.mapping === undefined ? "" : JSON.stringify(edgeWorking.mapping, null, 2);
+    let edgeDeleteArmed = false;
+    const edgeDelete = el("button", {
+      type: "button", class: "button danger", id: "draftDeleteEdge",
+      text: i18n.t("editor.deleteEdge"),
+      onclick: async () => {
+        if (!edgeDeleteArmed) {
+          edgeDeleteArmed = true;
+          edgeDelete.textContent = i18n.t("editor.deleteConfirm");
+          return;
+        }
+        const removedIndex = selectedEdge;
+        selectedEdge = Math.max(0, removedIndex - 1);
+        await applyCandidate(removeEdge(document, removedIndex));
+      },
+    });
+    const edgeForm = el("div", { class: "editor-form-grid" }, [
+      edgeError,
+      field(i18n.t("editor.edgeId"), edgeId),
+      field(i18n.t("editor.edgeFrom"), edgeFrom),
+      field(i18n.t("editor.edgeTo"), edgeTo),
+      field(i18n.t("editor.edgeRoute"), edgeRoute),
+      field(i18n.t("editor.edgePriority"), edgePriority),
+      field(i18n.t("editor.edgePolicy"), edgePolicy),
+      el("label", { class: "editor-check" }, [edgeBack, el("span", { text: i18n.t("editor.backEdge") })]),
+      field(i18n.t("editor.edgeCondition"), edgeCondition),
+      field(i18n.t("editor.edgeMapping"), edgeMapping),
+      el("div", { class: "actions" }, [
+        el("button", {
+          type: "button", class: "button primary", id: "draftApplyEdge",
+          text: i18n.t("editor.applyValidate"),
+          onclick: async () => {
+            try {
+              const [fromNode, fromPort] = edgeFrom.value.split("\u0000");
+              const [toNode, toPort] = edgeTo.value.split("\u0000");
+              const next = {
+                id: edgeId.value.trim(),
+                from: { node: fromNode, port: fromPort },
+                to: { node: toNode, port: toPort },
+                route: edgeRoute.value,
+                priority: Number(edgePriority.value),
+                back_edge: edgeBack.checked,
+              };
+              if (edgePolicy.value) next.policy = edgePolicy.value;
+              if (edgeCondition.value.trim()) {
+                try { next.condition = JSON.parse(edgeCondition.value); }
+                catch { next.condition = edgeCondition.value; }
+              }
+              if (edgeMapping.value.trim()) {
+                next.mapping = JSON.parse(edgeMapping.value);
+                if (!next.mapping || Array.isArray(next.mapping) || typeof next.mapping !== "object") {
+                  throw new Error(i18n.t("editor.mappingInvalid"));
+                }
+              }
+              if (!next.id || !fromNode || !fromPort || !toNode || !toPort) {
+                throw new Error(i18n.t("editor.edgeInvalid"));
+              }
+              edgeError.hidden = true;
+              const replacedIndex = selectedEdge;
+              if (selectedEdge === null) selectedEdge = edges.length;
+              await applyCandidate(replaceEdge(document, replacedIndex, next));
+            } catch (error) {
+              edgeError.textContent = error.message;
+              edgeError.hidden = false;
+            }
+          },
+        }),
+        ...(priorEdge ? [edgeDelete] : []),
+      ]),
+    ]);
+    edgesPane.replaceChildren(el("div", { class: "editor-node-layout" }, [edgeList, edgeForm]));
+
+    const policies = document.policies || [];
+    if (selectedPolicy !== null) {
+      selectedPolicy = Math.min(selectedPolicy, Math.max(0, policies.length - 1));
+    }
+    const policyList = el("div", { class: "editor-node-list" });
+    policies.forEach((policy, index) => policyList.append(el("button", {
+      type: "button", class: `editor-nav-item ${index === selectedPolicy ? "active" : ""}`,
+      text: `${policy.id} · ${policy.kind}`,
+      onclick: () => { selectedPolicy = index; drawStructured(); showPane("policies"); },
+    })));
+    policyList.append(el("button", {
+      type: "button", class: "button", id: "draftAddPolicy", text: i18n.t("editor.addPolicy"),
+      onclick: () => { selectedPolicy = null; drawStructured(); showPane("policies"); },
+    }));
+    const priorPolicy = selectedPolicy === null ? null : policies[selectedPolicy];
+    const policyWorking = JSON.parse(JSON.stringify(priorPolicy || {
+      id: `policy_${policies.length + 1}`, kind: "retry", config: { max_attempts: 3 },
+    }));
+    const policyError = el("div", { class: "banner error", hidden: "hidden", role: "alert" });
+    const policyId = el("input", { id: "draftPolicyId", value: policyWorking.id });
+    const policyKind = el("select", { id: "draftPolicyKind", "aria-label": i18n.t("editor.policyKind") },
+      ["route", "join", "retry", "rework", "loop", "completion"].map((value) => el("option", {
+        value, ...(value === policyWorking.kind ? { selected: "selected" } : {}), text: value,
+      })));
+    const policyConfig = el("textarea", { id: "draftPolicyConfig", class: "mono" });
+    policyConfig.value = JSON.stringify(policyWorking.config, null, 2);
+    const templates = {
+      route: {}, join: { mode: "all" }, retry: { max_attempts: 3 },
+      rework: { max_generations: 3 }, loop: { max_iterations: 3 }, completion: {},
+    };
+    policyKind.addEventListener("change", () => {
+      policyConfig.value = JSON.stringify(templates[policyKind.value], null, 2);
+    });
+    let policyDeleteArmed = false;
+    const policyDelete = el("button", {
+      type: "button", class: "button danger", id: "draftDeletePolicy",
+      text: i18n.t("editor.deletePolicy"),
+      onclick: async () => {
+        if (!policyDeleteArmed) {
+          policyDeleteArmed = true;
+          policyDelete.textContent = i18n.t("editor.deleteConfirm");
+          return;
+        }
+        const removedIndex = selectedPolicy;
+        selectedPolicy = Math.max(0, removedIndex - 1);
+        await applyCandidate(removePolicy(document, removedIndex));
+      },
+    });
+    const policyForm = el("div", { class: "editor-form-grid" }, [
+      policyError,
+      field(i18n.t("editor.policyId"), policyId),
+      field(i18n.t("editor.policyKind"), policyKind),
+      field(i18n.t("editor.policyConfig"), policyConfig),
+      el("div", { class: "actions" }, [
+        el("button", {
+          type: "button", class: "button primary", id: "draftApplyPolicy",
+          text: i18n.t("editor.applyValidate"),
+          onclick: async () => {
+            try {
+              const configValue = JSON.parse(policyConfig.value || "{}");
+              if (!policyId.value.trim() || !configValue || Array.isArray(configValue)
+                  || typeof configValue !== "object") throw new Error(i18n.t("editor.policyInvalid"));
+              policyError.hidden = true;
+              const replacedIndex = selectedPolicy;
+              if (selectedPolicy === null) selectedPolicy = policies.length;
+              await applyCandidate(replacePolicy(document, replacedIndex, {
+                id: policyId.value.trim(), kind: policyKind.value, config: configValue,
+              }));
+            } catch (error) {
+              policyError.textContent = error.message;
+              policyError.hidden = false;
+            }
+          },
+        }),
+        ...(priorPolicy ? [policyDelete] : []),
+      ]),
+    ]);
+    policiesPane.replaceChildren(el("div", { class: "editor-node-layout" }, [policyList, policyForm]));
+    showPane(activePane);
+  };
+
   let discardArmed = false;
   const redraw = () => {
     controls.replaceChildren();
+    if (command("workflow.draft.save")) {
+      controls.append(el("button", {
+        class: "button", id: "draftFormat", text: i18n.t("editor.format"),
+        onclick: async () => {
+          try {
+            if (saveTimer) clearTimeout(saveTimer);
+            source.value = formatWorkflowSource(parseWorkflowSource(source.value));
+            dirtySinceSave = true;
+            setSaveState("unsaved");
+            await save();
+          } catch (error) {
+            reportError(error);
+          }
+        },
+      }));
+    }
     const validate = command("workflow.draft.validate");
     if (validate) {
       controls.append(el("button", {
@@ -2029,9 +2867,21 @@ async function renderWorkflowEditor(root, draftId) {
       }));
     } else if (draft.diagnostics.length) {
       for (const item of draft.diagnostics) {
-        diagnostics.append(el("div", { class: "error-item" }, [
-          el("div", { class: "mono", text: `${item.code} ${item.json_path || ""}` }),
-          el("div", { text: item.message }),
+        const target = diagnosticTarget(item);
+        diagnostics.append(el("div", { class: "diagnostic-row" }, [
+          el("button", {
+            type: "button", class: "error-item diagnostic-item",
+            "aria-label": i18n.t("editor.locateDiagnostic", { code: item.code, path: target.path }),
+            onclick: () => locateDiagnostic(item, target),
+          }, [
+            el("div", { class: "mono", text: `${item.code} ${item.json_path || ""}` }),
+            el("div", { text: item.message }),
+          ]),
+          el("button", {
+            type: "button", class: "button diagnostic-copy",
+            text: i18n.t("editor.copyDiagnostic"),
+            onclick: () => copyText(`${item.code} ${target.path}`),
+          }),
         ]));
       }
     } else {
@@ -2039,10 +2889,15 @@ async function renderWorkflowEditor(root, draftId) {
         class: "muted", text: i18n.t("editor.notValidated"),
       }));
     }
+    draftFacts.textContent = i18n.t("editor.facts", {
+      revision: i18n.number(draft.revision),
+      updated: i18n.dateTime(draft.updated_at),
+      hash: (draft.validated_definition_hash || draft.source_hash || "—").slice(0, 27),
+    });
   };
 
   root.append(
-    el("section", { class: "panel" }, [
+    el("section", { class: "panel workflow-editor-panel" }, [
       el("div", { class: "panel-head" }, [
         el("div", {}, [
           el("div", { class: "eyebrow", text: `${draft.workflow_id} · v${draft.base_version}` }),
@@ -2051,17 +2906,51 @@ async function renderWorkflowEditor(root, draftId) {
         saveState,
         controls,
       ]),
-      el("div", { class: "panel-body" }, [conflict, source]),
-    ]),
-    el("section", { class: "panel" }, [
-      el("div", { class: "panel-head" }, [
-        el("div", { class: "panel-title", text: i18n.t("editor.diagnostics") }),
+      el("div", { class: "panel-body" }, [
+        conflict,
+        el("div", { class: "workflow-editor-layout" }, [
+          editorNav,
+          el("div", { class: "workflow-editor-content" }, [editorMain, draftFacts]),
+          el("aside", { class: "editor-diagnostics" }, [
+            el("div", { class: "panel-title", text: i18n.t("editor.diagnostics") }),
+            diagnostics,
+          ]),
+        ]),
       ]),
-      diagnostics,
     ]),
+  );
+  editorMain.append(
+    outlinePane, metadataPane, nodesPane, edgesPane, policiesPane, sourcePane,
+  );
+
+  const warnBeforeUnload = (event) => {
+    if (!dirtySinceSave && !saving) return;
+    event.preventDefault();
+    event.returnValue = "";
+  };
+  const retryWhenOnline = () => {
+    if (dirtySinceSave && !saving) save();
+  };
+  const markOffline = () => {
+    if (dirtySinceSave || saving) setSaveState("offline");
+  };
+  window.addEventListener("beforeunload", warnBeforeUnload);
+  window.addEventListener("online", retryWhenOnline);
+  window.addEventListener("offline", markOffline);
+  activeViewCleanup = () => {
+    if (saveTimer) clearTimeout(saveTimer);
+    window.removeEventListener("beforeunload", warnBeforeUnload);
+    window.removeEventListener("online", retryWhenOnline);
+    window.removeEventListener("offline", markOffline);
+    activeViewLeaveGuard = null;
+  };
+  activeViewLeaveGuard = () => (
+    (!dirtySinceSave && !saving) || window.confirm(i18n.t("editor.leaveConfirm"))
   );
   setSaveState("saved");
   redraw();
+  drawStructured();
+  showPane("outline");
 }
 
 function generatedInputSupported(entry) {
@@ -2364,7 +3253,7 @@ function describeGenerationFailure(error) {
   }
 }
 
-async function newRunDialog(preselectedWorkflowId = null) {
+async function newRunDialog(preselectedWorkflowId = null, preselectedVersion = null) {
   try {
     const active = (await api.dashboard()).data.active_goal;
     if (active) {
@@ -2384,13 +3273,26 @@ async function newRunDialog(preselectedWorkflowId = null) {
     announce(i18n.t("newRun.catalog.unavailable"), "error");
     return;
   }
-  const entries = catalog.data.workflows;
+  let entries = catalog.data.workflows;
+  if (preselectedWorkflowId && preselectedVersion) {
+    try {
+      const pinned = (await api.workflowDetail(
+        preselectedWorkflowId, preselectedVersion,
+      )).data;
+      entries = entries.map((item) =>
+        item.workflow_id === preselectedWorkflowId ? pinned : item);
+    } catch (error) {
+      reportError(error);
+      return;
+    }
+  }
   const state = {
     step: 0,
     workflowId: entries.some((item) => item.workflow_id === preselectedWorkflowId)
       ? preselectedWorkflowId : null,
     goal: "",
     input: {},
+    pinnedVersion: preselectedVersion,
     intent: `run.start:${crypto.randomUUID ? crypto.randomUUID() : Date.now()}`,
   };
   const dialog = el("dialog", { class: "goal-wizard", "aria-label": i18n.t("newRun.title") });
@@ -2404,6 +3306,7 @@ async function newRunDialog(preselectedWorkflowId = null) {
     problem.hidden = false;
   };
   const selectedEntry = () => entries.find((item) => item.workflow_id === state.workflowId);
+  const entryVersion = (entry) => entry.selected_version || entry.latest_version;
 
   const draw = () => {
     const entry = selectedEntry();
@@ -2424,12 +3327,16 @@ async function newRunDialog(preselectedWorkflowId = null) {
           el("input", {
             type: "radio", name: "workflow", value: item.workflow_id,
             ...(item.workflow_id === state.workflowId ? { checked: "checked" } : {}),
-            onchange: () => { state.workflowId = item.workflow_id; draw(); },
+            onchange: () => {
+              state.workflowId = item.workflow_id;
+              if (item.workflow_id !== preselectedWorkflowId) state.pinnedVersion = null;
+              draw();
+            },
           }),
           el("span", { class: "wizard-workflow-mark", "aria-hidden": "true", text: "⌘" }),
           el("span", { class: "wizard-workflow-copy" }, [
             el("strong", { text: item.name }),
-            el("small", { class: "muted mono", text: `${item.workflow_id} · v${item.latest_version}` }),
+            el("small", { class: "muted mono", text: `${item.workflow_id} · v${entryVersion(item)}` }),
             el("span", { class: "muted", text: item.description || i18n.t("workflows.noDescription") }),
           ]),
           el("span", { class: "workflow-meta", text: i18n.t("workflows.summary", {
@@ -2483,7 +3390,7 @@ async function newRunDialog(preselectedWorkflowId = null) {
       content.append(
         el("h3", { text: i18n.t("newRun.review.heading") }),
         el("dl", { class: "review-list" }, [
-          el("div", {}, [el("dt", { text: i18n.t("newRun.workflow") }), el("dd", { text: `${entry.name} · v${entry.latest_version}` })]),
+          el("div", {}, [el("dt", { text: i18n.t("newRun.workflow") }), el("dd", { text: `${entry.name} · v${entryVersion(entry)}` })]),
           el("div", {}, [el("dt", { text: i18n.t("newRun.goal") }), el("dd", { text: state.goal })]),
           el("div", {}, [
             el("dt", { text: i18n.t(entry.goal_binding ? "newRun.input.binding" : "newRun.input") }),
@@ -2499,7 +3406,7 @@ async function newRunDialog(preselectedWorkflowId = null) {
     } else {
       content.append(
         el("h3", { text: i18n.t("newRun.start.heading") }),
-        el("p", { class: "muted", text: i18n.t("newRun.start.body", { workflow: entry.name, version: entry.latest_version }) }),
+        el("p", { class: "muted", text: i18n.t("newRun.start.body", { workflow: entry.name, version: entryVersion(entry) }) }),
       );
     }
 
@@ -2554,11 +3461,13 @@ async function newRunDialog(preselectedWorkflowId = null) {
           try {
             // Refetch immediately before mutation. If the published workflow or
             // the actor's permission changed, do not submit a stale command.
-            const fresh = (await api.workflowCatalog()).data.workflows.find(
-              (item) => item.workflow_id === state.workflowId,
-            );
+            const fresh = state.pinnedVersion
+              ? (await api.workflowDetail(state.workflowId, state.pinnedVersion)).data
+              : (await api.workflowCatalog()).data.workflows.find(
+                  (item) => item.workflow_id === state.workflowId,
+                );
             if (!fresh) return fail("newRun.workflow.unavailable");
-            if (fresh.latest_version !== entry.latest_version) {
+            if (!state.pinnedVersion && fresh.latest_version !== entry.latest_version) {
               dialog.close();
               announce(i18n.t("newRun.workflow.changed"), "error");
               return;
@@ -2567,7 +3476,7 @@ async function newRunDialog(preselectedWorkflowId = null) {
             if (!allowed) return fail("newRun.workflow.forbidden");
             const started = await api.execute(allowed, {
               workflow_id: fresh.workflow_id,
-              workflow_version: fresh.latest_version,
+              workflow_version: entryVersion(fresh),
               goal: state.goal,
               input: state.input,
             }, state.intent);
@@ -2607,6 +3516,7 @@ async function newRunDialog(preselectedWorkflowId = null) {
 /* ------------------------------------------------------------------- shell */
 
 function navigate(next) {
+  if (activeViewLeaveGuard && !activeViewLeaveGuard()) return;
   route = next;
   router.navigate(next);
 }
@@ -2619,6 +3529,10 @@ async function render() {
     return;
   }
   rendering = true;
+  if (activeViewCleanup) {
+    activeViewCleanup();
+    activeViewCleanup = null;
+  }
   const root = document.getElementById("content");
   root.replaceChildren();
   root.append(dataState(el, i18n, "loading"));

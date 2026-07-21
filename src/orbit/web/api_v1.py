@@ -712,6 +712,9 @@ def build_api_v1(
                 "version": entry.manifest.version,
                 "manifest_fingerprint": entry.manifest.fingerprint,
                 "node_kinds": list(entry.manifest.node_kinds),
+                "inputs": dict(entry.manifest.inputs),
+                "outputs": dict(entry.manifest.outputs),
+                "config_schema": dict(entry.manifest.config_schema),
                 "execution_safety": entry.manifest.execution_safety.value,
                 "capabilities": list(entry.manifest.capabilities),
                 "required_secrets": list(entry.manifest.required_secrets),
@@ -1082,7 +1085,7 @@ def build_api_v1(
                 "method": "POST",
                 "href": f"/api/v1/workflows/{quote(workflow_id, safe=':')}/drafts",
                 "target_aggregate_id": workflow_id,
-                "expected_version": item["latest_version"],
+                "expected_version": item["selected_version"],
                 "payload_schema": "workflow-draft-create/1.0",
             })
         return JSONResponse(envelope(item))

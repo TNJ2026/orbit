@@ -102,6 +102,25 @@ class WorkflowMigrationAndUnitOfWorkTests(unittest.TestCase):
         self.assertIn("human_tasks", tables)
         self.assertEqual(list(range(1, 14)), versions)
 
+    def test_migration_is_repeatable_after_workflow_drafts_exist(self) -> None:
+        with connect_workflow_database(self.path) as connection:
+            connection.execute(
+                "INSERT INTO workflow_definitions VALUES (?, ?, ?, ?)",
+                ("workflow:repeat", "Repeat", "2026-07-20T00:00:00Z", "test"),
+            )
+            migrate_workflow_database(connection)
+            migrate_workflow_database(connection)
+            draft_table = connection.execute(
+                "SELECT COUNT(*) FROM sqlite_master "
+                "WHERE type='table' AND name='workflow_drafts'"
+            ).fetchone()[0]
+            definition = connection.execute(
+                "SELECT name FROM workflow_definitions WHERE workflow_id=?",
+                ("workflow:repeat",),
+            ).fetchone()[0]
+        self.assertEqual(1, draft_table)
+        self.assertEqual("Repeat", definition)
+
     def test_unit_of_work_requires_explicit_commit(self) -> None:
         with SQLiteUnitOfWork(self.path) as uow:
             uow.connection.execute(

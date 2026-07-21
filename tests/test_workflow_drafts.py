@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import tempfile
+import time
 import unittest
 
 from orbit.workflow.application.workflow_draft_service import (
@@ -153,6 +154,42 @@ class DraftLifecycleTests(DraftTestCase):
                 expected_revision=draft.revision, actor="author", now=NOW,
             )
 
+    def test_source_at_cap_survives_service_reconstruction(self) -> None:
+        draft = self.draft()
+        source = " " * MAX_SOURCE_BYTES
+        saved = self.service.save(
+            EntityId.parse(draft.draft_id), source,
+            expected_revision=draft.revision, actor="author", now=NOW,
+        )
+        restarted = WorkflowDraftApplicationService(self.path, self.definitions)
+        restored = restarted.get(
+            EntityId.parse(draft.draft_id), actor="author", now=NOW,
+        )
+        self.assertEqual(MAX_SOURCE_BYTES, len(restored.source_text.encode("utf-8")))
+        self.assertEqual(saved.revision, restored.revision)
+
+    def test_thirty_invalid_nodes_produce_diagnostics_within_budget(self) -> None:
+        draft = self.draft()
+        document = dsl()
+        document["nodes"] = [
+            {"id": f"node_{index}", "kind": "action"} for index in range(30)
+        ]
+        document["entry"] = ["node_0"]
+        document["terminals"] = ["node_29"]
+        document["edges"] = []
+        saved = self.service.save(
+            EntityId.parse(draft.draft_id), json.dumps(document),
+            expected_revision=draft.revision, actor="author", now=NOW,
+        )
+        started = time.monotonic()
+        checked = self.service.validate(
+            EntityId.parse(draft.draft_id), expected_revision=saved.revision,
+            actor="author", now=NOW,
+        )
+        self.assertLess(time.monotonic() - started, 5.0)
+        self.assertEqual("invalid", checked.validation_status)
+        self.assertGreaterEqual(len(checked.diagnostics), 30)
+
     def test_validation_records_diagnostics_and_gates_publish(self) -> None:
         draft = self.draft()
         saved = self.service.save(
@@ -165,6 +202,8 @@ class DraftLifecycleTests(DraftTestCase):
         )
         self.assertEqual("invalid", checked.validation_status)
         self.assertTrue(checked.diagnostics)
+        self.assertIn("json_path", checked.diagnostics[0])
+        self.assertNotIn("path", checked.diagnostics[0])
         with self.assertRaises(DraftNotValidatedError):
             self.service.publish(
                 EntityId.parse(draft.draft_id),

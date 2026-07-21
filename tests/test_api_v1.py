@@ -721,6 +721,13 @@ class CatalogTests(ApiTestCase):
                 "registration_only", response.json()["data"]["status_semantics"]
             )
             self.assertIn("manifest_fingerprint", entry)
+            self.assertEqual(
+                {"value": "example://integer/1.0"}, entry["inputs"]
+            )
+            self.assertEqual(
+                {"value": "example://integer/1.0"}, entry["outputs"]
+            )
+            self.assertEqual({"type": "object"}, entry["config_schema"])
             # Nothing here may be pasteable into a shell.
             serialised = repr(entry)
             for forbidden in ("command", "argv", "path", "secret_value"):
@@ -1097,6 +1104,17 @@ class WorkflowDraftApiTests(ApiTestCase):
             ).json()["data"]
             self.assertEqual(2, refreshed["latest_version"])
             self.assertEqual("Linear, edited", refreshed["name"])
+            historical = client.get(
+                "/api/v1/workflows/workflow:draftable?version=1", actor="writer"
+            ).json()["data"]
+            self.assertEqual(1, historical["selected_version"])
+            self.assertEqual(2, historical["latest_version"])
+            self.assertEqual([2, 1], [item["version"] for item in historical["versions"]])
+            create = next(
+                item for item in historical["allowed_commands"]
+                if item["command"] == "workflow.draft.create"
+            )
+            self.assertEqual(1, create["expected_version"])
 
     def test_invalid_source_reports_diagnostics_and_blocks_publish(self) -> None:
         with AsgiHarness(self.app) as client:

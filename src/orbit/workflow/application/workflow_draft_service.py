@@ -110,6 +110,13 @@ class DraftRecord:
     published_version: int | None
 
 
+def _draft_diagnostic(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Project old and new stored diagnostics onto WorkflowDraft 2.0."""
+    item = dict(value)
+    item["json_path"] = item.pop("path", item.get("json_path", "$"))
+    return item
+
+
 def _record(row) -> DraftRecord:
     return DraftRecord(
         draft_id=row["draft_id"], workflow_id=row["workflow_id"],
@@ -119,7 +126,10 @@ def _record(row) -> DraftRecord:
         validation_status=row["validation_status"],
         validated_source_hash=row["validated_source_hash"],
         validated_definition_hash=row["validated_definition_hash"],
-        diagnostics=tuple(json.loads(row["diagnostics_json"])),
+        diagnostics=tuple(
+            _draft_diagnostic(item)
+            for item in json.loads(row["diagnostics_json"])
+        ),
         revision=row["revision"], status=row["status"],
         created_at=row["created_at"], updated_at=row["updated_at"],
         published_version=row["published_version"],
@@ -275,7 +285,9 @@ class WorkflowDraftApplicationService:
                 validated_definition = compiled.definition_hash.value
             except DiagnosticError as exc:
                 verdict = "invalid"
-                diagnostics = [item.to_dict() for item in exc.diagnostics]
+                diagnostics = [
+                    _draft_diagnostic(item.to_dict()) for item in exc.diagnostics
+                ]
                 validated_definition = None
             db.execute(
                 """UPDATE workflow_drafts SET validation_status=?,
