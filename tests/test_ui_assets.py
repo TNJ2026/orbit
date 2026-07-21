@@ -61,10 +61,20 @@ class CatalogTests(unittest.TestCase):
 
     def test_the_chinese_catalog_is_actually_translated(self) -> None:
         zh, en = catalog("zh-CN"), catalog("en-US")
-        shared = [key for key in zh if zh[key] == en[key]]
-        # Brand names and a handful of identifiers legitimately match.
-        self.assertLessEqual(
-            len(shared), 3, f"untranslated zh-CN entries: {sorted(shared)}"
+        shared = {key for key in zh if zh[key] == en[key]}
+        # Brand names, identifiers, and terms deliberately kept in English.
+        intentional = {
+            "app.title",
+            "artifacts.title",
+            "nav.artifacts",
+            "nav.ops",
+            "run.data.kind.artifact",
+            "shell.breadcrumb.root",
+            "wait.none",
+        }
+        self.assertEqual(
+            set(), shared - intentional,
+            f"untranslated zh-CN entries: {sorted(shared - intentional)}",
         )
 
     def test_replaced_ops_and_shell_terms_are_not_kept_as_dead_keys(self) -> None:
