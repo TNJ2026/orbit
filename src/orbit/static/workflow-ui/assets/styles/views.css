@@ -478,10 +478,25 @@
 }
 .agent-editor-diff > div { min-width: 0; display: grid; gap: 6px; }
 .agent-editor-diff .artifact-preview { max-height: 300px; overflow: auto; }
+.agent-editor-semantic-diff {
+  display: grid; gap: 10px; padding: 12px; background: var(--panel-2);
+  border: 1px solid var(--line); border-radius: 12px;
+}
+.agent-editor-semantic-diff > .actions { justify-content: space-between; }
+.semantic-diff-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.semantic-diff-group {
+  min-width: 0; padding: 10px; border-left: 3px solid var(--blue);
+  background: color-mix(in srgb, var(--panel) 82%, transparent); border-radius: 8px;
+}
+.semantic-diff-group.added { border-left-color: var(--green); }
+.semantic-diff-group.removed { border-left-color: var(--red); }
+.semantic-diff-items { display: grid; gap: 4px; margin-top: 6px; }
+.semantic-diff-items span { overflow-wrap: anywhere; }
 .agent-editor-history { border-top: 1px solid var(--line-soft); padding-top: 12px; }
 .agent-workflow-editor .editor-diagnostics {
   border-left: 0; border-top: 1px solid var(--line-soft); padding: 12px 0 0;
 }
 @media (max-width: 700px) {
   .agent-editor-diff { grid-template-columns: 1fr; }
+  .semantic-diff-grid { grid-template-columns: 1fr; }
 }

@@ -21,6 +21,7 @@ const { Api, ApiError } = await import(`${assets}/api.js`);
 const { I18n, preferredLocale, LOCALES } = await import(`${assets}/i18n.js`);
 const { readRoute, routeHash } = await import(`${assets}/router.js`);
 const { dataState } = await import(`${assets}/components/data-state.js`);
+const { semanticWorkflowDiff } = await import(`${assets}/workflow-diff.js`);
 
 function catalog(locale) {
   return JSON.parse(readFileSync(`${assets}/i18n.${locale}.json`, "utf8"));
@@ -49,6 +50,51 @@ function stubUuid(next) {
   });
 }
 stubUuid(() => "uuid-1");
+
+/* -- Workflow semantic diff ---------------------------------------------- */
+
+test("workflow diff ignores formatting and object-key order", () => {
+  const before = JSON.stringify({
+    metadata: { name: "Review", id: "review" }, nodes: [{ id: "done", kind: "terminal" }], edges: [],
+  });
+  const after = JSON.stringify({
+    edges: [], nodes: [{ kind: "terminal", id: "done" }], metadata: { id: "review", name: "Review" },
+  }, null, 2);
+  assert.deepEqual(semanticWorkflowDiff(before, after), {
+    addedNodes: [], removedNodes: [], changedNodes: [],
+    addedEdges: [], removedEdges: [], changedEdges: [], workflowFields: [], changeCount: 0,
+  });
+});
+
+test("workflow diff reports graph and workflow changes by stable identity", () => {
+  const before = JSON.stringify({
+    metadata: { id: "review", name: "Review" }, entry: ["draft"],
+    nodes: [
+      { id: "draft", kind: "action", handler: { name: "agent.a", version: "1.0.0" } },
+      { id: "done", kind: "terminal" },
+    ],
+    edges: [{ id: "finish", from: { node: "draft", port: "out" }, to: { node: "done", port: "in" } }],
+  });
+  const after = JSON.stringify({
+    metadata: { id: "review", name: "Review with approval" }, entry: ["draft"],
+    nodes: [
+      { id: "draft", kind: "action", handler: { name: "agent.b", version: "1.0.0" } },
+      { id: "approve", kind: "human" },
+    ],
+    edges: [{ id: "finish", from: { node: "draft", port: "out" }, to: { node: "approve", port: "in" } }],
+  });
+  const diff = semanticWorkflowDiff(before, after);
+  assert.deepEqual(diff.addedNodes, ["approve"]);
+  assert.deepEqual(diff.removedNodes, ["done"]);
+  assert.deepEqual(diff.changedNodes, [{ id: "draft", fields: ["handler"] }]);
+  assert.deepEqual(diff.changedEdges, [{ id: "finish", fields: ["to"] }]);
+  assert.deepEqual(diff.workflowFields, ["metadata"]);
+  assert.equal(diff.changeCount, 5);
+});
+
+test("workflow diff preserves raw-source fallback for non-JSON DSL", () => {
+  assert.equal(semanticWorkflowDiff("nodes: []", "nodes: [changed]"), null);
+});
 
 /* -- error mapping -------------------------------------------------------- */
 

@@ -871,6 +871,8 @@ class WorkflowEditorP4Tests(BrowserE2ETestCase):
         page.click("#draftRevise")
         page.wait_for_selector("#draftReject", timeout=15000)
         self.assertIn("P4 Agent revision", page.text_content("#draftSourcePreview"))
+        self.assertIn("Change summary", page.inner_text("[data-semantic-diff]"))
+        self.assertIn("WORKFLOW FIELDS", page.inner_text("[data-semantic-diff]"))
         self.assertIn("CURRENT DRAFT", page.inner_text(".agent-editor-diff"))
         page.click("#draftReject")
         page.wait_for_function(

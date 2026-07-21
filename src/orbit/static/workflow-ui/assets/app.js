@@ -17,6 +17,7 @@ import {
   budgetDialog, cancelRunDialog, humanSubmitDialog, recoveryDialog,
 } from "./components/command-dialog.js";
 import { dataState } from "./components/data-state.js";
+import { semanticWorkflowDiff } from "./workflow-diff.js";
 
 const api = new Api();
 let i18n;
@@ -1961,6 +1962,36 @@ async function renderWorkflowEditor(root, draftId) {
   const command = (name) =>
     (draft.allowed_commands || []).find((item) => item.command === name);
 
+  const semanticDiffView = (candidate) => {
+    const diff = semanticWorkflowDiff(candidate.previous_source, candidate.source);
+    if (!diff) return null;
+    const groups = [
+      ["editor.diff.addedNodes", diff.addedNodes, "added"],
+      ["editor.diff.removedNodes", diff.removedNodes, "removed"],
+      ["editor.diff.changedNodes", diff.changedNodes.map((item) =>
+        `${item.id} · ${item.fields.join(", ")}`), "changed"],
+      ["editor.diff.addedEdges", diff.addedEdges, "added"],
+      ["editor.diff.removedEdges", diff.removedEdges, "removed"],
+      ["editor.diff.changedEdges", diff.changedEdges.map((item) =>
+        `${item.id} · ${item.fields.join(", ")}`), "changed"],
+      ["editor.diff.workflowFields", diff.workflowFields, "changed"],
+    ].filter(([, items]) => items.length);
+    return el("div", { class: "agent-editor-semantic-diff", "data-semantic-diff": "true" }, [
+      el("div", { class: "actions" }, [
+        el("div", { class: "panel-title", text: i18n.t("editor.diff.title") }),
+        el("span", { class: "pill", text: i18n.t("editor.diff.changeCount", {
+          count: i18n.number(diff.changeCount),
+        }) }),
+      ]),
+      groups.length ? el("div", { class: "semantic-diff-grid" }, groups.map(([key, items, tone]) =>
+        el("section", { class: `semantic-diff-group ${tone}` }, [
+          el("div", { class: "eyebrow", text: i18n.t(key, { count: i18n.number(items.length) }) }),
+          el("div", { class: "semantic-diff-items" }, items.map((item) =>
+            el("span", { class: "mono", text: item }))),
+        ]))) : el("p", { class: "muted", text: i18n.t("editor.diff.identical") }),
+    ]);
+  };
+
   const execute = async (name, payload, intent) => {
     const allowed = command(name);
     if (!allowed || busy) return null;
@@ -2135,6 +2166,7 @@ async function renderWorkflowEditor(root, draftId) {
             attempts: i18n.number(candidate.attempts),
             hash: candidate.definition_hash.slice(0, 27),
           }) }),
+          semanticDiffView(candidate),
           el("div", { class: "agent-editor-diff" }, [
             el("div", {}, [
               el("div", { class: "eyebrow", text: i18n.t("editor.beforeRevision") }),
