@@ -24,6 +24,7 @@ from typing import Any, Mapping
 
 from ..domain.ids import EntityId
 from ..persistence.database import connect_workflow_database
+from .graph_layout import graph_layout
 
 
 class PlanNotFound(ValueError):
@@ -85,41 +86,6 @@ def _definition_edges(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
         for source, target in sorted(successors.items())
         if target
     ]
-
-
-def _layout(nodes: list[dict[str, Any]], edges: list[dict[str, Any]]) -> dict[str, Any]:
-    """A deterministic, definition-only layout hint for the static UI.
-
-    Depth is derived from authored forward edges, never runtime events. Back
-    edges are excluded so loops cannot make the layout cyclic.
-    """
-
-    node_ids = [node["node_id"] for node in nodes]
-    depth = {node_id: 0 for node_id in node_ids}
-    incoming = {node_id: [] for node_id in node_ids}
-    outgoing = {node_id: [] for node_id in node_ids}
-    for edge in edges:
-        if edge.get("back_edge"):
-            continue
-        if edge["from"] in outgoing and edge["to"] in incoming:
-            outgoing[edge["from"]].append(edge["to"])
-            incoming[edge["to"]].append(edge["from"])
-    for node_id in node_ids:
-        if incoming[node_id]:
-            depth[node_id] = max(depth[parent] + 1 for parent in incoming[node_id])
-    widths: dict[int, int] = {}
-    positions = []
-    for node_id in node_ids:
-        layer = depth[node_id]
-        lane = widths.get(layer, 0)
-        widths[layer] = lane + 1
-        positions.append({"node_id": node_id, "depth": layer, "lane": lane})
-    branched = any(len(targets) > 1 for targets in outgoing.values())
-    joined = any(len(sources) > 1 for sources in incoming.values())
-    return {
-        "mode": "branching" if branched or joined else "outline",
-        "positions": positions,
-    }
 
 
 class PlanReadModelService:
@@ -437,7 +403,7 @@ class PlanReadModelService:
                 "definition_hash": definition["definition_hash"],
                 "nodes": nodes,
                 "edges": edges,
-                "layout": _layout(nodes, edges),
+                "layout": graph_layout([node["node_id"] for node in nodes], edges),
             },
             "runtime_overlay": {
                 "scope": "current",

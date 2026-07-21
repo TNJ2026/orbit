@@ -50,6 +50,87 @@ const el = (tag, props = {}, children = []) => {
   return node;
 };
 
+const svgEl = (tag, props = {}, children = []) => {
+  const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+  for (const [key, value] of Object.entries(props)) {
+    if (key === "text") node.textContent = value;
+    else if (value !== null && value !== undefined) node.setAttribute(key, value);
+  }
+  for (const child of [].concat(children)) {
+    if (child) node.append(child);
+  }
+  return node;
+};
+
+// Box geometry. The server hands us depth (column) and lane (row); turning
+// those into pixels is the only thing the browser decides about this picture.
+const GRAPH_BOX = { width: 168, height: 52, gapX: 64, gapY: 18, pad: 12 };
+
+function workflowGraphView(graph) {
+  const { width, height, gapX, gapY, pad } = GRAPH_BOX;
+  const at = new Map();
+  for (const position of graph.layout.positions) {
+    at.set(position.node_id, {
+      x: pad + position.depth * (width + gapX),
+      y: pad + position.lane * (height + gapY),
+    });
+  }
+  const columns = Math.max(...graph.layout.positions.map((p) => p.depth), 0) + 1;
+  const lanes = Math.max(...graph.layout.positions.map((p) => p.lane), 0) + 1;
+  const canvasWidth = pad * 2 + columns * width + (columns - 1) * gapX;
+  const canvasHeight = pad * 2 + lanes * height + (lanes - 1) * gapY;
+
+  const edges = graph.edges.map((edge) => {
+    const from = at.get(edge.from);
+    const to = at.get(edge.to);
+    if (!from || !to) return null;
+    const start = { x: from.x + width, y: from.y + height / 2 };
+    const end = { x: to.x, y: to.y + height / 2 };
+    // A back edge points at an earlier column, so route it under the row it
+    // came from instead of drawing a line straight through the boxes.
+    const path = edge.back_edge
+      ? `M${start.x - width / 2} ${from.y + height} V${from.y + height + gapY / 2}`
+        + ` H${end.x + width / 2} V${to.y + height}`
+      : `M${start.x} ${start.y} H${start.x + gapX / 2} V${end.y} H${end.x}`;
+    return svgEl("path", {
+      class: `graph-edge${edge.back_edge ? " back" : ""} route-${edge.route}`,
+      d: path, "marker-end": "url(#graphArrow)",
+    });
+  });
+
+  const boxes = graph.nodes.map((node) => {
+    const spot = at.get(node.node_id);
+    if (!spot) return null;
+    // Node kinds are DSL vocabulary, shown verbatim here as they are in the
+    // definition list below the picture.
+    const label = node.handler_name
+      ? `${node.handler_name}@${node.handler_version}`
+      : node.kind;
+    return svgEl("g", {
+      class: `graph-box kind-${node.kind}`,
+      transform: `translate(${spot.x} ${spot.y})`,
+    }, [
+      svgEl("rect", { width, height, rx: 10 }),
+      svgEl("text", { class: "graph-box-id", x: 12, y: 21, text: node.node_id }),
+      svgEl("text", { class: "graph-box-meta", x: 12, y: 38, text: label }),
+    ]);
+  });
+
+  const arrow = svgEl("marker", {
+    id: "graphArrow", viewBox: "0 0 8 8", refX: 7, refY: 4,
+    markerWidth: 6, markerHeight: 6, orient: "auto-start-reverse",
+  }, [svgEl("path", { d: "M0 0 L8 4 L0 8 z" })]);
+
+  return svgEl("svg", {
+    class: "workflow-graph", role: "img",
+    viewBox: `0 0 ${canvasWidth} ${canvasHeight}`,
+    width: canvasWidth, height: canvasHeight,
+    "aria-label": i18n.t("workflows.graphAria", {
+      nodes: i18n.number(graph.nodes.length), edges: i18n.number(graph.edges.length),
+    }),
+  }, [svgEl("defs", {}, [arrow]), ...edges, ...boxes]);
+}
+
 function syncCustomSelect(select) {
   const wrapper = select.closest(".custom-select");
   if (!wrapper) return;
@@ -1621,6 +1702,8 @@ async function renderOps(root) {
 async function renderAgents(root) {
   const catalog = (await api.handlerCatalog()).data;
   const agents = catalog.handlers.filter((handler) => handler.name.startsWith("agent."));
+  const registeredNames = new Set(agents.map((handler) => handler.name));
+  const detected = (catalog.agents || []).filter((agent) => !registeredNames.has(agent.name));
   root.append(el("div", { class: "banner info", text: i18n.t("agents.registrationOnly") }));
   root.append(el("section", { class: "panel" }, [
     el("div", { class: "panel-head" }, [
@@ -1635,7 +1718,7 @@ async function renderAgents(root) {
             el("span", { class: "agent-avatar", "aria-hidden": "true", text: initials }),
             el("div", {}, [
               el("div", { class: "panel-title mono", text: `${handler.name} ${handler.version}` }),
-              el("div", { class: "muted", text: i18n.t("agents.registered") }),
+              el("div", { class: "muted agent-status", text: i18n.t("agents.registered") }),
             ]),
           ]),
           (handler.capabilities || []).length
@@ -1648,6 +1731,34 @@ async function renderAgents(root) {
         ]);
       })
       : [el("div", { class: "muted", text: i18n.t("agents.empty") })]),
+  ]));
+  root.append(el("section", { class: "panel" }, [
+    el("div", { class: "panel-head" }, [
+      el("div", { class: "panel-title", text: i18n.t("agents.detected") }),
+    ]),
+    el("div", { class: "panel-body" }, [
+      el("p", { class: "muted", text: i18n.t("agents.detectedHint") }),
+    ]),
+    el("div", { class: "panel-body agents-grid" }, detected.length
+      ? detected.map((agent) => {
+        const initials = agent.name.replace(/^agent\./, "").slice(0, 2).toUpperCase();
+        return el("article", { class: "data-card list-option-card agent-card" }, [
+          el("div", { class: "agent-head" }, [
+            el("span", { class: "agent-avatar", "aria-hidden": "true", text: initials }),
+            el("div", {}, [
+              el("div", { class: "panel-title mono", text: agent.version
+                ? `${agent.name} ${agent.version}`
+                : `${agent.name} · ${i18n.t("agents.versionUnknown")}` }),
+              el("div", { class: "muted agent-status", text: i18n.t("agents.detectedStatus") }),
+            ]),
+          ]),
+          (agent.capabilities || []).length
+            ? el("div", { class: "capabilities" }, agent.capabilities.map((capability) =>
+                el("span", { class: "capability", text: capability })))
+            : el("div", { class: "muted", text: i18n.t("agents.noCapabilities") }),
+        ]);
+      })
+      : [el("div", { class: "muted", text: i18n.t("agents.detectedEmpty") })]),
   ]));
 }
 
@@ -1888,6 +1999,8 @@ async function renderWorkflows(root) {
             el("div", {}, [el("dt", { text: i18n.t("workflows.nodes") }), el("dd", { text: i18n.number(value.summary.node_count) })]),
             el("div", {}, [el("dt", { text: i18n.t("workflows.inputs") }), el("dd", { text: i18n.number(value.inputs.length) })]),
           ]),
+          el("div", { class: "eyebrow", text: i18n.t("workflows.graph") }),
+          el("div", { class: "workflow-graph-scroll" }, [workflowGraphView(value.graph)]),
           el("div", { class: "eyebrow", text: i18n.t("workflows.definition") }),
           el("div", { class: "definition-list" }, definition.nodes.map((node) =>
             el("div", { class: "actions" }, [

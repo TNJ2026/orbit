@@ -386,6 +386,38 @@ class WorkflowCatalogTests(BrowserE2ETestCase):
         self.assertIn("collect", detail)
         self.assertIn("transform@1.0.0", detail)
 
+    def test_the_definition_is_drawn_from_the_server_layout(self) -> None:
+        page = self.open("en-US", path="/ui/#/workflows")
+        card = page.locator(".workflow-card", has_text="Linear")
+        card.wait_for()
+        card.locator(".workflow-card-main").click()
+        page.wait_for_selector(".workflow-graph")
+        graph = page.evaluate(
+            """() => fetch('/api/v1/workflows/workflow%3Alinear')
+                 .then(r => r.json()).then(b => b.data.graph)"""
+        )
+        # Every node is a box, and each box sits where the server put it:
+        # depth is the column, lane the row.
+        self.assertEqual(
+            len(graph["nodes"]), page.locator(".workflow-graph .graph-box").count()
+        )
+        self.assertEqual(
+            len(graph["edges"]), page.locator(".workflow-graph .graph-edge").count()
+        )
+        columns = page.evaluate(
+            """() => [...document.querySelectorAll('.workflow-graph .graph-box')]
+                 .map(g => ({
+                   id: g.querySelector('.graph-box-id').textContent,
+                   x: Number(g.getAttribute('transform').match(/translate\\(([-\\d.]+)/)[1]),
+                 }))"""
+        )
+        depth = {p["node_id"]: p["depth"] for p in graph["layout"]["positions"]}
+        ordered = sorted(columns, key=lambda box: box["x"])
+        self.assertEqual(
+            [depth[box["id"]] for box in ordered],
+            sorted(depth[box["id"]] for box in ordered),
+        )
+
     def test_catalog_network_failure_is_not_reported_as_invalid_workflow(self) -> None:
         page = self.open("en-US")
         page.route("**/api/v1/workflows", lambda route: route.abort())
