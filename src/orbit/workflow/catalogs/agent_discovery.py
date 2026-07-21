@@ -1,9 +1,8 @@
 """Trusted discovery of locally installed Agent CLIs.
 
 Discovery answers exactly one question: *which* of a fixed, code-owned set of
-Agent CLIs is installed on this machine, and at what version. It never answers
-"what command should we run" — that lives in the spec, in this file, under
-review.
+Agent CLIs is installed on this machine. It never answers "what command should
+we run" — that lives in the spec, in this file, under review.
 
 The rule the whole design hangs on: a workflow author, the UI and the Planner
 can select an Agent by name, and nothing else. They cannot supply an
@@ -11,14 +10,16 @@ executable, an argument, a path or an environment variable. So a compromised
 plan or a prompt-injected Planner can at worst pick a different trusted CLI;
 it can never turn a node into arbitrary shell execution.
 
-Discovery output is an immutable HandlerManifest whose fingerprint covers the
-resolved CLI version, so a plan compiled against `claude 2.1` refuses to run
-against `claude 3.0` instead of silently changing behaviour.
+Detection scope follows main: a CLI counts as installed when it resolves on
+PATH, and each Hermes profile is its own agent. The version probe pins the
+CLI's version when it succeeds; a CLI whose version cannot be established is
+still detected, but only a version-pinned agent may be registered — an
+unpinned version would make the manifest fingerprint a lie.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import os
 from pathlib import Path
 import re
@@ -91,15 +92,59 @@ TRUSTED_AGENT_CLIS: tuple[AgentCliSpec, ...] = (
 
 @dataclass(frozen=True)
 class DiscoveredAgent:
-    """A trusted CLI that is actually installed, at a pinned version."""
+    """A trusted CLI that is actually installed.
+
+    `version` is the pinned CLI version, or None when the version probe could
+    not establish one. Detection reports it either way (main's rule); only a
+    version-pinned agent may become a registered handler.
+    """
 
     spec: AgentCliSpec
     executable_path: str
-    version: str
+    version: str | None
 
     @property
     def name(self) -> str:
         return self.spec.name
+
+
+_PROFILE_SLUG = re.compile(r"[^a-z0-9_-]+")
+
+
+def _profile_slug(name: str) -> str:
+    slug = _PROFILE_SLUG.sub("-", name.strip().lower()).strip("-")
+    return slug or "profile"
+
+
+def _hermes_profile_specs(
+    spec: AgentCliSpec, profile_root: Path
+) -> tuple[AgentCliSpec, ...]:
+    """Each Hermes profile as its own agent, same as main's detection.
+
+    Profile names come from the filesystem, so they are slugged into the same
+    safe-name space the spec constructor enforces; the profile never becomes
+    an argument anywhere — the name is all that survives.
+    """
+
+    try:
+        children = sorted(profile_root.iterdir(), key=lambda path: path.name.lower())
+    except OSError:
+        return ()
+    specs: list[AgentCliSpec] = []
+    used = {spec.name}
+    for child in children:
+        if not child.is_dir() or child.name.startswith("."):
+            continue
+        base = f"hermes-{_profile_slug(child.name)}"[:32]
+        name = base
+        counter = 2
+        while name in used:
+            suffix = f"-{counter}"
+            name = f"{base[:32 - len(suffix)]}{suffix}"
+            counter += 1
+        used.add(name)
+        specs.append(replace(spec, name=name))
+    return tuple(specs)
 
 
 def _probe_version(
@@ -128,22 +173,28 @@ def discover_agent_clis(
     *,
     which: Callable[[str], str | None] = shutil.which,
     runner=subprocess.run,
+    profile_root: Path | None = None,
 ) -> tuple[DiscoveredAgent, ...]:
     """Which trusted CLIs are installed here. Silent about the ones that aren't.
 
-    A CLI that is present but whose version cannot be established is skipped:
-    an unpinned version would make the manifest fingerprint a lie.
+    Detection follows main: a CLI on PATH counts as installed even when its
+    version cannot be established (the probe still runs — a pinned version is
+    what makes an agent registrable). An installed Hermes additionally yields
+    one agent per profile under ``~/.hermes/profiles``.
     """
 
+    hermes_profiles = profile_root or (Path.home() / ".hermes" / "profiles")
     found: list[DiscoveredAgent] = []
     for spec in specs:
         resolved = which(spec.executable)
         if not resolved:
             continue
         version = _probe_version(resolved, spec, runner)
-        if version is None:
-            continue
-        found.append(DiscoveredAgent(spec, str(Path(resolved)), version))
+        path = str(Path(resolved))
+        found.append(DiscoveredAgent(spec, path, version))
+        if spec.name == "hermes":
+            for profile_spec in _hermes_profile_specs(spec, hermes_profiles):
+                found.append(DiscoveredAgent(profile_spec, path, version))
     return tuple(found)
 
 
@@ -161,6 +212,11 @@ def agent_manifest(
     unknown rather than assume it never happened.
     """
 
+    if agent.version is None:
+        raise AgentDiscoveryError(
+            f"agent {agent.name!r} has no pinned version; a manifest fingerprint "
+            "built on an unknown version would be a lie"
+        )
     return HandlerManifest(
         f"agent.{agent.name}",
         # The CLI's own version is the handler version: upgrading the CLI
@@ -196,12 +252,17 @@ def registrable_agents(
     """Discovery result filtered through capability policy, ready to register.
 
     Policy runs here rather than at execution time so that a capability the
-    deployment has not granted never reaches the sealed registry at all.
+    deployment has not granted never reaches the sealed registry at all. An
+    agent whose version could not be pinned is detected but stops here too:
+    the manifest fingerprint covers the CLI version, so registering it would
+    make the fingerprint a lie.
     """
 
     permitted = None if allowed_capabilities is None else set(allowed_capabilities)
     pairs = []
     for agent in agents:
+        if agent.version is None:
+            continue
         if not agent.spec.runtime_compatible:
             continue
         if permitted is not None and not permitted.issuperset(agent.spec.capabilities):

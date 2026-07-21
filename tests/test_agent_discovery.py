@@ -93,32 +93,33 @@ class DiscoveryTests(unittest.TestCase):
             (), discover_agent_clis(TRUSTED_AGENT_CLIS, which=fake_which(set()))
         )
 
-    def test_a_cli_whose_version_cannot_be_read_is_skipped(self) -> None:
-        """An unpinned version would make the manifest fingerprint a lie."""
+    def test_a_cli_whose_version_cannot_be_read_is_still_detected(self) -> None:
+        """Main's rule: PATH presence is what "installed" means."""
 
         found = discover_agent_clis(
             (CLAUDE,), which=fake_which({"claude"}),
             runner=fake_runner({"claude": (0, "not a version string")}),
         )
-        self.assertEqual((), found)
+        self.assertEqual(["claude"], [agent.name for agent in found])
+        self.assertIsNone(found[0].version)
 
-    def test_a_failing_probe_is_skipped(self) -> None:
+    def test_a_failing_probe_still_detects_the_cli(self) -> None:
         found = discover_agent_clis(
             (CLAUDE,), which=fake_which({"claude"}),
             runner=fake_runner({"claude": (127, "")}),
         )
-        self.assertEqual((), found)
+        self.assertEqual(["claude"], [agent.name for agent in found])
+        self.assertIsNone(found[0].version)
 
     def test_a_crashing_probe_does_not_propagate(self) -> None:
         def explode(*_args, **_kwargs):
             raise OSError("no such file")
 
-        self.assertEqual(
-            (),
-            discover_agent_clis(
-                (CLAUDE,), which=fake_which({"claude"}), runner=explode
-            ),
+        found = discover_agent_clis(
+            (CLAUDE,), which=fake_which({"claude"}), runner=explode
         )
+        self.assertEqual(["claude"], [agent.name for agent in found])
+        self.assertIsNone(found[0].version)
 
     def test_the_probe_runs_the_resolved_path_with_flags_only(self) -> None:
         seen = {}
@@ -188,6 +189,76 @@ class PolicyTests(unittest.TestCase):
         spec = AgentCliSpec("hermes", "hermes", runtime_compatible=False)
         agent = DiscoveredAgent(spec, "/usr/local/bin/hermes", "0.18.2")
         self.assertEqual((), registrable_agents([agent]))
+
+    def test_an_unpinned_agent_is_detected_but_not_registrable(self) -> None:
+        """An unpinned version would make the manifest fingerprint a lie."""
+
+        agent = DiscoveredAgent(CLAUDE, "/usr/local/bin/claude", None)
+        self.assertEqual((), registrable_agents([agent]))
+        with self.assertRaises(AgentDiscoveryError):
+            agent_manifest(agent)
+
+
+class HermesProfileTests(unittest.TestCase):
+    """Main's detection scope: each Hermes profile is its own agent."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.profile_root = Path(self.temp.name)
+        self.spec = AgentCliSpec("hermes", "hermes", runtime_compatible=False)
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def discover(self, outputs=None):
+        return discover_agent_clis(
+            (self.spec,), which=fake_which({"hermes"}),
+            runner=fake_runner(outputs or {"hermes": (0, "hermes 0.18.2")}),
+            profile_root=self.profile_root,
+        )
+
+    def test_each_profile_is_its_own_agent(self) -> None:
+        for name in ("Research", "ops"):
+            (self.profile_root / name).mkdir()
+        (self.profile_root / ".hidden").mkdir()
+        (self.profile_root / "notes.txt").write_text("not a profile")
+
+        found = self.discover()
+        self.assertEqual(
+            ["hermes", "hermes-ops", "hermes-research"],
+            [agent.name for agent in found],
+        )
+        for agent in found:
+            with self.subTest(agent=agent.name):
+                self.assertEqual("/usr/local/bin/hermes", agent.executable_path)
+                self.assertEqual("0.18.2", agent.version)
+
+    def test_profile_names_are_slugged_and_deduped(self) -> None:
+        (self.profile_root / "My Profile").mkdir()
+        (self.profile_root / "my-profile").mkdir()
+
+        self.assertEqual(
+            ["hermes", "hermes-my-profile", "hermes-my-profile-2"],
+            [agent.name for agent in self.discover()],
+        )
+
+    def test_a_missing_profile_root_is_not_an_error(self) -> None:
+        found = discover_agent_clis(
+            (self.spec,), which=fake_which({"hermes"}),
+            runner=fake_runner({"hermes": (0, "hermes 0.18.2")}),
+            profile_root=self.profile_root / "absent",
+        )
+        self.assertEqual(["hermes"], [agent.name for agent in found])
+
+    def test_profiles_follow_the_same_detection_rule(self) -> None:
+        (self.profile_root / "ops").mkdir()
+        found = self.discover(outputs={"hermes": (127, "")})
+        self.assertEqual(["hermes", "hermes-ops"], [agent.name for agent in found])
+        self.assertIsNone(found[1].version)
+
+    def test_profiles_are_not_registrable_without_a_runtime_adapter(self) -> None:
+        (self.profile_root / "ops").mkdir()
+        self.assertEqual((), registrable_agents(self.discover()))
 
 
 class RegistrationTests(unittest.TestCase):
