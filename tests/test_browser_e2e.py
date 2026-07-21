@@ -1712,7 +1712,20 @@ class RefreshTests(BrowserE2ETestCase):
                                 "recent_attempt": None,
                             },
                         ],
-                        "agents": [],
+                        "agents": [
+                            {
+                                "name": "agent.codex", "agent": "codex",
+                                "version": "2.0.0",
+                                "capabilities": ["agent.invoke"],
+                                "registration_status": "discovered",
+                            },
+                            {
+                                "name": "agent.hermes", "agent": "hermes",
+                                "version": "0.18.2",
+                                "capabilities": ["agent.invoke"],
+                                "registration_status": "discovered",
+                            },
+                        ],
                         "status_semantics": "registration_only",
                     },
                 }),
@@ -1721,11 +1734,16 @@ class RefreshTests(BrowserE2ETestCase):
         page.goto(f"{self.base}/ui/#/agents")
         page.wait_for_selector(".agent-card")
 
-        self.assertEqual(1, page.locator("#content section.panel").count())
+        self.assertEqual(2, page.locator("#content section.panel").count())
         content = page.inner_text("#content")
         self.assertIn("Registered agents", content)
         self.assertIn("agent.codex 2.0.0", content)
         self.assertNotIn("transform 1.0.0", content)
+        # A discovered-but-unregistered CLI is listed once, in the detected
+        # panel; the registered one is not duplicated there.
+        self.assertIn("Detected CLIs", content)
+        self.assertEqual(1, page.locator("text=agent.hermes 0.18.2").count())
+        self.assertEqual(1, page.locator("text=agent.codex 2.0.0").count())
 
     def test_a_reload_restores_the_page_from_the_server(self) -> None:
         """Nothing is kept client-side, so a reload must lose nothing."""
