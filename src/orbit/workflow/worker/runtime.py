@@ -155,6 +155,63 @@ class TimerDispatcher:
         return True
 
 
+class RevisionDispatcher:
+    """Claim and run one queued Agent workflow-revision job.
+
+    The editor enqueues a prompt and returns; this loop is what actually
+    spends the model call. It mirrors PlannerDispatcher: lease long enough to
+    cover the CLI's own timeout, settle under the fence, and never hold a
+    transaction across the call.
+    """
+
+    def __init__(
+        self, service, *, worker_id="revision-1", clock, metrics=None,
+        lease_seconds=360, agent_command=None, model_id=None,
+    ):
+        self.service = service
+        self.worker_id = worker_id
+        self.clock = clock
+        self.metrics = metrics or InMemoryMetrics()
+        self.agent_command = agent_command
+        self.model_id = model_id
+        if lease_seconds <= 0 or lease_seconds > 600:
+            raise ValueError(
+                "revision lease must be positive and at most ten minutes"
+            )
+        self.lease_ttl = timedelta(seconds=lease_seconds)
+
+    def _increment(self, name):
+        try: self.metrics.increment(name)
+        except Exception: pass
+
+    def run_once(self) -> bool:
+        self._increment("revision_heartbeat")
+        claimed = self.service.claim_revision(
+            self.worker_id, self.clock(), lease_ttl=self.lease_ttl
+        )
+        if claimed is None:
+            self._increment("revision_empty")
+            return False
+        job, token = claimed
+        settled = self.service.execute_revision(
+            job, token, clock=self.clock,
+            agent_command=self.agent_command, model_id=self.model_id,
+        )
+        self._increment(f"revision_{settled.status}")
+        return True
+
+
+class RevisionRecoveryScanner:
+    """Fail revision jobs whose worker died holding the lease."""
+
+    def __init__(self, service, *, clock):
+        self.service = service
+        self.clock = clock
+
+    def run_once(self) -> bool:
+        return bool(self.service.expire_revisions(self.clock()))
+
+
 class PlannerDispatcher:
     """Claim and execute one durable Planner attempt."""
 

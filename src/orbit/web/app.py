@@ -34,6 +34,7 @@ from ..workflow.persistence.database import connect_workflow_database
 from ..workflow.persistence.migrations import migrate_workflow_database
 from ..workflow.worker.runtime import (
     ForeachReconciler, PlannerDispatcher, PlannerProposalReconciler,
+    RevisionDispatcher, RevisionRecoveryScanner,
     SubflowReconciler,
     TimerDispatcher, WorkerRuntime,
 )
@@ -138,12 +139,19 @@ class RuntimeComposition:
         artifact_backend: Any = None,
         planner_service: Any = None,
         human_delivery: Any = None,
+        draft_service: Any = None,
+        revision_agent_command: str | None = None,
+        revision_model_id: str | None = None,
     ) -> None:
         self.db_path = Path(db_path)
         self.clock = clock
         self.worker_count = max(1, int(worker_count))
         self.poll_seconds = poll_seconds
         self.planner_service = planner_service
+        # Set when a reviser is wired; the revision loops key off it.
+        self.draft_service = draft_service
+        self.revision_agent_command = revision_agent_command
+        self.revision_model_id = revision_model_id
         if human_delivery is None:
             from ..workflow.application.human_delivery import (
                 InMemoryHumanTaskDelivery,
@@ -256,6 +264,25 @@ class RuntimeComposition:
                     max(self.poll_seconds, 5.0),
                 )
             )
+        # Agent workflow revisions are durable jobs: the editor enqueues, this
+        # loop spends the model call, and a recovery pass fails jobs whose
+        # worker died mid-flight.
+        if getattr(self.draft_service, "reviser", None) is not None:
+            revisions = RevisionDispatcher(
+                self.draft_service, worker_id="revision-1", clock=self.clock,
+                agent_command=self.revision_agent_command,
+                model_id=self.revision_model_id,
+            )
+            loops.append(BackgroundLoop(
+                "revision-1", revisions.run_once, self.poll_seconds,
+            ))
+            revision_recovery = RevisionRecoveryScanner(
+                self.draft_service, clock=self.clock,
+            )
+            loops.append(BackgroundLoop(
+                "revision-recovery", revision_recovery.run_once,
+                max(self.poll_seconds, 5.0),
+            ))
         return loops
 
     def _recovery_pass(self) -> bool:
@@ -567,6 +594,14 @@ def create_app(
     draft_service = WorkflowDraftApplicationService(
         composition.db_path, workflow_publisher,
         reviser=authoring_service.revise if authoring_service is not None else None,
+    )
+    # Hand the service to the composition before lifespan startup builds its
+    # loops, so the revision dispatcher and its recovery pass are supervised
+    # like every other background component.
+    composition.draft_service = draft_service
+    generator_command = getattr(workflow_generator, "command", None)
+    composition.revision_agent_command = (
+        generator_command[0] if generator_command else None
     )
 
     routes: list[Route | Mount] = [

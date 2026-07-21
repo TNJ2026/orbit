@@ -6,64 +6,147 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "draft_id", "workflow_id", "base_version", "actor", "source_format",
-    "source", "source_hash", "validation_status", "validated_definition_hash",
-    "diagnostics", "revision", "status", "created_at", "updated_at",
-    "published_version", "pending_revision", "revision_history", "allowed_commands"
+    "draft_id",
+    "workflow_id",
+    "base_version",
+    "actor",
+    "source_format",
+    "source",
+    "source_hash",
+    "validation_status",
+    "validated_definition_hash",
+    "diagnostics",
+    "revision",
+    "status",
+    "created_at",
+    "updated_at",
+    "published_version",
+    "pending_revision",
+    "revision_history",
+    "allowed_commands"
   ],
   "properties": {
-    "draft_id": {"type": "string", "pattern": "^workflow_draft:"},
-    "workflow_id": {"type": "string", "pattern": "^workflow:"},
-    "base_version": {"type": "integer", "minimum": 1},
-    "actor": {"type": "string", "minLength": 1},
-    "source_format": {"enum": ["json", "yaml"]},
-    "source": {"type": "string"},
-    "source_hash": {"type": "string", "pattern": "^sha256:"},
+    "draft_id": {
+      "type": "string",
+      "pattern": "^workflow_draft:"
+    },
+    "workflow_id": {
+      "type": "string",
+      "pattern": "^workflow:"
+    },
+    "base_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "actor": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source_format": {
+      "enum": [
+        "json",
+        "yaml"
+      ]
+    },
+    "source": {
+      "type": "string"
+    },
+    "source_hash": {
+      "type": "string",
+      "pattern": "^sha256:"
+    },
     "validation_status": {
-      "enum": ["dirty", "valid", "invalid"],
+      "enum": [
+        "dirty",
+        "valid",
+        "invalid"
+      ],
       "description": "Validation is synchronous; there is deliberately no 'validating' state."
     },
     "validated_definition_hash": {
-      "type": ["string", "null"],
+      "type": [
+        "string",
+        "null"
+      ],
       "description": "Definition hash of the last successful validation; null until one succeeds."
     },
     "diagnostics": {
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["code", "message"],
+        "required": [
+          "code",
+          "message"
+        ],
         "properties": {
-          "code": {"type": "string", "minLength": 1},
-          "message": {"type": "string", "minLength": 1},
-          "json_path": {"type": "string"},
-          "severity": {"enum": ["error", "warning"]}
+          "code": {
+            "type": "string",
+            "minLength": 1
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1
+          },
+          "json_path": {
+            "type": "string"
+          },
+          "severity": {
+            "enum": [
+              "error",
+              "warning"
+            ]
+          }
         }
       }
     },
     "revision": {
-      "type": "integer", "minimum": 1,
+      "type": "integer",
+      "minimum": 1,
       "description": "The draft aggregate's expected version; every candidate, decision, publish or discard bumps it."
     },
-    "status": {"enum": ["active", "published", "discarded"]},
-    "created_at": {"type": "string", "format": "date-time"},
-    "updated_at": {"type": "string", "format": "date-time"},
+    "status": {
+      "enum": [
+        "active",
+        "published",
+        "discarded"
+      ]
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
     "published_version": {
-      "type": ["integer", "null"],
+      "type": [
+        "integer",
+        "null"
+      ],
       "description": "Set when status is published. May equal base_version: publishing an unchanged draft is a success that mints no new version."
     },
     "pending_revision": {
       "oneOf": [
-        {"type": "null"},
-        {"$ref": "#/$defs/pendingRevision"}
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/pendingRevision"
+        }
       ]
     },
     "revision_history": {
       "type": "array",
-      "items": {"$ref": "#/$defs/revisionHistoryItem"}
+      "items": {
+        "$ref": "#/$defs/revisionHistoryItem"
+      }
     },
     "allowed_commands": {
       "type": "array",
-      "items": {"$ref": "allowed-command.schema.json"}
+      "items": {
+        "$ref": "allowed-command.schema.json"
+      }
     }
   },
   "$defs": {
@@ -71,46 +154,235 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "revision_id", "instruction", "instruction_hash",
-        "base_draft_revision", "previous_source", "previous_source_hash",
-        "source", "source_hash", "definition_hash", "attempts", "status",
-        "created_at"
+        "revision_id",
+        "instruction",
+        "instruction_hash",
+        "base_draft_revision",
+        "previous_source",
+        "previous_source_hash",
+        "source",
+        "source_hash",
+        "definition_hash",
+        "attempts",
+        "status",
+        "created_at",
+        "in_flight"
       ],
       "properties": {
-        "revision_id": {"type": "string", "pattern": "^workflow_revision:"},
-        "instruction": {"type": "string", "minLength": 1},
-        "instruction_hash": {"type": "string", "pattern": "^sha256:"},
-        "base_draft_revision": {"type": "integer", "minimum": 1},
-        "previous_source": {"type": "string"},
-        "previous_source_hash": {"type": "string", "pattern": "^sha256:"},
-        "source": {"type": "string"},
-        "source_hash": {"type": "string", "pattern": "^sha256:"},
-        "definition_hash": {"type": "string", "pattern": "^sha256:"},
-        "attempts": {"type": "integer", "minimum": 1},
-        "status": {"const": "pending"},
-        "created_at": {"type": "string", "format": "date-time"}
-      }
+        "revision_id": {
+          "type": "string",
+          "pattern": "^workflow_revision:"
+        },
+        "instruction": {
+          "type": "string",
+          "minLength": 1
+        },
+        "instruction_hash": {
+          "type": "string",
+          "pattern": "^sha256:"
+        },
+        "base_draft_revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "previous_source": {
+          "type": "string"
+        },
+        "previous_source_hash": {
+          "type": "string",
+          "pattern": "^sha256:"
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_hash": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^sha256:"
+        },
+        "definition_hash": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^sha256:"
+        },
+        "attempts": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "status": {
+          "enum": [
+            "queued",
+            "running",
+            "pending",
+            "failed",
+            "cancelled"
+          ]
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "in_flight": {
+          "type": "boolean",
+          "description": "True while queued or running."
+        },
+        "cancel_requested": {
+          "type": "boolean"
+        },
+        "agent_command": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Which CLI answered."
+        },
+        "model_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "started_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "finished_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "duration_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "error_code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "error_message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "description": "The current Agent revision job. It is recorded when the prompt is submitted and lives through queued and running before settling into a pending candidate, a failure or a cancellation — so a reloaded editor can always tell what happened."
     },
     "revisionHistoryItem": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "revision_id", "instruction", "instruction_hash",
-        "previous_source_hash", "source_hash", "definition_hash", "attempts",
-        "status", "created_at", "decided_at", "decided_by"
+        "revision_id",
+        "instruction",
+        "instruction_hash",
+        "previous_source_hash",
+        "source_hash",
+        "definition_hash",
+        "attempts",
+        "status",
+        "created_at",
+        "decided_at",
+        "decided_by"
       ],
       "properties": {
-        "revision_id": {"type": "string", "pattern": "^workflow_revision:"},
-        "instruction": {"type": "string"},
-        "instruction_hash": {"type": "string", "pattern": "^sha256:"},
-        "previous_source_hash": {"type": "string", "pattern": "^sha256:"},
-        "source_hash": {"type": "string", "pattern": "^sha256:"},
-        "definition_hash": {"type": "string", "pattern": "^sha256:"},
-        "attempts": {"type": "integer", "minimum": 1},
-        "status": {"enum": ["pending", "accepted", "rejected", "undone"]},
-        "created_at": {"type": "string", "format": "date-time"},
-        "decided_at": {"type": ["string", "null"], "format": "date-time"},
-        "decided_by": {"type": ["string", "null"]}
+        "revision_id": {
+          "type": "string",
+          "pattern": "^workflow_revision:"
+        },
+        "instruction": {
+          "type": "string"
+        },
+        "instruction_hash": {
+          "type": "string",
+          "pattern": "^sha256:"
+        },
+        "previous_source_hash": {
+          "type": "string",
+          "pattern": "^sha256:"
+        },
+        "source_hash": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^sha256:"
+        },
+        "definition_hash": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^sha256:"
+        },
+        "attempts": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "status": {
+          "enum": [
+            "queued",
+            "running",
+            "pending",
+            "accepted",
+            "rejected",
+            "undone",
+            "failed",
+            "cancelled"
+          ]
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "decided_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "decided_by": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "duration_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "error_code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
       }
     }
   }

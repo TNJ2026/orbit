@@ -4,6 +4,8 @@ from .runtime import (
     CancellationToken,
     InMemoryMetrics,
     PlannerDispatcher,
+    RevisionDispatcher,
+    RevisionRecoveryScanner,
     TimerDispatcher,
     WorkerRuntime,
 )
@@ -11,5 +13,6 @@ from .supervisor import LeaseSupervisor
 
 __all__ = [
     "CancellationToken", "InMemoryMetrics", "LeaseSupervisor",
-    "PlannerDispatcher", "TimerDispatcher", "WorkerRuntime",
+    "PlannerDispatcher", "RevisionDispatcher", "RevisionRecoveryScanner",
+    "TimerDispatcher", "WorkerRuntime",
 ]

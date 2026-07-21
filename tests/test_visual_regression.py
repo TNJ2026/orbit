@@ -453,10 +453,19 @@ class VisualRegressionTests(unittest.TestCase):
                 candidate_source = json.dumps(
                     editable_dsl("linear", "Agent candidate"), indent=2,
                 )
+                # Named columns: the revision table also carries lease and
+                # audit fields now, so a positional insert would drift.
                 connection.execute(
-                    """INSERT INTO workflow_draft_revisions VALUES (
-                         ?,?,? ,?,?, ?,?,?,?,? ,?,?,?,? ,'pending',?,NULL,NULL
-                       )""",
+                    """INSERT INTO workflow_draft_revisions(
+                         revision_id, draft_id, base_draft_revision,
+                         instruction_text, instruction_hash,
+                         previous_source_text, previous_source_hash,
+                         previous_validation_status,
+                         previous_validated_source_hash,
+                         previous_definition_hash, proposed_source_text,
+                         proposed_source_hash, proposed_definition_hash,
+                         attempts, status, created_at
+                       ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?)""",
                     (
                         "workflow_revision:visual", self.visual_draft_id, 1,
                         "Add an approval before completion",

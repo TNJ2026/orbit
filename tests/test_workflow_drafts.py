@@ -401,6 +401,25 @@ class DraftReviseTests(DraftTestCase):
             self.path, self.definitions, reviser=reviser,
         )
 
+    def _run_worker(self, service, *, worker="worker-1", clock=None):
+        """One dispatcher turn: lease the queued job and settle it.
+
+        The Agent call is a durable job now, so a test that wants a candidate
+        must run the worker just as the background loop would.
+        """
+        from datetime import timedelta
+
+        claimed = service.claim_revision(
+            worker, NOW, lease_ttl=timedelta(minutes=5),
+        )
+        if claimed is None:
+            return None
+        job, token = claimed
+        return service.execute_revision(
+            job, token, clock=clock or (lambda: NOW),
+            agent_command="fake-cli", model_id="fake-model",
+        )
+
     def test_revise_stages_a_candidate_then_accepts_and_publishes(self) -> None:
         renamed = json.dumps(dsl(name="Revised"))
         reviser, calls = self._reviser(renamed)
@@ -412,9 +431,20 @@ class DraftReviseTests(DraftTestCase):
             EntityId.parse(draft.draft_id), "rename to Revised",
             expected_revision=draft.revision, actor="author", now=NOW,
         )
-        self.assertEqual("dirty", staged.validation_status)
+        # The call only enqueues; the source is untouched until a worker runs.
         self.assertNotIn("Revised", staged.source_text)
         self.assertEqual(draft.revision + 1, staged.revision)
+        queued, _, _ = service.revision_context(
+            EntityId.parse(draft.draft_id), actor="author",
+        )
+        self.assertEqual("queued", queued.status)
+        self.assertIsNone(queued.proposed_source_text)
+
+        settled = self._run_worker(service)
+        self.assertEqual("pending", settled.status)
+        self.assertEqual("fake-cli", settled.agent_command)
+        self.assertIsNotNone(settled.duration_ms)
+
         pending, history, undoable = service.revision_context(
             EntityId.parse(draft.draft_id), actor="author",
         )
@@ -449,6 +479,7 @@ class DraftReviseTests(DraftTestCase):
             EntityId.parse(draft.draft_id), "try a change",
             expected_revision=draft.revision, actor="author", now=NOW,
         )
+        self._run_worker(service)
         rejected = service.reject_revision(
             EntityId.parse(draft.draft_id),
             expected_revision=staged.revision, actor="author", now=NOW,
@@ -459,6 +490,7 @@ class DraftReviseTests(DraftTestCase):
             EntityId.parse(draft.draft_id), "accept a change",
             expected_revision=rejected.revision, actor="author", now=NOW,
         )
+        self._run_worker(service, worker="worker-2")
         accepted = service.accept_revision(
             EntityId.parse(draft.draft_id),
             expected_revision=staged.revision, actor="author", now=NOW,
@@ -485,9 +517,19 @@ class DraftReviseTests(DraftTestCase):
             EntityId.parse(draft.draft_id), "first change",
             expected_revision=draft.revision, actor="author", now=NOW,
         )
+        # Single flight starts at enqueue: a second prompt is refused while the
+        # first is merely queued, so two model calls can never overlap.
         with self.assertRaises(DraftRevisionStateError):
             service.revise(
                 EntityId.parse(draft.draft_id), "second change",
+                expected_revision=staged.revision, actor="author", now=NOW,
+            )
+        self.assertEqual(0, len(calls))
+
+        self._run_worker(service)
+        with self.assertRaises(DraftRevisionStateError):
+            service.revise(
+                EntityId.parse(draft.draft_id), "third change",
                 expected_revision=staged.revision, actor="author", now=NOW,
             )
         with self.assertRaises(DraftRevisionStateError):
@@ -530,6 +572,168 @@ class DraftReviseTests(DraftTestCase):
         )
         self.assertEqual("active", again.status)
         self.assertIsNone(again.published_version)
+
+
+class RevisionJobTests(DraftReviseTests):
+    """The Agent call as a durable job: leases, cancel, expiry, audit."""
+
+    def _queued(self, service, draft, instruction="do a thing"):
+        return service.revise(
+            EntityId.parse(draft.draft_id), instruction,
+            expected_revision=draft.revision, actor="author", now=NOW,
+        )
+
+    def test_enqueue_returns_before_the_agent_runs(self) -> None:
+        reviser, calls = self._reviser(json.dumps(dsl(name="Later")))
+        service = self._service_with(reviser)
+        draft = service.create_or_resume(
+            "workflow:draftable", base_version=None, actor="author", now=NOW,
+        )
+        self._queued(service, draft)
+        # The request did not wait for the CLI.
+        self.assertEqual([], calls)
+        job, _, _ = service.revision_context(
+            EntityId.parse(draft.draft_id), actor="author",
+        )
+        self.assertEqual("queued", job.status)
+        self.assertTrue(job.in_flight)
+
+    def test_a_claimed_job_records_agent_model_and_duration(self) -> None:
+        from datetime import timedelta
+
+        reviser, _ = self._reviser(json.dumps(dsl(name="Timed")))
+        service = self._service_with(reviser)
+        draft = service.create_or_resume(
+            "workflow:draftable", base_version=None, actor="author", now=NOW,
+        )
+        self._queued(service, draft)
+        claimed = service.claim_revision(
+            "worker-1", NOW, lease_ttl=timedelta(minutes=5),
+        )
+        self.assertIsNotNone(claimed)
+        job, token = claimed
+        self.assertEqual("running", job.status)
+        self.assertEqual(1, job.fencing_token)
+
+        ticks = iter([NOW, NOW + timedelta(seconds=7)])
+        settled = service.execute_revision(
+            job, token, clock=lambda: next(ticks),
+            agent_command="claude", model_id="claude-x",
+        )
+        self.assertEqual("pending", settled.status)
+        self.assertEqual("claude", settled.agent_command)
+        self.assertEqual("claude-x", settled.model_id)
+        self.assertEqual(7000, settled.duration_ms)
+
+    def test_only_one_worker_can_claim_a_job(self) -> None:
+        from datetime import timedelta
+
+        reviser, _ = self._reviser(json.dumps(dsl(name="Once")))
+        service = self._service_with(reviser)
+        draft = service.create_or_resume(
+            "workflow:draftable", base_version=None, actor="author", now=NOW,
+        )
+        self._queued(service, draft)
+        first = service.claim_revision("w1", NOW, lease_ttl=timedelta(minutes=5))
+        second = service.claim_revision("w2", NOW, lease_ttl=timedelta(minutes=5))
+        self.assertIsNotNone(first)
+        self.assertIsNone(second)
+
+    def test_a_failing_agent_settles_the_job_with_its_reason(self) -> None:
+        from datetime import timedelta
+
+        def angry(current_source, instruction, *, expected_workflow_id):
+            raise RuntimeError("the model refused")
+
+        service = self._service_with(angry)
+        draft = service.create_or_resume(
+            "workflow:draftable", base_version=None, actor="author", now=NOW,
+        )
+        self._queued(service, draft)
+        job, token = service.claim_revision(
+            "w1", NOW, lease_ttl=timedelta(minutes=5),
+        )
+        settled = service.execute_revision(job, token, clock=lambda: NOW)
+        self.assertEqual("failed", settled.status)
+        self.assertEqual("RuntimeError", settled.error_code)
+        self.assertIn("refused", settled.error_message)
+        # A failed job frees the draft for another attempt.
+        again = service.revise(
+            EntityId.parse(draft.draft_id), "try again",
+            expected_revision=draft.revision + 1, actor="author", now=NOW,
+        )
+        self.assertIsNotNone(again)
+
+    def test_cancelling_a_queued_job_never_calls_the_agent(self) -> None:
+        reviser, calls = self._reviser(json.dumps(dsl(name="Nope")))
+        service = self._service_with(reviser)
+        draft = service.create_or_resume(
+            "workflow:draftable", base_version=None, actor="author", now=NOW,
+        )
+        self._queued(service, draft)
+        job, _, _ = service.revision_context(
+            EntityId.parse(draft.draft_id), actor="author",
+        )
+        service.cancel_revision(
+            EntityId.parse(draft.draft_id), EntityId.parse(job.revision_id),
+            actor="author", now=NOW,
+        )
+        self.assertIsNone(self._run_worker(service))
+        self.assertEqual([], calls)
+        current, _, _ = service.revision_context(
+            EntityId.parse(draft.draft_id), actor="author",
+        )
+        self.assertIsNone(current)
+
+    def test_cancelling_a_running_job_discards_the_answer(self) -> None:
+        from datetime import timedelta
+
+        reviser, _ = self._reviser(json.dumps(dsl(name="Discarded")))
+        service = self._service_with(reviser)
+        draft = service.create_or_resume(
+            "workflow:draftable", base_version=None, actor="author", now=NOW,
+        )
+        self._queued(service, draft)
+        job, token = service.claim_revision(
+            "w1", NOW, lease_ttl=timedelta(minutes=5),
+        )
+        service.cancel_revision(
+            EntityId.parse(draft.draft_id), EntityId.parse(job.revision_id),
+            actor="author", now=NOW,
+        )
+        settled = service.execute_revision(job, token, clock=lambda: NOW)
+        # The Agent answered, but the operator had already said stop: the reply
+        # is dropped rather than shown as a candidate.
+        self.assertEqual("cancelled", settled.status)
+        self.assertIsNone(settled.proposed_source_text)
+
+    def test_an_abandoned_lease_expires_into_a_failure(self) -> None:
+        from datetime import timedelta
+
+        reviser, _ = self._reviser(json.dumps(dsl(name="Orphan")))
+        service = self._service_with(reviser)
+        draft = service.create_or_resume(
+            "workflow:draftable", base_version=None, actor="author", now=NOW,
+        )
+        self._queued(service, draft)
+        job, token = service.claim_revision(
+            "dead-worker", NOW, lease_ttl=timedelta(minutes=5),
+        )
+        expired = service.expire_revisions(NOW + timedelta(minutes=6))
+        self.assertEqual((job.revision_id,), expired)
+        current, _, _ = service.revision_context(
+            EntityId.parse(draft.draft_id), actor="author",
+        )
+        self.assertIsNone(current)
+
+        # The straggler comes back after the lease was reclaimed: its write is
+        # fenced off so it cannot resurrect a job the operator saw fail.
+        from orbit.workflow.application.workflow_draft_service import (
+            RevisionLeaseError,
+        )
+
+        with self.assertRaises(RevisionLeaseError):
+            service.execute_revision(job, token, clock=lambda: NOW)
 
 
 if __name__ == "__main__":

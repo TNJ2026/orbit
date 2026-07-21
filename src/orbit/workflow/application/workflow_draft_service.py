@@ -26,9 +26,11 @@ Concurrency and failure semantics worth naming:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 from pathlib import Path
+import secrets
 from typing import Any, Mapping
 
 from ..domain.ids import EntityId, new_id
@@ -140,12 +142,25 @@ def _source_hash(source: str) -> str:
     return definition_hash({"draft_source": source}).value
 
 
+def _token_hash(value: str) -> str:
+    """Only the hash of a lease token is stored, as for planner attempts."""
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
 class RevisionUnavailableError(ValueError):
     """No agent reviser is wired, so prompt-driven editing cannot run."""
 
 
 class DraftRevisionStateError(ValueError):
     """The requested candidate decision is not valid for the current draft."""
+
+
+class RevisionNotFoundError(LookupError):
+    """No such revision job for this draft and actor."""
+
+
+class RevisionLeaseError(RuntimeError):
+    """A worker tried to settle a job it no longer owns."""
 
 
 @dataclass(frozen=True)
@@ -160,14 +175,29 @@ class DraftRevisionRecord:
     previous_validation_status: str
     previous_validated_source_hash: str | None
     previous_definition_hash: str | None
-    proposed_source_text: str
-    proposed_source_hash: str
-    proposed_definition_hash: str
-    attempts: int
+    # Unset while the job is queued, running or failed: the Agent has not
+    # produced a compiler-accepted candidate yet.
+    proposed_source_text: str | None
+    proposed_source_hash: str | None
+    proposed_definition_hash: str | None
+    attempts: int | None
     status: str
     created_at: str
     decided_at: str | None
     decided_by: str | None
+    cancel_requested: bool = False
+    fencing_token: int = 0
+    agent_command: str | None = None
+    model_id: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+    duration_ms: int | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+
+    @property
+    def in_flight(self) -> bool:
+        return self.status in {"queued", "running"}
 
 
 def _revision_record(row) -> DraftRevisionRecord:
@@ -187,6 +217,12 @@ def _revision_record(row) -> DraftRevisionRecord:
         attempts=row["attempts"], status=row["status"],
         created_at=row["created_at"], decided_at=row["decided_at"],
         decided_by=row["decided_by"],
+        cancel_requested=bool(row["cancel_requested"]),
+        fencing_token=int(row["fencing_token"]),
+        agent_command=row["agent_command"], model_id=row["model_id"],
+        started_at=row["started_at"], finished_at=row["finished_at"],
+        duration_ms=row["duration_ms"], error_code=row["error_code"],
+        error_message=row["error_message"],
     )
 
 
@@ -222,7 +258,12 @@ class WorkflowDraftApplicationService:
     def revision_context(
         self, draft_id: EntityId, *, actor: str, limit: int = 10,
     ) -> tuple[DraftRevisionRecord | None, tuple[DraftRevisionRecord, ...], bool]:
-        """Return the pending candidate, recent decisions and undo availability."""
+        """Return the current revision, recent decisions and undo availability.
+
+        "Current" spans the whole job: queued and running come back too, so a
+        reloaded page can show work still in flight rather than an empty panel
+        that looks like nothing was ever asked for.
+        """
 
         with connect_workflow_database(self.path) as db:
             row = db.execute(
@@ -233,7 +274,7 @@ class WorkflowDraftApplicationService:
                 raise DraftNotFoundError(f"draft not found: {draft_id}")
             pending_row = db.execute(
                 "SELECT * FROM workflow_draft_revisions"
-                " WHERE draft_id=? AND status='pending'",
+                " WHERE draft_id=? AND status IN ('queued','running','pending')",
                 (str(draft_id),),
             ).fetchone()
             history_rows = db.execute(
@@ -476,57 +517,42 @@ class WorkflowDraftApplicationService:
         self, draft_id: EntityId, instruction: str, *, expected_revision: int,
         actor: str, now: datetime,
     ) -> DraftRecord:
-        """Generate a compiler-valid candidate without replacing the draft.
+        """Enqueue an Agent revision and return immediately.
 
-        The reviser call is slow and holds no transaction: the current source
-        is read, the agent produces a compiled replacement, then a fresh CAS
-        lands it. A concurrent edit between the two surfaces as a revision
-        conflict rather than a lost update.
+        The CLI call can take minutes, so it does not run inside the request.
+        The job is recorded as ``queued`` here; a dispatcher leases it, runs
+        the Agent and settles it into a ``pending`` candidate or a ``failed``
+        job. A reload therefore always finds the truth in the database rather
+        than in a request that may have been abandoned.
         """
         if self.reviser is None:
             raise RevisionUnavailableError("no agent reviser is configured")
-        current = self.get(draft_id, actor=actor, now=now)
-        if current.status != "active":
-            raise DraftNotFoundError(f"draft is {current.status}: {draft_id}")
-        if current.revision != expected_revision:
-            raise DraftVersionConflictError(expected_revision, current.revision)
-        pending, _, _ = self.revision_context(draft_id, actor=actor)
-        if pending is not None:
-            raise DraftRevisionStateError(
-                "the pending Agent revision must be accepted or rejected"
-            )
-        outcome = self.reviser(
-            current.source_text, instruction,
-            expected_workflow_id=current.workflow_id,
-        )
-        if len(outcome.source.encode("utf-8")) > MAX_SOURCE_BYTES:
-            raise DraftSourceTooLargeError(len(outcome.source.encode("utf-8")))
-        proposed_hash = _source_hash(outcome.source)
+        instruction = instruction.strip()
+        if not instruction:
+            raise ValueError("instruction is required")
         instruction_hash = definition_hash({"instruction": instruction}).value
         revision_id = str(new_id("workflow_revision"))
         with connect_workflow_database(self.path) as db:
             db.execute("BEGIN IMMEDIATE")
             record = self._owned_active(db, draft_id, actor, expected_revision)
-            if self._pending(db, draft_id) is not None:
+            active = self._active_revision(db, draft_id)
+            if active is not None:
                 raise DraftRevisionStateError(
-                    "the pending Agent revision must be accepted or rejected"
+                    "an Agent revision is already queued, running or awaiting"
+                    " a decision for this draft"
                 )
             db.execute(
                 """INSERT INTO workflow_draft_revisions(
                      revision_id,draft_id,base_draft_revision,instruction_text,
                      instruction_hash,previous_source_text,previous_source_hash,
                      previous_validation_status,previous_validated_source_hash,
-                     previous_definition_hash,proposed_source_text,
-                     proposed_source_hash,proposed_definition_hash,attempts,
-                     status,created_at,decided_at,decided_by
-                   ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,NULL,NULL)""",
+                     previous_definition_hash,status,created_at
+                   ) VALUES (?,?,?,?,?,?,?,?,?,?,'queued',?)""",
                 (
                     revision_id, str(draft_id), expected_revision, instruction,
                     instruction_hash, record.source_text, record.source_hash,
                     record.validation_status, record.validated_source_hash,
-                    record.validated_definition_hash, outcome.source,
-                    proposed_hash, outcome.definition_hash, outcome.attempts,
-                    now.isoformat(),
+                    record.validated_definition_hash, now.isoformat(),
                 ),
             )
             db.execute(
@@ -537,19 +563,167 @@ class WorkflowDraftApplicationService:
             audit(
                 db, run_id=None, actor=actor,
                 action="workflow.draft.revise", target_id=str(draft_id),
-                decision="candidate",
+                decision="queued",
                 details={
                     "revision_id": revision_id,
                     "instruction_hash": instruction_hash,
                     "previous_source_hash": record.source_hash,
-                    "proposed_source_hash": proposed_hash,
-                    "definition_hash": outcome.definition_hash,
-                    "attempts": outcome.attempts,
                 },
                 occurred_at=now,
             )
             db.commit()
             return self._read(db, draft_id)
+
+    # -- revision jobs -----------------------------------------------------
+
+    def claim_revision(
+        self, worker_id: str, now: datetime, *, lease_ttl: timedelta,
+    ) -> tuple[DraftRevisionRecord, str] | None:
+        """Lease the oldest queued job. Returns the job and its lease token."""
+
+        if not worker_id.strip() or lease_ttl <= timedelta(0):
+            raise ValueError("invalid revision lease")
+        raw = secrets.token_urlsafe(32)
+        with connect_workflow_database(self.path) as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT * FROM workflow_draft_revisions WHERE status='queued'"
+                " ORDER BY created_at, revision_id LIMIT 1"
+            ).fetchone()
+            if row is None:
+                db.commit()
+                return None
+            if row["cancel_requested"]:
+                # Cancelled before anyone picked it up: settle it without
+                # spending a model call.
+                self._settle_cancelled(db, row["revision_id"], now)
+                db.commit()
+                return None
+            fence = int(row["fencing_token"]) + 1
+            db.execute(
+                """UPDATE workflow_draft_revisions
+                     SET status='running', lease_owner=?, lease_token_hash=?,
+                         lease_expires_at=?, fencing_token=?, started_at=?
+                   WHERE revision_id=? AND status='queued'""",
+                (
+                    worker_id, _token_hash(raw),
+                    (now + lease_ttl).isoformat(), fence, now.isoformat(),
+                    row["revision_id"],
+                ),
+            )
+            db.commit()
+            claimed = db.execute(
+                "SELECT * FROM workflow_draft_revisions WHERE revision_id=?",
+                (row["revision_id"],),
+            ).fetchone()
+            return _revision_record(claimed), raw
+
+    def execute_revision(
+        self, job: DraftRevisionRecord, lease_token: str, *,
+        clock=None, agent_command: str | None = None,
+        model_id: str | None = None,
+    ) -> DraftRevisionRecord:
+        """Run the Agent for a leased job and settle it.
+
+        The call happens outside any transaction. Whatever it produces — a
+        candidate, a rejection from the compiler, or an unavailable CLI — is
+        written back under the lease fence, with how long it took.
+        """
+        tick = clock or (lambda: datetime.now(timezone.utc))
+        started = tick()
+        try:
+            outcome = self.reviser(
+                job.previous_source_text, job.instruction_text,
+                expected_workflow_id=self._workflow_id_for(job.draft_id),
+            )
+        except Exception as exc:  # settled as a failure, never a lost job
+            code = type(exc).__name__
+            return self._settle_failure(
+                job, lease_token, code=code, message=str(exc)[:500],
+                started_at=started, finished_at=tick(),
+                agent_command=agent_command, model_id=model_id,
+            )
+        if len(outcome.source.encode("utf-8")) > MAX_SOURCE_BYTES:
+            return self._settle_failure(
+                job, lease_token, code="DraftSourceTooLargeError",
+                message=f"revised source exceeds {MAX_SOURCE_BYTES} bytes",
+                started_at=started, finished_at=tick(),
+                agent_command=agent_command, model_id=model_id,
+            )
+        return self._settle_candidate(
+            job, lease_token, outcome, started_at=started, finished_at=tick(),
+            agent_command=agent_command, model_id=model_id,
+        )
+
+    def cancel_revision(
+        self, draft_id: EntityId, revision_id: EntityId, *, actor: str,
+        now: datetime,
+    ) -> DraftRecord:
+        """Ask an in-flight job to stop; settle it now when it never started."""
+
+        with connect_workflow_database(self.path) as db:
+            db.execute("BEGIN IMMEDIATE")
+            self._owned_draft(db, draft_id, actor)
+            row = db.execute(
+                "SELECT * FROM workflow_draft_revisions"
+                " WHERE revision_id=? AND draft_id=?",
+                (str(revision_id), str(draft_id)),
+            ).fetchone()
+            if row is None:
+                raise RevisionNotFoundError(f"revision not found: {revision_id}")
+            if row["status"] not in {"queued", "running"}:
+                raise DraftRevisionStateError(
+                    f"revision is {row['status']} and cannot be cancelled"
+                )
+            if row["status"] == "queued":
+                self._settle_cancelled(db, row["revision_id"], now)
+            else:
+                # Running: flag it. The worker notices and settles, so the
+                # record never claims a result the Agent did not produce.
+                db.execute(
+                    "UPDATE workflow_draft_revisions SET cancel_requested=1"
+                    " WHERE revision_id=?",
+                    (row["revision_id"],),
+                )
+            audit(
+                db, run_id=None, actor=actor,
+                action="workflow.draft.revision.cancel",
+                target_id=str(revision_id), decision="requested",
+                details={"draft_id": str(draft_id), "status": row["status"]},
+                occurred_at=now,
+            )
+            db.commit()
+            return self._read(db, draft_id)
+
+    def expire_revisions(self, now: datetime, *, limit: int = 50) -> tuple[str, ...]:
+        """Fail jobs whose worker died holding the lease.
+
+        Generation has no external side effect, so an abandoned job is simply
+        failed and left for the operator to retry — quietly re-running it
+        would spend another model call nobody asked for.
+        """
+        expired: list[str] = []
+        with connect_workflow_database(self.path) as db:
+            db.execute("BEGIN IMMEDIATE")
+            rows = db.execute(
+                "SELECT revision_id FROM workflow_draft_revisions"
+                " WHERE status='running' AND lease_expires_at IS NOT NULL"
+                " AND lease_expires_at<=? ORDER BY lease_expires_at LIMIT ?",
+                (now.isoformat(), limit),
+            ).fetchall()
+            for row in rows:
+                db.execute(
+                    """UPDATE workflow_draft_revisions
+                         SET status='failed', error_code='lease_expired',
+                             error_message='the worker running this revision stopped',
+                             finished_at=?, lease_owner=NULL,
+                             lease_token_hash=NULL, lease_expires_at=NULL
+                       WHERE revision_id=? AND status='running'""",
+                    (now.isoformat(), row["revision_id"]),
+                )
+                expired.append(row["revision_id"])
+            db.commit()
+        return tuple(expired)
 
     def accept_revision(
         self, draft_id: EntityId, *, expected_revision: int, actor: str,
@@ -676,6 +850,159 @@ class WorkflowDraftApplicationService:
             (str(draft_id),),
         ).fetchone()
         return None if row is None else _revision_record(row)
+
+    @staticmethod
+    def _active_revision(db, draft_id: EntityId) -> DraftRevisionRecord | None:
+        """Queued, running or awaiting a decision — the single-flight guard."""
+        row = db.execute(
+            "SELECT * FROM workflow_draft_revisions WHERE draft_id=?"
+            " AND status IN ('queued','running','pending')",
+            (str(draft_id),),
+        ).fetchone()
+        return None if row is None else _revision_record(row)
+
+    def _owned_draft(self, db, draft_id: EntityId, actor: str) -> DraftRecord:
+        row = db.execute(
+            "SELECT * FROM workflow_drafts WHERE draft_id=?", (str(draft_id),)
+        ).fetchone()
+        if row is None or row["actor"] != actor:
+            raise DraftNotFoundError(f"draft not found: {draft_id}")
+        return _record(row)
+
+    def _workflow_id_for(self, draft_id: str) -> str:
+        with connect_workflow_database(self.path, read_only=True) as db:
+            row = db.execute(
+                "SELECT workflow_id FROM workflow_drafts WHERE draft_id=?",
+                (str(draft_id),),
+            ).fetchone()
+        if row is None:
+            raise DraftNotFoundError(f"draft not found: {draft_id}")
+        return row["workflow_id"]
+
+    @staticmethod
+    def _settle_cancelled(db, revision_id: str, now: datetime) -> None:
+        db.execute(
+            """UPDATE workflow_draft_revisions
+                 SET status='cancelled', cancel_requested=1, finished_at=?,
+                     lease_owner=NULL, lease_token_hash=NULL,
+                     lease_expires_at=NULL
+               WHERE revision_id=? AND status IN ('queued','running')""",
+            (now.isoformat(), revision_id),
+        )
+
+    def _fenced_update(
+        self, db, job: DraftRevisionRecord, lease_token: str, sql: str,
+        params: tuple,
+    ) -> None:
+        """Apply a settle only if this worker still owns the lease."""
+        row = db.execute(
+            "SELECT status, lease_token_hash, fencing_token"
+            " FROM workflow_draft_revisions WHERE revision_id=?",
+            (job.revision_id,),
+        ).fetchone()
+        if (
+            row is None
+            or row["status"] != "running"
+            or row["lease_token_hash"] != _token_hash(lease_token)
+            or int(row["fencing_token"]) != job.fencing_token
+        ):
+            raise RevisionLeaseError(
+                f"the lease on {job.revision_id} is no longer held"
+            )
+        db.execute(sql, params)
+
+    def _settle_candidate(
+        self, job, lease_token, outcome, *, started_at, finished_at,
+        agent_command, model_id,
+    ) -> DraftRevisionRecord:
+        proposed_hash = _source_hash(outcome.source)
+        duration = int((finished_at - started_at).total_seconds() * 1000)
+        with connect_workflow_database(self.path) as db:
+            db.execute("BEGIN IMMEDIATE")
+            cancelled = db.execute(
+                "SELECT cancel_requested FROM workflow_draft_revisions"
+                " WHERE revision_id=?", (job.revision_id,),
+            ).fetchone()
+            if cancelled is not None and cancelled["cancel_requested"]:
+                # The operator asked to stop while the Agent was working; the
+                # answer is discarded rather than presented as a candidate.
+                self._settle_cancelled(db, job.revision_id, finished_at)
+                db.commit()
+                return self._revision(db, job.revision_id)
+            self._fenced_update(
+                db, job, lease_token,
+                """UPDATE workflow_draft_revisions
+                     SET status='pending', proposed_source_text=?,
+                         proposed_source_hash=?, proposed_definition_hash=?,
+                         attempts=?, agent_command=?, model_id=?,
+                         finished_at=?, duration_ms=?, lease_owner=NULL,
+                         lease_token_hash=NULL, lease_expires_at=NULL
+                   WHERE revision_id=?""",
+                (
+                    outcome.source, proposed_hash, outcome.definition_hash,
+                    outcome.attempts, agent_command, model_id,
+                    finished_at.isoformat(), duration, job.revision_id,
+                ),
+            )
+            audit(
+                db, run_id=None, actor="system:revision",
+                action="workflow.draft.revise", target_id=job.draft_id,
+                decision="candidate",
+                details={
+                    "revision_id": job.revision_id,
+                    "instruction_hash": job.instruction_hash,
+                    "previous_source_hash": job.previous_source_hash,
+                    "proposed_source_hash": proposed_hash,
+                    "definition_hash": outcome.definition_hash,
+                    "attempts": outcome.attempts,
+                    "agent_command": agent_command, "model_id": model_id,
+                    "duration_ms": duration,
+                },
+                occurred_at=finished_at,
+            )
+            db.commit()
+            return self._revision(db, job.revision_id)
+
+    def _settle_failure(
+        self, job, lease_token, *, code, message, started_at, finished_at,
+        agent_command, model_id,
+    ) -> DraftRevisionRecord:
+        duration = int((finished_at - started_at).total_seconds() * 1000)
+        with connect_workflow_database(self.path) as db:
+            db.execute("BEGIN IMMEDIATE")
+            self._fenced_update(
+                db, job, lease_token,
+                """UPDATE workflow_draft_revisions
+                     SET status='failed', error_code=?, error_message=?,
+                         agent_command=?, model_id=?, finished_at=?,
+                         duration_ms=?, lease_owner=NULL,
+                         lease_token_hash=NULL, lease_expires_at=NULL
+                   WHERE revision_id=?""",
+                (
+                    code, message, agent_command, model_id,
+                    finished_at.isoformat(), duration, job.revision_id,
+                ),
+            )
+            audit(
+                db, run_id=None, actor="system:revision",
+                action="workflow.draft.revise", target_id=job.draft_id,
+                decision="failed",
+                details={
+                    "revision_id": job.revision_id, "error_code": code,
+                    "agent_command": agent_command, "model_id": model_id,
+                    "duration_ms": duration,
+                },
+                occurred_at=finished_at,
+            )
+            db.commit()
+            return self._revision(db, job.revision_id)
+
+    @staticmethod
+    def _revision(db, revision_id: str) -> DraftRevisionRecord:
+        return _revision_record(db.execute(
+            "SELECT * FROM workflow_draft_revisions WHERE revision_id=?",
+            (revision_id,),
+        ).fetchone())
 
     def _read(self, db, draft_id: EntityId) -> DraftRecord:
         row = db.execute(

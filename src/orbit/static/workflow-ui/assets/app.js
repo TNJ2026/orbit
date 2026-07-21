@@ -1957,6 +1957,10 @@ async function renderWorkflowEditor(root, draftId) {
   let discardArmed = false;
   let instructionText = "";
   let revisionDiagnostics = [];
+  // The Agent call is a durable job, so the editor polls until it settles
+  // rather than holding a request open. A reload re-enters here and picks the
+  // same job back up.
+  let pollTimer = null;
 
   const panel = el("section", { class: "panel workflow-editor-panel agent-workflow-editor" });
   const command = (name) =>
@@ -2019,6 +2023,10 @@ async function renderWorkflowEditor(root, draftId) {
 
   const draw = () => {
     const candidate = draft.pending_revision;
+    const inFlight = Boolean(candidate?.in_flight);
+    const lastFailure = (draft.revision_history || []).find(
+      (item) => item.status === "failed" || item.status === "cancelled",
+    );
     const previewSource = candidate?.source || draft.source;
     let definition = null;
     try { definition = JSON.parse(previewSource); } catch { /* read-only fallback below */ }
@@ -2031,12 +2039,30 @@ async function renderWorkflowEditor(root, draftId) {
     const instruction = el("textarea", {
       id: "draftRevisionInstruction", maxlength: "4000", required: "required",
       placeholder: i18n.t("editor.agentPromptPlaceholder"),
-      disabled: busy || !revise ? "disabled" : null,
+      disabled: busy || inFlight || !revise ? "disabled" : null,
     });
     instruction.value = instructionText;
     instruction.addEventListener("input", () => { instructionText = instruction.value; });
     const findings = el("div", { class: "editor-diagnostics" });
-    if (candidate) {
+    if (inFlight) {
+      findings.append(el("div", { class: "banner info", id: "revisionProgress" }, [
+        el("span", { text: i18n.t(
+          candidate.status === "queued"
+            ? "editor.revisionQueued" : "editor.revisionRunning",
+        ) }),
+      ]));
+    } else if (lastFailure && !candidate) {
+      findings.append(el("div", { class: "banner error", id: "revisionFailed" }, [
+        el("div", { text: i18n.t(
+          lastFailure.status === "cancelled"
+            ? "editor.revisionCancelled" : "editor.revisionFailed",
+        ) }),
+        lastFailure.error_code
+          ? el("div", { class: "mono", text: lastFailure.error_code })
+          : null,
+      ]));
+    }
+    if (candidate && !inFlight) {
       findings.append(el("div", {
         class: "banner info", text: i18n.t("editor.candidateValid"),
       }));
@@ -2078,6 +2104,17 @@ async function renderWorkflowEditor(root, draftId) {
           draw();
         }
       },
+    }));
+    const cancelRevision = command("workflow.draft.cancel-revision");
+    if (cancelRevision) actions.append(el("button", {
+      type: "button", class: "button danger", id: "draftCancelRevision",
+      disabled: busy ? "disabled" : null,
+      text: i18n.t("editor.cancelRevision"),
+      onclick: () => execute(
+        "workflow.draft.cancel-revision",
+        { revision_id: candidate.revision_id },
+        `workflow.draft.cancel-revision:${candidate.revision_id}`,
+      ),
     }));
     if (accept) actions.append(el("button", {
       type: "button", class: "button primary", id: "draftAccept",
@@ -2151,7 +2188,12 @@ async function renderWorkflowEditor(root, draftId) {
         actions,
       ]),
       el("div", { class: "panel-body agent-editor-layout" }, [
-        el("section", { class: "agent-editor-prompt", hidden: candidate ? "hidden" : null }, [
+        // Visible while the job runs so progress and cancel stay on screen;
+        // hidden only once a candidate is waiting for accept or reject.
+        el("section", {
+          class: "agent-editor-prompt",
+          hidden: candidate && !inFlight ? "hidden" : null,
+        }, [
           el("div", { class: "panel-title", text: i18n.t("editor.agentPromptTitle") }),
           el("p", { class: "muted", text: i18n.t("editor.agentPromptHint") }),
           instruction,
@@ -2159,7 +2201,9 @@ async function renderWorkflowEditor(root, draftId) {
             class: "banner error", text: i18n.t("editor.agentUnavailable"),
           }),
         ]),
-        candidate ? el("section", { class: "agent-editor-candidate" }, [
+        // Only a settled candidate has a proposal to review; an in-flight job
+        // has no source, hash or attempt count yet.
+        candidate && !inFlight ? el("section", { class: "agent-editor-candidate" }, [
           el("div", { class: "panel-title", text: i18n.t("editor.reviewCandidate") }),
           el("p", { text: candidate.instruction }),
           el("div", { class: "muted mono", text: i18n.t("editor.candidateFacts", {
@@ -2210,6 +2254,25 @@ async function renderWorkflowEditor(root, draftId) {
         }) }),
       ]),
     );
+    schedulePoll();
+  };
+
+  /* Re-read the draft while the Agent is working. The job lives in the
+     database, so this is also what makes a reloaded page pick the same work
+     back up instead of showing an idle editor. */
+  const schedulePoll = () => {
+    if (pollTimer) clearTimeout(pollTimer);
+    pollTimer = null;
+    if (!draft.pending_revision?.in_flight) return;
+    pollTimer = setTimeout(async () => {
+      if (!document.getElementById("draftRevisionInstruction")) return;
+      try {
+        draft = (await api.workflowDraft(draft.draft_id)).data;
+        draw();
+      } catch (error) {
+        reportError(error);
+      }
+    }, 1500);
   };
 
   root.append(panel);

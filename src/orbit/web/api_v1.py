@@ -52,8 +52,9 @@ from ..workflow.artifacts.local_cas import BlobIntegrityError
 from ..workflow.authoring import AuthoringFailedError, AuthoringUnavailableError
 from ..workflow.application.workflow_draft_service import (
     DraftAlreadyActiveError, DraftNotFoundError, DraftNotValidatedError,
-    DraftSourceTooLargeError, DraftVersionConflictError, RevisionUnavailableError,
-    SourceUnavailableError, WorkflowVersionConflictError,
+    DraftSourceTooLargeError, DraftVersionConflictError, RevisionNotFoundError,
+    RevisionUnavailableError, SourceUnavailableError,
+    WorkflowVersionConflictError,
 )
 from ..workflow.persistence.database import connect_workflow_database
 from ..workflow.persistence.control import audit as persist_audit
@@ -1116,7 +1117,12 @@ def build_api_v1(
         )
         commands: list[dict[str, Any]] = []
         if record.status == "active" and guard.allows(actor, WRITE_SCOPE):
-            if pending is not None:
+            if pending is not None and pending.in_flight:
+                # Still with the Agent: the only thing to offer is stopping it.
+                commands.append(
+                    _draft_command(record, "cancel-revision", "Cancel revision")
+                )
+            elif pending is not None:
                 commands.extend([
                     _draft_command(record, "accept", "Accept revision"),
                     _draft_command(record, "reject", "Reject revision"),
@@ -1147,6 +1153,17 @@ def build_api_v1(
             "attempts": pending.attempts,
             "status": pending.status,
             "created_at": pending.created_at,
+            # Job facts: a reloaded editor can tell queued from running from
+            # failed, show how long it took and say why it stopped.
+            "in_flight": pending.in_flight,
+            "cancel_requested": pending.cancel_requested,
+            "agent_command": pending.agent_command,
+            "model_id": pending.model_id,
+            "started_at": pending.started_at,
+            "finished_at": pending.finished_at,
+            "duration_ms": pending.duration_ms,
+            "error_code": pending.error_code,
+            "error_message": pending.error_message,
         }
         return {
             "draft_id": record.draft_id,
@@ -1177,6 +1194,8 @@ def build_api_v1(
                 "created_at": item.created_at,
                 "decided_at": item.decided_at,
                 "decided_by": item.decided_by,
+                "duration_ms": item.duration_ms,
+                "error_code": item.error_code,
             } for item in history],
             "allowed_commands": commands,
         }
@@ -1282,8 +1301,20 @@ def build_api_v1(
     workflow_draft_discard = _draft_mutation("workflow.draft.discard", _draft_discard)
     workflow_draft_revise = _draft_mutation("workflow.draft.revise", _draft_revise)
     workflow_draft_accept = _draft_mutation("workflow.draft.accept", _draft_accept)
+    def _draft_cancel_revision(draft_id, body, actor):
+        revision_id = body.get("revision_id")
+        if not isinstance(revision_id, str) or not revision_id.strip():
+            raise ValueError("revision_id is required")
+        record = draft_service.cancel_revision(
+            draft_id, EntityId.parse(revision_id), actor=actor, now=now(),
+        )
+        return _draft_dto(record, actor)
+
     workflow_draft_reject = _draft_mutation("workflow.draft.reject", _draft_reject)
     workflow_draft_undo = _draft_mutation("workflow.draft.undo", _draft_undo)
+    workflow_draft_cancel_revision = _draft_mutation(
+        "workflow.draft.cancel-revision", _draft_cancel_revision,
+    )
 
     # -- writes -----------------------------------------------------------
 
@@ -1327,7 +1358,7 @@ def build_api_v1(
                 "active_goal_exists", str(exc), 409,
                 active_goal=exc.active_goal,
             )
-        except DraftNotFoundError as exc:
+        except (DraftNotFoundError, RevisionNotFoundError) as exc:
             return error("workflow_draft_not_found", str(exc), 404)
         except DraftVersionConflictError as exc:
             return error(
@@ -1693,6 +1724,10 @@ def build_api_v1(
         Route(
             "/api/v1/workflow-drafts/{draft_id}/undo", workflow_draft_undo,
             methods=["POST"],
+        ),
+        Route(
+            "/api/v1/workflow-drafts/{draft_id}/cancel-revision",
+            workflow_draft_cancel_revision, methods=["POST"],
         ),
         Route("/api/v1/capabilities", capability_read, methods=["GET"]),
     ]

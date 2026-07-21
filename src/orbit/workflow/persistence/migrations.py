@@ -933,6 +933,100 @@ _MIGRATIONS: tuple[tuple[int, str, str], ...] = (
             ON workflow_draft_revisions(draft_id, created_at DESC);
         """,
     ),
+    (
+        15,
+        "durable agent revision jobs",
+        """
+        -- The Agent call becomes a durable job rather than the body of an HTTP
+        -- request: it is recorded before the CLI runs, leased while it runs,
+        -- and settles into a candidate or a failure. SQLite cannot relax a
+        -- NOT NULL or widen a CHECK in place, so the table is rebuilt.
+        CREATE TABLE workflow_draft_revisions_v2 (
+            revision_id TEXT PRIMARY KEY,
+            draft_id TEXT NOT NULL REFERENCES workflow_drafts(draft_id),
+            base_draft_revision INTEGER NOT NULL CHECK (base_draft_revision >= 1),
+            instruction_text TEXT NOT NULL,
+            instruction_hash TEXT NOT NULL,
+            previous_source_text TEXT NOT NULL,
+            previous_source_hash TEXT NOT NULL,
+            previous_validation_status TEXT NOT NULL CHECK (
+                previous_validation_status IN ('dirty', 'valid', 'invalid')
+            ),
+            previous_validated_source_hash TEXT,
+            previous_definition_hash TEXT,
+            -- Unset until the Agent returns something the compiler accepts.
+            proposed_source_text TEXT,
+            proposed_source_hash TEXT,
+            proposed_definition_hash TEXT,
+            attempts INTEGER CHECK (attempts IS NULL OR attempts >= 1),
+            status TEXT NOT NULL CHECK (
+                status IN (
+                    'queued', 'running', 'pending', 'accepted', 'rejected',
+                    'undone', 'failed', 'cancelled'
+                )
+            ),
+            -- Lease: one worker owns a running job, fenced against a resumed
+            -- straggler writing over a newer attempt.
+            lease_owner TEXT,
+            lease_token_hash TEXT,
+            lease_expires_at TEXT,
+            fencing_token INTEGER NOT NULL DEFAULT 0,
+            cancel_requested INTEGER NOT NULL DEFAULT 0
+                CHECK (cancel_requested IN (0, 1)),
+            -- Audit: which CLI answered, how long it took, why it failed.
+            agent_command TEXT,
+            model_id TEXT,
+            started_at TEXT,
+            finished_at TEXT,
+            duration_ms INTEGER CHECK (duration_ms IS NULL OR duration_ms >= 0),
+            error_code TEXT,
+            error_message TEXT,
+            created_at TEXT NOT NULL,
+            decided_at TEXT,
+            decided_by TEXT,
+            CHECK (revision_id LIKE 'workflow_revision:%'),
+            -- A settled candidate must carry the source it proposes.
+            CHECK (
+                status IN ('queued', 'running', 'failed', 'cancelled')
+                OR (
+                    proposed_source_text IS NOT NULL
+                    AND proposed_source_hash IS NOT NULL
+                    AND proposed_definition_hash IS NOT NULL
+                )
+            )
+        );
+
+        INSERT INTO workflow_draft_revisions_v2(
+            revision_id, draft_id, base_draft_revision, instruction_text,
+            instruction_hash, previous_source_text, previous_source_hash,
+            previous_validation_status, previous_validated_source_hash,
+            previous_definition_hash, proposed_source_text, proposed_source_hash,
+            proposed_definition_hash, attempts, status, created_at, decided_at,
+            decided_by
+        )
+        SELECT
+            revision_id, draft_id, base_draft_revision, instruction_text,
+            instruction_hash, previous_source_text, previous_source_hash,
+            previous_validation_status, previous_validated_source_hash,
+            previous_definition_hash, proposed_source_text, proposed_source_hash,
+            proposed_definition_hash, attempts, status, created_at, decided_at,
+            decided_by
+        FROM workflow_draft_revisions;
+
+        DROP TABLE workflow_draft_revisions;
+        ALTER TABLE workflow_draft_revisions_v2 RENAME TO workflow_draft_revisions;
+
+        -- One in-flight or undecided revision per draft: a second prompt may
+        -- not start while one is queued, running or awaiting a decision.
+        CREATE UNIQUE INDEX workflow_draft_one_active_revision
+            ON workflow_draft_revisions(draft_id)
+            WHERE status IN ('queued', 'running', 'pending');
+        CREATE INDEX workflow_draft_revision_history
+            ON workflow_draft_revisions(draft_id, created_at DESC);
+        CREATE INDEX workflow_draft_revision_claimable
+            ON workflow_draft_revisions(status, created_at);
+        """,
+    ),
 )
 
 

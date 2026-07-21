@@ -1062,6 +1062,26 @@ class WorkflowDraftApiTests(ApiTestCase):
             lambda _prompt: json_module.dumps(editable_dsl(name="Linear, edited"))
         )
 
+    def _settle(self, client, draft_id, *, timeout=10.0):
+        """Wait for the background revision worker to settle the job.
+
+        The prompt is a durable job now, so the API returns while the Agent is
+        still running; a test that wants the outcome waits for it exactly as
+        the editor's poll does.
+        """
+        import time as _time
+
+        deadline = _time.monotonic() + timeout
+        while _time.monotonic() < deadline:
+            data = client.get(
+                f"/api/v1/workflow-drafts/{draft_id}", actor="writer",
+            ).json()["data"]
+            revision = data["pending_revision"]
+            if revision is None or not revision["in_flight"]:
+                return data
+            _time.sleep(0.02)
+        raise AssertionError("the revision job never settled")
+
     def _edit_command(self, client):
         detail = client.get(
             "/api/v1/workflows/workflow:draftable", actor="writer"
@@ -1159,6 +1179,9 @@ class WorkflowDraftApiTests(ApiTestCase):
                 },
             ).json()["data"]
             self.assertEqual("dirty", staged["validation_status"])
+            self.assertEqual("queued", staged["pending_revision"]["status"])
+            staged = self._settle(client, draft["draft_id"])
+            self.assertEqual("pending", staged["pending_revision"]["status"])
             self.assertIn("Linear, edited", staged["pending_revision"]["source"])
             accept = next(
                 command for command in staged["allowed_commands"]
@@ -1206,7 +1229,7 @@ class WorkflowDraftApiTests(ApiTestCase):
             draft = client.post(
                 command["href"], actor="writer", key="d5", body={},
             ).json()["data"]
-            failed = client.post(
+            queued = client.post(
                 f"/api/v1/workflow-drafts/{draft['draft_id']}/revise",
                 actor="writer", key="d6",
                 body={
@@ -1214,12 +1237,20 @@ class WorkflowDraftApiTests(ApiTestCase):
                     "expected_version": draft["revision"],
                 },
             )
-            self.assertEqual(422, failed.status_code)
-            self.assertTrue(failed.json()["error"]["details"]["diagnostics"])
+            # Enqueued, not judged: the verdict arrives on the job.
+            self.assertEqual(200, queued.status_code, queued.text)
+            self.assertEqual(
+                "queued", queued.json()["data"]["pending_revision"]["status"]
+            )
+            settled = self._settle(client, draft["draft_id"])
+            self.assertIsNone(settled["pending_revision"])
+            failure = settled["revision_history"][0]
+            self.assertEqual("failed", failure["status"])
+            self.assertTrue(failure["error_code"])
             denied = client.post(
                 f"/api/v1/workflow-drafts/{draft['draft_id']}/publish",
                 actor="writer", key="d7",
-                body={"expected_version": draft["revision"]},
+                body={"expected_version": settled["revision"]},
             )
             self.assertEqual(409, denied.status_code)
             self.assertEqual(
@@ -1283,15 +1314,18 @@ class WorkflowDraftApiTests(ApiTestCase):
             self.assertEqual(200, response.status_code, response.text)
             data = response.json()["data"]
             self.assertNotIn("Agent revised", data["source"])
+            # While the job is in flight the only offer is to stop it.
+            self.assertEqual({
+                "workflow.draft.cancel-revision", "workflow.draft.discard",
+            }, {item["command"] for item in data["allowed_commands"]})
+
+            data = self._settle(client, draft["draft_id"])
+            self.assertNotIn("Agent revised", data["source"])
             self.assertIn("Agent revised", data["pending_revision"]["source"])
-            revised_commands = {
-                item["command"]
-                for item in data["allowed_commands"]
-            }
             self.assertEqual({
                 "workflow.draft.accept", "workflow.draft.reject",
                 "workflow.draft.discard",
-            }, revised_commands)
+            }, {item["command"] for item in data["allowed_commands"]})
 
     def test_manual_draft_mutation_routes_are_not_exposed(self) -> None:
         with AsgiHarness(self.app) as client:
@@ -1328,10 +1362,102 @@ class WorkflowDraftApiTests(ApiTestCase):
             second = client.post(
                 revise["href"], actor="writer", key="revise-fail", body=body,
             )
-            self.assertEqual(422, first.status_code, first.text)
-            self.assertEqual(422, second.status_code, second.text)
+            # Redelivery of the same intent enqueues one job, never two model
+            # calls — the idempotency key is what makes a retried click safe.
+            self.assertEqual(200, first.status_code, first.text)
+            self.assertEqual(200, second.status_code, second.text)
             self.assertEqual(
-                "workflow_revision_failed", second.json()["error"]["code"]
+                first.json()["data"]["pending_revision"]["revision_id"],
+                second.json()["data"]["pending_revision"]["revision_id"],
+            )
+
+            settled = self._settle(client, draft["draft_id"])
+            # A failed job leaves no candidate to accept, and says why.
+            self.assertIsNone(settled["pending_revision"])
+            failure = settled["revision_history"][0]
+            self.assertEqual("failed", failure["status"])
+            self.assertTrue(failure["error_code"])
+            self.assertEqual(
+                {"workflow.draft.revise", "workflow.draft.discard"},
+                {item["command"] for item in settled["allowed_commands"]},
+            )
+
+    def test_an_in_flight_revision_can_be_cancelled(self) -> None:
+        import threading
+
+        release = threading.Event()
+
+        def slow(_prompt):
+            # Hold the Agent inside the worker so the job is observably
+            # running while the operator cancels it.
+            release.wait(timeout=10)
+            raise AssertionError("cancelled jobs must not be settled as candidates")
+
+        with AsgiHarness(self._app_with_reviser(slow)) as client:
+            command, _ = self._edit_command(client)
+            draft = client.post(
+                command["href"], actor="writer", key="cancel-create", body={},
+            ).json()["data"]
+            revise = next(
+                item for item in draft["allowed_commands"]
+                if item["command"] == "workflow.draft.revise"
+            )
+            queued = client.post(
+                revise["href"], actor="writer", key="cancel-revise",
+                body={
+                    "instruction": "take your time",
+                    "expected_version": revise["expected_version"],
+                },
+            ).json()["data"]
+            revision_id = queued["pending_revision"]["revision_id"]
+            cancel = next(
+                item for item in queued["allowed_commands"]
+                if item["command"] == "workflow.draft.cancel-revision"
+            )
+            cancelled = client.post(
+                cancel["href"], actor="writer", key="cancel-do",
+                body={
+                    "revision_id": revision_id,
+                    "expected_version": cancel["expected_version"],
+                },
+            )
+            self.assertEqual(200, cancelled.status_code, cancelled.text)
+            release.set()
+
+    def test_a_queued_revision_survives_a_restart(self) -> None:
+        import json as json_module
+
+        from tests.test_workflow_drafts import dsl as editable_dsl
+
+        revised = editable_dsl(name="Survived")
+        app = self._app_with_reviser(lambda _prompt: json_module.dumps(revised))
+        with AsgiHarness(app) as client:
+            command, _ = self._edit_command(client)
+            draft = client.post(
+                command["href"], actor="writer", key="restart-create", body={},
+            ).json()["data"]
+            revise = next(
+                item for item in draft["allowed_commands"]
+                if item["command"] == "workflow.draft.revise"
+            )
+            client.post(
+                revise["href"], actor="writer", key="restart-revise",
+                body={
+                    "instruction": "rename it",
+                    "expected_version": revise["expected_version"],
+                },
+            )
+            settled = self._settle(client, draft["draft_id"])
+
+        # A second composition over the same file sees the settled job: the
+        # record lives in the database, not in the request that started it.
+        with AsgiHarness(self._app_with_reviser(lambda _p: "{}")) as client:
+            reloaded = client.get(
+                f"/api/v1/workflow-drafts/{draft['draft_id']}", actor="writer",
+            ).json()["data"]
+            self.assertEqual(
+                settled["revision_history"][0]["revision_id"],
+                reloaded["revision_history"][0]["revision_id"],
             )
 
 

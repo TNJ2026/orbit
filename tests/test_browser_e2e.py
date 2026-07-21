@@ -816,6 +816,101 @@ class WorkflowEditorTests(BrowserE2ETestCase):
         ))
 
 
+class WorkflowRevisionJobTests(BrowserE2ETestCase):
+    """A revision is a durable job: it survives a reload and can be cancelled."""
+
+    gate = threading.Event()
+
+    @classmethod
+    def extra_app_kwargs(cls) -> dict:
+        from tests.test_workflow_drafts import dsl as editable_dsl
+
+        def generator(_prompt: str) -> str:
+            # Hold the agent so the browser sees the job mid-flight.
+            cls.gate.wait(20)
+            return json.dumps(editable_dsl(name="Draftable, edited"))
+
+        return {"workflow_generator": generator}
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        from orbit.workflow.application.workflows import (
+            WorkflowCatalogs, WorkflowDefinitionService,
+        )
+        from orbit.workflow.catalogs import (
+            InMemoryHandlerCatalog, InMemorySchemaCatalog,
+        )
+        from orbit.workflow.catalogs.extensions import InMemoryExtensionRegistry
+        from orbit.workflow.persistence.workflow_versions import (
+            SQLiteWorkflowVersionStore,
+        )
+        from tests.test_workflow_drafts import dsl as editable_dsl
+
+        catalogs = WorkflowCatalogs(
+            InMemoryHandlerCatalog([transform_registration().manifest]),
+            InMemorySchemaCatalog(SCHEMAS),
+            InMemoryExtensionRegistry(),
+        )
+        WorkflowDefinitionService(
+            catalogs, SQLiteWorkflowVersionStore(cls.db)
+        ).publish_workflow(
+            json.dumps(editable_dsl()), source_name="<fixture>",
+            source_format="json", expected_latest_version=0, actor="fixture",
+        )
+
+    def setUp(self) -> None:
+        super().setUp()
+        type(self).gate.clear()
+        self.addCleanup(type(self).gate.set)
+
+    def _open_editor(self):
+        page = self.open("en-US", path="/ui/#/workflows")
+        card = page.locator(".workflow-card", has_text="Draftable")
+        card.wait_for()
+        card.locator(".workflow-card-main").click()
+        page.wait_for_selector("#editWorkflow")
+        page.click("#editWorkflow")
+        page.wait_for_selector("#draftRevisionInstruction")
+        return page
+
+    def test_an_in_flight_revision_survives_a_reload_and_can_be_cancelled(self) -> None:
+        page = self._open_editor()
+        page.fill("#draftRevisionInstruction", "Rename this workflow")
+        page.click("#draftRevise")
+        page.wait_for_selector("#revisionProgress", timeout=15000)
+        # Wait for the dispatcher to actually claim it: cancelling a queued job
+        # is a different (and much easier) path than cancelling a running one.
+        draft_id = page.evaluate(
+            "() => decodeURIComponent(location.hash.split('/edit/')[1])"
+        )
+        page.wait_for_function(
+            "id => fetch(`/api/v1/workflow-drafts/${id}`).then(r => r.json())"
+            ".then(b => b.data.pending_revision?.status === 'running')",
+            arg=draft_id, timeout=15000,
+        )
+
+        # A reload rebuilds the view from the server, not from page memory.
+        page.reload()
+        page.wait_for_selector("#revisionProgress", timeout=15000)
+        self.assertEqual(1, page.locator("#draftCancelRevision").count())
+        self.assertEqual(0, page.locator("#draftRevise").count())
+
+        page.click("#draftCancelRevision")
+        # Release the agent only once the cancel is recorded; otherwise the
+        # answer can land first and the candidate legitimately stands.
+        page.wait_for_function(
+            "id => fetch(`/api/v1/workflow-drafts/${id}`).then(r => r.json())"
+            ".then(b => b.data.pending_revision?.cancel_requested === true)",
+            arg=draft_id, timeout=15000,
+        )
+        type(self).gate.set()
+        # The agent answer is discarded: the prompt comes back, no candidate.
+        page.wait_for_selector("#draftRevise", timeout=15000)
+        self.assertEqual(0, page.locator("#draftAccept").count())
+        self.assertNotIn("Draftable, edited", page.text_content("#draftSourcePreview"))
+
+
 class WorkflowEditorP4Tests(BrowserE2ETestCase):
     """The Agent compiler funnel replaces client-side edge/policy editing."""
 
