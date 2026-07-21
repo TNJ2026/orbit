@@ -58,6 +58,7 @@ class AgentCliSpec:
     required_secrets: tuple[str, ...] = ()
     max_duration_seconds: int = 1800
     cost_class: str = "agent-cli"
+    runtime_compatible: bool = True
 
     def __post_init__(self) -> None:
         if not _SAFE_NAME.match(self.name):
@@ -79,6 +80,12 @@ TRUSTED_AGENT_CLIS: tuple[AgentCliSpec, ...] = (
     AgentCliSpec("claude", "claude"),
     AgentCliSpec("codex", "codex"),
     AgentCliSpec("gemini", "gemini"),
+    # Keep detection aligned with main, but do not register a CLI as an Orbit
+    # Handler until it has an invocation/output adapter for Orbit's JSON
+    # protocol. Detection and execution compatibility are separate facts.
+    AgentCliSpec("antigravity", "agy", runtime_compatible=False),
+    AgentCliSpec("hermes", "hermes", runtime_compatible=False),
+    AgentCliSpec("opencode", "opencode", runtime_compatible=False),
 )
 
 
@@ -195,6 +202,8 @@ def registrable_agents(
     permitted = None if allowed_capabilities is None else set(allowed_capabilities)
     pairs = []
     for agent in agents:
+        if not agent.spec.runtime_compatible:
+            continue
         if permitted is not None and not permitted.issuperset(agent.spec.capabilities):
             continue
         pairs.append((agent, agent_manifest(agent)))

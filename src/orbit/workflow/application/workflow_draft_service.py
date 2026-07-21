@@ -3,7 +3,7 @@
 Editing never touches a published WorkflowVersion: an actor edits a durable
 Draft and publishing INSERTs a new immutable version through the same
 ``WorkflowDefinitionService`` the CLI uses. The Draft is an aggregate with an
-optimistic ``revision``; every save, validate, publish and discard is a CAS.
+optimistic ``revision``; every candidate, decision, publish and discard is a CAS.
 
 Concurrency and failure semantics worth naming:
 
@@ -140,10 +140,67 @@ def _source_hash(source: str) -> str:
     return definition_hash({"draft_source": source}).value
 
 
+class RevisionUnavailableError(ValueError):
+    """No agent reviser is wired, so prompt-driven editing cannot run."""
+
+
+class DraftRevisionStateError(ValueError):
+    """The requested candidate decision is not valid for the current draft."""
+
+
+@dataclass(frozen=True)
+class DraftRevisionRecord:
+    revision_id: str
+    draft_id: str
+    base_draft_revision: int
+    instruction_text: str
+    instruction_hash: str
+    previous_source_text: str
+    previous_source_hash: str
+    previous_validation_status: str
+    previous_validated_source_hash: str | None
+    previous_definition_hash: str | None
+    proposed_source_text: str
+    proposed_source_hash: str
+    proposed_definition_hash: str
+    attempts: int
+    status: str
+    created_at: str
+    decided_at: str | None
+    decided_by: str | None
+
+
+def _revision_record(row) -> DraftRevisionRecord:
+    return DraftRevisionRecord(
+        revision_id=row["revision_id"], draft_id=row["draft_id"],
+        base_draft_revision=row["base_draft_revision"],
+        instruction_text=row["instruction_text"],
+        instruction_hash=row["instruction_hash"],
+        previous_source_text=row["previous_source_text"],
+        previous_source_hash=row["previous_source_hash"],
+        previous_validation_status=row["previous_validation_status"],
+        previous_validated_source_hash=row["previous_validated_source_hash"],
+        previous_definition_hash=row["previous_definition_hash"],
+        proposed_source_text=row["proposed_source_text"],
+        proposed_source_hash=row["proposed_source_hash"],
+        proposed_definition_hash=row["proposed_definition_hash"],
+        attempts=row["attempts"], status=row["status"],
+        created_at=row["created_at"], decided_at=row["decided_at"],
+        decided_by=row["decided_by"],
+    )
+
+
 class WorkflowDraftApplicationService:
-    def __init__(self, path: Path | str, definitions: WorkflowDefinitionService) -> None:
+    def __init__(
+        self, path: Path | str, definitions: WorkflowDefinitionService,
+        *, reviser=None,
+    ) -> None:
         self.path = Path(path)
         self.definitions = definitions
+        # Callable[[current_source, instruction], GenerationOutcome]. None when
+        # no generation-capable agent CLI was discovered; the editor then has
+        # no way to change a workflow (agent-only editing).
+        self.reviser = reviser
 
     # -- reads -------------------------------------------------------------
 
@@ -161,6 +218,40 @@ class WorkflowDraftApplicationService:
             record = _record(row)
         reconciled = self._reconcile(record, now)
         return reconciled if reconciled is not None else record
+
+    def revision_context(
+        self, draft_id: EntityId, *, actor: str, limit: int = 10,
+    ) -> tuple[DraftRevisionRecord | None, tuple[DraftRevisionRecord, ...], bool]:
+        """Return the pending candidate, recent decisions and undo availability."""
+
+        with connect_workflow_database(self.path) as db:
+            row = db.execute(
+                "SELECT actor, source_hash FROM workflow_drafts WHERE draft_id=?",
+                (str(draft_id),),
+            ).fetchone()
+            if row is None or row["actor"] != actor:
+                raise DraftNotFoundError(f"draft not found: {draft_id}")
+            pending_row = db.execute(
+                "SELECT * FROM workflow_draft_revisions"
+                " WHERE draft_id=? AND status='pending'",
+                (str(draft_id),),
+            ).fetchone()
+            history_rows = db.execute(
+                "SELECT * FROM workflow_draft_revisions WHERE draft_id=?"
+                " ORDER BY base_draft_revision DESC, revision_id DESC LIMIT ?",
+                (str(draft_id), max(1, min(int(limit), 50))),
+            ).fetchall()
+            undoable = db.execute(
+                "SELECT 1 FROM workflow_draft_revisions"
+                " WHERE draft_id=? AND status='accepted'"
+                " AND proposed_source_hash=? LIMIT 1",
+                (str(draft_id), row["source_hash"]),
+            ).fetchone() is not None
+        return (
+            None if pending_row is None else _revision_record(pending_row),
+            tuple(_revision_record(item) for item in history_rows),
+            undoable,
+        )
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -317,6 +408,10 @@ class WorkflowDraftApplicationService:
     ) -> tuple[DraftRecord, Mapping[str, Any]]:
         with connect_workflow_database(self.path) as db:
             record = self._owned_active(db, draft_id, actor, expected_revision)
+            if self._pending(db, draft_id) is not None:
+                raise DraftRevisionStateError(
+                    "the pending Agent revision must be accepted or rejected"
+                )
         if (
             record.validation_status != "valid"
             or record.validated_source_hash != record.source_hash
@@ -364,6 +459,11 @@ class WorkflowDraftApplicationService:
                    WHERE draft_id=? AND revision=?""",
                 (now.isoformat(), str(draft_id), expected_revision),
             )
+            db.execute(
+                "UPDATE workflow_draft_revisions SET status='rejected',"
+                " decided_at=?, decided_by=? WHERE draft_id=? AND status='pending'",
+                (now.isoformat(), actor, str(draft_id)),
+            )
             audit(
                 db, run_id=None, actor=actor, action="workflow.draft.discard",
                 target_id=str(draft_id), decision="allowed",
@@ -372,7 +472,210 @@ class WorkflowDraftApplicationService:
             db.commit()
             return self._read(db, draft_id)
 
+    def revise(
+        self, draft_id: EntityId, instruction: str, *, expected_revision: int,
+        actor: str, now: datetime,
+    ) -> DraftRecord:
+        """Generate a compiler-valid candidate without replacing the draft.
+
+        The reviser call is slow and holds no transaction: the current source
+        is read, the agent produces a compiled replacement, then a fresh CAS
+        lands it. A concurrent edit between the two surfaces as a revision
+        conflict rather than a lost update.
+        """
+        if self.reviser is None:
+            raise RevisionUnavailableError("no agent reviser is configured")
+        current = self.get(draft_id, actor=actor, now=now)
+        if current.status != "active":
+            raise DraftNotFoundError(f"draft is {current.status}: {draft_id}")
+        if current.revision != expected_revision:
+            raise DraftVersionConflictError(expected_revision, current.revision)
+        pending, _, _ = self.revision_context(draft_id, actor=actor)
+        if pending is not None:
+            raise DraftRevisionStateError(
+                "the pending Agent revision must be accepted or rejected"
+            )
+        outcome = self.reviser(
+            current.source_text, instruction,
+            expected_workflow_id=current.workflow_id,
+        )
+        if len(outcome.source.encode("utf-8")) > MAX_SOURCE_BYTES:
+            raise DraftSourceTooLargeError(len(outcome.source.encode("utf-8")))
+        proposed_hash = _source_hash(outcome.source)
+        instruction_hash = definition_hash({"instruction": instruction}).value
+        revision_id = str(new_id("workflow_revision"))
+        with connect_workflow_database(self.path) as db:
+            db.execute("BEGIN IMMEDIATE")
+            record = self._owned_active(db, draft_id, actor, expected_revision)
+            if self._pending(db, draft_id) is not None:
+                raise DraftRevisionStateError(
+                    "the pending Agent revision must be accepted or rejected"
+                )
+            db.execute(
+                """INSERT INTO workflow_draft_revisions(
+                     revision_id,draft_id,base_draft_revision,instruction_text,
+                     instruction_hash,previous_source_text,previous_source_hash,
+                     previous_validation_status,previous_validated_source_hash,
+                     previous_definition_hash,proposed_source_text,
+                     proposed_source_hash,proposed_definition_hash,attempts,
+                     status,created_at,decided_at,decided_by
+                   ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,NULL,NULL)""",
+                (
+                    revision_id, str(draft_id), expected_revision, instruction,
+                    instruction_hash, record.source_text, record.source_hash,
+                    record.validation_status, record.validated_source_hash,
+                    record.validated_definition_hash, outcome.source,
+                    proposed_hash, outcome.definition_hash, outcome.attempts,
+                    now.isoformat(),
+                ),
+            )
+            db.execute(
+                "UPDATE workflow_drafts SET revision=revision+1, updated_at=?"
+                " WHERE draft_id=? AND revision=?",
+                (now.isoformat(), str(draft_id), expected_revision),
+            )
+            audit(
+                db, run_id=None, actor=actor,
+                action="workflow.draft.revise", target_id=str(draft_id),
+                decision="candidate",
+                details={
+                    "revision_id": revision_id,
+                    "instruction_hash": instruction_hash,
+                    "previous_source_hash": record.source_hash,
+                    "proposed_source_hash": proposed_hash,
+                    "definition_hash": outcome.definition_hash,
+                    "attempts": outcome.attempts,
+                },
+                occurred_at=now,
+            )
+            db.commit()
+            return self._read(db, draft_id)
+
+    def accept_revision(
+        self, draft_id: EntityId, *, expected_revision: int, actor: str,
+        now: datetime,
+    ) -> DraftRecord:
+        with connect_workflow_database(self.path) as db:
+            db.execute("BEGIN IMMEDIATE")
+            self._owned_active(db, draft_id, actor, expected_revision)
+            candidate = self._pending(db, draft_id)
+            if candidate is None:
+                raise DraftRevisionStateError("there is no pending Agent revision")
+            db.execute(
+                """UPDATE workflow_drafts SET source_text=?,source_hash=?,
+                     source_format='json',validation_status='valid',
+                     validated_source_hash=?,validated_definition_hash=?,
+                     diagnostics_json='[]',revision=revision+1,updated_at=?
+                   WHERE draft_id=? AND revision=?""",
+                (
+                    candidate.proposed_source_text, candidate.proposed_source_hash,
+                    candidate.proposed_source_hash,
+                    candidate.proposed_definition_hash, now.isoformat(),
+                    str(draft_id), expected_revision,
+                ),
+            )
+            db.execute(
+                "UPDATE workflow_draft_revisions SET status='accepted',"
+                " decided_at=?,decided_by=? WHERE revision_id=?",
+                (now.isoformat(), actor, candidate.revision_id),
+            )
+            audit(
+                db, run_id=None, actor=actor,
+                action="workflow.draft.revision.accept",
+                target_id=str(draft_id), decision="allowed",
+                details={"revision_id": candidate.revision_id}, occurred_at=now,
+            )
+            db.commit()
+            return self._read(db, draft_id)
+
+    def reject_revision(
+        self, draft_id: EntityId, *, expected_revision: int, actor: str,
+        now: datetime,
+    ) -> DraftRecord:
+        with connect_workflow_database(self.path) as db:
+            db.execute("BEGIN IMMEDIATE")
+            self._owned_active(db, draft_id, actor, expected_revision)
+            candidate = self._pending(db, draft_id)
+            if candidate is None:
+                raise DraftRevisionStateError("there is no pending Agent revision")
+            db.execute(
+                "UPDATE workflow_draft_revisions SET status='rejected',"
+                " decided_at=?,decided_by=? WHERE revision_id=?",
+                (now.isoformat(), actor, candidate.revision_id),
+            )
+            db.execute(
+                "UPDATE workflow_drafts SET revision=revision+1,updated_at=?"
+                " WHERE draft_id=? AND revision=?",
+                (now.isoformat(), str(draft_id), expected_revision),
+            )
+            audit(
+                db, run_id=None, actor=actor,
+                action="workflow.draft.revision.reject",
+                target_id=str(draft_id), decision="allowed",
+                details={"revision_id": candidate.revision_id}, occurred_at=now,
+            )
+            db.commit()
+            return self._read(db, draft_id)
+
+    def undo_revision(
+        self, draft_id: EntityId, *, expected_revision: int, actor: str,
+        now: datetime,
+    ) -> DraftRecord:
+        with connect_workflow_database(self.path) as db:
+            db.execute("BEGIN IMMEDIATE")
+            record = self._owned_active(db, draft_id, actor, expected_revision)
+            if self._pending(db, draft_id) is not None:
+                raise DraftRevisionStateError(
+                    "reject the pending Agent revision before undoing"
+                )
+            row = db.execute(
+                "SELECT * FROM workflow_draft_revisions"
+                " WHERE draft_id=? AND status='accepted'"
+                " AND proposed_source_hash=?"
+                " ORDER BY base_draft_revision DESC,revision_id DESC LIMIT 1",
+                (str(draft_id), record.source_hash),
+            ).fetchone()
+            if row is None:
+                raise DraftRevisionStateError("there is no accepted revision to undo")
+            accepted = _revision_record(row)
+            db.execute(
+                """UPDATE workflow_drafts SET source_text=?,source_hash=?,
+                     validation_status=?,validated_source_hash=?,
+                     validated_definition_hash=?,diagnostics_json='[]',
+                     revision=revision+1,updated_at=?
+                   WHERE draft_id=? AND revision=?""",
+                (
+                    accepted.previous_source_text, accepted.previous_source_hash,
+                    accepted.previous_validation_status,
+                    accepted.previous_validated_source_hash,
+                    accepted.previous_definition_hash, now.isoformat(),
+                    str(draft_id), expected_revision,
+                ),
+            )
+            db.execute(
+                "UPDATE workflow_draft_revisions SET status='undone',"
+                " decided_at=?,decided_by=? WHERE revision_id=?",
+                (now.isoformat(), actor, accepted.revision_id),
+            )
+            audit(
+                db, run_id=None, actor=actor,
+                action="workflow.draft.revision.undo",
+                target_id=str(draft_id), decision="allowed",
+                details={"revision_id": accepted.revision_id}, occurred_at=now,
+            )
+            db.commit()
+            return self._read(db, draft_id)
+
     # -- internals ---------------------------------------------------------
+
+    @staticmethod
+    def _pending(db, draft_id: EntityId) -> DraftRevisionRecord | None:
+        row = db.execute(
+            "SELECT * FROM workflow_draft_revisions"
+            " WHERE draft_id=? AND status='pending'",
+            (str(draft_id),),
+        ).fetchone()
+        return None if row is None else _revision_record(row)
 
     def _read(self, db, draft_id: EntityId) -> DraftRecord:
         row = db.execute(
@@ -429,14 +732,16 @@ class WorkflowDraftApplicationService:
 
         A validated draft whose definition hash already exists as a published
         version newer than or equal to its base was published; offering it for
-        publish again would rely on content idempotency to save us. Completing
-        it here makes the recovery visible instead of accidental (plan §9).
+        again would rely on content idempotency to save us. Completing it here
+        makes the recovery visible instead of accidental (plan §9).
         """
         if record.status != "active" or record.validated_definition_hash is None:
             return None
         if record.validated_source_hash != record.source_hash:
             return None
         with connect_workflow_database(self.path) as db:
+            if self._pending(db, EntityId.parse(record.draft_id)) is not None:
+                return None
             row = db.execute(
                 "SELECT version FROM workflow_versions"
                 " WHERE workflow_id=? AND definition_hash=? AND version>=?",

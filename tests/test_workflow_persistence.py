@@ -100,7 +100,7 @@ class WorkflowMigrationAndUnitOfWorkTests(unittest.TestCase):
         self.assertTrue({"jobs", "job_leases", "durable_timers"} <= tables)
         self.assertTrue({"planner_attempts", "planner_proposals"} <= tables)
         self.assertIn("human_tasks", tables)
-        self.assertEqual(list(range(1, 14)), versions)
+        self.assertEqual(list(range(1, 15)), versions)
 
     def test_migration_is_repeatable_after_workflow_drafts_exist(self) -> None:
         with connect_workflow_database(self.path) as connection:

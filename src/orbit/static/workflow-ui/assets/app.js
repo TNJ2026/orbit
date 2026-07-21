@@ -14,10 +14,6 @@ import { Api, ApiError } from "./api.js";
 import { I18n, LOCALES, preferredLocale } from "./i18n.js";
 import { Router } from "./router.js";
 import {
-  compatibleHandlers, diagnosticTarget, formatWorkflowSource, parseWorkflowSource,
-  removeEdge, removeNode, removePolicy, replaceEdge, replaceMetadata, replaceNode, replacePolicy,
-} from "./workflow-editor.js";
-import {
   budgetDialog, cancelRunDialog, humanSubmitDialog, recoveryDialog,
 } from "./components/command-dialog.js";
 import { dataState } from "./components/data-state.js";
@@ -1622,15 +1618,16 @@ async function renderOps(root) {
 
 async function renderAgents(root) {
   const catalog = (await api.handlerCatalog()).data;
+  const agents = catalog.handlers.filter((handler) => handler.name.startsWith("agent."));
   root.append(el("div", { class: "banner info", text: i18n.t("agents.registrationOnly") }));
   root.append(el("section", { class: "panel" }, [
     el("div", { class: "panel-head" }, [
       el("div", { class: "panel-title", text: i18n.t("agents.handlers") }),
     ]),
-    el("div", { class: "panel-body agents-grid" }, catalog.handlers.length
-      ? catalog.handlers.map((handler) => {
+    el("div", { class: "panel-body agents-grid" }, agents.length
+      ? agents.map((handler) => {
         const attempt = handler.recent_attempt;
-        const initials = handler.name.replace(/^handler:/, "").slice(0, 2).toUpperCase();
+        const initials = handler.name.replace(/^agent\./, "").slice(0, 2).toUpperCase();
         return el("article", { class: "data-card list-option-card agent-card" }, [
           el("div", { class: "agent-head" }, [
             el("span", { class: "agent-avatar", "aria-hidden": "true", text: initials }),
@@ -1649,15 +1646,6 @@ async function renderAgents(root) {
         ]);
       })
       : [el("div", { class: "muted", text: i18n.t("agents.empty") })]),
-  ]));
-  root.append(el("section", { class: "panel" }, [
-    el("div", { class: "panel-head" }, [
-      el("div", { class: "panel-title", text: i18n.t("agents.discovered") }),
-    ]),
-    el("div", { class: "panel-body" }, catalog.agents.length
-      ? catalog.agents.map((agent) =>
-        el("div", { class: "mono", text: `${agent.name} ${agent.version}` }))
-      : [el("div", { class: "muted", text: i18n.t("agents.discovered.empty") })]),
   ]));
 }
 
@@ -1956,1002 +1944,246 @@ async function renderWorkflows(root) {
 
 /* --------------------------------------------------------- workflow editor */
 
-/** Persistent Workflow Editor (editor plan P3).
+/** Agent-only Workflow Editor.
  *
- * Structured forms only produce candidate JSON. Save, validation, revision
- * and the command set remain server-owned; a candidate is applied through the
- * advertised save command and immediately checked by the production compiler.
+ * The published source is a read-only fact. The only operation that can
+ * replace it is the server-advertised revise command, whose output has already
+ * passed the production compiler before this view receives it.
  */
 async function renderWorkflowEditor(root, draftId) {
-  const [draftResponse, catalogResponse] = await Promise.all([
-    api.workflowDraft(draftId),
-    api.handlerCatalog().catch(() => ({ data: { handlers: [] } })),
-  ]);
-  let draft = draftResponse.data;
-  const handlers = catalogResponse.data.handlers || [];
+  let draft = (await api.workflowDraft(draftId)).data;
+  let busy = false;
+  let discardArmed = false;
+  let instructionText = "";
+  let revisionDiagnostics = [];
 
-  const source = el("textarea", {
-    id: "draftSource", class: "draft-source", spellcheck: "false",
-    "aria-label": i18n.t("editor.source"),
-  });
-  source.value = draft.source;
-  const saveState = el("span", {
-    class: "pill", id: "draftSaveState", role: "status", "aria-live": "polite",
-  });
-  const conflict = el("div", { class: "banner error", hidden: "hidden", role: "alert" });
-  const controls = el("div", { class: "actions", id: "draftControls" });
-  const diagnostics = el("div", { class: "panel-body", id: "draftDiagnostics" });
-  const editorNav = el("nav", {
-    class: "editor-nav", role: "tablist", "aria-label": i18n.t("editor.sections"),
-  });
-  const editorMain = el("div", { class: "editor-main" });
-  const outlinePane = el("section", { class: "editor-pane", "data-editor-pane": "outline" });
-  const metadataPane = el("section", { class: "editor-pane", "data-editor-pane": "metadata", hidden: "hidden" });
-  const nodesPane = el("section", { class: "editor-pane", "data-editor-pane": "nodes", hidden: "hidden" });
-  const edgesPane = el("section", { class: "editor-pane", "data-editor-pane": "edges", hidden: "hidden" });
-  const policiesPane = el("section", { class: "editor-pane", "data-editor-pane": "policies", hidden: "hidden" });
-  const sourcePane = el("section", { class: "editor-pane", "data-editor-pane": "source", hidden: "hidden" }, [source]);
-  const draftFacts = el("footer", { class: "editor-facts mono" });
-
-  let dirtySinceSave = false;
-  let saving = false;
-  let saveTimer = null;
-  let lastCommandFailure = null;
-  let selectedNode = 0;
-  let selectedEdge = 0;
-  let selectedPolicy = 0;
-  let activePane = "outline";
-
+  const panel = el("section", { class: "panel workflow-editor-panel agent-workflow-editor" });
   const command = (name) =>
     (draft.allowed_commands || []).find((item) => item.command === name);
 
-  const setSaveState = (key) => {
-    saveState.textContent = i18n.t(`editor.state.${key}`);
-    saveState.className = `pill ${key === "conflict" ? "failed" : key === "saved" ? "succeeded" : "waiting"}`;
-  };
-
-  const copyText = async (value) => {
-    try {
-      await navigator.clipboard.writeText(value);
-    } catch {
-      const fallback = el("textarea", { readonly: "readonly" });
-      fallback.value = value;
-      document.body.append(fallback);
-      fallback.select();
-      document.execCommand("copy");
-      fallback.remove();
-    }
-    announce(i18n.t("editor.copied"));
-  };
-
-  const showConflict = async (error) => {
-    const localSource = source.value;
-    conflict.replaceChildren(
-      el("span", { text: i18n.t("editor.conflict", { message: error.message }) }),
-      el("button", {
-        type: "button", class: "button", id: "draftCopyLocal",
-        text: i18n.t("editor.copyLocal"), onclick: () => copyText(localSource),
-      }),
-      el("button", {
-        type: "button", class: "button", id: "draftReload",
-        text: i18n.t("editor.reload"),
-        onclick: async () => {
-          draft = (await api.workflowDraft(draft.draft_id)).data;
-          source.value = draft.source;
-          dirtySinceSave = false;
-          conflict.hidden = true;
-          setSaveState("saved");
-          redraw();
-          drawStructured();
-        },
-      }),
-    );
-    conflict.hidden = false;
-    setSaveState("conflict");
-    try {
-      const remote = error.code === "workflow_version_conflict"
-        ? (await api.workflowDetail(draft.workflow_id, error.details.latest_version)).data
-        : (await api.workflowDraft(draft.draft_id)).data;
-      if (remote.source !== undefined && remote.source !== localSource) {
-        const local = el("textarea", { readonly: "readonly", class: "mono" });
-        local.value = localSource;
-        const server = el("textarea", { readonly: "readonly", class: "mono" });
-        server.value = remote.source || "";
-        const comparison = el("details", { class: "editor-conflict-compare" }, [
-          el("summary", { text: i18n.t("editor.compareConflict") }),
-          el("div", { class: "editor-compare-grid" }, [
-            field(i18n.t("editor.localDraft"), local),
-            field(error.code === "workflow_version_conflict"
-              ? i18n.t("editor.latestPublished", { version: error.details.latest_version })
-              : i18n.t("editor.serverDraft"), server),
-          ]),
-        ]);
-        conflict.append(comparison);
-        if (error.code === "workflow_version_conflict") {
-          conflict.append(
-            el("button", {
-              type: "button", class: "button", text: i18n.t("editor.viewLatest"),
-              onclick: () => { comparison.open = true; comparison.scrollIntoView({ block: "nearest" }); },
-            }),
-            el("button", {
-              type: "button", class: "button danger", id: "draftRebaseLatest",
-              text: i18n.t("editor.discardCreateLatest"),
-              onclick: async () => {
-                const discard = command("workflow.draft.discard");
-                const create = remote.allowed_commands?.find(
-                  (item) => item.command === "workflow.draft.create",
-                );
-                if (!discard || !create) return;
-                const removed = await api.execute(
-                  discard, {}, `workflow.draft.discard:${draft.draft_id}:rebase`,
-                );
-                if (!removed) return;
-                const next = await api.execute(
-                  create, { base_version: remote.selected_version },
-                  `workflow.draft.create:${draft.workflow_id}:${remote.selected_version}`,
-                );
-                navigate({
-                  view: "workflowEdit", workflowId: draft.workflow_id,
-                  draftId: next.data.draft_id, runId: null,
-                });
-              },
-            }),
-          );
-        }
-      }
-    } catch {
-      // The conflict itself remains actionable even if the comparison read
-      // races with another update or the connection drops.
-    }
-  };
-
-  const runCommand = async (name, payload = {}, intent) => {
+  const execute = async (name, payload, intent) => {
     const allowed = command(name);
-    if (!allowed) return null;
+    if (!allowed || busy) return null;
+    busy = true;
+    draw();
     try {
-      lastCommandFailure = null;
       const response = await api.execute(allowed, payload, intent);
       draft = response.data;
-      conflict.hidden = true;
-      redraw();
+      if (name === "workflow.draft.revise") revisionDiagnostics = [];
       return response;
     } catch (error) {
-      const failure = reportError(error);
-      lastCommandFailure = failure;
-      if (failure.requiresRefresh) showConflict(failure);
+      reportError(error);
+      if (name === "workflow.draft.revise") {
+        revisionDiagnostics = error.details?.diagnostics || [];
+      }
+      if (error instanceof ApiError && error.requiresRefresh) {
+        draft = (await api.workflowDraft(draft.draft_id)).data;
+      }
       return null;
+    } finally {
+      busy = false;
+      draw();
     }
   };
 
-  const save = async () => {
-    if (saving || !command("workflow.draft.save")) return null;
-    saving = true;
-    const submittedSource = source.value;
-    setSaveState("saving");
-    const response = await runCommand(
-      "workflow.draft.save", { source: submittedSource },
-      `workflow.draft.save:${draft.draft_id}:${Date.now()}`,
-    );
-    saving = false;
-    if (response) {
-      dirtySinceSave = source.value !== submittedSource;
-      setSaveState(dirtySinceSave ? "unsaved" : "saved");
-    } else {
-      dirtySinceSave = true;
-      if (lastCommandFailure?.status === 0) setSaveState("offline");
-      else if (!lastCommandFailure?.requiresRefresh) setSaveState("unsaved");
-    }
-    return response;
-  };
-
-  source.addEventListener("input", () => {
-    dirtySinceSave = true;
-    setSaveState("unsaved");
-    if (saveTimer) clearTimeout(saveTimer);
-    saveTimer = setTimeout(save, 800);
-  });
-
-  const applyCandidate = async (candidate) => {
-    if (saveTimer) clearTimeout(saveTimer);
-    source.value = formatWorkflowSource(candidate);
-    dirtySinceSave = true;
-    setSaveState("unsaved");
-    const saved = await save();
-    if (!saved) return;
-    const checked = await runCommand(
-      "workflow.draft.validate", {},
-      `workflow.draft.validate:${draft.draft_id}:${draft.revision}`,
-    );
-    if (checked) drawStructured();
-  };
-
-  const focusSource = (line, column) => {
-    showPane("source");
-    const lines = source.value.split("\n");
-    const row = Math.max(0, Math.min(lines.length - 1, line - 1));
-    const offset = lines.slice(0, row).reduce((total, value) => total + value.length + 1, 0);
-    const position = Math.min(source.value.length, offset + Math.max(0, column - 1));
-    source.focus();
-    source.setSelectionRange(position, position);
-  };
-
-  const locateDiagnostic = (item, target) => {
-    if (target.pane === "nodes" && target.index !== null) selectedNode = target.index;
-    if (target.pane === "edges" && target.index !== null) selectedEdge = target.index;
-    if (target.pane === "policies" && target.index !== null) selectedPolicy = target.index;
-    if (["nodes", "edges", "policies"].includes(target.pane)) {
-      drawStructured();
-      showPane(target.pane);
-    } else {
-      focusSource(target.line, target.column);
-    }
-    announce(i18n.t("editor.locatedDiagnostic", { code: item.code, path: target.path }));
-  };
-
-  const field = (label, control) => el("div", { class: "field" }, [
-    el("label", { text: label }), control,
-  ]);
-
-  const paneButton = (name, key) => {
-    const paneId = `draft-pane-${name}`;
-    const tabId = `draft-tab-${name}`;
-    const button = el("button", {
-      type: "button", class: "editor-nav-item", id: tabId,
-      role: "tab", tabindex: "-1", "aria-controls": paneId,
-      "aria-selected": "false", "data-editor-tab": name,
-      text: i18n.t(key),
-      onclick: () => showPane(name),
-    });
-    const pane = {
-      outline: outlinePane, metadata: metadataPane, nodes: nodesPane,
-      edges: edgesPane, policies: policiesPane, source: sourcePane,
-    }[name];
-    pane.id = paneId;
-    pane.setAttribute("role", "tabpanel");
-    pane.setAttribute("aria-labelledby", tabId);
-    button.addEventListener("keydown", (event) => {
-      const tabs = [...editorNav.querySelectorAll("[role='tab']")];
-      const index = tabs.indexOf(button);
-      let next = null;
-      if (event.key === "ArrowRight") next = (index + 1) % tabs.length;
-      if (event.key === "ArrowLeft") next = (index - 1 + tabs.length) % tabs.length;
-      if (event.key === "Home") next = 0;
-      if (event.key === "End") next = tabs.length - 1;
-      if (next === null) return;
-      event.preventDefault();
-      showPane(tabs[next].dataset.editorTab);
-      tabs[next].focus();
-    });
-    editorNav.append(button);
-  };
-
-  const showPane = (name) => {
-    activePane = name;
-    for (const pane of editorMain.querySelectorAll("[data-editor-pane]")) {
-      pane.hidden = pane.dataset.editorPane !== name;
-    }
-    for (const button of editorNav.querySelectorAll("[data-editor-tab]")) {
-      const active = button.dataset.editorTab === name;
-      button.classList.toggle("active", active);
-      button.setAttribute("aria-selected", String(active));
-      button.setAttribute("tabindex", active ? "0" : "-1");
-    }
-  };
-
-  paneButton("outline", "editor.outline");
-  paneButton("metadata", "editor.metadata");
-  paneButton("nodes", "editor.nodes");
-  paneButton("edges", "editor.edges");
-  paneButton("policies", "editor.policies");
-  paneButton("source", "editor.sourceTab");
-
-  const renderPortEditor = (title, ports, onChange) => {
-    const body = el("div", { class: "editor-port-list" });
-    const repaint = () => {
-      body.replaceChildren();
-      ports.forEach((port, index) => {
-        const id = el("input", { value: port.id || "", "aria-label": i18n.t("editor.portId") });
-        const schema = el("input", { value: port.schema_id || "", "aria-label": i18n.t("editor.schemaId") });
-        id.addEventListener("input", () => { port.id = id.value; onChange(); });
-        schema.addEventListener("input", () => { port.schema_id = schema.value; onChange(); });
-        body.append(el("div", { class: "editor-port-row" }, [
-          id, schema,
-          el("button", {
-            type: "button", class: "button danger", text: i18n.t("editor.remove"),
-            onclick: () => { ports.splice(index, 1); onChange(); repaint(); },
-          }),
-        ]));
-      });
-      body.append(el("button", {
-        type: "button", class: "button", text: i18n.t("editor.addPort"),
-        onclick: () => { ports.push({ id: "port", schema_id: "schema://object/1.0" }); onChange(); repaint(); },
-      }));
-    };
-    repaint();
-    return el("fieldset", { class: "editor-fieldset" }, [
-      el("legend", { text: title }), body,
-    ]);
-  };
-
-  const drawStructured = () => {
-    let document;
-    try {
-      document = parseWorkflowSource(source.value);
-    } catch (error) {
-      const unavailable = el("div", {
-        class: "banner error", text: i18n.t("editor.structuredUnavailable", { message: error.message }),
-      });
-      outlinePane.replaceChildren(unavailable);
-      metadataPane.replaceChildren(unavailable.cloneNode(true));
-      nodesPane.replaceChildren(unavailable.cloneNode(true));
-      edgesPane.replaceChildren(unavailable.cloneNode(true));
-      policiesPane.replaceChildren(unavailable.cloneNode(true));
-      return;
-    }
-
-    outlinePane.replaceChildren(
-      el("div", { class: "editor-section-head" }, [
-        el("div", {}, [
-          el("div", { class: "panel-title", text: document.metadata.name }),
-          el("div", { class: "muted", text: document.metadata.description || i18n.t("workflows.noDescription") }),
-        ]),
-      ]),
-      el("div", { class: "stat-grid editor-stats" }, [
-        el("article", { class: "stat-card" }, [
-          el("div", { class: "stat-value", text: i18n.number(document.nodes.length) }),
-          el("div", { class: "muted", text: i18n.t("editor.nodes") }),
-        ]),
-        el("article", { class: "stat-card" }, [
-          el("div", { class: "stat-value", text: i18n.number((document.edges || []).length) }),
-          el("div", { class: "muted", text: i18n.t("editor.edges") }),
-        ]),
-        el("article", { class: "stat-card" }, [
-          el("div", { class: "stat-value", text: i18n.number((document.policies || []).length) }),
-          el("div", { class: "muted", text: i18n.t("editor.policies") }),
-        ]),
-      ]),
-      el("div", { class: "editor-outline-list" }, document.nodes.map((node, index) =>
-        el("button", {
-          type: "button", class: "list-option-card editor-outline-node",
-          onclick: () => { selectedNode = index; drawStructured(); showPane("nodes"); },
-        }, [
-          el("strong", { class: "mono", text: node.id }),
-          el("span", { class: "pill", text: node.kind }),
-          el("span", { class: "muted mono", text: node.handler
-            ? `${node.handler.name}@${node.handler.version}` : i18n.t("editor.controller") }),
-        ])),
-      ),
-    );
-
-    const name = el("input", { id: "draftMetadataName", value: document.metadata.name });
-    const description = el("textarea", { id: "draftMetadataDescription" });
-    description.value = document.metadata.description || "";
-    const labels = el("textarea", { id: "draftMetadataLabels", class: "mono" });
-    labels.value = JSON.stringify(document.metadata.labels || {}, null, 2);
-    const metadataError = el("div", { class: "banner error", hidden: "hidden", role: "alert" });
-    metadataPane.replaceChildren(
-      el("div", { class: "editor-section-head" }, [
-        el("div", { class: "panel-title", text: i18n.t("editor.metadata") }),
-      ]),
-      metadataError,
-      el("div", { class: "editor-form-grid" }, [
-        field(i18n.t("editor.name"), name),
-        field(i18n.t("editor.description"), description),
-        field(i18n.t("editor.labels"), labels),
-      ]),
-      el("button", {
-        type: "button", class: "button primary", id: "draftApplyMetadata",
-        text: i18n.t("editor.applyValidate"),
-        onclick: async () => {
-          try {
-            const parsedLabels = JSON.parse(labels.value || "{}");
-            if (!name.value.trim() || !parsedLabels || Array.isArray(parsedLabels)
-                || typeof parsedLabels !== "object") throw new Error(i18n.t("editor.metadataInvalid"));
-            metadataError.hidden = true;
-            await applyCandidate(replaceMetadata(document, {
-              name: name.value.trim(), description: description.value,
-              labels: parsedLabels,
-            }));
-          } catch (error) {
-            metadataError.textContent = error.message;
-            metadataError.hidden = false;
-          }
-        },
-      }),
-    );
-
-    if (selectedNode !== null) {
-      selectedNode = Math.min(selectedNode, Math.max(0, document.nodes.length - 1));
-    }
-    const nodeList = el("div", { class: "editor-node-list" });
-    document.nodes.forEach((node, index) => nodeList.append(el("button", {
-      type: "button", class: `editor-nav-item ${index === selectedNode ? "active" : ""}`,
-      text: `${node.id} · ${node.kind}`,
-      onclick: () => { selectedNode = index; drawStructured(); showPane("nodes"); },
-    })));
-    nodeList.append(el("button", {
-      type: "button", class: "button", id: "draftAddNode", text: i18n.t("editor.addNode"),
-      onclick: () => { selectedNode = null; drawStructured(); showPane("nodes"); },
-    }));
-    const original = selectedNode === null ? null : document.nodes[selectedNode];
-    const working = JSON.parse(JSON.stringify(original || {
-      id: `node_${document.nodes.length + 1}`, kind: "terminal", inputs: [], outputs: [],
-    }));
-    working.inputs ||= [];
-    working.outputs ||= [];
-    working.config ||= {};
-    const nodeEditor = el("div", { class: "editor-node-form" });
-    const configFields = el("div", { class: "editor-config-fields" });
-    const handlerField = el("div");
-    const config = el("textarea", { id: "draftNodeConfig", class: "mono" });
-    config.value = JSON.stringify(working.config, null, 2);
-    const nodeError = el("div", { class: "banner error", hidden: "hidden", role: "alert" });
-    const nodeId = el("input", { id: "draftNodeId", value: working.id });
-    const entryNode = el("input", {
-      type: "checkbox",
-      ...((document.entry || []).includes(working.id) ? { checked: "checked" } : {}),
-    });
-    const kind = el("select", { id: "draftNodeKind", "aria-label": i18n.t("editor.kind") },
-      ["action", "human", "agentic", "foreach", "subflow", "decision", "join", "terminal", "extension"].map((value) =>
-        el("option", { value, ...(value === working.kind ? { selected: "selected" } : {}), text: value })));
-    kind.addEventListener("change", () => {
-      working.kind = kind.value;
-      if (working.kind !== "action") delete working.handler;
-      drawHandlerField();
-      drawConfigFields();
-    });
-    nodeEditor.append(
-      field(i18n.t("editor.nodeId"), nodeId),
-      field(i18n.t("editor.kind"), kind),
-      handlerField,
-    );
-
-    const selectedManifest = () => handlers.find((handler) =>
-      handler.name === working.handler?.name && handler.version === working.handler?.version);
-    const drawConfigFields = () => {
-      configFields.replaceChildren();
-      const schema = selectedManifest()?.config_schema || {};
-      const properties = schema.properties || {};
-      const required = new Set(schema.required || []);
-      for (const [name, property] of Object.entries(properties)) {
-        let control;
-        const value = working.config[name];
-        if (Array.isArray(property.enum)) {
-          control = el("select", { "aria-label": name }, property.enum.map((option) =>
-            el("option", {
-              value: String(option), ...(option === value ? { selected: "selected" } : {}),
-              text: String(option),
-            })));
-          control.addEventListener("change", () => { working.config[name] = control.value; });
-        } else if (property.type === "boolean") {
-          control = el("input", { type: "checkbox", ...(value ? { checked: "checked" } : {}) });
-          control.addEventListener("change", () => { working.config[name] = control.checked; });
-        } else {
-          control = el("input", {
-            type: ["integer", "number"].includes(property.type) ? "number" : "text",
-            value: value ?? "", ...(property.minimum !== undefined ? { min: property.minimum } : {}),
-          });
-          control.addEventListener("input", () => {
-            if (control.value === "" && !required.has(name)) delete working.config[name];
-            else working.config[name] = ["integer", "number"].includes(property.type)
-              ? Number(control.value) : control.value;
-            config.value = JSON.stringify(working.config, null, 2);
-          });
-        }
-        control.addEventListener("change", () => {
-          config.value = JSON.stringify(working.config, null, 2);
-        });
-        configFields.append(field(`${name}${required.has(name) ? " *" : ""}`, control));
-      }
-      configFields.hidden = !Object.keys(properties).length;
-    };
-
-    const drawHandlerField = () => {
-      handlerField.replaceChildren();
-      handlerField.hidden = working.kind !== "action";
-      if (working.kind !== "action") return;
-      const compatible = compatibleHandlers(working, handlers);
-      const handlerSelect = el("select", {
-        id: "draftNodeHandler", "aria-label": i18n.t("editor.handler"),
-      }, compatible.map((handler) => el("option", {
-        value: `${handler.name}\u0000${handler.version}`,
-        ...(working.handler?.name === handler.name && working.handler?.version === handler.version
-          ? { selected: "selected" } : {}),
-        text: `${handler.name}@${handler.version}`,
-      })));
-      if (!compatible.length) handlerSelect.append(el("option", {
-        value: "", text: i18n.t("editor.noCompatibleHandlers"), disabled: "disabled",
-      }));
-      handlerSelect.addEventListener("change", () => {
-        const [handlerName, version] = handlerSelect.value.split("\u0000");
-        working.handler = { name: handlerName, version };
-        drawConfigFields();
-      });
-      handlerField.append(field(i18n.t("editor.handler"), handlerSelect));
-    };
-
-    drawHandlerField();
-
-    let portsChanged = false;
-    nodeEditor.append(
-      renderPortEditor(i18n.t("editor.inputs"), working.inputs, () => {
-        portsChanged = true; drawHandlerField();
-      }),
-      renderPortEditor(i18n.t("editor.outputs"), working.outputs, () => {
-        portsChanged = true; drawHandlerField();
-      }),
-    );
-    drawConfigFields();
-    nodeEditor.append(configFields, field(i18n.t("editor.configAdvanced"), config));
-    const routeMode = el("select", { "aria-label": i18n.t("editor.routeMode") }, [
-      el("option", { value: "", text: i18n.t("editor.defaultRouteMode") }),
-      ...["exclusive", "parallel"].map((value) => el("option", {
-        value, ...(working.route_mode === value ? { selected: "selected" } : {}), text: value,
-      })),
-    ]);
-    routeMode.addEventListener("change", () => {
-      if (routeMode.value) working.route_mode = routeMode.value;
-      else delete working.route_mode;
-    });
-    const policyChecks = el("div", { class: "editor-check-grid" },
-      (document.policies || []).map((policy) => {
-        const checkbox = el("input", {
-          type: "checkbox", value: policy.id,
-          ...((working.policies || []).includes(policy.id) ? { checked: "checked" } : {}),
-        });
-        checkbox.addEventListener("change", () => {
-          const selected = new Set(working.policies || []);
-          if (checkbox.checked) selected.add(policy.id); else selected.delete(policy.id);
-          working.policies = [...selected];
-        });
-        return el("label", { class: "editor-check" }, [
-          checkbox, el("span", { text: `${policy.id} · ${policy.kind}` }),
-        ]);
-      }));
-    nodeEditor.append(
-      field(i18n.t("editor.routeMode"), routeMode),
-      el("label", { class: "editor-check" }, [
-        entryNode, el("span", { text: i18n.t("editor.entryNode") }),
-      ]),
-      el("fieldset", { class: "editor-fieldset" }, [
-        el("legend", { text: i18n.t("editor.nodePolicies") }),
-        policyChecks.childElementCount ? policyChecks
-          : el("div", { class: "muted", text: i18n.t("editor.noPolicies") }),
-      ]),
-    );
-    let nodeDeleteArmed = false;
-    const nodeDelete = el("button", {
-      type: "button", class: "button danger", id: "draftDeleteNode",
-      text: i18n.t("editor.deleteNode"),
-      onclick: async () => {
-        if (!nodeDeleteArmed) {
-          nodeDeleteArmed = true;
-          nodeDelete.textContent = i18n.t("editor.deleteConfirm");
-          return;
-        }
-        const removedIndex = selectedNode;
-        selectedNode = Math.max(0, removedIndex - 1);
-        await applyCandidate(removeNode(document, removedIndex));
-      },
-    });
-    nodeEditor.append(el("div", { class: "actions" }, [
-      el("button", {
-        type: "button", class: "button primary", id: "draftApplyNode",
-        text: i18n.t("editor.applyValidate"),
-        onclick: async () => {
-          try {
-            working.id = nodeId.value.trim();
-            if (!working.id) throw new Error(i18n.t("editor.nodeIdRequired"));
-            if (document.nodes.some((node, index) =>
-              node.id === working.id && index !== selectedNode)) {
-              throw new Error(i18n.t("editor.nodeIdDuplicate"));
-            }
-            working.config = JSON.parse(config.value || "{}");
-            if (working.kind === "action") {
-              const compatible = compatibleHandlers(working, handlers);
-              const selected = compatible.find((handler) =>
-                handler.name === working.handler?.name && handler.version === working.handler?.version);
-              if (!selected) throw new Error(portsChanged
-                ? i18n.t("editor.handlerPortsChanged") : i18n.t("editor.handlerRequired"));
-            }
-            nodeError.hidden = true;
-            const replacedIndex = selectedNode;
-            if (selectedNode === null) selectedNode = document.nodes.length;
-            let candidate = replaceNode(document, replacedIndex, working);
-            const entries = new Set(candidate.entry || []);
-            if (entryNode.checked) entries.add(working.id); else entries.delete(working.id);
-            candidate = { ...candidate, entry: [...entries] };
-            await applyCandidate(candidate);
-          } catch (error) {
-            nodeError.textContent = error.message;
-            nodeError.hidden = false;
-          }
-        },
-      }),
-      ...(original ? [nodeDelete] : []),
-    ]));
-    nodesPane.replaceChildren(
-      el("div", { class: "editor-node-layout" }, [nodeList, el("div", {}, [nodeError, nodeEditor])]),
-    );
-
-    const endpointOptions = (direction) => document.nodes.flatMap((node) =>
-      (node[direction] || []).map((port) => ({
-        value: `${node.id}\u0000${port.id}`,
-        label: `${node.id}.${port.id} · ${port.schema_id}`,
-      })));
-    const sourceEndpoints = endpointOptions("outputs");
-    const targetEndpoints = endpointOptions("inputs");
-    const edges = document.edges || [];
-    if (selectedEdge !== null) {
-      selectedEdge = Math.min(selectedEdge, Math.max(0, edges.length - 1));
-    }
-    const edgeList = el("div", { class: "editor-node-list" });
-    edges.forEach((edge, index) => edgeList.append(el("button", {
-      type: "button", class: `editor-nav-item ${index === selectedEdge ? "active" : ""}`,
-      text: `${edge.id} · ${edge.from.node} → ${edge.to.node}`,
-      onclick: () => { selectedEdge = index; drawStructured(); showPane("edges"); },
-    })));
-    edgeList.append(el("button", {
-      type: "button", class: "button", id: "draftAddEdge", text: i18n.t("editor.addEdge"),
-      onclick: () => { selectedEdge = null; drawStructured(); showPane("edges"); },
-    }));
-    const priorEdge = selectedEdge === null ? null : edges[selectedEdge];
-    const edgeWorking = JSON.parse(JSON.stringify(priorEdge || {
-      id: `edge_${edges.length + 1}`,
-      from: { node: sourceEndpoints[0]?.value.split("\u0000")[0] || "", port: sourceEndpoints[0]?.value.split("\u0000")[1] || "" },
-      to: { node: targetEndpoints[0]?.value.split("\u0000")[0] || "", port: targetEndpoints[0]?.value.split("\u0000")[1] || "" },
-    }));
-    const edgeError = el("div", { class: "banner error", hidden: "hidden", role: "alert" });
-    const edgeId = el("input", { id: "draftEdgeId", value: edgeWorking.id });
-    const endpointSelect = (options, selected, label) => el("select", {
-      "aria-label": label,
-    }, options.map((option) => el("option", {
-      value: option.value,
-      ...(option.value === `${selected.node}\u0000${selected.port}` ? { selected: "selected" } : {}),
-      text: option.label,
-    })));
-    const edgeFrom = endpointSelect(sourceEndpoints, edgeWorking.from, i18n.t("editor.edgeFrom"));
-    const edgeTo = endpointSelect(targetEndpoints, edgeWorking.to, i18n.t("editor.edgeTo"));
-    const edgeRoute = el("select", { "aria-label": i18n.t("editor.edgeRoute") },
-      ["success", "error", "timeout", "cancel"].map((value) => el("option", {
-        value, ...(value === (edgeWorking.route || "success") ? { selected: "selected" } : {}), text: value,
-      })));
-    const edgePriority = el("input", { type: "number", min: "0", value: edgeWorking.priority ?? 0 });
-    const edgeBack = el("input", { type: "checkbox", ...(edgeWorking.back_edge ? { checked: "checked" } : {}) });
-    const edgePolicy = el("select", { "aria-label": i18n.t("editor.edgePolicy") }, [
-      el("option", { value: "", text: i18n.t("editor.noPolicy") }),
-      ...(document.policies || []).map((policy) => el("option", {
-        value: policy.id, ...(edgeWorking.policy === policy.id ? { selected: "selected" } : {}),
-        text: `${policy.id} · ${policy.kind}`,
-      })),
-    ]);
-    const edgeCondition = el("textarea", { class: "mono", id: "draftEdgeCondition" });
-    edgeCondition.value = edgeWorking.condition === undefined ? "" : JSON.stringify(edgeWorking.condition, null, 2);
-    const edgeMapping = el("textarea", { class: "mono", id: "draftEdgeMapping" });
-    edgeMapping.value = edgeWorking.mapping === undefined ? "" : JSON.stringify(edgeWorking.mapping, null, 2);
-    let edgeDeleteArmed = false;
-    const edgeDelete = el("button", {
-      type: "button", class: "button danger", id: "draftDeleteEdge",
-      text: i18n.t("editor.deleteEdge"),
-      onclick: async () => {
-        if (!edgeDeleteArmed) {
-          edgeDeleteArmed = true;
-          edgeDelete.textContent = i18n.t("editor.deleteConfirm");
-          return;
-        }
-        const removedIndex = selectedEdge;
-        selectedEdge = Math.max(0, removedIndex - 1);
-        await applyCandidate(removeEdge(document, removedIndex));
-      },
-    });
-    const edgeForm = el("div", { class: "editor-form-grid" }, [
-      edgeError,
-      field(i18n.t("editor.edgeId"), edgeId),
-      field(i18n.t("editor.edgeFrom"), edgeFrom),
-      field(i18n.t("editor.edgeTo"), edgeTo),
-      field(i18n.t("editor.edgeRoute"), edgeRoute),
-      field(i18n.t("editor.edgePriority"), edgePriority),
-      field(i18n.t("editor.edgePolicy"), edgePolicy),
-      el("label", { class: "editor-check" }, [edgeBack, el("span", { text: i18n.t("editor.backEdge") })]),
-      field(i18n.t("editor.edgeCondition"), edgeCondition),
-      field(i18n.t("editor.edgeMapping"), edgeMapping),
-      el("div", { class: "actions" }, [
-        el("button", {
-          type: "button", class: "button primary", id: "draftApplyEdge",
-          text: i18n.t("editor.applyValidate"),
-          onclick: async () => {
-            try {
-              const [fromNode, fromPort] = edgeFrom.value.split("\u0000");
-              const [toNode, toPort] = edgeTo.value.split("\u0000");
-              const next = {
-                id: edgeId.value.trim(),
-                from: { node: fromNode, port: fromPort },
-                to: { node: toNode, port: toPort },
-                route: edgeRoute.value,
-                priority: Number(edgePriority.value),
-                back_edge: edgeBack.checked,
-              };
-              if (edgePolicy.value) next.policy = edgePolicy.value;
-              if (edgeCondition.value.trim()) {
-                try { next.condition = JSON.parse(edgeCondition.value); }
-                catch { next.condition = edgeCondition.value; }
-              }
-              if (edgeMapping.value.trim()) {
-                next.mapping = JSON.parse(edgeMapping.value);
-                if (!next.mapping || Array.isArray(next.mapping) || typeof next.mapping !== "object") {
-                  throw new Error(i18n.t("editor.mappingInvalid"));
-                }
-              }
-              if (!next.id || !fromNode || !fromPort || !toNode || !toPort) {
-                throw new Error(i18n.t("editor.edgeInvalid"));
-              }
-              edgeError.hidden = true;
-              const replacedIndex = selectedEdge;
-              if (selectedEdge === null) selectedEdge = edges.length;
-              await applyCandidate(replaceEdge(document, replacedIndex, next));
-            } catch (error) {
-              edgeError.textContent = error.message;
-              edgeError.hidden = false;
-            }
-          },
-        }),
-        ...(priorEdge ? [edgeDelete] : []),
-      ]),
-    ]);
-    edgesPane.replaceChildren(el("div", { class: "editor-node-layout" }, [edgeList, edgeForm]));
-
-    const policies = document.policies || [];
-    if (selectedPolicy !== null) {
-      selectedPolicy = Math.min(selectedPolicy, Math.max(0, policies.length - 1));
-    }
-    const policyList = el("div", { class: "editor-node-list" });
-    policies.forEach((policy, index) => policyList.append(el("button", {
-      type: "button", class: `editor-nav-item ${index === selectedPolicy ? "active" : ""}`,
-      text: `${policy.id} · ${policy.kind}`,
-      onclick: () => { selectedPolicy = index; drawStructured(); showPane("policies"); },
-    })));
-    policyList.append(el("button", {
-      type: "button", class: "button", id: "draftAddPolicy", text: i18n.t("editor.addPolicy"),
-      onclick: () => { selectedPolicy = null; drawStructured(); showPane("policies"); },
-    }));
-    const priorPolicy = selectedPolicy === null ? null : policies[selectedPolicy];
-    const policyWorking = JSON.parse(JSON.stringify(priorPolicy || {
-      id: `policy_${policies.length + 1}`, kind: "retry", config: { max_attempts: 3 },
-    }));
-    const policyError = el("div", { class: "banner error", hidden: "hidden", role: "alert" });
-    const policyId = el("input", { id: "draftPolicyId", value: policyWorking.id });
-    const policyKind = el("select", { id: "draftPolicyKind", "aria-label": i18n.t("editor.policyKind") },
-      ["route", "join", "retry", "rework", "loop", "completion"].map((value) => el("option", {
-        value, ...(value === policyWorking.kind ? { selected: "selected" } : {}), text: value,
-      })));
-    const policyConfig = el("textarea", { id: "draftPolicyConfig", class: "mono" });
-    policyConfig.value = JSON.stringify(policyWorking.config, null, 2);
-    const templates = {
-      route: {}, join: { mode: "all" }, retry: { max_attempts: 3 },
-      rework: { max_generations: 3 }, loop: { max_iterations: 3 }, completion: {},
-    };
-    policyKind.addEventListener("change", () => {
-      policyConfig.value = JSON.stringify(templates[policyKind.value], null, 2);
-    });
-    let policyDeleteArmed = false;
-    const policyDelete = el("button", {
-      type: "button", class: "button danger", id: "draftDeletePolicy",
-      text: i18n.t("editor.deletePolicy"),
-      onclick: async () => {
-        if (!policyDeleteArmed) {
-          policyDeleteArmed = true;
-          policyDelete.textContent = i18n.t("editor.deleteConfirm");
-          return;
-        }
-        const removedIndex = selectedPolicy;
-        selectedPolicy = Math.max(0, removedIndex - 1);
-        await applyCandidate(removePolicy(document, removedIndex));
-      },
-    });
-    const policyForm = el("div", { class: "editor-form-grid" }, [
-      policyError,
-      field(i18n.t("editor.policyId"), policyId),
-      field(i18n.t("editor.policyKind"), policyKind),
-      field(i18n.t("editor.policyConfig"), policyConfig),
-      el("div", { class: "actions" }, [
-        el("button", {
-          type: "button", class: "button primary", id: "draftApplyPolicy",
-          text: i18n.t("editor.applyValidate"),
-          onclick: async () => {
-            try {
-              const configValue = JSON.parse(policyConfig.value || "{}");
-              if (!policyId.value.trim() || !configValue || Array.isArray(configValue)
-                  || typeof configValue !== "object") throw new Error(i18n.t("editor.policyInvalid"));
-              policyError.hidden = true;
-              const replacedIndex = selectedPolicy;
-              if (selectedPolicy === null) selectedPolicy = policies.length;
-              await applyCandidate(replacePolicy(document, replacedIndex, {
-                id: policyId.value.trim(), kind: policyKind.value, config: configValue,
-              }));
-            } catch (error) {
-              policyError.textContent = error.message;
-              policyError.hidden = false;
-            }
-          },
-        }),
-        ...(priorPolicy ? [policyDelete] : []),
-      ]),
-    ]);
-    policiesPane.replaceChildren(el("div", { class: "editor-node-layout" }, [policyList, policyForm]));
-    showPane(activePane);
-  };
-
-  let discardArmed = false;
-  const redraw = () => {
-    controls.replaceChildren();
-    if (command("workflow.draft.save")) {
-      controls.append(el("button", {
-        class: "button", id: "draftFormat", text: i18n.t("editor.format"),
-        onclick: async () => {
-          try {
-            if (saveTimer) clearTimeout(saveTimer);
-            source.value = formatWorkflowSource(parseWorkflowSource(source.value));
-            dirtySinceSave = true;
-            setSaveState("unsaved");
-            await save();
-          } catch (error) {
-            reportError(error);
-          }
-        },
-      }));
-    }
-    const validate = command("workflow.draft.validate");
-    if (validate) {
-      controls.append(el("button", {
-        class: "button", id: "draftValidate", text: i18n.t("editor.validate"),
-        onclick: () => runCommand(
-          "workflow.draft.validate", {},
-          `workflow.draft.validate:${draft.draft_id}:${draft.revision}`,
-        ),
-      }));
-    }
+  const draw = () => {
+    const candidate = draft.pending_revision;
+    const previewSource = candidate?.source || draft.source;
+    let definition = null;
+    try { definition = JSON.parse(previewSource); } catch { /* read-only fallback below */ }
+    const revise = command("workflow.draft.revise");
+    const accept = command("workflow.draft.accept");
+    const reject = command("workflow.draft.reject");
+    const undo = command("workflow.draft.undo");
     const publish = command("workflow.draft.publish");
-    if (publish) {
-      controls.append(el("button", {
-        class: "button primary", id: "draftPublish", text: i18n.t("editor.publish"),
-        onclick: async () => {
-          const response = await runCommand(
-            "workflow.draft.publish", {},
-            `workflow.draft.publish:${draft.draft_id}`,
-          );
-          if (response) {
-            announce(i18n.t("editor.published", {
-              workflowId: draft.workflow_id,
-              version: i18n.number(response.data.published.version),
-            }));
-            navigate({ view: "workflows", runId: null });
-          }
-        },
-      }));
-    }
     const discard = command("workflow.draft.discard");
-    if (discard) {
-      controls.append(el("button", {
-        class: "button danger", id: "draftDiscard",
-        text: i18n.t(discardArmed ? "editor.discardConfirm" : "editor.discard"),
-        onclick: async () => {
-          if (!discardArmed) {
-            discardArmed = true;
-            redraw();
-            return;
-          }
-          const response = await runCommand(
-            "workflow.draft.discard", {},
-            `workflow.draft.discard:${draft.draft_id}`,
-          );
-          if (response) {
-            announce(i18n.t("editor.discarded"));
-            navigate({ view: "workflows", runId: null });
-          }
-        },
-      }));
-    }
-    if (draft.status !== "active") {
-      controls.append(el("span", {
-        class: "pill", text: i18n.status(draft.status),
-      }));
-    }
-
-    diagnostics.replaceChildren();
-    if (draft.validation_status === "valid") {
-      diagnostics.append(el("div", {
-        class: "banner info",
-        text: i18n.t("editor.valid", {
-          hash: (draft.validated_definition_hash || "").slice(0, 19),
-        }),
-      }));
-    } else if (draft.diagnostics.length) {
-      for (const item of draft.diagnostics) {
-        const target = diagnosticTarget(item);
-        diagnostics.append(el("div", { class: "diagnostic-row" }, [
-          el("button", {
-            type: "button", class: "error-item diagnostic-item",
-            "aria-label": i18n.t("editor.locateDiagnostic", { code: item.code, path: target.path }),
-            onclick: () => locateDiagnostic(item, target),
-          }, [
-            el("div", { class: "mono", text: `${item.code} ${item.json_path || ""}` }),
-            el("div", { text: item.message }),
-          ]),
-          el("button", {
-            type: "button", class: "button diagnostic-copy",
-            text: i18n.t("editor.copyDiagnostic"),
-            onclick: () => copyText(`${item.code} ${target.path}`),
-          }),
-        ]));
-      }
-    } else {
-      diagnostics.append(el("div", {
-        class: "muted", text: i18n.t("editor.notValidated"),
-      }));
-    }
-    draftFacts.textContent = i18n.t("editor.facts", {
-      revision: i18n.number(draft.revision),
-      updated: i18n.dateTime(draft.updated_at),
-      hash: (draft.validated_definition_hash || draft.source_hash || "—").slice(0, 27),
+    const instruction = el("textarea", {
+      id: "draftRevisionInstruction", maxlength: "4000", required: "required",
+      placeholder: i18n.t("editor.agentPromptPlaceholder"),
+      disabled: busy || !revise ? "disabled" : null,
     });
-  };
+    instruction.value = instructionText;
+    instruction.addEventListener("input", () => { instructionText = instruction.value; });
+    const findings = el("div", { class: "editor-diagnostics" });
+    if (candidate) {
+      findings.append(el("div", {
+        class: "banner info", text: i18n.t("editor.candidateValid"),
+      }));
+    } else if (draft.validation_status === "valid") {
+      findings.append(el("div", {
+        class: "banner info", text: i18n.t("editor.agentRevisionValid"),
+      }));
+    } else {
+      findings.append(el("div", {
+        class: "muted", text: i18n.t("editor.agentPromptRequired"),
+      }));
+    }
+    for (const item of [...(draft.diagnostics || []), ...revisionDiagnostics]) {
+      findings.append(el("div", { class: "error-item" }, [
+        el("div", { class: "mono", text: `${item.code} ${item.json_path || ""}` }),
+        el("div", { text: item.message }),
+      ]));
+    }
 
-  root.append(
-    el("section", { class: "panel workflow-editor-panel" }, [
+    const actions = el("div", { class: "actions", id: "draftControls" });
+    if (revise) actions.append(el("button", {
+      type: "button", class: "button primary", id: "draftRevise",
+      disabled: busy ? "disabled" : null,
+      text: i18n.t(busy ? "editor.agentRevising" : "editor.agentRevise"),
+      onclick: async () => {
+        const value = instruction.value.trim();
+        if (!value) {
+          instruction.setCustomValidity(i18n.t("editor.agentPromptRequired"));
+          instruction.reportValidity();
+          return;
+        }
+        instruction.setCustomValidity("");
+        const response = await execute(
+          "workflow.draft.revise", { instruction: value },
+          `workflow.draft.revise:${draft.draft_id}:${draft.revision}:${Date.now()}`,
+        );
+        if (response) {
+          instructionText = "";
+          draw();
+        }
+      },
+    }));
+    if (accept) actions.append(el("button", {
+      type: "button", class: "button primary", id: "draftAccept",
+      disabled: busy ? "disabled" : null, text: i18n.t("editor.acceptRevision"),
+      onclick: () => execute(
+        "workflow.draft.accept", {},
+        `workflow.draft.accept:${candidate.revision_id}`,
+      ),
+    }));
+    if (reject) actions.append(el("button", {
+      type: "button", class: "button", id: "draftReject",
+      disabled: busy ? "disabled" : null, text: i18n.t("editor.rejectRevision"),
+      onclick: () => execute(
+        "workflow.draft.reject", {},
+        `workflow.draft.reject:${candidate.revision_id}`,
+      ),
+    }));
+    if (undo) actions.append(el("button", {
+      type: "button", class: "button", id: "draftUndo",
+      disabled: busy ? "disabled" : null, text: i18n.t("editor.undoRevision"),
+      onclick: () => execute(
+        "workflow.draft.undo", {},
+        `workflow.draft.undo:${draft.draft_id}:${draft.revision}`,
+      ),
+    }));
+    if (publish) actions.append(el("button", {
+      type: "button", class: "button primary", id: "draftPublish",
+      disabled: busy ? "disabled" : null, text: i18n.t("editor.publish"),
+      onclick: async () => {
+        const response = await execute(
+          "workflow.draft.publish", {}, `workflow.draft.publish:${draft.draft_id}`,
+        );
+        if (response) {
+          announce(i18n.t("editor.published", {
+            workflowId: draft.workflow_id,
+            version: i18n.number(response.data.published.version),
+          }));
+          navigate({ view: "workflows", runId: null });
+        }
+      },
+    }));
+    if (discard) actions.append(el("button", {
+      type: "button", class: "button danger", id: "draftDiscard",
+      disabled: busy ? "disabled" : null,
+      text: i18n.t(discardArmed ? "editor.discardConfirm" : "editor.discard"),
+      onclick: async () => {
+        if (!discardArmed) { discardArmed = true; draw(); return; }
+        const response = await execute(
+          "workflow.draft.discard", {}, `workflow.draft.discard:${draft.draft_id}`,
+        );
+        if (response) {
+          announce(i18n.t("editor.discarded"));
+          navigate({ view: "workflows", runId: null });
+        }
+      },
+    }));
+
+    const nodes = definition?.nodes || [];
+    panel.replaceChildren(
       el("div", { class: "panel-head" }, [
         el("div", {}, [
           el("div", { class: "eyebrow", text: `${draft.workflow_id} · v${draft.base_version}` }),
-          el("div", { class: "panel-title", text: i18n.t("editor.title") }),
+          el("div", { class: "panel-title", text: i18n.t("editor.agentTitle") }),
         ]),
-        saveState,
-        controls,
+        el("span", {
+          class: `pill ${draft.validation_status === "valid" ? "succeeded" : "waiting"}`,
+          text: i18n.t(candidate ? "editor.state.reviewCandidate"
+            : draft.validation_status === "valid"
+              ? "editor.state.valid" : "editor.state.awaitingPrompt"),
+        }),
+        actions,
       ]),
-      el("div", { class: "panel-body" }, [
-        conflict,
-        el("div", { class: "workflow-editor-layout" }, [
-          editorNav,
-          el("div", { class: "workflow-editor-content" }, [editorMain, draftFacts]),
-          el("aside", { class: "editor-diagnostics" }, [
-            el("div", { class: "panel-title", text: i18n.t("editor.diagnostics") }),
-            diagnostics,
+      el("div", { class: "panel-body agent-editor-layout" }, [
+        el("section", { class: "agent-editor-prompt", hidden: candidate ? "hidden" : null }, [
+          el("div", { class: "panel-title", text: i18n.t("editor.agentPromptTitle") }),
+          el("p", { class: "muted", text: i18n.t("editor.agentPromptHint") }),
+          instruction,
+          revise || candidate ? null : el("div", {
+            class: "banner error", text: i18n.t("editor.agentUnavailable"),
+          }),
+        ]),
+        candidate ? el("section", { class: "agent-editor-candidate" }, [
+          el("div", { class: "panel-title", text: i18n.t("editor.reviewCandidate") }),
+          el("p", { text: candidate.instruction }),
+          el("div", { class: "muted mono", text: i18n.t("editor.candidateFacts", {
+            attempts: i18n.number(candidate.attempts),
+            hash: candidate.definition_hash.slice(0, 27),
+          }) }),
+          el("div", { class: "agent-editor-diff" }, [
+            el("div", {}, [
+              el("div", { class: "eyebrow", text: i18n.t("editor.beforeRevision") }),
+              el("pre", { class: "artifact-preview", text: candidate.previous_source }),
+            ]),
+            el("div", {}, [
+              el("div", { class: "eyebrow", text: i18n.t("editor.afterRevision") }),
+              el("pre", { class: "artifact-preview", text: candidate.source }),
+            ]),
+          ]),
+        ]) : null,
+        el("section", { class: "agent-editor-preview" }, [
+          el("div", { class: "panel-title", text: i18n.t(candidate
+            ? "editor.candidatePreview" : "editor.agentPreview") }),
+          el("div", { class: "definition-list" }, nodes.map((node) =>
+            el("div", { class: "actions" }, [
+              el("span", { class: "mono", text: node.id }),
+              el("span", { class: "pill", text: node.kind }),
+              node.handler ? el("span", {
+                class: "muted mono", text: `${node.handler.name}@${node.handler.version}`,
+              }) : null,
+            ]))),
+          el("details", {}, [
+            el("summary", { class: "muted", text: i18n.t("editor.sourceReadOnly") }),
+            el("pre", { class: "artifact-preview", id: "draftSourcePreview", text: previewSource }),
           ]),
         ]),
+        findings,
+        draft.revision_history?.length ? el("section", { class: "agent-editor-history" }, [
+          el("div", { class: "panel-title", text: i18n.t("editor.revisionHistory") }),
+          el("div", { class: "definition-list" }, draft.revision_history.map((item) =>
+            el("div", { class: "actions" }, [
+              el("span", { class: `pill ${item.status}` , text: i18n.status(item.status) }),
+              el("span", { text: item.instruction }),
+              el("span", { class: "muted mono", text: i18n.dateTime(item.created_at) }),
+            ]))),
+        ]) : null,
+        el("footer", { class: "editor-facts mono", text: i18n.t("editor.facts", {
+          revision: i18n.number(draft.revision), updated: i18n.dateTime(draft.updated_at),
+          hash: (draft.validated_definition_hash || draft.source_hash || "—").slice(0, 27),
+        }) }),
       ]),
-    ]),
-  );
-  editorMain.append(
-    outlinePane, metadataPane, nodesPane, edgesPane, policiesPane, sourcePane,
-  );
+    );
+  };
 
-  const warnBeforeUnload = (event) => {
-    if (!dirtySinceSave && !saving) return;
-    event.preventDefault();
-    event.returnValue = "";
-  };
-  const retryWhenOnline = () => {
-    if (dirtySinceSave && !saving) save();
-  };
-  const markOffline = () => {
-    if (dirtySinceSave || saving) setSaveState("offline");
-  };
-  window.addEventListener("beforeunload", warnBeforeUnload);
-  window.addEventListener("online", retryWhenOnline);
-  window.addEventListener("offline", markOffline);
-  activeViewCleanup = () => {
-    if (saveTimer) clearTimeout(saveTimer);
-    window.removeEventListener("beforeunload", warnBeforeUnload);
-    window.removeEventListener("online", retryWhenOnline);
-    window.removeEventListener("offline", markOffline);
-    activeViewLeaveGuard = null;
-  };
-  activeViewLeaveGuard = () => (
-    (!dirtySinceSave && !saving) || window.confirm(i18n.t("editor.leaveConfirm"))
-  );
-  setSaveState("saved");
-  redraw();
-  drawStructured();
-  showPane("outline");
+  root.append(panel);
+  draw();
 }
+
 
 function generatedInputSupported(entry) {
   const simple = new Set(["string", "integer", "number", "boolean"]);
@@ -3045,43 +2277,9 @@ async function generateWorkflowDialog(generateCommand) {
   dialog.append(form);
   let draft = null;
   let busy = false;
-  let validating = false;
   let draftProblem = "";
   let instructionText = "";
   let defaultAgent = agentHandlers[0]?.name || "";
-
-  const switchAgent = async (nodeId, handlerName) => {
-    if (busy || validating) return;
-    const handler = agentHandlers.find((item) => item.name === handlerName);
-    const validateCommand = (draft.allowed_commands || []).find(
-      (item) => item.command === "workflow.validate",
-    );
-    if (!handler || !validateCommand) return;
-    const document_ = JSON.parse(draft.source);
-    const node = document_.nodes.find((item) => item.id === nodeId);
-    if (!node?.handler) return;
-    node.handler = { name: handler.name, version: handler.version };
-    draft = {
-      ...draft,
-      source: JSON.stringify(document_, null, 2),
-      allowed_commands: [validateCommand],
-    };
-    validating = true;
-    draftProblem = "";
-    draw();
-    try {
-      const response = await api.execute(
-        validateCommand, { source: draft.source },
-        `workflow.validate:${Date.now()}`,
-      );
-      draft = { ...draft, ...response.data, attempts: draft.attempts };
-    } catch (error) {
-      draftProblem = describeGenerationFailure(error);
-    } finally {
-      validating = false;
-      draw();
-    }
-  };
 
   const draw = () => {
     const problem = el("div", { class: "banner error", hidden: "hidden", role: "alert" });
@@ -3159,25 +2357,11 @@ async function generateWorkflowDialog(generateCommand) {
           nodes: i18n.number(draft.node_count),
           attempts: i18n.number(draft.attempts),
         }) }),
-        validating ? el("div", {
-          class: "banner info", text: i18n.t("generate.validating"),
-        }) : null,
         el("div", { class: "definition-list" }, document_.nodes.map((node) => {
-          const editableAgent = node.handler?.name.startsWith("agent.")
-            && agentHandlers.length;
           return el("div", { class: "actions" }, [
             el("span", { class: "mono", text: node.id }),
             el("span", { class: "pill", text: node.kind }),
-            editableAgent ? el("select", {
-              class: "draft-agent-select",
-              "aria-label": i18n.t("generate.nodeAgent", { node: node.id }),
-              disabled: validating ? "disabled" : null,
-              onchange: (event) => switchAgent(node.id, event.target.value),
-            }, agentHandlers.map((handler) => el("option", {
-              value: handler.name,
-              text: `${handler.name}@${handler.version}`,
-              ...(handler.name === node.handler.name ? { selected: "selected" } : {}),
-            }))) : node.handler
+            node.handler
               ? el("span", { class: "muted mono", text: `${node.handler.name}@${node.handler.version}` })
               : null,
           ]);
@@ -3192,7 +2376,6 @@ async function generateWorkflowDialog(generateCommand) {
       );
       const back = el("button", {
         type: "button", class: "button", text: i18n.t("generate.back"),
-        disabled: validating ? "disabled" : null,
         onclick: () => { draft = null; draftProblem = ""; draw(); },
       });
       actions.append(back);

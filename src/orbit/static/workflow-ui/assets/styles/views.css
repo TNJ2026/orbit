@@ -457,91 +457,31 @@
   gap: var(--space-2);
 }
 
-/* Workflow source editor (editor plan P2). */
-.draft-source {
-  width: 100%; min-height: 380px; resize: vertical;
-  background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
-  padding: 12px; font-family: var(--mono); font-size: 12px; line-height: 1.55;
-  white-space: pre; overflow-wrap: normal; overflow-x: auto;
-}
-
-/* Workflow structured editor (editor plan P3). The navigation/content/
-   diagnostics geometry mirrors the restored prototype; narrow screens become
-   a vertical sequence without squeezing form controls into unusable columns. */
-.workflow-editor-layout {
-  display: grid; grid-template-columns: 170px minmax(0, 1fr) minmax(220px, 28%);
-  gap: 12px; align-items: start;
-}
-.editor-nav, .editor-node-list { display: flex; flex-direction: column; gap: 5px; }
-.editor-nav-item {
-  border: 1px solid transparent; border-radius: 8px; padding: 9px 10px;
-  background: transparent; color: var(--muted); text-align: left; cursor: pointer;
-  font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.editor-nav-item:hover, .editor-nav-item.active {
-  color: var(--text); background: var(--panel-2); border-color: var(--line-soft);
-}
-.editor-nav-item:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
-.workflow-editor-content { min-width: 0; display: grid; gap: 10px; }
-.workflow-version-picker { display: flex; align-items: end; gap: 10px; margin-bottom: 12px; }
-.editor-main { min-width: 0; }
-.editor-pane { display: grid; gap: 12px; min-width: 0; }
-.editor-pane[hidden] { display: none; }
-.editor-section-head { display: flex; align-items: start; justify-content: space-between; gap: 10px; }
-.editor-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-.editor-outline-list { display: grid; gap: 7px; }
-.editor-outline-node {
-  width: 100%; grid-template-columns: minmax(100px, 1fr) auto minmax(120px, 1fr);
-  align-items: center; text-align: left; cursor: pointer;
-}
-.editor-form-grid, .editor-node-form { display: grid; gap: 12px; }
-.editor-config-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
-.editor-check-grid { display: grid; gap: 7px; }
-.editor-check { display: flex; align-items: center; gap: 8px; font-size: 12px; }
-.editor-check input { accent-color: var(--blue); }
-.editor-node-layout { display: grid; grid-template-columns: minmax(130px, 190px) minmax(0, 1fr); gap: 14px; }
-.editor-fieldset {
-  min-width: 0; margin: 0; padding: 10px; border: 1px solid var(--line-soft);
-  border-radius: 9px;
-}
-.editor-fieldset legend { padding: 0 5px; color: var(--muted); font-size: 11px; font-weight: 650; }
-.editor-port-list { display: grid; gap: 7px; }
-.editor-port-row { display: grid; grid-template-columns: minmax(80px, 1fr) minmax(140px, 2fr) auto; gap: 7px; }
-.editor-port-row input {
-  min-width: 0; background: var(--panel-2); border: 1px solid var(--line);
-  border-radius: 8px; padding: 8px 10px; font-size: 12px;
-}
-.editor-diagnostics {
-  min-width: 0; border-left: 1px solid var(--line-soft); padding-left: 12px;
-}
-.editor-diagnostics .panel-body { padding: 10px 0; }
-.diagnostic-row { display: grid; gap: 5px; margin-bottom: 7px; }
-.diagnostic-copy { justify-self: end; padding: 5px 8px; font-size: 11px; }
-.diagnostic-item {
-  width: 100%; border: 1px solid var(--line-soft); border-radius: 8px;
-  padding: 9px; background: var(--panel-2); color: var(--text); text-align: left;
-  cursor: pointer;
-}
-.diagnostic-item:hover, .diagnostic-item:focus-visible { border-color: var(--red); }
-.editor-conflict-compare { width: 100%; margin-top: 9px; }
-.editor-conflict-compare summary { cursor: pointer; font-weight: 650; }
-.editor-compare-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin-top: 9px; }
-.editor-compare-grid textarea { min-height: 180px; }
 .editor-facts { padding-top: 10px; border-top: 1px solid var(--line-soft); color: var(--muted-2); }
 
-@media (max-width: 900px) {
-  .workflow-editor-layout { grid-template-columns: 1fr; }
-  .editor-nav { flex-direction: row; overflow-x: auto; padding-bottom: 3px; }
-  .editor-nav-item { flex: 0 0 auto; }
-  .editor-diagnostics { border-left: 0; border-top: 1px solid var(--line-soft); padding: 12px 0 0; }
+/* Agent-only editor: instructions are writable; the generated definition is
+   deliberately a read-only preview. */
+.agent-editor-layout { display: grid; gap: 16px; }
+.agent-editor-prompt, .agent-editor-preview, .agent-editor-candidate,
+.agent-editor-history { display: grid; gap: 10px; min-width: 0; }
+.agent-editor-prompt[hidden] { display: none; }
+.agent-editor-prompt textarea {
+  width: 100%; min-height: 150px; resize: vertical; color: var(--text);
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px;
+  padding: 12px; font: inherit; line-height: 1.55;
 }
-@media (max-width: 520px) {
-  .editor-node-layout { grid-template-columns: 1fr; }
-  .editor-node-list { flex-direction: row; overflow-x: auto; }
-  .editor-outline-node { grid-template-columns: minmax(0, 1fr) auto; }
-  .editor-outline-node .muted { grid-column: 1 / -1; }
-  .editor-port-row { grid-template-columns: 1fr; }
-  .editor-port-row .button { justify-self: start; }
-  .editor-compare-grid { grid-template-columns: 1fr; }
+.agent-editor-prompt textarea:focus { outline: 2px solid var(--blue); outline-offset: 1px; }
+.agent-editor-preview .definition-list { max-height: 280px; overflow: auto; }
+.agent-editor-preview .artifact-preview { max-height: 360px; overflow: auto; }
+.agent-editor-diff {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px;
+}
+.agent-editor-diff > div { min-width: 0; display: grid; gap: 6px; }
+.agent-editor-diff .artifact-preview { max-height: 300px; overflow: auto; }
+.agent-editor-history { border-top: 1px solid var(--line-soft); padding-top: 12px; }
+.agent-workflow-editor .editor-diagnostics {
+  border-left: 0; border-top: 1px solid var(--line-soft); padding: 12px 0 0;
+}
+@media (max-width: 700px) {
+  .agent-editor-diff { grid-template-columns: 1fr; }
 }

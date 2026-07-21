@@ -47,11 +47,11 @@ MAX_ATTEMPTS = 3  # first call plus two diagnostic-fed retries
 _FENCE = re.compile(r"```(?:json)?\s*(\{.*\})\s*```", re.S)
 
 
-class AuthoringUnavailableError(RuntimeError):
+class AuthoringUnavailableError(ValueError):
     """The generating CLI could not run at all."""
 
 
-class AuthoringFailedError(RuntimeError):
+class AuthoringFailedError(ValueError):
     """Every attempt produced something the compiler refused.
 
     ``diagnostics`` carries the last round's structured findings and
@@ -149,12 +149,14 @@ class WorkflowAuthoringService:
     def _prompt(
         self, instruction: str, feedback: str | None,
         preferred_handler: str | None = None,
+        current_source: Mapping[str, Any] | None = None,
     ) -> str:
         facts = {
             "dsl_version": "1.2",
             "node_kinds": ["action", "human", "decision", "join", "terminal"],
             "handlers": list(self.handler_facts),
             "preferred_handler": preferred_handler,
+            "current_source": current_source,
             "schema_ids": list(self.schemas.ids()),
             "shape_contract": {
                 "port": {"id": "port_id", "schema_id": "one schema_ids value"},
@@ -202,7 +204,10 @@ class WorkflowAuthoringService:
                     "rework_config": {"max_generations": "positive integer"},
                 },
             },
-            "rules": [
+            "rules": ([
+                "You are MODIFYING an existing workflow given as current_source. Start from it, apply only the change the instruction asks for, and return the COMPLETE modified document.",
+                "Keep metadata.id exactly as it is in current_source; the workflow identity must not change.",
+            ] if current_source is not None else []) + [
                 "Return exactly one JSON object, optionally inside a ```json fence, and nothing else.",
                 "Top level: dsl_version, metadata{id,name}, nodes[], edges[], entry[], terminals[], and optional policies[].",
                 "Every action node needs handler{name,version} chosen from `handlers` and ports typed with ids from `schema_ids`.",
@@ -274,13 +279,56 @@ class WorkflowAuthoringService:
             if preferred_handler not in available:
                 raise ValueError("preferred handler is not available")
 
+        return self._run_funnel(
+            lambda feedback: self._prompt(instruction, feedback, preferred_handler),
+            source_name="<generated>", failure="generation",
+        )
+
+    def revise(
+        self, current_source: str, instruction: str, *, expected_workflow_id: str,
+    ) -> GenerationOutcome:
+        """Apply a natural-language change to an existing workflow's source.
+
+        Same funnel as ``generate`` — the model's answer must still compile —
+        with the current source supplied as the base and one extra guard: the
+        result must keep the original workflow id. Changing metadata.id would
+        publish the edit onto a different aggregate, so a divergent id is a
+        validation failure that is fed back for retry, not a silent accept.
+        """
+        instruction = instruction.strip()
+        if not instruction:
+            raise ValueError("an instruction is required")
+        if len(instruction) > MAX_INSTRUCTION_CHARS:
+            raise ValueError(
+                f"instruction exceeds {MAX_INSTRUCTION_CHARS} characters"
+            )
+        try:
+            base = json.loads(current_source)
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise ValueError(f"current source is not valid JSON: {exc}") from None
+        if not isinstance(base, dict):
+            raise ValueError("current source must be a JSON object")
+
+        def guard(compiled):
+            if compiled.ir.workflow_id != expected_workflow_id:
+                raise ValueError(
+                    "the workflow id must not change: expected "
+                    f"{expected_workflow_id}, got {compiled.ir.workflow_id}"
+                )
+
+        return self._run_funnel(
+            lambda feedback: self._prompt(instruction, feedback, None, base),
+            source_name="<revised>", failure="revision", extra_check=guard,
+        )
+
+    def _run_funnel(
+        self, build_prompt, *, source_name: str, failure: str, extra_check=None,
+    ) -> GenerationOutcome:
         feedback: str | None = None
         raw = ""
         last_diagnostics: tuple[Mapping[str, Any], ...] = ()
         for attempt in range(1, self.max_attempts + 1):
-            raw = self.generate_text(
-                self._prompt(instruction, feedback, preferred_handler)
-            )
+            raw = self.generate_text(build_prompt(feedback))
             try:
                 document = self._extract_json(raw)
                 nodes = document.get("nodes")
@@ -291,8 +339,10 @@ class WorkflowAuthoringService:
                 source = json.dumps(document, ensure_ascii=False, indent=2)
                 compiled = compile_source(
                     source, self.handlers, self.schemas,
-                    source_name="<generated>", source_format="json",
+                    source_name=source_name, source_format="json",
                 )
+                if extra_check is not None:
+                    extra_check(compiled)
             except DiagnosticError as exc:
                 last_diagnostics = tuple(item.to_dict() for item in exc.diagnostics)
                 feedback = json.dumps(list(last_diagnostics), ensure_ascii=False)
@@ -311,8 +361,7 @@ class WorkflowAuthoringService:
                 attempts=attempt,
             )
         raise AuthoringFailedError(
-            "generation failed validation after "
-            f"{self.max_attempts} attempts",
+            f"{failure} failed validation after {self.max_attempts} attempts",
             diagnostics=last_diagnostics,
             raw_output=raw[-4000:],
         )

@@ -15,7 +15,7 @@ from orbit.web.api_v1 import (
     OPS_READ_SCOPE, OPS_WRITE_SCOPE, READ_SCOPE, SENSITIVE_SCOPE, WRITE_SCOPE,
     Authorizer,
 )
-from orbit.web.app import create_app
+from orbit.web.app import HandlerRegistration, create_app
 from orbit.workflow.api.dto import (
     CursorError, decode_cursor, encode_cursor, envelope, page_size,
 )
@@ -25,6 +25,10 @@ from orbit.workflow.application.human_service import HumanTaskService
 from orbit.workflow.api.workflow_catalog import WorkflowCatalogReadModelService
 from orbit.workflow.domain.human import HumanTaskKind
 from orbit.workflow.domain.ids import EntityId
+from orbit.workflow.catalogs.handlers import HandlerManifest
+from orbit.workflow.domain.durable_execution import ExecutionSafety
+from orbit.workflow.domain.handlers import ResourceProfile
+from orbit.workflow.handlers import TransformHandler
 from orbit.workflow.persistence.database import connect_workflow_database
 from tests.test_web_composition import (
     AsgiHarness, SCHEMAS, publish_human_workflow, publish_linear_workflow,
@@ -733,6 +737,45 @@ class CatalogTests(ApiTestCase):
             for forbidden in ("command", "argv", "path", "secret_value"):
                 self.assertNotIn(forbidden, serialised.lower())
 
+    def test_handler_catalog_serializes_nested_config_schema(self) -> None:
+        registration = HandlerRegistration(
+            HandlerManifest(
+                "nested", "1.0.0", ("action",),
+                {"value": "example://integer/1.0"},
+                {"value": "example://integer/1.0"},
+                {
+                    "type": "object",
+                    "properties": {
+                        "prompt": {"type": "string"},
+                        "choices": {"type": "array", "items": {"type": "string"}},
+                    },
+                },
+                ExecutionSafety.REPLAY_SAFE,
+                ResourceProfile(100, 100, 5, 60, 1_000_000, "test"),
+                "schema://object/1.0",
+            ),
+            TransformHandler(),
+            "nested@1.0.0",
+        )
+        app = create_app(
+            Path(self.temp.name) / "nested.db",
+            handlers=[registration], schemas=SCHEMAS,
+            worker_count=1, poll_seconds=0.02,
+            authenticator=lambda request: request.headers.get("x-orbit-actor"),
+            authorizer=Authorizer(lambda actor: self.scopes.get(actor, [])),
+            single_goal_mode=False,
+        )
+
+        with AsgiHarness(app) as client:
+            response = client.get("/api/v1/handler-catalog", actor="reader")
+
+        self.assertEqual(200, response.status_code, response.text)
+        schema = response.json()["data"]["handlers"][0]["config_schema"]
+        self.assertEqual("string", schema["properties"]["prompt"]["type"])
+        self.assertEqual(
+            {"type": "string"}, schema["properties"]["choices"]["items"]
+        )
+
     def test_workflow_catalog_advertises_start_only_to_writers(self) -> None:
         with AsgiHarness(self.app) as client:
             reader = client.get("/api/v1/workflows", actor="reader")
@@ -983,7 +1026,7 @@ class WorkflowAuthoringApiTests(ApiTestCase):
 
 
 class WorkflowDraftApiTests(ApiTestCase):
-    """Edit → save → validate → publish, all through advertised commands."""
+    """Agent instruction → compiled revision → publish."""
 
     def setUp(self) -> None:
         super().setUp()
@@ -1015,6 +1058,9 @@ class WorkflowDraftApiTests(ApiTestCase):
             json_module.dumps(editable_dsl()), source_name="<fixture>",
             source_format="json", expected_latest_version=0, actor="fixture",
         )
+        self.app = self._app_with_reviser(
+            lambda _prompt: json_module.dumps(editable_dsl(name="Linear, edited"))
+        )
 
     def _edit_command(self, client):
         detail = client.get(
@@ -1024,6 +1070,27 @@ class WorkflowDraftApiTests(ApiTestCase):
             c for c in detail["allowed_commands"]
             if c["command"] == "workflow.draft.create"
         ), detail
+
+    def _app_with_reviser(self, generate):
+        return create_app(
+            self.db,
+            handlers=[transform_registration()], schemas=SCHEMAS,
+            worker_count=1, poll_seconds=0.02,
+            authenticator=lambda request: request.headers.get("x-orbit-actor"),
+            authorizer=Authorizer(lambda actor: self.scopes.get(actor, [])),
+            workflow_generator=generate,
+            single_goal_mode=False,
+        )
+
+    def _app_without_reviser(self):
+        return create_app(
+            self.db,
+            handlers=[transform_registration()], schemas=SCHEMAS,
+            worker_count=1, poll_seconds=0.02,
+            authenticator=lambda request: request.headers.get("x-orbit-actor"),
+            authorizer=Authorizer(lambda actor: self.scopes.get(actor, [])),
+            single_goal_mode=False,
+        )
 
     def test_detail_advertises_editing_only_to_writers_with_source(self) -> None:
         with AsgiHarness(self.app) as client:
@@ -1048,9 +1115,25 @@ class WorkflowDraftApiTests(ApiTestCase):
                 if c["command"] == "workflow.draft.create"
             ])
 
-    def test_full_edit_loop_publishes_the_next_version(self) -> None:
-        import json as json_module
+    def test_detail_does_not_offer_editing_without_an_agent_reviser(self) -> None:
+        with AsgiHarness(self._app_without_reviser()) as client:
+            detail = client.get(
+                "/api/v1/workflows/workflow:draftable", actor="writer"
+            ).json()["data"]
+            self.assertEqual([], [
+                command for command in detail["allowed_commands"]
+                if command["command"] == "workflow.draft.create"
+            ])
+            direct = client.post(
+                "/api/v1/workflows/workflow:draftable/drafts",
+                actor="writer", key="no-reviser", body={"expected_version": 1},
+            )
+            self.assertEqual(503, direct.status_code)
+            self.assertEqual(
+                "generation_unavailable", direct.json()["error"]["code"]
+            )
 
+    def test_full_edit_loop_publishes_the_next_version(self) -> None:
         with AsgiHarness(self.app) as client:
             command, detail = self._edit_command(client)
             draft = client.post(
@@ -1059,30 +1142,31 @@ class WorkflowDraftApiTests(ApiTestCase):
             self.assertEqual("active", draft["status"])
             self.assertEqual("dirty", draft["validation_status"])
             commands = {c["command"] for c in draft["allowed_commands"]}
-            self.assertIn("workflow.draft.save", commands)
+            self.assertEqual({
+                "workflow.draft.revise", "workflow.draft.discard",
+            }, commands)
             self.assertNotIn("workflow.draft.publish", commands)
 
-            source = json_module.loads(draft["source"])
-            source["metadata"]["name"] = "Linear, edited"
-            save = next(
+            revise = next(
                 c for c in draft["allowed_commands"]
-                if c["command"] == "workflow.draft.save"
+                if c["command"] == "workflow.draft.revise"
             )
-            saved = client.post(
-                save["href"], actor="writer", key="d2",
+            staged = client.post(
+                revise["href"], actor="writer", key="d2",
                 body={
-                    "source": json_module.dumps(source),
-                    "expected_version": save["expected_version"],
+                    "instruction": "rename the workflow",
+                    "expected_version": revise["expected_version"],
                 },
             ).json()["data"]
-
-            validate = next(
-                c for c in saved["allowed_commands"]
-                if c["command"] == "workflow.draft.validate"
+            self.assertEqual("dirty", staged["validation_status"])
+            self.assertIn("Linear, edited", staged["pending_revision"]["source"])
+            accept = next(
+                command for command in staged["allowed_commands"]
+                if command["command"] == "workflow.draft.accept"
             )
             validated = client.post(
-                validate["href"], actor="writer", key="d3",
-                body={"expected_version": validate["expected_version"]},
+                accept["href"], actor="writer", key="d3",
+                body={"expected_version": accept["expected_version"]},
             ).json()["data"]
             self.assertEqual("valid", validated["validation_status"])
 
@@ -1117,27 +1201,25 @@ class WorkflowDraftApiTests(ApiTestCase):
             self.assertEqual(1, create["expected_version"])
 
     def test_invalid_source_reports_diagnostics_and_blocks_publish(self) -> None:
-        with AsgiHarness(self.app) as client:
+        with AsgiHarness(self._app_with_reviser(lambda _prompt: "{}")) as client:
             command, _ = self._edit_command(client)
             draft = client.post(
                 command["href"], actor="writer", key="d5", body={},
             ).json()["data"]
-            saved = client.post(
-                f"/api/v1/workflow-drafts/{draft['draft_id']}/save",
+            failed = client.post(
+                f"/api/v1/workflow-drafts/{draft['draft_id']}/revise",
                 actor="writer", key="d6",
-                body={"source": "{\"nope\": true}", "expected_version": draft["revision"]},
-            ).json()["data"]
-            validated = client.post(
-                f"/api/v1/workflow-drafts/{draft['draft_id']}/validate",
-                actor="writer", key="d7",
-                body={"expected_version": saved["revision"]},
-            ).json()["data"]
-            self.assertEqual("invalid", validated["validation_status"])
-            self.assertTrue(validated["diagnostics"])
+                body={
+                    "instruction": "make it invalid",
+                    "expected_version": draft["revision"],
+                },
+            )
+            self.assertEqual(422, failed.status_code)
+            self.assertTrue(failed.json()["error"]["details"]["diagnostics"])
             denied = client.post(
                 f"/api/v1/workflow-drafts/{draft['draft_id']}/publish",
-                actor="writer", key="d8",
-                body={"expected_version": validated["revision"]},
+                actor="writer", key="d7",
+                body={"expected_version": draft["revision"]},
             )
             self.assertEqual(409, denied.status_code)
             self.assertEqual(
@@ -1151,9 +1233,9 @@ class WorkflowDraftApiTests(ApiTestCase):
                 command["href"], actor="writer", key="d9", body={},
             ).json()["data"]
             stale = client.post(
-                f"/api/v1/workflow-drafts/{draft['draft_id']}/save",
+                f"/api/v1/workflow-drafts/{draft['draft_id']}/revise",
                 actor="writer", key="d10",
-                body={"source": "{}", "expected_version": 99},
+                body={"instruction": "rename it", "expected_version": 99},
             )
             self.assertEqual(409, stale.status_code)
             self.assertEqual(
@@ -1171,6 +1253,86 @@ class WorkflowDraftApiTests(ApiTestCase):
                 actor="second-writer",
             )
             self.assertEqual(404, other.status_code)
+
+    def test_reviser_is_the_only_draft_mutation_command(self) -> None:
+        import json as json_module
+        from tests.test_workflow_drafts import dsl as editable_dsl
+
+        revised = editable_dsl(name="Agent revised")
+        app = self._app_with_reviser(lambda _prompt: json_module.dumps(revised))
+        with AsgiHarness(app) as client:
+            command, _ = self._edit_command(client)
+            draft = client.post(
+                command["href"], actor="writer", key="revise-create", body={},
+            ).json()["data"]
+            commands = {item["command"] for item in draft["allowed_commands"]}
+            self.assertEqual({
+                "workflow.draft.revise", "workflow.draft.discard",
+            }, commands)
+            revise = next(
+                item for item in draft["allowed_commands"]
+                if item["command"] == "workflow.draft.revise"
+            )
+            response = client.post(
+                revise["href"], actor="writer", key="revise-success",
+                body={
+                    "instruction": "rename it",
+                    "expected_version": revise["expected_version"],
+                },
+            )
+            self.assertEqual(200, response.status_code, response.text)
+            data = response.json()["data"]
+            self.assertNotIn("Agent revised", data["source"])
+            self.assertIn("Agent revised", data["pending_revision"]["source"])
+            revised_commands = {
+                item["command"]
+                for item in data["allowed_commands"]
+            }
+            self.assertEqual({
+                "workflow.draft.accept", "workflow.draft.reject",
+                "workflow.draft.discard",
+            }, revised_commands)
+
+    def test_manual_draft_mutation_routes_are_not_exposed(self) -> None:
+        with AsgiHarness(self.app) as client:
+            command, _ = self._edit_command(client)
+            draft = client.post(
+                command["href"], actor="writer", key="manual-create", body={},
+            ).json()["data"]
+            for action in ("save", "validate"):
+                response = client.post(
+                    f"/api/v1/workflow-drafts/{draft['draft_id']}/{action}",
+                    actor="writer", key=f"manual-{action}",
+                    body={"source": "{}", "expected_version": draft["revision"]},
+                )
+                self.assertEqual(404, response.status_code)
+
+    def test_failed_revision_does_not_leave_a_pending_receipt(self) -> None:
+        app = self._app_with_reviser(lambda _prompt: "{}")
+        with AsgiHarness(app) as client:
+            command, _ = self._edit_command(client)
+            draft = client.post(
+                command["href"], actor="writer", key="revise-fail-create", body={},
+            ).json()["data"]
+            revise = next(
+                item for item in draft["allowed_commands"]
+                if item["command"] == "workflow.draft.revise"
+            )
+            body = {
+                "instruction": "make an invalid change",
+                "expected_version": revise["expected_version"],
+            }
+            first = client.post(
+                revise["href"], actor="writer", key="revise-fail", body=body,
+            )
+            second = client.post(
+                revise["href"], actor="writer", key="revise-fail", body=body,
+            )
+            self.assertEqual(422, first.status_code, first.text)
+            self.assertEqual(422, second.status_code, second.text)
+            self.assertEqual(
+                "workflow_revision_failed", second.json()["error"]["code"]
+            )
 
 
 class CapabilityTests(ApiTestCase):

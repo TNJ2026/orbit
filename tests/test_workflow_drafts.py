@@ -15,7 +15,8 @@ import unittest
 
 from orbit.workflow.application.workflow_draft_service import (
     DraftAlreadyActiveError, DraftNotFoundError, DraftNotValidatedError,
-    DraftSourceTooLargeError, DraftVersionConflictError, MAX_SOURCE_BYTES,
+    DraftRevisionStateError, DraftSourceTooLargeError, DraftVersionConflictError,
+    MAX_SOURCE_BYTES,
     SourceUnavailableError, WorkflowDraftApplicationService,
     WorkflowVersionConflictError,
 )
@@ -370,6 +371,165 @@ class DraftLifecycleTests(DraftTestCase):
         )
         self.assertEqual("published", recovered.status)
         self.assertEqual(2, recovered.published_version)
+
+
+class DraftReviseTests(DraftTestCase):
+    def _reviser(self, new_source):
+        from orbit.workflow.authoring.generator import GenerationOutcome
+        from orbit.workflow.domain.serialization import definition_hash
+
+        calls = []
+
+        def reviser(current_source, instruction, *, expected_workflow_id):
+            calls.append((current_source, instruction, expected_workflow_id))
+            from orbit.workflow.dsl import compile_source
+
+            compiled = compile_source(
+                new_source, self.definitions.catalogs.handlers,
+                self.definitions.catalogs.schemas, source_format="json",
+            )
+            return GenerationOutcome(
+                source=new_source, workflow_id=compiled.ir.workflow_id,
+                definition_hash=compiled.definition_hash.value,
+                node_count=len(compiled.ir.nodes), attempts=1,
+            )
+
+        return reviser, calls
+
+    def _service_with(self, reviser):
+        return WorkflowDraftApplicationService(
+            self.path, self.definitions, reviser=reviser,
+        )
+
+    def test_revise_stages_a_candidate_then_accepts_and_publishes(self) -> None:
+        renamed = json.dumps(dsl(name="Revised"))
+        reviser, calls = self._reviser(renamed)
+        service = self._service_with(reviser)
+        draft = service.create_or_resume(
+            "workflow:draftable", base_version=None, actor="author", now=NOW,
+        )
+        staged = service.revise(
+            EntityId.parse(draft.draft_id), "rename to Revised",
+            expected_revision=draft.revision, actor="author", now=NOW,
+        )
+        self.assertEqual("dirty", staged.validation_status)
+        self.assertNotIn("Revised", staged.source_text)
+        self.assertEqual(draft.revision + 1, staged.revision)
+        pending, history, undoable = service.revision_context(
+            EntityId.parse(draft.draft_id), actor="author",
+        )
+        self.assertIn("Revised", pending.proposed_source_text)
+        self.assertEqual("pending", history[0].status)
+        self.assertFalse(undoable)
+        # The reviser saw the seeded source, the instruction and the workflow id.
+        self.assertEqual("workflow:draftable", calls[0][2])
+
+        revised = service.accept_revision(
+            EntityId.parse(draft.draft_id),
+            expected_revision=staged.revision, actor="author", now=NOW,
+        )
+        self.assertEqual("valid", revised.validation_status)
+        self.assertIn("Revised", revised.source_text)
+
+        record, version = service.publish(
+            EntityId.parse(draft.draft_id),
+            expected_revision=revised.revision, actor="author", now=NOW,
+        )
+        self.assertEqual(2, version["version"])
+        stored = self.store.get("workflow:draftable", 2)
+        self.assertIn("Revised", stored.source_text)
+
+    def test_reject_preserves_source_and_undo_restores_previous_revision(self) -> None:
+        reviser, _ = self._reviser(json.dumps(dsl(name="Candidate")))
+        service = self._service_with(reviser)
+        draft = service.create_or_resume(
+            "workflow:draftable", base_version=None, actor="author", now=NOW,
+        )
+        staged = service.revise(
+            EntityId.parse(draft.draft_id), "try a change",
+            expected_revision=draft.revision, actor="author", now=NOW,
+        )
+        rejected = service.reject_revision(
+            EntityId.parse(draft.draft_id),
+            expected_revision=staged.revision, actor="author", now=NOW,
+        )
+        self.assertEqual(draft.source_hash, rejected.source_hash)
+
+        staged = service.revise(
+            EntityId.parse(draft.draft_id), "accept a change",
+            expected_revision=rejected.revision, actor="author", now=NOW,
+        )
+        accepted = service.accept_revision(
+            EntityId.parse(draft.draft_id),
+            expected_revision=staged.revision, actor="author", now=NOW,
+        )
+        self.assertIn("Candidate", accepted.source_text)
+        undone = service.undo_revision(
+            EntityId.parse(draft.draft_id),
+            expected_revision=accepted.revision, actor="author", now=NOW,
+        )
+        self.assertEqual(draft.source_hash, undone.source_hash)
+        _, history, undoable = service.revision_context(
+            EntityId.parse(draft.draft_id), actor="author",
+        )
+        self.assertEqual(["undone", "rejected"], [item.status for item in history])
+        self.assertFalse(undoable)
+
+    def test_pending_candidate_blocks_another_agent_call_and_publish(self) -> None:
+        reviser, calls = self._reviser(json.dumps(dsl(name="Candidate")))
+        service = self._service_with(reviser)
+        draft = service.create_or_resume(
+            "workflow:draftable", base_version=None, actor="author", now=NOW,
+        )
+        staged = service.revise(
+            EntityId.parse(draft.draft_id), "first change",
+            expected_revision=draft.revision, actor="author", now=NOW,
+        )
+        with self.assertRaises(DraftRevisionStateError):
+            service.revise(
+                EntityId.parse(draft.draft_id), "second change",
+                expected_revision=staged.revision, actor="author", now=NOW,
+            )
+        with self.assertRaises(DraftRevisionStateError):
+            service.publish(
+                EntityId.parse(draft.draft_id),
+                expected_revision=staged.revision, actor="author", now=NOW,
+            )
+        self.assertEqual(1, len(calls))
+
+    def test_revise_without_a_reviser_is_unavailable(self) -> None:
+        from orbit.workflow.application.workflow_draft_service import (
+            RevisionUnavailableError,
+        )
+
+        draft = self.draft()
+        with self.assertRaises(RevisionUnavailableError):
+            self.service.revise(
+                EntityId.parse(draft.draft_id), "change something",
+                expected_revision=draft.revision, actor="author", now=NOW,
+            )
+
+    def test_a_stale_revision_conflicts_before_calling_the_agent(self) -> None:
+        reviser, calls = self._reviser(json.dumps(dsl(name="X")))
+        service = self._service_with(reviser)
+        draft = service.create_or_resume(
+            "workflow:draftable", base_version=None, actor="author", now=NOW,
+        )
+        with self.assertRaises(DraftVersionConflictError):
+            service.revise(
+                EntityId.parse(draft.draft_id), "change",
+                expected_revision=99, actor="author", now=NOW,
+            )
+        self.assertEqual([], calls)
+
+    def test_a_fresh_draft_is_not_mistaken_for_published(self) -> None:
+        # Merely seeding source from a published version is not a publish.
+        draft = self.draft()
+        again = self.service.get(
+            EntityId.parse(draft.draft_id), actor="author", now=NOW,
+        )
+        self.assertEqual("active", again.status)
+        self.assertIsNone(again.published_version)
 
 
 if __name__ == "__main__":

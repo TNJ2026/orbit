@@ -54,6 +54,19 @@ class SpecValidationTests(unittest.TestCase):
         for spec in TRUSTED_AGENT_CLIS:
             self.assertEqual(spec.executable, spec.executable.strip())
 
+    def test_the_allowlist_matches_main_branch_agent_detection_scope(self) -> None:
+        self.assertEqual(
+            {
+                ("claude", "claude"),
+                ("codex", "codex"),
+                ("gemini", "gemini"),
+                ("antigravity", "agy"),
+                ("hermes", "hermes"),
+                ("opencode", "opencode"),
+            },
+            {(spec.name, spec.executable) for spec in TRUSTED_AGENT_CLIS},
+        )
+
 
 class DiscoveryTests(unittest.TestCase):
     def test_trusted_cli_environment_keeps_identity_but_not_provider_tokens(self) -> None:
@@ -170,6 +183,11 @@ class PolicyTests(unittest.TestCase):
         )
         self.assertEqual(1, len(pairs))
         self.assertEqual("agent.claude", pairs[0][1].name)
+
+    def test_detectable_cli_without_runtime_adapter_is_not_registrable(self) -> None:
+        spec = AgentCliSpec("hermes", "hermes", runtime_compatible=False)
+        agent = DiscoveredAgent(spec, "/usr/local/bin/hermes", "0.18.2")
+        self.assertEqual((), registrable_agents([agent]))
 
 
 class RegistrationTests(unittest.TestCase):

@@ -2,14 +2,14 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "orbit://ui-contracts/workflow-draft/2.0",
   "title": "WorkflowDraft 2.0",
-  "description": "One actor's persistent editing draft of a workflow (editor plan §8.3). The server owns revision, validation state and the command set; the client never derives publishability. allowed_commands is already authorised for the requesting actor and follows AllowedCommand 2.0 — POST only, which is why save is POST .../save.",
+  "description": "One actor's persistent Agent-edited draft. Agent output is staged as a candidate and must be accepted before it replaces source.",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "draft_id", "workflow_id", "base_version", "actor", "source_format",
     "source", "source_hash", "validation_status", "validated_definition_hash",
     "diagnostics", "revision", "status", "created_at", "updated_at",
-    "published_version", "allowed_commands"
+    "published_version", "pending_revision", "revision_history", "allowed_commands"
   ],
   "properties": {
     "draft_id": {"type": "string", "pattern": "^workflow_draft:"},
@@ -42,7 +42,7 @@
     },
     "revision": {
       "type": "integer", "minimum": 1,
-      "description": "The draft aggregate's expected version; every save/validate/publish/discard bumps it."
+      "description": "The draft aggregate's expected version; every candidate, decision, publish or discard bumps it."
     },
     "status": {"enum": ["active", "published", "discarded"]},
     "created_at": {"type": "string", "format": "date-time"},
@@ -51,9 +51,67 @@
       "type": ["integer", "null"],
       "description": "Set when status is published. May equal base_version: publishing an unchanged draft is a success that mints no new version."
     },
+    "pending_revision": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/pendingRevision"}
+      ]
+    },
+    "revision_history": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/revisionHistoryItem"}
+    },
     "allowed_commands": {
       "type": "array",
       "items": {"$ref": "allowed-command.schema.json"}
+    }
+  },
+  "$defs": {
+    "pendingRevision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "revision_id", "instruction", "instruction_hash",
+        "base_draft_revision", "previous_source", "previous_source_hash",
+        "source", "source_hash", "definition_hash", "attempts", "status",
+        "created_at"
+      ],
+      "properties": {
+        "revision_id": {"type": "string", "pattern": "^workflow_revision:"},
+        "instruction": {"type": "string", "minLength": 1},
+        "instruction_hash": {"type": "string", "pattern": "^sha256:"},
+        "base_draft_revision": {"type": "integer", "minimum": 1},
+        "previous_source": {"type": "string"},
+        "previous_source_hash": {"type": "string", "pattern": "^sha256:"},
+        "source": {"type": "string"},
+        "source_hash": {"type": "string", "pattern": "^sha256:"},
+        "definition_hash": {"type": "string", "pattern": "^sha256:"},
+        "attempts": {"type": "integer", "minimum": 1},
+        "status": {"const": "pending"},
+        "created_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "revisionHistoryItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "revision_id", "instruction", "instruction_hash",
+        "previous_source_hash", "source_hash", "definition_hash", "attempts",
+        "status", "created_at", "decided_at", "decided_by"
+      ],
+      "properties": {
+        "revision_id": {"type": "string", "pattern": "^workflow_revision:"},
+        "instruction": {"type": "string"},
+        "instruction_hash": {"type": "string", "pattern": "^sha256:"},
+        "previous_source_hash": {"type": "string", "pattern": "^sha256:"},
+        "source_hash": {"type": "string", "pattern": "^sha256:"},
+        "definition_hash": {"type": "string", "pattern": "^sha256:"},
+        "attempts": {"type": "integer", "minimum": 1},
+        "status": {"enum": ["pending", "accepted", "rejected", "undone"]},
+        "created_at": {"type": "string", "format": "date-time"},
+        "decided_at": {"type": ["string", "null"], "format": "date-time"},
+        "decided_by": {"type": ["string", "null"]}
+      }
     }
   }
 }

@@ -897,6 +897,42 @@ _MIGRATIONS: tuple[tuple[int, str, str], ...] = (
             WHERE status = 'active';
         """,
     ),
+    (
+        14,
+        "agent workflow draft revision candidates",
+        """
+        CREATE TABLE workflow_draft_revisions (
+            revision_id TEXT PRIMARY KEY,
+            draft_id TEXT NOT NULL REFERENCES workflow_drafts(draft_id),
+            base_draft_revision INTEGER NOT NULL CHECK (base_draft_revision >= 1),
+            instruction_text TEXT NOT NULL,
+            instruction_hash TEXT NOT NULL,
+            previous_source_text TEXT NOT NULL,
+            previous_source_hash TEXT NOT NULL,
+            previous_validation_status TEXT NOT NULL CHECK (
+                previous_validation_status IN ('dirty', 'valid', 'invalid')
+            ),
+            previous_validated_source_hash TEXT,
+            previous_definition_hash TEXT,
+            proposed_source_text TEXT NOT NULL,
+            proposed_source_hash TEXT NOT NULL,
+            proposed_definition_hash TEXT NOT NULL,
+            attempts INTEGER NOT NULL CHECK (attempts >= 1),
+            status TEXT NOT NULL CHECK (
+                status IN ('pending', 'accepted', 'rejected', 'undone')
+            ),
+            created_at TEXT NOT NULL,
+            decided_at TEXT,
+            decided_by TEXT,
+            CHECK (revision_id LIKE 'workflow_revision:%')
+        );
+
+        CREATE UNIQUE INDEX workflow_draft_one_pending_revision
+            ON workflow_draft_revisions(draft_id) WHERE status = 'pending';
+        CREATE INDEX workflow_draft_revision_history
+            ON workflow_draft_revisions(draft_id, created_at DESC);
+        """,
+    ),
 )
 
 

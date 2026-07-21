@@ -46,13 +46,14 @@ from ..workflow.application.run_service import (
 )
 from ..workflow.catalogs.schemas import InMemorySchemaCatalog
 from ..workflow.domain.ids import EntityId
+from ..workflow.domain.serialization import to_primitive
 from ..workflow.domain.versions import DefinitionHash
 from ..workflow.artifacts.local_cas import BlobIntegrityError
-from ..workflow.authoring import AuthoringUnavailableError
+from ..workflow.authoring import AuthoringFailedError, AuthoringUnavailableError
 from ..workflow.application.workflow_draft_service import (
     DraftAlreadyActiveError, DraftNotFoundError, DraftNotValidatedError,
-    DraftSourceTooLargeError, DraftVersionConflictError, SourceUnavailableError,
-    WorkflowVersionConflictError,
+    DraftSourceTooLargeError, DraftVersionConflictError, RevisionUnavailableError,
+    SourceUnavailableError, WorkflowVersionConflictError,
 )
 from ..workflow.persistence.database import connect_workflow_database
 from ..workflow.persistence.control import audit as persist_audit
@@ -714,7 +715,10 @@ def build_api_v1(
                 "node_kinds": list(entry.manifest.node_kinds),
                 "inputs": dict(entry.manifest.inputs),
                 "outputs": dict(entry.manifest.outputs),
-                "config_schema": dict(entry.manifest.config_schema),
+                # Handler manifests recursively freeze JSON objects as
+                # mappingproxy values.  Convert the full schema at the HTTP
+                # boundary; dict() only thaws its outermost object.
+                "config_schema": to_primitive(entry.manifest.config_schema),
                 "execution_safety": entry.manifest.execution_safety.value,
                 "capabilities": list(entry.manifest.capabilities),
                 "required_secrets": list(entry.manifest.required_secrets),
@@ -1076,6 +1080,7 @@ def build_api_v1(
         }] if guard.allows(actor, WRITE_SCOPE) else [])
         if (
             draft_service is not None
+            and getattr(draft_service, "reviser", None) is not None
             and item.get("source_available")
             and guard.allows(actor, WRITE_SCOPE)
         ):
@@ -1106,20 +1111,43 @@ def build_api_v1(
         }
 
     def _draft_dto(record, actor: str) -> dict[str, Any]:
+        pending, history, undoable = draft_service.revision_context(
+            EntityId.parse(record.draft_id), actor=actor,
+        )
         commands: list[dict[str, Any]] = []
         if record.status == "active" and guard.allows(actor, WRITE_SCOPE):
-            commands = [
-                _draft_command(record, "save", "Save"),
-                _draft_command(record, "validate", "Validate"),
-            ]
+            if pending is not None:
+                commands.extend([
+                    _draft_command(record, "accept", "Accept revision"),
+                    _draft_command(record, "reject", "Reject revision"),
+                ])
+            elif getattr(draft_service, "reviser", None) is not None:
+                commands.append(_draft_command(record, "revise", "Revise"))
             # Publish is advertised only when this exact source passed the
             # compiler (editor plan §8.2); the server re-checks on submit.
             if (
-                record.validation_status == "valid"
+                pending is None
+                and record.validation_status == "valid"
                 and record.validated_source_hash == record.source_hash
             ):
                 commands.append(_draft_command(record, "publish", "Publish"))
+            if pending is None and undoable:
+                commands.append(_draft_command(record, "undo", "Undo revision"))
             commands.append(_draft_command(record, "discard", "Discard"))
+        pending_dto = None if pending is None else {
+            "revision_id": pending.revision_id,
+            "instruction": pending.instruction_text,
+            "instruction_hash": pending.instruction_hash,
+            "base_draft_revision": pending.base_draft_revision,
+            "previous_source": pending.previous_source_text,
+            "previous_source_hash": pending.previous_source_hash,
+            "source": pending.proposed_source_text,
+            "source_hash": pending.proposed_source_hash,
+            "definition_hash": pending.proposed_definition_hash,
+            "attempts": pending.attempts,
+            "status": pending.status,
+            "created_at": pending.created_at,
+        }
         return {
             "draft_id": record.draft_id,
             "workflow_id": record.workflow_id,
@@ -1136,12 +1164,30 @@ def build_api_v1(
             "created_at": record.created_at,
             "updated_at": record.updated_at,
             "published_version": record.published_version,
+            "pending_revision": pending_dto,
+            "revision_history": [{
+                "revision_id": item.revision_id,
+                "instruction": item.instruction_text,
+                "instruction_hash": item.instruction_hash,
+                "previous_source_hash": item.previous_source_hash,
+                "source_hash": item.proposed_source_hash,
+                "definition_hash": item.proposed_definition_hash,
+                "attempts": item.attempts,
+                "status": item.status,
+                "created_at": item.created_at,
+                "decided_at": item.decided_at,
+                "decided_by": item.decided_by,
+            } for item in history],
             "allowed_commands": commands,
         }
 
     async def workflow_draft_create(request: Request) -> JSONResponse:
         if draft_service is None:
             return error("drafts_unavailable", "workflow drafts are not wired", 503)
+        if getattr(draft_service, "reviser", None) is None:
+            return error(
+                "generation_unavailable", "no agent reviser is configured", 503,
+            )
         workflow_id = request.path_params["workflow_id"]
 
         def command(body: Mapping[str, Any], actor: str, key: str) -> Mapping[str, Any]:
@@ -1187,23 +1233,6 @@ def build_api_v1(
 
         return handler
 
-    def _draft_save(draft_id, body, actor):
-        source = body.get("source")
-        if not isinstance(source, str):
-            raise ValueError("source is required")
-        record = draft_service.save(
-            draft_id, source, expected_revision=_required_version(body),
-            actor=actor, now=now(),
-        )
-        return _draft_dto(record, actor)
-
-    def _draft_validate(draft_id, body, actor):
-        record = draft_service.validate(
-            draft_id, expected_revision=_required_version(body),
-            actor=actor, now=now(),
-        )
-        return _draft_dto(record, actor)
-
     def _draft_publish(draft_id, body, actor):
         record, version = draft_service.publish(
             draft_id, expected_revision=_required_version(body),
@@ -1218,10 +1247,43 @@ def build_api_v1(
         )
         return _draft_dto(record, actor)
 
-    workflow_draft_save = _draft_mutation("workflow.draft.save", _draft_save)
-    workflow_draft_validate = _draft_mutation("workflow.draft.validate", _draft_validate)
+    def _draft_revise(draft_id, body, actor):
+        instruction = body.get("instruction")
+        if not isinstance(instruction, str) or not instruction.strip():
+            raise ValueError("instruction is required")
+        record = draft_service.revise(
+            draft_id, instruction, expected_revision=_required_version(body),
+            actor=actor, now=now(),
+        )
+        return _draft_dto(record, actor)
+
+    def _draft_accept(draft_id, body, actor):
+        record = draft_service.accept_revision(
+            draft_id, expected_revision=_required_version(body),
+            actor=actor, now=now(),
+        )
+        return _draft_dto(record, actor)
+
+    def _draft_reject(draft_id, body, actor):
+        record = draft_service.reject_revision(
+            draft_id, expected_revision=_required_version(body),
+            actor=actor, now=now(),
+        )
+        return _draft_dto(record, actor)
+
+    def _draft_undo(draft_id, body, actor):
+        record = draft_service.undo_revision(
+            draft_id, expected_revision=_required_version(body),
+            actor=actor, now=now(),
+        )
+        return _draft_dto(record, actor)
+
     workflow_draft_publish = _draft_mutation("workflow.draft.publish", _draft_publish)
     workflow_draft_discard = _draft_mutation("workflow.draft.discard", _draft_discard)
+    workflow_draft_revise = _draft_mutation("workflow.draft.revise", _draft_revise)
+    workflow_draft_accept = _draft_mutation("workflow.draft.accept", _draft_accept)
+    workflow_draft_reject = _draft_mutation("workflow.draft.reject", _draft_reject)
+    workflow_draft_undo = _draft_mutation("workflow.draft.undo", _draft_undo)
 
     # -- writes -----------------------------------------------------------
 
@@ -1251,7 +1313,14 @@ def build_api_v1(
             return error("forbidden", str(exc), 403)
         except BudgetVersionConflict as exc:
             return error("version_conflict", str(exc), 409)
-        except AuthoringUnavailableError as exc:
+        except AuthoringFailedError as exc:
+            # The agent could not produce a compilable revision. Return its
+            # findings so the editor can show them, not a bare 500.
+            return error(
+                "workflow_revision_failed", str(exc), 422,
+                diagnostics=list(exc.diagnostics),
+            )
+        except (AuthoringUnavailableError, RevisionUnavailableError) as exc:
             return error("generation_unavailable", str(exc), 503)
         except ActiveGoalExistsError as exc:
             return error(
@@ -1602,19 +1671,27 @@ def build_api_v1(
             methods=["GET"],
         ),
         Route(
-            "/api/v1/workflow-drafts/{draft_id}/save", workflow_draft_save,
-            methods=["POST"],
-        ),
-        Route(
-            "/api/v1/workflow-drafts/{draft_id}/validate", workflow_draft_validate,
-            methods=["POST"],
-        ),
-        Route(
             "/api/v1/workflow-drafts/{draft_id}/publish", workflow_draft_publish,
             methods=["POST"],
         ),
         Route(
             "/api/v1/workflow-drafts/{draft_id}/discard", workflow_draft_discard,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/v1/workflow-drafts/{draft_id}/revise", workflow_draft_revise,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/v1/workflow-drafts/{draft_id}/accept", workflow_draft_accept,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/v1/workflow-drafts/{draft_id}/reject", workflow_draft_reject,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/v1/workflow-drafts/{draft_id}/undo", workflow_draft_undo,
             methods=["POST"],
         ),
         Route("/api/v1/capabilities", capability_read, methods=["GET"]),

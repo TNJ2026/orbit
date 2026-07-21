@@ -21,10 +21,6 @@ const { Api, ApiError } = await import(`${assets}/api.js`);
 const { I18n, preferredLocale, LOCALES } = await import(`${assets}/i18n.js`);
 const { readRoute, routeHash } = await import(`${assets}/router.js`);
 const { dataState } = await import(`${assets}/components/data-state.js`);
-const {
-  compatibleHandlers, diagnosticTarget, formatWorkflowSource, parseWorkflowSource,
-  removeNode, removePolicy, replaceMetadata, replaceNode, replacePolicy,
-} = await import(`${assets}/workflow-editor.js`);
 
 function catalog(locale) {
   return JSON.parse(readFileSync(`${assets}/i18n.${locale}.json`, "utf8"));
@@ -172,102 +168,6 @@ test("workflow detail encodes identity and pins the requested version", async ()
   assert.equal(calls[0].url, "/api/v1/workflows/workflow%3Alaunch%20plan?version=3");
 });
 
-/* -- workflow editor transforms ----------------------------------------- */
-
-test("structured workflow edits produce a candidate without mutating the source", () => {
-  const original = {
-    dsl_version: "1.2",
-    metadata: { id: "demo", name: "Demo", labels: {} },
-    nodes: [{ id: "work", kind: "action", inputs: [], outputs: [] }],
-    edges: [], entry: ["work"], terminals: ["work"],
-  };
-  const metadata = replaceMetadata(original, {
-    name: "Renamed", description: "Edited", labels: { team: "local" },
-  });
-  const withNode = replaceNode(metadata, 0, {
-    ...metadata.nodes[0], config: { prompt: "hello" },
-  });
-  assert.equal(original.metadata.name, "Demo");
-  assert.equal(original.nodes[0].config, undefined);
-  assert.equal(parseWorkflowSource(formatWorkflowSource(withNode)).metadata.name, "Renamed");
-  assert.deepEqual(withNode.nodes[0].config, { prompt: "hello" });
-});
-
-test("node rename and removal update every graph reference", () => {
-  const original = {
-    nodes: [
-      { id: "work", kind: "action" },
-      { id: "done", kind: "terminal" },
-    ],
-    edges: [{
-      id: "flow", from: { node: "work", port: "out" },
-      to: { node: "done", port: "in" },
-    }],
-    entry: ["work"], terminals: ["done"],
-  };
-  const renamed = replaceNode(original, 0, { id: "start", kind: "action" });
-  assert.deepEqual(renamed.entry, ["start"]);
-  assert.equal(renamed.edges[0].from.node, "start");
-  const removed = removeNode(renamed, 1);
-  assert.deepEqual(removed.terminals, []);
-  assert.deepEqual(removed.edges, []);
-  assert.equal(original.nodes[0].id, "work");
-});
-
-test("handler choices require node kind and an exact input/output contract", () => {
-  const node = {
-    kind: "action",
-    inputs: [{ id: "prompt", schema_id: "schema://object/1.0" }],
-    outputs: [{ id: "result", schema_id: "schema://object/1.0" }],
-  };
-  const handlers = [
-    {
-      name: "agent.codex", version: "1.0.0", node_kinds: ["action"],
-      inputs: { prompt: "schema://object/1.0" },
-      outputs: { result: "schema://object/1.0" },
-    },
-    {
-      name: "wrong-port", version: "1.0.0", node_kinds: ["action"],
-      inputs: { value: "schema://object/1.0" }, outputs: {},
-    },
-    {
-      name: "wrong-kind", version: "1.0.0", node_kinds: ["human"],
-      inputs: { prompt: "schema://object/1.0" },
-      outputs: { result: "schema://object/1.0" },
-    },
-  ];
-  assert.deepEqual(
-    compatibleHandlers(node, handlers).map((handler) => handler.name),
-    ["agent.codex"],
-  );
-});
-
-test("policy transforms update and remove every node and edge reference", () => {
-  const original = {
-    nodes: [{ id: "work", policies: ["retry"] }],
-    edges: [{ id: "again", policy: "retry" }],
-    policies: [{ id: "retry", kind: "retry", config: { max_attempts: 2 } }],
-  };
-  const renamed = replacePolicy(original, 0, {
-    id: "bounded", kind: "retry", config: { max_attempts: 3 },
-  });
-  assert.deepEqual(renamed.nodes[0].policies, ["bounded"]);
-  assert.equal(renamed.edges[0].policy, "bounded");
-  const removed = removePolicy(renamed, 0);
-  assert.deepEqual(removed.policies, []);
-  assert.deepEqual(removed.nodes[0].policies, []);
-  assert.equal("policy" in removed.edges[0], false);
-});
-
-test("diagnostics resolve structured entities and source coordinates", () => {
-  assert.deepEqual(diagnosticTarget({
-    json_path: "$.edges[2].mapping",
-    source_range: { start: { line: 18, column: 5 } },
-  }), {
-    path: "$.edges[2].mapping", pane: "edges", index: 2, line: 18, column: 5,
-  });
-  assert.equal(diagnosticTarget({ path: "$.metadata.name" }).pane, "source");
-});
 
 test("ops and live reads use their versioned API views", async () => {
   const calls = stubFetch([

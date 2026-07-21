@@ -148,6 +148,7 @@ class VisualRegressionTests(unittest.TestCase):
         cls.temp = tempfile.TemporaryDirectory()
         cls.db = Path(cls.temp.name) / "runtime.db"
         cls.artifact_backend = LocalCASBackend(Path(cls.temp.name) / "artifacts")
+        source = json.dumps(editable_dsl("linear", "Visual Editor"))
         cls.app = create_app(
             cls.db,
             handlers=[transform_registration()], schemas=SCHEMAS,
@@ -158,13 +159,16 @@ class VisualRegressionTests(unittest.TestCase):
             authorizer=local_authorizer(),
             rate_limiter=RateLimiter(requests=1_000),
             artifact_backend=cls.artifact_backend,
+            workflow_generator=lambda _prompt: source,
             serve_ui=True,
         )
-        publish_linear_workflow(cls.db)
+        publish_linear_workflow(
+            cls.db,
+            clock=lambda: datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
         # Keep discovery baselines stable: the Editor fixture is a draft of
         # the existing linear workflow, not a second published catalog entry.
         cls.visual_draft_id = "workflow_draft:visual"
-        source = json.dumps(editable_dsl("linear", "Visual Editor"))
         source_hash = "sha256:" + hashlib.sha256(source.encode()).hexdigest()
         now = "2026-01-01T00:00:00+00:00"
         with connect_workflow_database(cls.db) as connection:
@@ -251,7 +255,7 @@ class VisualRegressionTests(unittest.TestCase):
                 )
             if editor_conflict:
                 context.route(
-                    "**/api/v1/workflow-drafts/*/save",
+                    "**/api/v1/workflow-drafts/*/revise",
                     lambda route: route.fulfill(
                         status=409, content_type="application/json",
                         body=json.dumps({
@@ -285,9 +289,12 @@ class VisualRegressionTests(unittest.TestCase):
                     page.click('[data-wizard-next]')
                     page.wait_for_selector("#newRunGoal")
                 if editor_conflict:
-                    page.click("[data-editor-tab='source']")
-                    page.fill("#draftSource", page.input_value("#draftSource") + " ")
-                    page.wait_for_selector("#draftReload", timeout=15000)
+                    page.fill("#draftRevisionInstruction", "Change this workflow")
+                    page.click("#draftRevise")
+                    page.wait_for_function(
+                        "() => !document.querySelector('#liveRegion').hidden",
+                        timeout=15000,
+                    )
             page.wait_for_timeout(100)  # one settle tick after fonts/layout
             return page.screenshot(full_page=False)
         finally:
@@ -398,7 +405,7 @@ class VisualRegressionTests(unittest.TestCase):
                 with self.subTest(name=name):
                     image = self.capture(
                         url, theme=theme, viewport=viewport,
-                        ready_selector="[data-editor-tab='outline']",
+                        ready_selector="#draftRevisionInstruction",
                     )
                     self.assert_matches_baseline(name, image, viewport)
 
@@ -421,6 +428,10 @@ class VisualRegressionTests(unittest.TestCase):
                 "source_range": {"start": {"line": 12, "column": 3}},
             }]
         with connect_workflow_database(self.db) as connection:
+            connection.execute(
+                "DELETE FROM workflow_draft_revisions WHERE draft_id=?",
+                (self.visual_draft_id,),
+            )
             source_hash = connection.execute(
                 "SELECT source_hash FROM workflow_drafts WHERE draft_id=?",
                 (self.visual_draft_id,),
@@ -438,19 +449,38 @@ class VisualRegressionTests(unittest.TestCase):
                     json.dumps(diagnostics), self.visual_draft_id,
                 ),
             )
+            if state == "candidate":
+                candidate_source = json.dumps(
+                    editable_dsl("linear", "Agent candidate"), indent=2,
+                )
+                connection.execute(
+                    """INSERT INTO workflow_draft_revisions VALUES (
+                         ?,?,? ,?,?, ?,?,?,?,? ,?,?,?,? ,'pending',?,NULL,NULL
+                       )""",
+                    (
+                        "workflow_revision:visual", self.visual_draft_id, 1,
+                        "Add an approval before completion",
+                        "sha256:" + "1" * 64, source, source_hash, "dirty",
+                        None, None, candidate_source, "sha256:" + "2" * 64,
+                        "sha256:" + "3" * 64, 2, "2026-01-01T00:01:00+00:00",
+                    ),
+                )
             connection.commit()
 
     def test_p5_editor_states_in_both_themes(self) -> None:
         viewport = VIEWPORTS["1280x800"]
         url = f"{self.base}/ui/#/workflows/workflow:linear/edit/{self.visual_draft_id}"
-        for state in ("empty", "invalid", "valid", "conflict"):
+        for state in ("empty", "invalid", "valid", "candidate", "conflict"):
             self._set_visual_draft("dirty" if state == "conflict" else state)
             for theme in ("dark", "light"):
                 name = f"editor-{state}-{theme}-1280x800"
                 with self.subTest(name=name):
                     image = self.capture(
                         url, theme=theme, viewport=viewport,
-                        ready_selector="[data-editor-tab='outline']",
+                        ready_selector=(
+                            "#draftAccept" if state == "candidate"
+                            else "#draftRevisionInstruction"
+                        ),
                         editor_conflict=state == "conflict",
                     )
                     self.assert_matches_baseline(name, image, viewport)

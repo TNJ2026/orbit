@@ -208,10 +208,14 @@ def linear_ir_for(manifest) -> WorkflowIR:
     )
 
 
-def publish_linear_workflow(db_path: Path) -> tuple[str, object]:
+def publish_linear_workflow(
+    db_path: Path,
+    *,
+    clock=None,
+) -> tuple[str, object]:
     ir = linear_ir_for(transform_registration().manifest)
     digest = definition_hash(ir)
-    SQLiteWorkflowVersionStore(db_path).publish(
+    SQLiteWorkflowVersionStore(db_path, clock=clock).publish(
         CompiledWorkflow(ir, digest, "1.0", "sha256:" + "e" * 64),
         expected_latest_version=0, source_format="json", source_text=None,
         actor="m2-test",
@@ -394,7 +398,7 @@ class HealthEndpointTests(unittest.TestCase):
             checks = response.json()["checks"]
             self.assertTrue(checks["database"]["ok"])
             self.assertTrue(checks["migrations"]["ok"])
-            self.assertEqual(list(range(1, 14)), checks["migrations"]["applied"])
+            self.assertEqual(list(range(1, 15)), checks["migrations"]["applied"])
             self.assertTrue(checks["handlers"]["sealed"])
             self.assertTrue(checks["components"]["ok"])
 

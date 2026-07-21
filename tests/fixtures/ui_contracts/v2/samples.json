@@ -273,25 +273,17 @@
       "created_at": "2026-07-20T08:00:00Z",
       "updated_at": "2026-07-20T08:12:00Z",
       "published_version": null,
+      "pending_revision": null,
+      "revision_history": [],
       "allowed_commands": [
         {
-          "command": "workflow.draft.save",
-          "label": "Save",
+          "command": "workflow.draft.revise",
+          "label": "Revise",
           "method": "POST",
-          "href": "/api/v1/workflow-drafts/workflow_draft:abc123/save",
+          "href": "/api/v1/workflow-drafts/workflow_draft:abc123/revise",
           "target_aggregate_id": "workflow_draft:abc123",
           "expected_version": 7,
-          "payload_schema": "workflow-draft-save/1.0",
-          "confirmation": "explicit"
-        },
-        {
-          "command": "workflow.draft.validate",
-          "label": "Validate",
-          "method": "POST",
-          "href": "/api/v1/workflow-drafts/workflow_draft:abc123/validate",
-          "target_aggregate_id": "workflow_draft:abc123",
-          "expected_version": 7,
-          "payload_schema": "workflow-draft-validate/1.0",
+          "payload_schema": "workflow-draft-revise/1.0",
           "confirmation": "explicit"
         },
         {
@@ -338,6 +330,8 @@
       "created_at": "2026-07-20T08:00:00Z",
       "updated_at": "2026-07-20T08:01:00Z",
       "published_version": null,
+      "pending_revision": null,
+      "revision_history": [],
       "allowed_commands": []
     }
   ],
@@ -380,13 +374,13 @@
       "published_version": null,
       "allowed_commands": [
         {
-          "command": "workflow.draft.save",
-          "label": "Save",
+          "command": "workflow.draft.revise",
+          "label": "Revise",
           "method": "PATCH",
           "href": "/api/v1/workflow-drafts/workflow_draft:x",
           "target_aggregate_id": "workflow_draft:x",
           "expected_version": 1,
-          "payload_schema": "workflow-draft-save/1.0",
+          "payload_schema": "workflow-draft-revise/1.0",
           "confirmation": "explicit"
         }
       ]

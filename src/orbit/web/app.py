@@ -380,8 +380,11 @@ def create_app(
 
         discovered = discover_agent_clis()
         agent_catalog = catalog_entries(discovered)
+        invokable_agents = tuple(
+            agent for agent in discovered if agent.spec.runtime_compatible
+        )
         agent_registrations, _names = agent_handlers(
-            discovered, allowed_capabilities=agent_capabilities
+            invokable_agents, allowed_capabilities=agent_capabilities
         )
         registrations.extend(agent_registrations)
 
@@ -389,7 +392,7 @@ def create_app(
         # rule: its command is the resolved executable, chosen here, never
         # supplied by a request. No discovered CLI simply means no planner —
         # the Runtime runs fine without one.
-        planner_provider = planner_provider_from_agents(discovered)
+        planner_provider = planner_provider_from_agents(invokable_agents)
         if planner_provider is not None:
             from ..workflow.application.planner_service import (
                 PlannerApplicationService,
@@ -402,11 +405,11 @@ def create_app(
         # Workflow generation rides the same discovery result: same trust
         # rule, same first-discovered-CLI choice as the planner. An explicit
         # `workflow_generator` (tests, embedders) takes precedence below.
-        if workflow_generator is None and discovered:
+        if workflow_generator is None and invokable_agents:
             from ..workflow.authoring import TrustedCliDslGenerator
 
             workflow_generator = TrustedCliDslGenerator(
-                (discovered[0].executable_path,)
+                (invokable_agents[0].executable_path,)
             )
 
     composition = RuntimeComposition(
@@ -538,9 +541,9 @@ def create_app(
         WorkflowDraftApplicationService,
     )
 
-    draft_service = WorkflowDraftApplicationService(
-        composition.db_path, workflow_publisher
-    )
+    # Authoring is built first so the draft service can borrow its reviser:
+    # editing a workflow means describing the change to the same agent that
+    # generates one from scratch.
     authoring_service = None
     if workflow_generator is not None:
         from ..workflow.authoring import WorkflowAuthoringService
@@ -560,6 +563,11 @@ def create_app(
                 for manifest in manifests
             ],
         )
+
+    draft_service = WorkflowDraftApplicationService(
+        composition.db_path, workflow_publisher,
+        reviser=authoring_service.revise if authoring_service is not None else None,
+    )
 
     routes: list[Route | Mount] = [
         Route("/health/live", health_live, methods=["GET"]),

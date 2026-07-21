@@ -231,6 +231,48 @@ class AuthoringServiceTests(unittest.TestCase):
         self.assertEqual([], model.prompts)
 
 
+class AuthoringReviseTests(unittest.TestCase):
+    def _revise(self, model, **kwargs):
+        base = json.dumps(valid_document())
+        return service(model).revise(
+            base, "rename it", expected_workflow_id="workflow:generated", **kwargs,
+        )
+
+    def test_revise_carries_current_source_and_the_keep_id_rule(self) -> None:
+        renamed = valid_document()
+        renamed["metadata"]["name"] = "Renamed"
+        model = ScriptedModel([json.dumps(renamed)])
+        outcome = self._revise(model)
+        self.assertEqual("workflow:generated", outcome.workflow_id)
+        prompt = model.prompts[0]
+        self.assertIn("current_source", prompt)
+        self.assertIn("MODIFYING an existing workflow", prompt)
+        self.assertIn("metadata.id exactly as it is", prompt)
+        self.assertIn("rename it", prompt)
+
+    def test_a_changed_workflow_id_is_rejected_and_retried(self) -> None:
+        drifted = valid_document(workflow_id="hijacked")
+        model = ScriptedModel([json.dumps(drifted), json.dumps(valid_document())])
+        outcome = self._revise(model)
+        self.assertEqual(2, outcome.attempts)
+        self.assertIn("must not change", model.prompts[1])
+
+    def test_persistent_id_drift_exhausts_and_fails(self) -> None:
+        drifted = json.dumps(valid_document(workflow_id="hijacked"))
+        model = ScriptedModel([drifted, drifted, drifted])
+        with self.assertRaises(AuthoringFailedError) as caught:
+            self._revise(model)
+        self.assertIn("revision failed", str(caught.exception))
+
+    def test_malformed_current_source_is_a_client_error(self) -> None:
+        model = ScriptedModel([])
+        with self.assertRaises(ValueError):
+            service(model).revise(
+                "{not json", "x", expected_workflow_id="workflow:generated",
+            )
+        self.assertEqual([], model.prompts)
+
+
 @dataclass
 class FakeOutcome:
     returncode: int = 0
