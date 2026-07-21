@@ -323,7 +323,8 @@ async function renderHome(root, selectedRunId = null) {
           onclick: () => navigate({ view: "workflows", runId: null }),
         }),
         mayStartRun && !active ? el("button", {
-          class: "button primary", text: i18n.t("action.newGoal"), onclick: newRunDialog,
+          id: "newRun", class: "button primary", text: i18n.t("action.newGoal"),
+          onclick: newRunDialog,
         }) : null,
         ...(active ? commandButtons(active.allowed_commands || [], reload) : []),
       ]),
@@ -2920,10 +2921,12 @@ async function boot() {
   try {
     shellFacts = (await api.capabilities()).data;
     mayStartRun = Boolean(shellFacts.permissions && shellFacts.permissions.start_run);
-    document.getElementById("newRun").hidden = !mayStartRun;
   } catch (error) {
     reportError(error);
   }
+  // Permissions have been resolved, so every view now renders the command set
+  // this actor really has. Views read it; automation waits on it.
+  document.documentElement.dataset.shell = "ready";
 
   const sidebar = document.getElementById("sidebar");
   const navToggle = document.getElementById("navToggle");
@@ -2947,7 +2950,6 @@ async function boot() {
   });
   setNavOpen(false);
 
-  document.getElementById("newRun").addEventListener("click", () => newRunDialog());
   document.getElementById("refresh").addEventListener("click", () => render());
   window.addEventListener("orbit:refresh", () => render());
   scheduleLivePolling();

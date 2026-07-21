@@ -275,10 +275,10 @@ class VisualRegressionTests(unittest.TestCase):
             page.goto(url)
             page.add_style_tag(content=FREEZE_CSS)
             if url.startswith("http"):
-                # Wait for the capabilities response: it unhides New goal, so
-                # nothing is captured while the shell is still booting.
+                # Nothing is captured before permissions have been resolved,
+                # or the shot catches a view rendered without its commands.
                 page.wait_for_function(
-                    "() => !document.getElementById('newRun').hidden"
+                    "() => document.documentElement.dataset.shell === 'ready'"
                 )
                 if ready_selector:
                     page.wait_for_selector(ready_selector)
