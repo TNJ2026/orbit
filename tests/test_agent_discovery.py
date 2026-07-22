@@ -7,6 +7,7 @@ become an executable, an argument or a path.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 import shutil
 import tempfile
@@ -257,6 +258,50 @@ class HermesProfileTests(unittest.TestCase):
         found = self.discover(outputs={"hermes": (127, "")})
         self.assertEqual(["hermes", "hermes-ops"], [agent.name for agent in found])
         self.assertIsNone(found[1].version)
+
+    def test_a_profile_agent_actually_runs_that_profile(self) -> None:
+        """Four names for one CLI is not four agents.
+
+        The flag is top-level, so it precedes the subcommand, and it carries
+        the directory name Hermes knows — not the slug the agent is named for.
+        """
+
+        for name in ("Research", "ops"):
+            (self.profile_root / name).mkdir()
+        self.spec = replace(
+            self.spec,
+            invocation=AgentInvocation(args=("chat", "-Q"), prompt_flag="-q"),
+        )
+        found = {agent.name: agent for agent in self.discover()}
+
+        self.assertEqual(("chat", "-Q"), found["hermes"].spec.invocation.args)
+        self.assertEqual(
+            ("--profile", "Research", "chat", "-Q"),
+            found["hermes-research"].spec.invocation.args,
+        )
+        self.assertEqual(
+            ("--profile", "ops", "chat", "-Q"),
+            found["hermes-ops"].spec.invocation.args,
+        )
+        self.assertEqual(
+            ["hermes", "hermes-ops", "hermes-research"],
+            sorted(agent.name for agent, _ in registrable_agents(found.values())),
+        )
+
+    def test_a_profile_that_cannot_be_named_is_detected_not_registered(self) -> None:
+        (self.profile_root / "we;rd").mkdir()
+        self.spec = replace(
+            self.spec,
+            invocation=AgentInvocation(args=("chat", "-Q"), prompt_flag="-q"),
+        )
+        found = {agent.name: agent for agent in self.discover()}
+
+        self.assertIn("hermes-we-rd", found)
+        self.assertIsNone(found["hermes-we-rd"].spec.invocation)
+        self.assertNotIn(
+            "hermes-we-rd",
+            [agent.name for agent, _ in registrable_agents(found.values())],
+        )
 
     def test_profiles_are_not_registrable_without_a_runtime_adapter(self) -> None:
         (self.profile_root / "ops").mkdir()

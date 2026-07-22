@@ -168,9 +168,20 @@ def _hermes_profile_specs(
 ) -> tuple[AgentCliSpec, ...]:
     """Each Hermes profile as its own agent, same as main's detection.
 
-    Profile names come from the filesystem, so they are slugged into the same
-    safe-name space the spec constructor enforces; the profile never becomes
-    an argument anywhere — the name is all that survives.
+    Two different names are at work. The *agent* name is slugged into the safe
+    space the spec constructor enforces, because it is an identifier workflows
+    bind to. The *profile* is the directory name exactly as Hermes knows it,
+    because that is what `--profile` has to receive — a slug would name a
+    profile that does not exist. It is a top-level flag, so it goes ahead of
+    the subcommand, and argv is a list with no shell anywhere.
+
+    Choosing an agent must actually choose that agent: without this the four
+    Hermes profiles were four names for one CLI run against whichever profile
+    happened to be the sticky default.
+
+    A directory whose name cannot be passed as an argument is detected and
+    left unregistrable, the same answer this file already gives for a CLI it
+    has no reviewed invocation for.
     """
 
     try:
@@ -190,7 +201,15 @@ def _hermes_profile_specs(
             name = f"{base[:32 - len(suffix)]}{suffix}"
             counter += 1
         used.add(name)
-        specs.append(replace(spec, name=name))
+        invocation = spec.invocation
+        if invocation is not None:
+            try:
+                invocation = replace(
+                    invocation, args=("--profile", child.name, *invocation.args),
+                )
+            except AgentDiscoveryError:
+                invocation = None
+        specs.append(replace(spec, name=name, invocation=invocation))
     return tuple(specs)
 
 
