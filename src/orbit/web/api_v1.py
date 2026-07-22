@@ -12,6 +12,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import hashlib
 import json
+
+import yaml
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import quote
@@ -139,6 +141,34 @@ class Authorizer:
         if self._scopes_for is None:
             return False
         return scope in set(self._scopes_for(actor))
+
+
+def _retarget_handlers(
+    document: Any, available: Mapping[str, str]
+) -> list[dict[str, str]]:
+    """Move each node's handler to the installed version, in place.
+
+    Returns one record per node actually moved, so the caller can refuse a
+    rebind that would change nothing rather than mint an identical version.
+    """
+
+    moved: list[dict[str, str]] = []
+    nodes = document.get("nodes") if isinstance(document, Mapping) else None
+    for node in nodes or ():
+        handler = node.get("handler") if isinstance(node, Mapping) else None
+        if not isinstance(handler, Mapping):
+            continue
+        name = handler.get("name")
+        target = available.get(name)
+        if target is not None and handler.get("version") != target:
+            moved.append({
+                "node_id": str(node.get("id")),
+                "handler_name": str(name),
+                "from": str(handler.get("version")),
+                "to": str(target),
+            })
+            handler["version"] = target
+    return moved
 
 
 def build_api_v1(
@@ -1101,6 +1131,40 @@ def build_api_v1(
 
         return await mutate(request, WRITE_SCOPE, "workflow.publish", command)
 
+    def handler_bindings(item: Mapping[str, Any]) -> list[dict[str, Any]]:
+        """How each node's pinned Handler compares with what is registered.
+
+        A published plan names the exact Handler build it was compiled against,
+        and an Agent's build *is* its CLI version — so upgrading a CLI retires
+        every binding to the old one. That is the guarantee working, not a
+        fault, but the operator has to be able to see it: without this the run
+        simply refuses to start and nothing says which Agent moved.
+        """
+
+        registry = getattr(durable_service, "execution_registry", None)
+        available: dict[str, str] = {}
+        if registry is not None and registry.sealed:
+            for entry in registry.entries():
+                available[entry.manifest.name] = entry.manifest.version
+        bindings = []
+        for node in item.get("definition", {}).get("nodes", ()):
+            handler = node.get("handler")
+            if not handler:
+                continue
+            name, pinned = handler["name"], handler["version"]
+            current = available.get(name)
+            bindings.append({
+                "node_id": node["id"],
+                "handler_name": name,
+                "pinned_version": pinned,
+                "available_version": current,
+                "status": (
+                    "current" if current == pinned
+                    else "missing" if current is None else "version_changed"
+                ),
+            })
+        return bindings
+
     async def workflow_detail(request: Request) -> JSONResponse:
         actor = authenticate(request, READ_SCOPE)
         if isinstance(actor, JSONResponse):
@@ -1140,7 +1204,93 @@ def build_api_v1(
                 "expected_version": item["selected_version"],
                 "payload_schema": "workflow-draft-create/1.0",
             })
+        item["handler_bindings"] = handler_bindings(item)
+        stale = [
+            binding for binding in item["handler_bindings"]
+            if binding["status"] != "current"
+        ]
+        item["handler_drift"] = stale
+        # Rebinding recompiles the same source against what is installed now.
+        # Offered only when every stale binding has somewhere to land: a
+        # Handler that is gone entirely is not a version to move to.
+        if (
+            stale
+            and all(binding["status"] == "version_changed" for binding in stale)
+            and item.get("source_available")
+            and workflow_publisher is not None
+            and guard.allows(actor, WRITE_SCOPE)
+        ):
+            item["allowed_commands"].append({
+                "command": "workflow.rebind",
+                "label": "Rebind to installed handlers",
+                "method": "POST",
+                "href": f"/api/v1/workflows/{quote(workflow_id, safe=':')}/rebind",
+                "target_aggregate_id": workflow_id,
+                "expected_version": item["latest_version"],
+                "payload_schema": "workflow-rebind/1.0",
+                "confirmation": "explicit",
+            })
         return JSONResponse(envelope(item))
+
+    async def workflow_rebind(request: Request) -> JSONResponse:
+        """Republish this workflow, moving each node to the installed Handler.
+
+        A plain recompile does not help: the source pins the build the workflow
+        was authored against, and an exact pin that is gone cannot resolve —
+        while a range that once matched excludes the newer build (`^0.18` stops
+        before `0.19`). So the rebind rewrites each node's handler version to
+        the one registered now, then republishes. The old version keeps its
+        bindings and its runs; immutability holds, this is simply a new one.
+        """
+
+        workflow_id = str(EntityId.parse(request.path_params["workflow_id"]))
+
+        def command(body: Mapping[str, Any], actor: str, key: str) -> Mapping[str, Any]:
+            expected = _required_version(body)
+            detail = workflow_reads.detail(workflow_id)
+            source = detail.get("source")
+            if not source:
+                raise ValueError(
+                    "this version was published without its source, so it cannot "
+                    "be rebound; publish the workflow again from its source"
+                )
+            source_format = detail.get("source_format") or "yaml"
+            available = {
+                binding["handler_name"]: binding["available_version"]
+                for binding in handler_bindings(detail)
+                if binding["available_version"] is not None
+            }
+            document = (
+                json.loads(source) if source_format == "json"
+                else yaml.safe_load(source)
+            )
+            moved = _retarget_handlers(document, available)
+            if not moved:
+                raise ValueError(
+                    "nothing to rebind: no node names a handler that is installed "
+                    "at a different version"
+                )
+            rewritten = (
+                json.dumps(document) if source_format == "json"
+                else yaml.safe_dump(document, allow_unicode=True, sort_keys=False)
+            )
+            try:
+                record = workflow_publisher.publish_workflow(
+                    rewritten, source_name="<rebind>", source_format=source_format,
+                    expected_latest_version=expected, actor=actor,
+                )
+            except PublishConflictError as exc:
+                raise ValueError(
+                    f"publish conflict: expected {exc.expected}, actual {exc.actual}"
+                )
+            return {
+                "workflow_id": record.workflow_id,
+                "version": record.version.value,
+                "definition_hash": record.definition_hash.value,
+                "rebound": moved,
+            }
+
+        return await mutate(request, WRITE_SCOPE, "workflow.rebind", command)
 
     # -- workflow drafts (editor plan §8) ----------------------------------
 
@@ -1439,6 +1589,12 @@ def build_api_v1(
         except SourceUnavailableError as exc:
             return error("source_unavailable", str(exc), 409)
         except (RunStartError, ValueError) as exc:
+            # A run refused because its plan names a Handler build that is no
+            # longer registered is not "you raced someone" — retrying cannot
+            # help. Give it a code of its own so the client stops telling the
+            # operator to reload and confirm.
+            if "HANDLER_UNAVAILABLE" in str(exc):
+                return error("handler_unavailable", str(exc), 409)
             return error("invalid_command", str(exc), 409)
         record_audit(actor, action, {"path": request.url.path, "key": key})
         return JSONResponse(envelope(result), status_code=status)
@@ -1827,6 +1983,10 @@ def build_api_v1(
         ),
         Route(
             "/api/v1/workflows/{workflow_id}/versions", workflow_publish,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/v1/workflows/{workflow_id}/rebind", workflow_rebind,
             methods=["POST"],
         ),
         Route(

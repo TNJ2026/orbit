@@ -148,6 +148,12 @@ td.numeric, th.numeric { text-align: right; font-variant-numeric: tabular-nums; 
 .banner { border-radius: 8px; padding: 10px 14px; border: 1px solid var(--line); font-size: 12px; }
 .banner.error { background: var(--red-soft); color: var(--red); border-color: var(--red); }
 .banner.info { background: var(--blue-soft); color: var(--blue); border-color: var(--blue); }
+.banner.warn { background: var(--amber-soft); color: var(--amber); border-color: var(--amber); }
+.workflow-drift { display: grid; gap: 8px; margin-bottom: 14px; }
+.workflow-drift .eyebrow { color: inherit; }
+.workflow-drift-list { margin: 0; padding-left: 16px; display: grid; gap: 3px; }
+.workflow-drift-list li { display: flex; gap: 8px; flex-wrap: wrap; align-items: baseline; }
+.workflow-drift button { justify-self: start; }
 
 /* The five generic data states (plan P1). Each carries a text label plus a
    distinct border treatment, so state is never expressed by colour alone. */

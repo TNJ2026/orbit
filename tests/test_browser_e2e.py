@@ -501,6 +501,62 @@ class WorkflowCatalogTests(BrowserE2ETestCase):
             sorted(depth[box["id"]] for box in ordered),
         )
 
+    def test_a_workflow_whose_handlers_drifted_offers_a_rebind(self) -> None:
+        """The run refuses to start; the detail page has to explain why."""
+
+        def with_drift(route):
+            response = route.fetch()
+            payload = response.json()
+            payload["data"]["handler_drift"] = [{
+                "node_id": "search_web", "handler_name": "agent.hermes-researcher",
+                "pinned_version": "0.18.2", "available_version": "0.19.0",
+                "status": "version_changed",
+            }]
+            payload["data"]["allowed_commands"].append({
+                "command": "workflow.rebind", "label": "Rebind to installed handlers",
+                "method": "POST",
+                "href": "/api/v1/workflows/workflow:linear/rebind",
+                "target_aggregate_id": "workflow:linear",
+                "expected_version": payload["data"]["latest_version"],
+                "payload_schema": "workflow-rebind/1.0",
+            })
+            route.fulfill(response=response, json=payload)
+
+        posted = {}
+
+        def capture_rebind(route):
+            posted["body"] = route.request.post_data_json
+            route.fulfill(status=200, content_type="application/json", body=json.dumps({
+                "schema_version": "1.0", "projection_version": None,
+                "data": {
+                    "workflow_id": "workflow:linear", "version": 2,
+                    "definition_hash": "sha256:rebound",
+                    "rebound": [{"node_id": "search_web", "handler_name":
+                                 "agent.hermes-researcher", "from": "0.18.2", "to": "0.19.0"}],
+                },
+                "next_cursor": None,
+            }))
+
+        page = self.open("en-US", path="/ui/#/workflows")
+        page.route("**/api/v1/workflows/workflow%3Alinear", with_drift)
+        page.route("**/api/v1/workflows/workflow:linear/rebind", capture_rebind)
+        card = page.locator(".workflow-card", has_text="Linear")
+        card.wait_for()
+        card.locator(".workflow-card-main").click()
+
+        drift = page.locator(".workflow-drift")
+        drift.wait_for()
+        self.assertIn("agent.hermes-researcher", drift.inner_text())
+        self.assertIn("0.18.2", drift.inner_text())
+        self.assertIn("0.19.0", drift.inner_text())
+
+        page.locator("#rebindWorkflow").click()
+        page.wait_for_function(
+            "() => document.getElementById('liveRegion')"
+            "?.textContent.includes('v2')"
+        )
+        self.assertEqual(1, posted["body"]["expected_version"])
+
     def test_a_graph_box_names_the_agent_without_the_registry_noise(self) -> None:
         """`agent.claude@1.0.0` is registry vocabulary; the box says `claude`."""
 

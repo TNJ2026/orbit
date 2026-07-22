@@ -850,6 +850,159 @@ class ArtifactApiTests(ApiTestCase):
             self.assertEqual("nosniff", download.headers["x-content-type-options"])
 
 
+class HandlerDriftTests(unittest.TestCase):
+    """A published plan pins a Handler build; upgrading the build strands it."""
+
+    DRIFTED = {
+        "dsl_version": "1.2",
+        "metadata": {"id": "drifted", "name": "Drifted"},
+        "nodes": [
+            {
+                "id": "work", "kind": "action",
+                "inputs": [{"id": "value", "schema_id": "example://integer/1.0"}],
+                "outputs": [{"id": "value", "schema_id": "example://integer/1.0"}],
+                "handler": {"name": "transform", "version": "0.9.0"},
+            },
+            {
+                "id": "done", "kind": "terminal",
+                "inputs": [{"id": "value", "schema_id": "example://integer/1.0"}],
+            },
+        ],
+        "edges": [{
+            "id": "flow", "from": {"node": "work", "port": "value"},
+            "to": {"node": "done", "port": "value"},
+        }],
+        "entry": ["work"], "terminals": ["done"],
+    }
+
+    def setUp(self) -> None:
+        import json as json_module
+
+        from orbit.workflow.catalogs import InMemoryHandlerCatalog, InMemorySchemaCatalog
+        from orbit.workflow.dsl import compile_source
+        from orbit.workflow.persistence.workflow_versions import SQLiteWorkflowVersionStore
+
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.db = Path(self.temp.name) / "runtime.db"
+        self.app = create_app(
+            self.db,
+            handlers=[transform_registration()], schemas=SCHEMAS,
+            worker_count=1, poll_seconds=0.02,
+            authenticator=lambda request: request.headers.get("x-orbit-actor"),
+            authorizer=Authorizer(lambda actor: [READ_SCOPE, WRITE_SCOPE]),
+            single_goal_mode=False,
+        )
+        # A version whose plan pins transform@0.9.0, kept coherent with its own
+        # source. The running registry has transform@1.0.0 — the exact drift an
+        # upgraded Agent CLI produces.
+        stale = self.manifest_at("0.9.0")
+        source = json_module.dumps(self.DRIFTED)
+        compiled = compile_source(
+            source, InMemoryHandlerCatalog([stale]),
+            InMemorySchemaCatalog(dict(SCHEMAS)), source_format="json",
+        )
+        SQLiteWorkflowVersionStore(self.db).publish(
+            compiled, expected_latest_version=0, source_format="json",
+            source_text=source, actor="drift-test",
+        )
+
+    @staticmethod
+    def manifest_at(version: str) -> HandlerManifest:
+        return HandlerManifest(
+            "transform", version, ("action",),
+            {"value": "example://integer/1.0"},
+            {"value": "example://integer/1.0"},
+            {"type": "object"}, ExecutionSafety.REPLAY_SAFE,
+            ResourceProfile(100, 100, 5, 60, 1_000_000, "test"),
+            "schema://object/1.0", (), (), True, True,
+        )
+
+    def detail(self, client, version=None):
+        path = "/api/v1/workflows/workflow:drifted"
+        if version is not None:
+            path += f"?version={version}"
+        return client.get(path, actor="writer").json()["data"]
+
+    def test_the_stale_binding_is_named_not_buried(self) -> None:
+        with AsgiHarness(self.app) as client:
+            data = self.detail(client)
+            drift = data["handler_drift"]
+            self.assertEqual(1, len(drift))
+            self.assertEqual(
+                ("transform", "0.9.0", "1.0.0", "version_changed"),
+                (drift[0]["handler_name"], drift[0]["pinned_version"],
+                 drift[0]["available_version"], drift[0]["status"]),
+            )
+            self.assertIn(
+                "workflow.rebind",
+                [c["command"] for c in data["allowed_commands"]],
+            )
+
+    def test_starting_the_stranded_version_says_so_and_does_not_ask_to_retry(self) -> None:
+        with AsgiHarness(self.app) as client:
+            response = client.post(
+                "/api/v1/runs", actor="writer", key="run-stranded",
+                body={
+                    "workflow_id": "workflow:drifted", "workflow_version": 1,
+                    "input": {"value": 1},
+                },
+            )
+            self.assertEqual(409, response.status_code, response.text)
+            self.assertEqual("handler_unavailable", response.json()["error"]["code"])
+
+    def test_rebind_moves_every_node_to_the_installed_build(self) -> None:
+        with AsgiHarness(self.app) as client:
+            before = self.detail(client)
+            rebind = next(
+                c for c in before["allowed_commands"] if c["command"] == "workflow.rebind"
+            )
+            result = client.post(
+                rebind["href"], actor="writer", key="rebind-1",
+                body={"expected_version": rebind["expected_version"]},
+            )
+            self.assertEqual(200, result.status_code, result.text)
+            data = result.json()["data"]
+            self.assertEqual(2, data["version"])
+            self.assertEqual(
+                [("work", "0.9.0", "1.0.0")],
+                [(m["node_id"], m["from"], m["to"]) for m in data["rebound"]],
+            )
+            # The new version is clean, and the run it refused now starts.
+            self.assertEqual([], self.detail(client, version=2)["handler_drift"])
+            started = client.post(
+                "/api/v1/runs", actor="writer", key="run-after-rebind",
+                body={"workflow_id": "workflow:drifted", "input": {"value": 1}},
+            )
+            self.assertEqual(200, started.status_code, started.text)
+
+    def test_a_version_without_source_cannot_be_rebound(self) -> None:
+        from orbit.workflow.catalogs import InMemoryHandlerCatalog, InMemorySchemaCatalog
+        from orbit.workflow.dsl import compile_source
+        from orbit.workflow.persistence.workflow_versions import SQLiteWorkflowVersionStore
+        import json as json_module
+
+        source = json_module.dumps({**self.DRIFTED, "metadata": {"id": "sourceless", "name": "Sourceless"}})
+        compiled = compile_source(
+            source, InMemoryHandlerCatalog([self.manifest_at("0.9.0")]),
+            InMemorySchemaCatalog(dict(SCHEMAS)), source_format="json",
+        )
+        SQLiteWorkflowVersionStore(self.db).publish(
+            compiled, expected_latest_version=0, source_format="json",
+            source_text=None, actor="drift-test",
+        )
+        with AsgiHarness(self.app) as client:
+            data = client.get(
+                "/api/v1/workflows/workflow:sourceless", actor="writer"
+            ).json()["data"]
+            # Drift is still reported — the operator must know — but a rebind
+            # that has no source to rewrite is not offered.
+            self.assertTrue(data["handler_drift"])
+            self.assertNotIn(
+                "workflow.rebind", [c["command"] for c in data["allowed_commands"]]
+            )
+
+
 class CatalogTests(ApiTestCase):
     def test_handler_catalog_exposes_identity_not_commands(self) -> None:
         with AsgiHarness(self.app) as client:

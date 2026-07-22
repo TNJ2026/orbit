@@ -2120,6 +2120,55 @@ function sortWorkflows(entries, sort) {
   });
 }
 
+/** Say when a workflow's Agents have moved out from under it.
+ *
+ * A published plan pins the exact Handler build it was compiled against, and
+ * an Agent's build is its CLI version — so upgrading a CLI retires every
+ * binding to the old one and the run refuses to start. The server states the
+ * drift; the UI shows which node moved and offers the one-click recompile it
+ * advertised, when every stale binding has a newer version to land on. */
+function handlerDriftNotice(value, redraw) {
+  const drift = value.handler_drift || [];
+  if (!drift.length) return null;
+  const rebind = (value.allowed_commands || []).find(
+    (item) => item.command === "workflow.rebind",
+  );
+  const rows = drift.map((binding) =>
+    el("li", {}, [
+      el("span", { class: "mono", text: binding.handler_name }),
+      el("span", {
+        class: "muted mono",
+        text: binding.status === "missing"
+          ? i18n.t("workflows.drift.missing", { pinned: binding.pinned_version })
+          : i18n.t("workflows.drift.changed", {
+              pinned: binding.pinned_version, available: binding.available_version,
+            }),
+      }),
+    ]));
+  return el("div", { class: "banner warn workflow-drift" }, [
+    el("div", { class: "eyebrow", text: i18n.t("workflows.drift.title") }),
+    el("ul", { class: "workflow-drift-list" }, rows),
+    rebind
+      ? el("button", {
+          class: "button", id: "rebindWorkflow", text: i18n.t("workflows.drift.rebind"),
+          onclick: async (event) => {
+            event.currentTarget.disabled = true;
+            try {
+              const next = (await api.execute(
+                rebind, {}, `workflow.rebind:${value.workflow_id}:${value.latest_version}`,
+              )).data;
+              announce(i18n.t("workflows.drift.rebound", { version: next.version }));
+              await redraw();
+            } catch (error) {
+              event.currentTarget.disabled = false;
+              reportError(error);
+            }
+          },
+        })
+      : el("div", { class: "muted", text: i18n.t("workflows.drift.republish") }),
+  ]);
+}
+
 async function renderWorkflows(root) {
   const catalog = (await api.workflowCatalog()).data;
   const entries = catalog.workflows;
@@ -2290,6 +2339,7 @@ async function renderWorkflowDetail(root, workflowId) {
         ]),
         el("div", { class: "panel-body" }, [
           value.description ? el("p", { text: value.description }) : null,
+          handlerDriftNotice(value, draw),
           el("dl", { class: "fact-grid" }, [
             el("div", {}, [el("dt", { text: i18n.t("workflows.nodes") }), el("dd", { text: i18n.number(value.summary.node_count) })]),
             el("div", {}, [el("dt", { text: i18n.t("workflows.inputs") }), el("dd", { text: i18n.number(value.inputs.length) })]),
@@ -3166,6 +3216,13 @@ async function newRunDialog(preselectedWorkflowId = null, preselectedVersion = n
               const active = error.details.active_goal;
               announce(i18n.t("newRun.active.exists", { goal: active?.display_name || active?.run_id || "" }), "info");
               if (active?.run_id) navigate({ view: "run", runId: active.run_id });
+            } else if (error instanceof ApiError && error.code === "handler_unavailable") {
+              // Not a race the operator can win by reloading: the Agent this
+              // plan pins is gone. Send them back to the workflow, where the
+              // drift notice offers a rebind.
+              dialog.close();
+              announce(i18n.t("newRun.handler.unavailable"), "error");
+              navigate({ view: "workflow", workflowId: state.workflowId, runId: null });
             } else if (error instanceof ApiError && error.requiresRefresh) {
               dialog.close();
               announce(i18n.t("newRun.workflow.changed"), "error");

@@ -27,6 +27,9 @@ from ..domain.graph import (
 )
 from ..domain.foreach import derive_group_id, derive_item_id, stable_aggregate
 from ..domain.graph_persistence import JoinGroupRecord, JoinGroupStatus
+from ..handlers.registry import (
+    HandlerContractMismatchError, HandlerNotAvailableError,
+)
 from ..domain.errors import ErrorCategory, ErrorInfo
 from ..domain.ids import EntityId
 from ..domain.human import submission_token_hash
@@ -161,6 +164,11 @@ class RuntimeKernel:
             )
         except UnsupportedPlanShapeError as exc:
             return self._rejected("UNSUPPORTED_PLAN_SHAPE", str(exc), command)
+        except (HandlerNotAvailableError, HandlerContractMismatchError) as exc:
+            # A plan names the exact Handler build it was published against. When
+            # that build is no longer registered the run cannot start, and the
+            # operator needs to read which one is missing — not "internal error".
+            return self._rejected("HANDLER_UNAVAILABLE", str(exc), command)
         except RepositoryAlreadyExistsError as exc:
             return self._rejected("ALREADY_EXISTS", str(exc), command)
         except IntegrityViolationError as exc:
