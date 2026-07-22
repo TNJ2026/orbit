@@ -20,6 +20,10 @@ export class ApiError extends Error {
     if (this.status === 403) return "error.forbidden";
     if (this.status === 429) return "error.rateLimited";
     if (this.code === "command_in_progress") return "error.commandInProgress";
+    // Also a 409, but a different fact: nobody raced us — the Runtime will
+    // not do this at all. Saying "it changed, try again" would send the
+    // operator round a loop that cannot end.
+    if (this.code === "invalid_command") return "error.rejected";
     if (this.status === 409) return "error.conflict";
     if (this.status === 0) return "error.network";
     return "error.generic";
@@ -132,6 +136,14 @@ export class Api {
     const params = new URLSearchParams({ limit: String(limit) });
     if (cursor) params.set("cursor", cursor);
     return this.get(`/api/v1/runs/${encodeURIComponent(runId)}/${kind}?${params}`);
+  }
+
+  /** Handler console output. A tail, not a page: `after` is the last chunk
+   *  already shown, so a follower asks only for what is new. */
+  runOutput(runId, after = 0, limit = 200) {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (after) params.set("after", String(after));
+    return this.get(`/api/v1/runs/${encodeURIComponent(runId)}/output?${params}`);
   }
 
   lineage(runId, dataId) {

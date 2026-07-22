@@ -15,6 +15,7 @@ import { I18n, LOCALES, preferredLocale } from "./i18n.js";
 import { Router } from "./router.js";
 import {
   budgetDialog, cancelRunDialog, humanSubmitDialog, recoveryDialog,
+  retryNodeDialog,
 } from "./components/command-dialog.js";
 import { dataState } from "./components/data-state.js";
 import { semanticWorkflowDiff } from "./workflow-diff.js";
@@ -35,6 +36,12 @@ let customSelectSequence = 0;
 const runFilters = { q: "", status: "", responsibility: "", activeOnly: false };
 const goalFilters = { q: "", status: "" };
 const artifactFilters = { q: "", runId: "", contentType: "" };
+// A catalog of dozens is browsed, not scanned. The default order answers the
+// question an author actually has — which workflow was I just running.
+const workflowFilters = { q: "", sort: "recentRun" };
+// How much of one recorded value is rendered. Inline values are capped at
+// 256 KB server-side; a page that pastes all of that stops responding.
+const DATA_TEXT_LIMIT = 20_000;
 
 const el = (tag, props = {}, children = []) => {
   const node = document.createElement(tag);
@@ -131,9 +138,11 @@ function workflowGraphView(graph) {
     const spot = at.get(node.node_id);
     if (!spot) return null;
     // Node kinds are DSL vocabulary, shown verbatim here as they are in the
-    // definition list below the picture.
+    // definition list below the picture. A handler gets one short line: the
+    // registry calls it `agent.claude@1.0.0`, the reader recognises `claude`.
+    // The exact name and version stay one hover (and one tab) away.
     const label = node.handler_name
-      ? `${node.handler_name}@${node.handler_version}`
+      ? node.handler_name.replace(/^agent\./, "")
       : node.kind;
     // SVG text does not wrap or ellipsize, so a long id would spill past the
     // box. Clip each line to the box interior and keep the full value in a
@@ -143,7 +152,11 @@ function workflowGraphView(graph) {
       class: `graph-box kind-${node.kind}`,
       transform: `translate(${spot.x} ${spot.y})`,
     }, [
-      svgEl("title", { text: node.handler_name ? `${node.node_id} · ${label}` : node.node_id }),
+      svgEl("title", {
+        text: node.handler_name
+          ? `${node.node_id} · ${node.handler_name}@${node.handler_version}`
+          : node.node_id,
+      }),
       svgEl("clipPath", { id: clipId }, [
         svgEl("rect", { x: 10, y: 0, width: width - 20, height }),
       ]),
@@ -177,25 +190,31 @@ function workflowGraphView(graph) {
   ]);
 }
 
+function definitionList(definition) {
+  return el("div", { class: "definition-list" }, (definition?.nodes || []).map((node) =>
+    el("div", { class: "actions" }, [
+      el("span", { class: "mono", text: node.id }),
+      el("span", { class: "pill", text: node.kind }),
+      node.handler ? el("span", {
+        class: "muted mono", text: `${node.handler.name}@${node.handler.version}`,
+      }) : null,
+    ]),
+  ));
+}
+
 // The same definition read two ways: the drawing answers "what shape is
 // this", the list answers "what exactly is in it". Tabs keep both a click
 // away without stacking two long blocks in one panel. The state is local:
 // which tab you are on is not worth a URL when the selected workflow is not
-// in one either.
-function workflowDefinitionTabs(value, definition) {
+// in one either. A draft the server could not lay out has no drawing, so
+// there is nothing to tab between and the list stands alone.
+function workflowDefinitionTabs(graph, definition, definitionKey = "workflows.definition") {
+  if (!graph) return definitionList(definition);
   const panes = {
     graph: () => el("div", { class: "workflow-graph-scroll" }, [
-      workflowGraphView(value.graph),
+      workflowGraphView(graph),
     ]),
-    definition: () => el("div", { class: "definition-list" }, definition.nodes.map((node) =>
-      el("div", { class: "actions" }, [
-        el("span", { class: "mono", text: node.id }),
-        el("span", { class: "pill", text: node.kind }),
-        node.handler ? el("span", {
-          class: "muted mono", text: `${node.handler.name}@${node.handler.version}`,
-        }) : null,
-      ]),
-    )),
+    definition: () => definitionList(definition),
   };
   const content = el("section", { class: "run-tab-content workflow-tab-content" });
   const tabs = el("nav", {
@@ -214,7 +233,7 @@ function workflowDefinitionTabs(value, definition) {
   for (const name of ["graph", "definition"]) {
     tabs.append(el("button", {
       class: "run-tab", "data-workflow-tab": name,
-      text: i18n.t(`workflows.${name === "graph" ? "graph" : "definition"}`),
+      text: i18n.t(name === "graph" ? "workflows.graph" : definitionKey),
       onclick: () => show(name),
     }));
   }
@@ -397,7 +416,12 @@ function commandButtons(commands, onDone) {
 
 /** Collect whatever the command's payload schema needs, then send it once. */
 async function promptAndExecute(allowed, onDone, siblings = []) {
-  const context = { api, el, i18n, reportError };
+  const context = {
+    api, el, i18n, reportError,
+    // Server-stated, never inferred: on a single-operator Runtime the
+    // approval token is minted and spent server-side.
+    tokenRequired: shellFacts?.permissions?.human_token_required !== false,
+  };
   let payload = {};
   if (allowed.payload_schema.startsWith("human-submit")) {
     payload = await humanSubmitDialog(context, allowed, siblings);
@@ -407,6 +431,8 @@ async function promptAndExecute(allowed, onDone, siblings = []) {
     payload = await cancelRunDialog(context);
   } else if (allowed.payload_schema.startsWith("recovery-apply")) {
     payload = await recoveryDialog(context, allowed);
+  } else if (allowed.payload_schema.startsWith("node-retry")) {
+    payload = await retryNodeDialog(context, allowed);
   } else {
     announce(i18n.t("command.schemaUnsupported", { schema: allowed.payload_schema }), "error");
     return;
@@ -843,7 +869,9 @@ async function renderRun(root, runId, activeTab = "overview") {
     if (activeTab === "overview") content = await overviewPanel(runId, summary, responsibilities);
     else if (activeTab === "plan") content = await planPanel(runId);
     else if (activeTab === "graph") content = await graphPanel(runId);
-    else if (activeTab === "data") content = await dataPanel(runId);
+    else if (activeTab === "data") content = await dataPanel(runId, {
+      live: !["succeeded", "failed", "cancelled"].includes(summary.status),
+    });
     else if (activeTab === "timeline") content = await pagedPanel(runId, "timeline", "run.timeline", (item) =>
       el("div", { class: "timeline-item" }, [
         el("span", { class: "mono muted", text: i18n.dateTime(item.occurred_at) }),
@@ -1121,8 +1149,102 @@ async function graphPanel(runId) {
   ]);
 }
 
-async function dataPanel(runId) {
-  return pagedPanel(runId, "data", "run.data", (item) => {
+/** What the Handlers' processes printed, followed while the run is alive.
+ *
+ * Values in the list below are results; this is the account of getting there.
+ * It is the only thing an attempt that ended `unknown_external_result` leaves,
+ * which is exactly when an operator most needs to read it.
+ */
+function consolePanel(runId, { live }) {
+  const log = el("pre", { class: "console-log", role: "log", tabindex: "0" });
+  const status = el("span", { class: "muted" });
+  const panel = el("section", { class: "panel console-panel" }, [
+    el("div", { class: "panel-head" }, [
+      el("div", { class: "panel-title", text: i18n.t("run.console") }),
+      status,
+    ]),
+    el("div", { class: "panel-body" }, [log]),
+  ]);
+
+  let after = 0;
+  let timer = null;
+  let stopped = false;
+
+  const draw = (chunks) => {
+    for (const chunk of chunks) {
+      log.append(el("span", {
+        class: `console-chunk ${chunk.stream}`, text: chunk.text,
+      }));
+    }
+    // Follow the tail only when the reader is already at the bottom, so
+    // scrolling back to read something does not get yanked away.
+    const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+    if (chunks.length && atBottom) log.scrollTop = log.scrollHeight;
+  };
+
+  const poll = async () => {
+    if (stopped) return;
+    try {
+      const response = await api.runOutput(runId, after);
+      after = response.data.after;
+      draw(response.data.chunks);
+      status.textContent = log.childElementCount
+        ? i18n.t(live ? "run.console.following" : "run.console.finished")
+        : i18n.t("run.console.empty");
+    } catch (error) {
+      // A console is a convenience: losing it must not replace the page with
+      // an error. Say so quietly and stop asking.
+      stopped = true;
+      status.textContent = error instanceof ApiError && error.status === 403
+        ? i18n.t("run.console.forbidden")
+        : i18n.t("run.console.unavailable");
+      return;
+    }
+    if (live && !stopped) timer = setTimeout(poll, 2000);
+  };
+
+  const previous = activeViewCleanup;
+  activeViewCleanup = () => {
+    stopped = true;
+    if (timer) clearTimeout(timer);
+    if (previous) previous();
+  };
+  poll();
+  return panel;
+}
+
+/** One recorded value, readable rather than merely present.
+ *
+ * An Agent's answer is prose, and prose crammed into one JSON line at 500
+ * characters is data you can prove you stored and cannot actually read.
+ */
+function dataValueView(item) {
+  if (item.kind !== "value" || item.value === null) {
+    return el("div", {
+      text: `${item.port_id}: ${item.content_type || item.schema_id}`
+        + ` · ${i18n.number(item.size_bytes)} B`,
+    });
+  }
+  const raw = typeof item.value === "string"
+    ? item.value
+    : typeof item.value?.text === "string"
+      ? item.value.text
+      : JSON.stringify(item.value, null, 2);
+  // Readable, still bounded: an inline value may be a quarter of a megabyte,
+  // and pasting all of it into the DOM is how a page stops responding. The
+  // size is always stated, so a clipped value never reads as a complete one.
+  const shown = raw.length <= DATA_TEXT_LIMIT
+    ? raw
+    : `${raw.slice(0, DATA_TEXT_LIMIT)}\n…`;
+  return el("details", { class: "data-value", ...(raw.length <= 2000 ? { open: "open" } : {}) }, [
+    el("summary", { text: `${item.port_id} · ${i18n.number(item.size_bytes)} B` }),
+    el("pre", { class: "data-text", text: shown }),
+  ]);
+}
+
+async function dataPanel(runId, { live = false } = {}) {
+  const wrapper = el("div", { class: "data-panel" }, [consolePanel(runId, { live })]);
+  wrapper.append(await pagedPanel(runId, "data", "run.data", (item) => {
     const lineage = el("div", { class: "muted mono", hidden: "hidden" });
     const button = el("button", {
       class: "button",
@@ -1140,25 +1262,18 @@ async function dataPanel(runId) {
         }
       },
     });
-    const rawValue = item.kind === "value" && item.value !== null
-      ? JSON.stringify(item.value)
-      : null;
-    const value = rawValue === null
-      ? `${item.content_type || item.schema_id} · ${i18n.number(item.size_bytes)} B`
-      : rawValue.length <= 500
-        ? rawValue
-        : `${rawValue.slice(0, 500)}… · ${i18n.number(item.size_bytes)} B`;
     return el("div", { class: "data-item" }, [
       el("div", { class: "actions" }, [
         el("span", { class: "mono", text: item.data_id }),
         el("span", { class: "pill", text: i18n.t(`run.data.kind.${item.kind}`) }),
         button,
       ]),
-      el("div", { text: `${item.port_id}: ${value}` }),
+      dataValueView(item),
       el("div", { class: "muted mono", text: item.checksum }),
       lineage,
     ]);
-  });
+  }));
+  return wrapper;
 }
 
 /** The plan, in three separately-labelled views.
@@ -1928,6 +2043,83 @@ async function renderSettings(root) {
 
 /* ------------------------------------------------ workflow catalog / wizard */
 
+const goToDraft = (workflowId, draftId) => navigate({
+  view: "workflowEdit", workflowId, draftId, runId: null,
+});
+
+/** Two drafts of one workflow would be two answers to the same question, so
+ *  the server refuses the second. The author decides which one survives. */
+function resolveDraftCollision(failure, create, value) {
+  const existing = failure.details.draft;
+  const dialog = el("dialog", {
+    class: "command-dialog", "aria-label": i18n.t("editor.activeDraftTitle"),
+  });
+  const close = () => { dialog.close(); dialog.remove(); };
+  dialog.append(el("div", { class: "dialog-body" }, [
+    el("h3", { text: i18n.t("editor.activeDraftTitle") }),
+    el("p", { class: "muted", text: i18n.t("editor.activeDraftBody", {
+      active: existing.base_version, requested: value.selected_version,
+    }) }),
+    el("div", { class: "actions" }, [
+      el("button", {
+        type: "button", class: "button", text: i18n.t("action.cancel"), onclick: close,
+      }),
+      el("button", {
+        type: "button", class: "button", id: "continueActiveDraft",
+        text: i18n.t("editor.continueActiveDraft"),
+        onclick: () => { close(); goToDraft(value.workflow_id, existing.draft_id); },
+      }),
+      el("button", {
+        type: "button", class: "button danger", id: "replaceActiveDraft",
+        text: i18n.t("editor.discardCreateVersion", { version: value.selected_version }),
+        onclick: async (event) => {
+          event.currentTarget.disabled = true;
+          try {
+            const current = (await api.workflowDraft(existing.draft_id)).data;
+            const discard = current.allowed_commands.find(
+              (item) => item.command === "workflow.draft.discard",
+            );
+            if (!discard) return;
+            await api.execute(
+              discard, {}, `workflow.draft.discard:${existing.draft_id}:replace`,
+            );
+            const next = (await api.execute(
+              create, { base_version: value.selected_version },
+              `workflow.draft.create:${value.workflow_id}:${value.selected_version}:replace`,
+            )).data;
+            close();
+            goToDraft(value.workflow_id, next.draft_id);
+          } catch (error) {
+            event.currentTarget.disabled = false;
+            reportError(error);
+          }
+        },
+      }),
+    ]),
+  ]));
+  document.body.append(dialog);
+  dialog.addEventListener("close", () => dialog.remove(), { once: true });
+  dialog.showModal();
+}
+
+/** Order the catalog the way the author is looking for it.
+ *
+ * A definition that has never run has no "last used" — an empty timestamp is
+ * not the oldest one, so those sort last rather than first.
+ */
+function sortWorkflows(entries, sort) {
+  const byName = (left, right) => left.name.localeCompare(right.name, i18n.locale);
+  const newest = (left, right) => String(right || "").localeCompare(String(left || ""));
+  return entries.slice().sort((left, right) => {
+    if (sort === "name") return byName(left, right);
+    if (sort === "recentPublish") {
+      return newest(left.created_at, right.created_at) || byName(left, right);
+    }
+    if (!left.last_run_at !== !right.last_run_at) return left.last_run_at ? -1 : 1;
+    return newest(left.last_run_at, right.last_run_at) || byName(left, right);
+  });
+}
+
 async function renderWorkflows(root) {
   const catalog = (await api.workflowCatalog()).data;
   const entries = catalog.workflows;
@@ -1948,103 +2140,122 @@ async function renderWorkflows(root) {
         onclick: () => generateWorkflowDialog(generateCommand),
       }) : null,
   ]));
-  const cards = el("section", { class: "workflow-grid", "aria-label": i18n.t("workflows.list") });
-  const detail = el("section", { class: "panel workflow-detail" }, [
-    el("div", { class: "empty", text: i18n.t("workflows.select") }),
-  ]);
-
-  const goToDraft = (workflowId, draftId) => navigate({
-    view: "workflowEdit", workflowId, draftId, runId: null,
+  const search = el("input", {
+    type: "search", value: workflowFilters.q,
+    placeholder: i18n.t("workflows.search.placeholder"),
+    "aria-label": i18n.t("workflows.search.label"),
   });
+  const sort = el("select", {
+    "aria-label": i18n.t("workflows.sort.label"),
+    onchange: (event) => { workflowFilters.sort = event.target.value; render(); },
+  });
+  for (const value of ["recentRun", "recentPublish", "name"]) {
+    sort.append(el("option", {
+      value, ...(value === workflowFilters.sort ? { selected: "selected" } : {}),
+      text: i18n.t(`workflows.sort.${value}`),
+    }));
+  }
+  root.append(el("form", { class: "filter-bar", onsubmit: (event) => {
+    event.preventDefault();
+    workflowFilters.q = search.value.trim();
+    render();
+  } }, [
+    search, sort,
+    el("button", { class: "button", type: "submit", text: i18n.t("action.search") }),
+  ]));
 
-  const resolveDraftCollision = (failure, create, value) => {
-    const existing = failure.details.draft;
-    const dialog = el("dialog", {
-      class: "command-dialog", "aria-label": i18n.t("editor.activeDraftTitle"),
-    });
-    const close = () => { dialog.close(); dialog.remove(); };
-    dialog.append(el("div", { class: "dialog-body" }, [
-      el("h3", { text: i18n.t("editor.activeDraftTitle") }),
-      el("p", { class: "muted", text: i18n.t("editor.activeDraftBody", {
-        active: existing.base_version, requested: value.selected_version,
-      }) }),
-      el("div", { class: "actions" }, [
-        el("button", {
-          type: "button", class: "button", text: i18n.t("action.cancel"), onclick: close,
-        }),
-        el("button", {
-          type: "button", class: "button", id: "continueActiveDraft",
-          text: i18n.t("editor.continueActiveDraft"),
-          onclick: () => { close(); goToDraft(value.workflow_id, existing.draft_id); },
-        }),
-        el("button", {
-          type: "button", class: "button danger", id: "replaceActiveDraft",
-          text: i18n.t("editor.discardCreateVersion", { version: value.selected_version }),
-          onclick: async (event) => {
-            event.currentTarget.disabled = true;
-            try {
-              const current = (await api.workflowDraft(existing.draft_id)).data;
-              const discard = current.allowed_commands.find(
-                (item) => item.command === "workflow.draft.discard",
-              );
-              if (!discard) return;
-              await api.execute(
-                discard, {}, `workflow.draft.discard:${existing.draft_id}:replace`,
-              );
-              const next = (await api.execute(
-                create, { base_version: value.selected_version },
-                `workflow.draft.create:${value.workflow_id}:${value.selected_version}:replace`,
-              )).data;
-              close();
-              goToDraft(value.workflow_id, next.draft_id);
-            } catch (error) {
-              event.currentTarget.disabled = false;
-              reportError(error);
-            }
-          },
-        }),
+  const cards = el("section", { class: "workflow-grid", "aria-label": i18n.t("workflows.list") });
+  // Searching and ordering a few dozen entries is a view concern: the catalog
+  // arrives in one response, so neither costs a round trip.
+  const needle = workflowFilters.q.toLowerCase();
+  const matches = entries.filter((entry) => !needle || [
+    entry.name, entry.workflow_id, entry.description,
+  ].some((field) => String(field || "").toLowerCase().includes(needle)));
+
+  for (const entry of sortWorkflows(matches, workflowFilters.sort)) {
+    const kinds = Object.entries(entry.summary.node_kinds || {});
+    const visualNodes = [];
+    for (const [kind, count] of kinds) {
+      for (let index = 0; index < Math.min(count, 4 - visualNodes.length); index += 1) {
+        visualNodes.push(el("span", {
+          class: `workflow-node ${kind}`, title: kind,
+          text: kind === "terminal" ? "✓" : kind === "human" ? "H" : kind === "decision" ? "?" : kind.slice(0, 1).toUpperCase(),
+        }));
+      }
+      if (visualNodes.length === 4) break;
+    }
+    if (entry.summary.node_count > visualNodes.length) visualNodes.push(el("span", {
+      class: "workflow-node more", text: `+${entry.summary.node_count - visualNodes.length}`,
+    }));
+    const card = el("article", {
+      class: "workflow-card panel", "data-workflow-id": entry.workflow_id,
+    }, [
+      el("button", { class: "workflow-card-main" }, [
+        el("span", { class: "workflow-visual", "aria-hidden": "true" }, visualNodes),
+        el("span", { class: "eyebrow", text: entry.workflow_id }),
+        el("strong", { text: entry.name }),
+        entry.description ? el("span", { class: "muted", text: entry.description }) : null,
+        el("span", { class: "workflow-meta", text: i18n.t("workflows.summary", {
+          nodes: i18n.number(entry.summary.node_count), inputs: i18n.number(entry.inputs.length),
+        }) }),
+        // Which version is current, and whether anyone has run it: the two
+        // facts that tell two similarly named workflows apart.
+        el("span", { class: "workflow-card-facts", text: [
+          `v${entry.latest_version}`,
+          entry.last_run_at
+            ? i18n.t("workflows.lastRun", { when: i18n.dateTime(entry.last_run_at) })
+            : i18n.t("workflows.neverRun"),
+        ].join(" · ") }),
       ]),
-    ]));
-    document.body.append(dialog);
-    dialog.addEventListener("close", () => dialog.remove(), { once: true });
-    dialog.showModal();
-  };
+      // Starting a run is the common act, so it does not require opening the
+      // definition first — but only where the server advertised run.start.
+      (entry.allowed_commands || []).some((item) => item.command === "run.start")
+        ? el("div", { class: "workflow-card-actions" }, [
+            el("button", {
+              class: "button", text: i18n.t("action.newGoal"),
+              onclick: () => newRunDialog(entry.workflow_id, entry.latest_version),
+            }),
+          ])
+        : null,
+    ]);
+    card.querySelector(".workflow-card-main").addEventListener("click", () => navigate({
+      view: "workflow", workflowId: entry.workflow_id, runId: null,
+    }));
+    cards.append(card);
+  }
+  if (!entries.length) {
+    cards.append(el("div", { class: "empty panel", text: i18n.t("workflows.empty") }));
+  } else if (!matches.length) {
+    cards.append(el("div", { class: "empty panel", text: i18n.t("workflows.noMatches") }));
+  }
+  root.append(cards);
+}
 
-  let selectedCard = null;
-  const showDetail = async (entry, card = null, requestedVersion = undefined) => {
-    if (selectedCard) {
-      selectedCard.classList.remove("selected");
-      selectedCard.querySelector(".workflow-card-main")?.removeAttribute("aria-current");
-    }
-    selectedCard = card || cards.querySelector(`[data-workflow-id="${CSS.escape(entry.workflow_id)}"]`);
-    if (selectedCard) {
-      selectedCard.classList.add("selected");
-      selectedCard.querySelector(".workflow-card-main")?.setAttribute("aria-current", "true");
-    }
-    detail.replaceChildren(dataState(el, i18n, "loading"));
+/** One published definition, at its own address.
+ *
+ * The catalog page is for finding a workflow; this page is for reading one, so
+ * it is reachable by link and survives a reload.
+ */
+async function renderWorkflowDetail(root, workflowId) {
+  const panel = el("section", { class: "panel workflow-detail" });
+  root.append(panel);
+
+  const draw = async () => {
+    panel.replaceChildren(dataState(el, i18n, "loading"));
     try {
-      const value = (await api.workflowDetail(entry.workflow_id, requestedVersion)).data;
+      const value = (await api.workflowDetail(workflowId)).data;
       const definition = value.definition;
-      const versionSelect = el("select", {
-        id: "workflowVersionSelect", "aria-label": i18n.t("workflows.versionHistory"),
-      }, value.versions.map((version) => el("option", {
-        value: String(version.version),
-        ...(version.version === value.selected_version ? { selected: "selected" } : {}),
-        text: i18n.t("workflows.versionOption", {
-          version: i18n.number(version.version),
-          date: i18n.dateTime(version.created_at),
-        }),
-      })));
-      versionSelect.addEventListener("change", () => {
-        showDetail(entry, selectedCard, Number(versionSelect.value));
-      });
-      detail.replaceChildren(
+      panel.replaceChildren(
         el("div", { class: "panel-head" }, [
           el("div", {}, [
             el("div", { class: "eyebrow", text: `${value.workflow_id} · v${value.selected_version}` }),
             el("div", { class: "panel-title", text: value.name }),
           ]),
           el("div", { class: "actions" }, [
+            el("button", {
+              class: "button", id: "backToWorkflows", text: i18n.t("action.back"),
+              onclick: () => navigate({ view: "workflows", runId: null }),
+            }),
             (() => {
               const create = value.allowed_commands.find(
                 (item) => item.command === "workflow.draft.create",
@@ -2078,66 +2289,21 @@ async function renderWorkflows(root) {
           ]),
         ]),
         el("div", { class: "panel-body" }, [
-          el("div", { class: "workflow-version-picker" }, [
-            el("div", { class: "field" }, [
-              el("label", { text: i18n.t("workflows.versionHistory") }), versionSelect,
-            ]),
-            value.selected_version === value.latest_version
-              ? el("span", { class: "pill succeeded", text: i18n.t("workflows.latestVersion") })
-              : el("span", { class: "pill", text: i18n.t("workflows.historicalVersion") }),
-          ]),
-          el("p", { class: value.description ? "" : "muted", text: value.description || i18n.t("workflows.noDescription") }),
+          value.description ? el("p", { text: value.description }) : null,
           el("dl", { class: "fact-grid" }, [
             el("div", {}, [el("dt", { text: i18n.t("workflows.nodes") }), el("dd", { text: i18n.number(value.summary.node_count) })]),
             el("div", {}, [el("dt", { text: i18n.t("workflows.inputs") }), el("dd", { text: i18n.number(value.inputs.length) })]),
           ]),
-          workflowDefinitionTabs(value, definition),
+          workflowDefinitionTabs(value.graph, definition),
         ]),
       );
     } catch (error) {
-      detail.replaceChildren(dataState(el, i18n, "error", { onRetry: () => showDetail(entry) }));
+      panel.replaceChildren(dataState(el, i18n, "error", { onRetry: draw }));
       reportError(error);
     }
   };
 
-  for (const entry of entries) {
-    const kinds = Object.entries(entry.summary.node_kinds || {});
-    const visualNodes = [];
-    for (const [kind, count] of kinds) {
-      for (let index = 0; index < Math.min(count, 4 - visualNodes.length); index += 1) {
-        visualNodes.push(el("span", {
-          class: `workflow-node ${kind}`, title: kind,
-          text: kind === "terminal" ? "✓" : kind === "human" ? "H" : kind === "decision" ? "?" : kind.slice(0, 1).toUpperCase(),
-        }));
-      }
-      if (visualNodes.length === 4) break;
-    }
-    if (entry.summary.node_count > visualNodes.length) visualNodes.push(el("span", {
-      class: "workflow-node more", text: `+${entry.summary.node_count - visualNodes.length}`,
-    }));
-    const card = el("article", {
-      class: "workflow-card panel", "data-workflow-id": entry.workflow_id,
-    }, [
-      el("button", { class: "workflow-card-main" }, [
-        el("span", { class: "workflow-visual", "aria-hidden": "true" }, visualNodes),
-        el("span", { class: "eyebrow", text: `${entry.workflow_id} · v${entry.latest_version}` }),
-        el("strong", { text: entry.name }),
-        el("span", { class: "muted", text: entry.description || i18n.t("workflows.noDescription") }),
-        el("span", { class: "workflow-meta", text: i18n.t("workflows.summary", {
-          nodes: i18n.number(entry.summary.node_count), inputs: i18n.number(entry.inputs.length),
-        }) }),
-      ]),
-      entry.allowed_commands.length ? el("button", {
-        class: "button", text: i18n.t("action.newGoal"),
-        onclick: () => newRunDialog(entry.workflow_id),
-      }) : null,
-    ]);
-    card.querySelector(".workflow-card-main").addEventListener("click", () => showDetail(entry, card));
-    cards.append(card);
-  }
-  if (!entries.length) cards.append(el("div", { class: "empty panel", text: i18n.t("workflows.empty") }));
-  if (entries.length) await showDetail(entries[0]);
-  root.append(el("div", { class: "workflows-layout" }, [cards, detail]));
+  await draw();
 }
 
 /* --------------------------------------------------------- workflow editor */
@@ -2227,6 +2393,9 @@ async function renderWorkflowEditor(root, draftId) {
       (item) => item.status === "failed" || item.status === "cancelled",
     );
     const previewSource = candidate?.source || draft.source;
+    // Drawn by the same server layout the published workflow uses, so the
+    // draft and the version it becomes are the same picture.
+    const previewGraph = candidate ? candidate.graph : draft.graph;
     let definition = null;
     try { definition = JSON.parse(previewSource); } catch { /* read-only fallback below */ }
     const revise = command("workflow.draft.revise");
@@ -2375,7 +2544,6 @@ async function renderWorkflowEditor(root, draftId) {
       },
     }));
 
-    const nodes = definition?.nodes || [];
     panel.replaceChildren(
       el("div", { class: "panel-head" }, [
         el("div", {}, [
@@ -2429,14 +2597,7 @@ async function renderWorkflowEditor(root, draftId) {
         el("section", { class: "agent-editor-preview" }, [
           el("div", { class: "panel-title", text: i18n.t(candidate
             ? "editor.candidatePreview" : "editor.agentPreview") }),
-          el("div", { class: "definition-list" }, nodes.map((node) =>
-            el("div", { class: "actions" }, [
-              el("span", { class: "mono", text: node.id }),
-              el("span", { class: "pill", text: node.kind }),
-              node.handler ? el("span", {
-                class: "muted mono", text: `${node.handler.name}@${node.handler.version}`,
-              }) : null,
-            ]))),
+          workflowDefinitionTabs(previewGraph, definition, "editor.draftDefinition"),
           el("details", {}, [
             el("summary", { class: "muted", text: i18n.t("editor.sourceReadOnly") }),
             el("pre", { class: "artifact-preview", id: "draftSourcePreview", text: previewSource }),
@@ -2578,6 +2739,7 @@ async function generateWorkflowDialog(generateCommand) {
   let busy = false;
   let draftProblem = "";
   let instructionText = "";
+  let descriptionText = "";
   let defaultAgent = agentHandlers[0]?.name || "";
   // Two different questions: which Agent writes the DSL (writerAgent) and
   // which Agent the written workflow should call (defaultAgent).
@@ -2606,11 +2768,21 @@ async function generateWorkflowDialog(generateCommand) {
         id: "generateInstruction", required: "required", maxlength: "4000",
         placeholder: i18n.t("generate.instructionPh"), text: instructionText,
       });
+      const description = el("input", {
+        id: "generateDescription", type: "text", maxlength: "50",
+        placeholder: i18n.t("generate.descriptionPh"), value: descriptionText,
+      });
+      description.addEventListener("input", () => { descriptionText = description.value; });
       body.push(
         el("div", { class: "field" }, [
           el("label", { for: "generateInstruction", text: i18n.t("generate.instruction") }),
           instruction,
           el("small", { class: "muted", text: i18n.t("generate.hint") }),
+        ]),
+        el("div", { class: "field" }, [
+          el("label", { for: "generateDescription", text: i18n.t("generate.description") }),
+          description,
+          el("small", { class: "muted", text: i18n.t("generate.descriptionHint") }),
         ]),
       );
       const writerField = generationAgentField(
@@ -2645,6 +2817,7 @@ async function generateWorkflowDialog(generateCommand) {
             const response = await api.execute(
               generateCommand, {
                 instruction: instructionText,
+                description: descriptionText.trim(),
                 ...(defaultAgent ? { default_agent: defaultAgent } : {}),
                 ...(writerAgent ? { agent: writerAgent } : {}),
               },
@@ -2834,7 +3007,7 @@ async function newRunDialog(preselectedWorkflowId = null, preselectedVersion = n
           el("span", { class: "wizard-workflow-copy" }, [
             el("strong", { text: item.name }),
             el("small", { class: "muted mono", text: `${item.workflow_id} · v${entryVersion(item)}` }),
-            el("span", { class: "muted", text: item.description || i18n.t("workflows.noDescription") }),
+            item.description ? el("span", { class: "muted", text: item.description }) : null,
           ]),
           el("span", { class: "workflow-meta", text: i18n.t("workflows.summary", {
             nodes: i18n.number(item.summary.node_count), inputs: i18n.number(item.inputs.length),
@@ -3044,7 +3217,8 @@ async function render() {
   for (const button of document.querySelectorAll(".nav-button")) {
     const section = route.view === "run" ? "runs"
       : route.view === "goal" || route.view === "goals" ? "home"
-        : route.view === "artifact" ? "artifacts" : route.view;
+        : route.view === "artifact" ? "artifacts"
+          : route.view === "workflow" ? "workflows" : route.view;
     const active = button.dataset.view === section;
     if (active) button.setAttribute("aria-current", "page");
     else button.removeAttribute("aria-current");
@@ -3053,7 +3227,8 @@ async function render() {
     route.view === "run" ? "run.title"
       : route.view === "goal" || route.view === "goals" ? "home.title"
         : route.view === "artifact" ? "artifacts.title"
-          : route.view === "workflowEdit" ? "editor.title" : `${route.view}.title`,
+          : route.view === "workflow" ? "workflows.title"
+            : route.view === "workflowEdit" ? "editor.title" : `${route.view}.title`,
   );
 
   try {
@@ -3062,6 +3237,7 @@ async function render() {
     else if (route.view === "goal") await renderHome(fresh, route.runId);
     else if (route.view === "goals") await renderHome(fresh);
     else if (route.view === "workflows") await renderWorkflows(fresh);
+    else if (route.view === "workflow") await renderWorkflowDetail(fresh, route.workflowId);
     else if (route.view === "workflowEdit") await renderWorkflowEditor(fresh, route.draftId);
     else if (route.view === "run") await renderRun(fresh, route.runId, route.tab || "overview");
     else if (route.view === "inbox") await renderInbox(fresh);

@@ -287,10 +287,26 @@ class AccessibilityTests(unittest.TestCase):
 
 class CapacityRenderingTests(unittest.TestCase):
     def test_large_inline_values_are_bounded_before_entering_the_dom(self) -> None:
+        """Readable is not the same as unbounded.
+
+        A value may be a quarter of a megabyte; the panel shows a generous
+        window of it as text and always states the real size, so a clipped
+        value can never be mistaken for the whole one.
+        """
+
         app_js = (ASSETS / "app.js").read_text(encoding="utf-8")
-        self.assertIn("rawValue.length <= 500", app_js)
-        self.assertIn("rawValue.slice(0, 500)", app_js)
+        self.assertIn("const DATA_TEXT_LIMIT = 20_000;", app_js)
+        self.assertIn("raw.length <= DATA_TEXT_LIMIT", app_js)
+        self.assertIn("raw.slice(0, DATA_TEXT_LIMIT)", app_js)
         self.assertIn("i18n.number(item.size_bytes)", app_js)
+
+    def test_the_console_follows_only_while_the_run_is_alive(self) -> None:
+        """Polling a finished run's console forever is a busy loop for nothing."""
+
+        app_js = (ASSETS / "app.js").read_text(encoding="utf-8")
+        self.assertIn('live: !["succeeded", "failed", "cancelled"]', app_js)
+        self.assertIn("if (live && !stopped) timer = setTimeout(poll, 2000);", app_js)
+        self.assertIn("activeViewCleanup = () => {", app_js)
 
 
 if __name__ == "__main__":

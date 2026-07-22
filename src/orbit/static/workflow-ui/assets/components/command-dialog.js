@@ -32,19 +32,22 @@ export function dialogResult(dialog, collect, validate) {
 }
 
 export function humanSubmitDialog(context, allowed, siblings = []) {
-  const { api, el, i18n, reportError } = context;
+  const { api, el, i18n, reportError, tokenRequired = true } = context;
   const decision = allowed.command.endsWith("reject")
     ? "reject"
     : allowed.command.endsWith("provide_input") ? "provide_input" : "approve";
   const token = el("input", {
-    type: "password", id: "humanToken", required: "required",
+    type: "password", id: "humanToken",
+    ...(tokenRequired ? { required: "required" } : {}),
     autocomplete: "off", spellcheck: "false",
   });
   const value = el("textarea", { id: "humanValue" });
   const valueError = el("div", {
     class: "banner error", id: "humanValueError", hidden: "hidden", role: "alert",
   });
-  const tokenCommand = siblings.find((item) => item.command === "human.token");
+  const tokenCommand = tokenRequired
+    ? siblings.find((item) => item.command === "human.token")
+    : null;
   const fetchToken = tokenCommand
     ? el("button", {
         type: "button",
@@ -74,12 +77,12 @@ export function humanSubmitDialog(context, allowed, siblings = []) {
         class: "muted",
         text: `${i18n.t("human.decision")}: ${i18n.t(`human.decision.${decision}`)}`,
       }),
-      el("div", { class: "field" }, [
+      ...(tokenRequired ? [el("div", { class: "field" }, [
         el("label", { for: "humanToken", text: i18n.t("human.token") }),
         token,
         ...(fetchToken ? [fetchToken] : []),
         el("small", { class: "muted", text: i18n.t("human.token.hint") }),
-      ]),
+      ])] : []),
       el("div", { class: "field" }, [
         el("label", { for: "humanValue", text: i18n.t("human.value") }),
         value,
@@ -162,6 +165,26 @@ export function cancelRunDialog({ el, i18n }) {
     ]),
   ]);
   return dialogResult(dialog, () => ({ reason: reason.value.trim() }));
+}
+
+/** Running a step again may repeat whatever the Agent already did outside the
+ *  Runtime, so the operator confirms rather than clicks once. */
+export function retryNodeDialog({ el, i18n }, allowed) {
+  const dialog = el("dialog", { "aria-label": i18n.t("retry.title") }, [
+    el("form", { method: "dialog" }, [
+      el("h2", { text: i18n.t("retry.title") }),
+      el("p", { text: i18n.t("retry.confirm") }),
+      el("div", { class: "mono muted", text: allowed.target_aggregate_id }),
+      el("div", { class: "actions" }, [
+        el("button", { class: "button", value: "cancel", text: i18n.t("action.cancel") }),
+        el("button", {
+          class: "button primary", value: "confirm",
+          text: i18n.t("command.node.retry"),
+        }),
+      ]),
+    ]),
+  ]);
+  return dialogResult(dialog, () => ({}));
 }
 
 export function recoveryDialog({ el, i18n }, allowed) {

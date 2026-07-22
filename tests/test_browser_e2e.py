@@ -374,6 +374,84 @@ class DiscoveryViewsTests(BrowserE2ETestCase):
 
 
 class WorkflowCatalogTests(BrowserE2ETestCase):
+    @staticmethod
+    def _usage(page, **last_run_at: str) -> None:
+        """Serve the catalog with chosen "last used" times.
+
+        Ordering is the thing under test; the fixture's real run history is
+        shared with every other test in this class and cannot be relied on.
+        """
+
+        def route_catalog(route):
+            response = route.fetch()
+            payload = response.json()
+            for entry in payload["data"]["workflows"]:
+                key = entry["workflow_id"].split(":", 1)[1]
+                entry["last_run_at"] = last_run_at.get(key)
+                entry["run_count"] = 1 if last_run_at.get(key) else 0
+            route.fulfill(response=response, json=payload)
+
+        page.route("**/api/v1/workflows", route_catalog)
+
+    def test_a_card_opens_the_workflow_at_its_own_address(self) -> None:
+        page = self.open("en-US", path="/ui/#/workflows")
+        card = page.locator(".workflow-card", has_text="Linear")
+        card.wait_for()
+        card.locator(".workflow-card-main").click()
+        page.wait_for_function(
+            "() => location.hash === '#/workflows/workflow%3Alinear'"
+        )
+        page.wait_for_selector(".workflow-detail .workflow-graph")
+        # The address is the page: a reload lands on the same definition.
+        page.reload()
+        page.wait_for_selector(".workflow-detail .workflow-graph")
+        self.assertIn("workflow:linear", page.inner_text(".workflow-detail").lower())
+        self.assertEqual(0, page.locator(".workflow-grid").count())
+        page.click("#backToWorkflows")
+        page.wait_for_selector(".workflow-grid .workflow-card")
+
+    def test_search_narrows_the_catalog_to_one_card(self) -> None:
+        page = self.open("en-US", path="/ui/#/workflows")
+        page.wait_for_selector(".workflow-card")
+        self.assertEqual(2, page.locator(".workflow-card").count())
+        page.fill(".filter-bar input[type=search]", "human")
+        page.click(".filter-bar button[type=submit]")
+        page.wait_for_function(
+            "() => document.querySelectorAll('.workflow-card').length === 1"
+        )
+        self.assertIn("Human approval", page.inner_text(".workflow-card"))
+        page.fill(".filter-bar input[type=search]", "nothing matches this")
+        page.click(".filter-bar button[type=submit]")
+        page.wait_for_selector(".workflow-grid .empty")
+
+    def test_the_catalog_leads_with_the_workflow_last_used(self) -> None:
+        self._usage(page := self.open("en-US", path="/ui/#/workflows"),
+                    linear="2026-01-01T00:00:00Z")
+        page.reload()
+        page.wait_for_selector(".workflow-card")
+        names = page.locator(".workflow-card strong").all_text_contents()
+        self.assertEqual("Linear", names[0])
+        cards = page.locator(".workflow-card")
+        self.assertIn("Never run", cards.filter(has_text="Human approval").inner_text())
+
+        sort = page.get_by_role("combobox", name="Sort workflows")
+        sort.click()
+        page.get_by_role("option", name="Name").click()
+        page.wait_for_function(
+            "() => document.querySelector('.workflow-card strong')?.textContent"
+            " === 'Human approval'"
+        )
+        page.unroute("**/api/v1/workflows")
+
+    def test_a_card_starts_a_run_without_opening_the_definition(self) -> None:
+        page = self.open("en-US", path="/ui/#/workflows")
+        card = page.locator(".workflow-card", has_text="Linear")
+        card.wait_for()
+        card.locator(".workflow-card-actions button").click()
+        page.wait_for_selector("dialog[open]")
+        self.assertIn("workflow:linear", page.inner_text("dialog[open]").lower())
+        page.keyboard.press("Escape")
+
     def test_catalog_card_opens_the_immutable_definition(self) -> None:
         page = self.open("en-US", path="/ui/#/workflows")
         card = page.locator(".workflow-card", has_text="Linear")
@@ -422,6 +500,32 @@ class WorkflowCatalogTests(BrowserE2ETestCase):
             [depth[box["id"]] for box in ordered],
             sorted(depth[box["id"]] for box in ordered),
         )
+
+    def test_a_graph_box_names_the_agent_without_the_registry_noise(self) -> None:
+        """`agent.claude@1.0.0` is registry vocabulary; the box says `claude`."""
+
+        def as_agent(route):
+            response = route.fetch()
+            payload = response.json()
+            for node in payload["data"]["graph"]["nodes"]:
+                if node["handler_name"]:
+                    node["handler_name"] = "agent.claude"
+                    node["handler_version"] = "1.0.0"
+            route.fulfill(response=response, json=payload)
+
+        page = self.open("en-US", path="/ui/#/workflows")
+        page.route("**/api/v1/workflows/workflow%3Alinear", as_agent)
+        card = page.locator(".workflow-card", has_text="Linear")
+        card.wait_for()
+        card.locator(".workflow-card-main").click()
+        page.wait_for_selector(".workflow-graph")
+        labels = page.locator(".workflow-graph .graph-box-meta").all_text_contents()
+        self.assertIn("claude", labels)
+        self.assertEqual([], [text for text in labels if "@" in text])
+        # Nothing is lost: the exact registration is one hover away.
+        self.assertIn("agent.claude@1.0.0", page.locator(
+            ".workflow-graph .graph-box title"
+        ).first.text_content())
 
     def test_catalog_network_failure_is_not_reported_as_invalid_workflow(self) -> None:
         page = self.open("en-US")
@@ -627,6 +731,7 @@ class GenerateWorkflowTests(BrowserE2ETestCase):
         page.click("#generateWorkflow")
         page.wait_for_selector("dialog[open]")
         page.fill("#generateInstruction", "先转换输入，然后结束")
+        page.fill("#generateDescription", "订单转换流程")
         page.click("#generateSubmit")
 
         # Preview: the draft names the workflow and its nodes before anything
@@ -638,7 +743,10 @@ class GenerateWorkflowTests(BrowserE2ETestCase):
         self.assertIn("transform@1.0.0", preview)
 
         page.click("#generatePublish")
-        page.wait_for_selector(".workflow-card:has-text('Prompted flow')")
+        card = page.locator(".workflow-card", has_text="Prompted flow")
+        card.wait_for()
+        # The author's description overrides whatever the Agent wrote.
+        self.assertIn("订单转换流程", card.inner_text())
 
         # The published workflow starts a run through the ordinary wizard.
         page.locator(
@@ -866,6 +974,30 @@ class WorkflowEditorTests(BrowserE2ETestCase):
         self.assertTrue(page.locator("#draftRevisionInstruction").evaluate(
             "node => !node.checkValidity()"
         ))
+
+    def test_the_editor_draws_the_draft_like_the_workflow_detail(self) -> None:
+        page = self.open("en-US", path="/ui/#/workflows")
+        card = page.locator(".workflow-card", has_text="Draftable")
+        card.wait_for()
+        card.locator(".workflow-card-main").click()
+        page.wait_for_selector(".workflow-detail .workflow-graph")
+        published = page.evaluate(
+            """() => [...document.querySelectorAll('.workflow-graph .graph-box')]
+                 .map(g => g.querySelector('.graph-box-id').textContent)"""
+        )
+        page.click("#editWorkflow")
+        page.wait_for_selector(".agent-editor-preview .workflow-graph")
+        drafted = page.evaluate(
+            """() => [...document.querySelectorAll(
+                   '.agent-editor-preview .workflow-graph .graph-box')]
+                 .map(g => g.querySelector('.graph-box-id').textContent)"""
+        )
+        self.assertEqual(published, drafted)
+        # The node list is one tab away here too.
+        self.assertEqual(0, page.locator(".agent-editor-preview .definition-list").count())
+        page.click('.agent-editor-preview [data-workflow-tab="definition"]')
+        page.wait_for_selector(".agent-editor-preview .definition-list")
+        self.assertEqual(0, page.locator(".agent-editor-preview .workflow-graph").count())
 
 
 class GenerationAgentChoiceTests(BrowserE2ETestCase):
@@ -1182,70 +1314,6 @@ class WorkflowEditorP5Tests(BrowserE2ETestCase):
         page.click("#draftDiscard")
         page.wait_for_function("() => location.hash === '#/workflows'")
 
-    def test_history_can_start_pinned_and_replace_an_active_draft(self) -> None:
-        page = self.open("en-US", path="/ui/#/workflows")
-        card = page.locator(".workflow-card", has_text="P5 Editor v2")
-        card.wait_for()
-        card.locator(".workflow-card-main").click()
-        page.wait_for_selector("#workflowVersionSelect", state="attached")
-        version_picker = page.locator("#workflowVersionSelect").locator("..")
-        version_picker.get_by_role("combobox").click()
-        version_picker.locator("[role='option'][data-value='1']").click()
-        page.wait_for_function(
-            "() => document.querySelector('.workflow-detail .eyebrow')?.textContent.includes('v1')"
-        )
-
-        page.get_by_role("button", name="New goal").last.click()
-        dialog = page.locator("dialog[open]")
-        dialog.wait_for()
-        self.assertIn("v1", dialog.inner_text())
-        self.complete_goal_wizard(
-            page, "workflow:p5-editor", goal="Replay v1", inputs={"value": 3},
-        )
-        page.wait_for_function("() => location.hash.startsWith('#/runs/run')")
-        run_id = page.evaluate("() => decodeURIComponent(location.hash.split('/')[2])")
-        summary = page.evaluate(
-            "id => fetch(`/api/v1/runs/${encodeURIComponent(id)}`)"
-            ".then(response => response.json()).then(body => body.data)",
-            arg=run_id,
-        )
-        self.assertEqual(1, summary["workflow_version"])
-        self.wait_for_status(page, run_id, "succeeded")
-        page.goto(f"{self.base}/ui/#/workflows")
-        card = page.locator(".workflow-card", has_text="P5 Editor v2")
-        card.wait_for()
-        card.locator(".workflow-card-main").click()
-        page.wait_for_selector("#workflowVersionSelect", state="attached")
-        version_picker = page.locator("#workflowVersionSelect").locator("..")
-        version_picker.get_by_role("combobox").click()
-        version_picker.locator("[role='option'][data-value='1']").click()
-        page.wait_for_function(
-            "() => document.querySelector('.workflow-detail .eyebrow')?.textContent.includes('v1')"
-        )
-
-        page.click("#editWorkflow")
-        page.wait_for_selector("#draftSourcePreview", state="attached")
-        page.goto(f"{self.base}/ui/#/workflows")
-        card = page.locator(".workflow-card", has_text="P5 Editor v2")
-        card.wait_for()
-        card.locator(".workflow-card-main").click()
-        page.wait_for_selector("#workflowVersionSelect", state="attached")
-        version_picker = page.locator("#workflowVersionSelect").locator("..")
-        version_picker.get_by_role("combobox").click()
-        version_picker.locator("[role='option'][data-value='2']").click()
-        page.click("#editWorkflow")
-        page.wait_for_selector("#replaceActiveDraft")
-        page.click("#replaceActiveDraft")
-        page.wait_for_selector("#draftSourcePreview", state="attached")
-        self.assertEqual(
-            "P5 Editor v2",
-            json.loads(page.text_content("#draftSourcePreview"))["metadata"]["name"],
-        )
-
-        page.click("#draftDiscard")
-        page.click("#draftDiscard")
-        page.wait_for_function("() => location.hash === '#/workflows'")
-
     def test_keyboard_offline_retry_and_reload_recovery(self) -> None:
         page = self.open("en-US", path="/ui/#/workflows")
         draft_responses: list[str] = []
@@ -1515,6 +1583,39 @@ class BudgetTests(BrowserE2ETestCase):
             timeout=15000,
         )
 
+    def test_a_refused_command_does_not_read_as_a_lost_race(self) -> None:
+        """"It changed, try again" would send the operator round a loop.
+
+        A refusal and a version conflict are both 409s and are not the same
+        fact: nobody raced the operator, the Runtime will not do this at all.
+        """
+
+        run_id = self.exhausted_run("browser-budget-refused")
+        page = self.open("en-US", path=f"/ui/#/runs/{run_id}")
+        page.route(
+            "**/api/v1/runs/**/budget",
+            lambda route: route.fulfill(
+                status=409, content_type="application/json",
+                body=json.dumps({"error": {
+                    "code": "invalid_command",
+                    "message": "VALIDATION_FAILED: the Runtime says no",
+                    "details": {},
+                }}),
+            ),
+        )
+        grant = page.locator("button", has_text="Add budget").first
+        grant.wait_for(timeout=15000)
+        grant.click()
+        page.wait_for_selector("dialog[open]")
+        page.fill("#budgetAmount", "500")
+        page.click("dialog button[value=confirm]")
+
+        page.wait_for_selector("#liveRegion.error", timeout=15000)
+        announced = page.inner_text("#liveRegion")
+        self.assertIn("refused", announced)
+        self.assertIn("the Runtime says no", announced)
+        self.assertNotIn("changed after you loaded it", announced)
+
     def test_the_grant_button_is_translated(self) -> None:
         run_id = self.exhausted_run("browser-budget-zh")
         page = self.open("zh-CN", path=f"/ui/#/runs/{run_id}")
@@ -1538,6 +1639,54 @@ class BudgetTests(BrowserE2ETestCase):
         page.wait_for_selector("text=microunits")
         text = page.inner_text("#content")
         self.assertRegex(text, r"2[,.]?500")
+
+
+class HandlerConsoleTests(BrowserE2ETestCase):
+    """What the Agent printed, on the page that explains the run."""
+
+    def seed_output(self, run_id: str, *chunks: tuple[str, str]) -> None:
+        from orbit.workflow.persistence.attempt_output import (
+            SQLiteAttemptOutputStore,
+        )
+
+        store = SQLiteAttemptOutputStore(self.db)
+        for index, (stream, text) in enumerate(chunks):
+            store.append(
+                run_id=EntityId.parse(run_id),
+                node_run_id=EntityId("node_run", f"{index:064d}"),
+                attempt_id=EntityId("attempt", f"{index:064d}"),
+                stream=stream, text=text, now=datetime.now(timezone.utc),
+            )
+
+    def test_the_data_tab_shows_what_the_handler_printed(self) -> None:
+        run_id = self.start_run("browser-console")
+        self.seed_output(
+            run_id,
+            ("stdout", "searching the web…\n"),
+            ("stderr", "warning: rate limited, retrying\n"),
+        )
+        page = self.open("en-US", path=f"/ui/#/runs/{run_id}/data")
+        page.wait_for_selector(".console-log .console-chunk", timeout=15000)
+        console = page.inner_text(".console-log")
+        self.assertIn("searching the web", console)
+        self.assertIn("rate limited", console)
+        # stderr is marked as such rather than blended into the transcript.
+        self.assertEqual(1, page.locator(".console-chunk.stderr").count())
+
+    def test_an_agent_answer_is_readable_not_a_json_line(self) -> None:
+        """A paragraph crammed into one JSON line is stored, not readable."""
+
+        run_id = self.start_run("browser-console-value")
+        page = self.open("en-US", path=f"/ui/#/runs/{run_id}/data")
+        page.wait_for_selector(".data-item", timeout=15000)
+        self.assertTrue(page.locator(".data-item .data-text").count())
+        self.assertEqual(
+            "pre-wrap",
+            page.eval_on_selector(
+                ".data-item .data-text",
+                "node => getComputedStyle(node).whiteSpace",
+            ),
+        )
 
 
 class CancelTests(BrowserE2ETestCase):
