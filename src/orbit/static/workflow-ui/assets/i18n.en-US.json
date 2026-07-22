@@ -500,6 +500,7 @@
   "wait.timer_wait": "Timer",
   "wait.unknown_wait": "Unknown outcome",
   "workflows.definition": "Published definition",
+  "workflows.definitionTabs": "Definition views",
   "workflows.description": "Choose a published, immutable definition or generate a new workflow from a goal.",
   "workflows.empty": "No published workflows are available.",
   "workflows.eyebrow": "Reusable definitions",

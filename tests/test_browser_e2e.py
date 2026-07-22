@@ -380,7 +380,12 @@ class WorkflowCatalogTests(BrowserE2ETestCase):
         card.wait_for()
         self.assertIn("4 nodes", card.inner_text())
         card.locator(".workflow-card-main").click()
+        # The drawing opens first; the node list is one tab away.
+        page.wait_for_selector(".workflow-detail .workflow-graph")
+        self.assertEqual(0, page.locator(".workflow-detail .definition-list").count())
+        page.click('.workflow-detail [data-workflow-tab="definition"]')
         page.wait_for_selector(".workflow-detail .definition-list")
+        self.assertEqual(0, page.locator(".workflow-detail .workflow-graph").count())
         detail = page.inner_text(".workflow-detail")
         self.assertIn("workflow:linear", detail.lower())
         self.assertIn("collect", detail)
@@ -597,6 +602,26 @@ class GenerateWorkflowTests(BrowserE2ETestCase):
             "workflow_generator": lambda prompt: json.dumps(GENERATED_WORKFLOW),
         }
 
+    def test_cancel_leaves_the_generate_dialog_without_a_prompt(self) -> None:
+        """Abandoning the dialog must not require filling the field first."""
+
+        page = self.open("en-US", path="/ui/#/workflows")
+        page.wait_for_selector("#generateWorkflow")
+        page.click("#generateWorkflow")
+        page.wait_for_selector("#generateInstruction")
+        page.locator("dialog[open] button", has_text="Cancel").click()
+        page.wait_for_selector("dialog", state="detached")
+
+    def test_cancel_leaves_the_goal_wizard_without_a_goal(self) -> None:
+        page = self.open("en-US")
+        page.click("#newRun")
+        page.wait_for_selector("dialog[open]")
+        page.check('input[name="workflow"][value="workflow:linear"]')
+        page.click("[data-wizard-next]")
+        page.wait_for_selector("#newRunGoal")
+        page.locator("dialog[open] button", has_text="Cancel").click()
+        page.wait_for_selector("dialog", state="detached")
+
     def test_a_described_workflow_is_published_and_runs(self) -> None:
         page = self.open("zh-CN", path="/ui/#/workflows")
         page.click("#generateWorkflow")
@@ -619,7 +644,7 @@ class GenerateWorkflowTests(BrowserE2ETestCase):
         page.locator(
             ".workflow-card", has_text="Prompted flow"
         ).locator(".workflow-card-main").click()
-        page.wait_for_selector(".workflow-detail .definition-list")
+        page.wait_for_selector(".workflow-detail .workflow-tabs")
         page.locator(".workflow-detail button", has_text="新建目标").click()
         page.wait_for_selector("dialog[open]")
         self.complete_goal_wizard(
@@ -1737,13 +1762,15 @@ class RefreshTests(BrowserE2ETestCase):
         self.assertEqual(2, page.locator("#content section.panel").count())
         content = page.inner_text("#content")
         self.assertIn("Registered agents", content)
-        self.assertIn("agent.codex 2.0.0", content)
+        # Name and version render on their own lines now.
+        self.assertIn("agent.codex", content)
+        self.assertIn("2.0.0", content)
         self.assertNotIn("transform 1.0.0", content)
         # A discovered-but-unregistered CLI is listed once, in the detected
         # panel; the registered one is not duplicated there.
         self.assertIn("Detected CLIs", content)
-        self.assertEqual(1, page.locator("text=agent.hermes 0.18.2").count())
-        self.assertEqual(1, page.locator("text=agent.codex 2.0.0").count())
+        self.assertEqual(1, page.locator("text=agent.hermes").count())
+        self.assertEqual(1, page.locator("text=agent.codex").count())
 
     def test_a_reload_restores_the_page_from_the_server(self) -> None:
         """Nothing is kept client-side, so a reload must lose nothing."""

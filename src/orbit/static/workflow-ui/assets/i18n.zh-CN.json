@@ -500,6 +500,7 @@
   "wait.timer_wait": "等待计时器",
   "wait.unknown_wait": "等待确认未知结果",
   "workflows.definition": "已发布定义",
+  "workflows.definitionTabs": "定义视图",
   "workflows.description": "选择已发布的不可变定义，或根据目标生成新的工作流。",
   "workflows.empty": "当前没有已发布的工作流。",
   "workflows.eyebrow": "可复用定义",

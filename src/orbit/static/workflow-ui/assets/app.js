@@ -64,10 +64,15 @@ const svgEl = (tag, props = {}, children = []) => {
 
 // Box geometry. The server hands us depth (column) and lane (row); turning
 // those into pixels is the only thing the browser decides about this picture.
-const GRAPH_BOX = { width: 168, height: 52, gapX: 64, gapY: 18, pad: 12 };
+const GRAPH_BOX = {
+  width: 168, height: 60, gapX: 64, gapY: 22, pad: 16,
+  // A one-lane flow would otherwise draw as a thin strip under the tabs,
+  // and the panel would jump in height on every tab switch.
+  minHeight: 260,
+};
 
 function workflowGraphView(graph) {
-  const { width, height, gapX, gapY, pad } = GRAPH_BOX;
+  const { width, height, gapX, gapY, pad, minHeight } = GRAPH_BOX;
   const at = new Map();
   for (const position of graph.layout.positions) {
     at.set(position.node_id, {
@@ -78,7 +83,10 @@ function workflowGraphView(graph) {
   const columns = Math.max(...graph.layout.positions.map((p) => p.depth), 0) + 1;
   const lanes = Math.max(...graph.layout.positions.map((p) => p.lane), 0) + 1;
   const canvasWidth = pad * 2 + columns * width + (columns - 1) * gapX;
-  const canvasHeight = pad * 2 + lanes * height + (lanes - 1) * gapY;
+  const drawnHeight = pad * 2 + lanes * height + (lanes - 1) * gapY;
+  const canvasHeight = Math.max(drawnHeight, minHeight);
+  // Centre a short graph in the taller canvas instead of pinning it to the top.
+  const offsetY = Math.round((canvasHeight - drawnHeight) / 2);
 
   const edges = graph.edges.map((edge) => {
     const from = at.get(edge.from);
@@ -128,7 +136,55 @@ function workflowGraphView(graph) {
     "aria-label": i18n.t("workflows.graphAria", {
       nodes: i18n.number(graph.nodes.length), edges: i18n.number(graph.edges.length),
     }),
-  }, [svgEl("defs", {}, [arrow]), ...edges, ...boxes]);
+  }, [
+    svgEl("defs", {}, [arrow]),
+    svgEl("g", { transform: `translate(0 ${offsetY})` }, [...edges, ...boxes]),
+  ]);
+}
+
+// The same definition read two ways: the drawing answers "what shape is
+// this", the list answers "what exactly is in it". Tabs keep both a click
+// away without stacking two long blocks in one panel. The state is local:
+// which tab you are on is not worth a URL when the selected workflow is not
+// in one either.
+function workflowDefinitionTabs(value, definition) {
+  const panes = {
+    graph: () => el("div", { class: "workflow-graph-scroll" }, [
+      workflowGraphView(value.graph),
+    ]),
+    definition: () => el("div", { class: "definition-list" }, definition.nodes.map((node) =>
+      el("div", { class: "actions" }, [
+        el("span", { class: "mono", text: node.id }),
+        el("span", { class: "pill", text: node.kind }),
+        node.handler ? el("span", {
+          class: "muted mono", text: `${node.handler.name}@${node.handler.version}`,
+        }) : null,
+      ]),
+    )),
+  };
+  const content = el("section", { class: "run-tab-content workflow-tab-content" });
+  const tabs = el("nav", {
+    class: "run-tabs", "aria-label": i18n.t("workflows.definitionTabs"),
+  });
+  const show = (name) => {
+    for (const button of tabs.children) {
+      const active = button.dataset.workflowTab === name;
+      button.classList.toggle("active", active);
+      if (active) button.setAttribute("aria-current", "page");
+      else button.removeAttribute("aria-current");
+    }
+    content.dataset.activeTab = name;
+    content.replaceChildren(panes[name]());
+  };
+  for (const name of ["graph", "definition"]) {
+    tabs.append(el("button", {
+      class: "run-tab", "data-workflow-tab": name,
+      text: i18n.t(`workflows.${name === "graph" ? "graph" : "definition"}`),
+      onclick: () => show(name),
+    }));
+  }
+  show("graph");
+  return el("div", { class: "workflow-tabs" }, [tabs, content]);
 }
 
 function syncCustomSelect(select) {
@@ -1717,7 +1773,8 @@ async function renderAgents(root) {
           el("div", { class: "agent-head" }, [
             el("span", { class: "agent-avatar", "aria-hidden": "true", text: initials }),
             el("div", {}, [
-              el("div", { class: "panel-title mono", text: `${handler.name} ${handler.version}` }),
+              el("div", { class: "panel-title mono", text: handler.name }),
+              el("div", { class: "muted mono agent-version", text: handler.version }),
               el("div", { class: "muted agent-status", text: i18n.t("agents.registered") }),
             ]),
           ]),
@@ -1746,9 +1803,9 @@ async function renderAgents(root) {
           el("div", { class: "agent-head" }, [
             el("span", { class: "agent-avatar", "aria-hidden": "true", text: initials }),
             el("div", {}, [
-              el("div", { class: "panel-title mono", text: agent.version
-                ? `${agent.name} ${agent.version}`
-                : `${agent.name} · ${i18n.t("agents.versionUnknown")}` }),
+              el("div", { class: "panel-title mono", text: agent.name }),
+              el("div", { class: "muted mono agent-version", text: agent.version
+                ? agent.version : i18n.t("agents.versionUnknown") }),
               el("div", { class: "muted agent-status", text: i18n.t("agents.detectedStatus") }),
             ]),
           ]),
@@ -1999,16 +2056,7 @@ async function renderWorkflows(root) {
             el("div", {}, [el("dt", { text: i18n.t("workflows.nodes") }), el("dd", { text: i18n.number(value.summary.node_count) })]),
             el("div", {}, [el("dt", { text: i18n.t("workflows.inputs") }), el("dd", { text: i18n.number(value.inputs.length) })]),
           ]),
-          el("div", { class: "eyebrow", text: i18n.t("workflows.graph") }),
-          el("div", { class: "workflow-graph-scroll" }, [workflowGraphView(value.graph)]),
-          el("div", { class: "eyebrow", text: i18n.t("workflows.definition") }),
-          el("div", { class: "definition-list" }, definition.nodes.map((node) =>
-            el("div", { class: "actions" }, [
-              el("span", { class: "mono", text: node.id }),
-              el("span", { class: "pill", text: node.kind }),
-              node.handler ? el("span", { class: "muted mono", text: `${node.handler.name}@${node.handler.version}` }) : null,
-            ]),
-          )),
+          workflowDefinitionTabs(value, definition),
         ]),
       );
     } catch (error) {
@@ -2497,7 +2545,14 @@ async function generateWorkflowDialog(generateCommand) {
       problem.hidden = false;
     }
     const actions = el("div", { class: "actions" }, [
-      el("button", { class: "button", value: "cancel", text: i18n.t("action.cancel") }),
+      // Cancel submits the dialog form (that is what closes it and sets the
+      // return value), so it must opt out of validation: otherwise a required
+      // field the user never filled in is what they are abandoning, and the
+      // browser refuses to let them leave.
+      el("button", {
+        class: "button", value: "cancel", formnovalidate: "formnovalidate",
+        text: i18n.t("action.cancel"),
+      }),
     ]);
     const body = [el("h2", { text: i18n.t("generate.title") }), problem];
 
@@ -2804,7 +2859,14 @@ async function newRunDialog(preselectedWorkflowId = null, preselectedVersion = n
 
     const problem = el("div", { class: "banner error wizard-problem", hidden: "hidden" });
     const actions = el("div", { class: "actions wizard-actions" }, [
-      el("button", { class: "button", value: "cancel", text: i18n.t("action.cancel") }),
+      // Cancel submits the dialog form (that is what closes it and sets the
+      // return value), so it must opt out of validation: otherwise a required
+      // field the user never filled in is what they are abandoning, and the
+      // browser refuses to let them leave.
+      el("button", {
+        class: "button", value: "cancel", formnovalidate: "formnovalidate",
+        text: i18n.t("action.cancel"),
+      }),
       state.step > 0 ? el("button", {
         class: "button", type: "button", text: i18n.t("action.back"),
         onclick: () => { state.step -= 1; draw(); },

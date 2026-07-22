@@ -442,6 +442,7 @@
 .agent-card:hover { transform: translateY(-2px); border-color: var(--muted-2); }
 .agents-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
 .agent-head { display: flex; align-items: center; gap: 10px; }
+.agent-version { font-size: 12px; margin-top: 2px; }
 .agent-status { font-size: 12px; margin-top: 4px; }
 .agent-avatar {
   width: 34px; height: 34px; border-radius: 9px; flex: 0 0 auto;
@@ -509,6 +510,8 @@
 /* The published definition drawn from the server's layout hint: depth is the
    column, lane the row. Wide graphs scroll inside the panel rather than giving
    the page a horizontal scrollbar. */
+.workflow-tabs { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.workflow-tab-content { min-height: 0; }
 /* min-width:0 or the flex parent sizes to the drawing and the whole page
    scrolls sideways on a phone instead of just this strip. */
 .workflow-graph-scroll {
