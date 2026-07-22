@@ -12,17 +12,20 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import time
 from types import SimpleNamespace
 import unittest
 
 from orbit.workflow.catalogs.agent_discovery import (
-    TRUSTED_AGENT_CLIS, AgentDiscoveryError, AgentInvocation,
+    TRUSTED_AGENT_CLIS, AgentCliSpec, AgentDiscoveryError, AgentInvocation,
+    DiscoveredAgent, agent_manifest,
 )
 from orbit.workflow.domain.handlers import (
     CancelDisposition, HandlerValidationError, UnknownExternalResultError,
 )
 from orbit.workflow.handlers.agent import (
-    AgentRequest, TrustedPromptCliAgentClient, render_agent_prompt,
+    AGENT_RESULT_PORT, AgentRequest, TrustedPromptCliAgentClient,
+    render_agent_prompt,
 )
 
 
@@ -67,7 +70,7 @@ class PromptTransportTests(unittest.TestCase):
             AgentRequest(node_input or {"prompt": "do the thing"}, config or {}, "key"),
             context(),
         )
-        return response.output["text"]
+        return response.output[AGENT_RESULT_PORT]
 
     def test_a_flag_carries_the_prompt_as_its_value(self) -> None:
         client = self.client(ECHO_ARGV, args=("chat", "-Q"), prompt_flag="-q")
@@ -123,6 +126,31 @@ class PromptTransportTests(unittest.TestCase):
         with self.assertRaises(HandlerValidationError):
             self.call(client)
 
+    def test_a_cli_that_leaves_a_child_holding_the_pipes_still_returns(self) -> None:
+        """The answer is in hand; nothing may wait on an EOF that never comes.
+
+        Hermes exits but leaves an MCP gateway alive, and that survivor holds
+        the write end of the pipes it inherited. Waiting for EOF — or closing
+        a pipe a thread is parked in — parks the whole Handler until the lease
+        expires, and an attempt that had already succeeded is written off as
+        unsettled.
+        """
+
+        client = self.client(
+            "\n".join((
+                "import subprocess, sys",
+                # The survivor: outlives its parent, holding stdout and stderr.
+                "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])",
+                "sys.stdout.write('the complete answer\\n'); sys.stdout.flush()",
+                "sys.stderr.write('shutdown noise\\n'); sys.stderr.flush()",
+            )),
+            prompt_flag="-q",
+            kill_grace_seconds=1,
+        )
+        started = time.monotonic()
+        self.assertEqual("the complete answer", self.call(client).strip())
+        self.assertLess(time.monotonic() - started, 20)
+
     def test_cancelling_an_idle_client_confirms_it_stopped(self) -> None:
         client = self.client(ECHO_ARGV, prompt_flag="-p")
         self.assertEqual(
@@ -138,6 +166,22 @@ class PromptTransportTests(unittest.TestCase):
     def test_a_prompt_flag_must_be_a_flag(self) -> None:
         with self.assertRaises(ValueError):
             TrustedPromptCliAgentClient(("/usr/bin/true",), prompt_flag="exec")
+
+
+class AgentPortContractTests(unittest.TestCase):
+    """The manifest a workflow binds to and the reply a client returns.
+
+    These two named the port differently — the manifest said `result`, the
+    client answered `text` — so every prompt-CLI Agent ran perfectly and was
+    then refused at completion, leaving the attempt to expire as unsettled.
+    """
+
+    def test_the_client_answers_on_the_port_the_manifest_declares(self) -> None:
+        agent = DiscoveredAgent(
+            AgentCliSpec("claude", "claude", invocation=AgentInvocation(prompt_flag="-p")),
+            "/usr/local/bin/claude", "1.0.0",
+        )
+        self.assertEqual({AGENT_RESULT_PORT}, set(agent_manifest(agent).outputs))
 
 
 class PromptRenderingTests(unittest.TestCase):

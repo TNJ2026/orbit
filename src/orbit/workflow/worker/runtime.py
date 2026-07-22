@@ -11,6 +11,7 @@ from typing import Any, Callable
 from jsonschema import Draft202012Validator
 
 from ..domain.handlers import HandlerResultStatus
+from ..domain.runtime import CommandResultDisposition
 from ..domain.envelopes import CommandEnvelope
 from ..domain.execution_plan import execution_plan_from_primitive
 from ..domain.ids import EntityId
@@ -19,6 +20,10 @@ from ..domain.policy import PolicyEffect, PolicyRule
 from ..domain.versions import AggregateVersion, Revision
 from ..domain.serialization import definition_hash, to_primitive
 from .supervisor import LeaseSupervisor
+
+
+class SettlementRejected(RuntimeError):
+    """The kernel refused the outcome a worker reported for its attempt."""
 
 
 class CancellationToken:
@@ -97,25 +102,35 @@ class WorkerRuntime:
                 finally:
                     supervisor.stop()
                 if result.status is HandlerResultStatus.SUCCEEDED:
-                    self.service.complete_job(
+                    self._settled("complete_job", self.service.complete_job(
                         claimed, self.clock(), dict(result.output),
                         handler_result=result,
-                    )
+                    ))
                     self._increment("worker_completed")
                 elif result.status is HandlerResultStatus.UNKNOWN_EXTERNAL_RESULT:
-                    self.service.report_unknown_job_result(claimed, self.clock(), result)
+                    self._settled("report_unknown_job_result",
+                                  self.service.report_unknown_job_result(
+                                      claimed, self.clock(), result))
                     self._increment("worker_unknown")
                 else:
-                    self.service.fail_job(
+                    self._settled("fail_job", self.service.fail_job(
                         claimed, self.clock(), to_primitive(result.error),
                         handler_result=result,
-                    )
+                    ))
                     self._increment("worker_failed")
             else:
                 node_id, input_value = self.service.build_legacy_executor_input(claimed)
                 output = self.executor(node_id, input_value, token)
-                self.service.complete_job(claimed, self.clock(), output)
+                self._settled(
+                    "complete_job", self.service.complete_job(claimed, self.clock(), output)
+                )
                 self._increment("worker_completed")
+        except SettlementRejected:
+            # Deliberately not converted into a failed attempt: the Handler ran,
+            # and only the Runtime's record of it was refused. Reporting it as a
+            # clean failure would state that nothing happened.
+            self._increment("worker_settlement_rejected")
+            raise
         except Exception as exc:
             error = {
                 "code": "handler_permanent", "category": "permanent_error",
@@ -128,6 +143,26 @@ class WorkerRuntime:
         finally:
             self.current_token = None
         return True
+
+    @staticmethod
+    def _settled(command_type: str, result):
+        """A refused settlement must not pass for a delivered one.
+
+        The kernel can refuse what a worker reports — an output that does not
+        fit the node's ports is refused exactly this way. Dropping the refusal
+        left the Handler's real result nowhere, and thirty seconds later the
+        lease reaper wrote the attempt off as unsettled: the loudest failure
+        the Runtime has, reported as the vaguest thing it can say.
+        """
+
+        if result.disposition is not CommandResultDisposition.REJECTED:
+            return result
+        diagnostic = (result.diagnostics or (None,))[0]
+        raise SettlementRejected(
+            f"{command_type} refused: "
+            + ("no diagnostic" if diagnostic is None
+               else f"{diagnostic.code}: {diagnostic.message}")
+        )
 
     def cancel_current(self) -> bool:
         if self.current_token is None: return False

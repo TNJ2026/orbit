@@ -35,7 +35,9 @@ from orbit.workflow.handlers.context import ScopedSecretResolver
 from orbit.workflow.handlers.tools import ToolResult
 from orbit.workflow.handlers.usage import UsageConflictError
 from orbit.workflow.persistence.workflow_versions import SQLiteWorkflowVersionStore
-from orbit.workflow.worker.runtime import CancellationToken, WorkerRuntime
+from orbit.workflow.worker.runtime import (
+    CancellationToken, SettlementRejected, WorkerRuntime,
+)
 from tests.test_workflow_runtime import linear_ir
 
 
@@ -425,7 +427,7 @@ class HandlerDurableEndToEndTests(unittest.TestCase):
 
     def tearDown(self): self.temp.cleanup()
 
-    def _registry(self, first=None, *, mixed=False):
+    def _registry(self, first=None, *, mixed=False, agent_output=None):
         registry = ExecutionRegistry()
         tools = ToolRegistry()
         tools.register(tool_manifest(), _Tool())
@@ -434,7 +436,9 @@ class HandlerDurableEndToEndTests(unittest.TestCase):
             implementation = (
                 first if name == "collect" and first is not None
                 else ToolHandler(tools) if mixed and name == "transform"
-                else AgentHandler(FakeAgentClient(AgentResponse({"value": 1}, None, "req-agent")))
+                else AgentHandler(FakeAgentClient(AgentResponse(
+                    {"value": 1} if agent_output is None else agent_output,
+                    None, "req-agent")))
                 if mixed and name == "publish"
                 else TransformHandler()
             )
@@ -459,6 +463,33 @@ class HandlerDurableEndToEndTests(unittest.TestCase):
         self.assertEqual(3, sum(item.envelope.event_type == "attempt_usage_recorded" for item in timeline))
         report = service.recovery.rehydrate(self.run_id)
         self.assertEqual(3, len(report.state["usage"]))
+
+    def test_a_refused_settlement_is_never_passed_off_as_delivered(self):
+        """The kernel can refuse what a worker reports; silence loses the run.
+
+        An output that does not fill the node's declared ports is refused
+        exactly this way. Dropping the refusal left the Handler's real result
+        nowhere and the attempt was written off half a minute later as
+        unsettled — the loudest failure reported as the vaguest thing there is.
+        """
+
+        # An Agent that answers on a port the node does not declare: exactly
+        # how a prompt CLI's reply reached the kernel before the client and the
+        # manifest agreed on one name.
+        registry = self._registry(mixed=True, agent_output={"not_declared": 1})
+        service = DurableRuntimeApplicationService(self.path, execution_registry=registry)
+        executor = HandlerExecutor(registry, SCHEMAS, clock=lambda: NOW)
+        service.submit(self.start)
+        worker = WorkerRuntime(service, executor, clock=lambda: NOW)
+        self.assertTrue(worker.run_once())
+        self.assertTrue(worker.run_once())
+        with self.assertRaises(SettlementRejected) as refused:
+            worker.run_once()
+        self.assertIn("complete_job refused", str(refused.exception))
+        self.assertIn("VALIDATION_FAILED", str(refused.exception))
+        # Not recorded as a clean failure: the Handler ran, only the Runtime's
+        # record of it was refused.
+        self.assertIs(WorkflowRunStatus.RUNNING, service.get_run(self.run_id).status)
 
     def test_handler_unknown_is_atomic_and_never_materialized(self):
         result = UnknownExternalResultError(

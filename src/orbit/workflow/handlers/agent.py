@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import os
 import subprocess
 import shutil
 from threading import Event, Lock, Thread
@@ -20,6 +21,34 @@ from ..domain.handlers import (
     RecoveryDisposition, RecoveryResult, UnknownExternalResultError,
 )
 from ..domain.serialization import to_primitive
+
+
+# The single output port every discovered Agent's manifest declares. The
+# manifest is what a workflow binds to, so this name is a contract between
+# `agent_discovery.agent_manifest` and the client that fills it.
+AGENT_RESULT_PORT = "result"
+
+
+def _abandon_pipe(stream) -> None:
+    """Release a pipe we can no longer drain, without waiting on its reader.
+
+    `close()` on a buffered pipe waits for the thread parked inside `read()`,
+    and that thread is waiting for an EOF that will never arrive: the CLI has
+    exited, but a process it left behind still holds the write end. Hermes
+    keeps an MCP gateway alive exactly this way, and the wait is unbounded —
+    a Handler that had already collected its answer would sit there until the
+    lease expired and the attempt was written off as unsettled.
+
+    Closing the descriptor ends the blocked read, the reader thread leaves,
+    and the buffered object goes with it.
+    """
+
+    if stream is None:
+        return
+    try:
+        os.close(stream.fileno())
+    except (OSError, ValueError):
+        pass
 
 
 @dataclass(frozen=True)
@@ -134,9 +163,10 @@ class TrustedCliAgentClient:
             with self._lock:
                 state = self._executions.pop(execution_ref, None)
                 cancelled = bool(state and state["cancelled"])
-            for stream in (process.stdin, process.stdout, process.stderr):
-                if stream is not None and not stream.closed:
-                    stream.close()
+            if process.stdin is not None and not process.stdin.closed:
+                process.stdin.close()
+            _abandon_pipe(process.stdout)
+            _abandon_pipe(process.stderr)
         if cancelled:
             raise UnknownExternalResultError("agent CLI cancellation outcome is unknown")
         if overflow:
@@ -179,7 +209,12 @@ class TrustedCliAgentClient:
             # has arrived, which is what makes following the console possible.
             read = getattr(pipe, "read1", pipe.read)
             while True:
-                chunk = read(65_536)
+                try:
+                    chunk = read(65_536)
+                except (OSError, ValueError):
+                    # The descriptor was dropped because nothing more could be
+                    # drained from it. There is no output left to miss.
+                    return
                 if not chunk: break
                 publish(name, chunk)
                 current = stdout_size if enforce else sum(map(len, chunks))
@@ -235,7 +270,14 @@ class TrustedPromptCliAgentClient(TrustedCliAgentClient):
     No installed Agent CLI speaks Orbit's `{"input": ...}` → `{"output": ...}`
     protocol; they take a prompt and answer in text. This client renders the
     node's input into one prompt string, hands it to the CLI the way that CLI
-    accepts it, and returns the reply as `{"text": ...}`.
+    accepts it, and returns the reply on the port every discovered Agent
+    declares: `AGENT_RESULT_PORT`.
+
+    The port name is not decoration. A workflow binds to the manifest, the
+    kernel refuses a completion whose output does not fill the node's declared
+    ports, and the worker's report is then all there is — so a client that
+    answered on a port of its own invention produced Agents that could run
+    perfectly and never complete.
 
     The argv prefix is still constructor-owned and comes from the reviewed
     allowlist. The prompt is *data*: it is passed either on stdin, or as the
@@ -277,7 +319,7 @@ class TrustedPromptCliAgentClient(TrustedCliAgentClient):
             extra, payload = (), encoded
         stdout = self._run(extra, payload, context)
         return AgentResponse(
-            {"text": stdout.decode("utf-8", errors="replace").strip()},
+            {AGENT_RESULT_PORT: stdout.decode("utf-8", errors="replace").strip()},
             None, None, "completed",
         )
 

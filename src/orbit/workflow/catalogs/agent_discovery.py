@@ -29,6 +29,7 @@ from typing import Callable, Iterable, Mapping, Sequence
 
 from ..cli_environment import trusted_cli_environment
 from ..domain.durable_execution import ExecutionSafety
+from ..handlers.agent import AGENT_RESULT_PORT
 from ..domain.handlers import ResourceProfile
 from .handlers import HandlerManifest
 
@@ -291,7 +292,10 @@ def agent_manifest(
         agent.version if agent.version.count(".") == 2 else f"{agent.version}.0",
         agent.spec.node_kinds,
         {"prompt": input_schema_id},
-        {"result": result_schema_id},
+        # The port the prompt client fills. Naming it in one place keeps the
+        # manifest a workflow binds to and the answer a client returns from
+        # drifting apart.
+        {AGENT_RESULT_PORT: result_schema_id},
         {
             "type": "object",
             "properties": {
