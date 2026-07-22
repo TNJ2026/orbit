@@ -42,6 +42,36 @@ class AgentDiscoveryError(ValueError):
     """A spec or a probe result that must not become a registered handler."""
 
 
+_SAFE_ARG = re.compile(r"^-{0,2}[A-Za-z0-9][A-Za-z0-9._:@/=-]*$")
+
+
+@dataclass(frozen=True)
+class AgentInvocation:
+    """How one CLI is asked a question, decided here and nowhere else.
+
+    `args` is the fixed argv tail — subcommand and flags — that this file
+    commits to. The prompt is data and rides in exactly one of three ways:
+    stdin (preferred, invisible to the process list), the value of a flag, or
+    a positional after `--`. Whichever it is, argv is built as a list without a
+    shell, so the prompt can never become a command.
+    """
+
+    args: tuple[str, ...] = ()
+    prompt_flag: str | None = None
+    prompt_positional: bool = False
+
+    def __post_init__(self) -> None:
+        for argument in self.args:
+            if not _SAFE_ARG.match(argument):
+                raise AgentDiscoveryError(f"unsafe agent argument: {argument!r}")
+        if self.prompt_flag is not None and self.prompt_positional:
+            raise AgentDiscoveryError("a prompt is passed one way: flag or positional")
+        if self.prompt_flag is not None and not self.prompt_flag.startswith("-"):
+            raise AgentDiscoveryError(
+                f"prompt flag must be a flag, got {self.prompt_flag!r}"
+            )
+
+
 @dataclass(frozen=True)
 class AgentCliSpec:
     """One trusted Agent CLI. Only this file may construct the allowlist.
@@ -59,7 +89,14 @@ class AgentCliSpec:
     required_secrets: tuple[str, ...] = ()
     max_duration_seconds: int = 1800
     cost_class: str = "agent-cli"
-    runtime_compatible: bool = True
+    # How to invoke it. None means the CLI is detected but has no reviewed
+    # invocation yet, so it can be listed and never registered — detection and
+    # execution compatibility are separate facts.
+    invocation: AgentInvocation | None = None
+
+    @property
+    def runtime_compatible(self) -> bool:
+        return self.invocation is not None
 
     def __post_init__(self) -> None:
         if not _SAFE_NAME.match(self.name):
@@ -77,16 +114,26 @@ class AgentCliSpec:
 
 # The allowlist. Adding an entry is a code change and a code review; there is
 # deliberately no config file, environment variable or API that extends it.
+# Every invocation below was probed against the installed CLI rather than read
+# off its help text: the argv is what actually produced a reply on stdout.
+# `--skip-git-repo-check` and `--skip-trust` waive the CLI's *directory* trust
+# check only; neither waives its tool-permission prompts.
 TRUSTED_AGENT_CLIS: tuple[AgentCliSpec, ...] = (
-    AgentCliSpec("claude", "claude"),
-    AgentCliSpec("codex", "codex"),
-    AgentCliSpec("gemini", "gemini"),
-    # Keep detection aligned with main, but do not register a CLI as an Orbit
-    # Handler until it has an invocation/output adapter for Orbit's JSON
-    # protocol. Detection and execution compatibility are separate facts.
-    AgentCliSpec("antigravity", "agy", runtime_compatible=False),
-    AgentCliSpec("hermes", "hermes", runtime_compatible=False),
-    AgentCliSpec("opencode", "opencode", runtime_compatible=False),
+    AgentCliSpec("claude", "claude", invocation=AgentInvocation(prompt_flag="-p")),
+    AgentCliSpec("codex", "codex", invocation=AgentInvocation(
+        args=("exec", "--skip-git-repo-check"), prompt_positional=True,
+    )),
+    AgentCliSpec("gemini", "gemini", invocation=AgentInvocation(
+        args=("--skip-trust",), prompt_flag="-p",
+    )),
+    AgentCliSpec("antigravity", "agy", invocation=AgentInvocation(prompt_flag="-p")),
+    AgentCliSpec("hermes", "hermes", invocation=AgentInvocation(
+        # -Q is quiet mode: the final response only, no banner or spinner.
+        args=("chat", "-Q"), prompt_flag="-q",
+    )),
+    # The only one that reads the prompt from stdin, so the only one whose
+    # prompt never appears in the process list.
+    AgentCliSpec("opencode", "opencode", invocation=AgentInvocation(args=("run",))),
 )
 
 

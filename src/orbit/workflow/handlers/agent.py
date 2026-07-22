@@ -82,9 +82,35 @@ class TrustedCliAgentClient:
         self._executions = {}
 
     def execute(self, request, context):
+        stdout = self._run(
+            (),
+            json.dumps(to_primitive({
+                "input": request.input, "config": request.config
+            })).encode("utf-8"),
+            context,
+        )
+        try:
+            value = json.loads(stdout.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise HandlerValidationError("agent CLI returned invalid JSON") from None
+        if not isinstance(value, dict) or not isinstance(value.get("output"), dict):
+            raise HandlerValidationError("agent CLI result must contain object output")
+        return AgentResponse(
+            value["output"], None, value.get("provider_request_id"),
+            value.get("finish_reason", "completed"),
+        )
+
+    def _run(self, extra_args, payload, context):
+        """Spawn, feed, bound and reap. Subclasses decide argv tail and parsing.
+
+        Everything here is about surviving the process, not about what it says:
+        a timeout or a non-zero exit after submission is an *unknown* external
+        result, never a failure, because the Agent may already have acted.
+        """
+
         process = subprocess.Popen(
-            self.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, env=self.environment,
+            (*self.command, *extra_args), stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.environment,
         )
         execution_ref = f"agent:{context.request.attempt_id}"
         with self._lock:
@@ -93,12 +119,7 @@ class TrustedCliAgentClient:
                 raise RuntimeError("duplicate concurrent Agent execution reference")
             self._executions[execution_ref] = {"process": process, "cancelled": False}
         try:
-            stdout, stderr, overflow = self._communicate_bounded(
-                process,
-                json.dumps(to_primitive({
-                    "input": request.input, "config": request.config
-                })).encode("utf-8"),
-            )
+            stdout, stderr, overflow = self._communicate_bounded(process, payload)
         except TimeoutError:
             process.terminate()
             try:
@@ -124,16 +145,7 @@ class TrustedCliAgentClient:
                 f"agent CLI exited with code {process.returncode} after request submission "
                 f"(stderr_bytes={len(stderr)}, stderr_sha256={digest})"
             )
-        try:
-            value = json.loads(stdout.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            raise HandlerValidationError("agent CLI returned invalid JSON") from None
-        if not isinstance(value, dict) or not isinstance(value.get("output"), dict):
-            raise HandlerValidationError("agent CLI result must contain object output")
-        return AgentResponse(
-            value["output"], None, value.get("provider_request_id"),
-            value.get("finish_reason", "completed"),
-        )
+        return stdout
 
     def _communicate_bounded(self, process, payload):
         stdout_chunks, stderr_chunks = [], []
@@ -197,6 +209,85 @@ class TrustedCliAgentClient:
 
     def recover(self, recovery_ref):
         return RecoveryResult(RecoveryDisposition.UNKNOWN, provider_request_id=recovery_ref)
+
+
+class TrustedPromptCliAgentClient(TrustedCliAgentClient):
+    """Adapter for CLIs that take a prompt and print prose.
+
+    No installed Agent CLI speaks Orbit's `{"input": ...}` → `{"output": ...}`
+    protocol; they take a prompt and answer in text. This client renders the
+    node's input into one prompt string, hands it to the CLI the way that CLI
+    accepts it, and returns the reply as `{"text": ...}`.
+
+    The argv prefix is still constructor-owned and comes from the reviewed
+    allowlist. The prompt is *data*: it is passed either on stdin, or as the
+    value of a code-owned flag, or as a positional after `--`. argv is a list
+    and no shell is involved, so a prompt cannot become a command — but on the
+    flag/positional paths it is visible in the process list to other users on
+    this machine, which is why stdin is preferred wherever the CLI allows it.
+    """
+
+    def __init__(
+        self, command, *, prompt_flag: str | None = None,
+        prompt_positional: bool = False, max_prompt_bytes: int = 131_072, **kwargs,
+    ) -> None:
+        super().__init__(command, **kwargs)
+        if prompt_flag is not None and prompt_positional:
+            raise ValueError("a prompt is passed one way: flag or positional")
+        if prompt_flag is not None and not prompt_flag.startswith("-"):
+            raise ValueError(f"prompt flag must be a flag, got {prompt_flag!r}")
+        if max_prompt_bytes < 1:
+            raise ValueError("prompt limit must be positive")
+        self.prompt_flag = prompt_flag
+        self.prompt_positional = prompt_positional
+        self.max_prompt_bytes = max_prompt_bytes
+
+    def execute(self, request, context):
+        prompt = render_agent_prompt(request.input, request.config)
+        encoded = prompt.encode("utf-8")
+        if len(encoded) > self.max_prompt_bytes:
+            raise HandlerValidationError(
+                f"prompt exceeds {self.max_prompt_bytes} bytes for this Agent CLI"
+            )
+        if self.prompt_flag is not None:
+            extra, payload = (self.prompt_flag, prompt), b""
+        elif self.prompt_positional:
+            # `--` first: a prompt that happens to start with a dash stays an
+            # argument to read, not a flag to obey.
+            extra, payload = ("--", prompt), b""
+        else:
+            extra, payload = (), encoded
+        stdout = self._run(extra, payload, context)
+        return AgentResponse(
+            {"text": stdout.decode("utf-8", errors="replace").strip()},
+            None, None, "completed",
+        )
+
+
+def render_agent_prompt(
+    node_input: Mapping[str, Any], config: Mapping[str, Any]
+) -> str:
+    """One prompt string from the node's authored config and its runtime input.
+
+    The authored preamble comes first and the runtime value follows inside
+    delimiters. The delimiters are for the reader's benefit, not a security
+    boundary: the CLI has no command surface to protect here, because argv is
+    fixed before the prompt is known.
+    """
+
+    parts = []
+    preamble = config.get("prompt")
+    if isinstance(preamble, str) and preamble.strip():
+        parts.append(preamble.strip())
+    value = node_input.get("prompt", node_input)
+    rendered = value if isinstance(value, str) else json.dumps(
+        to_primitive(value), ensure_ascii=False, sort_keys=True
+    )
+    if parts:
+        parts.append(f"INPUT-BEGIN\n{rendered}\nINPUT-END")
+    else:
+        parts.append(rendered)
+    return "\n\n".join(parts)
 
 
 class AgentHandler:

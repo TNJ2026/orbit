@@ -17,7 +17,9 @@ import tempfile
 import unittest
 from unittest import mock
 
-from orbit.workflow.catalogs.agent_discovery import AgentCliSpec, DiscoveredAgent
+from orbit.workflow.catalogs.agent_discovery import (
+    AgentCliSpec, AgentInvocation, DiscoveredAgent,
+)
 from orbit.workflow.domain.ids import EntityId
 from orbit.workflow.domain.versions import Revision
 from orbit.workflow.planner import TrustedCliPlannerProvider, build_planning_context
@@ -186,7 +188,12 @@ class CliProviderRealProcessTest(unittest.TestCase):
 
 
 def discovered(name, executable_path="/usr/bin/true"):
-    return DiscoveredAgent(AgentCliSpec(name, name), executable_path, "1.0")
+    # An invocation is what makes a spec runtime-compatible, and only a
+    # runtime-compatible agent is offered to the planner.
+    return DiscoveredAgent(
+        AgentCliSpec(name, name, invocation=AgentInvocation(prompt_flag="-p")),
+        executable_path, "1.0",
+    )
 
 
 class PlannerProviderFactoryTest(unittest.TestCase):

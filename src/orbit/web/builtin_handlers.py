@@ -21,7 +21,9 @@ from ..workflow.domain.durable_execution import ExecutionSafety
 from ..workflow.domain.handlers import ResourceProfile
 from ..workflow.catalogs.agent_discovery import registrable_agents
 from ..workflow.handlers import TransformHandler
-from ..workflow.handlers.agent import AgentHandler, TrustedCliAgentClient
+from ..workflow.handlers.agent import (
+    AgentHandler, TrustedCliAgentClient, TrustedPromptCliAgentClient,
+)
 from ..workflow.handlers.dev_tools import (
     CAPABILITY_PROCESS_RUN, CAPABILITY_WORKSPACE_READ, CAPABILITY_WORKSPACE_WRITE,
     DEFAULT_TIMEOUT_SECONDS, VerifyProfile, WorkspaceRunner, register_dev_tools,
@@ -67,9 +69,9 @@ def agent_handlers(
     workflow can see an installed agent and be unable to call it — which is
     the state the migration plan's M3 task 17 exists to prevent.
 
-    The command is owned by TrustedCliAgentClient's constructor, built here
-    from the executable discovery resolved. No workflow, plan or planner can
-    contribute an argument to it.
+    The command is owned by the client's constructor, built here from the
+    executable discovery resolved and the argv the allowlist committed to. No
+    workflow, plan or planner can contribute an argument to it.
     """
 
     registrations: list[HandlerRegistration] = []
@@ -80,16 +82,32 @@ def agent_handlers(
         registrations.append(
             HandlerRegistration(
                 manifest,
-                AgentHandler(
-                    TrustedCliAgentClient(
-                        (agent.executable_path,), timeout_seconds=timeout_seconds
-                    )
-                ),
+                AgentHandler(agent_client(agent, timeout_seconds=timeout_seconds)),
                 f"{manifest.name}@{manifest.version}",
             )
         )
         names.append(manifest.name)
     return tuple(registrations), tuple(names)
+
+
+def agent_client(agent: Any, *, timeout_seconds: int = 1800):
+    """The adapter a discovered CLI is invoked through.
+
+    A CLI that speaks Orbit's JSON protocol needs no adapter; none of the ones
+    on the allowlist do, so each carries a probed invocation profile instead.
+    """
+
+    invocation = agent.spec.invocation
+    if invocation is None:
+        return TrustedCliAgentClient(
+            (agent.executable_path,), timeout_seconds=timeout_seconds
+        )
+    return TrustedPromptCliAgentClient(
+        (agent.executable_path, *invocation.args),
+        prompt_flag=invocation.prompt_flag,
+        prompt_positional=invocation.prompt_positional,
+        timeout_seconds=timeout_seconds,
+    )
 
 
 def planner_provider_from_agents(

@@ -14,14 +14,16 @@ from types import SimpleNamespace
 import unittest
 
 from orbit.workflow.catalogs.agent_discovery import (
-    TRUSTED_AGENT_CLIS, AgentCliSpec, AgentDiscoveryError, DiscoveredAgent,
+    TRUSTED_AGENT_CLIS, AgentCliSpec, AgentDiscoveryError, AgentInvocation,
+    DiscoveredAgent,
     agent_manifest, catalog_entries, discover_agent_clis, registrable_agents,
 )
 from orbit.workflow.cli_environment import trusted_cli_environment
 from orbit.workflow.domain.durable_execution import ExecutionSafety
 
 
-CLAUDE = AgentCliSpec("claude", "claude")
+# A spec is registrable only once it carries a probed invocation.
+CLAUDE = AgentCliSpec("claude", "claude", invocation=AgentInvocation(prompt_flag="-p"))
 
 
 def fake_which(installed):
@@ -186,7 +188,7 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual("agent.claude", pairs[0][1].name)
 
     def test_detectable_cli_without_runtime_adapter_is_not_registrable(self) -> None:
-        spec = AgentCliSpec("hermes", "hermes", runtime_compatible=False)
+        spec = AgentCliSpec("hermes", "hermes")
         agent = DiscoveredAgent(spec, "/usr/local/bin/hermes", "0.18.2")
         self.assertEqual((), registrable_agents([agent]))
 
@@ -205,7 +207,7 @@ class HermesProfileTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.profile_root = Path(self.temp.name)
-        self.spec = AgentCliSpec("hermes", "hermes", runtime_compatible=False)
+        self.spec = AgentCliSpec("hermes", "hermes")
 
     def tearDown(self) -> None:
         self.temp.cleanup()
