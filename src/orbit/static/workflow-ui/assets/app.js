@@ -127,7 +127,7 @@ function workflowGraphView(graph) {
     });
   });
 
-  const boxes = graph.nodes.map((node) => {
+  const boxes = graph.nodes.map((node, index) => {
     const spot = at.get(node.node_id);
     if (!spot) return null;
     // Node kinds are DSL vocabulary, shown verbatim here as they are in the
@@ -135,13 +135,27 @@ function workflowGraphView(graph) {
     const label = node.handler_name
       ? `${node.handler_name}@${node.handler_version}`
       : node.kind;
+    // SVG text does not wrap or ellipsize, so a long id would spill past the
+    // box. Clip each line to the box interior and keep the full value in a
+    // <title> for hover — the drawing stays tidy, nothing is lost.
+    const clipId = `graph-clip-${index}`;
     return svgEl("g", {
       class: `graph-box kind-${node.kind}`,
       transform: `translate(${spot.x} ${spot.y})`,
     }, [
+      svgEl("title", { text: node.handler_name ? `${node.node_id} · ${label}` : node.node_id }),
+      svgEl("clipPath", { id: clipId }, [
+        svgEl("rect", { x: 10, y: 0, width: width - 20, height }),
+      ]),
       svgEl("rect", { width, height, rx: 10 }),
-      svgEl("text", { class: "graph-box-id", x: 12, y: 21, text: node.node_id }),
-      svgEl("text", { class: "graph-box-meta", x: 12, y: 38, text: label }),
+      svgEl("text", {
+        class: "graph-box-id", x: 12, y: 21, "clip-path": `url(#${clipId})`,
+        text: node.node_id,
+      }),
+      svgEl("text", {
+        class: "graph-box-meta", x: 12, y: 38, "clip-path": `url(#${clipId})`,
+        text: label,
+      }),
     ]);
   });
 
