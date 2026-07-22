@@ -283,6 +283,39 @@ class FakeOutcome:
     timed_out: bool = False
 
 
+class DescriptionTests(unittest.TestCase):
+    """The author's description is authoritative over the model's."""
+
+    def _generate(self, description, model_document=None):
+        document = model_document or valid_document()
+        model = ScriptedModel([json.dumps(document)])
+        outcome = service(model).generate("build a flow", description=description)
+        return json.loads(outcome.source)["metadata"]
+
+    def test_it_overrides_whatever_the_model_wrote(self) -> None:
+        document = valid_document()
+        document["metadata"]["description"] = "the model's guess"
+        meta = self._generate("A tidy pipeline", document)
+        self.assertEqual("A tidy pipeline", meta["description"])
+
+    def test_an_empty_description_clears_the_models(self) -> None:
+        document = valid_document()
+        document["metadata"]["description"] = "the model's guess"
+        meta = self._generate("", document)
+        self.assertNotIn("description", meta)
+
+    def test_no_description_leaves_the_document_untouched(self) -> None:
+        document = valid_document()
+        document["metadata"]["description"] = "the model's guess"
+        meta = self._generate(None, document)
+        self.assertEqual("the model's guess", meta["description"])
+
+    def test_a_description_over_fifty_characters_is_refused(self) -> None:
+        model = ScriptedModel([json.dumps(valid_document())])
+        with self.assertRaises(ValueError):
+            service(model).generate("build a flow", description="x" * 51)
+
+
 class NamedAgentTests(unittest.TestCase):
     """Which Agent writes the DSL is the caller's choice, by name only."""
 

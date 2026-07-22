@@ -41,6 +41,7 @@ from ..dsl import DiagnosticError, compile_source
 DEFAULT_TIMEOUT_SECONDS = 300
 MAX_RESPONSE_BYTES = 256 * 1024
 MAX_INSTRUCTION_CHARS = 4000
+MAX_DESCRIPTION_CHARS = 50
 MAX_NODES = 30
 MAX_ATTEMPTS = 3  # first call plus two diagnostic-fed retries
 
@@ -132,6 +133,29 @@ class TrustedCliDslGenerator:
                 f"generator response exceeded {self.max_response_bytes} bytes"
             )
         return outcome.stdout
+
+
+def _description_setter(description: str | None):
+    """Force metadata.description to the author's value, or clear it.
+
+    Returns None when the author gave nothing to say — including an empty
+    string, which explicitly means "no description", not "keep the model's".
+    A None factory leaves the document untouched (revision keeps its own).
+    """
+
+    if description is None:
+        return None
+
+    def apply(document):
+        metadata = document.get("metadata")
+        if isinstance(metadata, dict):
+            if description:
+                metadata["description"] = description
+            else:
+                metadata.pop("description", None)
+        return document
+
+    return apply
 
 
 class WorkflowAuthoringService:
@@ -310,7 +334,7 @@ class WorkflowAuthoringService:
 
     def generate(
         self, instruction: str, *, preferred_handler: str | None = None,
-        agent: str | None = None,
+        agent: str | None = None, description: str | None = None,
     ) -> GenerationOutcome:
         instruction = instruction.strip()
         if not instruction:
@@ -318,6 +342,11 @@ class WorkflowAuthoringService:
         if len(instruction) > MAX_INSTRUCTION_CHARS:
             raise ValueError(
                 f"instruction exceeds {MAX_INSTRUCTION_CHARS} characters"
+            )
+        description = None if description is None else description.strip()
+        if description is not None and len(description) > MAX_DESCRIPTION_CHARS:
+            raise ValueError(
+                f"description exceeds {MAX_DESCRIPTION_CHARS} characters"
             )
         if preferred_handler is not None:
             preferred_handler = preferred_handler.strip()
@@ -332,6 +361,10 @@ class WorkflowAuthoringService:
             lambda feedback: self._prompt(instruction, feedback, preferred_handler),
             source_name="<generated>", failure="generation",
             write=self._writer(agent),
+            # The author's description is authoritative: it overwrites whatever
+            # the model put in metadata.description, and an empty one leaves no
+            # description rather than the model's guess.
+            document_transform=_description_setter(description),
         )
 
     def revise(
@@ -375,7 +408,7 @@ class WorkflowAuthoringService:
 
     def _run_funnel(
         self, build_prompt, *, source_name: str, failure: str, extra_check=None,
-        write=None,
+        write=None, document_transform=None,
     ) -> GenerationOutcome:
         feedback: str | None = None
         raw = ""
@@ -384,6 +417,8 @@ class WorkflowAuthoringService:
             raw = (write or self.generate_text)(build_prompt(feedback))
             try:
                 document = self._extract_json(raw)
+                if document_transform is not None:
+                    document = document_transform(document)
                 nodes = document.get("nodes")
                 if isinstance(nodes, list) and len(nodes) > self.max_nodes:
                     raise ValueError(
