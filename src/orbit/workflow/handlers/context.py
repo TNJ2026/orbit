@@ -76,5 +76,17 @@ class NullTracer:
         return None
 
 
+class DiscardedAttemptOutput:
+    """Drops what a Handler prints.
+
+    Output is a convenience for the operator, never a result: a deployment
+    without an output store still runs Handlers, it just cannot show their
+    console. Failing here would turn a missing convenience into a failed run.
+    """
+
+    def emit(self, stream: str, text: str) -> None:
+        return None
+
+
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)

@@ -29,9 +29,14 @@ class HandlerRegistrySummary:
 
 
 class HandlerRuntimeBuilder:
-    def __init__(self, schema_catalog, *, secret_values=None) -> None:
+    def __init__(
+        self, schema_catalog, *, secret_values=None, output_sink_factory=None,
+    ) -> None:
         self.schemas = schema_catalog
         self.secret_values = dict(secret_values or {})
+        # Optional: where Handler console output is kept for the operator. A
+        # Runtime without one still executes every Handler.
+        self.output_sink_factory = output_sink_factory
         self.registry = ExecutionRegistry()
 
     def register(self, manifest, implementation, *, implementation_id):
@@ -44,7 +49,8 @@ class HandlerRuntimeBuilder:
         self.registry.seal()
         self.preflight()
         return HandlerExecutor(
-            self.registry, self.schemas, secret_values=self.secret_values
+            self.registry, self.schemas, secret_values=self.secret_values,
+            output_sink_factory=self.output_sink_factory,
         )
 
     def preflight(self) -> None:

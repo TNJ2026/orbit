@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+import threading
 import time
 import unittest
 
@@ -66,6 +67,40 @@ class LeaseSupervisorTests(unittest.TestCase):
         self.assertEqual(1, supervisor.renewal_failures)
         self.assertGreaterEqual(len(service.renewals), 1)
         self.assertFalse(token.cancelled)
+
+
+    def test_a_supervisor_that_dies_takes_the_handler_down_with_it(self):
+        """Silent death is the worst outcome: the Handler runs on unrenewed.
+
+        Whatever kills this thread, the attempt must not be left for the lease
+        reaper to discover half a minute later with no explanation.
+        """
+
+        class _Exploding:
+            reason = None
+            @property
+            def cancelled(self):
+                raise MemoryError("supervisor thread is doomed")
+            def cancel(self, reason="cancelled"):
+                _Exploding.reason = reason
+
+        cancelled = []
+        # The thread re-raises so a real deployment sees it in its logs; here
+        # that would only spray a traceback across the test output.
+        previous_hook = threading.excepthook
+        threading.excepthook = lambda args: None
+        self.addCleanup(setattr, threading, "excepthook", previous_hook)
+        supervisor = LeaseSupervisor(
+            _Service(), SimpleNamespace(lease_id="lease:1"), _Exploding(),
+            clock=lambda: NOW, deadline=NOW + timedelta(minutes=1),
+            renew_interval_seconds=0.01,
+            on_cancel=lambda: cancelled.append(True),
+        )
+        supervisor.start()
+        time.sleep(0.05)
+        supervisor.stop()
+        self.assertEqual("lease_lost", _Exploding.reason)
+        self.assertEqual([True], cancelled)
 
 
 if __name__ == "__main__": unittest.main()

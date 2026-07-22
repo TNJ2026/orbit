@@ -442,6 +442,7 @@ RUNTIME_COMMAND_PAYLOAD_SCHEMAS = {
     ),
     "cancel-run": _object_schema([], {"reason": {"type": "string"}}),
     "cancel-node": _object_schema([], {"reason": {"type": "string"}}),
+    "retry-node-run": _object_schema([], {"reason": {"type": "string"}}),
     "advance-graph": _object_schema([], {"plan_version": _REVISION}),
     "apply-planner-proposal": _object_schema(
         ["proposal_id"],

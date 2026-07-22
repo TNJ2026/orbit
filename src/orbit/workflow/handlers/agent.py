@@ -119,7 +119,9 @@ class TrustedCliAgentClient:
                 raise RuntimeError("duplicate concurrent Agent execution reference")
             self._executions[execution_ref] = {"process": process, "cancelled": False}
         try:
-            stdout, stderr, overflow = self._communicate_bounded(process, payload)
+            stdout, stderr, overflow = self._communicate_bounded(
+                process, payload, sink=getattr(context, "output", None),
+            )
         except TimeoutError:
             process.terminate()
             try:
@@ -147,7 +149,7 @@ class TrustedCliAgentClient:
             )
         return stdout
 
-    def _communicate_bounded(self, process, payload):
+    def _communicate_bounded(self, process, payload, *, sink=None):
         stdout_chunks, stderr_chunks = [], []
         stdout_size = 0
         overflow = Event()
@@ -159,11 +161,27 @@ class TrustedCliAgentClient:
             except (BrokenPipeError, OSError) as exc:
                 errors.append(exc)
 
-        def read_output(pipe, chunks, limit, enforce):
+        def publish(name, chunk):
+            # Forwarded as it is read, so a long-running Agent is watchable and
+            # a failed one still leaves an account. Never lets a reporting
+            # problem interfere with reading the pipe.
+            if sink is None:
+                return
+            try:
+                sink.emit(name, chunk.decode("utf-8", errors="replace"))
+            except Exception:  # noqa: BLE001
+                return
+
+        def read_output(pipe, chunks, limit, enforce, name):
             nonlocal stdout_size
+            # `read` waits for a full buffer or EOF, which turns a five-minute
+            # Agent into one silent block at the end. `read1` returns whatever
+            # has arrived, which is what makes following the console possible.
+            read = getattr(pipe, "read1", pipe.read)
             while True:
-                chunk = pipe.read(65_536)
+                chunk = read(65_536)
                 if not chunk: break
+                publish(name, chunk)
                 current = stdout_size if enforce else sum(map(len, chunks))
                 remaining = max(0, limit - current)
                 if remaining: chunks.append(chunk[:remaining])
@@ -176,8 +194,8 @@ class TrustedCliAgentClient:
 
         threads = (
             Thread(target=write_input, daemon=True),
-            Thread(target=read_output, args=(process.stdout, stdout_chunks, self.max_output_bytes, True), daemon=True),
-            Thread(target=read_output, args=(process.stderr, stderr_chunks, 65_536, False), daemon=True),
+            Thread(target=read_output, args=(process.stdout, stdout_chunks, self.max_output_bytes, True, "stdout"), daemon=True),
+            Thread(target=read_output, args=(process.stderr, stderr_chunks, 65_536, False, "stderr"), daemon=True),
         )
         for thread in threads: thread.start()
         try:

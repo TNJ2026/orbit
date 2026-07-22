@@ -49,7 +49,8 @@ class CommandResult:
 
 
 RUNTIME_COMMAND_TYPES = frozenset(
-    {"start_run", "schedule_node", "start_attempt", "complete_attempt", "fail_attempt", "cancel_node", "cancel_run", "advance_graph", "advance_foreach", "submit_human_task", "apply_planner_proposal", "reject_planner_proposal", "apply_subflow_result"}
+    {"start_run", "schedule_node", "start_attempt", "complete_attempt", "fail_attempt", "cancel_node", "cancel_run", "advance_graph", "advance_foreach", "submit_human_task", "apply_planner_proposal", "reject_planner_proposal", "apply_subflow_result",
+     "retry_node_run"}
 )
 
 RUNTIME_EVENT_VERSIONS = MappingProxyType(
@@ -89,6 +90,7 @@ _COMMAND_FIELDS = MappingProxyType(
         "apply_planner_proposal": ({"proposal_id"}, {"plan_version"}),
         "reject_planner_proposal": ({"proposal_id", "error"}, set()),
         "apply_subflow_result": ({"link_id"}, set()),
+        "retry_node_run": (set(), {"reason"}),
     }
 )
 

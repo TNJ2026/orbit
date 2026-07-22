@@ -118,7 +118,10 @@ class RecoveryApplyTests(unittest.TestCase):
                     "sha256:" + "4" * 64, NOW.isoformat(), NOW.isoformat(),
                 ),
             )
-        manager = RecoveryManager(self.path, human_service=self.human)
+        manager = RecoveryManager(
+            self.path, human_service=self.human,
+            takeover_participants=("operator",),
+        )
         first = manager.scan(NOW, apply=True)
         second = manager.scan(NOW, apply=True)
         self.assertIn("UNKNOWN_PLANNER", [item.code for item in first.findings])
@@ -130,6 +133,86 @@ class RecoveryApplyTests(unittest.TestCase):
                 (str(self.run_id),),
             ).fetchone()[0]
         self.assertEqual(1, count)
+
+    def test_an_unknown_attempt_is_reported_but_never_escalated(self):
+        """The run page owns this decision, so recovery offers nothing.
+
+        Run the step again or cancel the run — both live on the run itself. A
+        takeover task here would be a second, emptier place to look.
+        """
+
+        with connect_workflow_database(self.path) as connection:
+            connection.execute(
+                "INSERT INTO node_runs(node_run_id,run_id,node_id,source_plan_version,"
+                "status,aggregate_version,created_at,updated_at,generation,"
+                "activation_key) VALUES (?,?,?,1,'waiting',1,?,?,1,'root')",
+                (
+                    "node_run:unknown", str(self.run_id), "work",
+                    NOW.isoformat(), NOW.isoformat(),
+                ),
+            )
+            connection.execute(
+                "INSERT INTO node_attempts(attempt_id,node_run_id,attempt_number,"
+                "status,aggregate_version,created_at,updated_at)"
+                " VALUES (?,?,1,'unknown_external_result',3,?,?)",
+                ("attempt:unknown", "node_run:unknown", NOW.isoformat(), NOW.isoformat()),
+            )
+        manager = RecoveryManager(
+            self.path, human_service=self.human,
+            takeover_participants=("operator",),
+        )
+        report = manager.scan(NOW, apply=True)
+        finding = next(
+            item for item in report.findings if item.code == "UNKNOWN_ATTEMPT"
+        )
+        self.assertFalse(finding.actionable)
+        # Neither applied nor failed: it is simply not recovery's to act on.
+        self.assertNotIn(finding.action_id, report.applied_action_ids)
+        self.assertEqual(
+            [], [item for item in report.failed_actions if item[0] == finding.action_id]
+        )
+
+        outcomes = manager.apply_findings((finding.action_id,), NOW)
+        self.assertEqual("elsewhere", outcomes[0].outcome)
+        with connect_workflow_database(self.path, read_only=True) as connection:
+            count = connection.execute(
+                "SELECT COUNT(*) FROM human_tasks WHERE run_id=? AND kind='recovery'",
+                (str(self.run_id),),
+            ).fetchone()[0]
+        self.assertEqual(0, count)
+
+    def test_a_takeover_nobody_can_answer_is_not_created(self):
+        """A HumanTask names who may decide it; an unnamed one is a dead end."""
+
+        with connect_workflow_database(self.path) as connection:
+            connection.execute(
+                """INSERT INTO planner_attempts(
+                       attempt_id,run_id,attempt_number,status,context_json,
+                       context_hash,prompt_hash,capability_manifest_hash,model_id,
+                       provider_id,request_fingerprint,raw_response,
+                       raw_response_checksum,provider_request_id,usage_json,
+                       proposal_id,error_json,lease_owner,lease_token_hash,
+                       fencing_token,lease_expires_at,aggregate_version,
+                       created_at,updated_at
+                   ) VALUES (?,?,1,'unknown','{}',?,?,?,?,?, ?,NULL,NULL,NULL,NULL,
+                             NULL,'{}',NULL,NULL,0,NULL,0,?,?)""",
+                (
+                    "planner_attempt:orphan", str(self.run_id),
+                    "sha256:" + "5" * 64, "sha256:" + "6" * 64,
+                    "sha256:" + "7" * 64, "model", "provider",
+                    "sha256:" + "8" * 64, NOW.isoformat(), NOW.isoformat(),
+                ),
+            )
+        report = RecoveryManager(self.path, human_service=self.human).scan(
+            NOW, apply=True
+        )
+        self.assertTrue(report.failed_actions)
+        with connect_workflow_database(self.path, read_only=True) as connection:
+            count = connection.execute(
+                "SELECT COUNT(*) FROM human_tasks WHERE run_id=? AND kind='recovery'",
+                (str(self.run_id),),
+            ).fetchone()[0]
+        self.assertEqual(0, count)
 
     def test_pagination_cursor_is_stable(self):
         report = RecoveryManager(self.path).scan(NOW, limit=1)

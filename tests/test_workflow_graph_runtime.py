@@ -16,7 +16,9 @@ from orbit.workflow.application.plan_service import PlanService
 from orbit.workflow.application.budget_service import BudgetService
 from orbit.workflow.domain.durable_execution import ExecutionSafety
 from orbit.workflow.domain.data import derive_artifact_id
-from orbit.workflow.domain.handlers import ResourceProfile
+from orbit.workflow.domain.handlers import (
+    ResourceProfile, UnknownExternalResultError,
+)
 from orbit.workflow.domain.envelopes import CommandEnvelope
 from orbit.workflow.domain.execution_plan import GraphExecutionPlan, execution_plan_from_primitive
 from orbit.workflow.domain.graph import (
@@ -24,7 +26,9 @@ from orbit.workflow.domain.graph import (
 )
 from orbit.workflow.domain.ids import EntityId
 from orbit.workflow.domain.serialization import definition_hash, to_primitive
-from orbit.workflow.domain.states import BranchTokenStatus, WorkflowRunStatus
+from orbit.workflow.domain.states import (
+    AttemptStatus, BranchTokenStatus, WorkflowRunStatus,
+)
 from orbit.workflow.domain.versions import AggregateVersion, Revision
 from orbit.workflow.dsl import DiagnosticError, compile_source
 from orbit.workflow.graph.conditions import evaluate_condition
@@ -1116,6 +1120,129 @@ class GraphRuntimeE2ETests(unittest.TestCase):
             attempts = uow.attempts.list_by_node_run(work.node_run_id)
         self.assertEqual(1, len([item for item in nodes if item.node_id == "work"]))
         self.assertEqual([1, 2], [item.attempt_number.value for item in attempts])
+
+    def _park_on_unknown(self):
+        """Drive one action node to an external result nobody can settle."""
+
+        dsl = {
+            "dsl_version": "1.2",
+            "metadata": {"id": "unknown_graph", "name": "Unknown"},
+            "nodes": [
+                {"id": "work", "kind": "action", "inputs": PORT("value"),
+                 "outputs": PORT("value"),
+                 "handler": {"name": "work", "version": "1.0.0"}},
+                {"id": "done", "kind": "terminal", "inputs": PORT("value")},
+            ],
+            "edges": [{"id": "done", "from": {"node": "work", "port": "value"},
+                       "to": {"node": "done", "port": "value"}}],
+            "entry": ["work"], "terminals": ["done"],
+        }
+        handler = HandlerManifest(
+            name="work", version="1.0.0", node_kinds=("action",),
+            inputs={"value": "schema://value/1.0"},
+            outputs={"value": "schema://value/1.0"},
+            config_schema={"type": "object", "additionalProperties": False},
+            execution_safety=ExecutionSafety.UNKNOWN_ON_LEASE_LOSS,
+            resource_profile=ResourceProfile(0, 0, 0, 60, 0, "free"),
+            result_schema_id="schema://value/1.0",
+        )
+        compiled = compile_source(
+            json.dumps(dsl), InMemoryHandlerCatalog([handler]),
+            InMemorySchemaCatalog({"schema://value/1.0": {}}), source_format="json",
+        )
+        temp = tempfile.TemporaryDirectory(); self.addCleanup(temp.cleanup)
+        path = Path(temp.name) / "unknown.db"
+        SQLiteWorkflowVersionStore(path).publish(
+            compiled, expected_latest_version=0, source_format="json",
+            source_text=None, actor="test",
+        )
+        service = DurableRuntimeApplicationService(path)
+        run_id = EntityId("run", "unknown")
+        service.submit(CommandEnvelope(
+            EntityId("command", "unknown-start"), "start_run", run_id, run_id,
+            AggregateVersion(0), "unknown-start", "test", NOW,
+            {"workflow_id": compiled.ir.workflow_id, "workflow_version": 1,
+             "definition_hash": compiled.definition_hash.value,
+             "input": {"value": 1}},
+        ))
+        claimed = service.claim_job("worker", NOW)
+        service.start_job(claimed, NOW)
+        service.report_unknown_job_result(claimed, NOW, UnknownExternalResultError(
+            "the Agent never answered", provider_request_id="provider-1",
+        ).failure.to_result())
+        service.durable_recovery.scan_once(NOW)
+        with service.uow_factory() as uow:
+            node = next(
+                item for item in uow.node_runs.list_by_run(run_id)
+                if item.node_id == "work"
+            )
+        return service, run_id, node
+
+    def test_an_unknown_result_parks_the_run_instead_of_failing_it(self):
+        """The graph is not stalled — it is waiting for a person."""
+
+        service, run_id, _ = self._park_on_unknown()
+        self.assertIs(WorkflowRunStatus.WAITING, service.get_run(run_id).status)
+        reasons = [
+            item.envelope.payload.get("reason")
+            for item in service.get_timeline(run_id)
+            if item.envelope.event_type == "workflow_run_transitioned"
+        ]
+        self.assertIn("unknown_external_result", reasons)
+        self.assertNotIn("graph_stalled", reasons)
+
+    def test_an_operator_can_run_the_parked_node_again(self):
+        service, run_id, parked = self._park_on_unknown()
+        retry = CommandEnvelope(
+            EntityId("command", "unknown-retry"), "retry_node_run",
+            parked.node_run_id, run_id, parked.aggregate_version,
+            "retry:unknown", "operator", NOW, {"reason": "the Agent never ran"},
+        )
+        self.assertEqual("applied", service.submit(retry).disposition.value)
+        self.assertIs(WorkflowRunStatus.RUNNING, service.get_run(run_id).status)
+
+        with service.uow_factory() as uow:
+            work = [
+                item for item in uow.node_runs.list_by_run(run_id)
+                if item.node_id == "work"
+            ]
+            attempt = uow.attempts.list_by_node_run(parked.node_run_id)[0]
+        # The Runtime still does not know what the first attempt did, and does
+        # not pretend to: a later generation supersedes it.
+        self.assertIs(AttemptStatus.UNKNOWN_EXTERNAL_RESULT, attempt.status)
+        self.assertEqual([1, 2], sorted(item.generation for item in work))
+        self.assertEqual({"cancelled", "ready"}, {item.status.value for item in work})
+
+        second = service.claim_job("worker", NOW)
+        self.assertIsNotNone(second)
+        service.start_job(second, NOW)
+        service.complete_job(second, NOW, {"value": 2})
+        self.assertIs(WorkflowRunStatus.SUCCEEDED, service.get_run(run_id).status)
+
+    def test_retrying_a_node_nobody_is_waiting_on_is_refused(self):
+        compiled = compile_graph(decision_graph())
+        temp = tempfile.TemporaryDirectory(); self.addCleanup(temp.cleanup)
+        path = Path(temp.name) / "no-retry.db"
+        SQLiteWorkflowVersionStore(path).publish(
+            compiled, expected_latest_version=0, source_format="json",
+            source_text=None, actor="test",
+        )
+        service = DurableRuntimeApplicationService(path)
+        run_id = EntityId("run", "no-retry")
+        service.submit(CommandEnvelope(
+            EntityId("command", "no-retry-start"), "start_run", run_id, run_id,
+            AggregateVersion(0), "no-retry-start", "test", NOW,
+            {"workflow_id": compiled.ir.workflow_id, "workflow_version": 1,
+             "definition_hash": compiled.definition_hash.value,
+             "input": {"value": 1}},
+        ))
+        with service.uow_factory() as uow:
+            node = uow.node_runs.list_by_run(run_id)[0]
+        result = service.submit(CommandEnvelope(
+            EntityId("command", "no-retry"), "retry_node_run", node.node_run_id,
+            run_id, node.aggregate_version, "retry:no-retry", "operator", NOW, {},
+        ))
+        self.assertEqual("rejected", result.disposition.value)
 
     def test_controller_reaction_limit_yields_a_recoverable_continuation(self):
         count = 140

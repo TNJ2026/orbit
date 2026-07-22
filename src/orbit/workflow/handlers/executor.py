@@ -16,7 +16,10 @@ from ..domain.handlers import (
 )
 from ..domain.serialization import canonical_json, to_primitive
 from ..data.secrets import assert_no_secret_values
-from .context import NullTracer, RejectingArtifactWriter, ScopedSecretResolver, utc_now
+from .context import (
+    DiscardedAttemptOutput, NullTracer, RejectingArtifactWriter,
+    ScopedSecretResolver, utc_now,
+)
 from .registry import ExecutionRegistry
 from .usage import InMemoryUsageReporter, UsageConflictError
 
@@ -40,6 +43,7 @@ class HandlerExecutor:
         secret_values: Mapping[str, str] | None = None,
         artifact_writer=None,
         artifact_access_factory=None,
+        output_sink_factory=None,
         logger=None,
         tracer=None,
         clock=utc_now,
@@ -52,6 +56,9 @@ class HandlerExecutor:
         self.secret_values = dict(secret_values or {})
         self.artifact_writer = artifact_writer or RejectingArtifactWriter()
         self.artifact_access_factory = artifact_access_factory
+        # Where a Handler's console goes. Absent in tests and in embedders
+        # that keep no output store; Handlers must not care either way.
+        self.output_sink_factory = output_sink_factory
         self.logger = logger or (lambda message, fields: None)
         self.tracer = tracer or NullTracer()
         self.clock = clock
@@ -72,9 +79,13 @@ class HandlerExecutor:
             self.artifact_access_factory(request)
             if self.artifact_access_factory is not None else self.artifact_writer
         )
+        output = (
+            self.output_sink_factory(request)
+            if self.output_sink_factory is not None else DiscardedAttemptOutput()
+        )
         context = HandlerContext(
             request, resolver, artifacts, reporter,
-            cancellation_token, self.logger, self.tracer, self.clock,
+            cancellation_token, self.logger, self.tracer, self.clock, output,
         )
         try:
             _schema_error(manifest.config_schema, request.config, "config")

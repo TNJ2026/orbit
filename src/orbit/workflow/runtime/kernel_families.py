@@ -2775,9 +2775,19 @@ class RuntimeKernel:
                 not waiting_join and not active_job and not active_timer
                 and not active_human
             ):
-                ids.extend(self._fail_graph_run(
-                    uow, command, events, run.run_id, "graph_stalled",
-                ))
+                # An external result nobody has settled is not a stalled graph:
+                # the Runtime is not stuck, it is *waiting for a person* to say
+                # whether the Agent acted. Failing here would throw that
+                # decision away and leave the operator no lever at all.
+                if self._unsettled_unknown(uow, run.run_id):
+                    ids.extend(self._wait_graph_run(
+                        uow, command, events, run.run_id,
+                        "unknown_external_result",
+                    ))
+                else:
+                    ids.extend(self._fail_graph_run(
+                        uow, command, events, run.run_id, "graph_stalled",
+                    ))
         current = uow.runs.get(run.run_id)
         return ids, current.aggregate_version, run.run_id, {
             "run_id": str(run.run_id), "event_count": len(ids),
@@ -2944,6 +2954,148 @@ class RuntimeKernel:
             run.aggregate_version,
         )
         return [event.event_id]
+
+    @staticmethod
+    def _unsettled_unknown(uow, run_id):
+        """Is some NodeRun parked on an external result nobody has settled?
+
+        An attempt never leaves ``unknown_external_result`` — the Runtime never
+        learns what the Agent did. What makes the question *settled* is the
+        NodeRun moving on: a retry supersedes it with a later generation, and
+        cancelling the run ends it.
+        """
+
+        return uow.connection.execute(
+            """SELECT 1 FROM node_attempts a
+               JOIN node_runs n ON n.node_run_id = a.node_run_id
+               WHERE n.run_id = ? AND a.status = 'unknown_external_result'
+                 AND n.status IN ('pending','ready','running','waiting')
+               LIMIT 1""",
+            (str(run_id),),
+        ).fetchone() is not None
+
+    def _wait_graph_run(self, uow, command, events, run_id, reason):
+        run = uow.runs.get(run_id)
+        if run.status is not WorkflowRunStatus.RUNNING:
+            return []
+        event = events.make(
+            run_id, run.aggregate_version.value + 1, "workflow_run_transitioned",
+            _transition_payload(
+                "workflow_run", WorkflowRunStatus.RUNNING,
+                WorkflowRunStatus.WAITING, reason=reason,
+            ),
+        )
+        uow.events.append(run_id, run_id, run.aggregate_version, (event,))
+        uow.runs.update(
+            replace(
+                run, status=WorkflowRunStatus.WAITING,
+                aggregate_version=run.aggregate_version.next(),
+                updated_at=command.issued_at,
+            ),
+            run.aggregate_version,
+        )
+        return [event.event_id]
+
+    def _retry_node_run(self, uow, command, events):
+        """Take over a NodeRun parked on an unknown external result.
+
+        The unknown attempt is never rewritten — the Runtime still does not
+        know what happened, and saying otherwise would be a lie in the event
+        log. Instead the operator's decision *supersedes* it: the parked
+        NodeRun is cancelled and the same plan node is scheduled again at the
+        next generation, which is a new NodeRun with its own Job and Attempt.
+        """
+
+        node = uow.node_runs.get(command.aggregate_id)
+        if node is None:
+            raise ValueError("NodeRun was not found")
+        self._check_version(node, command)
+        if node.status not in {NodeRunStatus.READY, NodeRunStatus.WAITING}:
+            raise ValueError("RetryNodeRun requires a ready or waiting NodeRun")
+        attempts = uow.attempts.list_by_node_run(node.node_run_id)
+        if not any(
+            item.status is AttemptStatus.UNKNOWN_EXTERNAL_RESULT for item in attempts
+        ):
+            raise ValueError("RetryNodeRun requires an unknown external result")
+        if any(
+            item.node_run_id == node.node_run_id
+            and item.status in {
+                JobStatus.READY, JobStatus.LEASED, JobStatus.RUNNING,
+                JobStatus.RETRY_WAIT,
+            }
+            for item in uow.jobs.list_by_run(node.run_id)
+        ):
+            raise IntegrityViolationError("NodeRun already has active Job")
+        run = uow.runs.get(node.run_id)
+        if run is None or run.status not in {
+            WorkflowRunStatus.RUNNING, WorkflowRunStatus.WAITING,
+        }:
+            raise ValueError("RetryNodeRun requires a running or waiting Run")
+        plan = self._load_plan(uow, node.run_id, node.source_plan_version.value)
+        if not isinstance(plan, GraphExecutionPlan):
+            raise ValueError("RetryNodeRun requires ExecutionPlan 1.2")
+        input_value = next(
+            (
+                item.envelope.payload["input"]
+                for item in uow.events.read_stream(node.node_run_id, limit=1000)
+                if item.envelope.event_type == "node_input_prepared"
+            ),
+            None,
+        )
+        if input_value is None:
+            raise ValueError("NodeRun input is missing")
+
+        cancelled = events.make(
+            node.node_run_id, node.aggregate_version.value + 1,
+            "node_run_transitioned",
+            _transition_payload(
+                "node_run", node.status, NodeRunStatus.CANCELLED,
+                run_id=str(node.run_id), node_id=node.node_id,
+                generation=node.generation, activation_key=node.activation_key,
+            ),
+        )
+        uow.events.append(
+            node.run_id, node.node_run_id, node.aggregate_version, (cancelled,)
+        )
+        uow.node_runs.update(
+            replace(
+                node, status=NodeRunStatus.CANCELLED,
+                aggregate_version=node.aggregate_version.next(),
+                updated_at=command.issued_at,
+            ),
+            node.aggregate_version,
+        )
+        ids = [cancelled.event_id]
+        if run.status is WorkflowRunStatus.WAITING:
+            resumed = events.make(
+                run.run_id, run.aggregate_version.value + 1,
+                "workflow_run_transitioned",
+                _transition_payload(
+                    "workflow_run", WorkflowRunStatus.WAITING,
+                    WorkflowRunStatus.RUNNING, reason="node_retried",
+                ),
+            )
+            uow.events.append(
+                run.run_id, run.run_id, run.aggregate_version, (resumed,)
+            )
+            uow.runs.update(
+                replace(
+                    run, status=WorkflowRunStatus.RUNNING,
+                    aggregate_version=run.aggregate_version.next(),
+                    updated_at=command.issued_at,
+                ),
+                run.aggregate_version,
+            )
+            ids.append(resumed.event_id)
+        ids.extend(self._schedule_graph(
+            uow, command, events, plan, node.node_id, input_value,
+            generation=node.generation + 1, activation_key=node.activation_key,
+        ))
+        current = uow.node_runs.get(node.node_run_id)
+        return ids, current.aggregate_version, node.run_id, {
+            "node_run_id": str(node.node_run_id), "node_id": node.node_id,
+            "generation": node.generation + 1,
+        }
 
     def _fail_graph_run(self, uow, command, events, run_id, reason):
         run = uow.runs.get(run_id)

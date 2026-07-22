@@ -91,6 +91,19 @@ class CancellationTokenPort(Protocol):
 
 
 @runtime_checkable
+class AttemptOutputPort(Protocol):
+    """Where a Handler's subprocess output goes while it is still running.
+
+    An observation, not an event: it is what a process printed, it may be
+    truncated, and no kernel decision may read it. It exists so a person can
+    watch an Agent work — and can still see what it said when the attempt
+    never came back to report anything.
+    """
+
+    def emit(self, stream: str, text: str) -> None: ...
+
+
+@runtime_checkable
 class HandlerLoggerPort(Protocol):
     def __call__(self, message: str, fields: Mapping[str, Any]) -> None: ...
 
@@ -115,3 +128,4 @@ class HandlerContext:
     logger: HandlerLoggerPort
     tracer: TracerPort
     clock: ClockPort
+    output: AttemptOutputPort | None = None

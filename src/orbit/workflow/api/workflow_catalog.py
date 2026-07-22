@@ -174,7 +174,24 @@ class WorkflowCatalogReadModelService:
                    )
                    ORDER BY workflow_id"""
             ).fetchall()
-        return [self._entry(row, include_definition=False) for row in rows]
+            # How recently a definition was actually used is a fact about runs,
+            # not about the definition. A catalog of dozens is ordered by it far
+            # more often than by workflow_id, so the projection carries it.
+            usage = {
+                row["workflow_id"]: row
+                for row in connection.execute(
+                    "SELECT workflow_id, MAX(created_at) AS last_run_at,"
+                    " COUNT(*) AS run_count FROM workflow_runs GROUP BY workflow_id"
+                ).fetchall()
+            }
+        entries = []
+        for row in rows:
+            item = self._entry(row, include_definition=False)
+            used = usage.get(row["workflow_id"])
+            item["last_run_at"] = None if used is None else used["last_run_at"]
+            item["run_count"] = 0 if used is None else int(used["run_count"])
+            entries.append(item)
+        return entries
 
     def detail(self, workflow_id: str, version: int | None = None) -> dict[str, Any]:
         with connect_workflow_database(self.path, read_only=True) as connection:

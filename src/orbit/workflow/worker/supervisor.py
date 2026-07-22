@@ -53,6 +53,18 @@ class LeaseSupervisor:
             pass
 
     def _run(self) -> None:
+        try:
+            self._renew_until_done()
+        except BaseException:  # noqa: BLE001 - see below
+            # This thread is the only thing keeping the lease alive. If it dies
+            # for a reason the loop below does not name, the Handler keeps
+            # running against a lease nobody is renewing, and the attempt ends
+            # as `unknown_external_result` half a minute later with nothing to
+            # explain it. Cancelling instead makes the Handler stop and report.
+            self._cancel("lease_lost")
+            raise
+
+    def _renew_until_done(self) -> None:
         while not self._stop.wait(self.renew_interval_seconds):
             now = self.clock()
             if now >= self.deadline:

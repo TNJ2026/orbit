@@ -80,6 +80,24 @@ RESPONSIBILITY_QUERIES: tuple[tuple[str, str, str], ...] = (
         " AND status IN ('starting','running','unknown')",
         "Subflow",
     ),
+    # A NodeRun the Runtime could not settle is waiting on a person, not on
+    # itself. It carries its NodeRun because running the step again is an act
+    # on the NodeRun, not on the attempt that stayed unknown. A run that has
+    # already ended is nobody's responsibility: its history records that the
+    # result stayed unknown, and there is nothing left to decide.
+    (
+        "unknown",
+        "SELECT n.run_id, a.attempt_id AS id, a.status, n.node_id AS detail,"
+        " a.aggregate_version, n.node_run_id,"
+        " n.aggregate_version AS node_version"
+        " FROM node_attempts a JOIN node_runs n ON n.node_run_id=a.node_run_id"
+        " JOIN workflow_runs r ON r.run_id=n.run_id"
+        " WHERE n.run_id IN ({run_ids})"
+        " AND a.status='unknown_external_result'"
+        " AND n.status IN ('pending','ready','running','waiting')"
+        " AND r.status NOT IN ('succeeded','failed','cancelled')",
+        "Unknown result",
+    ),
 )
 
 
@@ -121,6 +139,7 @@ class ReadModelService:
         placeholders = ",".join("?" for _ in run_ids)
         for kind, sql, label in RESPONSIBILITY_QUERIES:
             for row in connection.execute(sql.format(run_ids=placeholders), tuple(run_ids)):
+                columns = set(row.keys())
                 grouped[row["run_id"]].append({
                     "kind": kind,
                     "id": row["id"],
@@ -128,6 +147,10 @@ class ReadModelService:
                     "detail": row["detail"],
                     "label": f"{label}: {row['detail']}" if row["detail"] else label,
                     "aggregate_version": row["aggregate_version"],
+                    # Carried only by the kinds whose command acts on something
+                    # other than the row itself.
+                    **({"node_run_id": row["node_run_id"]} if "node_run_id" in columns else {}),
+                    **({"node_version": row["node_version"]} if "node_version" in columns else {}),
                 })
         # Human first: those are the ones a person can actually act on.
         order = {kind: index for index, (kind, _, _) in enumerate(RESPONSIBILITY_QUERIES)}
@@ -380,14 +403,37 @@ class ReadModelService:
             summary["plan_version"] = plan["version"] if plan else None
         return summary
 
+    def _human_task_authority(self, connection, actor: str | None) -> dict[str, bool]:
+        """Which HumanTasks this actor may actually answer.
+
+        Token authority is per task and deliberately not a scope: a participant,
+        the assignee, the claimer or the creating actor. The Inbox has always
+        applied it; a run page that did not would offer an Approve button the
+        server refuses — which is exactly how people learn to distrust the UI.
+        """
+
+        rows = connection.execute(
+            "SELECT h.task_id, h.assignee, h.claimed_by, h.actor,"
+            " EXISTS(SELECT 1 FROM human_task_participants p"
+            "        WHERE p.task_id=h.task_id AND p.actor=?) AS participant"
+            " FROM human_tasks h WHERE h.status IN ('waiting','claimed')",
+            (actor or "",),
+        ).fetchall()
+        return {
+            row["task_id"]: bool(row["participant"])
+            or actor in {row["assignee"], row["claimed_by"], row["actor"]}
+            for row in rows
+        }
+
     def responsibilities(
-        self, run_id: EntityId, *, command_factory=None
+        self, run_id: EntityId, *, command_factory=None, actor: str | None = None
     ) -> list[dict[str, Any]]:
         """Waiting items for a run, each carrying its authorised commands."""
 
         with connect_workflow_database(self.path, read_only=True) as connection:
             rows = self._responsibility_rows(connection, str(run_id))
             budget = self._budget(connection, str(run_id))
+            human_authority = self._human_task_authority(connection, actor)
             run = connection.execute(
                 "SELECT status, aggregate_version,"
                 " COALESCE((SELECT MAX(e.aggregate_sequence) FROM run_events e"
@@ -413,8 +459,14 @@ class ReadModelService:
                 status=row["status"],
                 detail=row["detail"],
                 expected_version=row["aggregate_version"],
-                allowed_commands=tuple(
-                    factory(row, run_id=str(run_id), run_version=run["command_version"])
+                node_run_id=row.get("node_run_id"),
+                allowed_commands=(
+                    ()
+                    if row["kind"] == "human"
+                    and not human_authority.get(str(row["id"]), False)
+                    else tuple(factory(
+                        row, run_id=str(run_id), run_version=run["command_version"],
+                    ))
                 ),
             )
             result.append(responsibility.to_dict())
@@ -671,21 +723,30 @@ class ReadModelService:
                 " AND b.consumed_microunits>=b.total_microunits"
                 " AND r.status NOT IN ('succeeded','failed','cancelled')"
             ).fetchall()
+            # A node attempt carries its NodeRun with it: retrying is an act on
+            # the NodeRun, and only a NodeRun the graph still holds open is
+            # worth an operator's attention — a cancelled or superseded one has
+            # already been answered.
             unknown_rows = connection.execute(
                 "SELECT 'attempt' AS source, a.attempt_id AS id, n.run_id,"
                 " a.status, a.aggregate_version, COALESCE((SELECT MAX(e.aggregate_sequence)"
-                " FROM run_events e WHERE e.aggregate_id=r.run_id), 0) AS run_version"
+                " FROM run_events e WHERE e.aggregate_id=r.run_id), 0) AS run_version,"
+                " n.node_run_id, n.node_id, n.aggregate_version AS node_version"
                 " FROM node_attempts a JOIN node_runs n ON n.node_run_id=a.node_run_id"
                 " JOIN workflow_runs r ON r.run_id=n.run_id"
                 " WHERE a.status='unknown_external_result'"
+                " AND n.status IN ('pending','ready','running','waiting')"
+                " AND r.status NOT IN ('succeeded','failed','cancelled')"
                 " UNION ALL SELECT 'planner', p.attempt_id, p.run_id, p.status,"
                 " p.aggregate_version, COALESCE((SELECT MAX(e.aggregate_sequence)"
-                " FROM run_events e WHERE e.aggregate_id=r.run_id), 0)"
+                " FROM run_events e WHERE e.aggregate_id=r.run_id), 0),"
+                " NULL, NULL, NULL"
                 " FROM planner_attempts p JOIN workflow_runs r ON r.run_id=p.run_id"
                 " WHERE p.status='unknown'"
                 " UNION ALL SELECT 'subflow', s.link_id, s.parent_run_id, s.status,"
                 " s.aggregate_version, COALESCE((SELECT MAX(e.aggregate_sequence)"
-                " FROM run_events e WHERE e.aggregate_id=r.run_id), 0)"
+                " FROM run_events e WHERE e.aggregate_id=r.run_id), 0),"
+                " NULL, NULL, NULL"
                 " FROM subflow_links s JOIN workflow_runs r ON r.run_id=s.parent_run_id"
                 " WHERE s.status='unknown'"
             ).fetchall()
@@ -738,13 +799,23 @@ class ReadModelService:
                 "allowed_commands": allowed, "requires_actor_action": bool(allowed),
             })
         for row in unknown_rows:
-            record = {"kind": "unknown", "id": row["id"], "status": row["status"],
-                      "detail": row["source"], "aggregate_version": row["aggregate_version"]}
+            record = {
+                "kind": "unknown", "id": row["id"], "status": row["status"],
+                "detail": row["source"],
+                "aggregate_version": row["aggregate_version"],
+                "node_run_id": row["node_run_id"], "node_id": row["node_id"],
+                "node_version": row["node_version"],
+            }
             allowed = commands(record, row["run_id"], row["run_version"])
+            label = (
+                f"Unknown result: {row['node_id']}" if row["node_id"]
+                else f"Unknown result: {row['source']}"
+            )
             items.append({
                 "item_id": f"unknown:{row['id']}", "task_id": None,
                 "kind": "unknown", "run_id": row["run_id"], "status": "unknown",
-                "label": f"Unknown result: {row['source']}", "detail": row["source"],
+                "label": label, "detail": row["source"],
+                "node_run_id": row["node_run_id"], "node_id": row["node_id"],
                 "expected_version": row["aggregate_version"], "deadline_at": None,
                 "quorum": None,
                 "allowed_commands": allowed, "requires_actor_action": bool(allowed),
@@ -833,6 +904,23 @@ def default_allowed_commands(
                 "budget.add", "Add budget", "POST",
                 f"/api/v1/runs/{run_id}/budget",
                 f"budget_account:{run_id}", version, "budget-add/1.0",
+            ),
+            AllowedCommand(
+                "run.cancel", "Cancel run", "POST",
+                f"/api/v1/runs/{run_id}/cancel",
+                run_id, run_version, "run-cancel/1.0",
+            ),
+        )
+    # A node parked on an unknown external result is the one case an operator
+    # can resolve: they know whether the Agent already acted, so they may run
+    # the node again. The Runtime never decides that on its own.
+    if kind == "unknown" and row.get("node_run_id"):
+        node_run_id = str(row["node_run_id"])
+        return (
+            AllowedCommand(
+                "node.retry", "Run this step again", "POST",
+                f"/api/v1/runs/{run_id}/node-runs/{node_run_id}/retry",
+                node_run_id, int(row["node_version"]), "node-retry/1.0",
             ),
             AllowedCommand(
                 "run.cancel", "Cancel run", "POST",

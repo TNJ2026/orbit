@@ -247,6 +247,36 @@ class RunLifecycleE2E(unittest.TestCase):
                     body = response.read().decode()
                 self.assertNotIn("http://", body.replace("http://www.w3.org", ""))
 
+    def test_ui_modules_are_revalidated_rather_than_assumed_fresh(self) -> None:
+        """One stale module would break the whole ES module graph.
+
+        The UI's modules import each other by fixed path, so a browser that
+        keeps one file from its cache while fetching its changed neighbour gets
+        an import error and renders nothing at all.
+        """
+
+        for path in (
+            "/ui/", "/ui/assets/app.js",
+            "/ui/assets/components/command-dialog.js",
+            "/ui/assets/styles/views.css", "/ui/assets/i18n.en-US.json",
+        ):
+            with self.subTest(path=path):
+                with urllib.request.urlopen(f"{self.base}{path}", timeout=5) as response:
+                    self.assertEqual("no-cache", response.headers["cache-control"])
+                    self.assertIsNotNone(response.headers["etag"])
+
+        # Revalidation stays cheap: an unchanged file still answers 304.
+        request = urllib.request.Request(f"{self.base}/ui/assets/app.js")
+        with urllib.request.urlopen(request, timeout=5) as response:
+            etag = response.headers["etag"]
+        request.add_header("if-none-match", etag)
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                self.fail(f"expected 304, got {response.status}")
+        except urllib.error.HTTPError as error:
+            self.assertEqual(304, error.code)
+            self.assertEqual("no-cache", error.headers["cache-control"])
+
     def test_health_reports_every_background_component(self) -> None:
         _status, body = self.client.get("/health/ready")
         components = body["checks"]["components"]["detail"]

@@ -14,6 +14,13 @@ from ..persistence.control import audit
 from ..persistence.database import connect_workflow_database
 
 
+# Findings Ops can do nothing useful about, because the decision belongs
+# somewhere the operator can already make it. An unsettled Agent result is
+# answered on the run itself — run the step again, or cancel the run — and a
+# takeover task would only add a second, emptier place to look.
+OPERATOR_OWNED_ELSEWHERE = frozenset({"UNKNOWN_ATTEMPT"})
+
+
 @dataclass(frozen=True)
 class RecoveryFinding:
     code: str
@@ -27,13 +34,19 @@ class RecoveryFinding:
     def action_id(self) -> str:
         return f"{self.code}:{self.entity_id}:{self.expected_version}"
 
+    @property
+    def actionable(self) -> bool:
+        """Whether Ops has anything to offer for this finding."""
+
+        return self.code not in OPERATOR_OWNED_ELSEWHERE
+
 
 @dataclass(frozen=True)
 class AppliedFinding:
     """What happened to one selected finding."""
 
     action_id: str
-    outcome: str          # applied | stale | unsafe | failed
+    outcome: str          # applied | stale | unsafe | elsewhere | failed
     detail: str = ""
 
     def to_dict(self) -> dict[str, str]:
@@ -59,12 +72,17 @@ class RecoveryManager:
         planner_service=None,
         human_service=None,
         foreach_service=None,
+        takeover_participants: Sequence[str] = (),
     ) -> None:
         self.path = Path(path)
         self.durable = durable_service
         self.planner = planner_service
         self.human = human_service
         self.foreach = foreach_service
+        # Who may answer a takeover. A HumanTask names the people who can
+        # decide it; a takeover created with nobody named is a task no one can
+        # ever answer, which is worse than no takeover at all.
+        self.takeover_participants = tuple(dict.fromkeys(takeover_participants))
 
     def scan(
         self,
@@ -95,6 +113,11 @@ class RecoveryManager:
         failed: list[tuple[str, str]] = []
         if apply:
             for finding in findings:
+                # Reported, never acted on: the operator answers these on the
+                # run itself, and a sweep that "failed" on every one of them
+                # would bury the findings that do need attention.
+                if not finding.actionable:
+                    continue
                 try:
                     self._apply_finding(finding, now)
                     applied.append(finding.action_id)
@@ -149,6 +172,12 @@ class RecoveryManager:
                 results.append(
                     AppliedFinding(action_id, "stale", "no longer reported by a scan")
                 )
+                continue
+            if not finding.actionable:
+                results.append(AppliedFinding(
+                    action_id, "elsewhere",
+                    "answered on the run: run the step again, or cancel the run",
+                ))
                 continue
             if not finding.safe_to_apply:
                 self._create_manual_takeover(finding, now)
@@ -269,6 +298,11 @@ class RecoveryManager:
                 EntityId.parse(finding.entity_id), actor=actor, now=now
             )
             return
+        if not finding.actionable:
+            raise RuntimeError(
+                f"{finding.code} is answered on the run, not through recovery: "
+                "run the step again or cancel the run"
+            )
         if not finding.safe_to_apply:
             self._create_manual_takeover(finding, now)
             return
@@ -279,6 +313,11 @@ class RecoveryManager:
     ) -> None:
         if self.human is None:
             raise RuntimeError("HumanTask service is unavailable")
+        if not self.takeover_participants:
+            raise RuntimeError(
+                "manual takeover needs an operator to answer it: "
+                "no takeover participants are configured"
+            )
         try:
             self.human.create(
                 EntityId.parse(finding.run_id),
@@ -290,6 +329,7 @@ class RecoveryManager:
                     "allowed_actions": ["new_attempt", "compensate", "terminate"],
                 },
                 actor="system:recovery",
+                participants=self.takeover_participants,
                 now=now,
             )
         except ValueError as exc:

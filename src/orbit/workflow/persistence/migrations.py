@@ -1037,6 +1037,35 @@ _MIGRATIONS: tuple[tuple[int, str, str], ...] = (
         ALTER TABLE workflow_draft_revisions ADD COLUMN requested_agent TEXT;
         """,
     ),
+    (
+        17,
+        "attempt output stream",
+        """
+        -- What the Handler's process printed, as it printed it.
+        --
+        -- Deliberately NOT an event: this is an observation of a subprocess,
+        -- not a decision the kernel made. It is non-deterministic, it may be
+        -- truncated, and a replay must never read it. Nothing in reducers or
+        -- recovery may branch on a row here — it exists so a person can see
+        -- what the Agent said, including when the attempt never came back.
+        CREATE TABLE attempt_output (
+            chunk_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL,
+            node_run_id TEXT NOT NULL,
+            attempt_id TEXT NOT NULL,
+            stream TEXT NOT NULL CHECK (stream IN ('stdout', 'stderr')),
+            text TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            CHECK (run_id LIKE 'run:%'),
+            CHECK (attempt_id LIKE 'attempt:%')
+        );
+
+        CREATE INDEX attempt_output_by_attempt
+            ON attempt_output(attempt_id, chunk_id);
+        CREATE INDEX attempt_output_by_run
+            ON attempt_output(run_id, chunk_id);
+        """,
+    ),
 )
 
 

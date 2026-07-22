@@ -242,7 +242,9 @@ def _serve(args) -> None:
 
     from .web.app import create_app
     from .web.builtin_handlers import BUILTIN_SCHEMAS, builtin_handlers
-    from .web.local_identity import local_authorizer, loopback_authenticator
+    from .web.local_identity import (
+        LOCAL_ACTOR, local_authorizer, loopback_authenticator,
+    )
     from .web.schema_guard import MixedSchemaError, assert_runtime_schema
     from .workflow.artifacts import LocalCASBackend
 
@@ -313,6 +315,16 @@ def _serve(args) -> None:
             serve_ui=True,
             authenticator=loopback_authenticator,
             authorizer=local_authorizer(),
+            # One operator, one machine: the rate limit would only ever throttle
+            # this person's own browser, which polls several endpoints per tick.
+            unlimited_actors=(LOCAL_ACTOR,),
+            # The approval token proves the answer came from the person the
+            # task was delivered to. On loopback that person is the only actor
+            # there is, and they can fetch the token at will — so requiring
+            # them to paste it back buys nothing.
+            token_exempt_actors=(LOCAL_ACTOR,),
+            # Recovery takeovers are answered by this person too.
+            operator_actors=(LOCAL_ACTOR,),
         )
     except MixedSchemaError as exc:
         raise SystemExit(f"error: {exc}") from None

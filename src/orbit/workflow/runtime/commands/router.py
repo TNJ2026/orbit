@@ -13,6 +13,7 @@ FAMILIES = {
     "apply_planner_proposal": "planner",
     "reject_planner_proposal": "planner",
     "apply_subflow_result": "subflow",
+    "retry_node_run": "graph",
 }
 
 

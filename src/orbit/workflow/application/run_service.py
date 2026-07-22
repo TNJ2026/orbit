@@ -227,6 +227,47 @@ class RunApplicationService:
             raise RunStartError(reasons)
         return {"run_id": run_id, "disposition": result.disposition.value}
 
+    def retry_node_run(
+        self,
+        run_id: str,
+        node_run_id: str,
+        expected_version: int,
+        *,
+        actor: str,
+        idempotency_key: str,
+        reason: str = "retried by operator",
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Run a NodeRun parked on an unknown external result once more.
+
+        The operator, not the Runtime, decides that re-running is safe: only
+        they can know whether the Agent already acted on the outside world.
+        """
+
+        identifier = EntityId.parse(node_run_id)
+        command = CommandEnvelope(
+            EntityId("command", hashlib.sha256(
+                f"retry|{node_run_id}|{idempotency_key}".encode("utf-8")
+            ).hexdigest()),
+            "retry_node_run", identifier, EntityId.parse(run_id),
+            AggregateVersion(int(expected_version)),
+            f"retry_node_run:{idempotency_key}", actor,
+            now or datetime.now(timezone.utc), {"reason": reason},
+        )
+        result = self.service.submit(command)
+        if result.disposition.value not in {"applied", "replayed"}:
+            reasons = "; ".join(
+                f"{item.code}: {item.message}" for item in result.diagnostics
+            ) or "retry rejected"
+            raise RunStartError(reasons)
+        summary = result.summary or {}
+        return {
+            "node_run_id": node_run_id,
+            "node_id": summary.get("node_id"),
+            "generation": summary.get("generation"),
+            "disposition": result.disposition.value,
+        }
+
     # -- inspect ----------------------------------------------------------
 
     def inspect(self, run_id: str) -> dict[str, Any]:

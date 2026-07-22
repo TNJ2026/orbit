@@ -28,6 +28,7 @@ from ..workflow.application.durable_runtime_service import (
     DurableRuntimeApplicationService,
 )
 from ..workflow.application.handler_runtime_service import HandlerRuntimeBuilder
+from ..workflow.persistence.attempt_output import attempt_output_sink_factory
 from ..workflow.application.plan_service import PlanService
 from ..workflow.catalogs import InMemorySchemaCatalog
 from ..workflow.persistence.database import connect_workflow_database
@@ -91,13 +92,21 @@ class BackgroundLoop:
             if not did_work:
                 self._stop.wait(self.poll_seconds)
 
-    def stop(self, timeout: float = DEFAULT_SHUTDOWN_SECONDS) -> bool:
+    def request_stop(self) -> None:
+        """Ask the loop to finish its current step and exit."""
+
         self._stop.set()
+
+    def join(self, timeout: float = DEFAULT_SHUTDOWN_SECONDS) -> bool:
         thread = self._thread
         if thread is None:
             return True
         thread.join(timeout=timeout)
         return not thread.is_alive()
+
+    def stop(self, timeout: float = DEFAULT_SHUTDOWN_SECONDS) -> bool:
+        self.request_stop()
+        return self.join(timeout)
 
     @property
     def alive(self) -> bool:
@@ -178,7 +187,10 @@ class RuntimeComposition:
 
         self.schema_catalog = InMemorySchemaCatalog(dict(schemas or {}))
         builder = HandlerRuntimeBuilder(
-            self.schema_catalog, secret_values=dict(secret_values or {})
+            self.schema_catalog, secret_values=dict(secret_values or {}),
+            output_sink_factory=attempt_output_sink_factory(
+                self.db_path, clock=self.clock
+            ),
         )
         for registration in handlers:
             builder.register(
@@ -313,15 +325,24 @@ class RuntimeComposition:
         self._started = True
 
     def stop(self, timeout: float = DEFAULT_SHUTDOWN_SECONDS) -> list[str]:
-        """Stop every loop; returns the names that did not exit in time."""
+        """Stop every loop; returns the names that did not exit in time.
 
-        stragglers = [loop.name for loop in self.loops if not loop.stop(timeout)]
-        # Any handler subprocess still running belongs to a cancelled job.
+        Order matters. A worker inside a minutes-long Agent call cannot notice
+        a stop flag, so waiting on it first only burns the shutdown budget and
+        then kills the process with the Handler still running — the lease then
+        expires unrenewed and the attempt ends `unknown_external_result` with
+        nothing recorded. Cancelling first gives that Handler the chance to
+        stop and report while the process is still alive to write it down.
+        """
+
+        for loop in self.loops:
+            loop.request_stop()
         for worker in self._workers:
             try:
                 worker.cancel_current()
             except Exception:
                 pass
+        stragglers = [loop.name for loop in self.loops if not loop.join(timeout)]
         self._started = False
         return stragglers
 
@@ -381,6 +402,9 @@ def create_app(
     authenticator: Callable[[Any], str | None] | None = None,
     authorizer: Any = None,
     rate_limiter: Any = None,
+    unlimited_actors: Sequence[str] = (),
+    token_exempt_actors: Sequence[str] = (),
+    operator_actors: Sequence[str] = (),
     serve_ui: bool = False,
     discover_agents: bool = False,
     agent_capabilities: Sequence[str] | None = None,
@@ -644,6 +668,9 @@ def create_app(
             composition.db_path, composition.service,
             authenticator=authenticator, authorizer=authorizer,
             rate_limiter=rate_limiter,
+            unlimited_actors=unlimited_actors,
+            token_exempt_actors=token_exempt_actors,
+            operator_actors=operator_actors,
             agent_catalog=agent_catalog,
             capabilities=capabilities,
             schema_catalog=composition.schema_catalog,
@@ -674,9 +701,30 @@ def create_app(
 
         from starlette.staticfiles import StaticFiles
 
+        class RevalidatedStaticFiles(StaticFiles):
+            """Serve the UI with `cache-control: no-cache`.
+
+            The UI is ES modules that import each other by fixed path. Without
+            an explicit directive a browser applies heuristic freshness per
+            file, so one changed module can load beside a cached copy of its
+            neighbour — the import then fails and the page renders nothing at
+            all. `no-cache` still revalidates with the ETag, so an unchanged
+            file costs a 304 rather than a re-download; what it removes is the
+            chance of a half-old module graph.
+            """
+
+            def file_response(self, *args, **kwargs):
+                response = super().file_response(*args, **kwargs)
+                response.headers["cache-control"] = "no-cache"
+                return response
+
         ui_root = resources.files("orbit").joinpath("static/workflow-ui")
         routes.append(
-            Mount("/ui", app=StaticFiles(directory=str(ui_root), html=True), name="ui")
+            Mount(
+                "/ui",
+                app=RevalidatedStaticFiles(directory=str(ui_root), html=True),
+                name="ui",
+            )
         )
 
     routes.extend(extra_routes)

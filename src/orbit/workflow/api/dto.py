@@ -118,6 +118,9 @@ class Responsibility:
     expected_version: int
     allowed_commands: tuple[AllowedCommand, ...] = ()
     detail: str | None = None
+    # Present when the responsibility is a NodeRun the Runtime could not
+    # settle: its command acts on that NodeRun, not on this row's own id.
+    node_run_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -127,6 +130,7 @@ class Responsibility:
             "status": self.status,
             "detail": self.detail,
             "expected_version": self.expected_version,
+            "node_run_id": self.node_run_id,
             "allowed_commands": [item.to_dict() for item in self.allowed_commands],
         }
 

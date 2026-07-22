@@ -18,10 +18,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 import sqlite3
 import tempfile
+import threading
 import time
 import unittest
 
 from orbit.web.app import RuntimeComposition, HandlerRegistration, create_app
+from orbit.workflow.application.run_service import RunApplicationService
 from orbit.web.schema_guard import (
     LEGACY_TABLES, MixedSchemaError, assert_runtime_schema, table_names,
 )
@@ -398,7 +400,7 @@ class HealthEndpointTests(unittest.TestCase):
             checks = response.json()["checks"]
             self.assertTrue(checks["database"]["ok"])
             self.assertTrue(checks["migrations"]["ok"])
-            self.assertEqual(list(range(1, 17)), checks["migrations"]["applied"])
+            self.assertEqual(list(range(1, 18)), checks["migrations"]["applied"])
             self.assertTrue(checks["handlers"]["sealed"])
             self.assertTrue(checks["components"]["ok"])
 
@@ -491,6 +493,79 @@ class EndToEndTests(unittest.TestCase):
         self.assertTrue(all(loop.alive for loop in composition.loops))
         self.assertEqual([], composition.stop())
         self.assertTrue(all(not loop.alive for loop in composition.loops))
+
+    def test_shutdown_cancels_a_running_handler_before_waiting_on_it(self) -> None:
+        """A Handler mid-call cannot notice a stop flag; it must be told.
+
+        Waiting on it first only spends the shutdown budget and then kills the
+        process with the Handler still running — the lease expires unrenewed
+        and the attempt lands as `unknown_external_result` explaining nothing.
+        """
+
+        from orbit.workflow.domain.handlers import (
+            CancelAck, CancelDisposition, HandlerResult, HandlerResultStatus,
+            HandlerValidationResult, PreparedExecution, RawHandlerResult,
+            RecoveryDisposition, RecoveryResult,
+        )
+
+        started = threading.Event()
+        released = threading.Event()
+
+        class _Blocking:
+            """An Agent CLI in miniature: runs until told to stop."""
+
+            def validate(self, manifest, config):
+                return HandlerValidationResult()
+
+            def prepare(self, request, context):
+                return PreparedExecution(
+                    {"input": request.input}, f"blocking:{request.attempt_id}"
+                )
+
+            def execute(self, prepared, context):
+                started.set()
+                for _ in range(600):
+                    if context.cancellation.cancelled:
+                        break
+                    time.sleep(0.02)
+                released.set()
+                return RawHandlerResult({"value": 1}, None)
+
+            def normalize_result(self, raw, context):
+                return HandlerResult(HandlerResultStatus.SUCCEEDED, raw.payload)
+
+            def cancel(self, execution_ref, context):
+                return CancelAck(CancelDisposition.CONFIRMED_STOPPED)
+
+            def recover(self, recovery_ref, context):
+                return RecoveryResult(RecoveryDisposition.NOT_FOUND)
+
+        registration = transform_registration()
+        composition = RuntimeComposition(
+            self.db,
+            handlers=[HandlerRegistration(
+                registration.manifest, _Blocking(), registration.implementation_id,
+            )],
+            schemas=SCHEMAS, worker_count=1, poll_seconds=0.02,
+            clock=lambda: datetime.now(timezone.utc),
+        )
+        publish_linear_workflow(self.db)
+        composition.start()
+        try:
+            RunApplicationService(self.db, composition.service).start_run(
+                workflow_id="workflow:linear", inputs={"value": 1},
+                actor="test", idempotency_key="shutdown-cancel",
+            )
+            self.assertTrue(started.wait(timeout=20), "handler never started")
+            began = time.monotonic()
+            stragglers = composition.stop(timeout=10)
+        finally:
+            composition._started = False
+        elapsed = time.monotonic() - began
+        self.assertTrue(released.is_set(), "the handler was never told to stop")
+        self.assertEqual([], stragglers)
+        # It stopped because it was cancelled, not because the budget ran out.
+        self.assertLess(elapsed, 8)
 
     def test_lifespan_starts_and_stops_components(self) -> None:
         app = create_app(

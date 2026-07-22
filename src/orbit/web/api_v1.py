@@ -23,6 +23,7 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
 from ..workflow.api.dto import CursorError, decode_cursor, encode_cursor, envelope, page_size
+from ..workflow.api.draft_graph import draft_graph
 from ..workflow.api.artifact_read_models import (
     ArtifactNotVisible, ArtifactReadModelService, PREVIEW_LIMIT_BYTES,
 )
@@ -30,6 +31,7 @@ from ..workflow.api.plan_read_models import PlanNotFound, PlanReadModelService
 from ..workflow.api.dynamic_read_models import DynamicReadModelService
 from ..workflow.api.read_models import ReadModelService
 from ..workflow.api.workflow_catalog import WorkflowCatalogReadModelService
+from ..workflow.persistence.attempt_output import SQLiteAttemptOutputStore
 from ..workflow.api.routes import (
     ApiCommandExecutor, CommandInProgress, IdempotencyConflict, RateLimiter,
     RequestTooLarge, _bounded_json,
@@ -146,6 +148,9 @@ def build_api_v1(
     authenticator: Callable[[Request], str | None] | None = None,
     authorizer: Authorizer | None = None,
     rate_limiter: RateLimiter | None = None,
+    unlimited_actors: Sequence[str] = (),
+    token_exempt_actors: Sequence[str] = (),
+    operator_actors: Sequence[str] = (),
     audit: Callable[[str, str, Mapping[str, Any]], None] | None = None,
     fault_hook: Callable[[str], None] | None = None,
     clock: Callable[[], datetime] | None = None,
@@ -174,6 +179,9 @@ def build_api_v1(
         path, schema_catalog or InMemorySchemaCatalog({})
     )
     humans = HumanTaskService(path)
+    # Handler console output: an observation store, not a projection of
+    # events, so it is read directly rather than through ReadModelService.
+    attempt_output = SQLiteAttemptOutputStore(path)
     budgets = BudgetService(path)
     # Every service a finding can be applied through. Recovery that detects a
     # problem it cannot act on is worse than not detecting it: the operator is
@@ -181,8 +189,20 @@ def build_api_v1(
     recovery = RecoveryManager(
         path, durable_service=durable_service, human_service=humans,
         foreach_service=ForeachService(path),
+        # A takeover is answered by a person. The composition root is the only
+        # place that knows who that is here.
+        takeover_participants=tuple(operator_actors),
     )
     limiter = rate_limiter or RateLimiter()
+    # The limit exists to keep a shared deployment from being drowned by one
+    # caller. An actor the composition root vouches for — the single operator
+    # on loopback — is not that caller, and its own UI polling should never
+    # lock it out of its own Runtime.
+    exempt_from_limit = frozenset(unlimited_actors)
+    # Actors the composition root vouches for as the person at the keyboard.
+    # They still need the token — the Runtime just stops asking them to carry
+    # it back and forth to themselves.
+    token_exempt_actors = frozenset(token_exempt_actors)
     executor = ApiCommandExecutor(path, fault_hook=fault_hook)
     guard = authorizer or Authorizer()
     record_audit = audit or (lambda actor, action, detail: None)
@@ -261,7 +281,7 @@ def build_api_v1(
             return error("unauthenticated", "valid actor credentials are required", 401)
         if not guard.allows(actor, scope):
             return error("forbidden", f"actor lacks scope {scope}", 403)
-        if not limiter.allow(actor):
+        if actor not in exempt_from_limit and not limiter.allow(actor):
             return error("rate_limited", "request rate limit exceeded", 429)
         return actor
 
@@ -357,7 +377,7 @@ def build_api_v1(
         try:
             items = reads.responsibilities(
                 EntityId.parse(request.path_params["run_id"]),
-                command_factory=_command_factory(actor),
+                command_factory=_command_factory(actor), actor=actor,
             )
         except ValueError as exc:
             return error("not_found", str(exc), 404)
@@ -501,7 +521,7 @@ def build_api_v1(
             can_recover = guard.allows(actor, OPS_WRITE_SCOPE)
             for finding in report.findings:
                 command = None
-                if can_recover:
+                if can_recover and finding.actionable:
                     takeover = not finding.safe_to_apply
                     command = {
                         "command": "recovery.takeover" if takeover else "recovery.apply",
@@ -870,6 +890,9 @@ def build_api_v1(
                 "start_run": guard.allows(actor, WRITE_SCOPE),
                 "ops_read": guard.allows(actor, OPS_READ_SCOPE),
                 "ops_write": guard.allows(actor, OPS_WRITE_SCOPE),
+                # Whether this actor must carry the approval token back. The
+                # client is told; it never infers this from being on loopback.
+                "human_token_required": actor not in token_exempt_actors,
             },
         }))
 
@@ -954,10 +977,13 @@ def build_api_v1(
             preferred_handler = body.get("default_agent")
             if preferred_handler is not None and not isinstance(preferred_handler, str):
                 raise ValueError("default_agent must be a string")
+            description = body.get("description")
+            if description is not None and not isinstance(description, str):
+                raise ValueError("description must be a string")
             try:
                 outcome = authoring_service.generate(
                     instruction, preferred_handler=preferred_handler,
-                    agent=_generation_agent(body),
+                    agent=_generation_agent(body), description=description,
                 )
             except AuthoringFailedError as exc:
                 # A model that cannot satisfy the compiler is a client-visible
@@ -1169,6 +1195,10 @@ def build_api_v1(
             "previous_source_hash": pending.previous_source_hash,
             "source": pending.proposed_source_text,
             "source_hash": pending.proposed_source_hash,
+            # The proposal drawn the same way the published workflow is, so
+            # accepting a revision is not the first time its shape is visible.
+            "graph": draft_graph(pending.proposed_source_text),
+            "previous_graph": draft_graph(pending.previous_source_text),
             "definition_hash": pending.proposed_definition_hash,
             "attempts": pending.attempts,
             "status": pending.status,
@@ -1194,6 +1224,7 @@ def build_api_v1(
             "source_format": record.source_format,
             "source": record.source_text,
             "source_hash": record.source_hash,
+            "graph": draft_graph(record.source_text),
             "validation_status": record.validation_status,
             "validated_definition_hash": record.validated_definition_hash,
             "diagnostics": list(record.diagnostics),
@@ -1463,6 +1494,60 @@ def build_api_v1(
 
         return await mutate(request, WRITE_SCOPE, "run.cancel", command)
 
+    async def run_output(request: Request) -> JSONResponse:
+        """What the Handlers' processes printed, in the order they printed it.
+
+        Not paged by opaque cursor like the projections: this is a tail, and a
+        client following a running Agent asks "what is new since chunk N".
+        Sensitive scope, because a console holds whatever the Agent echoed.
+        """
+
+        actor = authenticate(request, SENSITIVE_SCOPE)
+        if isinstance(actor, JSONResponse):
+            return actor
+        allowed_params = {"after", "limit", "node_run_id"}
+        unknown = set(request.query_params) - allowed_params
+        if unknown:
+            return error(
+                "invalid_request", f"unknown output parameter: {sorted(unknown)[0]}"
+            )
+        try:
+            after = int(request.query_params.get("after") or 0)
+            limit = page_size(request.query_params.get("limit"))
+        except ValueError as exc:
+            return error("invalid_request", str(exc))
+        run_id = request.path_params["run_id"]
+        chunks, next_after = attempt_output.read(
+            run_id, after_chunk_id=after, limit=limit,
+            node_run_id=request.query_params.get("node_run_id"),
+        )
+        return JSONResponse(envelope({
+            "chunks": chunks,
+            # The cursor a follower sends back. Present even when this page is
+            # the last one, so a tail can keep asking without re-reading.
+            "after": chunks[-1]["chunk_id"] if chunks else after,
+            "has_more": next_after is not None,
+        }))
+
+    async def retry_node_run(request: Request) -> JSONResponse:
+        """Re-run one NodeRun the Runtime could not settle.
+
+        Deliberately an operator decision: only a person can know whether the
+        Agent behind an unknown external result already acted.
+        """
+
+        run_id = request.path_params["run_id"]
+        node_run_id = request.path_params["node_run_id"]
+
+        def command(body: Mapping[str, Any], actor: str, key: str) -> Mapping[str, Any]:
+            return runs.retry_node_run(
+                run_id, node_run_id, _required_version(body),
+                actor=actor, idempotency_key=key,
+                reason=str(body.get("reason", "retried by operator")),
+            )
+
+        return await mutate(request, WRITE_SCOPE, "node.retry", command)
+
     async def claim_human_task(request: Request) -> JSONResponse:
         task_id = request.path_params["task_id"]
 
@@ -1488,21 +1573,37 @@ def build_api_v1(
         def command(body: Mapping[str, Any], actor: str, key: str) -> Mapping[str, Any]:
             token = str(body.get("submission_token", ""))
             decision = str(body.get("decision", ""))
+            version = _required_version(body)
+            parsed_task_id = EntityId.parse(task_id)
+            if not token and actor in token_exempt_actors:
+                # A single-operator Runtime hands this person the token the
+                # moment they ask for it, so carrying it back is ceremony, not
+                # a check. The Runtime spends one on their behalf instead.
+                #
+                # Deliberately not a bypass of the token itself: it is minted,
+                # rotated and verified exactly as always, and *who may decide*
+                # is still the workflow's own answer — an actor the task does
+                # not name is refused here as loudly as anywhere else.
+                issued = humans.reissue_token(
+                    parsed_task_id, actor=actor, expected_version=version,
+                    now=now(),
+                )
+                token = issued["submission_token"]
+                version = int(issued["expected_version"])
             if not token:
                 raise ValueError("submission_token is required")
-            parsed_task_id = EntityId.parse(task_id)
             linked = humans.linked_scope(parsed_task_id)
             if linked is not None:
                 _node_run_id, run_id = linked
                 return durable_service.submit_human_task(
                     parsed_task_id, run_id,
-                    _required_version(body), token=token, decision=decision,
+                    version, token=token, decision=decision,
                     value=body.get("value"), actor=actor,
                     idempotency_key=key, now=now(),
                 )
             status = humans.submit(
                 parsed_task_id, token, decision, body.get("value"),
-                actor=actor, expected_version=_required_version(body), now=now(),
+                actor=actor, expected_version=version, now=now(),
             )
             return {"task_id": task_id, "decision": decision, "status": status.value}
 
@@ -1600,7 +1701,8 @@ def build_api_v1(
                                     "payload_schema": "recovery-apply/1.0",
                                     "action_id": finding.action_id,
                                 }]
-                                if guard.allows(actor, OPS_WRITE_SCOPE) else []
+                                if guard.allows(actor, OPS_WRITE_SCOPE)
+                                and finding.actionable else []
                             ),
                         }
                         for finding in report.findings
@@ -1660,6 +1762,7 @@ def build_api_v1(
             "/api/v1/runs/{run_id}/data/{data_id}/lineage", data_lineage,
             methods=["GET"],
         ),
+        Route("/api/v1/runs/{run_id}/output", run_output, methods=["GET"]),
         Route("/api/v1/artifacts", artifact_list, methods=["GET"]),
         Route("/api/v1/artifacts/{artifact_id}", artifact_detail, methods=["GET"]),
         Route(
@@ -1671,6 +1774,10 @@ def build_api_v1(
             methods=["GET"],
         ),
         Route("/api/v1/runs/{run_id}/cancel", cancel_run, methods=["POST"]),
+        Route(
+            "/api/v1/runs/{run_id}/node-runs/{node_run_id}/retry",
+            retry_node_run, methods=["POST"],
+        ),
         Route("/api/v1/runs/{run_id}/plan", plan_definition, methods=["GET"]),
         Route("/api/v1/runs/{run_id}/plan/overlay", plan_overlay, methods=["GET"]),
         Route("/api/v1/runs/{run_id}/plan/diff", plan_diff, methods=["GET"]),

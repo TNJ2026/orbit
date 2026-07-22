@@ -209,6 +209,89 @@ class HandlerRuntimeContractTests(unittest.TestCase):
             response.output,
         )
 
+    def test_trusted_cli_streams_both_consoles_while_it_runs(self):
+        """An Agent that runs for minutes is otherwise a black box."""
+
+        script = (
+            "import json,sys; sys.stderr.write('working\\n'); sys.stderr.flush(); "
+            "json.dump({'output': {'value': 1}}, sys.stdout)"
+        )
+        seen = []
+        client = TrustedCliAgentClient((sys.executable, "-c", script), timeout_seconds=5)
+        context = SimpleNamespace(
+            request=SimpleNamespace(attempt_id=EntityId("attempt", "streamed")),
+            output=SimpleNamespace(emit=lambda stream, text: seen.append((stream, text))),
+        )
+        client.execute(AgentRequest({}, {}, "key"), context)
+        streams = {stream for stream, _ in seen}
+        self.assertEqual({"stdout", "stderr"}, streams)
+        self.assertIn("working", "".join(text for name, text in seen if name == "stderr"))
+
+    def test_console_chunks_arrive_while_the_cli_is_still_running(self):
+        """Output that only lands at exit is a log, not a live console.
+
+        A buffered `read` waits for 64 KB or EOF, which is how a five-minute
+        Agent turns into one silent block at the end.
+        """
+
+        script = (
+            "import sys,time\n"
+            "print('first', flush=True)\n"
+            "time.sleep(1.0)\n"
+            "print('second', flush=True)\n"
+        )
+        seen = []
+        client = TrustedCliAgentClient((sys.executable, "-c", script), timeout_seconds=10)
+        context = SimpleNamespace(
+            request=SimpleNamespace(attempt_id=EntityId("attempt", "streaming")),
+            output=SimpleNamespace(
+                emit=lambda stream, text: seen.append((time.monotonic(), text))
+            ),
+        )
+        try:
+            client.execute(AgentRequest({}, {}, "key"), context)
+        except Exception:  # noqa: BLE001 - the script prints prose, not protocol
+            pass
+        finished = time.monotonic()
+        self.assertTrue(seen, "nothing was streamed at all")
+        self.assertGreater(
+            finished - seen[0][0], 0.5,
+            "the first chunk arrived only once the process had exited",
+        )
+
+    def test_a_failing_cli_still_leaves_its_stderr_behind(self):
+        """The console is the only account a failed attempt leaves."""
+
+        script = "import sys; sys.stderr.write('boom: no credentials\\n'); sys.exit(3)"
+        seen = []
+        client = TrustedCliAgentClient((sys.executable, "-c", script), timeout_seconds=5)
+        context = SimpleNamespace(
+            request=SimpleNamespace(attempt_id=EntityId("attempt", "failed")),
+            output=SimpleNamespace(emit=lambda stream, text: seen.append((stream, text))),
+        )
+        with self.assertRaises(UnknownExternalResultError):
+            client.execute(AgentRequest({}, {}, "key"), context)
+        self.assertIn(
+            "boom: no credentials",
+            "".join(text for name, text in seen if name == "stderr"),
+        )
+
+    def test_a_broken_output_store_never_fails_the_attempt(self):
+        """Showing the console is a convenience; running the Handler is not."""
+
+        script = "import json,sys; json.dump({'output': {'value': 2}}, sys.stdout)"
+
+        def explode(stream, text):
+            raise RuntimeError("output store is down")
+
+        client = TrustedCliAgentClient((sys.executable, "-c", script), timeout_seconds=5)
+        context = SimpleNamespace(
+            request=SimpleNamespace(attempt_id=EntityId("attempt", "broken-sink")),
+            output=SimpleNamespace(emit=explode),
+        )
+        response = client.execute(AgentRequest({}, {}, "key"), context)
+        self.assertEqual({"value": 2}, response.output)
+
     def test_trusted_cli_cancel_terminates_and_reports_unknown(self):
         client = TrustedCliAgentClient(
             (sys.executable, "-c", "import time; time.sleep(10)"),
