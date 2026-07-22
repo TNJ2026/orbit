@@ -194,6 +194,7 @@ class DraftRevisionRecord:
     duration_ms: int | None = None
     error_code: str | None = None
     error_message: str | None = None
+    requested_agent: str | None = None
 
     @property
     def in_flight(self) -> bool:
@@ -223,6 +224,7 @@ def _revision_record(row) -> DraftRevisionRecord:
         started_at=row["started_at"], finished_at=row["finished_at"],
         duration_ms=row["duration_ms"], error_code=row["error_code"],
         error_message=row["error_message"],
+        requested_agent=row["requested_agent"],
     )
 
 
@@ -515,7 +517,7 @@ class WorkflowDraftApplicationService:
 
     def revise(
         self, draft_id: EntityId, instruction: str, *, expected_revision: int,
-        actor: str, now: datetime,
+        actor: str, now: datetime, agent: str | None = None,
     ) -> DraftRecord:
         """Enqueue an Agent revision and return immediately.
 
@@ -546,13 +548,16 @@ class WorkflowDraftApplicationService:
                      revision_id,draft_id,base_draft_revision,instruction_text,
                      instruction_hash,previous_source_text,previous_source_hash,
                      previous_validation_status,previous_validated_source_hash,
-                     previous_definition_hash,status,created_at
-                   ) VALUES (?,?,?,?,?,?,?,?,?,?,'queued',?)""",
+                     previous_definition_hash,status,created_at,requested_agent
+                   ) VALUES (?,?,?,?,?,?,?,?,?,?,'queued',?,?)""",
                 (
                     revision_id, str(draft_id), expected_revision, instruction,
                     instruction_hash, record.source_text, record.source_hash,
                     record.validation_status, record.validated_source_hash,
                     record.validated_definition_hash, now.isoformat(),
+                    # Recorded now, honoured minutes later: the dispatcher must
+                    # run the Agent that was chosen, not today's default.
+                    (agent or None),
                 ),
             )
             db.execute(
@@ -635,6 +640,7 @@ class WorkflowDraftApplicationService:
             outcome = self.reviser(
                 job.previous_source_text, job.instruction_text,
                 expected_workflow_id=self._workflow_id_for(job.draft_id),
+                agent=job.requested_agent,
             )
         except Exception as exc:  # settled as a failure, never a lost job
             code = type(exc).__name__

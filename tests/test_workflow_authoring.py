@@ -13,6 +13,7 @@ import json
 import unittest
 
 from orbit.workflow.authoring import (
+    UnknownGenerationAgentError,
     AuthoringFailedError, AuthoringUnavailableError, TrustedCliDslGenerator,
     WorkflowAuthoringService,
 )
@@ -280,6 +281,48 @@ class FakeOutcome:
     stderr: str = ""
     stdout_truncated: bool = False
     timed_out: bool = False
+
+
+class NamedAgentTests(unittest.TestCase):
+    """Which Agent writes the DSL is the caller's choice, by name only."""
+
+    def setUp(self) -> None:
+        self.codex = ScriptedModel([json.dumps(valid_document())])
+        self.claude = ScriptedModel([json.dumps(valid_document())])
+        self.default = ScriptedModel([json.dumps(valid_document())])
+        self.service = service(
+            self.default, generators={"codex": self.codex, "claude": self.claude},
+        )
+
+    def test_the_named_agent_writes_it(self) -> None:
+        self.service.generate("build a flow", agent="codex")
+        self.assertEqual(1, len(self.codex.prompts))
+        self.assertEqual([], self.claude.prompts)
+        self.assertEqual([], self.default.prompts)
+
+    def test_omitting_the_name_keeps_this_runtime_default(self) -> None:
+        self.service.generate("build a flow")
+        self.assertEqual(1, len(self.default.prompts))
+        self.assertEqual([], self.codex.prompts)
+
+    def test_a_revision_honours_the_same_choice(self) -> None:
+        self.service.revise(
+            json.dumps(valid_document()), "rename it",
+            expected_workflow_id="workflow:generated", agent="claude",
+        )
+        self.assertEqual(1, len(self.claude.prompts))
+        self.assertEqual([], self.default.prompts)
+
+    def test_an_unknown_agent_is_refused_rather_than_silently_swapped(self) -> None:
+        """Being told Agent A wrote it when Agent B did is worse than an error."""
+
+        with self.assertRaises(UnknownGenerationAgentError) as caught:
+            self.service.generate("build a flow", agent="gpt-9")
+        self.assertEqual(("claude", "codex"), caught.exception.available)
+        self.assertEqual([], self.default.prompts)
+
+    def test_the_available_names_are_reported_for_the_ui(self) -> None:
+        self.assertEqual(("claude", "codex"), self.service.available_agents)
 
 
 class CliGeneratorTests(unittest.TestCase):

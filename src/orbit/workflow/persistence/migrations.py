@@ -1027,6 +1027,16 @@ _MIGRATIONS: tuple[tuple[int, str, str], ...] = (
             ON workflow_draft_revisions(status, created_at);
         """,
     ),
+    (
+        16,
+        "chosen revision agent",
+        """
+        -- Which Agent the author asked for, recorded when the job is queued.
+        -- The dispatcher runs minutes later and must use the Agent that was
+        -- chosen then, not whichever one the Runtime would pick today.
+        ALTER TABLE workflow_draft_revisions ADD COLUMN requested_agent TEXT;
+        """,
+    ),
 )
 
 

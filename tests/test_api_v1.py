@@ -1285,6 +1285,112 @@ class WorkflowDraftApiTests(ApiTestCase):
             )
             self.assertEqual(404, other.status_code)
 
+    def _app_with_named_agents(self, generators):
+        return create_app(
+            self.db,
+            handlers=[transform_registration()], schemas=SCHEMAS,
+            worker_count=1, poll_seconds=0.02,
+            authenticator=lambda request: request.headers.get("x-orbit-actor"),
+            authorizer=Authorizer(lambda actor: self.scopes.get(actor, [])),
+            workflow_generators=generators,
+            single_goal_mode=False,
+        )
+
+    def test_generation_names_the_agent_that_writes_the_dsl(self) -> None:
+        import json as json_module
+        from tests.test_workflow_drafts import dsl as editable_dsl
+
+        asked = []
+
+        def writer(name):
+            def generate(_prompt):
+                asked.append(name)
+                return json_module.dumps(editable_dsl(name=f"By {name}"))
+            return generate
+
+        app = self._app_with_named_agents(
+            {"codex": writer("codex"), "claude": writer("claude")}
+        )
+        with AsgiHarness(app) as client:
+            caps = client.get(
+                "/api/v1/capabilities", actor="writer"
+            ).json()["data"]["capabilities"]
+            self.assertEqual(
+                ["claude", "codex"], caps["workflow_generation"]["agents"]
+            )
+            response = client.post(
+                "/api/v1/workflows/generate", actor="writer", key="gen-codex",
+                body={"instruction": "a flow", "agent": "codex"},
+            )
+            self.assertEqual(200, response.status_code, response.json())
+            self.assertEqual(["codex"], asked)
+
+    def test_an_unknown_generation_agent_is_a_client_error(self) -> None:
+        """Silently using a different Agent than the one asked for is worse."""
+
+        app = self._app_with_named_agents({"codex": lambda _prompt: "{}"})
+        with AsgiHarness(app) as client:
+            response = client.post(
+                "/api/v1/workflows/generate", actor="writer", key="gen-nope",
+                body={"instruction": "a flow", "agent": "gpt-9"},
+            )
+            self.assertEqual(400, response.status_code)
+            body = response.json()["error"]
+            self.assertEqual("unknown_generation_agent", body["code"])
+            self.assertEqual(["codex"], body["details"]["available"])
+
+    def test_a_revision_records_the_agent_the_author_chose(self) -> None:
+        import json as json_module
+        from tests.test_workflow_drafts import dsl as editable_dsl
+
+        revised = editable_dsl(name="Agent revised")
+        app = self._app_with_named_agents(
+            {"codex": lambda _prompt: json_module.dumps(revised)}
+        )
+        with AsgiHarness(app) as client:
+            command, _ = self._edit_command(client)
+            draft = client.post(
+                command["href"], actor="writer", key="agent-create", body={},
+            ).json()["data"]
+            revise = next(
+                item for item in draft["allowed_commands"]
+                if item["command"] == "workflow.draft.revise"
+            )
+            queued = client.post(
+                revise["href"], actor="writer", key="agent-revise",
+                body={
+                    "instruction": "rename it", "agent": "codex",
+                    "expected_version": draft["revision"],
+                },
+            ).json()["data"]
+            self.assertEqual("codex", queued["pending_revision"]["requested_agent"])
+            settled = self._settle(client, draft["draft_id"])
+            self.assertEqual("pending", settled["pending_revision"]["status"])
+
+    def test_a_revision_naming_an_unknown_agent_never_queues(self) -> None:
+        app = self._app_with_named_agents({"codex": lambda _prompt: "{}"})
+        with AsgiHarness(app) as client:
+            command, _ = self._edit_command(client)
+            draft = client.post(
+                command["href"], actor="writer", key="unknown-create", body={},
+            ).json()["data"]
+            revise = next(
+                item for item in draft["allowed_commands"]
+                if item["command"] == "workflow.draft.revise"
+            )
+            response = client.post(
+                revise["href"], actor="writer", key="unknown-revise",
+                body={
+                    "instruction": "rename it", "agent": "gpt-9",
+                    "expected_version": draft["revision"],
+                },
+            )
+            self.assertEqual(400, response.status_code)
+            after = client.get(
+                f"/api/v1/workflow-drafts/{draft['draft_id']}", actor="writer",
+            ).json()["data"]
+            self.assertIsNone(after["pending_revision"])
+
     def test_reviser_is_the_only_draft_mutation_command(self) -> None:
         import json as json_module
         from tests.test_workflow_drafts import dsl as editable_dsl

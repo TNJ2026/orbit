@@ -71,6 +71,27 @@ const GRAPH_BOX = {
   minHeight: 260,
 };
 
+// Which Agents this Runtime can write DSL with. The server decides; an empty
+// list means there is exactly one way and the choice is not worth offering.
+function generationAgents() {
+  const capability = shellFacts?.capabilities?.workflow_generation;
+  return capability?.available ? capability.agents || [] : [];
+}
+
+function generationAgentField(id, selected, onchange) {
+  const agents = generationAgents();
+  if (agents.length < 2) return null;
+  return el("div", { class: "field" }, [
+    el("label", { for: id, text: i18n.t("generate.writtenBy") }),
+    el("select", { id, onchange: (event) => onchange(event.target.value) },
+      agents.map((name) => el("option", {
+        value: name, text: name,
+        ...(name === selected ? { selected: "selected" } : {}),
+      }))),
+    el("small", { class: "muted", text: i18n.t("generate.writtenByHint") }),
+  ]);
+}
+
 function workflowGraphView(graph) {
   const { width, height, gapX, gapY, pad, minHeight } = GRAPH_BOX;
   const at = new Map();
@@ -2118,6 +2139,8 @@ async function renderWorkflowEditor(root, draftId) {
   let busy = false;
   let discardArmed = false;
   let instructionText = "";
+  // The Agent chosen to write the revision, kept across redraws.
+  let writerAgent = "";
   let revisionDiagnostics = [];
   // The Agent call is a durable job, so the editor polls until it settles
   // rather than holding a request open. A reload re-enters here and picks the
@@ -2198,6 +2221,9 @@ async function renderWorkflowEditor(root, draftId) {
     const undo = command("workflow.draft.undo");
     const publish = command("workflow.draft.publish");
     const discard = command("workflow.draft.discard");
+    const writerField = generationAgentField(
+      "draftRevisionAgent", writerAgent, (value) => { writerAgent = value; },
+    );
     const instruction = el("textarea", {
       id: "draftRevisionInstruction", maxlength: "4000", required: "required",
       placeholder: i18n.t("editor.agentPromptPlaceholder"),
@@ -2258,7 +2284,8 @@ async function renderWorkflowEditor(root, draftId) {
         }
         instruction.setCustomValidity("");
         const response = await execute(
-          "workflow.draft.revise", { instruction: value },
+          "workflow.draft.revise",
+          { instruction: value, ...(writerAgent ? { agent: writerAgent } : {}) },
           `workflow.draft.revise:${draft.draft_id}:${draft.revision}:${Date.now()}`,
         );
         if (response) {
@@ -2358,6 +2385,7 @@ async function renderWorkflowEditor(root, draftId) {
         }, [
           el("div", { class: "panel-title", text: i18n.t("editor.agentPromptTitle") }),
           el("p", { class: "muted", text: i18n.t("editor.agentPromptHint") }),
+          revise ? writerField : null,
           instruction,
           revise || candidate ? null : el("div", {
             class: "banner error", text: i18n.t("editor.agentUnavailable"),
@@ -2537,6 +2565,9 @@ async function generateWorkflowDialog(generateCommand) {
   let draftProblem = "";
   let instructionText = "";
   let defaultAgent = agentHandlers[0]?.name || "";
+  // Two different questions: which Agent writes the DSL (writerAgent) and
+  // which Agent the written workflow should call (defaultAgent).
+  let writerAgent = "";
 
   const draw = () => {
     const problem = el("div", { class: "banner error", hidden: "hidden", role: "alert" });
@@ -2568,6 +2599,10 @@ async function generateWorkflowDialog(generateCommand) {
           el("small", { class: "muted", text: i18n.t("generate.hint") }),
         ]),
       );
+      const writerField = generationAgentField(
+        "generateWriter", writerAgent, (value) => { writerAgent = value; },
+      );
+      if (writerField) body.push(writerField);
       if (agentHandlers.length) {
         body.push(el("div", { class: "field" }, [
           el("label", { for: "generateDefaultAgent", text: i18n.t("generate.defaultAgent") }),
@@ -2597,6 +2632,7 @@ async function generateWorkflowDialog(generateCommand) {
               generateCommand, {
                 instruction: instructionText,
                 ...(defaultAgent ? { default_agent: defaultAgent } : {}),
+                ...(writerAgent ? { agent: writerAgent } : {}),
               },
               `workflow.generate:${Date.now()}`,
             );

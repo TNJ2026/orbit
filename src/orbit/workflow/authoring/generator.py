@@ -51,6 +51,14 @@ class AuthoringUnavailableError(ValueError):
     """The generating CLI could not run at all."""
 
 
+class UnknownGenerationAgentError(ValueError):
+    """A caller named an Agent this Runtime cannot generate with."""
+
+    def __init__(self, message: str, *, available: Sequence[str] = ()) -> None:
+        super().__init__(message)
+        self.available = tuple(available)
+
+
 class AuthoringFailedError(ValueError):
     """Every attempt produced something the compiler refused.
 
@@ -133,6 +141,7 @@ class WorkflowAuthoringService:
         schemas: InMemorySchemaCatalog,
         generate: Callable[[str], str],
         *,
+        generators: Mapping[str, Callable[[str], str]] | None = None,
         handler_facts: Sequence[Mapping[str, Any]] = (),
         max_nodes: int = MAX_NODES,
         max_attempts: int = MAX_ATTEMPTS,
@@ -140,9 +149,48 @@ class WorkflowAuthoringService:
         self.handlers = handlers
         self.schemas = schemas
         self.generate_text = generate
+        # Which Agent writes the DSL is a choice, not a startup constant. The
+        # caller names one; the command behind that name was fixed at
+        # composition, so naming is all a caller can do.
+        self.generators = dict(generators or {})
         self.handler_facts = tuple(handler_facts)
         self.max_nodes = max_nodes
         self.max_attempts = max_attempts
+
+    @property
+    def available_agents(self) -> tuple[str, ...]:
+        return tuple(sorted(self.generators))
+
+    def ensure_agent(self, agent: str | None) -> str | None:
+        """Refuse an unknown name now rather than when the job finally runs.
+
+        A queued revision is executed minutes later; discovering the name was
+        wrong then turns a typo into a failed job instead of a rejected
+        request.
+        """
+
+        if agent is None:
+            return None
+        self._writer(agent)
+        return agent.strip()
+
+    def _writer(self, agent: str | None) -> Callable[[str], str]:
+        """The text generator for a named Agent, or the default one.
+
+        An unknown name is refused rather than quietly served by the default:
+        being told the workflow was written by the Agent you asked for, when
+        it was not, is worse than an error.
+        """
+
+        if agent is None:
+            return self.generate_text
+        agent = agent.strip()
+        if agent not in self.generators:
+            raise UnknownGenerationAgentError(
+                f"unknown generation agent: {agent!r}",
+                available=self.available_agents,
+            )
+        return self.generators[agent]
 
     # -- prompt ------------------------------------------------------------
 
@@ -262,6 +310,7 @@ class WorkflowAuthoringService:
 
     def generate(
         self, instruction: str, *, preferred_handler: str | None = None,
+        agent: str | None = None,
     ) -> GenerationOutcome:
         instruction = instruction.strip()
         if not instruction:
@@ -282,10 +331,12 @@ class WorkflowAuthoringService:
         return self._run_funnel(
             lambda feedback: self._prompt(instruction, feedback, preferred_handler),
             source_name="<generated>", failure="generation",
+            write=self._writer(agent),
         )
 
     def revise(
         self, current_source: str, instruction: str, *, expected_workflow_id: str,
+        agent: str | None = None,
     ) -> GenerationOutcome:
         """Apply a natural-language change to an existing workflow's source.
 
@@ -319,16 +370,18 @@ class WorkflowAuthoringService:
         return self._run_funnel(
             lambda feedback: self._prompt(instruction, feedback, None, base),
             source_name="<revised>", failure="revision", extra_check=guard,
+            write=self._writer(agent),
         )
 
     def _run_funnel(
         self, build_prompt, *, source_name: str, failure: str, extra_check=None,
+        write=None,
     ) -> GenerationOutcome:
         feedback: str | None = None
         raw = ""
         last_diagnostics: tuple[Mapping[str, Any], ...] = ()
         for attempt in range(1, self.max_attempts + 1):
-            raw = self.generate_text(build_prompt(feedback))
+            raw = (write or self.generate_text)(build_prompt(feedback))
             try:
                 document = self._extract_json(raw)
                 nodes = document.get("nodes")

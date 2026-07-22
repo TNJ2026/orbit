@@ -141,6 +141,7 @@ class RuntimeComposition:
         human_delivery: Any = None,
         draft_service: Any = None,
         revision_agent_command: str | None = None,
+        revision_agent_commands: Mapping[str, str] | None = None,
         revision_model_id: str | None = None,
     ) -> None:
         self.db_path = Path(db_path)
@@ -151,6 +152,7 @@ class RuntimeComposition:
         # Set when a reviser is wired; the revision loops key off it.
         self.draft_service = draft_service
         self.revision_agent_command = revision_agent_command
+        self.revision_agent_commands = dict(revision_agent_commands or {})
         self.revision_model_id = revision_model_id
         if human_delivery is None:
             from ..workflow.application.human_delivery import (
@@ -271,6 +273,7 @@ class RuntimeComposition:
             revisions = RevisionDispatcher(
                 self.draft_service, worker_id="revision-1", clock=self.clock,
                 agent_command=self.revision_agent_command,
+                agent_commands=self.revision_agent_commands,
                 model_id=self.revision_model_id,
             )
             loops.append(BackgroundLoop(
@@ -382,6 +385,7 @@ def create_app(
     discover_agents: bool = False,
     agent_capabilities: Sequence[str] | None = None,
     workflow_generator: Callable[[str], str] | None = None,
+    workflow_generators: Mapping[str, Callable[[str], str]] | None = None,
     single_goal_mode: bool = True,
 ) -> Starlette:
     """Build the Runtime application.
@@ -396,6 +400,9 @@ def create_app(
     # merely late — it is impossible, and that is how discovered agents ended
     # up visible in the catalog and uncallable from a workflow.
     agent_catalog: Sequence[Mapping[str, Any]] = ()
+    # Named generators an author may choose between. Discovery fills this
+    # below; an explicit mapping (tests, embedders) wins outright.
+    generation_agents: dict[str, Any] = dict(workflow_generators or {})
     registrations = list(handlers)
     planner_service = None
     if discover_agents:
@@ -429,15 +436,23 @@ def create_app(
                 db_path, provider=planner_provider
             )
 
-        # Workflow generation rides the same discovery result: same trust
-        # rule, same first-discovered-CLI choice as the planner. An explicit
-        # `workflow_generator` (tests, embedders) takes precedence below.
-        if workflow_generator is None and invokable_agents:
+        # Workflow generation rides the same discovery result and the same
+        # trust rule. Every discovered CLI gets a generator so the author can
+        # name one per request; the first stays the default for callers that
+        # do not care. An explicit `workflow_generator` (tests, embedders)
+        # takes precedence below.
+        if invokable_agents:
             from ..workflow.authoring import TrustedCliDslGenerator
 
-            workflow_generator = TrustedCliDslGenerator(
-                (invokable_agents[0].executable_path,)
-            )
+            if not generation_agents:
+                generation_agents = {
+                    agent.name: TrustedCliDslGenerator((agent.executable_path,))
+                    for agent in invokable_agents
+                }
+            if workflow_generator is None:
+                workflow_generator = generation_agents.get(
+                    invokable_agents[0].name, next(iter(generation_agents.values()))
+                )
 
     composition = RuntimeComposition(
         db_path,
@@ -481,6 +496,12 @@ def create_app(
     # Composition facts for /api/v1/capabilities: what this deployment can do,
     # with a reason when it cannot. The UI renders "service not provided" from
     # these instead of probing endpoints for 404s (delivery plan API-7).
+    # An injected mapping without discovery still needs one default, and it has
+    # to be settled before capabilities are declared or the Runtime would
+    # report generation unavailable while holding generators.
+    if workflow_generator is None and generation_agents:
+        workflow_generator = next(iter(generation_agents.values()))
+
     capabilities = {
         "static_graph": {"available": True},
         "human_tasks": {"available": True},
@@ -531,7 +552,9 @@ def create_app(
         "subflow": {"available": True},
         "history_overlay": {"available": True},
         "workflow_generation": (
-            {"available": True}
+            # The names an author may pick from. Empty means this Runtime has
+            # exactly one way to write DSL and the choice is not offered.
+            {"available": True, "agents": sorted(generation_agents)}
             if workflow_generator is not None
             else {
                 "available": False,
@@ -541,7 +564,9 @@ def create_app(
                 ),
             }
         ),
-        "workflow_editing": {"available": True},
+        "workflow_editing": {
+            "available": True, "agents": sorted(generation_agents),
+        },
     }
 
     # Authoring shares the sealed registry's manifests and the composition's
@@ -579,6 +604,7 @@ def create_app(
             authoring_catalogs.handlers,
             composition.schema_catalog,
             workflow_generator,
+            generators=generation_agents,
             handler_facts=[
                 {
                     "name": manifest.name, "version": manifest.version,
@@ -603,6 +629,13 @@ def create_app(
     composition.revision_agent_command = (
         generator_command[0] if generator_command else None
     )
+    # The dispatcher records which CLI actually ran a job, so it needs the
+    # command behind each name the author could have chosen.
+    composition.revision_agent_commands = {
+        name: generator.command[0]
+        for name, generator in generation_agents.items()
+        if getattr(generator, "command", None)
+    }
 
     routes: list[Route | Mount] = [
         Route("/health/live", health_live, methods=["GET"]),

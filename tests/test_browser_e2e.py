@@ -868,6 +868,90 @@ class WorkflowEditorTests(BrowserE2ETestCase):
         ))
 
 
+class GenerationAgentChoiceTests(BrowserE2ETestCase):
+    """The author picks which Agent writes the DSL; the server records it."""
+
+    @classmethod
+    def extra_app_kwargs(cls) -> dict:
+        from tests.test_workflow_drafts import dsl as editable_dsl
+
+        def writer(name):
+            def generate(_prompt):
+                return json.dumps(editable_dsl(name=f"Written by {name}"))
+            return generate
+
+        return {
+            "workflow_generators": {
+                "codex": writer("codex"), "claude": writer("claude"),
+            },
+        }
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        from orbit.workflow.application.workflows import (
+            WorkflowCatalogs, WorkflowDefinitionService,
+        )
+        from orbit.workflow.catalogs import (
+            InMemoryHandlerCatalog, InMemorySchemaCatalog,
+        )
+        from orbit.workflow.catalogs.extensions import InMemoryExtensionRegistry
+        from orbit.workflow.persistence.workflow_versions import (
+            SQLiteWorkflowVersionStore,
+        )
+        from tests.test_workflow_drafts import dsl as editable_dsl
+
+        catalogs = WorkflowCatalogs(
+            InMemoryHandlerCatalog([transform_registration().manifest]),
+            InMemorySchemaCatalog(SCHEMAS),
+            InMemoryExtensionRegistry(),
+        )
+        WorkflowDefinitionService(
+            catalogs, SQLiteWorkflowVersionStore(cls.db)
+        ).publish_workflow(
+            json.dumps(editable_dsl()), source_name="<fixture>",
+            source_format="json", expected_latest_version=0, actor="fixture",
+        )
+
+    def test_the_generate_dialog_offers_the_discovered_writers(self) -> None:
+        page = self.open("en-US", path="/ui/#/workflows")
+        page.wait_for_selector("#generateWorkflow")
+        page.click("#generateWorkflow")
+        # The native select is replaced by the themed custom select, so the
+        # options are read from the popup the operator actually sees.
+        page.wait_for_selector("#generateWriter", state="attached")
+        wrapper = page.locator("#generateWriter").locator("xpath=../..")
+        wrapper.locator(".custom-select-trigger").click()
+        # Every custom select on the page keeps its own popup; read this one's.
+        self.assertEqual(
+            ["claude", "codex"],
+            wrapper.locator(".custom-select-option").all_text_contents(),
+        )
+
+    def test_the_editor_sends_the_chosen_writer_with_the_revision(self) -> None:
+        page = self.open("en-US", path="/ui/#/workflows")
+        card = page.locator(".workflow-card", has_text="Draftable")
+        card.wait_for()
+        card.locator(".workflow-card-main").click()
+        page.wait_for_selector("#editWorkflow")
+        page.click("#editWorkflow")
+        page.wait_for_selector("#draftRevisionAgent", state="attached")
+        page.locator("#draftRevisionAgent").locator("xpath=../..").locator(
+            ".custom-select-trigger"
+        ).click()
+        page.get_by_role("option", name="codex").click()
+        page.fill("#draftRevisionInstruction", "Rename it")
+        page.click("#draftRevise")
+        draft_id = page.evaluate(
+            "() => decodeURIComponent(location.hash.split('/edit/')[1])"
+        )
+        page.wait_for_function(
+            "id => fetch(`/api/v1/workflow-drafts/${id}`).then(r => r.json())"
+            ".then(b => b.data.pending_revision?.requested_agent === 'codex')",
+            arg=draft_id, timeout=15000,
+        )
+
+
 class WorkflowRevisionJobTests(BrowserE2ETestCase):
     """A revision is a durable job: it survives a reload and can be cancelled."""
 

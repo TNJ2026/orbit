@@ -166,13 +166,17 @@ class RevisionDispatcher:
 
     def __init__(
         self, service, *, worker_id="revision-1", clock, metrics=None,
-        lease_seconds=360, agent_command=None, model_id=None,
+        lease_seconds=360, agent_command=None, agent_commands=None,
+        model_id=None,
     ):
         self.service = service
         self.worker_id = worker_id
         self.clock = clock
         self.metrics = metrics or InMemoryMetrics()
         self.agent_command = agent_command
+        # The author may have named an Agent when queueing; the audit trail
+        # should name the CLI that really ran, not the Runtime's default.
+        self.agent_commands = dict(agent_commands or {})
         self.model_id = model_id
         if lease_seconds <= 0 or lease_seconds > 600:
             raise ValueError(
@@ -195,7 +199,10 @@ class RevisionDispatcher:
         job, token = claimed
         settled = self.service.execute_revision(
             job, token, clock=self.clock,
-            agent_command=self.agent_command, model_id=self.model_id,
+            agent_command=self.agent_commands.get(
+                job.requested_agent, self.agent_command
+            ),
+            model_id=job.requested_agent or self.model_id,
         )
         self._increment(f"revision_{settled.status}")
         return True

@@ -49,7 +49,10 @@ from ..workflow.domain.ids import EntityId
 from ..workflow.domain.serialization import to_primitive
 from ..workflow.domain.versions import DefinitionHash
 from ..workflow.artifacts.local_cas import BlobIntegrityError
-from ..workflow.authoring import AuthoringFailedError, AuthoringUnavailableError
+from ..workflow.authoring import (
+    AuthoringFailedError, AuthoringUnavailableError,
+    UnknownGenerationAgentError,
+)
 from ..workflow.application.workflow_draft_service import (
     DraftAlreadyActiveError, DraftNotFoundError, DraftNotValidatedError,
     DraftSourceTooLargeError, DraftVersionConflictError, RevisionNotFoundError,
@@ -82,6 +85,22 @@ class ClosingStreamingResponse(StreamingResponse):
             await super().__call__(scope, receive, send)
         finally:
             await anyio.to_thread.run_sync(self._source.close)
+
+
+def _generation_agent(body: Mapping[str, Any]) -> str | None:
+    """The Agent the author picked to write the DSL, by name only.
+
+    A name is the whole of what a caller may contribute: the command behind it
+    was fixed at composition from the discovery allowlist. Omitting it keeps
+    this Runtime's default Agent.
+    """
+
+    agent = body.get("agent")
+    if agent is None:
+        return None
+    if not isinstance(agent, str) or not agent.strip():
+        raise ValueError("agent must be a non-empty string")
+    return agent.strip()
 
 
 def _required_version(body: Mapping[str, Any]) -> int:
@@ -938,6 +957,7 @@ def build_api_v1(
             try:
                 outcome = authoring_service.generate(
                     instruction, preferred_handler=preferred_handler,
+                    agent=_generation_agent(body),
                 )
             except AuthoringFailedError as exc:
                 # A model that cannot satisfy the compiler is a client-visible
@@ -1159,6 +1179,7 @@ def build_api_v1(
             "cancel_requested": pending.cancel_requested,
             "agent_command": pending.agent_command,
             "model_id": pending.model_id,
+            "requested_agent": pending.requested_agent,
             "started_at": pending.started_at,
             "finished_at": pending.finished_at,
             "duration_ms": pending.duration_ms,
@@ -1270,9 +1291,12 @@ def build_api_v1(
         instruction = body.get("instruction")
         if not isinstance(instruction, str) or not instruction.strip():
             raise ValueError("instruction is required")
+        agent = _generation_agent(body)
+        if agent is not None and authoring_service is not None:
+            agent = authoring_service.ensure_agent(agent)
         record = draft_service.revise(
             draft_id, instruction, expected_revision=_required_version(body),
-            actor=actor, now=now(),
+            actor=actor, now=now(), agent=agent,
         )
         return _draft_dto(record, actor)
 
@@ -1350,6 +1374,11 @@ def build_api_v1(
             return error(
                 "workflow_revision_failed", str(exc), 422,
                 diagnostics=list(exc.diagnostics),
+            )
+        except UnknownGenerationAgentError as exc:
+            return error(
+                "unknown_generation_agent", str(exc), 400,
+                available=list(exc.available),
             )
         except (AuthoringUnavailableError, RevisionUnavailableError) as exc:
             return error("generation_unavailable", str(exc), 503)

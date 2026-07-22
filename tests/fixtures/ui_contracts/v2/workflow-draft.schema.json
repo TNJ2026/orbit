@@ -284,6 +284,13 @@
             "string",
             "null"
           ]
+        },
+        "requested_agent": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The Agent the author named when queueing, if any."
         }
       },
       "description": "The current Agent revision job. It is recorded when the prompt is submitted and lives through queued and running before settling into a pending candidate, a failure or a cancellation — so a reloaded editor can always tell what happened."

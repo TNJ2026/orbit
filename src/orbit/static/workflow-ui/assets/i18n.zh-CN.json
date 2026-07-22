@@ -224,6 +224,8 @@
   "generate.source": "查看生成的源码",
   "generate.title": "用描述生成工作流",
   "generate.validating": "正在重新校验草稿…",
+  "generate.writtenBy": "由谁编写",
+  "generate.writtenByHint": "由哪个 Agent 编写 DSL;不选则用本 Runtime 的默认 Agent。",
   "goals.budgetUsage": "预算使用率",
   "goals.currentState": "当前 Runtime 状态",
   "goals.currentState.clear": "当前没有阻塞此目标的待处理责任。",

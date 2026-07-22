@@ -380,8 +380,8 @@ class DraftReviseTests(DraftTestCase):
 
         calls = []
 
-        def reviser(current_source, instruction, *, expected_workflow_id):
-            calls.append((current_source, instruction, expected_workflow_id))
+        def reviser(current_source, instruction, *, expected_workflow_id, agent=None):
+            calls.append((current_source, instruction, expected_workflow_id, agent))
             from orbit.workflow.dsl import compile_source
 
             compiled = compile_source(
@@ -583,6 +583,36 @@ class RevisionJobTests(DraftReviseTests):
             expected_revision=draft.revision, actor="author", now=NOW,
         )
 
+    def test_the_chosen_agent_is_recorded_and_used_when_the_job_runs(self) -> None:
+        """The dispatcher runs minutes later; it must honour the choice made then."""
+
+        reviser, calls = self._reviser(json.dumps(dsl(name="By codex")))
+        service = self._service_with(reviser)
+        draft = service.create_or_resume(
+            "workflow:draftable", base_version=None, actor="author", now=NOW,
+        )
+        service.revise(
+            EntityId.parse(draft.draft_id), "rename it",
+            expected_revision=draft.revision, actor="author", now=NOW,
+            agent="codex",
+        )
+        job, _, _ = service.revision_context(
+            EntityId.parse(draft.draft_id), actor="author",
+        )
+        self.assertEqual("codex", job.requested_agent)
+        self._run_worker(service)
+        self.assertEqual("codex", calls[0][3])
+
+    def test_no_choice_leaves_the_runtime_default_in_place(self) -> None:
+        reviser, calls = self._reviser(json.dumps(dsl(name="By default")))
+        service = self._service_with(reviser)
+        draft = service.create_or_resume(
+            "workflow:draftable", base_version=None, actor="author", now=NOW,
+        )
+        self._queued(service, draft)
+        self._run_worker(service)
+        self.assertIsNone(calls[0][3])
+
     def test_enqueue_returns_before_the_agent_runs(self) -> None:
         reviser, calls = self._reviser(json.dumps(dsl(name="Later")))
         service = self._service_with(reviser)
@@ -642,7 +672,7 @@ class RevisionJobTests(DraftReviseTests):
     def test_a_failing_agent_settles_the_job_with_its_reason(self) -> None:
         from datetime import timedelta
 
-        def angry(current_source, instruction, *, expected_workflow_id):
+        def angry(current_source, instruction, *, expected_workflow_id, agent=None):
             raise RuntimeError("the model refused")
 
         service = self._service_with(angry)

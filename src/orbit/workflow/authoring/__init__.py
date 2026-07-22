@@ -5,10 +5,12 @@ from .generator import (
     AuthoringUnavailableError,
     GenerationOutcome,
     TrustedCliDslGenerator,
+    UnknownGenerationAgentError,
     WorkflowAuthoringService,
 )
 
 __all__ = [
     "AuthoringFailedError", "AuthoringUnavailableError", "GenerationOutcome",
-    "TrustedCliDslGenerator", "WorkflowAuthoringService",
+    "TrustedCliDslGenerator", "UnknownGenerationAgentError",
+    "WorkflowAuthoringService",
 ]

@@ -224,6 +224,8 @@
   "generate.source": "Show generated source",
   "generate.title": "Generate a workflow from a description",
   "generate.validating": "Revalidating draft…",
+  "generate.writtenBy": "Written by",
+  "generate.writtenByHint": "Which Agent writes the DSL. Unset uses this Runtime's default.",
   "goals.budgetUsage": "Budget usage",
   "goals.currentState": "Current runtime state",
   "goals.currentState.clear": "No open responsibility is blocking this goal.",
