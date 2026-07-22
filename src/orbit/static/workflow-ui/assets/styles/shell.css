@@ -94,6 +94,7 @@
 }
 .crumb-sep { color: var(--muted-2); }
 .content { padding: 20px; display: flex; flex-direction: column; gap: 16px; }
+#liveRegion { margin: 16px 20px 0; }
 .nav-toggle, .nav-backdrop { display: none; }
 
 /* Icon-only rail between the drawer and the full sidebar (prototype). */
@@ -126,4 +127,5 @@
   body[data-nav-open="true"] .nav-backdrop { display: block; }
   .topbar { flex-wrap: wrap; padding: 10px 12px; position: static; }
   .content { padding: 14px 12px; }
+  #liveRegion { margin: 12px 12px 0; }
 }
