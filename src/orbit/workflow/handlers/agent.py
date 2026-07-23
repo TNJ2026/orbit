@@ -27,6 +27,13 @@ from ..domain.serialization import to_primitive
 # manifest is what a workflow binds to, so this name is a contract between
 # `agent_discovery.agent_manifest` and the client that fills it.
 AGENT_RESULT_PORT = "result"
+# The reply is prose, but the port it fills is typed as an object — that is how
+# every discovered Agent's manifest declares it, and how one Agent's output can
+# satisfy the next Agent's object-typed input. So the text is carried under a
+# key rather than returned bare: a bare string reaching a downstream object port
+# is rejected as "not of type object", which is where an Agent chain used to die
+# one node after the Agent that actually answered.
+AGENT_RESULT_TEXT_KEY = "text"
 
 
 def _abandon_pipe(stream) -> None:
@@ -318,8 +325,9 @@ class TrustedPromptCliAgentClient(TrustedCliAgentClient):
         else:
             extra, payload = (), encoded
         stdout = self._run(extra, payload, context)
+        text = stdout.decode("utf-8", errors="replace").strip()
         return AgentResponse(
-            {AGENT_RESULT_PORT: stdout.decode("utf-8", errors="replace").strip()},
+            {AGENT_RESULT_PORT: {AGENT_RESULT_TEXT_KEY: text}},
             None, None, "completed",
         )
 

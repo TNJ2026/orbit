@@ -24,8 +24,8 @@ from orbit.workflow.domain.handlers import (
     CancelDisposition, HandlerValidationError, UnknownExternalResultError,
 )
 from orbit.workflow.handlers.agent import (
-    AGENT_RESULT_PORT, AgentRequest, TrustedPromptCliAgentClient,
-    render_agent_prompt,
+    AGENT_RESULT_PORT, AGENT_RESULT_TEXT_KEY, AgentRequest,
+    TrustedPromptCliAgentClient, render_agent_prompt,
 )
 
 
@@ -70,7 +70,9 @@ class PromptTransportTests(unittest.TestCase):
             AgentRequest(node_input or {"prompt": "do the thing"}, config or {}, "key"),
             context(),
         )
-        return response.output[AGENT_RESULT_PORT]
+        result = response.output[AGENT_RESULT_PORT]
+        # The reply is carried under a key so it fills an object-typed port.
+        return result[AGENT_RESULT_TEXT_KEY]
 
     def test_a_flag_carries_the_prompt_as_its_value(self) -> None:
         client = self.client(ECHO_ARGV, args=("chat", "-Q"), prompt_flag="-q")
@@ -175,6 +177,26 @@ class AgentPortContractTests(unittest.TestCase):
     client answered `text` — so every prompt-CLI Agent ran perfectly and was
     then refused at completion, leaving the attempt to expire as unsettled.
     """
+
+    def test_the_reply_is_an_object_so_it_fits_an_object_typed_port(self) -> None:
+        """The result port is typed as an object; a bare string does not fit it.
+
+        One Agent's output feeds the next Agent's object-typed input, so a bare
+        string reaching it is rejected as "not of type object" — the node after
+        the Agent that answered. The reply is carried under a key instead.
+        """
+
+        cli = FakeCli("print('the prose reply')")
+        self.addCleanup(cli.cleanup)
+        client = TrustedPromptCliAgentClient(
+            (str(cli.path),), environment={"PATH": os.environ["PATH"]},
+            prompt_flag="-q",
+        )
+        output = client.execute(
+            AgentRequest({"prompt": "go"}, {}, "key"), context(),
+        ).output
+        self.assertEqual({AGENT_RESULT_PORT: {AGENT_RESULT_TEXT_KEY: "the prose reply"}}, output)
+        self.assertIsInstance(output[AGENT_RESULT_PORT], dict)
 
     def test_the_client_answers_on_the_port_the_manifest_declares(self) -> None:
         agent = DiscoveredAgent(

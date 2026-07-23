@@ -89,7 +89,26 @@ def compile_document(
         source = node_data[value["from"]["node"]]
         source_port = next(item for item in source.get("outputs", []) if item["id"] == value["from"]["port"])
         condition = compile_condition(value.get("condition"), ("edges", index, "condition"))
-        mapping = compile_mapping(value.get("mapping"), source_port["schema_id"], ("edges", index, "mapping"))
+        target_port_id = value["to"]["port"]
+        if value.get("mapping") in (None, {}) and value["from"]["port"] != target_port_id:
+            # A bare edge means "carry this output port to that input port". When
+            # the two share a name the identity mapping delivers it, and that is
+            # what this compiled to for years. When they differ, identity hands
+            # the target an object keyed by the *source* port — the input it
+            # actually requires is missing, and the run only discovers it at the
+            # downstream node, as `missing required input ports`. So a bare edge
+            # across differently-named ports compiles to the rename it means.
+            mapping = {
+                "op": "object",
+                "schema_id": source_port["schema_id"],
+                "fields": {
+                    target_port_id: {"op": "ref", "path": f"source.{source_port['id']}"},
+                },
+            }
+        else:
+            mapping = compile_mapping(
+                value.get("mapping"), source_port["schema_id"], ("edges", index, "mapping"),
+            )
         allowed_references = {
             f"source.{source_port['id']}",
             *(f"workflow.inputs.{item['id']}" for item in data.get("inputs", [])),

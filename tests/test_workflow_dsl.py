@@ -397,6 +397,35 @@ class WorkflowDslSemanticTests(unittest.TestCase):
         self.assertEqual("map", mapping["op"])
         self.assertEqual({"op": "ref", "path": "source.request.id"}, mapping["value"]["fields"]["id"])
 
+    def test_a_bare_edge_between_same_named_ports_stays_identity(self) -> None:
+        compiled = compile_source(
+            json.dumps(VALID_DSL), self.handlers, self.schemas, source_format="json",
+        )
+        mapping = to_primitive(compiled.ir.edges[0].mapping)
+        self.assertEqual("identity", mapping["op"])
+
+    def test_a_bare_edge_across_differently_named_ports_renames(self) -> None:
+        """`request` out, `prompt` in: identity would hand the target `request`.
+
+        The downstream node requires `prompt`, so a bare edge across the two
+        must compile to the rename it plainly means, or the run only fails at
+        the target with `missing required input ports`.
+        """
+
+        value = json.loads(json.dumps(VALID_DSL))
+        value["nodes"][1]["inputs"] = [
+            {"id": "prompt", "schema_id": "example://request/1.0"}
+        ]
+        value["edges"][0]["to"]["port"] = "prompt"
+        compiled = compile_source(
+            json.dumps(value), self.handlers, self.schemas, source_format="json",
+        )
+        mapping = to_primitive(compiled.ir.edges[0].mapping)
+        self.assertEqual("object", mapping["op"])
+        self.assertEqual(
+            {"prompt": {"op": "ref", "path": "source.request"}}, mapping["fields"]
+        )
+
     def test_workflow_ir_schema_round_trip_is_lossless(self) -> None:
         compiled = compile_source(json.dumps(VALID_DSL), self.handlers, self.schemas, source_format="json")
         primitive = to_primitive(compiled.ir)
