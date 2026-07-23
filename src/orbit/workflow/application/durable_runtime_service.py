@@ -305,6 +305,9 @@ class DurableRuntimeApplicationService:
             f"{job.run_id}+{node.node_run_id}+{attempt.attempt_number.value}",
             now + timedelta(seconds=manifest.resource_profile.max_duration_seconds),
             manifest.execution_safety, manifest.resource_profile,
+            # The port transports a Handler needs to route its own output; the
+            # manifest carries only schemas.
+            tuple(plan_node.outputs),
         )
 
     def build_legacy_executor_input(self, claimed: ClaimedWork):

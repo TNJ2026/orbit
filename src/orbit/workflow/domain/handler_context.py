@@ -36,6 +36,11 @@ class ExecutorRequest:
     deadline: datetime
     execution_safety: ExecutionSafety
     resource_profile: ResourceProfile
+    # The plan node's output ports, verbatim — id, schema and, crucially, the
+    # data_policy transport. `output_manifest` carries only schema ids, so a
+    # Handler that must decide inline-vs-artifact for its own output reads it
+    # here. Empty for callers that predate large-output routing.
+    output_ports: tuple[Mapping[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
         for value, kind in (
@@ -57,6 +62,7 @@ class ExecutorRequest:
         object.__setattr__(self, "input", freeze_json(self.input))
         object.__setattr__(self, "input_manifest", freeze_json(self.input_manifest))
         object.__setattr__(self, "output_manifest", freeze_json(self.output_manifest))
+        object.__setattr__(self, "output_ports", freeze_json(tuple(self.output_ports)))
 
 
 @dataclass(frozen=True)

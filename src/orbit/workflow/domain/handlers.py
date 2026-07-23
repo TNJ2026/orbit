@@ -109,6 +109,11 @@ class RawHandlerResult:
     usage: UsageSnapshot | None
     provider_request_id: str | None = None
     external_effect: ExternalEffect = ExternalEffect.NONE
+    # Artifacts the Handler staged for its output ports. Carried here so a
+    # Handler that writes to CAS in `execute` can hand the ids to
+    # `normalize_result`, which turns them into the HandlerResult refs the
+    # kernel commits. Empty for the inline path.
+    artifact_refs: tuple[EntityId, ...] = ()
 
     def __post_init__(self) -> None:
         if self.provider_request_id is not None and not self.provider_request_id.strip():
@@ -119,7 +124,11 @@ class RawHandlerResult:
             and self.usage.provider_request_id not in {None, self.provider_request_id}
         ):
             raise ValueError("usage provider_request_id does not match raw result")
+        for reference in self.artifact_refs:
+            if not isinstance(reference, EntityId) or reference.kind != "artifact":
+                raise ValueError("artifact_refs must contain artifact ids")
         object.__setattr__(self, "output", freeze_json(self.output))
+        object.__setattr__(self, "artifact_refs", tuple(self.artifact_refs))
 
 
 @dataclass(frozen=True)
