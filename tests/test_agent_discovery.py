@@ -57,7 +57,10 @@ class SpecValidationTests(unittest.TestCase):
         for spec in TRUSTED_AGENT_CLIS:
             self.assertEqual(spec.executable, spec.executable.strip())
 
-    def test_the_allowlist_matches_main_branch_agent_detection_scope(self) -> None:
+    def test_the_allowlist_is_exactly_the_reviewed_set(self) -> None:
+        # main's detection scope plus kimi, each probed against the installed
+        # CLI. Adding to this set is a code change and a code review — there is
+        # no config or API that extends it.
         self.assertEqual(
             {
                 ("claude", "claude"),
@@ -65,6 +68,7 @@ class SpecValidationTests(unittest.TestCase):
                 ("gemini", "gemini"),
                 ("antigravity", "agy"),
                 ("hermes", "hermes"),
+                ("kimi", "kimi"),
                 ("opencode", "opencode"),
             },
             {(spec.name, spec.executable) for spec in TRUSTED_AGENT_CLIS},

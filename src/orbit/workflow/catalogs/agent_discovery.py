@@ -128,6 +128,9 @@ TRUSTED_AGENT_CLIS: tuple[AgentCliSpec, ...] = (
         args=("--skip-trust",), prompt_flag="-p",
     )),
     AgentCliSpec("antigravity", "agy", invocation=AgentInvocation(prompt_flag="-p")),
+    # `kimi -p "<prompt>"` runs one prompt non-interactively and prints the
+    # reply on stdout; probed against kimi 0.28.1.
+    AgentCliSpec("kimi", "kimi", invocation=AgentInvocation(prompt_flag="-p")),
     AgentCliSpec("hermes", "hermes", invocation=AgentInvocation(
         # -Q is quiet mode: the final response only, no banner or spinner.
         args=("chat", "-Q"), prompt_flag="-q",
