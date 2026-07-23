@@ -1839,72 +1839,6 @@ async function renderArtifactDetail(root, artifactId) {
   }
 }
 
-async function renderOps(root) {
-  const [statusResponse, recoveryResponse] = await Promise.all([
-    api.opsStatus(), api.recovery(),
-  ]);
-  const status = statusResponse.data;
-  const recovery = recoveryResponse.data;
-
-  root.append(
-    el("section", { class: "panel" }, [
-      el("div", { class: "panel-head" }, [
-        el("div", { class: "panel-title", text: i18n.t("ops.integrity") }),
-        pill(status.integrity.status === "ok" ? "succeeded" : "failed"),
-      ]),
-      el("div", { class: "panel-body" }, [
-        el("div", { text: i18n.t("ops.integrity.summary", {
-          version: i18n.number(status.integrity.migration_version),
-        }) }),
-      ]),
-    ]),
-  );
-
-  const findings = recovery.findings;
-  root.append(
-    el("section", { class: "panel" }, [
-      el("div", { class: "panel-head" }, [
-        el("div", { class: "panel-title", text: i18n.t("ops.recovery") }),
-      ]),
-      el("div", { class: "panel-body" }, [
-        el("div", {
-          class: "muted",
-          text: i18n.t("ops.recovery.scanned", {
-            count: i18n.number(recovery.scanned_runs),
-          }),
-        }),
-        ...(findings.length
-          ? findings.map((finding) =>
-              el("div", { class: "actions" }, [
-                el("span", { class: "mono", text: `${finding.code} · ${finding.entity_id}` }),
-                ...commandButtons(finding.allowed_commands || [], () => render()),
-              ]),
-            )
-          : [el("div", { class: "muted", text: i18n.t("ops.recovery.empty") })]),
-      ]),
-    ]),
-  );
-
-  root.append(el("section", { class: "stat-grid" }, [
-    el("article", { class: "stat-card" }, [
-      el("div", { class: "panel-title", text: i18n.t("ops.capacity") }),
-      el("div", { class: "stat-value", text: i18n.number(status.capacity.ready_jobs) }),
-      el("div", { class: "muted", text: i18n.t("ops.capacity.ready") }),
-      el("div", { class: "muted", text: i18n.t("ops.capacity.workers", {
-        count: i18n.number(status.capacity.configured_workers || 0),
-      }) }),
-    ]),
-    el("article", { class: "stat-card" }, [
-      el("div", { class: "panel-title", text: i18n.t("ops.durable") }),
-      el("div", { class: "stat-value", text: i18n.number(status.durable.active_leases) }),
-      el("div", { class: "muted", text: i18n.t("ops.durable.leases") }),
-      el("div", { class: "muted", text: i18n.t("ops.durable.unknown", {
-        count: i18n.number(status.durable.unknown_external_results),
-      }) }),
-    ]),
-  ]));
-}
-
 async function renderAgents(root) {
   const catalog = (await api.handlerCatalog()).data;
   const agents = catalog.handlers.filter((handler) => handler.name.startsWith("agent."));
@@ -2005,7 +1939,16 @@ function scheduleLivePolling() {
 }
 
 async function renderSettings(root) {
-  const status = shellFacts?.permissions?.ops_read ? (await api.opsStatus()).data : null;
+  // Ops and preferences share one page. The operational half needs ops_read;
+  // without it the page is still useful for local preferences, and the server
+  // decides what to show rather than the client guessing from a 403.
+  const opsRead = Boolean(shellFacts?.permissions?.ops_read);
+  const [statusResponse, recoveryResponse] = opsRead
+    ? await Promise.all([api.opsStatus(), api.recovery()])
+    : [null, null];
+  const status = statusResponse?.data ?? null;
+  const recovery = recoveryResponse?.data ?? null;
+
   const interval = el("select", { "aria-label": i18n.t("settings.refresh") });
   for (const seconds of [5, 15, 30, 60, 300]) interval.append(el("option", {
     value: String(seconds), text: i18n.t("settings.seconds", { count: seconds }),
@@ -2027,6 +1970,67 @@ async function renderSettings(root) {
       el("div", { class: "muted", text: i18n.t("settings.localOnly") }),
     ]),
   ]));
+
+  if (status) {
+    root.append(
+      el("section", { class: "panel" }, [
+        el("div", { class: "panel-head" }, [
+          el("div", { class: "panel-title", text: i18n.t("ops.integrity") }),
+          pill(status.integrity.status === "ok" ? "succeeded" : "failed"),
+        ]),
+        el("div", { class: "panel-body" }, [
+          el("div", { text: i18n.t("ops.integrity.summary", {
+            version: i18n.number(status.integrity.migration_version),
+          }) }),
+        ]),
+      ]),
+    );
+
+    const findings = recovery?.findings || [];
+    root.append(
+      el("section", { class: "panel" }, [
+        el("div", { class: "panel-head" }, [
+          el("div", { class: "panel-title", text: i18n.t("ops.recovery") }),
+        ]),
+        el("div", { class: "panel-body" }, [
+          el("div", {
+            class: "muted",
+            text: i18n.t("ops.recovery.scanned", {
+              count: i18n.number(recovery?.scanned_runs || 0),
+            }),
+          }),
+          ...(findings.length
+            ? findings.map((finding) =>
+                el("div", { class: "actions" }, [
+                  el("span", { class: "mono", text: `${finding.code} · ${finding.entity_id}` }),
+                  ...commandButtons(finding.allowed_commands || [], () => render()),
+                ]),
+              )
+            : [el("div", { class: "muted", text: i18n.t("ops.recovery.empty") })]),
+        ]),
+      ]),
+    );
+
+    root.append(el("section", { class: "stat-grid" }, [
+      el("article", { class: "stat-card" }, [
+        el("div", { class: "panel-title", text: i18n.t("ops.capacity") }),
+        el("div", { class: "stat-value", text: i18n.number(status.capacity.ready_jobs) }),
+        el("div", { class: "muted", text: i18n.t("ops.capacity.ready") }),
+        el("div", { class: "muted", text: i18n.t("ops.capacity.workers", {
+          count: i18n.number(status.capacity.configured_workers || 0),
+        }) }),
+      ]),
+      el("article", { class: "stat-card" }, [
+        el("div", { class: "panel-title", text: i18n.t("ops.durable") }),
+        el("div", { class: "stat-value", text: i18n.number(status.durable.active_leases) }),
+        el("div", { class: "muted", text: i18n.t("ops.durable.leases") }),
+        el("div", { class: "muted", text: i18n.t("ops.durable.unknown", {
+          count: i18n.number(status.durable.unknown_external_results),
+        }) }),
+      ]),
+    ]));
+  }
+
   root.append(el("section", { class: "panel" }, [
     el("div", { class: "panel-head" }, [el("div", {
       class: "panel-title", text: i18n.t("settings.server"),
@@ -3275,7 +3279,8 @@ async function render() {
     const section = route.view === "run" ? "runs"
       : route.view === "goal" || route.view === "goals" ? "home"
         : route.view === "artifact" ? "artifacts"
-          : route.view === "workflow" ? "workflows" : route.view;
+          : route.view === "workflow" ? "workflows"
+            : route.view === "ops" ? "settings" : route.view;
     const active = button.dataset.view === section;
     if (active) button.setAttribute("aria-current", "page");
     else button.removeAttribute("aria-current");
@@ -3285,7 +3290,8 @@ async function render() {
       : route.view === "goal" || route.view === "goals" ? "home.title"
         : route.view === "artifact" ? "artifacts.title"
           : route.view === "workflow" ? "workflows.title"
-            : route.view === "workflowEdit" ? "editor.title" : `${route.view}.title`,
+            : route.view === "ops" ? "settings.title"
+              : route.view === "workflowEdit" ? "editor.title" : `${route.view}.title`,
   );
 
   try {
@@ -3301,8 +3307,8 @@ async function render() {
     else if (route.view === "artifacts") await renderArtifacts(fresh);
     else if (route.view === "artifact") await renderArtifacts(fresh, route.artifactId);
     else if (route.view === "agents") await renderAgents(fresh);
-    else if (route.view === "ops") await renderOps(fresh);
-    else if (route.view === "settings") await renderSettings(fresh);
+    // Ops folded into settings; #/ops stays a working deep link.
+    else if (route.view === "ops" || route.view === "settings") await renderSettings(fresh);
     else await renderRuns(fresh);
     root.replaceChildren(...fresh.childNodes);
     if (route.view !== "inbox") await refreshInboxCount();

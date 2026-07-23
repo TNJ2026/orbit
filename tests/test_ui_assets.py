@@ -67,7 +67,6 @@ class CatalogTests(unittest.TestCase):
             "app.title",
             "artifacts.title",
             "nav.artifacts",
-            "nav.ops",
             "run.data.kind.artifact",
             "shell.breadcrumb.root",
             "wait.none",
@@ -102,7 +101,7 @@ class SourceTests(unittest.TestCase):
         known = set(catalog("en-US"))
         for key in (
             "run.timeline.empty", "run.errors.empty", "runs.title", "inbox.title",
-            "ops.title", "run.title", "human.decision.approve", "human.decision.reject",
+            "run.title", "human.decision.approve", "human.decision.reject",
             "state.loading", "state.empty", "state.error", "state.stale",
             "state.pending", "state.retry",
         ):
