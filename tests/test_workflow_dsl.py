@@ -513,6 +513,96 @@ class WorkflowDslSemanticTests(unittest.TestCase):
         self.assertEqual("n0", cycle[-1])
 
 
+class ArtifactEdgeTests(unittest.TestCase):
+    """A bare artifact edge may rename ports; an explicit one may not.
+
+    Large data rides an artifact_ref port, and one node's `result` feeds the
+    next node's `prompt` — different names. A bare edge across the two must
+    carry the reference to the target port, exactly as an inline edge would,
+    while a transform mapping on an artifact edge stays forbidden so a blob's
+    reference can never be rewritten in flight.
+    """
+
+    ARTIFACT_POLICY = {
+        "transport": "artifact_ref", "max_size_bytes": 1_000_000,
+        "content_types": ["text/plain"], "visibility": "run",
+    }
+
+    def setUp(self) -> None:
+        self.schemas = InMemorySchemaCatalog({"x://blob/1.0": {"type": "object"}})
+        self.handlers = InMemoryHandlerCatalog([
+            HandlerManifest(
+                name="produce", version="1.0.0", node_kinds=("action",),
+                inputs={}, outputs={"result": "x://blob/1.0"},
+                config_schema={"type": "object", "additionalProperties": False},
+                execution_safety=ExecutionSafety.REPLAY_SAFE,
+                resource_profile=ResourceProfile(0, 0, 0, 60, 1_000_000, "free"),
+                result_schema_id="x://blob/1.0",
+            ),
+            HandlerManifest(
+                name="consume", version="1.0.0", node_kinds=("action",),
+                inputs={"prompt": "x://blob/1.0"}, outputs={"result": "x://blob/1.0"},
+                config_schema={"type": "object", "additionalProperties": False},
+                execution_safety=ExecutionSafety.REPLAY_SAFE,
+                resource_profile=ResourceProfile(0, 0, 0, 60, 1_000_000, "free"),
+                result_schema_id="x://blob/1.0",
+            ),
+        ])
+
+    def document(self, edge_extra=None):
+        policy = self.ARTIFACT_POLICY
+        return {
+            "dsl_version": "1.2",
+            "metadata": {"id": "blobs", "name": "Blobs"},
+            "nodes": [
+                {"id": "produce", "kind": "action",
+                 "outputs": [{"id": "result", "schema_id": "x://blob/1.0", **policy}],
+                 "handler": {"name": "produce", "version": "1.0.0"}},
+                {"id": "consume", "kind": "action",
+                 "inputs": [{"id": "prompt", "schema_id": "x://blob/1.0", **policy}],
+                 "outputs": [{"id": "result", "schema_id": "x://blob/1.0", **policy}],
+                 "handler": {"name": "consume", "version": "1.0.0"}},
+                {"id": "done", "kind": "terminal",
+                 "inputs": [{"id": "result", "schema_id": "x://blob/1.0", **policy}]},
+            ],
+            "edges": [
+                {"id": "p_c", "from": {"node": "produce", "port": "result"},
+                 "to": {"node": "consume", "port": "prompt"}, **(edge_extra or {})},
+                {"id": "c_d", "from": {"node": "consume", "port": "result"},
+                 "to": {"node": "done", "port": "result"}},
+            ],
+            "entry": ["produce"], "terminals": ["done"],
+        }
+
+    def test_a_bare_artifact_edge_carries_the_reference_to_the_target_port(self) -> None:
+        compiled = compile_source(
+            json.dumps(self.document()), self.handlers, self.schemas,
+            source_format="json",
+        )
+        edge = next(e for e in compiled.ir.edges if e.id == "p_c")
+        mapping = to_primitive(edge.mapping)
+        self.assertEqual("object", mapping["op"])
+        self.assertEqual(
+            {"prompt": {"op": "ref", "path": "source.result"}}, mapping["fields"]
+        )
+        # The same-named edge still compiles to bare identity.
+        same = next(e for e in compiled.ir.edges if e.id == "c_d")
+        self.assertEqual("identity", to_primitive(same.mapping)["op"])
+
+    def test_a_transform_mapping_on_an_artifact_edge_is_refused(self) -> None:
+        document = self.document(edge_extra={
+            "mapping": {"schema_id": "x://blob/1.0",
+                        "value": {"artifact_id": "$source.result.artifact_id"}},
+        })
+        with self.assertRaises(DiagnosticError) as raised:
+            compile_source(
+                json.dumps(document), self.handlers, self.schemas, source_format="json",
+            )
+        self.assertIn(
+            "DSL_MAPPING_INVALID", [d.code for d in raised.exception.diagnostics]
+        )
+
+
 class WorkflowDslGoldenTests(unittest.TestCase):
     def test_yaml_and_json_match_canonical_ir_and_hash_golden(self) -> None:
         root = Path(__file__).parent / "fixtures"
