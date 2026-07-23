@@ -2048,18 +2048,21 @@ class RefreshTests(BrowserE2ETestCase):
         page.goto(f"{self.base}/ui/#/agents")
         page.wait_for_selector(".agent-card")
 
-        self.assertEqual(2, page.locator("#content section.panel").count())
+        # One panel: registered agents. The detection scope is the fixed
+        # allowlist, so a found CLI either registers or is simply absent — there
+        # is no separate "detected but unusable" list.
+        self.assertEqual(1, page.locator("#content section.panel").count())
         content = page.inner_text("#content")
         self.assertIn("Registered agents", content)
         # Name and version render on their own lines now.
         self.assertIn("agent.codex", content)
         self.assertIn("2.0.0", content)
         self.assertNotIn("transform 1.0.0", content)
-        # A discovered-but-unregistered CLI is listed once, in the detected
-        # panel; the registered one is not duplicated there.
-        self.assertIn("Detected CLIs", content)
-        self.assertEqual(1, page.locator("text=agent.hermes").count())
+        self.assertNotIn("Detected CLIs", content)
+        # The registered agent appears once; a discovered-but-unregistered CLI
+        # is not surfaced at all.
         self.assertEqual(1, page.locator("text=agent.codex").count())
+        self.assertEqual(0, page.locator("text=agent.hermes").count())
 
     def test_a_reload_restores_the_page_from_the_server(self) -> None:
         """Nothing is kept client-side, so a reload must lose nothing."""

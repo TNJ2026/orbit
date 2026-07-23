@@ -1842,8 +1842,6 @@ async function renderArtifactDetail(root, artifactId) {
 async function renderAgents(root) {
   const catalog = (await api.handlerCatalog()).data;
   const agents = catalog.handlers.filter((handler) => handler.name.startsWith("agent."));
-  const registeredNames = new Set(agents.map((handler) => handler.name));
-  const detected = (catalog.agents || []).filter((agent) => !registeredNames.has(agent.name));
   root.append(el("div", { class: "banner info", text: i18n.t("agents.registrationOnly") }));
   root.append(el("section", { class: "panel" }, [
     el("div", { class: "panel-head" }, [
@@ -1872,34 +1870,6 @@ async function renderAgents(root) {
         ]);
       })
       : [el("div", { class: "muted", text: i18n.t("agents.empty") })]),
-  ]));
-  root.append(el("section", { class: "panel" }, [
-    el("div", { class: "panel-head" }, [
-      el("div", { class: "panel-title", text: i18n.t("agents.detected") }),
-    ]),
-    el("div", { class: "panel-body" }, [
-      el("p", { class: "muted", text: i18n.t("agents.detectedHint") }),
-    ]),
-    el("div", { class: "panel-body agents-grid" }, detected.length
-      ? detected.map((agent) => {
-        const initials = agent.name.replace(/^agent\./, "").slice(0, 2).toUpperCase();
-        return el("article", { class: "data-card list-option-card agent-card" }, [
-          el("div", { class: "agent-head" }, [
-            el("span", { class: "agent-avatar", "aria-hidden": "true", text: initials }),
-            el("div", {}, [
-              el("div", { class: "panel-title mono", text: agent.name }),
-              el("div", { class: "muted mono agent-version", text: agent.version
-                ? agent.version : i18n.t("agents.versionUnknown") }),
-              el("div", { class: "muted agent-status", text: i18n.t("agents.detectedStatus") }),
-            ]),
-          ]),
-          (agent.capabilities || []).length
-            ? el("div", { class: "capabilities" }, agent.capabilities.map((capability) =>
-                el("span", { class: "capability", text: capability })))
-            : el("div", { class: "muted", text: i18n.t("agents.noCapabilities") }),
-        ]);
-      })
-      : [el("div", { class: "muted", text: i18n.t("agents.detectedEmpty") })]),
   ]));
 }
 
