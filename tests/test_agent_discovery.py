@@ -69,6 +69,7 @@ class SpecValidationTests(unittest.TestCase):
                 ("antigravity", "agy"),
                 ("hermes", "hermes"),
                 ("kimi", "kimi"),
+                ("pi", "pi"),
                 ("opencode", "opencode"),
             },
             {(spec.name, spec.executable) for spec in TRUSTED_AGENT_CLIS},

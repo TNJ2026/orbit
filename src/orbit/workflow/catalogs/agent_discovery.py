@@ -131,6 +131,11 @@ TRUSTED_AGENT_CLIS: tuple[AgentCliSpec, ...] = (
     # `kimi -p "<prompt>"` runs one prompt non-interactively and prints the
     # reply on stdout; probed against kimi 0.28.1.
     AgentCliSpec("kimi", "kimi", invocation=AgentInvocation(prompt_flag="-p")),
+    # `pi -p "<prompt>"` is non-interactive print mode, text output by default.
+    # `-p` is a boolean and the prompt is a positional message, but the argv is
+    # identical to the flag form, and pi rejects the `--` fence a positional
+    # spec would add ("Unknown option: --"). Probed against pi 0.81.1.
+    AgentCliSpec("pi", "pi", invocation=AgentInvocation(prompt_flag="-p")),
     AgentCliSpec("hermes", "hermes", invocation=AgentInvocation(
         # -Q is quiet mode: the final response only, no banner or spinner.
         args=("chat", "-Q"), prompt_flag="-q",
