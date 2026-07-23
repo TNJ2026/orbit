@@ -56,8 +56,18 @@ class InMemoryMetrics:
     def observe(self, name, value, **labels): self.observations.append((name, value, labels))
 
 
+# A job lease has to outlive a renewal that stalls. Renewal writes to the same
+# SQLite database as five workers, the timer loop and recovery, and the busy
+# timeout there is 30s — so one renewal can block that long before it commits.
+# A 30s lease renewed every 10s leaves only 20s of slack, less than that single
+# stall, and the reaper then expires a lease whose handler is still running and
+# writes the attempt off as unknown. 120s keeps the lease alive across several
+# consecutive worst-case stalls while staying well under MAX_JOB_LEASE_TTL.
+JOB_LEASE_TTL = timedelta(seconds=120)
+
+
 class WorkerRuntime:
-    def __init__(self, service, executor: Callable[[str, dict, CancellationToken], dict], *, worker_id="worker-1", clock: Callable[[], datetime], metrics=None, renew_interval_seconds=10.0) -> None:
+    def __init__(self, service, executor: Callable[[str, dict, CancellationToken], dict], *, worker_id="worker-1", clock: Callable[[], datetime], metrics=None, renew_interval_seconds=10.0, lease_ttl: timedelta = JOB_LEASE_TTL) -> None:
         self.service = service
         self.executor = executor
         self.worker_id = worker_id
@@ -65,6 +75,7 @@ class WorkerRuntime:
         self.metrics = metrics or InMemoryMetrics()
         self.current_token = None
         self.renew_interval_seconds = renew_interval_seconds
+        self.lease_ttl = lease_ttl
 
     def _increment(self, name):
         try: self.metrics.increment(name)
@@ -73,7 +84,7 @@ class WorkerRuntime:
     def run_once(self) -> bool:
         now = self.clock()
         self._increment("worker_heartbeat")
-        claimed = self.service.claim_job(self.worker_id, now)
+        claimed = self.service.claim_job(self.worker_id, now, lease_ttl=self.lease_ttl)
         if claimed is None:
             self._increment("worker_empty")
             return False
@@ -92,6 +103,7 @@ class WorkerRuntime:
                     self.service, claimed, token, clock=self.clock,
                     deadline=request.deadline,
                     renew_interval_seconds=self.renew_interval_seconds,
+                    lease_ttl=self.lease_ttl,
                     on_cancel=lambda: getattr(
                         self.executor, "cancel_current", lambda *_: None
                     )(request.attempt_id),

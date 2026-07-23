@@ -451,6 +451,38 @@ class HandlerDurableEndToEndTests(unittest.TestCase):
         registry.seal()
         return registry
 
+    def test_a_job_lease_outlasts_a_renewal_stalled_on_a_busy_database(self):
+        """The lease must survive a renewal that blocks on the write lock.
+
+        Renewal writes to the same SQLite the workers, timer and recovery all
+        write, where the busy timeout is 30s — so a single renewal can stall
+        that long. A lease that expires inside that window is reaped mid-flight
+        and the attempt is written off as unknown though the handler still runs.
+        The claimed lease has to hold well past one worst-case stall.
+        """
+
+        from datetime import timedelta
+
+        from orbit.workflow.persistence.database import BUSY_TIMEOUT_MS
+        from orbit.workflow.worker.runtime import JOB_LEASE_TTL
+
+        busy_timeout = timedelta(milliseconds=BUSY_TIMEOUT_MS)
+        # Room for several consecutive worst-case stalls, not just one.
+        self.assertGreaterEqual(JOB_LEASE_TTL, busy_timeout * 3)
+
+        registry = self._registry()
+        service = DurableRuntimeApplicationService(self.path, execution_registry=registry)
+        service.submit(self.start)
+        claimed = service.claim_job("worker-1", NOW, lease_ttl=JOB_LEASE_TTL)
+        self.assertIsNotNone(claimed)
+        with service.uow_factory() as uow:
+            lease = uow.leases.get(claimed.lease_id)
+        held = lease.expires_at - NOW
+        self.assertGreaterEqual(held, busy_timeout * 3)
+        # And the worker claims with that TTL, not the bare 30s default.
+        worker = WorkerRuntime(service, object(), clock=lambda: NOW)
+        self.assertEqual(JOB_LEASE_TTL, worker.lease_ttl)
+
     def test_transform_tool_agent_execution_path_records_final_usage(self):
         registry = self._registry(mixed=True)
         service = DurableRuntimeApplicationService(self.path, execution_registry=registry)
