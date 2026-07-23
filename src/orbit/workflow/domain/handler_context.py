@@ -41,6 +41,10 @@ class ExecutorRequest:
     # Handler that must decide inline-vs-artifact for its own output reads it
     # here. Empty for callers that predate large-output routing.
     output_ports: tuple[Mapping[str, Any], ...] = ()
+    # The plan node's input ports, same shape. A Handler consuming an artifact
+    # input needs the transport to know a `{artifact_id}` value is a reference
+    # to resolve, not an inline object to pass through.
+    input_ports: tuple[Mapping[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
         for value, kind in (
@@ -63,6 +67,7 @@ class ExecutorRequest:
         object.__setattr__(self, "input_manifest", freeze_json(self.input_manifest))
         object.__setattr__(self, "output_manifest", freeze_json(self.output_manifest))
         object.__setattr__(self, "output_ports", freeze_json(tuple(self.output_ports)))
+        object.__setattr__(self, "input_ports", freeze_json(tuple(self.input_ports)))
 
 
 @dataclass(frozen=True)

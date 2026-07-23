@@ -12,6 +12,7 @@ import hashlib
 from typing import Any, Mapping, Protocol, runtime_checkable
 
 from ..cli_environment import trusted_cli_environment
+from ..domain.ids import EntityId
 from ..domain.accounting import UsageSnapshot
 from ..domain.durable_execution import ExecutionSafety
 from ..domain.handlers import (
@@ -71,6 +72,9 @@ class AgentResponse:
     usage: UsageSnapshot | None
     provider_request_id: str | None
     finish_reason: str = "completed"
+    # Artifacts the client staged for the result port, when the port is
+    # artifact_ref. Empty on the inline path.
+    artifact_refs: tuple[Any, ...] = ()
 
 
 @runtime_checkable
@@ -136,12 +140,16 @@ class TrustedCliAgentClient:
             value.get("finish_reason", "completed"),
         )
 
-    def _run(self, extra_args, payload, context):
+    def _run(self, extra_args, payload, context, *, max_output_bytes=None):
         """Spawn, feed, bound and reap. Subclasses decide argv tail and parsing.
 
         Everything here is about surviving the process, not about what it says:
         a timeout or a non-zero exit after submission is an *unknown* external
         result, never a failure, because the Agent may already have acted.
+
+        `max_output_bytes` overrides the read ceiling for this call — an
+        artifact result port raises it to the port's size limit, so a reply too
+        big to go inline is still fully read on its way to the blob store.
         """
 
         process = subprocess.Popen(
@@ -157,6 +165,7 @@ class TrustedCliAgentClient:
         try:
             stdout, stderr, overflow = self._communicate_bounded(
                 process, payload, sink=getattr(context, "output", None),
+                max_output_bytes=max_output_bytes,
             )
         except TimeoutError:
             process.terminate()
@@ -186,7 +195,8 @@ class TrustedCliAgentClient:
             )
         return stdout
 
-    def _communicate_bounded(self, process, payload, *, sink=None):
+    def _communicate_bounded(self, process, payload, *, sink=None, max_output_bytes=None):
+        stdout_limit = max_output_bytes or self.max_output_bytes
         stdout_chunks, stderr_chunks = [], []
         stdout_size = 0
         overflow = Event()
@@ -236,7 +246,7 @@ class TrustedCliAgentClient:
 
         threads = (
             Thread(target=write_input, daemon=True),
-            Thread(target=read_output, args=(process.stdout, stdout_chunks, self.max_output_bytes, True, "stdout"), daemon=True),
+            Thread(target=read_output, args=(process.stdout, stdout_chunks, stdout_limit, True, "stdout"), daemon=True),
             Thread(target=read_output, args=(process.stderr, stderr_chunks, 65_536, False, "stderr"), daemon=True),
         )
         for thread in threads: thread.start()
@@ -310,11 +320,28 @@ class TrustedPromptCliAgentClient(TrustedCliAgentClient):
         self.max_prompt_bytes = max_prompt_bytes
 
     def execute(self, request, context):
-        prompt = render_agent_prompt(request.input, request.config)
+        # An upstream Agent may have handed this one its answer as an artifact
+        # reference (a large output that never went inline). Resolve it back to
+        # text before rendering, so the prompt is the prose, not a reference.
+        resolved_input = _resolve_artifact_inputs(request.input, context)
+        prompt = render_agent_prompt(resolved_input, request.config)
         encoded = prompt.encode("utf-8")
-        if len(encoded) > self.max_prompt_bytes:
+        # A prompt fed by an artifact input may be far larger than the inline
+        # cap — the point of carrying it as an artifact. Only a stdin CLI can
+        # receive it: a flag or positional value goes in argv, which the OS caps
+        # at ARG_MAX, so those keep the small inline limit and say so plainly.
+        via_stdin = self.prompt_flag is None and not self.prompt_positional
+        prompt_limit = (
+            max(self.max_prompt_bytes, _artifact_input_budget(context))
+            if via_stdin else self.max_prompt_bytes
+        )
+        if len(encoded) > prompt_limit:
+            hint = "" if via_stdin else (
+                " — this CLI takes the prompt as an argument, which the OS "
+                "caps; a stdin-based Agent can receive a large artifact input"
+            )
             raise HandlerValidationError(
-                f"prompt exceeds {self.max_prompt_bytes} bytes for this Agent CLI"
+                f"prompt exceeds {prompt_limit} bytes for this Agent CLI{hint}"
             )
         if self.prompt_flag is not None:
             extra, payload = (self.prompt_flag, prompt), b""
@@ -324,12 +351,94 @@ class TrustedPromptCliAgentClient(TrustedCliAgentClient):
             extra, payload = ("--", prompt), b""
         else:
             extra, payload = (), encoded
-        stdout = self._run(extra, payload, context)
-        text = stdout.decode("utf-8", errors="replace").strip()
-        return AgentResponse(
-            {AGENT_RESULT_PORT: {AGENT_RESULT_TEXT_KEY: text}},
-            None, None, "completed",
+        # An artifact result port lifts the read ceiling to its size limit, so a
+        # reply too large for the inline path is still fully captured.
+        result_port = _artifact_port(
+            getattr(getattr(context, "request", None), "output_ports", ()),
+            AGENT_RESULT_PORT,
         )
+        max_output_bytes = None
+        if result_port is not None:
+            max_output_bytes = result_port.get("data_policy", {}).get("max_size_bytes")
+        stdout = self._run(extra, payload, context, max_output_bytes=max_output_bytes)
+        text = stdout.decode("utf-8", errors="replace").strip()
+        return _agent_result(text, context)
+
+
+def _artifact_port(ports, port_id: str):
+    """The plan port dict for `port_id` when it is artifact_ref, else None."""
+
+    for port in ports or ():
+        if port.get("id") == port_id and (
+            port.get("data_policy", {}).get("transport") == "artifact_ref"
+        ):
+            return port
+    return None
+
+
+def _artifact_input_budget(context) -> int:
+    """The largest artifact input the plan lets this node receive.
+
+    Zero when no input port is artifact_ref, so an ordinary Agent keeps its
+    small inline prompt cap.
+    """
+
+    ports = getattr(getattr(context, "request", None), "input_ports", ())
+    budget = 0
+    for port in ports or ():
+        policy = port.get("data_policy", {})
+        if policy.get("transport") == "artifact_ref":
+            budget = max(budget, int(policy.get("max_size_bytes") or 0))
+    return budget
+
+
+def _resolve_artifact_inputs(node_input, context):
+    """Replace artifact-reference input values with their text.
+
+    Only ports the plan declares artifact_ref are touched, and only their
+    committed, authorised blobs are read — an inline value that merely happens
+    to carry an `artifact_id` key is left exactly as it is.
+    """
+
+    ports = getattr(getattr(context, "request", None), "input_ports", ())
+    artifacts = getattr(context, "artifacts", None)
+    if not ports or artifacts is None or not isinstance(node_input, Mapping):
+        return node_input
+    resolved = dict(node_input)
+    for port in ports:
+        if port.get("data_policy", {}).get("transport") != "artifact_ref":
+            continue
+        value = resolved.get(port["id"])
+        if not isinstance(value, Mapping) or "artifact_id" not in value:
+            continue
+        blob = artifacts.read(EntityId.parse(str(value["artifact_id"])))
+        resolved[port["id"]] = blob.decode("utf-8", errors="replace")
+    return resolved
+
+
+def _agent_result(text: str, context) -> "AgentResponse":
+    """The reply, inline for a small port or staged for an artifact one.
+
+    The port the workflow declared decides. An artifact_ref result port sends
+    the text to the blob store — no 1 MiB inline ceiling — and the output
+    carries only the reference; an inline port keeps the object envelope.
+    """
+
+    ports = getattr(getattr(context, "request", None), "output_ports", ())
+    port = _artifact_port(ports, AGENT_RESULT_PORT)
+    if port is None:
+        return AgentResponse(
+            {AGENT_RESULT_PORT: {AGENT_RESULT_TEXT_KEY: text}}, None, None, "completed",
+        )
+    content_types = port.get("data_policy", {}).get("content_types") or ("text/plain",)
+    artifact_id = context.artifacts.write(
+        name=AGENT_RESULT_PORT, content=text.encode("utf-8"),
+        content_type=content_types[0],
+    )
+    return AgentResponse(
+        {AGENT_RESULT_PORT: {"artifact_id": str(artifact_id)}},
+        None, None, "completed", artifact_refs=(artifact_id,),
+    )
 
 
 def render_agent_prompt(
@@ -392,7 +501,7 @@ class AgentHandler:
         )
         return RawHandlerResult(
             response.output, response.usage, response.provider_request_id,
-            ExternalEffect.KNOWN_APPLIED,
+            ExternalEffect.KNOWN_APPLIED, artifact_refs=response.artifact_refs,
         )
 
     def normalize_result(self, raw, context):
@@ -401,6 +510,7 @@ class AgentHandler:
         return HandlerResult(
             HandlerResultStatus.SUCCEEDED, raw.output, None, raw.usage,
             raw.usage is None, raw.external_effect, raw.provider_request_id,
+            artifact_refs=raw.artifact_refs,
         )
 
     def cancel(self, execution_ref, context): return self.client.cancel(execution_ref)

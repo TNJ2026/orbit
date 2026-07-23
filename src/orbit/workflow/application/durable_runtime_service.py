@@ -306,9 +306,10 @@ class DurableRuntimeApplicationService:
             f"{job.run_id}+{node.node_run_id}+{attempt.attempt_number.value}",
             now + timedelta(seconds=manifest.resource_profile.max_duration_seconds),
             manifest.execution_safety, manifest.resource_profile,
-            # The port transports a Handler needs to route its own output; the
-            # manifest carries only schemas.
+            # The port transports a Handler needs to route its own output and to
+            # recognise an artifact input; the manifest carries only schemas.
             tuple(plan_node.outputs),
+            tuple(plan_node.inputs),
         )
 
     def build_artifact_access(self, request: ExecutorRequest):

@@ -206,6 +206,127 @@ class AgentPortContractTests(unittest.TestCase):
         self.assertEqual({AGENT_RESULT_PORT}, set(agent_manifest(agent).outputs))
 
 
+class _FakeArtifacts:
+    """A minimal CAS stand-in: write returns an id, read returns the bytes."""
+
+    def __init__(self):
+        self.blobs = {}
+        self.writes = []
+
+    def write(self, *, name, content, content_type):
+        from orbit.workflow.domain.ids import EntityId
+
+        artifact_id = EntityId("artifact", f"{name}-{len(self.blobs)}")
+        self.blobs[str(artifact_id)] = content
+        self.writes.append((name, content_type, len(content)))
+        return artifact_id
+
+    def read(self, artifact_id, *, max_size_bytes=None):
+        return self.blobs[str(artifact_id)]
+
+
+def _port(port_id, *, transport="inline", max_size_bytes=1_000_000, content_types=("text/plain",)):
+    policy = {"transport": transport, "max_size_bytes": max_size_bytes,
+              "content_types": list(content_types) if transport == "artifact_ref" else [],
+              "visibility": "run" if transport == "artifact_ref" else None}
+    return {"id": port_id, "schema_id": "x://o/1.0", "required": True,
+            "has_default": False, "default": None, "description": "",
+            "data_policy": policy}
+
+
+def _routing_context(*, output_ports=(), input_ports=(), artifacts=None):
+    return SimpleNamespace(
+        request=SimpleNamespace(
+            attempt_id="attempt-1", output_ports=tuple(output_ports),
+            input_ports=tuple(input_ports),
+        ),
+        artifacts=artifacts,
+    )
+
+
+class AgentArtifactRoutingTests(unittest.TestCase):
+    """The result port's transport decides where a reply goes."""
+
+    def client(self, body, **kwargs):
+        cli = FakeCli(body)
+        self.addCleanup(cli.cleanup)
+        return TrustedPromptCliAgentClient(
+            (str(cli.path),), environment={"PATH": os.environ["PATH"]}, **kwargs,
+        )
+
+    def test_an_artifact_result_port_stages_the_reply_and_returns_a_reference(self) -> None:
+        artifacts = _FakeArtifacts()
+        client = self.client("print('the long report')", prompt_flag="-q")
+        response = client.execute(
+            AgentRequest({"prompt": "go"}, {}, "key"),
+            _routing_context(
+                output_ports=[_port("result", transport="artifact_ref")],
+                artifacts=artifacts,
+            ),
+        )
+        artifact_id = response.output[AGENT_RESULT_PORT]["artifact_id"]
+        self.assertEqual((artifact_id,), tuple(str(r) for r in response.artifact_refs))
+        self.assertEqual(b"the long report", artifacts.blobs[artifact_id])
+        self.assertEqual([("result", "text/plain", 15)], artifacts.writes)
+
+    def test_an_inline_result_port_keeps_the_text_envelope(self) -> None:
+        client = self.client("print('short')", prompt_flag="-q")
+        response = client.execute(
+            AgentRequest({"prompt": "go"}, {}, "key"),
+            _routing_context(output_ports=[_port("result")], artifacts=_FakeArtifacts()),
+        )
+        self.assertEqual({AGENT_RESULT_PORT: {AGENT_RESULT_TEXT_KEY: "short"}}, response.output)
+        self.assertEqual((), response.artifact_refs)
+
+    def test_an_artifact_input_is_resolved_to_text_before_the_prompt(self) -> None:
+        artifacts = _FakeArtifacts()
+        from orbit.workflow.domain.ids import EntityId
+
+        artifacts.blobs[str(EntityId("artifact", "up-0"))] = b"upstream prose"
+        # Echo argv so we can see what prompt the CLI received.
+        client = self.client(ECHO_ARGV, prompt_flag="-q")
+        response = client.execute(
+            AgentRequest({"prompt": {"artifact_id": str(EntityId("artifact", "up-0"))}}, {}, "key"),
+            _routing_context(
+                input_ports=[_port("prompt", transport="artifact_ref")],
+                artifacts=artifacts,
+            ),
+        )
+        seen = json.loads(response.output[AGENT_RESULT_PORT][AGENT_RESULT_TEXT_KEY])
+        self.assertEqual(["-q", "upstream prose"], seen["argv"])
+
+    def test_a_large_prompt_via_a_flag_is_refused_with_a_hint(self) -> None:
+        from orbit.workflow.domain.ids import EntityId
+
+        artifacts = _FakeArtifacts()
+        artifacts.blobs[str(EntityId("artifact", "big-0"))] = b"y" * 500_000
+        client = self.client("print('x')", prompt_flag="-q")
+        with self.assertRaises(HandlerValidationError) as raised:
+            client.execute(
+                AgentRequest({"prompt": {"artifact_id": str(EntityId("artifact", "big-0"))}}, {}, "key"),
+                _routing_context(
+                    input_ports=[_port("prompt", transport="artifact_ref")],
+                    artifacts=artifacts,
+                ),
+            )
+        self.assertIn("argument", str(raised.exception))
+
+    def test_a_large_prompt_via_stdin_is_allowed_up_to_the_input_budget(self) -> None:
+        from orbit.workflow.domain.ids import EntityId
+
+        artifacts = _FakeArtifacts()
+        artifacts.blobs[str(EntityId("artifact", "big-0"))] = b"z" * 500_000
+        client = self.client("import sys; sys.stdin.read(); print('ok')")  # stdin transport
+        response = client.execute(
+            AgentRequest({"prompt": {"artifact_id": str(EntityId("artifact", "big-0"))}}, {}, "key"),
+            _routing_context(
+                input_ports=[_port("prompt", transport="artifact_ref")],
+                artifacts=artifacts,
+            ),
+        )
+        self.assertEqual("ok", response.output[AGENT_RESULT_PORT][AGENT_RESULT_TEXT_KEY])
+
+
 class PromptRenderingTests(unittest.TestCase):
     def test_a_string_input_is_the_prompt(self) -> None:
         self.assertEqual("go", render_agent_prompt({"prompt": "go"}, {}))
