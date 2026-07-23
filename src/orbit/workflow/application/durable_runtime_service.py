@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from typing import Mapping
 from pathlib import Path
 import secrets
 
@@ -308,6 +309,65 @@ class DurableRuntimeApplicationService:
             # The port transports a Handler needs to route its own output; the
             # manifest carries only schemas.
             tuple(plan_node.outputs),
+        )
+
+    def build_artifact_access(self, request: ExecutorRequest):
+        """The Artifact capability a Handler sees, scoped to this attempt.
+
+        Without a Blob backend there is nothing to scope, so the executor keeps
+        its rejecting default. With one, the Handler may write to the artifact
+        output ports its plan node declares, and read exactly the artifacts its
+        artifact input ports were bound to — no enumeration, no other run's data.
+        The ScopedArtifactAccess adapter was defined for this and, until now,
+        never actually wired into the running server.
+        """
+
+        if self.artifact_backend is None:
+            return None
+        from ..artifacts.access import ScopedArtifactAccess
+        from ..domain.data import ArtifactVisibility, PortDataPolicy, PortTransport
+
+        def policy_of(port) -> tuple[str, "PortDataPolicy"]:
+            raw = port["data_policy"]
+            visibility = raw["visibility"]
+            return port["schema_id"], PortDataPolicy(
+                PortTransport(raw["transport"]), raw["max_size_bytes"],
+                tuple(raw["content_types"]),
+                None if visibility is None else ArtifactVisibility(visibility),
+            )
+
+        with self.uow_factory() as uow:
+            run = uow.runs.get(request.run_id)
+            plan_record = uow.plans.get(request.run_id, request.plan_version)
+            plan = execution_plan_from_primitive(to_primitive(plan_record.plan))
+            node = plan.node(request.node_id)
+            output_policies = {
+                port["id"]: policy_of(port)
+                for port in node.outputs
+                if port["data_policy"]["transport"] == PortTransport.ARTIFACT_REF.value
+            }
+            authorized = []
+            for port in node.inputs:
+                if port["data_policy"]["transport"] != PortTransport.ARTIFACT_REF.value:
+                    continue
+                bound = request.input.get(port["id"]) if request.input else None
+                artifact_id = (
+                    bound.get("artifact_id") if isinstance(bound, Mapping) else None
+                )
+                if artifact_id is None:
+                    continue
+                metadata = uow.artifacts.get(
+                    EntityId.parse(str(artifact_id)), committed_only=True
+                )
+                if metadata is not None:
+                    authorized.append(metadata)
+
+        return ScopedArtifactAccess(
+            self.artifact_backend, self.uow_factory,
+            run_id=request.run_id, workflow_id=run.workflow_id,
+            node_run_id=request.node_run_id, attempt_id=request.attempt_id,
+            output_policies=output_policies, authorized_inputs=tuple(authorized),
+            clock=lambda: datetime.now(timezone.utc),
         )
 
     def build_legacy_executor_input(self, claimed: ClaimedWork):

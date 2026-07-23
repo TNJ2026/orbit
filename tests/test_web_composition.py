@@ -442,6 +442,119 @@ class EndToEndTests(unittest.TestCase):
             time.sleep(0.05)
         self.fail(f"run did not reach {statuses}; last status was {last}")
 
+    def test_a_handler_can_write_an_artifact_output_through_the_composition(self) -> None:
+        """The Artifact adapter must actually reach a running Handler.
+
+        ScopedArtifactAccess was defined but never wired in, so every artifact
+        write in the running server hit the rejecting default. A blob larger
+        than the 1 MiB inline ceiling proves the write went to CAS, not events.
+        """
+
+        from orbit.workflow.artifacts.local_cas import LocalCASBackend
+        from orbit.workflow.application.run_service import RunApplicationService
+        from orbit.workflow.domain.handlers import (
+            CancelAck, CancelDisposition, HandlerResult, HandlerResultStatus,
+            HandlerValidationResult, PreparedExecution, RawHandlerResult,
+            RecoveryDisposition, RecoveryResult,
+        )
+
+        big = "x" * 2_000_000  # over the 1 MiB inline cap → must go to CAS
+
+        class BigWriter:
+            def validate(self, m, c):
+                return HandlerValidationResult()
+
+            def prepare(self, request, context):
+                return PreparedExecution({"input": request.input}, f"big:{request.attempt_id}")
+
+            def execute(self, prepared, context):
+                artifact_id = context.artifacts.write(
+                    name="result", content=big.encode(), content_type="text/plain",
+                )
+                return RawHandlerResult(
+                    {"result": {"artifact_id": str(artifact_id)}}, None,
+                    artifact_refs=(artifact_id,),
+                )
+
+            def normalize_result(self, raw, context):
+                return HandlerResult(
+                    HandlerResultStatus.SUCCEEDED, raw.output, None, None, True,
+                    raw.external_effect, artifact_refs=raw.artifact_refs,
+                )
+
+            def cancel(self, r, c):
+                return CancelAck(CancelDisposition.CONFIRMED_STOPPED)
+
+            def recover(self, r, c):
+                return RecoveryResult(RecoveryDisposition.NOT_FOUND)
+
+        manifest = HandlerManifest(
+            "bigwriter", "1.0.0", ("action",), {"prompt": "schema://object/1.0"},
+            {"result": "schema://object/1.0"}, {"type": "object"},
+            ExecutionSafety.REPLAY_SAFE,
+            ResourceProfile(1, 1, 1, 60, 10_000_000, "t"), "schema://object/1.0",
+            (), (), True, True,
+        )
+        policy = {
+            "transport": "artifact_ref", "max_size_bytes": 10_000_000,
+            "content_types": ["text/plain"], "visibility": "run",
+        }
+        dsl = {
+            "dsl_version": "1.2", "metadata": {"id": "big", "name": "Big"},
+            "nodes": [
+                {"id": "work", "kind": "action",
+                 "inputs": [{"id": "prompt", "schema_id": "schema://object/1.0"}],
+                 "outputs": [{"id": "result", "schema_id": "schema://object/1.0", **policy}],
+                 "handler": {"name": "bigwriter", "version": "1.0.0"}},
+                {"id": "done", "kind": "terminal",
+                 "inputs": [{"id": "result", "schema_id": "schema://object/1.0", **policy}]},
+            ],
+            "edges": [{"id": "e", "from": {"node": "work", "port": "result"},
+                       "to": {"node": "done", "port": "result"}}],
+            "entry": ["work"], "terminals": ["done"],
+        }
+        compiled = compile_source(
+            json.dumps(dsl), InMemoryHandlerCatalog([manifest]),
+            InMemorySchemaCatalog(SCHEMAS), source_format="json",
+        )
+        SQLiteWorkflowVersionStore(self.db).publish(
+            compiled, expected_latest_version=0, source_format="json",
+            source_text=None, actor="t",
+        )
+        backend = LocalCASBackend(Path(self.temp.name) / "artifacts")
+        composition = RuntimeComposition(
+            self.db, handlers=[HandlerRegistration(manifest, BigWriter(), "bigwriter@1.0.0")],
+            schemas=SCHEMAS, worker_count=2, poll_seconds=0.02,
+            clock=lambda: datetime.now(timezone.utc), artifact_backend=backend,
+        )
+        composition.start()
+        try:
+            RunApplicationService(self.db, composition.service).start_run(
+                workflow_id=compiled.ir.workflow_id, inputs={"prompt": {"goal": "x"}},
+                actor="t", idempotency_key="big",
+            )
+            deadline = time.monotonic() + 20
+            status = None
+            while time.monotonic() < deadline:
+                conn = sqlite3.connect(self.db)
+                try:
+                    row = conn.execute("SELECT status FROM workflow_runs").fetchone()
+                    status = row[0] if row else None
+                finally:
+                    conn.close()
+                if status in {"succeeded", "failed"}:
+                    break
+                time.sleep(0.1)
+            self.assertEqual("succeeded", status)
+            conn = sqlite3.connect(self.db)
+            try:
+                art = conn.execute("SELECT status, size_bytes FROM artifacts").fetchone()
+            finally:
+                conn.close()
+            self.assertEqual(("committed", 2_000_000), (art[0], art[1]))
+        finally:
+            composition.stop()
+
     def test_static_workflow_runs_to_completion(self) -> None:
         composition = self._compose()
         _, digest = publish_linear_workflow(self.db)

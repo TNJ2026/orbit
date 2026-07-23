@@ -212,6 +212,11 @@ class RuntimeComposition:
             planner_service=planner_service,
             budget_service=self.budget_service,
         )
+        # The executor is built before the service (it seals the registry the
+        # service binds to), so the Artifact capability is attached now that the
+        # service exists. Without this the adapter was defined but never reached
+        # a running Handler, and every artifact write hit the rejecting default.
+        self.handler_executor.artifact_access_factory = self.service.build_artifact_access
 
         self.loops: list[BackgroundLoop] = []
         self._workers: list[WorkerRuntime] = []
