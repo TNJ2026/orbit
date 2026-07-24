@@ -138,25 +138,13 @@ export class Api {
     return this.get(`/api/v1/runs/${encodeURIComponent(runId)}/outcome`);
   }
 
-  runPage(runId, kind, cursor, limit = 25) {
-    const params = new URLSearchParams({ limit: String(limit) });
-    if (cursor) params.set("cursor", cursor);
-    return this.get(`/api/v1/runs/${encodeURIComponent(runId)}/${kind}?${params}`);
-  }
-
-  /** Handler console output. A tail, not a page: `after` is the last chunk
-   *  already shown, so a follower asks only for what is new. */
-  runOutput(runId, after = 0, limit = 200) {
+  runOutput(runId, after = 0, limit = 200, nodeRunId = "") {
     const params = new URLSearchParams({ limit: String(limit) });
     if (after) params.set("after", String(after));
+    if (nodeRunId) params.set("node_run_id", nodeRunId);
     return this.get(`/api/v1/runs/${encodeURIComponent(runId)}/output?${params}`);
   }
 
-  lineage(runId, dataId) {
-    return this.get(
-      `/api/v1/runs/${encodeURIComponent(runId)}/data/${encodeURIComponent(dataId)}/lineage`,
-    );
-  }
 
   artifacts({ cursor, q = "", runId = "", contentType = "", limit = 25 } = {}) {
     const params = new URLSearchParams({ limit: String(limit) });
@@ -169,10 +157,6 @@ export class Api {
 
   artifact(artifactId) {
     return this.get(`/api/v1/artifacts/${encodeURIComponent(artifactId)}`);
-  }
-
-  artifactLineage(artifactId) {
-    return this.get(`/api/v1/artifacts/${encodeURIComponent(artifactId)}/lineage`);
   }
 
   async artifactPreview(artifactId) {
@@ -205,77 +189,23 @@ export class Api {
      overlay and diff apart, and merging them here would put the distinction
      back at the mercy of the client. */
 
-  planDefinition(runId, planVersion) {
-    const suffix = planVersion === undefined ? "" : `?plan_version=${planVersion}`;
-    return this.get(`/api/v1/runs/${encodeURIComponent(runId)}/plan${suffix}`);
-  }
 
-  planOverlay(runId, planVersion, asOfGlobalPosition) {
-    const params = new URLSearchParams();
-    if (planVersion !== undefined) params.set("plan_version", String(planVersion));
-    if (asOfGlobalPosition !== undefined && asOfGlobalPosition !== null) {
-      params.set("as_of_global_position", String(asOfGlobalPosition));
-    }
-    const suffix = params.size ? `?${params}` : "";
-    return this.get(
-      `/api/v1/runs/${encodeURIComponent(runId)}/plan/overlay${suffix}`,
-    );
-  }
 
-  planDiff(runId, baseVersion, targetVersion) {
-    const params = new URLSearchParams({
-      base_version: String(baseVersion), target_version: String(targetVersion),
-    });
-    return this.get(`/api/v1/runs/${encodeURIComponent(runId)}/plan/diff?${params}`);
-  }
 
-  plannerDecisions(runId, cursor) {
-    const params = new URLSearchParams({ limit: "50" });
-    if (cursor) params.set("cursor", cursor);
-    return this.get(
-      `/api/v1/runs/${encodeURIComponent(runId)}/planner-decisions?${params}`,
-    );
-  }
 
-  foreachGroups(runId, cursor) {
-    const params = new URLSearchParams({ limit: "50" });
-    if (cursor) params.set("cursor", cursor);
-    return this.get(`/api/v1/runs/${encodeURIComponent(runId)}/foreach?${params}`);
-  }
 
-  foreachItems(runId, groupId, cursor) {
-    const params = new URLSearchParams({ limit: "50" });
-    if (cursor) params.set("cursor", cursor);
-    return this.get(
-      `/api/v1/runs/${encodeURIComponent(runId)}/foreach/`
-      + `${encodeURIComponent(groupId)}/items?${params}`,
-    );
-  }
 
-  subflows(runId, cursor) {
-    const params = new URLSearchParams({ limit: "50" });
-    if (cursor) params.set("cursor", cursor);
-    return this.get(`/api/v1/runs/${encodeURIComponent(runId)}/subflows?${params}`);
-  }
 
   graph(runId, planVersion) {
     const suffix = planVersion === undefined ? "" : `?plan_version=${planVersion}`;
     return this.get(`/api/v1/runs/${encodeURIComponent(runId)}/graph${suffix}`);
   }
 
-  inbox(cursor) {
-    const params = new URLSearchParams({ limit: "25" });
-    if (cursor) params.set("cursor", cursor);
-    return this.get(`/api/v1/inbox?${params}`);
-  }
 
   capabilities() {
     return this.get("/api/v1/capabilities");
   }
 
-  handlerCatalog() {
-    return this.get("/api/v1/handler-catalog");
-  }
 
   workflowCatalog() {
     return this.get("/api/v1/workflows");
@@ -297,13 +227,7 @@ export class Api {
     return this.get(`/api/v1/workflow-authoring-jobs?${params}`);
   }
 
-  recovery() {
-    return this.get("/api/v1/recovery");
-  }
 
-  opsStatus() {
-    return this.get("/api/v1/ops/status");
-  }
 
   live(cursor) {
     const suffix = cursor ? `?cursor=${encodeURIComponent(cursor)}` : "";

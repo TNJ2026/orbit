@@ -142,11 +142,11 @@ def _goal_readiness_buckets(path: Path) -> dict[str, list[dict[str, object]]]:
 
 
 def _report_goal_readiness(db_path) -> None:
-    """Say at startup which Workflows the simplified UI will not start.
+    """Say at startup which Workflows cannot start a Goal.
 
-    Simplified mode withholds `run.start` from anything that cannot run from a
-    single Goal, so the operator who turned it on is told before their users
-    find out. It never blocks the boot: a report is information, not a gate.
+    The UI withholds `run.start` from anything that cannot run from a single
+    Goal, so the operator is told before their users find out. It never blocks
+    the boot: a report is information, not a gate.
     """
 
     try:
@@ -156,7 +156,7 @@ def _report_goal_readiness(db_path) -> None:
         return
     upgrade, migrate = buckets["needs_upgrade"], buckets["needs_migration"]
     print(
-        f"simplified goal UI: {len(buckets['ready'])} workflow(s) can start a goal, "
+        f"goal readiness: {len(buckets['ready'])} workflow(s) can start a goal, "
         f"{len(upgrade)} need an upgrade, {len(migrate)} cannot be upgraded",
         flush=True,
     )
@@ -171,12 +171,12 @@ def _report_goal_readiness(db_path) -> None:
 
 
 def _workflow_inventory(args, machine_output: bool) -> None:
-    """Who can start a Goal today, and who cannot — before switching modes on.
+    """Who can start a Goal today, and who cannot.
 
-    Turning on the simplified UI hides every Workflow that cannot run from a
-    single Goal, so an operator deserves that list before their users find it.
-    The report only reads the catalog projection: it publishes nothing, edits
-    nothing, and is safe to run against a live database.
+    The UI hides every Workflow that cannot run from a single Goal, so an
+    operator deserves that list before their users find it. The report only
+    reads the catalog projection: it publishes nothing, edits nothing, and is
+    safe to run against a live database.
     """
 
     path = Path(_runtime_db_path(args.db))
@@ -417,7 +417,6 @@ def _serve(args) -> None:
             token_exempt_actors=(LOCAL_ACTOR,),
             # Recovery takeovers are answered by this person too.
             operator_actors=(LOCAL_ACTOR,),
-            simplified_goal_ui=args.simplified_goal_ui,
         )
     except MixedSchemaError as exc:
         raise SystemExit(f"error: {exc}") from None
@@ -432,8 +431,7 @@ def _serve(args) -> None:
         f"(db: {db_path}, artifacts: {artifact_backend.root})",
         flush=True,
     )
-    if args.simplified_goal_ui:
-        _report_goal_readiness(db_path)
+    _report_goal_readiness(db_path)
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 
 
@@ -484,14 +482,6 @@ def main() -> None:
         ),
     )
     serve_cmd.add_argument(
-        "--simplified-goal-ui",
-        action="store_true",
-        help=(
-            "Use the Workflow-first simplified UI. Requires the default "
-            "single-goal Runtime mode."
-        ),
-    )
-    serve_cmd.add_argument(
         ACKNOWLEDGE_FLAG,
         action="store_true",
         help=(
@@ -510,9 +500,9 @@ def main() -> None:
     inventory = workflow_sub.add_parser(
         "inventory",
         help=(
-            "Report which published Workflows can start a Goal in simplified "
-            "mode, which the author can upgrade, and which need operator "
-            "attention. Read-only."
+            "Report which published Workflows can start a Goal, which the "
+            "author can upgrade, and which need operator attention. "
+            "Read-only."
         ),
     )
     inventory.add_argument("--db", default=None, help="SQLite database path")

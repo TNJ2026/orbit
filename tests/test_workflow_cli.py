@@ -170,11 +170,11 @@ class WorkflowCliTests(unittest.TestCase):
 
 
 class WorkflowInventoryCliTests(unittest.TestCase):
-    """Which published Workflows survive the switch to simplified mode.
+    """Which published Workflows can start a Goal.
 
-    Turning the simplified UI on withholds `run.start` from anything that
-    cannot run from a single Goal. An operator is entitled to that list before
-    their users discover it, so the report exists and is read-only.
+    The UI withholds `run.start` from anything that cannot run from a single
+    Goal. An operator is entitled to that list before their users discover it,
+    so the report exists and is read-only.
     """
 
     def setUp(self) -> None:
@@ -286,24 +286,9 @@ class WorkflowInventoryCliTests(unittest.TestCase):
         )
         self.assertFalse(buckets["needs_migration"][0]["source_available"])
 
-    def test_serving_the_simplified_ui_names_what_it_will_not_start(self) -> None:
+    def test_serving_reports_goal_readiness(self) -> None:
         """The operator hears it at boot, not from a confused user later."""
 
-        with (
-            patch("orbit.web.app.create_app"),
-            patch("orbit.__main__.upsert_project"),
-            patch("orbit.__main__.uvicorn.run"),
-        ):
-            output = self.run_cli(
-                "serve", "--db", str(self.db), "--simplified-goal-ui",
-                "--no-agent-discovery",
-            )
-
-        self.assertIn("simplified goal UI:", output)
-        self.assertIn("workflow:legacy", output)
-        self.assertIn("orbit workflow inventory", output)
-
-    def test_the_report_is_not_printed_for_the_full_runtime_ui(self) -> None:
         with (
             patch("orbit.web.app.create_app"),
             patch("orbit.__main__.upsert_project"),
@@ -313,7 +298,9 @@ class WorkflowInventoryCliTests(unittest.TestCase):
                 "serve", "--db", str(self.db), "--no-agent-discovery",
             )
 
-        self.assertNotIn("simplified goal UI:", output)
+        self.assertIn("goal readiness:", output)
+        self.assertIn("workflow:legacy", output)
+        self.assertIn("orbit workflow inventory", output)
 
     def test_a_readiness_survey_that_fails_does_not_stop_the_server(self) -> None:
         """A report is information; refusing to boot over it would be worse."""
@@ -328,7 +315,7 @@ class WorkflowInventoryCliTests(unittest.TestCase):
             ),
         ):
             output = self.run_cli(
-                "serve", "--db", str(self.db), "--simplified-goal-ui",
+                "serve", "--db", str(self.db),
                 "--no-agent-discovery",
             )
 

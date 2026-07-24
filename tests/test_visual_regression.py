@@ -154,15 +154,7 @@ def pixel_difference(expected: bytes, actual: bytes) -> tuple[float, bytes | Non
 
 @unittest.skipUnless(sync_playwright, "playwright is not installed")
 class VisualCaptureCase(unittest.TestCase):
-    """Boots one Runtime and screenshots it. Subclasses choose the product mode.
-
-    The simplified goal UI is a different product surface, not a skin: its
-    navigation, workspace and run page are drawn by different code. It needs
-    its own baselines, and the only difference in getting them is the flag the
-    server was started with.
-    """
-
-    SIMPLIFIED_GOAL_UI = False
+    """Boots one Runtime and screenshots the Goal UI in both themes."""
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -184,7 +176,6 @@ class VisualCaptureCase(unittest.TestCase):
             artifact_backend=cls.artifact_backend,
             workflow_generator=lambda _prompt: source,
             serve_ui=True,
-            simplified_goal_ui=cls.SIMPLIFIED_GOAL_UI,
             single_goal_mode=True,
         )
         publish_linear_workflow(
@@ -367,200 +358,6 @@ class VisualCaptureCase(unittest.TestCase):
             )
 
 
-class VisualRegressionTests(VisualCaptureCase):
-    """The full Runtime UI, at the viewports and themes it ships in."""
-
-    def test_prototype_dark_1280(self) -> None:
-        viewport = VIEWPORTS["1280x800"]
-        image = self.capture(PROTOTYPE.as_uri(), theme="dark", viewport=viewport)
-        self.assert_matches_baseline("prototype-dark-1280x800", image, viewport)
-
-    def test_app_shell_three_viewports_in_both_themes(self) -> None:
-        for viewport_name, viewport in VIEWPORTS.items():
-            for theme in ("dark", "light"):
-                name = f"shell-{theme}-{viewport_name}"
-                with self.subTest(name=name):
-                    image = self.capture(
-                        f"{self.base}/ui/", theme=theme, viewport=viewport
-                    )
-                    self.assert_matches_baseline(name, image, viewport)
-
-    def test_p2_discovery_views_in_both_themes(self) -> None:
-        viewport = VIEWPORTS["1280x800"]
-        for theme in ("dark", "light"):
-            name = f"goals-{theme}-1280x800"
-            with self.subTest(name=name):
-                image = self.capture(
-                    f"{self.base}/ui/#/goals", theme=theme, viewport=viewport
-                )
-                self.assert_matches_baseline(name, image, viewport)
-
-    def test_p3_workflows_and_wizard_in_both_themes(self) -> None:
-        viewport = VIEWPORTS["1280x800"]
-        for theme in ("dark", "light"):
-            with self.subTest(view=f"workflows-{theme}"):
-                image = self.capture(
-                    f"{self.base}/ui/#/workflows", theme=theme, viewport=viewport
-                )
-                self.assert_matches_baseline(
-                    f"workflows-{theme}-1280x800", image, viewport
-                )
-            with self.subTest(view=f"new-goal-{theme}"):
-                image = self.capture(
-                    f"{self.base}/ui/", theme=theme, viewport=viewport, wizard=True
-                )
-                self.assert_matches_baseline(
-                    f"new-goal-{theme}-1280x800", image, viewport
-                )
-
-    def test_p5_editor_three_viewports_in_both_themes(self) -> None:
-        self._set_visual_draft("dirty")
-        url = f"{self.base}/ui/#/workflows/workflow:linear/edit/{self.visual_draft_id}"
-        for viewport_name, viewport in VIEWPORTS.items():
-            for theme in ("dark", "light"):
-                name = f"editor-{theme}-{viewport_name}"
-                with self.subTest(name=name):
-                    image = self.capture(
-                        url, theme=theme, viewport=viewport,
-                        ready_selector="#draftRevisionInstruction",
-                    )
-                    self.assert_matches_baseline(name, image, viewport)
-
-    def _set_visual_draft(self, state: str) -> None:
-        source = json.dumps(editable_dsl("linear", "Visual Editor"))
-        diagnostics = []
-        validated_source_hash = None
-        validated_definition_hash = None
-        if state == "empty":
-            document = editable_dsl("linear", "Empty Editor")
-            document["nodes"] = []
-            document["edges"] = []
-            document["entry"] = []
-            document["terminals"] = []
-            source = json.dumps(document)
-        if state == "invalid":
-            diagnostics = [{
-                "code": "DSL_GRAPH_CYCLE", "message": "A cycle requires a loop policy.",
-                "json_path": "$.edges[0]", "severity": "error",
-                "source_range": {"start": {"line": 12, "column": 3}},
-            }]
-        with connect_workflow_database(self.db) as connection:
-            connection.execute(
-                "DELETE FROM workflow_draft_revisions WHERE draft_id=?",
-                (self.visual_draft_id,),
-            )
-            source_hash = connection.execute(
-                "SELECT source_hash FROM workflow_drafts WHERE draft_id=?",
-                (self.visual_draft_id,),
-            ).fetchone()[0]
-            if state == "valid":
-                validated_source_hash = source_hash
-                validated_definition_hash = "sha256:" + "a" * 64
-            connection.execute(
-                "UPDATE workflow_drafts SET source_text=?, validation_status=?, "
-                "validated_source_hash=?, validated_definition_hash=?, diagnostics_json=? "
-                "WHERE draft_id=?",
-                (
-                    source, "valid" if state == "valid" else "invalid" if state == "invalid" else "dirty",
-                    validated_source_hash, validated_definition_hash,
-                    json.dumps(diagnostics), self.visual_draft_id,
-                ),
-            )
-            if state == "candidate":
-                candidate_source = json.dumps(
-                    editable_dsl("linear", "Agent candidate"), indent=2,
-                )
-                # Named columns: the revision table also carries lease and
-                # audit fields now, so a positional insert would drift.
-                connection.execute(
-                    """INSERT INTO workflow_draft_revisions(
-                         revision_id, draft_id, base_draft_revision,
-                         instruction_text, instruction_hash,
-                         previous_source_text, previous_source_hash,
-                         previous_validation_status,
-                         previous_validated_source_hash,
-                         previous_definition_hash, proposed_source_text,
-                         proposed_source_hash, proposed_definition_hash,
-                         attempts, status, created_at
-                       ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?)""",
-                    (
-                        "workflow_revision:visual", self.visual_draft_id, 1,
-                        "Add an approval before completion",
-                        "sha256:" + "1" * 64, source, source_hash, "dirty",
-                        None, None, candidate_source, "sha256:" + "2" * 64,
-                        "sha256:" + "3" * 64, 2, "2026-01-01T00:01:00+00:00",
-                    ),
-                )
-            connection.commit()
-
-    def test_p5_editor_states_in_both_themes(self) -> None:
-        viewport = VIEWPORTS["1280x800"]
-        url = f"{self.base}/ui/#/workflows/workflow:linear/edit/{self.visual_draft_id}"
-        for state in ("empty", "invalid", "valid", "candidate", "conflict"):
-            self._set_visual_draft("dirty" if state == "conflict" else state)
-            for theme in ("dark", "light"):
-                name = f"editor-{state}-{theme}-1280x800"
-                with self.subTest(name=name):
-                    image = self.capture(
-                        url, theme=theme, viewport=viewport,
-                        ready_selector=(
-                            "#draftAccept" if state == "candidate"
-                            else "#draftRevisionInstruction"
-                        ),
-                        editor_conflict=state == "conflict",
-                    )
-                    self.assert_matches_baseline(name, image, viewport)
-        self._set_visual_draft("dirty")
-
-    def test_p6_artifacts_in_both_themes(self) -> None:
-        viewport = VIEWPORTS["1280x800"]
-        for theme in ("dark", "light"):
-            with self.subTest(theme=theme):
-                image = self.capture(
-                    f"{self.base}/ui/#/artifacts", theme=theme, viewport=viewport,
-                    ready_selector=".artifact-card-main",
-                )
-                self.assert_matches_baseline(
-                    f"artifacts-{theme}-1280x800", image, viewport
-                )
-
-    def test_p7_admin_views_in_both_themes(self) -> None:
-        viewport = VIEWPORTS["1280x800"]
-        for view in ("agents", "ops", "settings"):
-            for theme in ("dark", "light"):
-                with self.subTest(view=view, theme=theme):
-                    image = self.capture(
-                        f"{self.base}/ui/#/{view}", theme=theme, viewport=viewport,
-                    )
-                    self.assert_matches_baseline(
-                        f"{view}-{theme}-1280x800", image, viewport
-                    )
-
-    def test_p9_key_pages_and_states_in_both_themes(self) -> None:
-        viewport = VIEWPORTS["1280x800"]
-        cases = (
-            ("inbox", f"{self.base}/ui/#/inbox", None, None),
-            (
-                "run-detail", f"{self.base}/ui/#/runs/{self.visual_run_id}",
-                ".run-hero", None,
-            ),
-            (
-                "error", f"{self.base}/ui/#/home", ".data-state.error",
-                "/api/v1/dashboard",
-            ),
-        )
-        for name, url, selector, fail_path in cases:
-            for theme in ("dark", "light"):
-                with self.subTest(name=name, theme=theme):
-                    image = self.capture(
-                        url, theme=theme, viewport=viewport,
-                        ready_selector=selector, fail_path=fail_path,
-                    )
-                    self.assert_matches_baseline(
-                        f"{name}-{theme}-1280x800", image, viewport
-                    )
-
-
 class SimplifiedVisualRegressionTests(VisualCaptureCase):
     """The simplified Goal UI, which draws its own shell, workspace and run.
 
@@ -568,8 +365,6 @@ class SimplifiedVisualRegressionTests(VisualCaptureCase):
     the two modes share a stylesheet but almost no layout, so a regression in
     one is invisible in the other.
     """
-
-    SIMPLIFIED_GOAL_UI = True
 
     def test_the_workspace_and_catalog_in_both_themes(self) -> None:
         viewport = VIEWPORTS["1280x800"]
@@ -605,6 +400,17 @@ class SimplifiedVisualRegressionTests(VisualCaptureCase):
                 )
                 self.assert_matches_baseline(name, image, viewport)
 
+    def test_the_workflows_page_in_both_themes(self) -> None:
+        viewport = VIEWPORTS["1280x800"]
+        for theme in ("dark", "light"):
+            name = f"simplified-workflows-{theme}-1280x800"
+            with self.subTest(name=name):
+                image = self.capture(
+                    f"{self.base}/ui/#/workflows", theme=theme, viewport=viewport,
+                    ready_selector=".simplified-workflow-generator",
+                )
+                self.assert_matches_baseline(name, image, viewport)
+
     def test_the_workspace_on_a_phone(self) -> None:
         """The simplified UI is the one most likely to be opened on a phone."""
 
@@ -615,6 +421,17 @@ class SimplifiedVisualRegressionTests(VisualCaptureCase):
                 image = self.capture(
                     f"{self.base}/ui/", theme=theme, viewport=viewport,
                     ready_selector=".simplified-workspace-composer",
+                )
+                self.assert_matches_baseline(name, image, viewport)
+
+    def test_the_workflows_page_on_a_phone(self) -> None:
+        viewport = VIEWPORTS["360x800"]
+        for theme in ("dark", "light"):
+            name = f"simplified-workflows-{theme}-360x800"
+            with self.subTest(name=name):
+                image = self.capture(
+                    f"{self.base}/ui/#/workflows", theme=theme, viewport=viewport,
+                    ready_selector=".simplified-workflow-generator",
                 )
                 self.assert_matches_baseline(name, image, viewport)
 

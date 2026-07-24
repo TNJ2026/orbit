@@ -33,16 +33,13 @@ let renderQueued = false;
 let activeViewCleanup = null;
 let activeViewLeaveGuard = null;
 let customSelectSequence = 0;
-// One-shot: the catalog asked the detail page to open its upgrade prompt. It
-// is consumed on the next detail render so a reload does not reopen it.
-let pendingUpgrade = null;
 const goalFilters = { q: "", status: "" };
 const artifactFilters = { q: "", runId: "", contentType: "" };
 // A catalog of dozens is browsed, not scanned. The default order answers the
 // question an author actually has — which workflow was I just running.
-const workflowFilters = { q: "", sort: "recentRun" };
 const simplifiedComposerState = { runId: null, workflowId: "", goal: "" };
 let focusSimplifiedGoalOnRender = false;
+let simplifiedWorkflowGenerationPending = false;
 const TERMINAL_RUN_STATUSES = new Set(["succeeded", "failed", "cancelled"]);
 // How much of one recorded value is rendered. Inline values are capped at
 // 256 KB server-side; a page that pastes all of that stops responding.
@@ -90,10 +87,6 @@ function generationAgents() {
   return capability?.available ? capability.agents || [] : [];
 }
 
-function simplifiedGoalUI() {
-  const mode = shellFacts?.product_mode;
-  return Boolean(mode?.simplified_goal_ui && mode?.single_goal_mode);
-}
 
 function generationAgentField(id, selected, onchange) {
   const agents = generationAgents();
@@ -185,7 +178,7 @@ function workflowGraphView(graph) {
       svgEl("rect", { width, height, rx: 10 }),
       svgEl("text", {
         class: "graph-box-id", x: 12, y: 21, "clip-path": `url(#${clipId})`,
-        text: simplifiedGoalUI() ? readableNodeName(node) : node.node_id,
+        text: readableNodeName(node),
       }),
       svgEl("text", {
         class: "graph-box-meta", x: 12, y: 38, "clip-path": `url(#${clipId})`,
@@ -214,14 +207,29 @@ function workflowGraphView(graph) {
 
 function definitionList(definition) {
   return el("div", { class: "definition-list" }, (definition?.nodes || []).map((node) =>
-    el("div", { class: "actions" }, [
-      el("span", { class: "mono", text: node.id }),
-      el("span", { class: "pill", text: node.kind }),
-      node.handler ? el("span", {
-        class: "muted mono", text: `${node.handler.name}@${node.handler.version}`,
-      }) : null,
+    el("div", { class: "definition-node" }, [
+      el("div", { class: "actions" }, [
+        el("span", { class: "mono", text: node.id }),
+        el("span", { class: "pill", text: node.kind }),
+        node.handler ? el("span", {
+          class: "muted mono", text: `${node.handler.name}@${node.handler.version}`,
+        }) : null,
+      ]),
+      // The authored prompt is what this step actually asks its Agent; a
+      // reader scanning the definition wants it next to the handler name, not
+      // buried in the source.
+      stepPrompt(node.config),
     ]),
   ));
+}
+
+function stepPrompt(config, extraClass = "") {
+  const prompt = typeof config?.prompt === "string" ? config.prompt.trim() : "";
+  if (!prompt) return null;
+  return el("div", {
+    class: `muted step-prompt${extraClass ? ` ${extraClass}` : ""}`,
+    title: prompt, text: `prompt: ${prompt}`,
+  });
 }
 
 // The same definition read two ways: the drawing answers "what shape is
@@ -489,125 +497,8 @@ function runName(run) {
   return run.display_name || run.goal || run.run_id;
 }
 
-function waitText(run) {
-  if (run.primary_responsibility) {
-    return run.primary_responsibility.label
-      || i18n.t(`responsibility.${run.primary_responsibility.kind}`);
-  }
-  if (run.wait_reason) return i18n.t(`wait.${run.wait_reason}`);
-  return i18n.t("wait.none");
-}
 
-function statusSelect(value, onChange, labelKey = "runs.filter.status") {
-  const select = el("select", { "aria-label": i18n.t(labelKey), onchange: onChange });
-  for (const status of ["", "pending", "running", "waiting", "succeeded", "failed", "cancelled"]) {
-    select.append(el("option", {
-      value: status,
-      ...(status === value ? { selected: "selected" } : {}),
-      text: status ? i18n.status(status) : i18n.t("runs.filter.allStatuses"),
-    }));
-  }
-  return select;
-}
 
-async function renderHome(root, selectedRunId = null, includeHistory = true) {
-  const dashboard = (await api.dashboard()).data;
-  const active = dashboard.active_goal;
-  let responsibilities = [];
-  let responsibilityError = null;
-  if (active) {
-    try {
-      responsibilities = (await api.responsibilities(active.run_id)).data.responsibilities;
-    } catch (error) {
-      responsibilityError = error;
-    }
-  }
-  const reload = () => render();
-  root.append(
-    el("section", { class: `home-hero panel${active ? " active-goal-hero" : " empty-goal-hero"}` }, [
-      el("div", {}, [
-        el("div", { class: "eyebrow", text: i18n.t(active ? "home.active.eyebrow" : "home.empty.eyebrow") }),
-        active ? el("div", { class: "run-hero-title" }, [
-          statusDot(active.status), el("h2", { text: runName(active) }), pill(active.status),
-        ]) : el("h2", { text: i18n.t("home.empty.heading") }),
-        el("p", { class: "muted", text: active
-          ? `${active.workflow_id} · ${i18n.t("run.updated", { time: i18n.dateTime(active.updated_at) })}`
-          : i18n.t("home.empty.description") }),
-      ]),
-      el("div", { class: "home-hero-actions" }, [
-        active ? el("button", {
-          class: "button primary", text: i18n.t("home.active.open"),
-          onclick: () => navigate({ view: "run", runId: active.run_id }),
-        }) : el("button", {
-          class: "button", text: i18n.t("action.browseWorkflows"),
-          onclick: () => navigate({ view: "workflows", runId: null }),
-        }),
-        mayStartRun && !active ? el("button", {
-          id: "newRun", class: "button primary", text: i18n.t("action.newGoal"),
-          onclick: newRunDialog,
-        }) : null,
-        ...(active ? commandButtons(active.allowed_commands || [], reload) : []),
-      ]),
-    ]),
-  );
-
-  if (active) root.append(el("div", { class: "home-grid workbench-grid" }, [
-    el("section", { class: "panel attention-panel current-step-panel" }, [
-      el("div", { class: "panel-head" }, [
-        el("div", {}, [
-          el("div", { class: "panel-title", text: i18n.t("home.active.next") }),
-          el("div", { class: "panel-subtitle", text: i18n.t("home.active.next.subtitle") }),
-        ]),
-        responsibilities.length ? el("span", { class: "pill waiting", text: i18n.number(responsibilities.length) }) : null,
-      ]),
-      el("div", { class: "panel-body attention-home-list" }, responsibilityError
-        ? [dataState(el, i18n, "error", { onRetry: reload })]
-        : responsibilities.length ? responsibilities.slice(0, 3).map((item) => {
-          const kind = item.kind || "human";
-          return el("div", { class: "home-attention-row workbench-action" }, [
-            el("span", { class: `attention-symbol ${kind}`, text: kind === "budget" ? "$" : kind.slice(0, 1).toUpperCase() }),
-            el("span", { class: "attention-copy" }, [
-              el("strong", { text: item.label }),
-              el("span", { class: "muted", text: item.detail || i18n.t(`responsibility.${kind}`) }),
-            ]),
-            el("span", { class: "actions" }, commandButtons(item.allowed_commands || [], reload)),
-          ]);
-        }) : [el("div", { class: "workbench-running" }, [
-          el("span", { class: "live-dot", "aria-hidden": "true" }),
-          el("div", {}, [
-            el("strong", { text: i18n.t("home.active.running") }),
-            el("p", { class: "muted", text: i18n.t("home.active.running.detail") }),
-          ]),
-        ])]),
-    ]),
-    el("section", { class: "panel" }, [
-      el("div", { class: "panel-head" }, [
-        el("div", {}, [
-          el("div", { class: "panel-title", text: i18n.t("home.active.context") }),
-          el("div", { class: "panel-subtitle", text: i18n.t("home.active.context.subtitle") }),
-        ]),
-      ]),
-      el("div", { class: "panel-body workbench-facts" }, [
-        el("div", {}, [el("span", { class: "muted", text: i18n.t("home.active.goal") }), el("strong", { text: active.goal || runName(active) })]),
-        el("div", {}, [el("span", { class: "muted", text: i18n.t("home.active.wait") }), el("strong", { text: waitText(active) })]),
-        el("div", {}, [el("span", { class: "muted", text: i18n.t("home.active.started") }), el("strong", { text: i18n.dateTime(active.created_at) })]),
-      ]),
-    ]),
-  ]));
-
-  if (!includeHistory) return;
-  const historySection = el("section", { class: "workspace-history" }, [
-    el("div", { class: "section-heading" }, [
-      el("div", {}, [
-        el("div", { class: "eyebrow", text: i18n.t("home.history.eyebrow") }),
-        el("h2", { text: i18n.t("home.history.heading") }),
-        el("p", { class: "muted", text: i18n.t("home.history.description") }),
-      ]),
-    ]),
-  ]);
-  await renderGoals(historySection, selectedRunId);
-  root.append(historySection);
-}
 
 function workflowStartCommand(entry) {
   return (entry?.allowed_commands || []).find((item) => item.command === "run.start");
@@ -633,8 +524,7 @@ function prepareSimplifiedComposer(summary, entries) {
 
 function renderSimplifiedComposer(root, entries, summary) {
   prepareSimplifiedComposer(summary, entries);
-  const terminal = summary ? TERMINAL_RUN_STATUSES.has(summary.status) : false;
-  const locked = Boolean(summary && !terminal);
+  const locked = Boolean(summary);
   const selectedEntry = () => entries.find(
     (item) => item.workflow_id === simplifiedComposerState.workflowId,
   );
@@ -655,12 +545,18 @@ function renderSimplifiedComposer(root, entries, summary) {
   for (const entry of entries) {
     const readiness = entry.goal_readiness === "ready"
       ? "" : ` · ${i18n.t(`workflows.readiness.${entry.goal_readiness}`)}`;
+    const nodes = i18n.t("workflows.nodeCount", {
+      count: i18n.number(entry.summary.node_count),
+    });
     workflow.append(el("option", {
       value: entry.workflow_id,
-      text: `${entry.name}${readiness}`,
+      text: `${entry.name} · ${nodes}${readiness}`,
       selected: entry.workflow_id === simplifiedComposerState.workflowId ? "selected" : null,
     }));
   }
+  if (!entries.length) workflow.append(el("option", {
+    value: "", text: i18n.t("workflows.empty"), selected: "selected",
+  }));
   const goal = el("textarea", {
     id: "simplifiedGoal", required: "required",
     disabled: locked ? "disabled" : null,
@@ -678,7 +574,7 @@ function renderSimplifiedComposer(root, entries, summary) {
     disabled: locked || !allowed ? "disabled" : null,
     text: locked
       ? i18n.t("simplified.run.inProgress")
-      : terminal ? i18n.t("simplified.run.again") : i18n.t("newRun.submit"),
+      : i18n.t("newRun.submit"),
   });
   const form = el("form", {
     class: "panel simplified-workspace-composer",
@@ -745,29 +641,23 @@ function renderSimplifiedComposer(root, entries, summary) {
       }
     },
   }, [
-    el("div", { class: "simplified-composer-copy" }, [
-      el("div", { class: "eyebrow", text: i18n.t("simplified.workspace.eyebrow") }),
-      el("h2", { text: i18n.t("simplified.start.title") }),
-      el("p", { class: "muted", text: i18n.t("simplified.start.description") }),
-    ]),
     el("div", { class: "simplified-composer-fields" }, [
+      el("div", { class: "field" }, [
+        el("label", { for: "simplifiedWorkflow", text: i18n.t("newRun.workflow") }),
+        el("div", { class: "simplified-workflow-picker" }, [
+          workflow,
+          el("button", {
+            class: "button", type: "button", id: "homeGenerateWorkflow",
+            text: i18n.t("generate.action"),
+            onclick: () => navigate({ view: "workflows", runId: null }),
+          }),
+        ]),
+      ]),
       el("div", { class: "field simplified-goal-field" }, [
         el("label", { for: "simplifiedGoal", text: i18n.t("newRun.goal") }),
         goal,
       ]),
-      el("div", { class: "simplified-composer-controls" }, [
-        el("div", { class: "field" }, [
-          el("label", { for: "simplifiedWorkflow", text: i18n.t("newRun.workflow") }),
-          workflow,
-        ]),
-        el("div", { class: "actions" }, [
-          el("button", {
-            class: "button", type: "button", text: i18n.t("simplified.workflow.manage"),
-            onclick: () => navigate({ view: "workflows", runId: null }),
-          }),
-          start,
-        ]),
-      ]),
+      el("div", { class: "actions simplified-composer-actions" }, [start]),
       chosen && !allowed ? el("div", {
         class: "banner warn", text: i18n.t("simplified.workflow.unavailable"),
       }) : null,
@@ -788,35 +678,106 @@ async function renderSimplifiedWorkspace(root, selectedRunId = null) {
   const runId = selectedRunId || dashboardResponse.data.active_goal?.run_id || null;
   const entries = catalogResponse.data.workflows;
   const summary = runId ? (await api.runSummary(runId)).data : null;
-  renderSimplifiedComposer(root, entries, summary);
-  if (runId && summary) await renderSimplifiedRun(root, runId, summary);
-  else root.append(
-    el("section", { class: "panel simplified-workspace-empty simplified-execution" }, [
-      el("div", { class: "panel-head" }, [
-        el("div", { class: "panel-title", text: i18n.t("simplified.execution") }),
-      ]),
-      el("div", { class: "panel-body muted", text: i18n.t("simplified.workspace.empty.description") }),
-    ]),
-    el("section", { class: "panel simplified-workspace-empty simplified-result" }, [
-      el("div", { class: "panel-head" }, [
-        el("div", { class: "panel-title", text: i18n.t("simplified.result") }),
-      ]),
-      el("div", { class: "panel-body muted", text: i18n.t("simplified.result.state.pending") }),
-    ]),
-    el("section", { class: "panel simplified-workspace-empty simplified-artifacts" }, [
-      el("div", { class: "panel-head" }, [
-        el("div", { class: "panel-title", text: i18n.t("simplified.artifacts") }),
-      ]),
-      el("div", { class: "panel-body muted", text: i18n.t("simplified.artifacts.pending") }),
-    ]),
+  const historicalDetail = Boolean(
+    selectedRunId && summary && TERMINAL_RUN_STATUSES.has(summary.status),
   );
+  if (!historicalDetail) renderSimplifiedComposer(root, entries, summary);
+  if (runId && summary) await renderSimplifiedRun(root, runId, summary);
+}
+
+function historyDayKey(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "unknown";
+  const parts = [date.getFullYear(), date.getMonth() + 1, date.getDate()]
+    .map((part) => String(part).padStart(2, "0"));
+  return parts.join("-");
+}
+
+function historyDayLabel(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return i18n.t("history.date.unknown");
+  const today = new Date();
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+  const key = historyDayKey(value);
+  if (key === historyDayKey(today)) return i18n.t("history.date.today");
+  if (key === historyDayKey(yesterday)) return i18n.t("history.date.yesterday");
+  return new Intl.DateTimeFormat(i18n.locale, { dateStyle: "long" }).format(date);
+}
+
+function historyTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value || "";
+  return new Intl.DateTimeFormat(i18n.locale, { timeStyle: "short" }).format(date);
+}
+
+function historyDuration(run) {
+  const started = new Date(run.created_at).getTime();
+  const finished = new Date(run.updated_at).getTime();
+  if (!Number.isFinite(started) || !Number.isFinite(finished) || finished < started) return "";
+  const minutes = Math.floor((finished - started) / 60_000);
+  if (minutes < 1) return i18n.t("history.duration.short");
+  if (minutes < 60) return i18n.t("history.duration.minutes", {
+    count: i18n.number(minutes),
+  });
+  return i18n.t("history.duration.hours", {
+    hours: i18n.number(Math.floor(minutes / 60)),
+    minutes: i18n.number(minutes % 60),
+  });
+}
+
+function historyArtifactCount(count) {
+  if (!count) return i18n.t("history.artifacts.zero");
+  return i18n.t(count === 1 ? "history.artifacts.one" : "history.artifacts.many", {
+    count: i18n.number(count),
+  });
+}
+
+function historyGoalRow(run, workflowNames) {
+  const duration = historyDuration(run);
+  const metadata = [
+    workflowNames.get(run.workflow_id) || run.workflow_id,
+    historyTime(run.updated_at),
+    duration,
+  ].filter(Boolean).join(" · ");
+  return el("button", {
+    class: "history-goal-row",
+    onclick: () => navigate({ view: "run", runId: run.run_id }),
+  }, [
+    el("span", { class: "history-goal-copy" }, [
+      el("strong", { class: "history-goal-title", text: runName(run) }),
+      el("span", { class: "history-goal-meta muted", text: metadata }),
+      el("span", {
+        class: `history-goal-artifacts${run.artifact_count ? " available" : ""}`,
+        text: historyArtifactCount(run.artifact_count),
+      }),
+    ]),
+    el("span", { class: "history-goal-tail" }, [
+      pill(run.status),
+      el("span", { class: "history-goal-chevron", "aria-hidden": "true", text: "›" }),
+    ]),
+  ]);
+}
+
+function appendHistoryRuns(list, runs, workflowNames) {
+  for (const run of runs) {
+    const key = historyDayKey(run.updated_at);
+    let group = [...list.children].find((item) => item.dataset.historyDay === key);
+    if (!group) {
+      group = el("section", { class: "history-day-group", "data-history-day": key }, [
+        el("h3", { class: "history-day-heading", text: historyDayLabel(run.updated_at) }),
+        el("div", { class: "history-day-rows" }),
+      ]);
+      list.append(group);
+    }
+    group.querySelector(".history-day-rows").append(historyGoalRow(run, workflowNames));
+  }
 }
 
 async function renderHistory(root, selectedRunId = null) {
   root.append(el("header", { class: "view-intro" }, [
     el("div", {}, [
-      el("div", { class: "eyebrow", text: i18n.t("history.eyebrow") }),
-      el("h2", { text: i18n.t("history.heading") }),
+      el("h2", { text: i18n.t("history.eyebrow") }),
       el("p", { class: "muted", text: i18n.t("history.description") }),
     ]),
   ]));
@@ -826,7 +787,7 @@ async function renderHistory(root, selectedRunId = null) {
     "aria-label": i18n.t("goals.search.label"),
   });
   root.append(el("form", {
-    class: "filter-bar",
+    class: "filter-bar history-filter-bar",
     onsubmit: (event) => {
       event.preventDefault();
       goalFilters.q = search.value.trim();
@@ -835,9 +796,35 @@ async function renderHistory(root, selectedRunId = null) {
   }, [
     search,
     el("button", { class: "button", type: "submit", text: i18n.t("action.search") }),
+    goalFilters.q ? el("button", {
+      class: "button", type: "button", text: i18n.t("action.clear"),
+      onclick: () => {
+        goalFilters.q = "";
+        render();
+      },
+    }) : null,
   ]));
+  root.append(el("div", {
+    class: "history-status-filters", role: "group",
+    "aria-label": i18n.t("goals.filter.status"),
+  }, [
+    ["", "history.status.all"],
+    ["succeeded", "status.succeeded"],
+    ["failed", "status.failed"],
+    ["cancelled", "status.cancelled"],
+  ].map(([status, label]) => el("button", {
+    class: `button history-status-filter${goalFilters.status === status ? " active" : ""}`,
+    type: "button", "aria-pressed": String(goalFilters.status === status),
+    text: i18n.t(label),
+    onclick: () => {
+      goalFilters.status = status;
+      render();
+    },
+  }))));
   const [response, catalogResponse] = await Promise.all([
-    api.listRuns({ limit: 25, q: goalFilters.q, terminalOnly: true }),
+    api.listRuns({
+      limit: 25, q: goalFilters.q, status: goalFilters.status, terminalOnly: true,
+    }),
     api.workflowCatalog(),
   ]);
   const workflowNames = new Map(
@@ -845,135 +832,140 @@ async function renderHistory(root, selectedRunId = null) {
   );
   const runs = response.data.runs;
   if (!runs.length) {
-    root.append(el("div", { class: "empty panel", text: i18n.t("history.empty") }));
+    root.append(el("div", {
+      class: "empty panel",
+      text: goalFilters.q || goalFilters.status
+        ? i18n.t("history.noMatches") : i18n.t("history.empty"),
+    }));
     return;
   }
-  root.append(el("section", { class: "history-goal-list" }, runs.map((run) =>
-    el("button", {
-      class: "goal-row history-goal-row",
-      onclick: () => navigate({ view: "run", runId: run.run_id }),
-    }, [
-      el("span", { class: "goal-row-main" }, [
-        el("strong", { class: "with-dot" }, [
-          statusDot(run.status), el("span", { text: runName(run) }),
-        ]),
-        el("span", {
-          class: "muted",
-          text: `${workflowNames.get(run.workflow_id) || run.workflow_id} · ${i18n.dateTime(run.updated_at)}`,
-        }),
-        // Whether the row has anything to open. It rides along with the page
-        // rather than costing two requests per row.
-        el("span", {
-          class: "muted",
-          text: run.status === "succeeded" || run.artifact_count
-            ? i18n.t("history.hasContent") : i18n.t("history.noContent"),
-        }),
-      ]),
-      pill(run.status),
-    ]))),
-  );
+  const list = el("section", { class: "history-goal-list panel" });
+  appendHistoryRuns(list, runs, workflowNames);
+  root.append(list);
+  let loadedCount = runs.length;
+  let nextCursor = response.next_cursor;
+  const count = el("p", { class: "history-result-count muted" });
+  const updateCount = () => {
+    count.textContent = i18n.t(
+      nextCursor ? "history.resultCount.more" : "history.resultCount",
+      { count: i18n.number(loadedCount) },
+    );
+  };
+  const loadMore = el("button", {
+    class: "button", hidden: nextCursor ? null : "hidden",
+    text: i18n.t("action.loadMore"),
+    onclick: async () => {
+      loadMore.disabled = true;
+      try {
+        const next = await api.listRuns({
+          cursor: nextCursor, limit: 25, q: goalFilters.q,
+          status: goalFilters.status, terminalOnly: true,
+        });
+        appendHistoryRuns(list, next.data.runs, workflowNames);
+        loadedCount += next.data.runs.length;
+        nextCursor = next.next_cursor;
+        loadMore.hidden = !nextCursor;
+        updateCount();
+      } catch (error) {
+        reportError(error);
+      } finally {
+        loadMore.disabled = false;
+      }
+    },
+  });
+  updateCount();
+  root.append(el("footer", { class: "history-list-footer" }, [count, loadMore]));
 }
 
-async function renderGoals(root, selectedRunId = null) {
-  const response = await api.listRuns({ limit: 25, q: goalFilters.q, status: goalFilters.status });
-  const runs = response.data.runs;
-  let selected = selectedRunId ? runs.find((item) => item.run_id === selectedRunId) : runs[0];
-  if (selectedRunId && !selected) selected = (await api.runSummary(selectedRunId)).data;
-  else if (selected) selected = (await api.runSummary(selected.run_id)).data;
 
-  const search = el("input", {
-    type: "search", value: goalFilters.q, placeholder: i18n.t("goals.search.placeholder"),
-    "aria-label": i18n.t("goals.search.label"),
+function simplifiedStepName(node) {
+  const label = node?.label;
+  if (typeof label === "string" && label.trim()) return label.trim();
+  const nodeId = typeof node?.node_id === "string" ? node.node_id.trim() : "";
+  return nodeId ? nodeId.replace(/[_-]+/g, " ") : i18n.t("simplified.workflow.step");
+}
+
+function simplifiedStepRunner(node) {
+  const handler = typeof node?.handler_name === "string" ? node.handler_name.trim() : "";
+  if (handler.startsWith("agent.")) {
+    return {
+      kind: "agent",
+      text: i18n.t("simplified.execution.agent", { name: handler.slice("agent.".length) }),
+    };
+  }
+  if (handler) {
+    return {
+      kind: "tool",
+      text: i18n.t("simplified.execution.tool", { name: handler }),
+    };
+  }
+  if (node?.kind === "human") {
+    return { kind: "human", text: i18n.t("simplified.execution.human") };
+  }
+  return null;
+}
+
+function simplifiedStepOutput(runId, nodeRunId, { live }) {
+  const log = el("pre", {
+    class: "console-log simplified-step-output-log", role: "log", tabindex: "0", hidden: true,
   });
-  const filters = el("form", { class: "filter-bar", onsubmit: (event) => {
-    event.preventDefault();
-    goalFilters.q = search.value.trim();
-    render();
-  } }, [
-    search,
-    statusSelect(goalFilters.status, (event) => {
-      goalFilters.status = event.target.value;
-      render();
-    }, "goals.filter.status"),
-    el("button", { class: "button", type: "submit", text: i18n.t("action.search") }),
+  const state = el("span", { class: "muted", text: i18n.t("run.console.empty") });
+  const details = el("details", { class: "simplified-step-output" }, [
+    el("summary", { text: i18n.t("simplified.execution.output") }),
+    el("div", { class: "simplified-step-output-body" }, [state, log]),
   ]);
-  root.append(filters);
+  let after = 0;
+  let timer = null;
+  let loading = false;
+  let stopped = false;
 
-  const list = el("div", { class: "goal-list", "aria-label": i18n.t("goals.list") });
-  for (const run of runs) {
-    list.append(el("button", {
-      class: `goal-row${run.run_id === selected?.run_id ? " selected" : ""}`,
-      "aria-current": run.run_id === selected?.run_id ? "true" : null,
-      onclick: () => navigate({ view: "goal", runId: run.run_id }),
-    }, [
-      el("span", { class: "goal-row-main" }, [
-        el("strong", { class: "with-dot" }, [
-          statusDot(run.status), el("span", { text: runName(run) }),
-        ]),
-        el("span", { class: "muted", text: waitText(run) }),
-      ]),
-      pill(run.status),
-    ]));
-  }
-  if (!runs.length) list.append(el("div", { class: "empty", text: i18n.t("goals.empty") }));
+  const draw = (chunks) => {
+    for (const chunk of chunks) {
+      log.append(el("span", {
+        class: `console-chunk ${chunk.stream}`, text: chunk.text,
+      }));
+    }
+    if (log.childElementCount) log.hidden = false;
+  };
 
-  const detail = el("section", { class: "panel goal-detail" });
-  if (!selected) {
-    detail.append(el("div", { class: "empty", text: i18n.t("goals.select") }));
-  } else {
-    const budget = selected.budget_summary;
-    const primary = selected.primary_responsibility;
-    const budgetPercent = budget && budget.total_microunits > 0
-      ? Math.min(100, Math.round((budget.consumed_microunits / budget.total_microunits) * 100)) : null;
-    detail.append(
-      el("div", { class: "panel-head goal-detail-head" }, [
-        el("div", {}, [
-          el("div", { class: "eyebrow", text: i18n.t("goals.detail") }),
-          el("div", { class: "panel-title", text: runName(selected) }),
-          el("div", { class: "goal-detail-id muted mono", text: selected.run_id }),
-        ]),
-        pill(selected.status),
-      ]),
-      el("div", { class: "panel-body" }, [
-        el("p", { class: selected.goal ? "goal-copy" : "muted", text: selected.goal || i18n.t("goals.noDescription") }),
-        el("section", { class: `goal-state-card${primary ? " waiting" : ""}` }, [
-          el("div", { class: "eyebrow", text: i18n.t("goals.currentState") }),
-          el("strong", { text: primary?.label || i18n.t(`status.${selected.status}`) }),
-          el("span", { class: "muted", text: primary
-            ? i18n.t("goals.currentState.waiting") : i18n.t("goals.currentState.clear") }),
-        ]),
-        el("div", { class: "goal-section-label eyebrow", text: i18n.t("goals.facts") }),
-        el("dl", { class: "fact-grid" }, [
-          el("div", {}, [el("dt", { text: i18n.t("run.workflow") }), el("dd", { text: selected.workflow_id })]),
-          el("div", {}, [el("dt", { text: i18n.t("goals.waitingOn") }), el("dd", { text: waitText(selected) })]),
-          el("div", {}, [el("dt", { text: i18n.t("runs.column.updated") }), el("dd", { text: i18n.dateTime(selected.updated_at) })]),
-          el("div", {}, [el("dt", { text: i18n.t("goals.planVersion") }), el("dd", { text: selected.plan_version ? `v${i18n.number(selected.plan_version)}` : i18n.t("goals.planVersion.none") })]),
-          budget ? el("div", {}, [
-            el("dt", { text: i18n.t("run.budget") }),
-            el("dd", { text: i18n.t("run.budget.used", {
-              used: i18n.number(budget.consumed_microunits), total: i18n.number(budget.total_microunits), unit: budget.unit,
-            }) }),
-          ]) : null,
-        ]),
-        budgetPercent === null ? null : el("div", { class: "goal-budget" }, [
-          el("div", { class: "goal-budget-label" }, [
-            el("span", { text: i18n.t("goals.budgetUsage") }),
-            el("strong", { text: `${i18n.number(budgetPercent)}%` }),
-          ]),
-          el("div", { class: "goal-progress-bar" }, [
-            el("span", { style: `width:${budgetPercent}%` }),
-          ]),
-        ]),
-        el("div", { class: "actions" }, [
-          el("button", {
-            class: "button primary", text: i18n.t("action.openRun"),
-            onclick: () => navigate({ view: "run", runId: selected.run_id }),
-          }),
-        ]),
-      ]),
-    );
-  }
-  root.append(el("div", { class: "goals-layout" }, [list, detail]));
+  const poll = async () => {
+    if (stopped || loading || !details.open) return;
+    loading = true;
+    if (!log.childElementCount) state.textContent = i18n.t("simplified.execution.output.loading");
+    try {
+      const response = await api.runOutput(runId, after, 200, nodeRunId);
+      after = response.data.after;
+      draw(response.data.chunks);
+      state.textContent = log.childElementCount
+        ? i18n.t(live ? "run.console.following" : "run.console.finished")
+        : i18n.t("run.console.empty");
+      if (response.data.has_more) timer = setTimeout(poll, 0);
+      else if (live) timer = setTimeout(poll, 2000);
+    } catch (error) {
+      stopped = true;
+      state.textContent = error instanceof ApiError && error.status === 403
+        ? i18n.t("run.console.forbidden")
+        : i18n.t("run.console.unavailable");
+    } finally {
+      loading = false;
+    }
+  };
+
+  details.addEventListener("toggle", () => {
+    if (details.open) poll();
+    else if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+  });
+
+  const previous = activeViewCleanup;
+  activeViewCleanup = () => {
+    stopped = true;
+    if (timer) clearTimeout(timer);
+    if (previous) previous();
+  };
+  return details;
 }
 
 function simplifiedExecutionPanel(graph, summary, reload) {
@@ -1035,6 +1027,7 @@ function simplifiedExecutionPanel(graph, summary, reload) {
   });
   const rows = nodes.map((node, index) => {
     const runtime = statuses.get(node.node_id);
+    const runner = simplifiedStepRunner(node);
     const status = runtime?.status || "pending";
     const mark = status === "succeeded" ? "✓"
       : ["failed", "cancelled"].includes(status) ? "×"
@@ -1042,12 +1035,21 @@ function simplifiedExecutionPanel(graph, summary, reload) {
     return el("div", { class: `simplified-step-row ${status}` }, [
       el("span", { class: "simplified-step-mark", text: mark }),
       el("div", { class: "simplified-step-copy" }, [
-        el("strong", { text: readableNodeName(node) }),
-        runtime ? el("span", { class: "muted", text: i18n.t("simplified.execution.attempts", {
-          count: i18n.number(runtime.attempts),
-        }) }) : el("span", { class: "muted", text: i18n.t("simplified.execution.waiting") }),
+        el("strong", { text: simplifiedStepName(node) }),
+        stepPrompt(node.config, "simplified-step-prompt"),
+        el("div", { class: "simplified-step-meta" }, [
+          runner ? el("span", {
+            class: `simplified-step-runner ${runner.kind}`, text: runner.text,
+          }) : null,
+          runtime ? el("span", { class: "muted", text: i18n.t("simplified.execution.attempts", {
+            count: i18n.number(runtime.attempts),
+          }) }) : el("span", { class: "muted", text: i18n.t("simplified.execution.waiting") }),
+        ]),
       ]),
       pill(status),
+      runtime?.node_run_id && node.handler_name
+        ? simplifiedStepOutput(summary.run_id, runtime.node_run_id, { live: status === "running" })
+        : null,
     ]);
   });
   return el("section", { class: "panel simplified-execution simplified-run-hero" }, [
@@ -1076,9 +1078,7 @@ function simplifiedResultBody(outcome) {
       text: JSON.stringify(outcome.value, null, 2),
     });
   }
-  return el("div", { class: "muted", text: outcome.content_type || i18n.t(
-    "simplified.result.artifact",
-  ) });
+  return null;
 }
 
 async function renderSimplifiedRun(root, runId, summary) {
@@ -1116,11 +1116,44 @@ async function renderSimplifiedRun(root, runId, summary) {
     ]));
   }
 
+  root.append(el("section", { class: "panel simplified-run-info" }, [
+    el("div", { class: "panel-head" }, [
+      el("div", { class: "panel-title", text: i18n.t("simplified.runInfo") }),
+    ]),
+    el("div", { class: "panel-body" }, [
+      el("dl", { class: "fact-grid" }, [
+        el("div", {}, [
+          el("dt", { text: i18n.t("simplified.runInfo.id") }),
+          el("dd", { class: "mono", text: summary.run_id }),
+        ]),
+        el("div", {}, [
+          el("dt", { text: i18n.t("simplified.runInfo.workflow") }),
+          el("dd", { text: summary.workflow_id }),
+        ]),
+        el("div", {}, [
+          el("dt", { text: i18n.t("simplified.runInfo.version") }),
+          el("dd", { text: summary.workflow_version ? `v${i18n.number(summary.workflow_version)}` : "—" }),
+        ]),
+        el("div", {}, [
+          el("dt", { text: i18n.t("simplified.runInfo.started") }),
+          el("dd", { text: i18n.dateTime(summary.created_at) }),
+        ]),
+        el("div", {}, [
+          el("dt", { text: i18n.t("simplified.runInfo.updated") }),
+          el("dd", { text: i18n.dateTime(summary.updated_at) }),
+        ]),
+      ]),
+    ]),
+  ]));
+
   root.append(el("section", { class: "panel simplified-result" }, [
     el("div", { class: "panel-head" }, [
       el("div", { class: "panel-title", text: i18n.t("simplified.result") }),
     ]),
-    el("div", { class: "panel-body" }, [simplifiedResultBody(outcome)]),
+    el("div", { class: "panel-body" }, [
+      pill(summary.status),
+      simplifiedResultBody(outcome),
+    ]),
   ]));
 
   root.append(el("section", { class: "simplified-artifacts" }, [
@@ -1137,357 +1170,11 @@ async function renderSimplifiedRun(root, runId, summary) {
   ]));
 }
 
-async function renderRun(root, runId, activeTab = "overview") {
-  if (simplifiedGoalUI()) {
-    await renderSimplifiedWorkspace(root, runId);
-    return;
-  }
-  let summary;
-  try {
-    summary = (await api.runSummary(runId)).data;
-  } catch (error) {
-    reportError(error);
-    root.append(el("div", { class: "empty", text: i18n.t("run.notFound") }));
-    return;
-  }
 
-  const reload = () => navigate({ view: "run", runId, tab: activeTab });
-  const budget = summary.budget_summary;
-  root.append(
-    el("section", { class: "run-hero panel" }, [
-      el("div", { class: "panel-head run-hero-head" }, [
-        el("div", {}, [
-          el("div", { class: "eyebrow", text: i18n.t("run.title") }),
-          el("div", { class: "run-hero-title" }, [
-            statusDot(summary.status),
-            el("h2", { text: runName(summary) }),
-          ]),
-          el("div", { class: "mono muted", text: summary.run_id }),
-        ]),
-        pill(summary.status),
-      ]),
-      el("div", { class: "panel-body" }, [
-        el("div", { class: "run-hero-meta" }, [
-          el("span", { text: summary.workflow_id }),
-          el("span", { text: i18n.t("run.updated", { time: i18n.dateTime(summary.updated_at) }) }),
-        ]),
-      ]),
-    ]),
-  );
 
-  let responsibilities = [];
-  let responsibilitiesError = null;
-  try {
-    responsibilities = (await api.responsibilities(runId)).data.responsibilities;
-  } catch (error) {
-    responsibilitiesError = error;
-  }
-  root.append(whyPanel(summary, responsibilities, responsibilitiesError, budget, reload));
 
-  const tabs = el("nav", { class: "run-tabs", "aria-label": i18n.t("run.tabs.label") });
-  for (const tab of ["overview", "timeline", "plan", "graph", "data", "errors"]) {
-    tabs.append(el("button", {
-      class: `run-tab${tab === activeTab ? " active" : ""}`,
-      "aria-current": tab === activeTab ? "page" : null,
-      "data-run-tab": tab,
-      text: i18n.t(`run.tab.${tab}`),
-      onclick: () => navigate({ view: "run", runId, tab }),
-    }));
-  }
-  root.append(tabs);
 
-  const tabContent = el("section", { class: "run-tab-content", "data-active-tab": activeTab }, [
-    dataState(el, i18n, "loading"),
-  ]);
-  root.append(tabContent);
-  try {
-    let content;
-    if (activeTab === "overview") content = await overviewPanel(runId, summary, responsibilities);
-    else if (activeTab === "plan") content = await planPanel(runId);
-    else if (activeTab === "graph") content = await graphPanel(runId);
-    else if (activeTab === "data") content = await dataPanel(runId, {
-      live: !["succeeded", "failed", "cancelled"].includes(summary.status),
-    });
-    else if (activeTab === "timeline") content = await pagedPanel(runId, "timeline", "run.timeline", (item) =>
-      el("div", { class: "timeline-item" }, [
-        el("span", { class: "mono muted", text: i18n.dateTime(item.occurred_at) }),
-        el("strong", { text: item.type }),
-        el("span", { class: "mono muted", text: item.aggregate_id }),
-      ]));
-    else content = await pagedPanel(runId, "errors", "run.errors", errorItem);
-    tabContent.replaceChildren(content);
-  } catch (error) {
-    tabContent.replaceChildren(dataState(el, i18n, "error", {
-      message: error instanceof ApiError
-        ? i18n.t(error.messageKey, { message: error.message }) : null,
-      onRetry: reload,
-    }));
-    reportError(error);
-  }
-}
 
-function whyPanel(summary, responsibilities, failure, budget, reload) {
-  const responsibilityList = el("div", { class: "responsibility-list" }, [
-    el("div", { class: "eyebrow", text: i18n.t("run.responsibilities") }),
-  ]);
-  if (failure) {
-    responsibilityList.append(dataState(el, i18n, "error", { onRetry: reload }));
-  } else if (!responsibilities.length) {
-    const reason = summary.wait_reason
-      ? i18n.t(`wait.${summary.wait_reason}`)
-      : i18n.t(`run.why.${summary.status}`);
-    responsibilityList.append(el("p", {
-      class: "muted", text: reason,
-    }));
-  } else {
-    for (const item of responsibilities) {
-      responsibilityList.append(el("div", { class: "responsibility-row" }, [
-        el("div", {}, [
-          el("strong", { text: item.label }),
-          el("div", { class: "muted mono", text: item.responsibility_id }),
-        ]),
-        pill(item.status),
-        el("div", { class: "actions" }, commandButtons(item.allowed_commands, reload)),
-      ]));
-    }
-  }
-  return el("section", { class: "why-panel panel" }, [
-    el("div", { class: "panel-head" }, [
-      el("div", {}, [
-        el("div", { class: "eyebrow", text: i18n.t("run.why.eyebrow") }),
-        el("div", { class: "panel-title", text: i18n.t("run.why.title") }),
-      ]),
-    ]),
-    el("div", { class: "panel-body why-grid" }, [responsibilityList, budgetView(budget)]),
-  ]);
-}
-
-function budgetView(budget) {
-  const view = el("div", { class: "budget-view" }, [
-    el("div", { class: "eyebrow", text: i18n.t("run.budget") }),
-  ]);
-  if (!budget) {
-    view.append(el("p", { class: "muted", text: i18n.t("run.budget.none") }));
-    return view;
-  }
-  const total = Math.max(0, budget.total_microunits);
-  const denominator = Math.max(total, budget.consumed_microunits + budget.reserved_microunits, 1);
-  const width = (value) => `${Math.max(0, Math.min(100, (value / denominator) * 100))}%`;
-  view.append(
-    el("div", { class: "budget-bar", role: "img", "aria-label": i18n.t("run.budget.used", {
-      used: i18n.number(budget.consumed_microunits), total: i18n.number(total), unit: budget.unit,
-    }) }, [
-      el("span", { class: "consumed", style: `width:${width(budget.consumed_microunits)}` }),
-      el("span", { class: "reserved", style: `width:${width(budget.reserved_microunits)}` }),
-    ]),
-    el("div", { class: "budget-legend" }, [
-      el("span", { text: i18n.t("run.budget.consumed", { value: i18n.number(budget.consumed_microunits) }) }),
-      el("span", { text: i18n.t("run.budget.reserved", { value: i18n.number(budget.reserved_microunits) }) }),
-      el("span", { text: i18n.t("run.budget.remaining", { value: i18n.number(budget.remaining_microunits) }) }),
-    ]),
-    el("div", { class: "muted", text: i18n.t("run.budget.used", {
-      used: i18n.number(budget.consumed_microunits), total: i18n.number(total), unit: budget.unit,
-    }) }),
-    budget.overrun ? el("div", { class: "banner error", text: i18n.t("run.budget.overrun") }) : null,
-  );
-  return view;
-}
-
-async function overviewPanel(runId, summary, responsibilities) {
-  const panel = el("section", { class: "panel" }, [
-    el("div", { class: "panel-head" }, [
-      el("div", { class: "panel-title", text: i18n.t("run.tab.overview") }),
-    ]),
-    el("div", { class: "panel-body" }, [
-      el("p", { class: summary.goal ? "goal-copy" : "muted", text: summary.goal || i18n.t("goals.noDescription") }),
-      el("dl", { class: "fact-grid" }, [
-        el("div", {}, [el("dt", { text: i18n.t("run.workflow") }), el("dd", { class: "mono", text: summary.workflow_id })]),
-        el("div", {}, [el("dt", { text: i18n.t("run.status") }), el("dd", {}, [pill(summary.status)])]),
-        el("div", {}, [el("dt", { text: i18n.t("run.responsibilities") }), el("dd", { text: i18n.number(responsibilities.length) })]),
-      ]),
-    ]),
-  ]);
-  const [subflowResponse, foreachResponse] = await Promise.all([
-    api.subflows(runId), api.foreachGroups(runId),
-  ]);
-  const links = subflowResponse.data.items;
-  if (links.length) {
-    const body = panel.querySelector(".panel-body");
-    body.append(el("div", { class: "eyebrow", text: i18n.t("subflow.title") }));
-    for (const link of links) {
-      const isParent = link.parent_run_id === runId;
-      const related = isParent ? link.child_run_id : link.parent_run_id;
-      body.append(el("div", { class: "data-item" }, [
-        el("div", { class: "actions" }, [
-          pill(link.status),
-          el("span", {
-            class: "muted",
-            text: i18n.t(isParent ? "subflow.child" : "subflow.parent"),
-          }),
-          el("button", {
-            class: "button mono", text: related,
-            onclick: () => navigate({ view: "run", runId: related }),
-          }),
-        ]),
-        el("div", { class: "muted", text: i18n.t("subflow.depth", {
-          depth: i18n.number(link.recursion_depth),
-        }) }),
-      ]));
-    }
-  }
-  const groups = foreachResponse.data.items;
-  if (groups.length) {
-    const body = panel.querySelector(".panel-body");
-    body.append(el("div", { class: "eyebrow", text: i18n.t("foreach.title") }));
-    for (const group of groups) {
-      const items = el("div", {});
-      const loadItems = async () => {
-        items.replaceChildren(el("div", { class: "muted", text: i18n.t("loading") }));
-        try {
-          const grid = el("div", {
-            class: "virtual-window foreach-grid", role: "grid",
-            "aria-label": i18n.t("foreach.items"),
-          });
-          const notice = el("div", { class: "banner info", hidden: "hidden" });
-          const more = el("button", {
-            class: "button", text: i18n.t("action.loadMore"),
-          });
-          let cursor = null;
-          let rendered = 0;
-          let omitted = 0;
-          const nextPage = async () => {
-            more.disabled = true;
-            try {
-              const response = await api.foreachItems(runId, group.group_id, cursor);
-              for (const item of response.data.items) {
-                grid.insertBefore(el("div", { class: "actions", role: "row" }, [
-                  el("span", { class: "mono", role: "gridcell", text: item.item_key }),
-                  el("span", { role: "gridcell" }, [pill(item.status)]),
-                  ...(item.child_run_id ? [el("button", {
-                    class: "button mono", role: "gridcell", text: item.child_run_id,
-                    onclick: () => navigate({ view: "run", runId: item.child_run_id }),
-                  })] : []),
-                ]), more);
-                rendered += 1;
-              }
-              while (rendered > 200) {
-                const candidate = [...grid.children].find(
-                  (child) => child !== notice && child !== more,
-                );
-                if (!candidate) break;
-                candidate.remove();
-                rendered -= 1;
-                omitted += 1;
-              }
-              if (omitted) {
-                notice.textContent = i18n.t("foreach.windowed", {
-                  count: i18n.number(omitted),
-                });
-                notice.hidden = false;
-              }
-              cursor = response.next_cursor;
-              more.hidden = !cursor;
-            } finally {
-              more.disabled = false;
-            }
-          };
-          more.addEventListener("click", () => nextPage().catch(reportError));
-          grid.append(notice, more);
-          items.replaceChildren(grid);
-          await nextPage();
-        } catch (error) {
-          items.replaceChildren(dataState(el, i18n, "error", { onRetry: loadItems }));
-        }
-      };
-      body.append(el("div", { class: "data-item" }, [
-        el("div", { class: "actions" }, [
-          el("span", { class: "mono", text: group.group_id }),
-          pill(group.status),
-          el("span", { class: "muted", text: i18n.t("foreach.progress", {
-            done: i18n.number(group.counts.succeeded + group.counts.failed),
-            total: i18n.number(group.item_count),
-          }) }),
-          el("button", { class: "button", text: i18n.t("foreach.items"), onclick: loadItems }),
-        ]),
-        el("div", { class: "muted", text: i18n.t("foreach.policy", {
-          policy: group.failure_policy,
-          concurrency: i18n.number(group.concurrency_limit),
-        }) }),
-        items,
-      ]));
-    }
-  }
-  return panel;
-}
-
-function errorItem(item) {
-  const error = (item.payload && item.payload.error) || {};
-  const where = (item.payload && item.payload.node_run_id) || item.aggregate_id;
-  return el("div", { class: "error-item" }, [
-    el("strong", { text: error.message || error.code || item.type }),
-    el("div", { class: "muted mono", text: [error.category, error.source, where].filter(Boolean).join(" · ") }),
-    el("div", { class: "muted mono", text: i18n.dateTime(item.occurred_at) }),
-  ]);
-}
-
-async function graphPanel(runId, simplified = false) {
-  const graph = (await api.graph(runId)).data;
-  const definition = graph.definition;
-  const overlay = graph.runtime_overlay;
-  const statuses = new Map();
-  for (const node of overlay.nodes) {
-    const current = statuses.get(node.node_id);
-    if (!current || node.generation >= current.generation) statuses.set(node.node_id, node);
-  }
-  const positions = new Map(definition.layout.positions.map((item) => [item.node_id, item]));
-  const maxDepth = Math.max(0, ...definition.layout.positions.map((item) => item.depth));
-  const canvas = el("div", {
-    class: `graph-canvas ${definition.layout.mode}`,
-    style: `grid-template-columns:repeat(${maxDepth + 1},minmax(150px,1fr))`,
-  });
-  for (const node of definition.nodes) {
-    const position = positions.get(node.node_id) || { depth: 0, lane: 0 };
-    const runtime = statuses.get(node.node_id);
-    canvas.append(el("article", {
-      class: `graph-node${runtime ? ` ${runtime.status}` : ""}`,
-      style: `grid-column:${position.depth + 1};grid-row:${position.lane + 1}`,
-    }, [
-      el("div", { class: "graph-node-head" }, [
-        el("strong", { text: readableNodeName(node) }),
-        runtime ? pill(runtime.status) : el("span", { class: "pill", text: i18n.t("graph.notStarted") }),
-      ]),
-      el("span", {
-        class: "muted",
-        text: node.handler_name
-          ? node.handler_name.replace(/^agent\./, "")
-          : node.kind,
-      }),
-      runtime ? el("span", { class: "muted", text: i18n.t("plan.overlay.counts", {
-        generation: i18n.number(runtime.generation), attempts: i18n.number(runtime.attempts),
-      }) }) : null,
-    ]));
-  }
-  return el("section", { class: "panel graph-panel" }, [
-    el("div", { class: "panel-head" }, [
-      el("div", {}, [
-        el("div", { class: "panel-title", text: i18n.t("run.tab.graph") }),
-        el("div", { class: "muted", text: i18n.t("graph.scopes", { version: graph.plan_version }) }),
-      ]),
-      el("span", { class: "pill", text: definition.layout.mode }),
-    ]),
-    el("div", { class: "panel-body graph-body" }, [
-      canvas,
-      simplified ? null : el("div", { class: "graph-edges" }, definition.edges.map((edge) =>
-        el("span", { class: "mono", text: `${edge.from} → ${edge.to}${edge.back_edge ? ` · ${i18n.t("graph.loop")}` : ""}` }),
-      )),
-      simplified ? null : el("div", { class: "graph-facts" }, [
-        el("span", { text: i18n.t("graph.branches", { count: i18n.number(overlay.branch_tokens.length) }) }),
-        el("span", { text: i18n.t("graph.joins", { count: i18n.number(overlay.join_groups.length) }) }),
-        el("span", { text: i18n.t("graph.counters", { count: i18n.number(overlay.control_counters.length) }) }),
-      ]),
-    ]),
-  ]);
-}
 
 /** What the Handlers' processes printed, followed while the run is alive.
  *
@@ -1495,126 +1182,13 @@ async function graphPanel(runId, simplified = false) {
  * It is the only thing an attempt that ended `unknown_external_result` leaves,
  * which is exactly when an operator most needs to read it.
  */
-function consolePanel(runId, { live }) {
-  const log = el("pre", { class: "console-log", role: "log", tabindex: "0" });
-  const status = el("span", { class: "muted" });
-  const panel = el("section", { class: "panel console-panel" }, [
-    el("div", { class: "panel-head" }, [
-      el("div", { class: "panel-title", text: i18n.t("run.console") }),
-      status,
-    ]),
-    el("div", { class: "panel-body" }, [log]),
-  ]);
-
-  let after = 0;
-  let timer = null;
-  let stopped = false;
-
-  const draw = (chunks) => {
-    for (const chunk of chunks) {
-      log.append(el("span", {
-        class: `console-chunk ${chunk.stream}`, text: chunk.text,
-      }));
-    }
-    // Follow the tail only when the reader is already at the bottom, so
-    // scrolling back to read something does not get yanked away.
-    const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
-    if (chunks.length && atBottom) log.scrollTop = log.scrollHeight;
-  };
-
-  const poll = async () => {
-    if (stopped) return;
-    try {
-      const response = await api.runOutput(runId, after);
-      after = response.data.after;
-      draw(response.data.chunks);
-      status.textContent = log.childElementCount
-        ? i18n.t(live ? "run.console.following" : "run.console.finished")
-        : i18n.t("run.console.empty");
-    } catch (error) {
-      // A console is a convenience: losing it must not replace the page with
-      // an error. Say so quietly and stop asking.
-      stopped = true;
-      status.textContent = error instanceof ApiError && error.status === 403
-        ? i18n.t("run.console.forbidden")
-        : i18n.t("run.console.unavailable");
-      return;
-    }
-    if (live && !stopped) timer = setTimeout(poll, 2000);
-  };
-
-  const previous = activeViewCleanup;
-  activeViewCleanup = () => {
-    stopped = true;
-    if (timer) clearTimeout(timer);
-    if (previous) previous();
-  };
-  poll();
-  return panel;
-}
 
 /** One recorded value, readable rather than merely present.
  *
  * An Agent's answer is prose, and prose crammed into one JSON line at 500
  * characters is data you can prove you stored and cannot actually read.
  */
-function dataValueView(item) {
-  if (item.kind !== "value" || item.value === null) {
-    return el("div", {
-      text: `${item.port_id}: ${item.content_type || item.schema_id}`
-        + ` · ${i18n.number(item.size_bytes)} B`,
-    });
-  }
-  const raw = typeof item.value === "string"
-    ? item.value
-    : typeof item.value?.text === "string"
-      ? item.value.text
-      : JSON.stringify(item.value, null, 2);
-  // Readable, still bounded: an inline value may be a quarter of a megabyte,
-  // and pasting all of it into the DOM is how a page stops responding. The
-  // size is always stated, so a clipped value never reads as a complete one.
-  const shown = raw.length <= DATA_TEXT_LIMIT
-    ? raw
-    : `${raw.slice(0, DATA_TEXT_LIMIT)}\n…`;
-  return el("details", { class: "data-value", ...(raw.length <= 2000 ? { open: "open" } : {}) }, [
-    el("summary", { text: `${item.port_id} · ${i18n.number(item.size_bytes)} B` }),
-    el("pre", { class: "data-text", text: shown }),
-  ]);
-}
 
-async function dataPanel(runId, { live = false } = {}) {
-  const wrapper = el("div", { class: "data-panel" }, [consolePanel(runId, { live })]);
-  wrapper.append(await pagedPanel(runId, "data", "run.data", (item) => {
-    const lineage = el("div", { class: "muted mono", hidden: "hidden" });
-    const button = el("button", {
-      class: "button",
-      text: i18n.t("run.data.lineage"),
-      onclick: async () => {
-        try {
-          const response = await api.lineage(runId, item.data_id);
-          const links = response.data.links;
-          lineage.textContent = links.length
-            ? links.map((link) => `${link.type}: ${link.source_id} → ${link.target_id}`).join(" · ")
-            : i18n.t("run.data.lineage.empty");
-          lineage.hidden = false;
-        } catch (error) {
-          reportError(error);
-        }
-      },
-    });
-    return el("div", { class: "data-item" }, [
-      el("div", { class: "actions" }, [
-        el("span", { class: "mono", text: item.data_id }),
-        el("span", { class: "pill", text: i18n.t(`run.data.kind.${item.kind}`) }),
-        button,
-      ]),
-      dataValueView(item),
-      el("div", { class: "muted mono", text: item.checksum }),
-      lineage,
-    ]);
-  }));
-  return wrapper;
-}
 
 /** The plan, in three separately-labelled views.
  *
@@ -1623,400 +1197,14 @@ async function dataPanel(runId, { live = false } = {}) {
  * statuses onto this version's graph is the bug this shape prevents; showing
  * "no run state for this version" is the correct, honest alternative.
  */
-async function planPanel(runId) {
-  const body = el("div", { class: "panel-body" });
-  const panel = el("section", { class: "panel" }, [
-    el("div", { class: "panel-head" }, [
-      el("div", { class: "panel-title", text: i18n.t("plan.title") }),
-    ]),
-    body,
-  ]);
 
-  let definition;
-  try {
-    definition = (await api.planDefinition(runId)).data;
-  } catch (error) {
-    if (!(error instanceof ApiError) || error.status !== 404) throw error;
-    body.append(el("div", { class: "muted", text: i18n.t("plan.none") }));
-    return panel;
-  }
 
-  const versions = definition.available_versions || [definition.plan_version];
-  const state = { version: definition.plan_version, view: "definition", asOf: null };
 
-  const tabs = el("div", { class: "actions" });
-  const content = el("div", {});
 
-  const draw = async () => {
-    content.replaceChildren(el("div", { class: "muted", text: i18n.t("loading") }));
-    for (const button of tabs.querySelectorAll("button[data-view]")) {
-      button.setAttribute("aria-pressed", String(button.dataset.view === state.view));
-    }
-    try {
-      if (state.view === "definition") content.replaceChildren(await planDefinitionView(runId, state));
-      else if (state.view === "overlay") content.replaceChildren(await planOverlayView(runId, state));
-      else if (state.view === "diff") content.replaceChildren(await planDiffView(runId, state, versions));
-      else content.replaceChildren(await plannerDecisionsView(runId));
-    } catch (error) {
-      content.replaceChildren();
-      reportError(error);
-    }
-  };
-  state.redraw = draw;
-
-  for (const view of ["definition", "overlay", "diff", "decisions"]) {
-    if (view === "diff" && versions.length < 2) continue;
-    tabs.append(
-      el("button", {
-        class: "button",
-        "data-view": view,
-        "aria-pressed": String(view === state.view),
-        text: i18n.t(`plan.${view}`),
-        onclick: () => {
-          state.view = view;
-          draw();
-        },
-      }),
-    );
-  }
-
-  if (versions.length > 1) {
-    const select = el("select", { "aria-label": i18n.t("plan.version") });
-    for (const version of versions) {
-      select.append(
-        el("option", {
-          value: String(version),
-          ...(version === state.version ? { selected: "selected" } : {}),
-          text: `v${version}`,
-        }),
-      );
-    }
-    select.addEventListener("change", (event) => {
-      state.version = Number(event.target.value);
-      draw();
-    });
-    tabs.append(select);
-  }
-
-  body.append(tabs, content);
-  await draw();
-  return panel;
-}
-
-async function plannerDecisionsView(runId) {
-  const response = await api.plannerDecisions(runId);
-  const items = response.data.items;
-  const list = el("div", {}, [
-    el("div", { class: "eyebrow", text: i18n.t("plan.decisions.title") }),
-  ]);
-  if (!items.length) {
-    list.append(el("div", { class: "muted", text: i18n.t("plan.decisions.empty") }));
-    return list;
-  }
-  for (const item of items) {
-    const proposal = item.proposal;
-    const patch = item.patch;
-    const policy = item.policy;
-    list.append(el("div", { class: "data-item" }, [
-      el("div", { class: "actions" }, [
-        el("span", { class: "mono", text: `#${item.attempt_number}` }),
-        pill(item.status),
-        el("span", { class: "muted", text: `${item.provider_id} · ${item.model_id}` }),
-        ...(item.usage ? [el("span", {
-          class: "muted",
-          text: i18n.t("plan.decisions.cost", {
-            cost: i18n.number(item.usage.cost_microunits),
-          }),
-        })] : []),
-      ]),
-      ...(proposal ? [
-        el("div", { class: "actions" }, [
-          el("span", { class: "mono", text: proposal.proposal_id }),
-          pill(proposal.action.kind),
-          pill(proposal.status),
-        ]),
-        el("div", { text: proposal.reason }),
-      ] : []),
-      ...(patch ? [el("div", {
-        class: "muted mono",
-        text: i18n.t("plan.decisions.patch", {
-          status: patch.status,
-          version: patch.result_plan_version ?? "—",
-        }),
-      })] : []),
-      ...(policy ? [el("div", {
-        class: "muted",
-        text: i18n.t(
-          policy.allowed ? "plan.decisions.policy.allowed" : "plan.decisions.policy.denied",
-        ),
-      })] : []),
-    ]));
-  }
-  return list;
-}
-
-async function planDefinitionView(runId, state) {
-  const definition = (await api.planDefinition(runId, state.version)).data;
-  const list = el("div", {}, [
-    el("div", {
-      class: "eyebrow",
-      text: i18n.t("plan.definition.version", { version: definition.plan_version }),
-    }),
-  ]);
-  for (const node of definition.nodes) {
-    list.append(
-      el("div", { class: "actions" }, [
-        el("span", { class: "mono", text: node.node_id }),
-        el("span", { class: "muted", text: node.kind }),
-        el("span", {
-          class: "muted mono",
-          text: node.handler_name ? `${node.handler_name}@${node.handler_version}` : "",
-        }),
-      ]),
-    );
-  }
-  list.append(
-    el("div", {
-      class: "muted",
-      text: definition.edges.map((edge) => `${edge.from} → ${edge.to}`).join("   "),
-    }),
-  );
-  return list;
-}
-
-async function planOverlayView(runId, state) {
-  const overlay = (await api.planOverlay(runId, state.version, state.asOf)).data;
-  const position = el("input", {
-    type: "number", min: "0", inputmode: "numeric",
-    value: state.asOf === null ? "" : String(state.asOf),
-    placeholder: i18n.t("plan.overlay.history.position"),
-    "aria-label": i18n.t("plan.overlay.history.position"),
-  });
-  const historyControls = el("div", { class: "actions" }, [
-    position,
-    el("button", {
-      class: "button", text: i18n.t("plan.overlay.history.apply"),
-      onclick: () => {
-        if (!position.value.length || Number(position.value) < 0) return;
-        state.asOf = Number(position.value);
-        state.redraw();
-      },
-    }),
-    el("button", {
-      class: "button", text: i18n.t("plan.overlay.history.current"),
-      onclick: () => { state.asOf = null; state.redraw(); },
-    }),
-  ]);
-  const list = el("div", {}, [
-    el("div", {
-      class: "eyebrow",
-      text: i18n.t("plan.overlay.for", { version: overlay.plan_version }),
-    }),
-    historyControls,
-    ...(overlay.as_of_global_position === null ? [] : [el("div", {
-      class: "muted mono",
-      text: i18n.t("plan.overlay.history.asOf", {
-        position: i18n.number(overlay.as_of_global_position),
-        head: i18n.number(overlay.event_head),
-      }),
-    })]),
-  ]);
-  if (!overlay.nodes.length) {
-    list.append(el("div", { class: "muted", text: i18n.t("plan.overlay.empty") }));
-    return list;
-  }
-  for (const node of overlay.nodes) {
-    list.append(
-      el("div", { class: "actions" }, [
-        el("span", { class: "mono", text: node.node_id }),
-        pill(node.status),
-        el("span", {
-          class: "muted",
-          text: i18n.t("plan.overlay.counts", {
-            generation: i18n.number(node.generation),
-            attempts: i18n.number(node.attempts),
-          }),
-        }),
-      ]),
-    );
-  }
-  return list;
-}
-
-async function planDiffView(runId, state, versions) {
-  const base = versions[versions.indexOf(state.version) - 1] ?? versions[0];
-  const diff = (await api.planDiff(runId, base, state.version)).data;
-  const list = el("div", {}, [
-    el("div", {
-      class: "eyebrow",
-      text: i18n.t("plan.diff.between", {
-        base: diff.base_version, target: diff.target_version,
-      }),
-    }),
-  ]);
-  if (diff.identical) {
-    list.append(el("div", { class: "muted", text: i18n.t("plan.diff.identical") }));
-    return list;
-  }
-  const rows = [
-    ["plan.diff.added", diff.added_nodes],
-    ["plan.diff.removed", diff.removed_nodes],
-    ["plan.diff.changed", diff.changed_nodes.map((node) => node.node_id)],
-  ];
-  for (const [key, values] of rows) {
-    if (!values.length) continue;
-    list.append(
-      el("div", { class: "actions" }, [
-        el("span", { class: "muted", text: i18n.t(key) }),
-        el("span", { class: "mono", text: values.join(", ") }),
-      ]),
-    );
-  }
-  return list;
-}
 
 /** A cursor-paged section. Paging is the server's; the UI only carries tokens. */
-async function pagedPanel(runId, kind, titleKey, renderItem) {
-  // Keep a bounded scroll window: cursor pages can be arbitrarily large, but
-  // the DOM remains capped while the server remains the source of truth.
-  const body = el("div", { class: "panel-body virtual-window", role: "log" });
-  const more = el("button", { class: "button", text: i18n.t("action.loadMore") });
-  const windowNotice = el("div", { class: "banner info", hidden: "hidden" });
-  let cursor = null;
-  let rendered = 0;
-  let omitted = 0;
 
-  const page = async () => {
-    const response = await api.runPage(runId, kind, cursor);
-    for (const item of response.data.items) {
-      body.insertBefore(renderItem(item), more);
-      rendered += 1;
-    }
-    while (rendered > 200) {
-      const candidate = [...body.children].find(
-        (child) => child !== windowNotice && child !== more,
-      );
-      if (!candidate) break;
-      candidate.remove();
-      rendered -= 1;
-      omitted += 1;
-    }
-    if (omitted) {
-      windowNotice.textContent = i18n.t("run.windowed", { count: i18n.number(omitted) });
-      windowNotice.hidden = false;
-    }
-    cursor = response.next_cursor;
-    more.hidden = !cursor;
-    if (rendered === 0) {
-      body.insertBefore(el("div", { class: "muted", text: i18n.t(`${titleKey}.empty`) }), more);
-    }
-  };
 
-  more.addEventListener("click", () => page().catch(reportError));
-  body.append(windowNotice, more);
-  const panel = el("section", { class: "panel" }, [
-    el("div", { class: "panel-head" }, [
-      el("div", { class: "panel-title", text: i18n.t(titleKey) }),
-    ]),
-    body,
-  ]);
-  await page();
-  return panel;
-}
-
-async function renderInbox(root) {
-  const response = await api.inbox();
-  const items = response.data.items;
-  const body = el("tbody");
-  for (const item of items) {
-    body.append(inboxRow(item));
-  }
-  let cursor = response.next_cursor;
-  const more = el("button", {
-    class: "button", text: i18n.t("action.loadMore"),
-    ...(cursor ? {} : { hidden: "hidden" }),
-    onclick: async () => {
-      const next = await api.inbox(cursor);
-      for (const item of next.data.items) body.append(inboxRow(item));
-      cursor = next.next_cursor;
-      more.hidden = !cursor;
-    },
-  });
-  const panel = el("section", { class: "panel" }, [
-    el("div", { class: "panel-head" }, [
-      el("div", { class: "panel-title", text: i18n.t("inbox.title") }),
-    ]),
-    items.length
-      ? el("div", { class: "table-scroll" }, [
-          el("table", { class: "inbox-table" }, [
-            el("thead", {}, [
-              el("tr", {}, [
-                el("th", { text: i18n.t("inbox.column.item") }),
-                el("th", { text: i18n.t("inbox.column.run") }),
-                el("th", { text: i18n.t("inbox.column.status") }),
-                el("th", { text: i18n.t("inbox.column.actions") }),
-              ]),
-            ]),
-            body,
-          ]),
-        ])
-      : el("div", { class: "empty", text: i18n.t("inbox.empty") }),
-    more,
-  ]);
-  root.append(panel);
-  const count = response.data.action_count || 0;
-  document.getElementById("inboxCount").textContent = count ? String(count) : "";
-}
-
-function inboxRow(item) {
-  const glyphs = { human: "H", budget: "$", unknown: "?", recovery: "R" };
-  return el("tr", { class: "list-option-row inbox-list-option" }, [
-        el("td", {
-          class: "inbox-item-copy", "data-field": "item",
-          "data-label": i18n.t("inbox.column.item"),
-        }, [
-          el("div", { class: "actions inbox-item-head" }, [
-            el("span", {
-              class: `inbox-kind ${item.kind}`, "aria-hidden": "true",
-              text: glyphs[item.kind] || "•",
-            }),
-            el("span", { class: "pill", text: i18n.t(`responsibility.${item.kind}`) }),
-            el("strong", { text: item.label }),
-          ]),
-          item.deadline_at ? el("div", { class: "muted", text: i18n.t("inbox.deadline", {
-            time: i18n.dateTime(item.deadline_at),
-          }) }) : null,
-          item.quorum ? el("div", { class: "muted", text: i18n.t("inbox.quorum", {
-            submitted: i18n.number(item.quorum.submitted), required: i18n.number(item.quorum.count),
-          }) }) : null,
-          el("div", { class: "muted mono", text: i18n.t("inbox.source", {
-            source: item.item_id,
-          }) }),
-        ]),
-        el("td", { "data-field": "run", "data-label": i18n.t("inbox.column.run") }, [
-          el("button", {
-            class: "list-option-link id-button",
-            text: item.run_id,
-            title: item.run_id,
-            onclick: () => navigate({ view: "run", runId: item.run_id }),
-          }),
-        ]),
-        el("td", { "data-field": "status", "data-label": i18n.t("inbox.column.status") }, [pill(item.status)]),
-        el("td", { "data-field": "actions", "data-label": i18n.t("inbox.column.actions") }, [
-          el("div", { class: "actions" }, commandButtons(item.allowed_commands, () => render())),
-        ]),
-      ]);
-}
-
-async function refreshInboxCount() {
-  try {
-    const response = await api.inbox();
-    const count = response.data.action_count || 0;
-    document.getElementById("inboxCount").textContent = count ? String(count) : "";
-  } catch {
-    // A badge is supplementary; the destination keeps its own error boundary.
-  }
-}
 
 /* Sidebar health card: the same facts `/health/ready` serves, nothing more.
    A failed fetch means "degraded" — the card never claims a state the
@@ -2241,16 +1429,8 @@ function artifactContent(item) {
 
 async function renderArtifactDetail(panel, artifactId) {
   try {
-    const simple = simplifiedGoalUI();
-    const [detailResponse, lineageResponse] = await Promise.all([
-      api.artifact(artifactId),
-      simple ? Promise.resolve({ data: null }) : api.artifactLineage(artifactId),
-    ]);
+    const detailResponse = await api.artifact(artifactId);
     const item = detailResponse.data;
-    const lineage = lineageResponse.data;
-    const links = simple ? [] : [
-      ...lineage.producers, ...lineage.consumers, ...lineage.derived_from,
-    ];
     panel.replaceChildren(
       el("div", { class: "panel-head" }, [
         el("div", {}, [
@@ -2262,13 +1442,13 @@ async function renderArtifactDetail(panel, artifactId) {
             class: "button", text: i18n.t("artifacts.download"),
             href: api.artifactDownloadUrl(item.artifact_id),
           }),
-          simple ? el("button", {
+          el("button", {
             class: "button", text: i18n.t("artifacts.copyId"),
             onclick: async () => {
               await navigator.clipboard.writeText(item.artifact_id);
               announce(i18n.t("artifacts.idCopied"));
             },
-          }) : null,
+          }),
           el("button", {
             class: "button", text: i18n.t("action.close"),
             onclick: () => panel.close(),
@@ -2276,30 +1456,9 @@ async function renderArtifactDetail(panel, artifactId) {
         ]),
       ]),
       el("div", { class: "panel-body" }, [
-        // The Artifact itself comes first: someone who opened it wants to read
-        // it, not to read about it. The facts follow the content.
+        // The Artifact itself is what someone opened this for: the picture or
+        // the text first, nothing about it in front of it.
         artifactContent(item),
-        simple ? null : el("dl", { class: "fact-grid" }, [
-          el("div", {}, [
-            el("dt", { text: i18n.t("artifacts.goal") }),
-            el("dd", {
-              class: "fact-line", text: item.goal || item.run_id,
-              title: item.goal || item.run_id,
-            }),
-          ]),
-          el("div", {}, [el("dt", { text: i18n.t("artifacts.workflow") }), el("dd", { class: "mono", text: item.workflow_id })]),
-          el("div", {}, [el("dt", { text: i18n.t("artifacts.run") }), el("dd", { class: "mono", text: item.run_id })]),
-          el("div", {}, [el("dt", { text: i18n.t("artifacts.type") }), el("dd", { text: item.content_type })]),
-          el("div", {}, [el("dt", { text: i18n.t("artifacts.sizeLabel") }), el("dd", { text: i18n.number(item.size_bytes) })]),
-          el("div", {}, [el("dt", { text: i18n.t("artifacts.producer") }), el("dd", { class: "mono", text: item.producer_id })]),
-          // The id is addressing, not a name: it reads as one fact among the
-          // others rather than as the heading of the Artifact.
-          el("div", {}, [el("dt", { text: i18n.t("artifacts.idLabel") }), el("dd", { class: "mono", text: item.artifact_id })]),
-        ]),
-        simple ? null : el("div", { class: "eyebrow", text: i18n.t("artifacts.lineage") }),
-        ...(simple ? [] : links.length ? links.map((link) => el("div", {
-          class: "lineage-row mono", text: `${link.type}: ${link.source_id} → ${link.target_id}`,
-        })) : [el("div", { class: "muted", text: i18n.t("artifacts.lineage.empty") })]),
       ]),
     );
   } catch (error) {
@@ -2312,43 +1471,45 @@ async function renderArtifactDetail(panel, artifactId) {
   }
 }
 
-async function renderAgents(root) {
-  const catalog = (await api.handlerCatalog()).data;
-  const agents = catalog.handlers.filter((handler) => handler.name.startsWith("agent."));
-  root.append(el("div", { class: "banner info", text: i18n.t("agents.registrationOnly") }));
-  root.append(el("section", { class: "panel" }, [
-    el("div", { class: "panel-head" }, [
-      el("div", { class: "panel-title", text: i18n.t("agents.handlers") }),
-    ]),
-    el("div", { class: "panel-body agents-grid" }, agents.length
-      ? agents.map((handler) => {
-        const attempt = handler.recent_attempt;
-        const initials = handler.name.replace(/^agent\./, "").slice(0, 2).toUpperCase();
-        return el("article", { class: "data-card list-option-card agent-card" }, [
-          el("div", { class: "agent-head" }, [
-            el("span", { class: "agent-avatar", "aria-hidden": "true", text: initials }),
-            el("div", {}, [
-              el("div", { class: "panel-title mono", text: handler.name }),
-              el("div", { class: "muted mono agent-version", text: handler.version }),
-              el("div", { class: "muted agent-status", text: i18n.t("agents.registered") }),
-            ]),
-          ]),
-          (handler.capabilities || []).length
-            ? el("div", { class: "capabilities" }, handler.capabilities.map((capability) =>
-                el("span", { class: "capability", text: capability })))
-            : el("div", { class: "muted", text: i18n.t("agents.noCapabilities") }),
-          el("div", { class: "muted mono", text: attempt
-            ? `${attempt.status} · ${attempt.run_id} · ${i18n.dateTime(attempt.occurred_at)}`
-            : i18n.t("agents.noAttempts") }),
-        ]);
-      })
-      : [el("div", { class: "muted", text: i18n.t("agents.empty") })]),
-  ]));
-}
 
 function refreshSeconds() {
   const value = Number(localStorage.getItem("orbit.refreshSeconds") || 15);
   return Number.isFinite(value) && value >= 5 && value <= 300 ? value : 15;
+}
+
+const REFRESH_INTERVAL_SECONDS = [5, 15, 30, 60, 300];
+
+function syncRefreshIntervalSelect(interval) {
+  const current = String(refreshSeconds());
+  if (!interval.options.length) {
+    for (const seconds of REFRESH_INTERVAL_SECONDS) interval.append(el("option", {
+      value: String(seconds), text: i18n.t("settings.seconds", { count: seconds }),
+    }));
+  } else {
+    for (const option of interval.options) {
+      option.textContent = i18n.t("settings.seconds", { count: Number(option.value) });
+    }
+  }
+  interval.value = current;
+  const label = i18n.t("settings.refresh");
+  interval.setAttribute("aria-label", label);
+  const wrapper = interval.closest(".custom-select");
+  if (wrapper) {
+    for (const option of wrapper.querySelectorAll(".custom-select-option")) {
+      const nativeOption = [...interval.options].find(
+        (item) => item.value === option.dataset.value,
+      );
+      if (nativeOption) option.textContent = nativeOption.textContent;
+    }
+    wrapper.querySelector(".custom-select-options")?.setAttribute("aria-label", label);
+  }
+  syncCustomSelect(interval);
+}
+
+function saveRefreshInterval(interval) {
+  localStorage.setItem("orbit.refreshSeconds", interval.value);
+  scheduleLivePolling();
+  announce(i18n.t("settings.saved"));
 }
 
 function scheduleLivePolling() {
@@ -2381,114 +1542,6 @@ function scheduleLivePolling() {
   refreshTimer = setTimeout(tick, delaySeconds() * 1000);
 }
 
-async function renderSettings(root) {
-  // Ops and preferences share one page. The operational half needs ops_read;
-  // without it the page is still useful for local preferences, and the server
-  // decides what to show rather than the client guessing from a 403.
-  const opsRead = !simplifiedGoalUI() && Boolean(shellFacts?.permissions?.ops_read);
-  const [statusResponse, recoveryResponse] = opsRead
-    ? await Promise.all([api.opsStatus(), api.recovery()])
-    : [null, null];
-  const status = statusResponse?.data ?? null;
-  const recovery = recoveryResponse?.data ?? null;
-
-  const interval = el("select", { "aria-label": i18n.t("settings.refresh") });
-  for (const seconds of [5, 15, 30, 60, 300]) interval.append(el("option", {
-    value: String(seconds), text: i18n.t("settings.seconds", { count: seconds }),
-    ...(seconds === refreshSeconds() ? { selected: "selected" } : {}),
-  }));
-  interval.addEventListener("change", () => {
-    localStorage.setItem("orbit.refreshSeconds", interval.value);
-    scheduleLivePolling();
-    announce(i18n.t("settings.saved"));
-  });
-  root.append(el("section", { class: "panel" }, [
-    el("div", { class: "panel-head" }, [el("div", {
-      class: "panel-title", text: i18n.t("settings.preferences"),
-    })]),
-    el("div", { class: "panel-body" }, [
-      el("label", { class: "settings-row" }, [
-        el("span", { text: i18n.t("settings.refresh") }), interval,
-      ]),
-      el("div", { class: "muted", text: i18n.t("settings.localOnly") }),
-    ]),
-  ]));
-
-  if (simplifiedGoalUI()) return;
-
-  if (status) {
-    root.append(
-      el("section", { class: "panel" }, [
-        el("div", { class: "panel-head" }, [
-          el("div", { class: "panel-title", text: i18n.t("ops.integrity") }),
-          pill(status.integrity.status === "ok" ? "succeeded" : "failed"),
-        ]),
-        el("div", { class: "panel-body" }, [
-          el("div", { text: i18n.t("ops.integrity.summary", {
-            version: i18n.number(status.integrity.migration_version),
-          }) }),
-        ]),
-      ]),
-    );
-
-    const findings = recovery?.findings || [];
-    root.append(
-      el("section", { class: "panel" }, [
-        el("div", { class: "panel-head" }, [
-          el("div", { class: "panel-title", text: i18n.t("ops.recovery") }),
-        ]),
-        el("div", { class: "panel-body" }, [
-          el("div", {
-            class: "muted",
-            text: i18n.t("ops.recovery.scanned", {
-              count: i18n.number(recovery?.scanned_runs || 0),
-            }),
-          }),
-          ...(findings.length
-            ? findings.map((finding) =>
-                el("div", { class: "actions" }, [
-                  el("span", { class: "mono", text: `${finding.code} · ${finding.entity_id}` }),
-                  ...commandButtons(finding.allowed_commands || [], () => render()),
-                ]),
-              )
-            : [el("div", { class: "muted", text: i18n.t("ops.recovery.empty") })]),
-        ]),
-      ]),
-    );
-
-    root.append(el("section", { class: "stat-grid" }, [
-      el("article", { class: "stat-card" }, [
-        el("div", { class: "panel-title", text: i18n.t("ops.capacity") }),
-        el("div", { class: "stat-value", text: i18n.number(status.capacity.ready_jobs) }),
-        el("div", { class: "muted", text: i18n.t("ops.capacity.ready") }),
-        el("div", { class: "muted", text: i18n.t("ops.capacity.workers", {
-          count: i18n.number(status.capacity.configured_workers || 0),
-        }) }),
-      ]),
-      el("article", { class: "stat-card" }, [
-        el("div", { class: "panel-title", text: i18n.t("ops.durable") }),
-        el("div", { class: "stat-value", text: i18n.number(status.durable.active_leases) }),
-        el("div", { class: "muted", text: i18n.t("ops.durable.leases") }),
-        el("div", { class: "muted", text: i18n.t("ops.durable.unknown", {
-          count: i18n.number(status.durable.unknown_external_results),
-        }) }),
-      ]),
-    ]));
-  }
-
-  root.append(el("section", { class: "panel" }, [
-    el("div", { class: "panel-head" }, [el("div", {
-      class: "panel-title", text: i18n.t("settings.server"),
-    })]),
-    el("div", { class: "panel-body mono", text: status
-      ? i18n.t("settings.server.summary", {
-        workers: status.server_config.worker_count,
-        poll: status.server_config.poll_seconds,
-        artifacts: String(status.server_config.artifact_store_configured),
-      })
-      : i18n.t("settings.server.restricted") }),
-  ]));
-}
 
 /* ------------------------------------------------ workflow catalog / wizard */
 
@@ -2615,64 +1668,101 @@ function handlerDriftNotice(value, redraw) {
 }
 
 async function renderWorkflows(root) {
-  const catalog = (await api.workflowCatalog()).data;
-  const entries = catalog.workflows;
-  const simplified = simplifiedGoalUI();
+  let catalog = (await api.workflowCatalog()).data;
+  let entries = catalog.workflows;
   // Generation appears only when the server advertised it: capability off or
   // read-only actor simply means the button does not exist.
-  const generateCommand = (catalog.allowed_commands || []).find(
+  let generateCommand = (catalog.allowed_commands || []).find(
     (item) => item.command === "workflow.generate",
   );
-  const activeGeneration = simplified && generateCommand
+  const activeGeneration = generateCommand
     ? (await api.authoringJobs({ active: true, type: "generate" })).data.jobs[0]
     : null;
-  root.append(el("header", { class: "view-intro" }, [
-    el("div", {}, [
-      el("div", { class: "eyebrow", text: i18n.t("workflows.eyebrow") }),
-      el("h2", { text: i18n.t("workflows.heading") }),
-      el("p", { class: "muted", text: i18n.t("workflows.description") }),
-    ]),
-    generateCommand ? el("button", {
-        class: "button primary", id: "generateWorkflow",
-        text: activeGeneration
-          ? i18n.t(`authoring.job.${activeGeneration.status}`)
-          : i18n.t("generate.action"),
-        onclick: () => generateWorkflowDialog(generateCommand, activeGeneration),
-      }) : null,
-  ]));
-  const search = el("input", {
-    type: "search", value: workflowFilters.q,
-    placeholder: i18n.t("workflows.search.placeholder"),
-    "aria-label": i18n.t("workflows.search.label"),
-  });
-  const sort = el("select", {
-    "aria-label": i18n.t("workflows.sort.label"),
-    onchange: (event) => { workflowFilters.sort = event.target.value; render(); },
-  });
-  for (const value of ["recentRun", "recentPublish", "name"]) {
-    sort.append(el("option", {
-      value, ...(value === workflowFilters.sort ? { selected: "selected" } : {}),
-      text: i18n.t(`workflows.sort.${value}`),
-    }));
+  if (activeGeneration) simplifiedWorkflowGenerationPending = true;
+  if (simplifiedWorkflowGenerationPending && !activeGeneration) {
+    catalog = (await api.workflowCatalog()).data;
+    entries = catalog.workflows;
+    generateCommand = (catalog.allowed_commands || []).find(
+      (item) => item.command === "workflow.generate",
+    );
+    simplifiedWorkflowGenerationPending = false;
   }
-  root.append(el("form", { class: "filter-bar", onsubmit: (event) => {
-    event.preventDefault();
-    workflowFilters.q = search.value.trim();
-    render();
-  } }, [
-    search, simplified ? null : sort,
-    el("button", { class: "button", type: "submit", text: i18n.t("action.search") }),
-  ]));
 
+  {
+    const instruction = el("textarea", {
+      id: "generateInstruction", required: "required", maxlength: "4000",
+      disabled: activeGeneration ? "disabled" : null,
+      placeholder: i18n.t("generate.instructionPh"),
+      text: activeGeneration?.prompt || "",
+    });
+    const problem = el("div", {
+      class: "banner error simplified-workflow-generation-problem", hidden: "hidden",
+    });
+    const submit = el("button", {
+      class: "button primary", type: "submit", id: "generateWorkflow",
+      disabled: !generateCommand || activeGeneration ? "disabled" : null,
+      text: activeGeneration
+        ? i18n.t(`authoring.job.${activeGeneration.status}`)
+        : i18n.t("generate.action"),
+    });
+    root.append(el("section", { class: "panel simplified-workflow-generator" }, [
+      el("div", { class: "simplified-workflow-generator-copy" }, [
+        el("h2", { text: i18n.t("generate.title") }),
+        el("p", { class: "muted", text: i18n.t("generate.hint") }),
+      ]),
+      el("form", {
+        class: "simplified-workflow-generator-form",
+        onsubmit: async (event) => {
+          event.preventDefault();
+          if (!generateCommand || activeGeneration
+              || !instruction.value.trim() || !instruction.reportValidity()) return;
+          submit.disabled = true;
+          problem.hidden = true;
+          try {
+            await api.execute(
+              generateCommand,
+              { prompt: instruction.value.trim(), display_language: i18n.locale },
+              `workflow.generate:${Date.now()}`,
+            );
+            simplifiedWorkflowGenerationPending = true;
+            render();
+          } catch (error) {
+            problem.textContent = error instanceof ApiError
+              ? i18n.t(error.messageKey, { message: error.message })
+              : i18n.t("error.generic");
+            problem.hidden = false;
+            reportError(error);
+            submit.disabled = false;
+          }
+        },
+      }, [
+        el("div", { class: "field" }, [
+          el("label", { for: "generateInstruction", text: i18n.t("generate.instruction") }),
+          instruction,
+        ]),
+        el("div", { class: "actions simplified-workflow-generator-actions" }, [submit]),
+        activeGeneration ? el("div", { class: `authoring-job-state ${activeGeneration.status}` }, [
+          el("span", { class: "live-dot", "aria-hidden": "true" }),
+          el("strong", { text: i18n.t(`authoring.job.${activeGeneration.status}`) }),
+        ]) : null,
+        problem,
+      ]),
+    ]));
+    root.append(el("header", { class: "view-intro simplified-workflow-list-heading" }, [
+      el("div", {}, [
+        el("div", { class: "eyebrow", text: i18n.t("workflows.generated.eyebrow") }),
+        el("h2", { text: i18n.t("workflows.generated.heading") }),
+        el("p", { class: "muted", text: i18n.t("workflows.generated.description") }),
+      ]),
+    ]));
+    if (activeGeneration) {
+      const timer = setTimeout(() => render(), 800);
+      activeViewCleanup = () => clearTimeout(timer);
+    }
+  }
   const cards = el("section", { class: "workflow-grid", "aria-label": i18n.t("workflows.list") });
-  // Searching and ordering a few dozen entries is a view concern: the catalog
-  // arrives in one response, so neither costs a round trip.
-  const needle = workflowFilters.q.toLowerCase();
-  const matches = entries.filter((entry) => !needle || [
-    entry.name, entry.workflow_id, entry.description,
-  ].some((field) => String(field || "").toLowerCase().includes(needle)));
 
-  for (const entry of sortWorkflows(matches, workflowFilters.sort)) {
+  for (const entry of sortWorkflows(entries, "recentPublish")) {
     const kinds = Object.entries(entry.summary.node_kinds || {});
     const visualNodes = [];
     for (const [kind, count] of kinds) {
@@ -2688,21 +1778,21 @@ async function renderWorkflows(root) {
       class: "workflow-node more", text: `+${entry.summary.node_count - visualNodes.length}`,
     }));
     const card = el("article", {
-      class: `workflow-card panel${simplified ? " simplified-workflow-card" : ""}`,
+      class: "workflow-card panel",
       "data-workflow-id": entry.workflow_id,
     }, [
       el("button", { class: "workflow-card-main" }, [
-        simplified ? null : el("span", { class: "workflow-visual", "aria-hidden": "true" }, visualNodes),
-        simplified ? null : el("span", { class: "eyebrow", text: entry.workflow_id }),
+        el("span", { class: "workflow-visual", "aria-hidden": "true" }, visualNodes),
+        el("span", { class: "eyebrow", text: entry.workflow_id }),
         el("span", { class: "workflow-card-heading" }, [
           el("strong", { text: entry.name }),
-          simplified && entry.goal_readiness !== "ready" ? el("span", {
+          entry.goal_readiness !== "ready" ? el("span", {
             class: `pill ${entry.goal_readiness === "needs_upgrade" ? "waiting" : "failed"}`,
             text: i18n.t(`workflows.readiness.${entry.goal_readiness}`),
           }) : null,
         ]),
         entry.description ? el("span", { class: "muted", text: entry.description }) : null,
-        simplified && entry.goal_readiness !== "ready" ? el("span", {
+        entry.goal_readiness !== "ready" ? el("span", {
           class: "muted",
           // A definition that cannot be upgraded is normally answered by
           // generating a replacement. Where this deployment has no generating
@@ -2714,12 +1804,12 @@ async function renderWorkflows(root) {
               : `workflows.readiness.${entry.goal_readiness}.description`,
           ),
         }) : null,
-        simplified ? null : el("span", { class: "workflow-meta", text: i18n.t("workflows.summary", {
+        el("span", { class: "workflow-meta", text: i18n.t("workflows.summary", {
           nodes: i18n.number(entry.summary.node_count), inputs: i18n.number(entry.inputs.length),
         }) }),
         // Which version is current, and whether anyone has run it: the two
         // facts that tell two similarly named workflows apart.
-        simplified ? null : el("span", { class: "workflow-card-facts", text: entry.last_run_at
+        el("span", { class: "workflow-card-facts", text: entry.last_run_at
           ? i18n.t("workflows.lastRun", { when: i18n.dateTime(entry.last_run_at) })
           : i18n.t("workflows.neverRun") }),
       ]),
@@ -2732,23 +1822,19 @@ async function renderWorkflows(root) {
               onclick: () => newRunDialog(entry.workflow_id),
             }),
           ])
-        : simplified && entry.goal_readiness === "needs_upgrade"
+        : entry.goal_readiness === "needs_upgrade"
           ? el("div", { class: "workflow-card-actions" }, [
               el("button", {
                 // A class, not an id: the catalog can list several of these.
                 class: "button upgrade-workflow", text: i18n.t("workflows.upgrade"),
-                // The detail page owns the modify command, so the catalog asks
-                // it to open the upgrade prompt rather than making the author
-                // find the same button again one page later.
-                onclick: () => {
-                  pendingUpgrade = entry.workflow_id;
-                  navigate({
-                    view: "workflow", workflowId: entry.workflow_id, runId: null,
-                  });
-                },
+                // The detail drawer opens the revision band by itself; the
+                // card only has to point at the definition.
+                onclick: () => navigate({
+                  view: "workflow", workflowId: entry.workflow_id, runId: null,
+                }),
               }),
             ])
-          : simplified && entry.goal_readiness === "needs_migration" && generateCommand
+          : entry.goal_readiness === "needs_migration" && generateCommand
             ? el("div", { class: "workflow-card-actions" }, [
                 el("button", {
                   class: "button", text: i18n.t("generate.action"),
@@ -2764,59 +1850,120 @@ async function renderWorkflows(root) {
   }
   if (!entries.length) {
     cards.append(el("div", { class: "empty panel", text: i18n.t("workflows.empty") }));
-  } else if (!matches.length) {
-    cards.append(el("div", { class: "empty panel", text: i18n.t("workflows.noMatches") }));
   }
   root.append(cards);
 }
 
+/* The detail slides in from the right over the catalog, not a page under it.
+ *
+ * `#/workflows/{id}` stays the address, so the drawer is opened by the route
+ * and dismissing it navigates back — Escape, the scrim and the Close button
+ * all end in the same place. The catalog behind it stays rendered (and
+ * visible), so a dismissal is one gesture instead of one fetch. */
+async function openWorkflowDrawer(workflowId) {
+  const panel = el("aside", {
+    class: "workflow-drawer", role: "dialog", "aria-modal": "true",
+    "aria-label": i18n.t("workflows.detail"), tabindex: "-1",
+  }, [dataState(el, i18n, "loading")]);
+  const scrim = el("div", { class: "workflow-drawer-scrim" });
+  const root = el("div", { class: "workflow-drawer-root" }, [scrim, panel]);
+
+  let settled = false;
+  const teardown = () => {
+    document.removeEventListener("keydown", onKeydown);
+    document.body.style.overflow = previousOverflow;
+  };
+  const dismiss = () => {
+    if (settled) return;
+    settled = true;
+    teardown();
+    root.classList.add("closing");
+    const finish = () => {
+      if (root.isConnected) root.remove();
+      // Only walk back if this Workflow is still what the address names: a
+      // drawer closed by a navigation must not undo that navigation.
+      if (route.view === "workflow" && route.workflowId === workflowId) {
+        navigate({ view: "workflows", runId: null });
+      }
+    };
+    panel.addEventListener("transitionend", (event) => {
+      if (event.target === panel) finish();
+    }, { once: true });
+    setTimeout(finish, 340);
+  };
+  const onKeydown = (event) => {
+    if (event.key !== "Escape") return;
+    // A stacked <dialog> (the modify flow) owns Escape while it is open; the
+    // drawer only answers once the top layer is empty again.
+    if (document.querySelector("dialog[open]")) return;
+    event.preventDefault();
+    dismiss();
+  };
+
+  const previousOverflow = document.body.style.overflow;
+  document.body.style.overflow = "hidden";
+  document.addEventListener("keydown", onKeydown);
+  scrim.addEventListener("click", dismiss);
+  const previous = activeViewCleanup;
+  activeViewCleanup = () => {
+    if (!settled) {
+      settled = true;
+      teardown();
+    }
+    root.remove();
+    if (previous) previous();
+  };
+
+  document.body.append(root);
+  // One frame closed, then open: the transition needs a starting pose.
+  void root.offsetWidth;
+  root.classList.add("open");
+  panel.focus();
+  await renderWorkflowDetail(panel, workflowId, dismiss);
+}
+
 /** One published definition, at its own address.
  *
- * The catalog page is for finding a workflow; this page is for reading one, so
- * it is reachable by link and survives a reload.
+ * The catalog is for finding a workflow; the dialog is for reading one, so it
+ * is reachable by link and survives a reload.
  */
-async function renderWorkflowDetail(root, workflowId) {
-  const simplified = simplifiedGoalUI();
+async function renderWorkflowDetail(root, workflowId, dismiss = null) {
   const panel = el("section", { class: "panel workflow-detail" });
-  root.append(panel);
+  // replaceChildren drops the drawer's loading placeholder; append would stack
+  // the panel beside it.
+  root.replaceChildren(panel);
 
   const draw = async () => {
     panel.replaceChildren(dataState(el, i18n, "loading"));
     try {
       const value = (await api.workflowDetail(workflowId)).data;
       const definition = value.definition;
+      const openEditor = (modify) => {
+        // One editor at a time: the band owns the drawer's top until closed.
+        if (root.querySelector(".workflow-editor-wrap")) return;
+        root.prepend(workflowEditorPanel(modify, value, draw));
+      };
       panel.replaceChildren(
         el("div", { class: "panel-head" }, [
           el("div", {}, [
-            simplified ? null : el("div", { class: "eyebrow", text: value.workflow_id }),
+            el("div", { class: "eyebrow", text: value.workflow_id }),
             el("div", { class: "panel-title", text: value.name }),
           ]),
           el("div", { class: "actions" }, [
             el("button", {
-              class: "button", id: "backToWorkflows", text: i18n.t("action.back"),
-              onclick: () => navigate({ view: simplified ? "home" : "workflows", runId: null }),
+              class: "button", id: "backToWorkflows",
+              text: i18n.t(dismiss ? "action.close" : "action.back"),
+              onclick: () => dismiss
+                ? dismiss()
+                : navigate({ view: "workflows", runId: null }),
             }),
             (() => {
-              const modify = value.allowed_commands.find(
-                (item) => item.command === "workflow.modify",
-              );
-              if (simplified && modify) return el("button", {
-                class: "button", id: "editWorkflow",
-                text: i18n.t(
-                  value.goal_readiness === "needs_upgrade"
-                    ? "workflows.upgrade" : "editor.edit",
-                ),
-                onclick: () => modifyWorkflowDialog(modify, value, draw),
-              });
               const create = value.allowed_commands.find(
                 (item) => item.command === "workflow.draft.create",
               );
               return create ? el("button", {
                 class: "button", id: "editWorkflow",
-                text: i18n.t(
-                  simplified && value.goal_readiness === "needs_upgrade"
-                    ? "workflows.upgrade" : "editor.edit",
-                ),
+                text: i18n.t("editor.edit"),
                 onclick: async () => {
                   try {
                     const draft = (await api.execute(
@@ -2844,32 +1991,22 @@ async function renderWorkflowDetail(root, workflowId) {
         ]),
         el("div", { class: "panel-body" }, [
           value.description ? el("p", { text: value.description }) : null,
-          simplified && value.active_job ? el("div", {
-            class: "banner info", text: i18n.t(
-              `authoring.job.${value.active_job.status}`,
-            ),
-          }) : null,
-          simplified && value.goal_readiness !== "ready" ? el("div", {
-            class: `banner ${value.goal_readiness === "needs_upgrade" ? "warn" : "error"}`,
-            text: i18n.t(`workflows.readiness.${value.goal_readiness}.description`),
-          }) : null,
-          simplified ? null : handlerDriftNotice(value, draw),
-          simplified ? null : el("dl", { class: "fact-grid" }, [
+          handlerDriftNotice(value, draw),
+          el("dl", { class: "fact-grid" }, [
             el("div", {}, [el("dt", { text: i18n.t("workflows.nodes") }), el("dd", { text: i18n.number(value.summary.node_count) })]),
             el("div", {}, [el("dt", { text: i18n.t("workflows.inputs") }), el("dd", { text: i18n.number(value.inputs.length) })]),
           ]),
-          simplified
-            ? el("div", { class: "workflow-graph-scroll" }, [workflowGraphView(value.graph)])
-            : workflowDefinitionTabs(value.graph, definition),
+          // The drawing answers "what shape is this", the definition list
+          // answers "what exactly is in it" — one layout for both modes.
+          workflowDefinitionTabs(value.graph, definition),
         ]),
       );
-      if (pendingUpgrade === value.workflow_id) {
-        pendingUpgrade = null;
-        const modify = value.allowed_commands.find(
-          (item) => item.command === "workflow.modify",
-        );
-        if (modify) modifyWorkflowDialog(modify, value, draw);
-      }
+      // The revision band is the point of this drawer: it opens with the
+      // definition — no button stands between the author and the prompt.
+      const modify = value.allowed_commands.find(
+        (item) => item.command === "workflow.modify",
+      );
+      if (modify) openEditor(modify);
     } catch (error) {
       panel.replaceChildren(dataState(el, i18n, "error", { onRetry: draw }));
       reportError(error);
@@ -3215,14 +2352,6 @@ async function renderWorkflowEditor(root, draftId) {
 }
 
 
-function generatedInputSupported(entry) {
-  const simple = new Set(["string", "integer", "number", "boolean"]);
-  return entry.input_mode === "structured" && entry.inputs.every((port) => {
-    const schema = port.schema || {};
-    return Array.isArray(schema.enum) || simple.has(schema.type);
-  });
-}
-
 function bindGoalInput(entry, goal, input = {}) {
   const binding = entry.goal_binding;
   if (!binding) return input;
@@ -3232,67 +2361,7 @@ function bindGoalInput(entry, goal, input = {}) {
   envelope[binding.property] = goal;
   return { ...input, [binding.input_id]: envelope };
 }
-
-function inputField(port, value) {
-  const schema = port.schema || {};
-  let control;
-  if (Array.isArray(schema.enum)) {
-    control = el("select", { id: `newRunInput-${port.id}`, "data-port": port.id });
-    if (!port.required && !port.has_default) {
-      control.append(el("option", { value: "", text: i18n.t("newRun.input.notSet") }));
-    }
-    for (const option of schema.enum) control.append(el("option", {
-      value: JSON.stringify(option), text: String(option),
-      ...(Object.is(option, value) ? { selected: "selected" } : {}),
-    }));
-  } else if (schema.type === "boolean") {
-    control = el("input", {
-      type: "checkbox", id: `newRunInput-${port.id}`, "data-port": port.id,
-      "data-type": "boolean", ...(value === true ? { checked: "checked" } : {}),
-    });
-  } else {
-    control = el("input", {
-      type: ["integer", "number"].includes(schema.type) ? "number" : "text",
-      id: `newRunInput-${port.id}`, "data-port": port.id, "data-type": schema.type || "string",
-      ...(schema.minimum !== undefined ? { min: schema.minimum } : {}),
-      ...(schema.maximum !== undefined ? { max: schema.maximum } : {}),
-      ...(schema.minLength !== undefined ? { minlength: schema.minLength } : {}),
-      ...(schema.maxLength !== undefined ? { maxlength: schema.maxLength } : {}),
-      ...(schema.pattern !== undefined ? { pattern: schema.pattern } : {}),
-      ...(["integer", "number"].includes(schema.type)
-        ? { step: schema.type === "number" ? "any" : "1" } : {}),
-      ...(value !== undefined && value !== null ? { value: String(value) } : {}),
-      ...(port.required ? { required: "required" } : {}),
-    });
-  }
-  return el("div", { class: "field" }, [
-    el("label", { for: `newRunInput-${port.id}`, text: port.description || port.id }),
-    control,
-    el("small", { class: "muted mono", text: port.schema_id }),
-  ]);
-}
-
-function readGeneratedInputs(container, entry) {
-  const result = {};
-  for (const port of entry.inputs) {
-    const control = container.querySelector(`[data-port="${CSS.escape(port.id)}"]`);
-    if (!control) continue;
-    if (control.tagName === "SELECT" && control.value === "" && !port.required) continue;
-    else if (control.tagName === "SELECT") result[port.id] = JSON.parse(control.value);
-    else if (control.dataset.type === "boolean") result[port.id] = control.checked;
-    else if (!control.value && !port.required) continue;
-    else if (control.dataset.type === "integer") result[port.id] = Number.parseInt(control.value, 10);
-    else if (control.dataset.type === "number") result[port.id] = Number(control.value);
-    else result[port.id] = control.value;
-  }
-  return result;
-}
-
 async function generateWorkflowDialog(generateCommand, initialJob = null) {
-  if (!simplifiedGoalUI()) {
-    await legacyGenerateWorkflowDialog(generateCommand);
-    return;
-  }
   const dialog = el("dialog", { "aria-label": i18n.t("generate.title") });
   const form = el("form", { method: "dialog" });
   dialog.append(form);
@@ -3420,152 +2489,6 @@ async function generateWorkflowDialog(generateCommand, initialJob = null) {
   dialog.showModal();
 }
 
-async function legacyGenerateWorkflowDialog(generateCommand) {
-  let handlers = [];
-  try {
-    handlers = (await api.handlerCatalog()).data.handlers.filter((item) =>
-      item.registration_status === "registered"
-      && (item.capabilities || []).includes("agent.invoke"),
-    );
-  } catch (error) {
-    reportError(error);
-  }
-  const dialog = el("dialog", { "aria-label": i18n.t("generate.title") });
-  const form = el("form", { method: "dialog" });
-  let draft = null;
-  let instructionText = "";
-  let descriptionText = "";
-  let defaultAgent = handlers[0]?.name || "";
-  let writerAgent = generationAgents()[0] || "";
-  const draw = () => {
-    const problem = el("div", {
-      class: "banner error", hidden: "hidden", role: "alert",
-    });
-    if (!draft) {
-      const instruction = el("textarea", {
-        id: "generateInstruction", required: "required", maxlength: "4000",
-        text: instructionText, placeholder: i18n.t("generate.instructionPh"),
-      });
-      const description = el("input", {
-        id: "generateDescription", type: "text", maxlength: "50",
-        value: descriptionText,
-      });
-      form.replaceChildren(
-        el("h2", { text: i18n.t("generate.title") }),
-        el("div", { class: "field" }, [
-          el("label", {
-            for: "generateInstruction", text: i18n.t("generate.instruction"),
-          }),
-          instruction,
-        ]),
-        el("div", { class: "field" }, [
-          el("label", {
-            for: "generateDescription", text: i18n.t("generate.description"),
-          }),
-          description,
-        ]),
-        handlers.length ? el("div", { class: "field" }, [
-          el("label", {
-            for: "generateDefaultAgent", text: i18n.t("generate.defaultAgent"),
-          }),
-          el("select", {
-            id: "generateDefaultAgent",
-            onchange: (event) => { defaultAgent = event.target.value.split("@")[0]; },
-          }, handlers.map((item) => el("option", {
-            value: `${item.name}@${item.version}`,
-            text: `${item.name}@${item.version}`,
-            ...(item.name === defaultAgent ? { selected: "selected" } : {}),
-          }))),
-        ]) : null,
-        generationAgentField(
-          "generateWriter", writerAgent,
-          (value) => { writerAgent = value; },
-        ),
-        problem,
-        el("div", { class: "actions" }, [
-          el("button", {
-            class: "button", value: "cancel", formnovalidate: "formnovalidate",
-            text: i18n.t("action.cancel"),
-          }),
-          el("button", {
-            id: "generateSubmit", type: "button", class: "button primary",
-            text: i18n.t("generate.action"),
-            onclick: async () => {
-              if (!instruction.value.trim()) return;
-              instructionText = instruction.value.trim();
-              descriptionText = description.value.trim();
-              try {
-                draft = (await api.execute(generateCommand, {
-                  instruction: instructionText,
-                  description: descriptionText || null,
-                  default_agent: defaultAgent || null,
-                  agent: writerAgent || null,
-                }, `workflow.generate:${Date.now()}`)).data;
-                draw();
-              } catch (error) {
-                problem.textContent = describeGenerationFailure(error);
-                problem.hidden = false;
-              }
-            },
-          }),
-        ]),
-      );
-      return;
-    }
-    const publish = (draft.allowed_commands || []).find(
-      (item) => item.command === "workflow.publish",
-    );
-    let handlerRefs = "";
-    try {
-      handlerRefs = JSON.parse(draft.source).nodes
-        .filter((node) => node.handler)
-        .map((node) => `${node.handler.name}@${node.handler.version}`)
-        .join(" · ");
-    } catch {
-      handlerRefs = "";
-    }
-    form.replaceChildren(
-      el("h2", { text: i18n.t("generate.preview", {
-        nodes: i18n.number(draft.node_count),
-        attempts: i18n.number(draft.attempts),
-      }) }),
-      el("div", { class: "mono", text: draft.workflow_id }),
-      handlerRefs ? el("div", { class: "muted mono", text: handlerRefs }) : null,
-      el("pre", {
-        id: "generatePreview", class: "code-block", text: draft.source,
-      }),
-      problem,
-      el("div", { class: "actions" }, [
-        el("button", {
-          type: "button", class: "button", text: i18n.t("action.back"),
-          onclick: () => { draft = null; draw(); },
-        }),
-        publish ? el("button", {
-          id: "generatePublish", type: "button", class: "button primary",
-          text: i18n.t("generate.publish"),
-          onclick: async () => {
-            try {
-              await api.execute(
-                publish, { source: draft.source },
-                `workflow.publish:${draft.definition_hash}`,
-              );
-              dialog.close();
-              await render();
-            } catch (error) {
-              problem.textContent = describeGenerationFailure(error);
-              problem.hidden = false;
-            }
-          },
-        }) : null,
-      ]),
-    );
-  };
-  dialog.append(form);
-  dialog.addEventListener("close", () => dialog.remove(), { once: true });
-  document.body.append(dialog);
-  draw();
-  dialog.showModal();
-}
 
 /* What the modification changed, as steps rather than counts.
  *
@@ -3597,13 +2520,15 @@ function changeSummaryView(summary) {
   ].filter(Boolean);
 }
 
-async function modifyWorkflowDialog(modifyCommand, workflow, onDone) {
+/* The revision editor is a band at the top of the detail drawer, not a
+ * floating dialog: the graph it revises stays visible underneath, and the
+ * detail slides down to make room — a grid row animates the height so nothing
+ * jumps. Closing the drawer closes the editor with it. */
+function workflowEditorPanel(modifyCommand, workflow, onDone) {
   const upgrading = workflow.goal_readiness === "needs_upgrade";
-  const dialog = el("dialog", {
-    "aria-label": i18n.t(upgrading ? "workflows.upgrade" : "editor.edit"),
-  });
-  const form = el("form", { method: "dialog" });
-  dialog.append(form);
+  const title = i18n.t(upgrading ? "workflows.upgrade" : "editor.edit");
+  const section = el("section", { class: "workflow-editor", "aria-label": title });
+  const wrap = el("div", { class: "workflow-editor-wrap" }, [section]);
   let job = workflow.active_job || null;
   // An upgrade opens with the instruction already written: the author asked to
   // upgrade, not to compose the sentence that means "upgrade".
@@ -3612,6 +2537,22 @@ async function modifyWorkflowDialog(modifyCommand, workflow, onDone) {
   // stays out of sight until a plain modify has actually failed.
   let regenerateOffered = false;
   let timer = null;
+  let collapsed = false;
+
+  const collapse = (refresh) => {
+    if (collapsed) return;
+    collapsed = true;
+    clearTimeout(timer);
+    wrap.classList.remove("open");
+    const finish = () => {
+      if (wrap.isConnected) wrap.remove();
+      if (refresh) onDone();
+    };
+    wrap.addEventListener("transitionend", (event) => {
+      if (event.target === wrap) finish();
+    }, { once: true });
+    setTimeout(finish, 340);
+  };
 
   const submit = async (mode) => {
     try {
@@ -3627,9 +2568,15 @@ async function modifyWorkflowDialog(modifyCommand, workflow, onDone) {
   };
 
   const draw = () => {
-    const body = [el("h2", {
-      text: i18n.t(upgrading ? "workflows.upgrade" : "editor.edit"),
-    })];
+    // Same layout language as the draft editor page: a state pill in the
+    // head, the instruction in an agent-editor-prompt section beneath it.
+    const statePill = el("span", {
+      class: `pill ${!job || ["queued", "running"].includes(job.status)
+        ? "waiting" : job.status === "done" ? "succeeded" : "failed"}`,
+      text: i18n.t(!job ? "editor.state.awaitingPrompt"
+        : `authoring.job.${job.status}`),
+    });
+    const body = [];
     const actions = el("div", { class: "actions" });
     if (!job) {
       const prompt = el("textarea", {
@@ -3640,16 +2587,15 @@ async function modifyWorkflowDialog(modifyCommand, workflow, onDone) {
       // Focus lands in the prompt so a prefilled upgrade is one click from
       // running and still editable in place.
       setTimeout(() => prompt.focus(), 0);
-      body.push(prompt, el("p", {
-        class: "muted", text: i18n.t("simplified.workflow.nextGoal"),
-      }));
+      body.push(prompt);
       if (regenerateOffered) body.push(el("p", {
         class: "muted", text: i18n.t("simplified.workflow.regenerate.hint"),
       }));
       actions.append(
         el("button", {
-          class: "button", value: "cancel", formnovalidate: "formnovalidate",
+          type: "button", class: "button",
           text: i18n.t("action.cancel"),
+          onclick: () => collapse(false),
         }),
         el("button", {
           type: "button", class: "button primary", text: i18n.t("editor.agentRevise"),
@@ -3671,7 +2617,6 @@ async function modifyWorkflowDialog(modifyCommand, workflow, onDone) {
       );
     } else {
       body.push(
-        el("strong", { text: i18n.t(`authoring.job.${job.status}`) }),
         ...changeSummaryView(job.result?.change_summary),
         job.error ? el("div", { class: "banner error", text: job.error.message }) : null,
       );
@@ -3701,20 +2646,30 @@ async function modifyWorkflowDialog(modifyCommand, workflow, onDone) {
         }));
         actions.append(el("button", {
           type: "button", class: "button primary", text: i18n.t("action.close"),
-          onclick: async () => {
-            dialog.close();
-            if (job.status === "done") await onDone();
-          },
+          onclick: () => collapse(job.status === "done"),
         }));
       }
     }
     // replaceChildren has no opinion about null the way el() does: it would
     // render an absent banner as the literal word "null".
-    form.replaceChildren(...body.filter(Boolean), actions);
+    section.replaceChildren(
+      el("div", { class: "workflow-editor-head" }, [
+        el("div", { class: "panel-title", text: title }),
+        statePill,
+      ]),
+      el("section", { class: "agent-editor-prompt" }, [
+        el("div", { class: "panel-title", text: i18n.t("editor.agentPromptTitle") }),
+        el("p", { class: "muted", text: i18n.t("editor.agentPromptHint") }),
+        ...body.filter(Boolean),
+      ]),
+      actions,
+    );
   };
   const watch = () => {
     if (!job || !["queued", "running"].includes(job.status)) return;
     timer = setTimeout(async () => {
+      // A closed drawer detaches the editor: stop spending requests on it.
+      if (!section.isConnected) return;
       try {
         job = (await api.get(job.href)).data;
         draw();
@@ -3724,14 +2679,13 @@ async function modifyWorkflowDialog(modifyCommand, workflow, onDone) {
       }
     }, 800);
   };
-  dialog.addEventListener("close", () => {
-    clearTimeout(timer);
-    dialog.remove();
-  }, { once: true });
-  document.body.append(dialog);
+
   draw();
   watch();
-  dialog.showModal();
+  // Two frames: the grid-row transition needs the zero-height pose committed
+  // before the growing class lands, or the opening never animates.
+  requestAnimationFrame(() => requestAnimationFrame(() => wrap.classList.add("open")));
+  return wrap;
 }
 
 /** Generation failures carry the compiler's findings as JSON; show the
@@ -3752,6 +2706,9 @@ function describeGenerationFailure(error) {
 }
 
 async function newRunDialog(preselectedWorkflowId = null) {
+  /* No wizard: the home composer is the one place a Goal begins. The catalog
+     pre-flight stays — the composer must know which Workflow is runnable and
+     the author must hear "no catalog" before typing a goal nobody can run. */
   try {
     const active = (await api.dashboard()).data.active_goal;
     if (active) {
@@ -3771,255 +2728,15 @@ async function newRunDialog(preselectedWorkflowId = null) {
     announce(i18n.t("newRun.catalog.unavailable"), "error");
     return;
   }
-  const entries = catalog.data.workflows;
-  const preselected = entries.find(
+  const preselected = catalog.data.workflows.find(
     (item) => item.workflow_id === preselectedWorkflowId,
   );
-  if (simplifiedGoalUI()) {
-    simplifiedComposerState.runId = null;
-    simplifiedComposerState.workflowId = preselected?.goal_readiness === "ready"
-      ? preselected.workflow_id : "";
-    simplifiedComposerState.goal = "";
-    focusSimplifiedGoalOnRender = true;
-    navigate({ view: "home", runId: null });
-    return;
-  }
-  const state = {
-    step: 0,
-    workflowId: entries.some((item) => item.workflow_id === preselectedWorkflowId)
-      ? preselectedWorkflowId : null,
-    goal: "",
-    input: {},
-    intent: `run.start:${crypto.randomUUID ? crypto.randomUUID() : Date.now()}`,
-  };
-  const dialog = el("dialog", { class: "goal-wizard", "aria-label": i18n.t("newRun.title") });
-  const form = el("form", { method: "dialog" });
-  dialog.append(form);
-  document.body.append(dialog);
-
-  const fail = (key, values = {}) => {
-    const problem = form.querySelector(".wizard-problem");
-    problem.textContent = i18n.t(key, values);
-    problem.hidden = false;
-  };
-  const selectedEntry = () => entries.find((item) => item.workflow_id === state.workflowId);
-
-  const draw = () => {
-    const entry = selectedEntry();
-    const steps = el("ol", { class: "wizard-steps", "aria-label": i18n.t("newRun.steps") });
-    for (let index = 0; index < 4; index += 1) {
-      steps.append(el("li", {
-        class: index === state.step ? "active" : index < state.step ? "done" : "",
-        "aria-current": index === state.step ? "step" : null,
-        text: `${index + 1}. ${i18n.t(`newRun.step.${index + 1}`)}`,
-      }));
-    }
-    const content = el("div", { class: "wizard-content" });
-    if (state.step === 0) {
-      content.append(el("h3", { text: i18n.t("newRun.select.heading") }));
-      const choices = el("div", { class: "wizard-workflows" });
-      for (const item of entries) {
-        choices.append(el("label", { class: `wizard-workflow list-option-card${item.workflow_id === state.workflowId ? " selected" : ""}` }, [
-          el("input", {
-            type: "radio", name: "workflow", value: item.workflow_id,
-            ...(item.workflow_id === state.workflowId ? { checked: "checked" } : {}),
-            onchange: () => {
-              state.workflowId = item.workflow_id;
-              draw();
-            },
-          }),
-          el("span", { class: "wizard-workflow-mark", "aria-hidden": "true", text: "⌘" }),
-          el("span", { class: "wizard-workflow-copy" }, [
-            el("strong", { text: item.name }),
-            el("small", { class: "muted mono", text: item.workflow_id }),
-            item.description ? el("span", { class: "muted", text: item.description }) : null,
-          ]),
-          el("span", { class: "workflow-meta", text: i18n.t("workflows.summary", {
-            nodes: i18n.number(item.summary.node_count), inputs: i18n.number(item.inputs.length),
-          }) }),
-        ]));
-      }
-      if (!entries.length) choices.append(el("div", { class: "empty", text: i18n.t("workflows.empty") }));
-      content.append(choices);
-    } else if (state.step === 1) {
-      content.append(el("h3", {
-        text: i18n.t(entry.goal_binding ? "newRun.goal.heading" : "newRun.inputs.heading"),
-      }));
-      content.append(el("div", { class: "field" }, [
-        el("label", { for: "newRunGoal", text: i18n.t("newRun.goal") }),
-        el("textarea", { id: "newRunGoal", required: "required", text: state.goal }),
-      ]));
-      const inputArea = el("div", { id: "newRunInputs", class: "wizard-inputs" });
-      if (entry.goal_binding) {
-        inputArea.append(
-          el("div", { class: "banner info", text: i18n.t("newRun.input.goalBound", {
-            input: entry.goal_binding.input_id,
-          }) }),
-          el("details", { class: "advanced-input" }, [
-            el("summary", { text: i18n.t("newRun.input.advanced") }),
-            el("p", { class: "muted", text: i18n.t("newRun.input.advancedHelp") }),
-            el("div", { class: "field" }, [
-              el("label", { for: "newRunInput", text: i18n.t("newRun.input") }),
-              el("textarea", { id: "newRunInput", text: JSON.stringify(state.input, null, 2) }),
-            ]),
-          ]),
-        );
-      } else if (generatedInputSupported(entry)) {
-        for (const port of entry.inputs) {
-          const value = Object.prototype.hasOwnProperty.call(state.input, port.id)
-            ? state.input[port.id] : port.has_default ? port.default : undefined;
-          inputArea.append(inputField(port, value));
-        }
-        if (!entry.inputs.length) inputArea.append(el("div", { class: "muted", text: i18n.t("newRun.input.none") }));
-      } else {
-        inputArea.append(
-          el("div", { class: "banner info", text: i18n.t("newRun.input.jsonFallback") }),
-          el("div", { class: "field" }, [
-            el("label", { for: "newRunInput", text: i18n.t("newRun.input") }),
-            el("textarea", { id: "newRunInput", text: JSON.stringify(state.input, null, 2) }),
-          ]),
-        );
-      }
-      content.append(inputArea);
-    } else if (state.step === 2) {
-      content.append(
-        el("h3", { text: i18n.t("newRun.review.heading") }),
-        el("dl", { class: "review-list" }, [
-          el("div", {}, [el("dt", { text: i18n.t("newRun.workflow") }), el("dd", { text: entry.name })]),
-          el("div", {}, [el("dt", { text: i18n.t("newRun.goal") }), el("dd", { text: state.goal })]),
-          el("div", {}, [
-            el("dt", { text: i18n.t(entry.goal_binding ? "newRun.input.binding" : "newRun.input") }),
-            el("dd", {
-              class: entry.goal_binding ? "" : "mono",
-              text: entry.goal_binding
-                ? i18n.t("newRun.input.goalBoundReview", { input: entry.goal_binding.input_id })
-                : JSON.stringify(state.input, null, 2),
-            }),
-          ]),
-        ]),
-      );
-    } else {
-      content.append(
-        el("h3", { text: i18n.t("newRun.start.heading") }),
-        el("p", { class: "muted", text: i18n.t("newRun.start.body", { workflow: entry.name }) }),
-      );
-    }
-
-    const problem = el("div", { class: "banner error wizard-problem", hidden: "hidden" });
-    const actions = el("div", { class: "actions wizard-actions" }, [
-      // Cancel submits the dialog form (that is what closes it and sets the
-      // return value), so it must opt out of validation: otherwise a required
-      // field the user never filled in is what they are abandoning, and the
-      // browser refuses to let them leave.
-      el("button", {
-        class: "button", value: "cancel", formnovalidate: "formnovalidate",
-        text: i18n.t("action.cancel"),
-      }),
-      state.step > 0 ? el("button", {
-        class: "button", type: "button", text: i18n.t("action.back"),
-        onclick: () => { state.step -= 1; draw(); },
-      }) : null,
-      state.step < 3 ? el("button", {
-        class: "button primary", type: "button", "data-wizard-next": "true",
-        text: i18n.t("action.next"), onclick: () => {
-          if (state.step === 0) {
-            if (!entry) return fail("newRun.workflow.invalid");
-            if (!entry.allowed_commands.length) return fail("newRun.workflow.forbidden");
-          }
-          if (state.step === 1) {
-            const goal = form.querySelector("#newRunGoal");
-            if (!goal.value.trim()) return fail("newRun.goal.required");
-            if (!goal.reportValidity()) return;
-            state.goal = goal.value.trim();
-            if (entry.goal_binding) {
-              try {
-                const value = JSON.parse(form.querySelector("#newRunInput").value || "{}");
-                if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error();
-                state.input = bindGoalInput(entry, state.goal, value);
-              } catch {
-                return fail("newRun.input.invalid");
-              }
-            } else if (generatedInputSupported(entry)) {
-              if (!form.reportValidity()) return;
-              state.input = readGeneratedInputs(form, entry);
-            } else {
-              try {
-                const value = JSON.parse(form.querySelector("#newRunInput").value || "{}");
-                if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error();
-                state.input = value;
-              } catch {
-                return fail("newRun.input.invalid");
-              }
-            }
-          }
-          state.step += 1;
-          draw();
-        },
-      }) : el("button", {
-        class: "button primary", type: "button", id: "newGoalStart",
-        text: i18n.t("newRun.submit"), onclick: async (event) => {
-          event.currentTarget.disabled = true;
-          problem.hidden = true;
-          try {
-            // Refetch immediately before mutation. If the published workflow or
-            // the actor's permission changed, do not submit a stale command.
-            const fresh = (await api.workflowCatalog()).data.workflows.find(
-              (item) => item.workflow_id === state.workflowId,
-            );
-            if (!fresh) return fail("newRun.workflow.unavailable");
-            // Republished between review and submit: what the operator read is
-            // not what would run, so they confirm the current definition.
-            if (fresh.latest_version !== entry.latest_version) {
-              dialog.close();
-              announce(i18n.t("newRun.workflow.changed"), "error");
-              return;
-            }
-            const allowed = fresh.allowed_commands[0];
-            if (!allowed) return fail("newRun.workflow.forbidden");
-            const started = await api.execute(allowed, {
-              workflow_id: fresh.workflow_id,
-              workflow_version: fresh.latest_version,
-              goal: state.goal,
-              input: state.input,
-            }, state.intent);
-            dialog.close();
-            announce(i18n.t("newRun.started", { runId: started.data.run_id }));
-            navigate({ view: "run", runId: started.data.run_id });
-          } catch (error) {
-            if (error instanceof ApiError && error.code === "active_goal_exists") {
-              dialog.close();
-              const active = error.details.active_goal;
-              announce(i18n.t("newRun.active.exists", { goal: active?.display_name || active?.run_id || "" }), "info");
-              if (active?.run_id) navigate({ view: "run", runId: active.run_id });
-            } else if (error instanceof ApiError && error.code === "handler_unavailable") {
-              // Not a race the operator can win by reloading: the Agent this
-              // plan pins is gone. Send them back to the workflow, where the
-              // drift notice offers a rebind.
-              dialog.close();
-              announce(i18n.t("newRun.handler.unavailable"), "error");
-              navigate({ view: "workflow", workflowId: state.workflowId, runId: null });
-            } else if (error instanceof ApiError && error.requiresRefresh) {
-              dialog.close();
-              announce(i18n.t("newRun.workflow.changed"), "error");
-            } else {
-              fail(
-                error instanceof ApiError ? error.messageKey : "error.generic",
-                { message: error.message || String(error) },
-              );
-              reportError(error);
-            }
-          } finally {
-            if (event.currentTarget.isConnected) event.currentTarget.disabled = false;
-          }
-        },
-      }),
-    ]);
-    form.replaceChildren(el("h2", { text: i18n.t("newRun.title") }), steps, problem, content, actions);
-  };
-
-  dialog.addEventListener("close", () => dialog.remove(), { once: true });
-  draw();
-  dialog.showModal();
+  simplifiedComposerState.runId = null;
+  simplifiedComposerState.workflowId = preselected?.goal_readiness === "ready"
+    ? preselected.workflow_id : "";
+  simplifiedComposerState.goal = "";
+  focusSimplifiedGoalOnRender = true;
+  navigate({ view: "home", runId: null });
 }
 
 /* ------------------------------------------------------------------- shell */
@@ -4031,6 +2748,11 @@ function navigate(next) {
 }
 
 async function render() {
+  // Old bookmarks to retired views land on the workspace instead of a 404.
+  if (["ops", "settings", "inbox", "agents"].includes(route.view)) {
+    navigate({ view: "home", runId: null });
+    return;
+  }
   // A render requested mid-flight is coalesced, not dropped: the state (or
   // locale) it reacted to is not in the in-flight paint.
   if (rendering) {
@@ -4050,51 +2772,38 @@ async function render() {
     const section = route.view === "run" || route.view === "goal"
       || route.view === "goals" ? "home"
         : route.view === "artifact" ? "artifacts"
-          : route.view === "workflow" ? "workflows"
-            : route.view === "ops" ? "settings" : route.view;
+          : route.view === "workflow" ? "workflows" : route.view;
     const active = button.dataset.view === section;
     if (active) button.setAttribute("aria-current", "page");
     else button.removeAttribute("aria-current");
   }
   document.getElementById("viewTitle").textContent = i18n.t(
-    route.view === "run" ? (simplifiedGoalUI() ? "simplified.title" : "run.title")
-      : route.view === "goal" || route.view === "goals"
-        ? (simplifiedGoalUI() ? "history.title" : "home.title")
-        : route.view === "home" && simplifiedGoalUI() ? "simplified.title"
+    route.view === "run" || route.view === "home" ? "simplified.title"
+      : route.view === "goal" || route.view === "goals" ? "history.title"
         : route.view === "artifact" ? "artifacts.title"
           : route.view === "workflow" ? "workflows.title"
-            : route.view === "ops" ? "settings.title"
-              : route.view === "workflowEdit" ? "editor.title" : `${route.view}.title`,
+            : route.view === "workflowEdit" ? "editor.title" : `${route.view}.title`,
   );
 
   try {
     const fresh = el("div", { class: "content" });
-    if (route.view === "home") {
-      if (simplifiedGoalUI()) await renderSimplifiedWorkspace(fresh);
-      else await renderHome(fresh);
-    }
-    else if (route.view === "goal") {
-      if (simplifiedGoalUI()) await renderHistory(fresh, route.runId);
-      else await renderHome(fresh, route.runId);
-    }
-    else if (route.view === "goals") {
-      if (simplifiedGoalUI()) await renderHistory(fresh);
-      else await renderHome(fresh);
-    }
+    if (route.view === "home") await renderSimplifiedWorkspace(fresh);
+    else if (route.view === "goal") await renderHistory(fresh, route.runId);
+    else if (route.view === "goals") await renderHistory(fresh);
     else if (route.view === "workflows") await renderWorkflows(fresh);
-    else if (route.view === "workflow") await renderWorkflowDetail(fresh, route.workflowId);
+    else if (route.view === "workflow") {
+      // The detail is a drawer over the catalog, same contract as the Artifact
+      // dialog: the address stays, dismissing walks back.
+      await renderWorkflows(fresh);
+      await openWorkflowDrawer(route.workflowId);
+    }
     else if (route.view === "workflowEdit") await renderWorkflowEditor(fresh, route.draftId);
-    else if (route.view === "run") await renderRun(fresh, route.runId, route.tab || "overview");
-    else if (route.view === "inbox") await renderInbox(fresh);
+    else if (route.view === "run") await renderSimplifiedWorkspace(fresh, route.runId);
     else if (route.view === "artifacts") await renderArtifacts(fresh);
     else if (route.view === "artifact") await renderArtifacts(fresh, route.artifactId);
-    else if (route.view === "agents") await renderAgents(fresh);
-    // Ops folded into settings; #/ops stays a working deep link.
-    else if (route.view === "ops" || route.view === "settings") await renderSettings(fresh);
-    // The run list is gone; the workspace is the one place runs are browsed.
-    else await renderHome(fresh);
+    // The workspace is the one place runs are browsed.
+    else await renderSimplifiedWorkspace(fresh);
     root.replaceChildren(...fresh.childNodes);
-    if (route.view !== "inbox") await refreshInboxCount();
     refreshRuntimeCard();
   } catch (error) {
     // The failure lives where the data would have been, with a retry —
@@ -4132,21 +2841,6 @@ function applyStaticText() {
   document.querySelectorAll("select[data-custom-select='true']").forEach(syncCustomSelect);
 }
 
-function applyProductMode() {
-  const simplified = simplifiedGoalUI();
-  document.documentElement.dataset.productMode = simplified ? "simplified-goal" : "runtime";
-  for (const node of document.querySelectorAll("[data-simplified-only]")) {
-    node.hidden = !simplified;
-  }
-  for (const node of document.querySelectorAll("[data-full-only]")) {
-    node.hidden = simplified;
-  }
-  const homeLabel = document.getElementById("homeNavLabel");
-  if (homeLabel) {
-    homeLabel.dataset.i18n = simplified ? "nav.workflowGoal" : "nav.home";
-    homeLabel.textContent = i18n.t(homeLabel.dataset.i18n);
-  }
-}
 
 async function setLocale(locale) {
   i18n = await I18n.load(locale);
@@ -4154,7 +2848,7 @@ async function setLocale(locale) {
   document.getElementById("localeSelect").value = locale;
   syncCustomSelect(document.getElementById("localeSelect"));
   applyStaticText();
-  applyProductMode();
+  syncRefreshIntervalSelect(document.getElementById("refreshInterval"));
   await render();
 }
 
@@ -4173,6 +2867,9 @@ async function boot() {
   }
   select.value = i18n.locale;
   select.addEventListener("change", (event) => setLocale(event.target.value));
+  const refreshInterval = document.getElementById("refreshInterval");
+  syncRefreshIntervalSelect(refreshInterval);
+  refreshInterval.addEventListener("change", () => saveRefreshInterval(refreshInterval));
   installCustomSelects();
 
   document.getElementById("themeToggle").addEventListener("click", () => {
@@ -4191,7 +2888,6 @@ async function boot() {
   // Permissions have been resolved, so every view now renders the command set
   // this actor really has. Views read it; automation waits on it.
   document.documentElement.dataset.shell = "ready";
-  applyProductMode();
 
   const sidebar = document.getElementById("sidebar");
   const navToggle = document.getElementById("navToggle");
@@ -4218,11 +2914,6 @@ async function boot() {
   document.getElementById("refresh").addEventListener("click", () => render());
   window.addEventListener("orbit:refresh", () => render());
   scheduleLivePolling();
-  document.getElementById("globalSearchForm").addEventListener("submit", (event) => {
-    event.preventDefault();
-    goalFilters.q = document.getElementById("globalSearch").value.trim();
-    navigate({ view: "home", runId: null });
-  });
   for (const button of document.querySelectorAll(".nav-button")) {
     button.addEventListener("click", () => {
       // A message about the page you just left is noise on the next one.
@@ -4233,7 +2924,6 @@ async function boot() {
   }
 
   applyStaticText();
-  applyProductMode();
   // Awaited so the first paint already carries the runtime's own health word.
   // After applyStaticText: the static catalog must not overwrite the status.
   await refreshRuntimeCard();

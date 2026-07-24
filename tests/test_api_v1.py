@@ -1310,20 +1310,104 @@ class CatalogTests(ApiTestCase):
             {"type": "string"}, schema["properties"]["choices"]["items"]
         )
 
+    def _goal_ready_app(self):
+        """An app whose catalog carries one goal-ready workflow.
+
+        run.start is advertised only for a definition whose entry step is an
+        Agent taking the goal envelope on a `prompt` port, and the command
+        re-checks that the bound handler is registered — so the fixture both
+        publishes such a definition and boots an app carrying its handler.
+        Whether the run later executes is the Runtime's concern; the catalog
+        tests only read the advertisement and the acceptance.
+        """
+        from orbit.workflow.domain.definitions import (
+            CompiledWorkflow, IREdge, IRHandlerRef, IRNode, IRPort, WorkflowIR,
+        )
+        from orbit.workflow.domain.serialization import definition_hash
+        from orbit.workflow.persistence.workflow_versions import (
+            SQLiteWorkflowVersionStore,
+        )
+
+        manifest = HandlerManifest(
+            "agent.test", "1.0.0", ("action",),
+            {"prompt": "schema://object/1.0"},
+            {"value": "schema://object/1.0"},
+            {"type": "object"},
+            ExecutionSafety.REPLAY_SAFE,
+            ResourceProfile(100, 100, 5, 60, 1_000_000, "test"),
+            "schema://object/1.0", (), (), True, True,
+        )
+        prompt = IRPort("prompt", "schema://object/1.0", True, False, None, "")
+        value = IRPort("value", "schema://object/1.0", True, False, None, "")
+        ref = IRHandlerRef(
+            manifest.name, manifest.version, manifest.fingerprint,
+        )
+        ir = WorkflowIR(
+            "1.1", "workflow:research", "Research", "", {}, (), (),
+            (
+                IRNode(
+                    "ask", "action", (prompt,), (value,), ref, {}, (), None,
+                    label="Ask",
+                ),
+                IRNode(
+                    "done", "terminal", (value,), (), None, {}, (), None,
+                    label="Finish",
+                ),
+            ),
+            (
+                IREdge(
+                    "ask_done", "ask", "value", "done", "value", "success",
+                    {"op": "literal", "value": True},
+                    {"op": "identity", "schema_id": "schema://object/1.0"},
+                ),
+            ),
+            ("ask",), ("done",), (), (), {},
+        )
+        SQLiteWorkflowVersionStore(self.db).publish(
+            CompiledWorkflow(ir, definition_hash(ir), "1.0", manifest.fingerprint),
+            expected_latest_version=0, source_format="json", source_text=None,
+            actor="test",
+        )
+        return create_app(
+            self.db,
+            handlers=[
+                transform_registration(),
+                HandlerRegistration(manifest, TransformHandler(), "agent.test@1.0.0"),
+            ],
+            schemas=SCHEMAS,
+            worker_count=1, poll_seconds=0.02,
+            authenticator=lambda request: request.headers.get("x-orbit-actor"),
+            authorizer=Authorizer(lambda actor: self.scopes.get(actor, [])),
+            artifact_backend=self.artifact_backend,
+            single_goal_mode=False,
+        )
+
     def test_workflow_catalog_advertises_start_only_to_writers(self) -> None:
-        with AsgiHarness(self.app) as client:
+        app = self._goal_ready_app()
+        with AsgiHarness(app) as client:
             reader = client.get("/api/v1/workflows", actor="reader")
             self.assertEqual(200, reader.status_code, reader.text)
-            self.assertEqual([], reader.json()["data"]["workflows"][0]["allowed_commands"])
+            reader_entries = {
+                item["workflow_id"]: item
+                for item in reader.json()["data"]["workflows"]
+            }
+            self.assertEqual([], reader_entries["workflow:research"]["allowed_commands"])
 
             writer = client.get("/api/v1/workflows", actor="writer")
-            entry = writer.json()["data"]["workflows"][0]
-            self.assertEqual("Linear", entry["name"])
-            self.assertEqual("structured", entry["input_mode"])
-            self.assertIsNone(entry["goal_binding"])
-            self.assertEqual("value", entry["inputs"][0]["id"])
-            self.assertEqual("integer", entry["inputs"][0]["schema"]["type"])
-            self.assertEqual(4, entry["summary"]["node_count"])
+            entries = {
+                item["workflow_id"]: item
+                for item in writer.json()["data"]["workflows"]
+            }
+            linear = entries["workflow:linear"]
+            self.assertEqual("Linear", linear["name"])
+            self.assertEqual("structured", linear["input_mode"])
+            self.assertIsNone(linear["goal_binding"])
+            self.assertEqual("value", linear["inputs"][0]["id"])
+            self.assertEqual("integer", linear["inputs"][0]["schema"]["type"])
+            self.assertEqual(4, linear["summary"]["node_count"])
+            # Not goal-ready: no start command, even for a writer.
+            self.assertEqual([], linear["allowed_commands"])
+            entry = entries["workflow:research"]
             command = entry["allowed_commands"][0]
             self.assertEqual("run.start", command["command"])
             started = client.post(
@@ -1332,7 +1416,7 @@ class CatalogTests(ApiTestCase):
                     "workflow_id": entry["workflow_id"],
                     "workflow_version": entry["latest_version"],
                     "expected_version": command["expected_version"],
-                    "input": {"value": 3},
+                    "input": {"prompt": {"goal": "research a topic"}},
                 },
             )
             self.assertEqual(200, started.status_code, started.text)
@@ -1340,10 +1424,15 @@ class CatalogTests(ApiTestCase):
     def test_catalog_reports_when_a_definition_was_last_used(self) -> None:
         """Ordering a catalog by "recently used" is a fact about runs."""
 
-        with AsgiHarness(self.app) as client:
-            entry = client.get(
-                "/api/v1/workflows", actor="writer"
-            ).json()["data"]["workflows"][0]
+        app = self._goal_ready_app()
+        with AsgiHarness(app) as client:
+            entry = next(
+                item
+                for item in client.get(
+                    "/api/v1/workflows", actor="writer"
+                ).json()["data"]["workflows"]
+                if item["workflow_id"] == "workflow:research"
+            )
             self.assertIsNone(entry["last_run_at"])
             self.assertEqual(0, entry["run_count"])
 
@@ -1354,14 +1443,18 @@ class CatalogTests(ApiTestCase):
                     "workflow_id": entry["workflow_id"],
                     "workflow_version": entry["latest_version"],
                     "expected_version": command["expected_version"],
-                    "input": {"value": 3},
+                    "input": {"prompt": {"goal": "research a topic"}},
                 },
             )
             self.assertEqual(200, started.status_code, started.text)
 
-            used = client.get(
-                "/api/v1/workflows", actor="writer"
-            ).json()["data"]["workflows"][0]
+            used = next(
+                item
+                for item in client.get(
+                    "/api/v1/workflows", actor="writer"
+                ).json()["data"]["workflows"]
+                if item["workflow_id"] == "workflow:research"
+            )
             self.assertIsNotNone(used["last_run_at"])
             self.assertEqual(1, used["run_count"])
 
@@ -1465,123 +1558,6 @@ class WorkflowAuthoringApiTests(ApiTestCase):
         "entry": ["work"], "terminals": ["done"],
     }
 
-    def app_with_generator(self, responses):
-        import json as json_module
-
-        queue = list(responses)
-        return create_app(
-            self.db,
-            handlers=[transform_registration()], schemas=SCHEMAS,
-            worker_count=1, poll_seconds=0.02,
-            authenticator=lambda request: request.headers.get("x-orbit-actor"),
-            authorizer=Authorizer(lambda actor: self.scopes.get(actor, [])),
-            workflow_generator=lambda prompt: queue.pop(0),
-        )
-
-    def test_generate_then_publish_through_the_advertised_command(self) -> None:
-        import json as json_module
-
-        app = self.app_with_generator([json_module.dumps(self.GENERATED)])
-        with AsgiHarness(app) as client:
-            catalog = client.get("/api/v1/workflows", actor="writer").json()["data"]
-            generate = next(
-                c for c in catalog["allowed_commands"]
-                if c["command"] == "workflow.generate"
-            )
-
-            drafted = client.post(
-                generate["href"], actor="writer", key="gen-1",
-                body={"instruction": "one transform then done"},
-            )
-            self.assertEqual(200, drafted.status_code, drafted.text)
-            draft = drafted.json()["data"]
-            self.assertEqual("workflow:prompted", draft["workflow_id"])
-            self.assertEqual(2, draft["node_count"])
-            publish = draft["allowed_commands"][0]
-            self.assertEqual("workflow.publish", publish["command"])
-            self.assertEqual(0, publish["expected_version"])
-            validate = next(
-                item for item in draft["allowed_commands"]
-                if item["command"] == "workflow.validate"
-            )
-
-            edited = json_module.loads(draft["source"])
-            edited["metadata"]["name"] = "Edited before publish"
-            validated = client.post(
-                validate["href"], actor="writer", key="validate-1",
-                body={
-                    "source": json_module.dumps(edited),
-                    "expected_version": validate["expected_version"],
-                },
-            )
-            self.assertEqual(200, validated.status_code, validated.text)
-            validated_draft = validated.json()["data"]
-            self.assertNotEqual(
-                draft["definition_hash"], validated_draft["definition_hash"],
-            )
-            publish = next(
-                item for item in validated_draft["allowed_commands"]
-                if item["command"] == "workflow.publish"
-            )
-
-            published = client.post(
-                publish["href"], actor="writer", key="pub-1",
-                body={
-                    "source": validated_draft["source"],
-                    "expected_version": publish["expected_version"],
-                },
-            )
-            self.assertEqual(200, published.status_code, published.text)
-            self.assertEqual(1, published.json()["data"]["version"])
-
-            # The published workflow immediately appears in the catalog with a
-            # start command — the wizard can run it with no further plumbing.
-            entries = client.get(
-                "/api/v1/workflows", actor="writer"
-            ).json()["data"]["workflows"]
-            entry = next(
-                item for item in entries
-                if item["workflow_id"] == "workflow:prompted"
-            )
-            self.assertEqual(
-                "run.start", entry["allowed_commands"][0]["command"]
-            )
-
-    def test_generation_accepts_an_allowlisted_default_handler(self) -> None:
-        import json as json_module
-
-        prompts = []
-
-        def generate(prompt):
-            prompts.append(prompt)
-            return json_module.dumps(self.GENERATED)
-
-        app = create_app(
-            self.db,
-            handlers=[transform_registration()], schemas=SCHEMAS,
-            worker_count=1, poll_seconds=0.02,
-            authenticator=lambda request: request.headers.get("x-orbit-actor"),
-            authorizer=Authorizer(lambda actor: self.scopes.get(actor, [])),
-            workflow_generator=generate,
-        )
-        with AsgiHarness(app) as client:
-            response = client.post(
-                "/api/v1/workflows/generate", actor="writer", key="gen-default",
-                body={"instruction": "flow", "default_agent": "transform"},
-            )
-        self.assertEqual(200, response.status_code, response.text)
-        self.assertIn('"preferred_handler":"transform"', prompts[0])
-
-    def test_generation_failure_returns_diagnostics_not_a_500(self) -> None:
-        app = self.app_with_generator(["nonsense"] * 3)
-        with AsgiHarness(app) as client:
-            response = client.post(
-                "/api/v1/workflows/generate", actor="writer", key="gen-bad",
-                body={"instruction": "??"},
-            )
-            self.assertEqual(409, response.status_code, response.text)
-            self.assertIn("GENERATION_PROTOCOL", response.json()["error"]["message"])
-
     def test_generate_is_absent_without_a_generator(self) -> None:
         with AsgiHarness(self.app) as client:
             catalog = client.get("/api/v1/workflows", actor="writer").json()["data"]
@@ -1599,16 +1575,12 @@ class WorkflowAuthoringApiTests(ApiTestCase):
     def test_publish_rejects_a_source_that_names_a_different_workflow(self) -> None:
         import json as json_module
 
-        app = self.app_with_generator([json_module.dumps(self.GENERATED)])
-        with AsgiHarness(app) as client:
-            drafted = client.post(
-                "/api/v1/workflows/generate", actor="writer", key="gen-2",
-                body={"instruction": "flow"},
-            ).json()["data"]
+        source = json_module.dumps(self.GENERATED)
+        with AsgiHarness(self.app) as client:
             response = client.post(
                 "/api/v1/workflows/workflow:someone-else/versions",
                 actor="writer", key="pub-2",
-                body={"source": drafted["source"], "expected_version": 0},
+                body={"source": source, "expected_version": 0},
             )
             self.assertEqual(409, response.status_code)
             self.assertIn("route names", response.json()["error"]["message"])
@@ -1623,22 +1595,18 @@ class WorkflowAuthoringApiTests(ApiTestCase):
     def test_publish_conflict_and_reader_denial(self) -> None:
         import json as json_module
 
-        app = self.app_with_generator([json_module.dumps(self.GENERATED)])
-        with AsgiHarness(app) as client:
-            drafted = client.post(
-                "/api/v1/workflows/generate", actor="writer", key="gen-3",
-                body={"instruction": "flow"},
-            ).json()["data"]
+        source = json_module.dumps(self.GENERATED)
+        with AsgiHarness(self.app) as client:
             stale = client.post(
                 "/api/v1/workflows/workflow:prompted/versions",
                 actor="writer", key="pub-3",
-                body={"source": drafted["source"], "expected_version": 7},
+                body={"source": source, "expected_version": 7},
             )
             self.assertEqual(409, stale.status_code)
             denied = client.post(
                 "/api/v1/workflows/workflow:prompted/versions",
                 actor="reader", key="pub-4",
-                body={"source": drafted["source"], "expected_version": 0},
+                body={"source": source, "expected_version": 0},
             )
             self.assertEqual(403, denied.status_code)
 
@@ -1939,20 +1907,6 @@ class WorkflowDraftApiTests(ApiTestCase):
             self.assertEqual(200, response.status_code, response.json())
             self.assertEqual(["codex"], asked)
 
-    def test_an_unknown_generation_agent_is_a_client_error(self) -> None:
-        """Silently using a different Agent than the one asked for is worse."""
-
-        app = self._app_with_named_agents({"codex": lambda _prompt: "{}"})
-        with AsgiHarness(app) as client:
-            response = client.post(
-                "/api/v1/workflows/generate", actor="writer", key="gen-nope",
-                body={"instruction": "a flow", "agent": "gpt-9"},
-            )
-            self.assertEqual(400, response.status_code)
-            body = response.json()["error"]
-            self.assertEqual("unknown_generation_agent", body["code"])
-            self.assertEqual(["codex"], body["details"]["available"])
-
     def test_a_revision_records_the_agent_the_author_chose(self) -> None:
         import json as json_module
         from tests.test_workflow_drafts import dsl as editable_dsl
@@ -2246,10 +2200,7 @@ class CapabilityTests(ApiTestCase):
             self.assertFalse(data["permissions"]["ops_read"])
             self.assertFalse(data["permissions"]["ops_write"])
             self.assertEqual(
-                {
-                    "simplified_goal_ui": False,
-                    "single_goal_mode": False,
-                },
+                {"single_goal_mode": False},
                 data["product_mode"],
             )
             caps = data["capabilities"]
@@ -2274,7 +2225,7 @@ class CapabilityTests(ApiTestCase):
             self.assertTrue(writer["permissions"]["ops_read"])
             self.assertTrue(writer["permissions"]["ops_write"])
 
-    def test_capabilities_report_simplified_single_goal_product_mode(self) -> None:
+    def test_capabilities_report_single_goal_product_mode(self) -> None:
         app = create_app(
             self.db,
             handlers=[transform_registration()], schemas=SCHEMAS,
@@ -2283,17 +2234,13 @@ class CapabilityTests(ApiTestCase):
             authorizer=Authorizer(lambda actor: self.scopes.get(actor, [])),
             artifact_backend=self.artifact_backend,
             single_goal_mode=True,
-            simplified_goal_ui=True,
         )
         with AsgiHarness(app) as client:
             data = client.get(
                 "/api/v1/capabilities", actor="reader"
             ).json()["data"]
             self.assertEqual(
-                {
-                    "simplified_goal_ui": True,
-                    "single_goal_mode": True,
-                },
+                {"single_goal_mode": True},
                 data["product_mode"],
             )
             catalog = client.get(

@@ -122,13 +122,13 @@ flowchart TD
 顶层 Goal，则不能移除全局 Inbox，因为只在当前 Goal 内联责任会漏掉其他 Run
 的待办。
 
-简化 UI 通过 `/api/v1/capabilities` 的服务端声明启用，不根据页面状态猜测：
+简化 UI 即唯一 UI 形态（完整 Runtime 控制台已移除）；`/api/v1/capabilities`
+仍声明 single-goal 语义，不根据页面状态猜测：
 
 ```json
 {
   "data": {
     "product_mode": {
-      "simplified_goal_ui": true,
       "single_goal_mode": true
     },
     "permissions": {
@@ -138,15 +138,15 @@ flowchart TD
 }
 ```
 
-- 仅当 `simplified_goal_ui=true` 且 `single_goal_mode=true` 时使用本文导航；
-- 否则继续使用完整 Runtime UI 和全局 Inbox；
+- 本文导航始终适用；`single_goal_mode=true` 时一次只推进一个 Goal（服务端
+  以 409 `active_goal_exists` 拒绝第二个）；
 - `permissions.human_token_required` 继续使用现有字段，不在 `product_mode` 重复
   定义，并控制 §5.5 的内联取令牌步骤。
 
-`simplified_goal_ui` 与 `single_goal_mode` 同源，均由部署者通过 `orbit serve`
-启动参数或对应部署配置设置，并在进程生命周期内保持不变。
-`/api/v1/capabilities` 只负责报告最终生效值；普通 UI 不设置、覆盖或推断这两个
-标志。
+`single_goal_mode` 由部署者通过 `orbit serve` 启动参数或对应部署配置设置，
+并在进程生命周期内保持不变。`/api/v1/capabilities` 只负责报告最终生效值；
+UI 不设置、覆盖或推断该标志。（`simplified_goal_ui` 标志已随完整 UI 一同
+移除。）
 
 单目标模式下，普通 UI 最多保留三个一级入口：
 
@@ -1288,7 +1288,8 @@ Compiler diagnostics、异常堆栈和内部错误代码写入日志与审计，
 - Budget 耗尽时显示追加预算或终止入口；
 - Recovery/unknown responsibility 阻塞时显示服务端授权的恢复、接管或终止入口；
 - Workflow 更新不会改变正在执行的 Run；
-- 本简化导航只在 `simplified_goal_ui=true` 且 `single_goal_mode=true` 时启用；
+- 本导航始终启用（简化形态为唯一 UI）；`single_goal_mode=true` 时服务端拒绝
+  第二个活跃 Goal；
 - `/api/v1/capabilities` 明确返回 simplified UI、single-goal 和
   human-token 模式；
 - human token 非豁免部署在回答前展示取得/输入令牌步骤；
@@ -1352,9 +1353,10 @@ Compiler diagnostics、异常堆栈和内部错误代码写入日志与审计，
 - 当前 Run 历史查询必须增加按 Goal 文本搜索，并覆盖分页游标与搜索条件一致性的
   测试；
 - 当前 responsibility 投影必须让 Budget 和 Recovery 在 Goal 页面有完整出口；
-- `/api/v1/capabilities` 必须增加简化模式和 single-goal 服务端声明；
-- `orbit serve` 必须提供与部署配置同源的 `simplified_goal_ui` 和
-  `single_goal_mode` 参数，并由 capabilities 报告其最终生效值；
+- `/api/v1/capabilities` 必须声明 single-goal 服务端语义（`simplified_goal_ui`
+  标志已随完整 UI 移除）；
+- `orbit serve` 必须提供与部署配置同源的 `single_goal_mode` 参数，并由
+  capabilities 报告其最终生效值；
 - 简化模式的 Settings 页面必须移除 Ops 和 Runtime 运维分区。
 
 ### 9.7 历史记录

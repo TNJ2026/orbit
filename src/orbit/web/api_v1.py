@@ -213,7 +213,6 @@ def build_api_v1(
     workflow_publisher=None,
     draft_service=None,
     single_goal_mode: bool = True,
-    simplified_goal_ui: bool = False,
 ) -> list[Route]:
     """Routes for `/api/v1`, ready to mount on the composition root."""
 
@@ -1031,7 +1030,6 @@ def build_api_v1(
             "actor": actor,
             "capabilities": dict(capabilities or {}),
             "product_mode": {
-                "simplified_goal_ui": simplified_goal_ui,
                 "single_goal_mode": single_goal_mode,
             },
             "permissions": {
@@ -1063,9 +1061,7 @@ def build_api_v1(
                     "target_aggregate_id": item["workflow_id"],
                     "expected_version": 0,
                     "payload_schema": "run-start/1.0",
-                }] if may_start and (
-                    not simplified_goal_ui or item["goal_readiness"] == "ready"
-                ) else [])
+                }] if may_start and item["goal_readiness"] == "ready" else [])
         # Generation is a catalog-level act — there is no aggregate yet — so
         # its command is advertised beside the list, not on an entry.
         catalog_commands = ([{
@@ -1119,40 +1115,6 @@ def build_api_v1(
             )
 
         def command(body: Mapping[str, Any], actor: str, key: str) -> Mapping[str, Any]:
-            if not simplified_goal_ui:
-                from ..workflow.authoring import AuthoringFailedError
-
-                instruction = str(body.get("instruction", body.get("prompt", "")))
-                preferred_handler = body.get("default_agent")
-                if preferred_handler is not None and not isinstance(preferred_handler, str):
-                    raise ValueError("default_agent must be a string")
-                description = body.get("description")
-                if description is not None and not isinstance(description, str):
-                    raise ValueError("description must be a string")
-                try:
-                    outcome = authoring_service.generate(
-                        instruction, preferred_handler=preferred_handler,
-                        agent=_generation_agent(body), description=description,
-                    )
-                except AuthoringFailedError as exc:
-                    raise ValueError(json.dumps({
-                        "message": str(exc),
-                        "diagnostics": list(exc.diagnostics),
-                    }, ensure_ascii=False)) from None
-                existing = {
-                    item["workflow_id"]: item["latest_version"]
-                    for item in workflow_reads.list()
-                }
-                latest = existing.get(outcome.workflow_id, 0)
-                return {
-                    "source": outcome.source,
-                    "workflow_id": outcome.workflow_id,
-                    "definition_hash": outcome.definition_hash,
-                    "node_count": outcome.node_count,
-                    "attempts": outcome.attempts,
-                    "latest_version": latest,
-                    "allowed_commands": _draft_commands(outcome.workflow_id, latest),
-                }
             if authoring_jobs is None:
                 raise ValueError("workflow generation jobs are unavailable")
             try:
@@ -1378,9 +1340,8 @@ def build_api_v1(
             "target_aggregate_id": item["workflow_id"],
             "expected_version": 0,
             "payload_schema": "run-start/1.0",
-        }] if guard.allows(actor, WRITE_SCOPE) and (
-            not simplified_goal_ui or item["goal_readiness"] == "ready"
-        ) else [])
+        }] if guard.allows(actor, WRITE_SCOPE)
+        and item["goal_readiness"] == "ready" else [])
         if (
             draft_service is not None
             and getattr(draft_service, "reviser", None) is not None

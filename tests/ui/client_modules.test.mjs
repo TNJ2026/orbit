@@ -217,16 +217,13 @@ test("workflow detail encodes identity and asks for no particular version", asyn
 });
 
 
-test("ops and live reads use their versioned API views", async () => {
+test("live reads use their versioned API view", async () => {
   const calls = stubFetch([
-    { status: 200, body: { data: {} } },
     { status: 200, body: { data: {} } },
   ]);
   const api = new Api();
-  await api.opsStatus();
   await api.live("opaque+/=");
-  assert.equal(calls[0].url, "/api/v1/ops/status");
-  assert.equal(calls[1].url, "/api/v1/live?cursor=opaque%2B%2F%3D");
+  assert.equal(calls[0].url, "/api/v1/live?cursor=opaque%2B%2F%3D");
 });
 
 /* -- shell primitives ---------------------------------------------------- */
@@ -237,8 +234,10 @@ test("router parses deep links and serialises navigation", () => {
   assert.deepEqual(readRoute("#/artifacts/artifact%3A7"), {
     view: "artifact", artifactId: "artifact:7", runId: null,
   });
-  assert.deepEqual(readRoute("#/inbox"), { view: "inbox", runId: null });
   assert.deepEqual(readRoute("#/workflows"), { view: "workflows", runId: null });
+  // Retired views still parse (render() redirects them to the workspace,
+  // normalising the hash); unknown ones fall straight through.
+  assert.deepEqual(readRoute("#/inbox"), { view: "inbox", runId: null });
   assert.deepEqual(readRoute("#/agents"), { view: "agents", runId: null });
   assert.deepEqual(readRoute("#/settings"), { view: "settings", runId: null });
   assert.deepEqual(readRoute("#/not-a-view"), { view: "home", runId: null });
@@ -248,9 +247,6 @@ test("router parses deep links and serialises navigation", () => {
     routeHash({ view: "artifact", artifactId: "artifact:7" }),
     "#/artifacts/artifact%3A7",
   );
-  assert.equal(routeHash({ view: "ops", runId: null }), "#/ops");
-  assert.equal(routeHash({ view: "agents", runId: null }), "#/agents");
-  assert.equal(routeHash({ view: "settings", runId: null }), "#/settings");
 });
 
 test("generic data states carry text roles and retry actions", () => {
@@ -283,9 +279,9 @@ test("a missing key is reported loudly, not silently blank", () => {
 test("placeholders are substituted in both locales", () => {
   for (const locale of LOCALES) {
     const i18n = new I18n(locale, catalog(locale));
-    const rendered = i18n.t("newRun.started", { runId: "run:7" });
+    const rendered = i18n.t("newRun.active.exists", { goal: "run:7" });
     assert.ok(rendered.includes("run:7"), `${locale}: ${rendered}`);
-    assert.ok(!rendered.includes("{runId}"));
+    assert.ok(!rendered.includes("{goal}"));
   }
 });
 

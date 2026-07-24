@@ -102,8 +102,7 @@ class SourceTests(unittest.TestCase):
     def test_dynamically_built_keys_resolve(self) -> None:
         known = set(catalog("en-US"))
         for key in (
-            "run.timeline.empty", "run.errors.empty", "inbox.title",
-            "run.title", "human.decision.approve", "human.decision.reject",
+            "human.decision.approve", "human.decision.reject",
             "state.loading", "state.empty", "state.error", "state.stale",
             "state.pending", "state.retry",
         ):
@@ -139,81 +138,6 @@ class SourceTests(unittest.TestCase):
         self.assertNotIn("/api/v1/human-tasks", app_js)
         self.assertNotIn("/cancel", app_js)
         self.assertIn("allowed.href", api_js)
-
-    def test_new_run_distinguishes_catalog_failure_from_invalid_workflow(self) -> None:
-        app_js = (ASSETS / "app.js").read_text(encoding="utf-8")
-        self.assertIn('announce(i18n.t("newRun.catalog.unavailable")', app_js)
-        self.assertIn('fail("newRun.workflow.invalid")', app_js)
-        self.assertIn('fail("newRun.workflow.unavailable")', app_js)
-
-    def test_no_mock_data_survives(self) -> None:
-        joined = "\n".join(path.read_text(encoding="utf-8") for path in source_files())
-        for forbidden in ("mock", "Mock", "fixture", "Lorem", "Good morning"):
-            with self.subTest(forbidden=forbidden):
-                self.assertNotIn(forbidden, joined)
-
-
-class PlanSeparationTests(unittest.TestCase):
-    """M4.6: definition, overlay and diff must not be merged in the client."""
-
-    def setUp(self) -> None:
-        self.app_js = (ASSETS / "app.js").read_text(encoding="utf-8")
-        self.api_js = (ASSETS / "api.js").read_text(encoding="utf-8")
-
-    def test_each_view_has_its_own_renderer(self) -> None:
-        for function in ("planDefinitionView", "planOverlayView", "planDiffView"):
-            with self.subTest(function=function):
-                self.assertIn(f"function {function}", self.app_js)
-
-    def test_each_view_has_its_own_fetch(self) -> None:
-        for method in ("planDefinition(", "planOverlay(", "planDiff("):
-            with self.subTest(method=method):
-                self.assertIn(method, self.api_js)
-
-    def test_the_overlay_always_states_the_version_it_describes(self) -> None:
-        """Otherwise a reader cannot tell they are looking at stale state."""
-
-        self.assertIn("plan.overlay.for", self.app_js)
-        self.assertIn("overlay.plan_version", self.app_js)
-
-    def test_the_definition_view_renders_no_status(self) -> None:
-        start = self.app_js.index("async function planDefinitionView")
-        end = self.app_js.index("async function planOverlayView")
-        definition_view = self.app_js[start:end]
-        for forbidden in ("status", "pill(", "attempts", "generation"):
-            with self.subTest(forbidden=forbidden):
-                self.assertNotIn(forbidden, definition_view)
-
-    def test_the_overlay_view_renders_no_handler_identity(self) -> None:
-        start = self.app_js.index("async function planOverlayView")
-        end = self.app_js.index("async function planDiffView")
-        overlay_view = self.app_js[start:end]
-        for forbidden in ("handler_name", "handler_version", "edges", "kind"):
-            with self.subTest(forbidden=forbidden):
-                self.assertNotIn(forbidden, overlay_view)
-
-
-class ErrorRenderingTests(unittest.TestCase):
-    """An error entry is an event; its fields live under `payload.error`.
-
-    Reading them from the top level rendered an empty Errors panel for a run
-    that had failed with a perfectly precise message — the worst possible
-    failure mode for the one panel an operator opens when something breaks.
-    """
-
-    def setUp(self) -> None:
-        self.app_js = (ASSETS / "app.js").read_text(encoding="utf-8")
-
-    def test_the_error_renderer_reads_the_event_payload(self) -> None:
-        self.assertIn("item.payload && item.payload.error", self.app_js)
-
-    def test_the_error_renderer_surfaces_more_than_a_message(self) -> None:
-        start = self.app_js.index("function errorItem")
-        section = self.app_js[start:start + 900]
-        for field in ("error.message", "error.category", "error.source"):
-            with self.subTest(field=field):
-                self.assertIn(field, section)
-
 
 class AccessibilityTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -271,14 +195,6 @@ class AccessibilityTests(unittest.TestCase):
         css = stylesheet_source()
         self.assertIn("@media (max-width", css)
 
-    def test_inbox_table_becomes_labelled_cards_on_phones(self) -> None:
-        app_js = (ASSETS / "app.js").read_text(encoding="utf-8")
-        css = stylesheet_source()
-        self.assertIn('class: "inbox-table"', app_js)
-        self.assertIn('"data-label": i18n.t("inbox.column.run")', app_js)
-        self.assertIn('.inbox-table td::before', css)
-        self.assertIn('content: attr(data-label)', css)
-
     def test_mobile_navigation_is_a_real_drawer(self) -> None:
         css = stylesheet_source()
         self.assertIn('body[data-nav-open="true"] .sidebar', css)
@@ -287,26 +203,12 @@ class AccessibilityTests(unittest.TestCase):
 
 
 class CapacityRenderingTests(unittest.TestCase):
-    def test_large_inline_values_are_bounded_before_entering_the_dom(self) -> None:
-        """Readable is not the same as unbounded.
-
-        A value may be a quarter of a megabyte; the panel shows a generous
-        window of it as text and always states the real size, so a clipped
-        value can never be mistaken for the whole one.
-        """
-
-        app_js = (ASSETS / "app.js").read_text(encoding="utf-8")
-        self.assertIn("const DATA_TEXT_LIMIT = 20_000;", app_js)
-        self.assertIn("raw.length <= DATA_TEXT_LIMIT", app_js)
-        self.assertIn("raw.slice(0, DATA_TEXT_LIMIT)", app_js)
-        self.assertIn("i18n.number(item.size_bytes)", app_js)
-
     def test_the_console_follows_only_while_the_run_is_alive(self) -> None:
         """Polling a finished run's console forever is a busy loop for nothing."""
 
         app_js = (ASSETS / "app.js").read_text(encoding="utf-8")
-        self.assertIn('live: !["succeeded", "failed", "cancelled"]', app_js)
-        self.assertIn("if (live && !stopped) timer = setTimeout(poll, 2000);", app_js)
+        self.assertIn('{ live: status === "running" }', app_js)
+        self.assertIn("else if (live) timer = setTimeout(poll, 2000);", app_js)
         self.assertIn("activeViewCleanup = () => {", app_js)
 
 

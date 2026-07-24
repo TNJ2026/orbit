@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-product-mode="simplified-goal">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -18,10 +18,6 @@
           <div class="brand-sub" data-i18n="app.subtitle">Mission control</div>
         </div>
       </div>
-      <form class="search-slot" id="globalSearchForm" role="search" data-full-only>
-        <label class="sr-only" for="globalSearch" data-i18n="search.label">Search runs</label>
-        <input id="globalSearch" type="search" data-i18n-placeholder="search.placeholder" placeholder="Search goals and runs">
-      </form>
       <nav class="nav" data-i18n-label="nav.label" aria-label="Main navigation">
         <div class="nav-group">
           <div class="nav-group-title" data-i18n="nav.group.workspace">Workspace</div>
@@ -29,35 +25,17 @@
             <span class="nav-icon" aria-hidden="true">⌂</span>
             <span id="homeNavLabel" data-i18n="nav.home">Workspace</span>
           </button>
-          <button class="nav-button" data-view="goals" data-simplified-only hidden>
-            <span class="nav-icon" aria-hidden="true">◷</span>
-            <span data-i18n="nav.goals">History</span>
-          </button>
-          <button class="nav-button" data-view="workflows" data-full-only>
+          <button class="nav-button" data-view="workflows">
             <span class="nav-icon" aria-hidden="true">⌘</span>
             <span data-i18n="nav.workflows">Workflows</span>
           </button>
-        </div>
-        <div class="nav-group" data-full-only>
-          <div class="nav-group-title" data-i18n="nav.group.advanced">Advanced</div>
-          <button class="nav-button" data-view="inbox">
-            <span class="nav-icon" aria-hidden="true">▣</span>
-            <span data-i18n="nav.inbox">Inbox</span>
-            <span class="nav-count" id="inboxCount"></span>
+          <button class="nav-button" data-view="goals">
+            <span class="nav-icon" aria-hidden="true">◷</span>
+            <span data-i18n="nav.goals">History</span>
           </button>
           <button class="nav-button" data-view="artifacts">
             <span class="nav-icon" aria-hidden="true">◇</span>
             <span data-i18n="nav.artifacts">Artifacts</span>
-          </button>
-          <button class="nav-button" data-view="agents">
-            <span class="nav-icon" aria-hidden="true">∆</span>
-            <span data-i18n="nav.agents">Agents</span>
-          </button>
-        </div>
-        <div class="nav-group nav-settings-group">
-          <button class="nav-button" data-view="settings">
-            <span class="nav-icon" aria-hidden="true">⚙</span>
-            <span data-i18n="nav.settings">Settings</span>
           </button>
         </div>
       </nav>
@@ -84,6 +62,10 @@
         <button class="button" id="refresh" data-i18n="action.refresh">Refresh</button>
         <select id="localeSelect" data-i18n-label="locale.switch" aria-label="Change language"></select>
         <button class="button" id="themeToggle" data-i18n-label="theme.toggle" aria-label="Toggle theme">◐</button>
+        <span class="topbar-refresh-control">
+          <label for="refreshInterval" data-i18n="settings.refresh">Live refresh interval</label>
+          <select id="refreshInterval" data-i18n-label="settings.refresh" aria-label="Live refresh interval"></select>
+        </span>
       </header>
       <!-- Command outcomes are announced here rather than shown as a toast, so
            a screen reader hears the same result a sighted operator reads. -->
