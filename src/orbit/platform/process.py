@@ -498,12 +498,21 @@ def run(
     redactor: Redactor | None = None,
     on_stdout: Callable[[str], None] | None = None,
     on_stderr: Callable[[str], None] | None = None,
+    on_start: Callable[[ProcessHandle], None] | None = None,
 ) -> ProcessResult:
-    """Spawn, stream and reap a child process in one call."""
+    """Spawn, stream and reap a child process in one call.
+
+    ``on_start`` hands the live handle to the caller before the wait begins,
+    which is the only way another thread can stop this child: without it a
+    cancelled job would keep an Agent CLI running to completion and simply
+    throw the answer away.
+    """
 
     handle = ProcessHandle(
         argv, cwd=cwd, env=env, stdin_text=stdin_text,
         max_output_bytes=max_output_bytes, redactor=redactor,
         on_stdout=on_stdout, on_stderr=on_stderr,
     )
+    if on_start is not None:
+        on_start(handle)
     return handle.wait(timeout=timeout)

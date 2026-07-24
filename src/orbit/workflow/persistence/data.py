@@ -56,6 +56,7 @@ def artifact_from_row(row) -> ArtifactMetadata:
         ArtifactStatus(row["status"]), _datetime(row["created_at"]),
         _datetime(row["committed_at"]),
         None if row["created_event_id"] is None else EntityId.parse(row["created_event_id"]),
+        row["filename"] if "filename" in row.keys() else None,
     )
 
 
@@ -161,8 +162,8 @@ class SQLiteArtifactRepository(_SQLiteDataRepository):
                 artifact_id, run_id, workflow_id, producer_type, producer_id,
                 producer_node_run_id, output_port_id, schema_id, content_type,
                 checksum, size_bytes, blob_key, visibility, scope_id, status,
-                created_at, committed_at, created_event_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                created_at, committed_at, created_event_id, filename
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             str(record.artifact_id), str(record.run_id), str(record.workflow_id),
             record.producer_type, str(record.producer_id),
@@ -170,7 +171,7 @@ class SQLiteArtifactRepository(_SQLiteDataRepository):
             record.output_port_id, record.schema_id, record.content_type,
             record.checksum.value, record.size_bytes, record.blob_key,
             record.visibility.value, str(record.scope_id), record.status.value,
-            _time(record.created_at), None, None,
+            _time(record.created_at), None, None, record.filename,
         ))
 
     def get(self, artifact_id, *, committed_only=False):
@@ -191,6 +192,7 @@ class SQLiteArtifactRepository(_SQLiteDataRepository):
             "run_id", "workflow_id", "producer_type", "producer_id",
             "producer_node_run_id", "output_port_id", "schema_id", "content_type",
             "checksum", "size_bytes", "blob_key", "visibility", "scope_id", "created_at",
+            "filename",
         )
         if any(getattr(prior, field) != getattr(record, field) for field in immutable):
             raise IntegrityViolationError("committed Artifact metadata differs from staged metadata")

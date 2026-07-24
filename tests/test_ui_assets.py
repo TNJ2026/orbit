@@ -65,6 +65,7 @@ class CatalogTests(unittest.TestCase):
         # Brand names, identifiers, and terms deliberately kept in English.
         intentional = {
             "app.title",
+            "artifacts.idLabel",
             "artifacts.title",
             "nav.artifacts",
             "run.data.kind.artifact",
@@ -79,9 +80,10 @@ class CatalogTests(unittest.TestCase):
     def test_replaced_ops_and_shell_terms_are_not_kept_as_dead_keys(self) -> None:
         keys = set(catalog("en-US"))
         self.assertTrue({
-            "action.newRun", "action.retry", "newRun.workflow.hint",
+            "action.newRun", "newRun.workflow.hint",
             "ops.agents", "ops.agents.empty", "ops.handlers", "ops.health",
             "ops.health.notReady", "ops.health.ready",
+            "nav.runs", "runs.title", "runs.empty", "runs.orderHint",
         }.isdisjoint(keys))
 
 
@@ -100,7 +102,7 @@ class SourceTests(unittest.TestCase):
     def test_dynamically_built_keys_resolve(self) -> None:
         known = set(catalog("en-US"))
         for key in (
-            "run.timeline.empty", "run.errors.empty", "runs.title", "inbox.title",
+            "run.timeline.empty", "run.errors.empty", "inbox.title",
             "run.title", "human.decision.approve", "human.decision.reject",
             "state.loading", "state.empty", "state.error", "state.stale",
             "state.pending", "state.retry",
@@ -269,12 +271,12 @@ class AccessibilityTests(unittest.TestCase):
         css = stylesheet_source()
         self.assertIn("@media (max-width", css)
 
-    def test_runs_table_becomes_labelled_cards_on_phones(self) -> None:
+    def test_inbox_table_becomes_labelled_cards_on_phones(self) -> None:
         app_js = (ASSETS / "app.js").read_text(encoding="utf-8")
         css = stylesheet_source()
-        self.assertIn('class: "runs-table"', app_js)
-        self.assertIn('"data-label": i18n.t("runs.column.run")', app_js)
-        self.assertIn('.runs-table td::before', css)
+        self.assertIn('class: "inbox-table"', app_js)
+        self.assertIn('"data-label": i18n.t("inbox.column.run")', app_js)
+        self.assertIn('.inbox-table td::before', css)
         self.assertIn('content: attr(data-label)', css)
 
     def test_mobile_navigation_is_a_real_drawer(self) -> None:

@@ -61,13 +61,16 @@ class ScopedSecretResolver:
 
 
 class RejectingArtifactWriter:
-    def write(self, *, name: str, content: bytes, content_type: str):
+    def write(
+        self, *, name: str, content: bytes, content_type: str,
+        filename: str | None = None,
+    ):
         raise RuntimeError("ARTIFACT_NOT_AVAILABLE: Artifact persistence starts in Step 7")
     def read(self, artifact_id, *, max_size_bytes=None):
         raise RuntimeError("ARTIFACT_NOT_AVAILABLE: no Artifact was authorized")
     def open(self, artifact_id):
         raise RuntimeError("ARTIFACT_NOT_AVAILABLE: no Artifact was authorized")
-    def open_writer(self, *, name, content_type):
+    def open_writer(self, *, name, content_type, filename=None):
         raise RuntimeError("ARTIFACT_NOT_AVAILABLE: Artifact persistence is not configured")
 
 

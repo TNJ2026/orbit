@@ -128,7 +128,7 @@ def compile_patch(
         base.run_id, base.plan_version.next(), base.workflow_id, base.workflow_version,
         base.workflow_definition_hash, base.entry_node_ids, base.terminal_node_ids,
         tuple(item.node_id for item in ordered_nodes), ordered_nodes, ordered_edges,
-        outgoing, incoming, base.policies,
+        outgoing, incoming, base.policies, base.result,
     )
 
 

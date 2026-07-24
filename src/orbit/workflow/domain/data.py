@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 import hashlib
@@ -323,6 +323,7 @@ class ArtifactMetadata:
     created_at: datetime
     committed_at: datetime | None = None
     created_event_id: EntityId | None = None
+    filename: str | None = field(default=None, metadata={"omit_none": True})
 
     def __post_init__(self) -> None:
         _expect(self.artifact_id, "artifact")
@@ -376,6 +377,15 @@ class ArtifactMetadata:
         elif self.committed_at is not None or self.created_event_id is not None:
             raise ValueError("operational Artifact state cannot reference a commit Event")
         object.__setattr__(self, "content_type", normalized_type)
+        if self.filename is not None:
+            filename = self.filename.strip()
+            if (
+                not filename or len(filename) > 255
+                or "/" in filename or "\\" in filename
+                or filename in {".", ".."}
+            ):
+                raise ValueError("filename must be a safe basename")
+            object.__setattr__(self, "filename", filename)
 
     @property
     def ref(self) -> ArtifactRef:

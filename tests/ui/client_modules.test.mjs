@@ -208,10 +208,12 @@ test("capabilities reads the shell identity and deployment facts endpoint", asyn
   assert.equal(response.data.actor, "local");
 });
 
-test("workflow detail encodes identity and pins the requested version", async () => {
+test("workflow detail encodes identity and asks for no particular version", async () => {
   const calls = stubFetch([{ status: 200, body: { data: {} } }]);
   await new Api().workflowDetail("workflow:launch plan", 3);
-  assert.equal(calls[0].url, "/api/v1/workflows/workflow%3Alaunch%20plan?version=3");
+  // Extra arguments cannot bring version selection back: the catalog serves
+  // the current definition and only that.
+  assert.equal(calls[0].url, "/api/v1/workflows/workflow%3Alaunch%20plan");
 });
 
 

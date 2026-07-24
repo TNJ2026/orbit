@@ -169,5 +169,192 @@ class WorkflowCliTests(unittest.TestCase):
         self.assertFalse(artifact_root.exists())
 
 
+class WorkflowInventoryCliTests(unittest.TestCase):
+    """Which published Workflows survive the switch to simplified mode.
+
+    Turning the simplified UI on withholds `run.start` from anything that
+    cannot run from a single Goal. An operator is entitled to that list before
+    their users discover it, so the report exists and is read-only.
+    """
+
+    def setUp(self) -> None:
+        from orbit.workflow.application.workflows import (
+            WorkflowCatalogs, WorkflowDefinitionService,
+        )
+        from orbit.workflow.catalogs import (
+            InMemoryHandlerCatalog, InMemorySchemaCatalog,
+        )
+        from orbit.workflow.catalogs.extensions import InMemoryExtensionRegistry
+        from orbit.workflow.persistence.database import connect_workflow_database
+        from orbit.workflow.persistence.migrations import migrate_workflow_database
+        from orbit.workflow.persistence.workflow_versions import (
+            SQLiteWorkflowVersionStore,
+        )
+        from tests.test_workflow_authoring_jobs import MANIFEST, dsl
+
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.db = Path(self.temp_dir.name) / "runtime.db"
+        with connect_workflow_database(self.db) as connection:
+            migrate_workflow_database(connection)
+        definitions = WorkflowDefinitionService(
+            WorkflowCatalogs(
+                InMemoryHandlerCatalog([MANIFEST]),
+                InMemorySchemaCatalog({
+                    "example://integer/1.0": {"type": "integer"},
+                    "schema://object/1.0": {"type": "object"},
+                }),
+                InMemoryExtensionRegistry(),
+            ),
+            SQLiteWorkflowVersionStore(self.db),
+        )
+        definitions.publish_workflow(
+            json.dumps(dsl()), source_name="<test>", source_format="json",
+            expected_latest_version=0, actor="author",
+        )
+        legacy = dsl()
+        legacy["dsl_version"] = "1.2"
+        legacy["metadata"] = {"id": "legacy", "name": "Legacy"}
+        legacy.pop("result")
+        definitions.publish_workflow(
+            json.dumps(legacy), source_name="<test>", source_format="json",
+            expected_latest_version=0, actor="author",
+        )
+
+    def run_cli(self, *arguments: str) -> str:
+        output = StringIO()
+        with patch("sys.argv", ["orbit", *arguments]), redirect_stdout(output):
+            main()
+        return output.getvalue()
+
+    def report(self) -> dict:
+        return json.loads(
+            self.run_cli("workflow", "inventory", "--db", str(self.db), "--json")
+        )
+
+    def test_every_published_workflow_lands_in_exactly_one_bucket(self) -> None:
+        report = self.report()
+        buckets = report["workflows"]
+        self.assertEqual(
+            {"ready", "needs_upgrade", "needs_migration"}, set(buckets),
+        )
+        listed = [
+            item["workflow_id"] for group in buckets.values() for item in group
+        ]
+        self.assertEqual(sorted(listed), sorted(set(listed)))
+        self.assertEqual({"workflow:legacy", "workflow:research"}, set(listed))
+        self.assertEqual(
+            {key: len(value) for key, value in buckets.items()}, report["counts"],
+        )
+
+    def test_a_workflow_that_cannot_start_a_goal_carries_its_reason(self) -> None:
+        entries = [
+            item for group in self.report()["workflows"].values() for item in group
+            if item["workflow_id"] == "workflow:legacy"
+        ]
+        self.assertEqual(1, len(entries))
+        self.assertIsNotNone(entries[0]["reason"])
+
+    def test_a_workflow_without_source_needs_an_operator_not_a_prompt(self) -> None:
+        from orbit.workflow.persistence.database import connect_workflow_database
+
+        # A published version is immutable, so the source-less case is written
+        # as a fresh version — which is how it exists in the wild: published by
+        # an older build that never stored the author's text.
+        with connect_workflow_database(self.db) as connection:
+            row = connection.execute(
+                "SELECT * FROM workflow_versions WHERE workflow_id='workflow:legacy'"
+            ).fetchone()
+            connection.execute(
+                "INSERT INTO workflow_versions(workflow_id,version,definition_hash,"
+                "dsl_version,ir_version,compiler_version,canonical_ir_json,"
+                "source_format,source_text,catalog_fingerprint,created_at,created_by)"
+                " VALUES (?,?,?,?,?,?,?,?,NULL,?,?,?)",
+                (
+                    row["workflow_id"], int(row["version"]) + 1,
+                    row["definition_hash"] + "-next", row["dsl_version"],
+                    row["ir_version"], row["compiler_version"],
+                    row["canonical_ir_json"], row["source_format"],
+                    row["catalog_fingerprint"], row["created_at"], row["created_by"],
+                ),
+            )
+            connection.commit()
+        buckets = self.report()["workflows"]
+        self.assertEqual(
+            ["workflow:legacy"],
+            [item["workflow_id"] for item in buckets["needs_migration"]],
+        )
+        self.assertFalse(buckets["needs_migration"][0]["source_available"])
+
+    def test_serving_the_simplified_ui_names_what_it_will_not_start(self) -> None:
+        """The operator hears it at boot, not from a confused user later."""
+
+        with (
+            patch("orbit.web.app.create_app"),
+            patch("orbit.__main__.upsert_project"),
+            patch("orbit.__main__.uvicorn.run"),
+        ):
+            output = self.run_cli(
+                "serve", "--db", str(self.db), "--simplified-goal-ui",
+                "--no-agent-discovery",
+            )
+
+        self.assertIn("simplified goal UI:", output)
+        self.assertIn("workflow:legacy", output)
+        self.assertIn("orbit workflow inventory", output)
+
+    def test_the_report_is_not_printed_for_the_full_runtime_ui(self) -> None:
+        with (
+            patch("orbit.web.app.create_app"),
+            patch("orbit.__main__.upsert_project"),
+            patch("orbit.__main__.uvicorn.run"),
+        ):
+            output = self.run_cli(
+                "serve", "--db", str(self.db), "--no-agent-discovery",
+            )
+
+        self.assertNotIn("simplified goal UI:", output)
+
+    def test_a_readiness_survey_that_fails_does_not_stop_the_server(self) -> None:
+        """A report is information; refusing to boot over it would be worse."""
+
+        with (
+            patch("orbit.web.app.create_app"),
+            patch("orbit.__main__.upsert_project"),
+            patch("orbit.__main__.uvicorn.run") as run,
+            patch(
+                "orbit.__main__._goal_readiness_buckets",
+                side_effect=RuntimeError("projection is rebuilding"),
+            ),
+        ):
+            output = self.run_cli(
+                "serve", "--db", str(self.db), "--simplified-goal-ui",
+                "--no-agent-discovery",
+            )
+
+        self.assertIn("could not survey workflow goal readiness", output)
+        self.assertTrue(run.called)
+
+    def test_the_report_reads_and_never_writes(self) -> None:
+        before = self.db.read_bytes()
+        self.run_cli("workflow", "inventory", "--db", str(self.db))
+        self.assertEqual(before, self.db.read_bytes())
+
+    def test_the_human_report_names_each_bucket_and_every_workflow(self) -> None:
+        printed = self.run_cli("workflow", "inventory", "--db", str(self.db))
+        for expected in (
+            "ready", "needs upgrade", "needs migration",
+            "workflow:legacy", "workflow:research",
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, printed)
+
+    def test_a_missing_database_is_named_rather_than_stack_traced(self) -> None:
+        missing = Path(self.temp_dir.name) / "absent.db"
+        with self.assertRaises(SystemExit) as caught:
+            self.run_cli("workflow", "inventory", "--db", str(missing))
+        self.assertIn(str(missing), str(caught.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

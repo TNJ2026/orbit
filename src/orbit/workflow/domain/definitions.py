@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Mapping
 
@@ -78,9 +78,17 @@ class IRNode:
     policies: tuple[str, ...]
     extension: IRExtension | None
     route_mode: str | None = None
+    # The step's name in the reader's language. Absent on definitions written
+    # before it existed, and on nodes a dynamic patch added.
+    label: str | None = field(default=None, metadata={"omit_none": True})
 
     def __post_init__(self) -> None:
         _required(self.id, "node id")
+        if self.label is not None:
+            label = self.label.strip()
+            if not label or len(label) > 80:
+                raise ValueError("node label must be 1-80 characters")
+            object.__setattr__(self, "label", label)
         if self.kind not in {"action", "human", "agentic", "foreach", "subflow", "decision", "join", "terminal", "extension"}:
             raise ValueError(f"unsupported IR node kind: {self.kind}")
         if self.route_mode is not None and self.route_mode not in {"exclusive", "parallel"}:
@@ -141,6 +149,16 @@ class IRPolicy:
 
 
 @dataclass(frozen=True)
+class IRResult:
+    node_id: str
+    output_port_id: str
+
+    def __post_init__(self) -> None:
+        _required(self.node_id, "result node id")
+        _required(self.output_port_id, "result output port id")
+
+
+@dataclass(frozen=True)
 class WorkflowIR:
     ir_version: str
     workflow_id: str
@@ -156,10 +174,15 @@ class WorkflowIR:
     policies: tuple[IRPolicy, ...]
     extensions: tuple[IRExtension, ...]
     indexes: Any
+    result: IRResult | None = field(default=None, metadata={"omit_none": True})
 
     def __post_init__(self) -> None:
-        if self.ir_version not in {"1.1", "1.2"}:
+        if self.ir_version not in {"1.1", "1.2", "1.3"}:
             raise ValueError("unsupported WorkflowIR version")
+        if self.ir_version == "1.3" and self.result is None:
+            raise ValueError("WorkflowIR 1.3 requires a result declaration")
+        if self.result is not None and not isinstance(self.result, IRResult):
+            raise TypeError("result must be IRResult")
         _required(self.workflow_id, "workflow id")
         _required(self.name, "workflow name")
         object.__setattr__(self, "labels", MappingProxyType(dict(self.labels)))

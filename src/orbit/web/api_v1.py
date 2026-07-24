@@ -27,7 +27,8 @@ from starlette.routing import Route
 from ..workflow.api.dto import CursorError, decode_cursor, encode_cursor, envelope, page_size
 from ..workflow.api.draft_graph import draft_graph
 from ..workflow.api.artifact_read_models import (
-    ArtifactNotVisible, ArtifactReadModelService, PREVIEW_LIMIT_BYTES,
+    ArtifactNotVisible, ArtifactReadModelService, IMAGE_PREVIEW_LIMIT_BYTES,
+    INLINE_IMAGE_TYPES, PREVIEW_LIMIT_BYTES, base_content_type,
 )
 from ..workflow.api.plan_read_models import PlanNotFound, PlanReadModelService
 from ..workflow.api.dynamic_read_models import DynamicReadModelService
@@ -43,6 +44,9 @@ from ..workflow.application.budget_service import (
 )
 from ..workflow.application.foreach_service import ForeachService
 from ..workflow.application.human_service import HumanTaskService
+from ..workflow.application.authoring_job_service import (
+    AuthoringJobConflict, AuthoringJobService,
+)
 from ..workflow.application.run_service import (
     ActiveGoalExistsError,
     RunApplicationService,
@@ -89,6 +93,22 @@ class ClosingStreamingResponse(StreamingResponse):
             await super().__call__(scope, receive, send)
         finally:
             await anyio.to_thread.run_sync(self._source.close)
+
+
+def _display_language(body: Mapping[str, Any]) -> str | None:
+    """The language step names should be written in, as the caller states it.
+
+    The Agent otherwise infers it from the instruction, so a Chinese UI and an
+    English prompt produce English step names. A BCP-47 tag is a label, not an
+    instruction: it is length-capped and stored, never executed.
+    """
+
+    value = body.get("display_language")
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip() or len(value) > 35:
+        raise ValueError("display_language must be a short language tag")
+    return value.strip()
 
 
 def _generation_agent(body: Mapping[str, Any]) -> str | None:
@@ -193,13 +213,20 @@ def build_api_v1(
     workflow_publisher=None,
     draft_service=None,
     single_goal_mode: bool = True,
+    simplified_goal_ui: bool = False,
 ) -> list[Route]:
     """Routes for `/api/v1`, ready to mount on the composition root."""
 
     path = Path(db_path)
     reads = ReadModelService(path)
-    artifact_reads = ArtifactReadModelService(path)
     artifact_backend = artifact_backend or getattr(durable_service, "artifact_backend", None)
+
+    def read_preview_blob(blob_key: str) -> bytes:
+        if artifact_backend is None:
+            raise LookupError("Artifact store is unavailable")
+        return artifact_backend.read(blob_key, max_size_bytes=PREVIEW_LIMIT_BYTES)
+
+    artifact_reads = ArtifactReadModelService(path, blob_reader=read_preview_blob)
     runs = RunApplicationService(
         path, durable_service, enforce_single_goal=single_goal_mode
     )
@@ -207,6 +234,16 @@ def build_api_v1(
     dynamic_reads = DynamicReadModelService(path)
     workflow_reads = WorkflowCatalogReadModelService(
         path, schema_catalog or InMemorySchemaCatalog({})
+    )
+    authoring_jobs = (
+        AuthoringJobService(
+            path, authoring_service, workflow_publisher,
+            timeout_seconds=int(operational_config.get("authoring_timeout_seconds", 300))
+            if operational_config else 300,
+            clock=clock,
+        )
+        if authoring_service is not None and workflow_publisher is not None
+        else None
     )
     humans = HumanTaskService(path)
     # Handler console output: an observation store, not a projection of
@@ -328,7 +365,10 @@ def build_api_v1(
         if isinstance(actor, JSONResponse):
             return actor
         try:
-            allowed_params = {"cursor", "limit", "active", "q", "status", "responsibility"}
+            allowed_params = {
+                "cursor", "limit", "active", "terminal", "q", "status",
+                "responsibility",
+            }
             unknown = set(request.query_params) - allowed_params
             if unknown:
                 raise ValueError(f"unknown run query parameter: {sorted(unknown)[0]}")
@@ -337,6 +377,9 @@ def build_api_v1(
             if active_raw not in {None, "true", "false"}:
                 raise ValueError("active must be true or false")
             active = active_raw == "true"
+            terminal_raw = request.query_params.get("terminal")
+            if terminal_raw not in {None, "true", "false"}:
+                raise ValueError("terminal must be true or false")
             items, next_cursor = reads.list_runs(
                 cursor=cursor,
                 limit=limit,
@@ -344,7 +387,9 @@ def build_api_v1(
                 q=request.query_params.get("q", ""),
                 status=request.query_params.get("status") or None,
                 responsibility=request.query_params.get("responsibility") or None,
+                terminal_only=terminal_raw == "true",
                 can_act=guard.allows(actor, WRITE_SCOPE),
+                actor=actor,
             )
         except CursorError as exc:
             return error("invalid_cursor", str(exc))
@@ -388,6 +433,20 @@ def build_api_v1(
             envelope(summary, projection_version=summary["projection_version"])
         )
 
+    async def run_outcome(request: Request) -> JSONResponse:
+        actor = authenticate(request, READ_SCOPE)
+        if isinstance(actor, JSONResponse):
+            return actor
+        try:
+            payload = reads.outcome(
+                EntityId.parse(request.path_params["run_id"]),
+                actor=actor,
+                content_visible=guard.allows(actor, SENSITIVE_SCOPE),
+            )
+        except ValueError as exc:
+            return error("not_found", str(exc), 404)
+        return JSONResponse(envelope({"result": payload}))
+
     def _command_factory(actor: str):
         """Commands are authorised before they are advertised (plan B1).
 
@@ -409,6 +468,35 @@ def build_api_v1(
                 EntityId.parse(request.path_params["run_id"]),
                 command_factory=_command_factory(actor), actor=actor,
             )
+            run_id = request.path_params["run_id"]
+            can_recover = guard.allows(actor, OPS_WRITE_SCOPE)
+            for finding in recovery.scan(now(), limit=200, apply=False).findings:
+                if finding.run_id != run_id:
+                    continue
+                command = None
+                if can_recover and finding.actionable:
+                    takeover = not finding.safe_to_apply
+                    command = {
+                        "command": (
+                            "recovery.takeover" if takeover else "recovery.apply"
+                        ),
+                        "label": (
+                            "Create takeover" if takeover else "Apply recovery"
+                        ),
+                        "method": "POST", "href": "/api/v1/recovery/apply",
+                        "target_aggregate_id": finding.action_id,
+                        "expected_version": finding.expected_version,
+                        "payload_schema": "recovery-apply/1.0",
+                        "confirmation": "explicit",
+                    }
+                items.append({
+                    "responsibility_id": f"recovery:{finding.action_id}",
+                    "kind": "recovery", "label": "Recovery required",
+                    "status": "blocked", "detail": finding.code,
+                    "expected_version": finding.expected_version,
+                    "node_run_id": None,
+                    "allowed_commands": [] if command is None else [command],
+                })
         except ValueError as exc:
             return error("not_found", str(exc), 404)
         return JSONResponse(envelope({"responsibilities": items}))
@@ -621,11 +709,14 @@ def build_api_v1(
             if unknown:
                 raise ValueError(f"unknown Artifact query parameter: {sorted(unknown)[0]}")
             cursor, limit = read_params(request)
+            # A document title is content. An actor who may not read content
+            # gets the same catalog without it, never a 403 for the page.
             items, next_cursor = artifact_reads.list(
                 actor, cursor=cursor, limit=limit,
                 q=request.query_params.get("q", ""),
                 run_id=request.query_params.get("run_id", ""),
                 content_type=request.query_params.get("content_type", ""),
+                with_titles=guard.allows(actor, SENSITIVE_SCOPE),
             )
         except CursorError as exc:
             return error("invalid_cursor", str(exc))
@@ -648,7 +739,10 @@ def build_api_v1(
         if isinstance(actor, JSONResponse):
             return actor
         try:
-            payload = artifact_reads.detail(actor, _artifact_id(request))
+            payload = artifact_reads.detail(
+                actor, _artifact_id(request),
+                with_title=guard.allows(actor, SENSITIVE_SCOPE),
+            )
         except (ArtifactNotVisible, ValueError):
             audit_artifact_read(
                 actor, "artifact.metadata.read",
@@ -698,14 +792,22 @@ def build_api_v1(
                 details={"download": download},
             )
             return error("artifact_not_found", "Artifact not found", 404)
+        base_type = base_content_type(record["content_type"])
+        # An image is previewed as itself, so the catalog can show a thumbnail
+        # instead of a filename. Raster types only, and each kind keeps its own
+        # ceiling: an image that is worth showing is bigger than a text preview.
+        inline_image = base_type in INLINE_IMAGE_TYPES
+        preview_limit = IMAGE_PREVIEW_LIMIT_BYTES if inline_image else PREVIEW_LIMIT_BYTES
         if not download:
-            content_type = record["content_type"]
-            if not (content_type.startswith("text/") or content_type == "application/json"):
-                return error("preview_unsupported", "Artifact is not text-previewable", 415)
-            if int(record["size_bytes"]) > PREVIEW_LIMIT_BYTES:
+            if not (
+                inline_image
+                or base_type.startswith("text/") or base_type == "application/json"
+            ):
+                return error("preview_unsupported", "Artifact is not previewable", 415)
+            if int(record["size_bytes"]) > preview_limit:
                 return error(
                     "preview_too_large", "Artifact exceeds the preview limit", 413,
-                    size_bytes=int(record["size_bytes"]), limit_bytes=PREVIEW_LIMIT_BYTES,
+                    size_bytes=int(record["size_bytes"]), limit_bytes=preview_limit,
                 )
         try:
             audit_artifact_read(
@@ -733,7 +835,9 @@ def build_api_v1(
                     finally:
                         source.close()
 
-                filename = quote(f"{record['artifact_id']}.bin", safe="")
+                filename = quote(
+                    record["filename"] or f"{record['artifact_id']}.bin", safe="",
+                )
                 return ClosingStreamingResponse(
                     source, chunks(), media_type=record["content_type"],
                     headers={
@@ -743,7 +847,7 @@ def build_api_v1(
                     },
                 )
             content = artifact_backend.read(
-                record["blob_key"], max_size_bytes=PREVIEW_LIMIT_BYTES
+                record["blob_key"], max_size_bytes=preview_limit
             )
         except BlobIntegrityError as exc:
             if "missing" in str(exc).lower():
@@ -751,7 +855,17 @@ def build_api_v1(
             return error("artifact_integrity_failed", "Artifact integrity check failed", 409)
         if len(content) != int(record["size_bytes"]):
             return error("artifact_integrity_failed", "Artifact integrity check failed", 409)
-        headers = {"X-Content-Type-Options": "nosniff"}
+        headers = {
+            "X-Content-Type-Options": "nosniff",
+            # Bytes served from the Runtime's own origin execute nothing: the
+            # thumbnail an operator sees is a picture, never a document.
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+        }
+        if inline_image:
+            # Authorization can change while immutable bytes do not. Never let
+            # a browser cache bypass the scope and ACL checks above after
+            # access has been revoked.
+            headers["Cache-Control"] = "no-store"
         return Response(content, media_type=record["content_type"], headers=headers)
 
     async def handler_catalog(request: Request) -> JSONResponse:
@@ -916,6 +1030,10 @@ def build_api_v1(
         return JSONResponse(envelope({
             "actor": actor,
             "capabilities": dict(capabilities or {}),
+            "product_mode": {
+                "simplified_goal_ui": simplified_goal_ui,
+                "single_goal_mode": single_goal_mode,
+            },
             "permissions": {
                 "start_run": guard.allows(actor, WRITE_SCOPE),
                 "ops_read": guard.allows(actor, OPS_READ_SCOPE),
@@ -933,6 +1051,10 @@ def build_api_v1(
         may_start = guard.allows(actor, WRITE_SCOPE)
         workflows = workflow_reads.list()
         for item in workflows:
+            item["active_job"] = (
+                None if authoring_jobs is None
+                else authoring_jobs.active_for_workflow(item["workflow_id"], actor=actor)
+            )
             item["allowed_commands"] = ([{
                     "command": "run.start",
                     "label": "Start run",
@@ -941,7 +1063,9 @@ def build_api_v1(
                     "target_aggregate_id": item["workflow_id"],
                     "expected_version": 0,
                     "payload_schema": "run-start/1.0",
-                }] if may_start else [])
+                }] if may_start and (
+                    not simplified_goal_ui or item["goal_readiness"] == "ready"
+                ) else [])
         # Generation is a catalog-level act — there is no aggregate yet — so
         # its command is advertised beside the list, not on an entry.
         catalog_commands = ([{
@@ -987,13 +1111,7 @@ def build_api_v1(
         ]
 
     async def workflow_generate(request: Request) -> JSONResponse:
-        """Natural language → validated DSL draft. Never publishes.
-
-        The draft comes back with the compiler's verdict and a server-advertised
-        publish command carrying the current latest version, so the confirming
-        click stays inside the AllowedCommand discipline like every other
-        mutation.
-        """
+        """Queue natural-language generation and publish its valid result."""
         if authoring_service is None:
             return error(
                 "generation_unavailable",
@@ -1001,43 +1119,111 @@ def build_api_v1(
             )
 
         def command(body: Mapping[str, Any], actor: str, key: str) -> Mapping[str, Any]:
-            from ..workflow.authoring import AuthoringFailedError
+            if not simplified_goal_ui:
+                from ..workflow.authoring import AuthoringFailedError
 
-            instruction = str(body.get("instruction", ""))
-            preferred_handler = body.get("default_agent")
-            if preferred_handler is not None and not isinstance(preferred_handler, str):
-                raise ValueError("default_agent must be a string")
-            description = body.get("description")
-            if description is not None and not isinstance(description, str):
-                raise ValueError("description must be a string")
+                instruction = str(body.get("instruction", body.get("prompt", "")))
+                preferred_handler = body.get("default_agent")
+                if preferred_handler is not None and not isinstance(preferred_handler, str):
+                    raise ValueError("default_agent must be a string")
+                description = body.get("description")
+                if description is not None and not isinstance(description, str):
+                    raise ValueError("description must be a string")
+                try:
+                    outcome = authoring_service.generate(
+                        instruction, preferred_handler=preferred_handler,
+                        agent=_generation_agent(body), description=description,
+                    )
+                except AuthoringFailedError as exc:
+                    raise ValueError(json.dumps({
+                        "message": str(exc),
+                        "diagnostics": list(exc.diagnostics),
+                    }, ensure_ascii=False)) from None
+                existing = {
+                    item["workflow_id"]: item["latest_version"]
+                    for item in workflow_reads.list()
+                }
+                latest = existing.get(outcome.workflow_id, 0)
+                return {
+                    "source": outcome.source,
+                    "workflow_id": outcome.workflow_id,
+                    "definition_hash": outcome.definition_hash,
+                    "node_count": outcome.node_count,
+                    "attempts": outcome.attempts,
+                    "latest_version": latest,
+                    "allowed_commands": _draft_commands(outcome.workflow_id, latest),
+                }
+            if authoring_jobs is None:
+                raise ValueError("workflow generation jobs are unavailable")
             try:
-                outcome = authoring_service.generate(
-                    instruction, preferred_handler=preferred_handler,
-                    agent=_generation_agent(body), description=description,
+                return authoring_jobs.create(
+                    actor=actor,
+                    prompt=str(body.get("prompt", body.get("instruction", ""))),
+                    idempotency_key=key,
+                    display_language=_display_language(body),
                 )
-            except AuthoringFailedError as exc:
-                # A model that cannot satisfy the compiler is a client-visible
-                # result, not a server fault: return the findings for repair.
+            except AuthoringJobConflict as exc:
                 raise ValueError(json.dumps({
-                    "message": str(exc),
-                    "diagnostics": list(exc.diagnostics),
-                }, ensure_ascii=False))
-            existing = {
-                item["workflow_id"]: item["latest_version"]
-                for item in workflow_reads.list()
-            }
-            latest = existing.get(outcome.workflow_id, 0)
-            return {
-                "source": outcome.source,
-                "workflow_id": outcome.workflow_id,
-                "definition_hash": outcome.definition_hash,
-                "node_count": outcome.node_count,
-                "attempts": outcome.attempts,
-                "latest_version": latest,
-                "allowed_commands": _draft_commands(outcome.workflow_id, latest),
-            }
+                    "code": exc.code, "active_job": exc.job,
+                }, ensure_ascii=False)) from None
 
         return await mutate(request, WRITE_SCOPE, "workflow.generate", command)
+
+    async def workflow_modify(request: Request) -> JSONResponse:
+        if authoring_jobs is None:
+            return error("generation_unavailable", "workflow modification is unavailable", 503)
+        workflow_id = str(EntityId.parse(request.path_params["workflow_id"]))
+
+        def command(body: Mapping[str, Any], actor: str, key: str):
+            try:
+                return authoring_jobs.create(
+                    actor=actor, workflow_id=workflow_id,
+                    prompt=str(body.get("prompt", "")),
+                    mode=str(body.get("mode", "modify")),
+                    display_language=_display_language(body),
+                    idempotency_key=key,
+                )
+            except AuthoringJobConflict as exc:
+                raise ValueError(json.dumps({
+                    "code": exc.code, "active_job": exc.job,
+                }, ensure_ascii=False)) from None
+
+        return await mutate(request, WRITE_SCOPE, "workflow.modify", command)
+
+    async def authoring_job_list(request: Request) -> JSONResponse:
+        actor = authenticate(request, READ_SCOPE)
+        if isinstance(actor, JSONResponse):
+            return actor
+        if authoring_jobs is None:
+            return JSONResponse(envelope({"jobs": []}))
+        unknown = set(request.query_params) - {"mine", "active", "type"}
+        if unknown:
+            return error("invalid_request", "unknown authoring job query parameter")
+        jobs = authoring_jobs.list(
+            actor=actor,
+            active_only=request.query_params.get("active") == "true",
+            job_type=request.query_params.get("type") or None,
+        )
+        return JSONResponse(envelope({"jobs": jobs}))
+
+    async def authoring_job_read(request: Request) -> JSONResponse:
+        actor = authenticate(request, READ_SCOPE)
+        if isinstance(actor, JSONResponse):
+            return actor
+        try:
+            job = authoring_jobs.get(request.path_params["job_id"], actor=actor)
+        except (AttributeError, LookupError):
+            return error("not_found", "authoring job not found", 404)
+        return JSONResponse(envelope(job))
+
+    async def authoring_job_cancel(request: Request) -> JSONResponse:
+        if authoring_jobs is None:
+            return error("generation_unavailable", "authoring jobs are unavailable", 503)
+
+        def command(body: Mapping[str, Any], actor: str, key: str):
+            return authoring_jobs.cancel(request.path_params["job_id"], actor=actor)
+
+        return await mutate(request, WRITE_SCOPE, "workflow.authoring.cancel", command)
 
     async def workflow_validate(request: Request) -> JSONResponse:
         """Compile an edited draft without publishing or changing state."""
@@ -1173,13 +1359,17 @@ def build_api_v1(
             workflow_id = str(EntityId.parse(request.path_params["workflow_id"]))
             if not workflow_id.startswith("workflow:"):
                 raise ValueError("workflow id is required")
-            raw_version = request.query_params.get("version")
-            version = None if raw_version is None else int(raw_version)
-            if version is not None and version < 1:
-                raise ValueError("version must be positive")
-            item = workflow_reads.detail(workflow_id, version)
+            # No version selector: the catalog serves the current definition
+            # and nothing else, so `?version=` is an unknown parameter now.
+            if set(request.query_params):
+                raise ValueError("unknown workflow query parameter")
+            item = workflow_reads.detail(workflow_id)
         except ValueError as exc:
             return error("not_found", str(exc), 404)
+        item["active_job"] = (
+            None if authoring_jobs is None
+            else authoring_jobs.active_for_workflow(workflow_id, actor=actor)
+        )
         item["allowed_commands"] = ([{
             "command": "run.start",
             "label": "Start run",
@@ -1188,7 +1378,9 @@ def build_api_v1(
             "target_aggregate_id": item["workflow_id"],
             "expected_version": 0,
             "payload_schema": "run-start/1.0",
-        }] if guard.allows(actor, WRITE_SCOPE) else [])
+        }] if guard.allows(actor, WRITE_SCOPE) and (
+            not simplified_goal_ui or item["goal_readiness"] == "ready"
+        ) else [])
         if (
             draft_service is not None
             and getattr(draft_service, "reviser", None) is not None
@@ -1201,8 +1393,21 @@ def build_api_v1(
                 "method": "POST",
                 "href": f"/api/v1/workflows/{quote(workflow_id, safe=':')}/drafts",
                 "target_aggregate_id": workflow_id,
-                "expected_version": item["selected_version"],
+                "expected_version": item["latest_version"],
                 "payload_schema": "workflow-draft-create/1.0",
+            })
+        if (
+            authoring_jobs is not None and item.get("source_available")
+            and guard.allows(actor, WRITE_SCOPE)
+        ):
+            item["allowed_commands"].append({
+                "command": "workflow.modify",
+                "label": "Modify workflow",
+                "method": "POST",
+                "href": f"/api/v1/workflows/{quote(workflow_id, safe=':')}/modify",
+                "target_aggregate_id": workflow_id,
+                "expected_version": item["latest_version"],
+                "payload_schema": "workflow-modify/1.0",
             })
         item["handler_bindings"] = handler_bindings(item)
         stale = [
@@ -1904,6 +2109,7 @@ def build_api_v1(
             "/api/v1/runs/{run_id}/responsibilities", run_responsibilities,
             methods=["GET"],
         ),
+        Route("/api/v1/runs/{run_id}/outcome", run_outcome, methods=["GET"]),
         Route("/api/v1/runs/{run_id}/timeline", _paged_read(reads.timeline), methods=["GET"]),
         Route("/api/v1/runs/{run_id}/errors", _paged_read(reads.errors), methods=["GET"]),
         Route(
@@ -1979,7 +2185,22 @@ def build_api_v1(
         # literal segment must not be captured as a workflow id.
         Route("/api/v1/workflows/generate", workflow_generate, methods=["POST"]),
         Route(
+            "/api/v1/workflow-authoring-jobs", authoring_job_list, methods=["GET"],
+        ),
+        Route(
+            "/api/v1/workflow-authoring-jobs/{job_id}",
+            authoring_job_read, methods=["GET"],
+        ),
+        Route(
+            "/api/v1/workflow-authoring-jobs/{job_id}/cancel",
+            authoring_job_cancel, methods=["POST"],
+        ),
+        Route(
             "/api/v1/workflows/{workflow_id}", workflow_detail, methods=["GET"]
+        ),
+        Route(
+            "/api/v1/workflows/{workflow_id}/modify",
+            workflow_modify, methods=["POST"],
         ),
         Route(
             "/api/v1/workflows/{workflow_id}/versions", workflow_publish,

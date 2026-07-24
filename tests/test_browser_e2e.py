@@ -16,6 +16,7 @@ failing, so a plain checkout still runs green.
 
 from __future__ import annotations
 
+import base64
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
@@ -25,6 +26,7 @@ import threading
 import time
 import unittest
 import urllib.request
+from urllib.parse import quote
 
 try:
     from playwright.sync_api import sync_playwright
@@ -184,6 +186,344 @@ class BrowserE2ETestCase(unittest.TestCase):
         page.click('[data-wizard-next]')
         page.click('[data-wizard-next]')
         page.click("#newGoalStart")
+
+
+class SimplifiedGoalUITests(BrowserE2ETestCase):
+    @classmethod
+    def extra_app_kwargs(cls) -> dict:
+        return {"single_goal_mode": True, "simplified_goal_ui": True}
+
+    def test_navigation_and_workflow_catalog_use_the_simplified_product_mode(self) -> None:
+        page = self.open("en-US")
+        page.wait_for_selector(".simplified-workspace-composer")
+
+        self.assertEqual("simplified-goal", page.locator("html").get_attribute("data-product-mode"))
+        self.assertEqual("Workflow & goal", page.locator("#homeNavLabel").inner_text())
+        self.assertTrue(page.locator('[data-view="goals"]').is_visible())
+        self.assertFalse(page.locator('[data-view="workflows"]').is_visible())
+        self.assertFalse(page.locator('[data-view="inbox"]').is_visible())
+        self.assertTrue(page.locator("#simplifiedGoal").is_visible())
+        self.assertTrue(page.get_by_role("combobox", name="Workflow").is_visible())
+        self.assertTrue(page.locator("#newGoalStart").is_visible())
+        self.assertEqual(0, page.locator(".workflow-card").count())
+
+    def test_goal_starts_and_stays_in_one_workspace(self) -> None:
+        page = self.open("en-US")
+        started = {}
+
+        def advertise_goal_ready_workflow(route):
+            response = route.fetch()
+            payload = response.json()
+            entry = next(
+                item for item in payload["data"]["workflows"]
+                if item["workflow_id"] == "workflow:linear"
+            )
+            entry["goal_readiness"] = "ready"
+            entry["goal_binding"] = {
+                "source": "run.goal", "node_id": "first",
+                "input_id": "value", "property": "goal", "value_shape": "object",
+            }
+            entry["allowed_commands"] = [{
+                "command": "run.start", "label": "Start goal", "method": "POST",
+                "href": "/api/v1/runs", "expected_version": 0,
+            }]
+            route.fulfill(response=response, json=payload)
+
+        def start_goal(route):
+            if route.request.method != "POST":
+                return route.continue_()
+            goal = route.request.post_data_json["goal"]
+            run_id = self.start_goal("simplified-workspace-start", goal)
+            started["run_id"] = run_id
+            route.fulfill(
+                status=200, content_type="application/json",
+                body=json.dumps({
+                    "schema_version": "1.0", "projection_version": None,
+                    "data": {"run_id": run_id}, "next_cursor": None,
+                }),
+            )
+
+        page.route("**/api/v1/workflows", advertise_goal_ready_workflow)
+        page.route("**/api/v1/runs", start_goal)
+        page.reload()
+        page.wait_for_selector(".simplified-workspace-composer")
+        page.locator("#simplifiedWorkflow").evaluate(
+            "node => { node.value = 'workflow:linear';"
+            " node.dispatchEvent(new Event('change', {bubbles: true})); }"
+        )
+        page.fill("#simplifiedGoal", "Prepare a concise report")
+        page.click("#newGoalStart")
+        page.wait_for_function("() => location.hash.startsWith('#/runs/run%3A')")
+        page.wait_for_selector(".simplified-execution")
+
+        self.assertTrue(started["run_id"])
+        self.assertIn("Prepare a concise report", page.input_value("#simplifiedGoal"))
+        self.assertEqual("workflow:linear", page.input_value("#simplifiedWorkflow"))
+        self.assertTrue(page.locator(".simplified-result").is_visible())
+        self.assertTrue(page.locator(".simplified-artifacts").is_visible())
+
+    def test_run_detail_has_no_runtime_tabs(self) -> None:
+        run_id = self.start_goal("simplified-run", "Prepare a concise report")
+        page = self.open("en-US", f"/ui/#/runs/{run_id}")
+        page.wait_for_selector(".simplified-run-hero")
+
+        self.assertEqual(0, page.locator(".run-tabs").count())
+        self.assertEqual(0, page.locator(".why-panel").count())
+        self.assertIn("Prepare a concise report", page.input_value("#simplifiedGoal"))
+        self.assertTrue(page.locator(".simplified-workspace-composer").is_visible())
+        self.assertTrue(page.locator(".simplified-execution").is_visible())
+        self.assertTrue(page.locator(".simplified-result").is_visible())
+        self.assertTrue(page.locator(".simplified-artifacts").is_visible())
+
+    def test_settings_omit_operations_sections(self) -> None:
+        page = self.open("en-US", "/ui/#/settings")
+        page.wait_for_selector(".settings-row")
+
+        self.assertEqual(1, page.locator("#content > .panel").count())
+        self.assertEqual(0, page.locator(".stat-grid").count())
+
+    def test_history_lists_finished_goals_only(self) -> None:
+        finished = self.start_goal("simplified-history", "Summarise the quarter")
+        self.wait_for_status(self.open("en-US"), finished, "succeeded")
+
+        page = self.open("en-US", "/ui/#/goals")
+        page.wait_for_selector(".history-goal-row")
+        rows = page.locator(".history-goal-row")
+        self.assertIn("Summarise the quarter", rows.first.inner_text())
+        # The history is a Goal record, not a Run console: no technical filters.
+        self.assertEqual(0, page.locator('[aria-label="Filter by status"]').count())
+
+    def test_progress_rides_the_live_cursor_and_adds_no_second_channel(self) -> None:
+        """One refresh mechanism for the whole shell, including this page."""
+
+        run_id = self.start_goal("simplified-live", "Watch this run")
+        context = self.browser.new_context(locale="en-US")
+        self.addCleanup(context.close)
+        page = context.new_page()
+        polled: list[str] = []
+        page.on("request", lambda request: polled.append(request.url))
+        page.goto(f"{self.base}/ui/#/runs/{run_id}")
+        page.wait_for_selector(".simplified-run-hero")
+        page.wait_for_function(
+            "() => window.performance.getEntriesByType('resource')"
+            ".some(entry => entry.name.includes('/api/v1/live'))",
+            timeout=30_000,
+        )
+
+        self.assertFalse(
+            [url for url in polled if "/events" in url or "/stream" in url],
+            "the simplified run page must not open a second progress channel",
+        )
+
+    def test_history_reads_one_page_rather_than_two_calls_per_row(self) -> None:
+        """Twenty-five rows must not become fifty-one requests."""
+
+        finished = self.start_goal("simplified-history-cost", "Tidy the archive")
+        self.wait_for_status(self.open("en-US"), finished, "succeeded")
+
+        context = self.browser.new_context(locale="en-US")
+        self.addCleanup(context.close)
+        page = context.new_page()
+        per_row: list[str] = []
+        page.on("request", lambda request: per_row.append(request.url) if (
+            "/outcome" in request.url or "/api/v1/artifacts?" in request.url
+        ) else None)
+        page.goto(f"{self.base}/ui/#/goals")
+        page.wait_for_selector(".history-goal-row")
+        page.wait_for_timeout(500)
+
+        self.assertEqual([], per_row)
+        self.assertIn(
+            "content", page.locator(".history-goal-row").first.inner_text().lower(),
+        )
+
+
+class SimplifiedUpgradeTests(BrowserE2ETestCase):
+    """A published Workflow that cannot start a Goal is fixed by prompting."""
+
+    @classmethod
+    def extra_app_kwargs(cls) -> dict:
+        from tests.test_workflow_authoring_jobs import dsl as goal_ready_dsl
+
+        return {
+            "single_goal_mode": True,
+            "simplified_goal_ui": True,
+            # The Agent answers with the envelope the modify contract asks for,
+            # so the summary the page shows is the Agent's own words.
+            "workflow_generator": lambda _prompt: json.dumps({
+                "workflow": {
+                    **goal_ready_dsl(nodes=("collect", "fact_check")),
+                    "metadata": {"id": "legacy", "name": "Legacy archive"},
+                },
+                "change_summary": [{
+                    "kind": "added", "node_id": "fact_check",
+                    "label": "Fact check", "detail": "runs before the report",
+                }],
+            }),
+        }
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        from orbit.workflow.application.workflows import (
+            WorkflowCatalogs, WorkflowDefinitionService,
+        )
+        from orbit.workflow.catalogs import (
+            InMemoryHandlerCatalog, InMemorySchemaCatalog,
+        )
+        from orbit.workflow.catalogs.extensions import InMemoryExtensionRegistry
+        from orbit.workflow.persistence.workflow_versions import (
+            SQLiteWorkflowVersionStore,
+        )
+        from tests.test_workflow_authoring_jobs import MANIFEST, dsl as goal_ready_dsl
+
+        legacy = goal_ready_dsl()
+        legacy["dsl_version"] = "1.2"
+        legacy["metadata"] = {"id": "legacy", "name": "Legacy archive"}
+        legacy.pop("result")
+        WorkflowDefinitionService(
+            WorkflowCatalogs(
+                InMemoryHandlerCatalog([MANIFEST]),
+                InMemorySchemaCatalog({
+                    "example://integer/1.0": {"type": "integer"},
+                    "schema://object/1.0": {"type": "object"},
+                }),
+                InMemoryExtensionRegistry(),
+            ),
+            SQLiteWorkflowVersionStore(cls.db),
+        ).publish_workflow(
+            json.dumps(legacy), source_name="<test>", source_format="json",
+            expected_latest_version=0, actor="local",
+        )
+
+    def card(self, page):
+        card = page.locator(".workflow-card", has_text="Legacy archive").first
+        card.wait_for()
+        return card
+
+    def test_a_workflow_needing_an_upgrade_stays_visible_but_cannot_start(self) -> None:
+        page = self.open("en-US", "/ui/#/workflows")
+        card = self.card(page)
+
+        self.assertIn("Upgrade needed", card.inner_text())
+        # Visible, explained, and without a way to start a Goal that would fail:
+        # upgrading is the only action the card offers.
+        self.assertEqual(
+            ["Upgrade workflow"],
+            card.locator(".workflow-card-actions button").all_inner_texts(),
+        )
+
+    def test_upgrading_opens_a_prefilled_prompt_and_reports_what_changed(self) -> None:
+        page = self.open("en-US", "/ui/#/workflows")
+        self.card(page).locator(".upgrade-workflow").click()
+
+        page.wait_for_selector("dialog[open] textarea")
+        prompt = page.locator("dialog[open] textarea")
+        self.assertIn("Upgrade this workflow", prompt.input_value())
+        # Regenerate is the bigger hammer and stays hidden until modify fails.
+        self.assertEqual(0, page.locator("#regenerateWorkflow").count())
+
+        page.get_by_role("button", name="Revise with Agent").click()
+        page.wait_for_selector("dialog[open] .change-summary", timeout=30_000)
+        summary = page.locator("dialog[open] .change-summary").inner_text()
+        self.assertIn("Fact check", summary)
+        self.assertIn("runs before the report", summary)
+
+
+class SimplifiedRegenerateTests(BrowserE2ETestCase):
+    """Regenerate appears only once keeping the structure has demonstrably failed.
+
+    It discards a structure the author already accepted, so offering it before
+    there is any evidence that modifying cannot work would put the largest
+    action in the easiest place to hit by accident.
+    """
+
+    @classmethod
+    def extra_app_kwargs(cls) -> dict:
+        return {
+            "single_goal_mode": True,
+            "simplified_goal_ui": True,
+            # Never produces anything the compiler accepts, so every attempt
+            # settles as failed and the retry path is the one under test.
+            "workflow_generator": lambda _prompt: "not a workflow at all",
+        }
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        from orbit.workflow.application.workflows import (
+            WorkflowCatalogs, WorkflowDefinitionService,
+        )
+        from orbit.workflow.catalogs import (
+            InMemoryHandlerCatalog, InMemorySchemaCatalog,
+        )
+        from orbit.workflow.catalogs.extensions import InMemoryExtensionRegistry
+        from orbit.workflow.persistence.workflow_versions import (
+            SQLiteWorkflowVersionStore,
+        )
+        from tests.test_workflow_authoring_jobs import MANIFEST, dsl
+
+        # Modifying needs the author's source, which the shared linear fixture
+        # does not carry.
+        WorkflowDefinitionService(
+            WorkflowCatalogs(
+                InMemoryHandlerCatalog([MANIFEST]),
+                InMemorySchemaCatalog({
+                    "example://integer/1.0": {"type": "integer"},
+                    "schema://object/1.0": {"type": "object"},
+                }),
+                InMemoryExtensionRegistry(),
+            ),
+            SQLiteWorkflowVersionStore(cls.db),
+        ).publish_workflow(
+            json.dumps(dsl()), source_name="<test>", source_format="json",
+            expected_latest_version=0, actor="local",
+        )
+
+    def open_dialog(self):
+        page = self.open("en-US", "/ui/#/workflows/workflow:research")
+        page.wait_for_selector("#editWorkflow")
+        page.locator("#editWorkflow").click()
+        page.wait_for_selector("dialog[open] textarea")
+        return page
+
+    def test_regenerate_is_offered_only_after_a_modification_fails(self) -> None:
+        page = self.open_dialog()
+
+        # 1. The first form offers modifying and nothing larger.
+        self.assertEqual(0, page.locator("#regenerateWorkflow").count())
+        page.locator("dialog[open] textarea").fill("Add a fact check step")
+        page.get_by_role("button", name="Revise with Agent").click()
+
+        # 2. The failure offers a retry rather than a dead end.
+        page.wait_for_selector("#retryWorkflowModify", timeout=30_000)
+        page.locator("#retryWorkflowModify").click()
+
+        # 3. Only now are both offered, and the prompt survived the round trip.
+        page.wait_for_selector("#regenerateWorkflow")
+        self.assertEqual(
+            "Add a fact check step",
+            page.locator("dialog[open] textarea").input_value(),
+        )
+        self.assertEqual(
+            1, page.get_by_role("button", name="Revise with Agent").count(),
+        )
+        self.assertIn(
+            "Regenerate lets the system redesign",
+            page.locator("dialog[open]").inner_text(),
+        )
+
+    def test_a_failed_modification_leaves_the_workflow_alone(self) -> None:
+        page = self.open_dialog()
+        page.locator("dialog[open] textarea").fill("Break everything")
+        page.get_by_role("button", name="Revise with Agent").click()
+        page.wait_for_selector("#retryWorkflowModify", timeout=30_000)
+
+        latest = page.evaluate(
+            "() => fetch('/api/v1/workflows/workflow:research')"
+            ".then(r => r.json()).then(b => b.data.latest_version)"
+        )
+        self.assertEqual(1, latest)
 
 
 class LocaleTests(BrowserE2ETestCase):
@@ -553,7 +893,7 @@ class WorkflowCatalogTests(BrowserE2ETestCase):
         page.locator("#rebindWorkflow").click()
         page.wait_for_function(
             "() => document.getElementById('liveRegion')"
-            "?.textContent.includes('v2')"
+            "?.textContent.includes('Rebound')"
         )
         self.assertEqual(1, posted["body"]["expected_version"])
 
@@ -721,7 +1061,7 @@ class WorkflowCatalogTests(BrowserE2ETestCase):
             inputs={"value": 9},
         )
         page.wait_for_selector("#liveRegion.error")
-        self.assertIn("changed after review", page.inner_text("#liveRegion"))
+        self.assertIn("republished after you reviewed it", page.inner_text("#liveRegion"))
         self.assertFalse(page.is_visible("dialog[open]"))
 
 
@@ -1944,14 +2284,28 @@ class DataAndRecoverySurfaceTests(BrowserE2ETestCase):
         self.assertIn("1 of 1", page.inner_text("#liveRegion"))
 
 
+PIXEL_PNG = (
+    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+    b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00"
+    b"\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
+)
+CHECKER_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAM0lEQVR42mN0av3CAAPL0uFMhq"
+    "iZDFjFmRhIBLTXwPjizReC7kYWH4R+YCHG3aPxQHMNAER/FF7xPoSoAAAAAElFTkSuQmCC"
+)
+
+
 class ArtifactCatalogTests(BrowserE2ETestCase):
-    def artifact(self) -> str:
+    def artifact(
+        self, *, content=b"reviewable artifact text", content_type="text/plain",
+        key="browser-artifact", goal=None, output_port="report",
+    ) -> str:
         from orbit.workflow.persistence.database import connect_workflow_database
 
-        run_id = self.start_run("browser-artifact")
-        receipt = self.artifact_backend.write(
-            b"reviewable artifact text", max_size_bytes=1024
+        run_id = (
+            self.start_goal(key, goal) if goal is not None else self.start_run(key)
         )
+        receipt = self.artifact_backend.write(content, max_size_bytes=1024 * 1024)
         artifact_id = f"artifact:{receipt.checksum.value.removeprefix('sha256:')}"
         with connect_workflow_database(self.db) as connection:
             event_id = connection.execute(
@@ -1960,12 +2314,12 @@ class ArtifactCatalogTests(BrowserE2ETestCase):
             ).fetchone()[0]
             now = "2026-01-01T00:00:00+00:00"
             connection.execute(
-                "INSERT INTO artifacts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO artifacts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     artifact_id, run_id, "workflow:linear", "attempt", "attempt:browser",
-                    "node_run:browser", "report", "schema:text", "text/plain",
+                    "node_run:browser", output_port, "schema:text", content_type,
                     receipt.checksum.value, receipt.size_bytes, receipt.blob_key,
-                    "run", run_id, "committed", now, now, event_id,
+                    "run", run_id, "committed", now, now, event_id, None,
                 ),
             )
             connection.execute(
@@ -1975,7 +2329,7 @@ class ArtifactCatalogTests(BrowserE2ETestCase):
             connection.execute(
                 "INSERT INTO artifact_links VALUES (?,?,?,?,?,?,?,?)",
                 (
-                    "artifact_link:browser-producer", "workflow:linear", run_id,
+                    f"artifact_link:{key}-producer", "workflow:linear", run_id,
                     artifact_id, "producer", "attempt:browser", event_id, now,
                 ),
             )
@@ -1985,19 +2339,102 @@ class ArtifactCatalogTests(BrowserE2ETestCase):
     def test_catalog_detail_lineage_preview_and_reload(self) -> None:
         artifact_id = self.artifact()
         page = self.open("en-US", path="/ui/#/artifacts")
-        page.wait_for_selector("text=report")
+        page.wait_for_selector(".artifact-card-main")
         page.locator(".artifact-card-main").first.click()
         page.wait_for_function(
             "id => location.hash === `#/artifacts/${encodeURIComponent(id)}`",
             arg=artifact_id,
         )
-        page.wait_for_selector(".artifact-detail .panel-title")
-        self.assertIn("attempt:browser", page.inner_text("#content"))
-        page.get_by_role("button", name="Load text preview").click()
-        page.wait_for_selector("text=reviewable artifact text")
+        page.wait_for_selector("dialog[open].artifact-detail .panel-title")
+        self.assertIn("attempt:browser", page.inner_text("dialog.artifact-detail"))
+        # The text is the point of opening it, so it arrives with the dialog
+        # rather than behind a button.
+        page.wait_for_selector("dialog.artifact-detail .artifact-preview")
+        self.assertIn(
+            "reviewable artifact text",
+            page.inner_text("dialog.artifact-detail .artifact-preview"),
+        )
         page.reload()
         page.wait_for_selector("text=Producer and consumer lineage")
-        self.assertIn(artifact_id, page.inner_text("#content"))
+        self.assertIn(artifact_id, page.inner_text("dialog.artifact-detail"))
+
+    def test_the_detail_dialog_closes_back_to_the_catalog(self) -> None:
+        artifact_id = self.artifact(
+            content=b"dialog artifact text", key="browser-artifact-dialog",
+        )
+        page = self.open("en-US", path=f"/ui/#/artifacts/{artifact_id}")
+        page.wait_for_selector("dialog[open].artifact-detail .panel-title")
+        page.keyboard.press("Escape")
+        page.wait_for_selector("dialog.artifact-detail", state="detached")
+        # Escape and Close must both leave the address on the catalog: a
+        # dismissed dialog that keeps its own URL reopens on reload.
+        page.wait_for_function("() => location.hash === '#/artifacts'")
+        page.wait_for_selector(".artifact-card-main")
+
+        page.locator(".artifact-card-main").first.click()
+        page.wait_for_selector("dialog[open].artifact-detail .panel-title")
+        page.get_by_role("button", name="Close").click()
+        page.wait_for_selector("dialog.artifact-detail", state="detached")
+        page.wait_for_function("() => location.hash === '#/artifacts'")
+
+    def test_a_document_card_leads_with_its_title_goal_and_workflow(self) -> None:
+        self.artifact(
+            content=b"# Launch checklist\n\nStep one.\n", content_type="text/markdown",
+            key="browser-artifact-document", goal="Ship the launch",
+        )
+        page = self.open("en-US", path="/ui/#/artifacts")
+        card = page.locator(".artifact-card", has_text="Launch checklist").first
+        card.wait_for()
+        self.assertEqual("Launch checklist", card.locator(".artifact-name").inner_text())
+        text = card.inner_text()
+        self.assertIn("Ship the launch", text)
+        # The workflow reads by name; `workflow:` is the id's kind, not a fact
+        # the card has to spend a line on.
+        self.assertIn("linear", text)
+        self.assertNotIn("workflow:linear", text)
+        # Addressing — the output port, the producer, the Artifact id — belongs
+        # to the detail panel, not to a card being scanned.
+        self.assertNotIn("report", text)
+        self.assertNotIn("attempt:browser", text)
+
+    def test_an_image_card_shows_the_image(self) -> None:
+        artifact_id = self.artifact(
+            content=PIXEL_PNG, content_type="image/png", key="browser-artifact-image",
+        )
+        page = self.open("en-US", path="/ui/#/artifacts")
+        thumb = page.locator(".artifact-thumb").first
+        thumb.wait_for()
+        self.assertIn(quote(artifact_id, safe=""), thumb.get_attribute("src"))
+        # A broken thumbnail would still be an <img>; only a decoded one has
+        # intrinsic dimensions. The fetch is the browser's own, so wait for it
+        # rather than sampling the frame the assertion happens to land on.
+        page.wait_for_function(
+            "() => { const img = document.querySelector('.artifact-thumb');"
+            " return !!img && img.complete && img.naturalWidth > 0; }"
+        )
+
+    def test_z_failed_detail_image_can_be_retried(self) -> None:
+        artifact_id = self.artifact(
+            content=CHECKER_PNG, content_type="image/png",
+            key="browser-artifact-image-error", output_port="report-error",
+        )
+        page = self.open("en-US", path="/ui/#/artifacts")
+        content_path = "**/api/v1/artifacts/*/content"
+        page.route(content_path, lambda route: route.abort())
+        page.goto(f"{self.base}/ui/#/artifacts/{quote(artifact_id, safe='')}")
+        dialog = page.locator("dialog[open].artifact-detail")
+        dialog.wait_for()
+        retry = dialog.get_by_role("button", name="Try again")
+        retry.wait_for()
+        self.assertEqual(0, dialog.locator(".artifact-image").count())
+
+        page.unroute(content_path)
+        retry.click()
+        page.wait_for_function(
+            "() => { const img = document.querySelector("
+            "'dialog.artifact-detail .artifact-image');"
+            " return !!img && img.complete && img.naturalWidth > 0; }"
+        )
 
 
 class RefreshTests(BrowserE2ETestCase):
@@ -2081,7 +2518,7 @@ class RefreshTests(BrowserE2ETestCase):
 
     def test_no_console_errors_on_any_view(self) -> None:
         for path in (
-            "/ui/", "/ui/#/goals", "/ui/#/workflows", "/ui/#/runs",
+            "/ui/", "/ui/#/goals", "/ui/#/workflows",
             "/ui/#/inbox", "/ui/#/artifacts", "/ui/#/agents",
             "/ui/#/ops", "/ui/#/settings",
         ):
@@ -2112,7 +2549,7 @@ class ReleaseHardeningTests(BrowserE2ETestCase):
         self.addCleanup(context.close)
         page = context.new_page()
         for view in (
-            "home", "goals", "workflows", "runs", "inbox", "artifacts",
+            "home", "goals", "workflows", "inbox", "artifacts",
             "agents", "ops", "settings",
         ):
             with self.subTest(view=view):
@@ -2174,7 +2611,7 @@ class ReleaseHardeningTests(BrowserE2ETestCase):
                 route.continue_()
 
         page.route("**/api/v1/runs?*", network)
-        page.click('[data-view="runs"]')
+        page.click("#refresh")
         page.wait_for_selector("#content .data-state.error")
         self.assertIn("Cannot reach the runtime", page.inner_text("#content"))
         failing["value"] = False
@@ -2188,7 +2625,7 @@ class ReleaseHardeningTests(BrowserE2ETestCase):
         page.wait_for_selector("#content .panel")
 
     def test_service_unavailable_is_locatable_and_retryable(self) -> None:
-        page = self.open("en-US", path="/ui/#/runs")
+        page = self.open("en-US", path="/ui/#/inbox")
         failing = {"value": True}
 
         def unavailable(route):

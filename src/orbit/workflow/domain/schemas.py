@@ -369,6 +369,7 @@ ARTIFACT_METADATA_SCHEMA = _object_schema(
         "created_at": _DATE_TIME,
         "committed_at": {"type": ["string", "null"]},
         "created_event_id": {**_ID, "type": ["string", "null"]},
+        "filename": {"type": "string", "minLength": 1, "maxLength": 255},
     },
 )
 
@@ -885,6 +886,26 @@ GRAPH_EXECUTION_PLAN_SCHEMA = _object_schema(
     },
 )
 
+GRAPH_EXECUTION_PLAN_1_3_SCHEMA = _object_schema(
+    [
+        "schema_version", "plan_id", "run_id", "plan_version", "workflow_id",
+        "workflow_version", "workflow_definition_hash", "entry_node_ids",
+        "terminal_node_ids", "ordered_node_ids", "nodes", "edges",
+        "outgoing_edges", "incoming_edges", "policies", "result",
+    ],
+    {
+        **GRAPH_EXECUTION_PLAN_SCHEMA["properties"],
+        "schema_version": {"enum": ["1.3"]},
+        "result": _object_schema(
+            ["node_id", "output_port_id"],
+            {
+                "node_id": {"type": "string", "minLength": 1},
+                "output_port_id": {"type": "string", "minLength": 1},
+            },
+        ),
+    },
+)
+
 def _planner_action_variant(kind: str, arguments: dict[str, Any]) -> dict[str, Any]:
     return _object_schema(
         ["kind", "arguments"],
@@ -1089,6 +1110,7 @@ CONTRACT_SCHEMAS = MappingProxyType(
         "input-manifest/1.0": freeze_json(INPUT_MANIFEST_SCHEMA),
         "execution-plan/1.1": freeze_json(EXECUTION_PLAN_SCHEMA),
         "execution-plan/1.2": freeze_json(GRAPH_EXECUTION_PLAN_SCHEMA),
+        "execution-plan/1.3": freeze_json(GRAPH_EXECUTION_PLAN_1_3_SCHEMA),
         "graph-token-scope/1.2": freeze_json(TOKEN_SCOPE_1_2_SCHEMA),
         "graph-plan-edge/1.2": freeze_json(PLAN_EDGE_1_2_SCHEMA),
         "graph-retry-policy/1.2": freeze_json(RETRY_POLICY_1_2_SCHEMA),

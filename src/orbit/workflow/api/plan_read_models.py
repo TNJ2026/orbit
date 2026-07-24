@@ -44,7 +44,25 @@ def _plan_row(connection, run_id: str, version: int | None):
     ).fetchone()
 
 
-def _node_definition(node: Mapping[str, Any]) -> dict[str, Any]:
+def _node_labels(connection, workflow_id: str, workflow_version: int) -> dict[str, str]:
+    """Reader-facing step names from the Workflow version a plan was built on."""
+
+    row = connection.execute(
+        "SELECT canonical_ir_json FROM workflow_versions"
+        " WHERE workflow_id = ? AND version = ?",
+        (workflow_id, workflow_version),
+    ).fetchone()
+    if row is None:
+        return {}
+    labels = {}
+    for node in json.loads(row["canonical_ir_json"]).get("nodes", ()):
+        label = node.get("label")
+        if isinstance(label, str) and label.strip():
+            labels[str(node["id"])] = label.strip()
+    return labels
+
+
+def _node_definition(node: Mapping[str, Any], label: str | None = None) -> dict[str, Any]:
     """One node, definition fields only.
 
     The handler fingerprint is included deliberately: two plan versions whose
@@ -55,6 +73,7 @@ def _node_definition(node: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "node_id": node["node_id"],
         "kind": node["kind"],
+        "label": label,
         "handler_name": node.get("handler_name"),
         "handler_version": node.get("handler_version"),
         "handler_manifest_fingerprint": node.get("handler_manifest_fingerprint"),
@@ -67,7 +86,7 @@ def _node_definition(node: Mapping[str, Any]) -> dict[str, Any]:
 def _definition_edges(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
     """Normalize linear 1.1 and static-graph 1.2 edges for read clients."""
 
-    if plan.get("schema_version") == "1.2":
+    if plan.get("schema_version") in {"1.2", "1.3"}:
         return [
             {
                 "edge_id": edge["edge_id"],
@@ -111,6 +130,13 @@ class PlanReadModelService:
                     (str(run_id),),
                 )
             ]
+            # Step names come from the Workflow version this plan was built
+            # from, so a diagram reads as steps rather than node ids. They are
+            # presentation only: nothing about execution depends on them, and a
+            # node a dynamic patch added simply has none.
+            labels = _node_labels(
+                connection, row["workflow_id"], int(row["workflow_version"])
+            )
 
         plan = json.loads(row["canonical_plan_json"])
         edges = _definition_edges(plan)
@@ -126,7 +152,10 @@ class PlanReadModelService:
             "terminal_node_id": plan.get("terminal_node_id"),
             "entry_node_ids": plan.get("entry_node_ids") or [plan.get("entry_node_id")],
             "terminal_node_ids": plan.get("terminal_node_ids") or [plan.get("terminal_node_id")],
-            "nodes": [_node_definition(node) for node in plan.get("nodes") or ()],
+            "nodes": [
+                _node_definition(node, labels.get(node["node_id"]))
+                for node in plan.get("nodes") or ()
+            ],
             "edges": edges,
             "available_versions": versions,
         }

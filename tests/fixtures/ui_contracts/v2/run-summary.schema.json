@@ -47,6 +47,11 @@
       "type": "boolean",
       "description": "Actor-aware: true only when the requesting actor can act. Must agree with the inbox badge semantics."
     },
+    "artifact_count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "How many committed Artifacts of this run the requesting actor may read. Optional and additive: it exists so a Goal list can say whether a row has anything to open without one follow-up read per row, which is the same rule the rest of this contract states. Counted through artifact_acl, so it never reveals Artifacts the actor cannot open."
+    },
     "budget_summary": {
       "type": ["object", "null"],
       "additionalProperties": false,

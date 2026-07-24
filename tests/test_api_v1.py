@@ -109,6 +109,97 @@ class WorkflowCatalogProjectionTests(unittest.TestCase):
         }]
         self.assertIsNone(WorkflowCatalogReadModelService._goal_binding(ir, inputs))
 
+    def test_goal_readiness_accepts_one_goal_and_one_legacy_result(self) -> None:
+        ir = {
+            "entry": ["analyze"],
+            "terminals": ["done"],
+            "nodes": [
+                {
+                    "id": "analyze", "kind": "action",
+                    "handler": {"name": "agent.claude", "version": "1.0.0"},
+                    "outputs": [{"id": "result"}],
+                },
+                {
+                    "id": "done", "kind": "terminal",
+                    "inputs": [{"id": "result"}],
+                },
+            ],
+            "edges": [{
+                "source_node": "analyze", "source_port": "result",
+                "target_node": "done", "target_port": "result",
+            }],
+        }
+        inputs = [{
+            "id": "prompt", "required": True, "has_default": False,
+            "schema": {"type": "object"}, "transport": "inline",
+        }]
+        binding = WorkflowCatalogReadModelService._goal_binding(ir, inputs)
+
+        self.assertEqual(
+            ("ready", None),
+            WorkflowCatalogReadModelService._goal_readiness(
+                ir, inputs, binding, source_available=True,
+            ),
+        )
+
+    def test_unready_workflow_is_upgradeable_only_when_source_exists(self) -> None:
+        ir = {"entry": [], "terminals": [], "nodes": [], "edges": []}
+        self.assertEqual(
+            ("needs_upgrade", "goal_binding_missing"),
+            WorkflowCatalogReadModelService._goal_readiness(
+                ir, [], None, source_available=True,
+            ),
+        )
+        self.assertEqual(
+            ("needs_migration", "goal_binding_missing"),
+            WorkflowCatalogReadModelService._goal_readiness(
+                ir, [], None, source_available=False,
+            ),
+        )
+
+    def test_required_non_goal_input_must_have_a_default(self) -> None:
+        ir = {
+            "entry": ["analyze"], "terminals": ["done"],
+            "nodes": [
+                {
+                    "id": "analyze", "kind": "action",
+                    "handler": {"name": "agent.claude", "version": "1.0.0"},
+                    "outputs": [{"id": "result"}],
+                },
+                {"id": "done", "kind": "terminal", "inputs": [{"id": "result"}]},
+            ],
+            "edges": [{
+                "source_node": "analyze", "source_port": "result",
+                "target_node": "done", "target_port": "result",
+            }],
+        }
+        inputs = [
+            {
+                "id": "prompt", "required": True, "has_default": False,
+                "schema": {"type": "object"}, "transport": "inline",
+            },
+            {
+                "id": "region", "required": True, "has_default": False,
+                "schema": {"type": "string"}, "transport": "inline",
+            },
+        ]
+        binding = WorkflowCatalogReadModelService._goal_binding(ir, inputs)
+
+        self.assertIsNotNone(binding)
+        self.assertEqual(
+            ("needs_upgrade", "required_input_without_default"),
+            WorkflowCatalogReadModelService._goal_readiness(
+                ir, inputs, binding, source_available=True,
+            ),
+        )
+        inputs[1]["has_default"] = True
+        self.assertEqual(
+            ("ready", None),
+            WorkflowCatalogReadModelService._goal_readiness(
+                ir, inputs, binding, source_available=True,
+            ),
+        )
+
 
 class EnvelopeTests(unittest.TestCase):
     def test_shape_is_stable(self) -> None:
@@ -415,6 +506,17 @@ class RunLifecycleTests(ApiTestCase):
             summary = client.get(f"/api/v1/runs/{run_id}", actor="reader")
             self.assertEqual(200, summary.status_code, summary.text)
             self.assertIsNotNone(summary.json()["projection_version"])
+            current_step = summary.json()["data"]["current_step"]
+            if current_step is not None:
+                self.assertIn(current_step["state"], {"running", "retrying"})
+                self.assertTrue(current_step["node_id"])
+                # The step is named the way the definition names it, never by
+                # its internal node id.
+                self.assertIn(
+                    current_step["label"],
+                    {"Collect the data", "Tidy it up", "Write the report"},
+                )
+                self.assertNotIn(current_step["label"], {"collect", "transform"})
 
             responsibilities = client.get(
                 f"/api/v1/runs/{run_id}/responsibilities", actor="reader"
@@ -718,12 +820,18 @@ class DataApiTests(ApiTestCase):
 
 
 class ArtifactApiTests(ApiTestCase):
-    def _artifact(self, client, *, content=b"hello artifact", subject="sensitive"):
+    def _artifact(
+        self, client, *, content=b"hello artifact", subject="sensitive",
+        content_type="text/plain", goal="",
+    ):
         from orbit.workflow.persistence.database import connect_workflow_database
 
+        body = {"workflow_id": "workflow:linear", "input": {"value": 7}}
+        if goal:
+            body["goal"] = goal
         run_id = client.post(
-            "/api/v1/runs", actor="writer", key=f"artifact-{len(content)}",
-            body={"workflow_id": "workflow:linear", "input": {"value": 7}},
+            "/api/v1/runs", actor="writer", key=f"artifact-{len(content)}-{content_type}",
+            body=body,
         ).json()["data"]["run_id"]
         receipt = self.artifact_backend.write(content, max_size_bytes=len(content))
         artifact_id = f"artifact:{receipt.checksum.value.removeprefix('sha256:')}"
@@ -734,12 +842,12 @@ class ArtifactApiTests(ApiTestCase):
             ).fetchone()[0]
             now = "2026-01-01T00:00:00+00:00"
             connection.execute(
-                "INSERT INTO artifacts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO artifacts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     artifact_id, run_id, "workflow:linear", "attempt", "attempt:test",
-                    "node_run:test", "report", "schema:text", "text/plain",
+                    "node_run:test", "report", "schema:text", content_type,
                     receipt.checksum.value, receipt.size_bytes, receipt.blob_key,
-                    "run", run_id, "committed", now, now, event_id,
+                    "run", run_id, "committed", now, now, event_id, None,
                 ),
             )
             connection.execute(
@@ -750,7 +858,8 @@ class ArtifactApiTests(ApiTestCase):
                 connection.execute(
                     "INSERT INTO artifact_links VALUES (?,?,?,?,?,?,?,?)",
                     (
-                        f"artifact_link:{kind}-{len(content)}", "workflow:linear", run_id,
+                        f"artifact_link:{kind}-{len(content)}-{content_type}",
+                        "workflow:linear", run_id,
                         artifact_id, kind, target, event_id, now,
                     ),
                 )
@@ -828,6 +937,138 @@ class ArtifactApiTests(ApiTestCase):
             )
             self.assertEqual(404, denied.status_code)
             self.assertEqual(denied.json(), public_missing.json())
+
+    def test_a_document_is_catalogued_by_its_own_title_and_goal(self) -> None:
+        with AsgiHarness(self.app) as client:
+            _run_id, artifact_id, _blob = self._artifact(
+                client, content=b"---\n# Quarterly report\n\nBody text.\n",
+                content_type="text/markdown", goal="Ship the quarterly report",
+            )
+            item = client.get(
+                "/api/v1/artifacts", actor="sensitive"
+            ).json()["data"]["artifacts"][0]
+            self.assertEqual(artifact_id, item["artifact_id"])
+            self.assertEqual("Quarterly report", item["title"])
+            self.assertEqual("Ship the quarterly report", item["goal"])
+            self.assertEqual("workflow:linear", item["workflow_id"])
+            self.assertEqual("document", item["preview_kind"])
+            self.assertFalse(item["image_previewable"])
+            detail = client.get(
+                f"/api/v1/artifacts/{artifact_id}", actor="sensitive"
+            ).json()["data"]
+            self.assertEqual("Quarterly report", detail["title"])
+            self.assertEqual("Ship the quarterly report", detail["goal"])
+
+    def test_a_step_is_named_by_the_definition_the_run_is_bound_to(self) -> None:
+        """Not by the catalog's current definition, and not by its node id.
+
+        A Run shows the flow it actually executed, so its step names come from
+        the immutable Workflow version it was started against.
+        """
+
+        with AsgiHarness(self.app) as client:
+            run_id = client.post(
+                "/api/v1/runs", actor="writer", key="labelled",
+                body={"workflow_id": "workflow:linear", "input": {"value": 1}},
+            ).json()["data"]["run_id"]
+            graph = client.get(
+                f"/api/v1/runs/{run_id}/graph", actor="sensitive"
+            ).json()["data"]["definition"]["nodes"]
+            labels = {node["node_id"]: node["label"] for node in graph}
+
+            self.assertEqual("Collect the data", labels["collect"])
+            self.assertEqual("Finish", labels["done"])
+
+    def test_the_run_list_carries_an_acl_scoped_artifact_count(self) -> None:
+        """A Goal list says "has files" without a follow-up read per row.
+
+        The count travels through `artifact_acl` like every other Artifact
+        read: telling an actor a Run has files they cannot open would be a
+        permission leak wearing a convenience's clothes.
+        """
+
+        with AsgiHarness(self.app) as client:
+            run_id, _artifact_id, _blob = self._artifact(client)
+            visible = client.get("/api/v1/runs", actor="sensitive").json()["data"]["runs"]
+            counts = {item["run_id"]: item["artifact_count"] for item in visible}
+            self.assertEqual(1, counts[run_id])
+
+            hidden = client.get("/api/v1/runs", actor="reader").json()["data"]["runs"]
+            self.assertEqual(
+                0, {item["run_id"]: item["artifact_count"] for item in hidden}[run_id],
+            )
+
+    def test_a_multi_line_goal_is_catalogued_by_its_first_line(self) -> None:
+        with AsgiHarness(self.app) as client:
+            self._artifact(
+                client, content=b"notes", content_type="text/plain",
+                goal="  Compare competitor pricing  \nThen draft the memo.\n",
+            )
+            item = client.get(
+                "/api/v1/artifacts", actor="sensitive"
+            ).json()["data"]["artifacts"][0]
+            self.assertEqual("Compare competitor pricing", item["goal"])
+
+    def test_a_title_is_content_and_needs_the_content_scope(self) -> None:
+        """A viewer keeps the catalog; it just stops describing the bytes."""
+
+        with AsgiHarness(self.app) as client:
+            _run_id, artifact_id, _blob = self._artifact(
+                client, content=b"# Internal memo\n", content_type="text/markdown",
+                subject="reader", goal="Draft the memo",
+            )
+            item = client.get(
+                "/api/v1/artifacts", actor="reader"
+            ).json()["data"]["artifacts"][0]
+            self.assertEqual(artifact_id, item["artifact_id"])
+            self.assertIsNone(item["title"])
+            # Identity is metadata, and stays.
+            self.assertEqual("Draft the memo", item["goal"])
+            self.assertIsNone(client.get(
+                f"/api/v1/artifacts/{artifact_id}", actor="reader"
+            ).json()["data"]["title"])
+
+    def test_a_raster_image_previews_inline_and_a_svg_never_does(self) -> None:
+        png = (
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+            b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00"
+            b"\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
+        )
+        with AsgiHarness(self.app) as client:
+            _run_id, image_id, _blob = self._artifact(
+                client, content=png, content_type="image/png",
+            )
+            item = client.get(
+                f"/api/v1/artifacts?content_type=image/png", actor="sensitive"
+            ).json()["data"]["artifacts"][0]
+            self.assertEqual("image", item["preview_kind"])
+            self.assertTrue(item["image_previewable"])
+            # An image has no text title to read out of its bytes.
+            self.assertIsNone(item["title"])
+            inline = client.get(
+                f"/api/v1/artifacts/{image_id}/content", actor="sensitive"
+            )
+            self.assertEqual(200, inline.status_code, inline.text)
+            self.assertEqual(png, inline.content)
+            self.assertEqual("image/png", inline.headers["content-type"])
+            self.assertEqual("nosniff", inline.headers["x-content-type-options"])
+            self.assertIn("sandbox", inline.headers["content-security-policy"])
+            self.assertEqual("no-store", inline.headers["cache-control"])
+
+            _run_id, svg_id, _blob = self._artifact(
+                client, content=b"<svg xmlns='http://www.w3.org/2000/svg'/>",
+                content_type="image/svg+xml",
+            )
+            svg_item = client.get(
+                "/api/v1/artifacts?content_type=image/svg%2Bxml", actor="sensitive"
+            ).json()["data"]["artifacts"][0]
+            self.assertEqual("binary", svg_item["preview_kind"])
+            self.assertFalse(svg_item["image_previewable"])
+            refused = client.get(
+                f"/api/v1/artifacts/{svg_id}/content", actor="sensitive"
+            )
+            self.assertEqual(415, refused.status_code)
+            self.assertEqual("preview_unsupported", refused.json()["error"]["code"])
 
     def test_large_text_is_not_loaded_as_a_preview(self) -> None:
         with AsgiHarness(self.app) as client:
@@ -918,11 +1159,10 @@ class HandlerDriftTests(unittest.TestCase):
             "schema://object/1.0", (), (), True, True,
         )
 
-    def detail(self, client, version=None):
-        path = "/api/v1/workflows/workflow:drifted"
-        if version is not None:
-            path += f"?version={version}"
-        return client.get(path, actor="writer").json()["data"]
+    def detail(self, client):
+        return client.get(
+            "/api/v1/workflows/workflow:drifted", actor="writer"
+        ).json()["data"]
 
     def test_the_stale_binding_is_named_not_buried(self) -> None:
         with AsgiHarness(self.app) as client:
@@ -968,8 +1208,9 @@ class HandlerDriftTests(unittest.TestCase):
                 [("work", "0.9.0", "1.0.0")],
                 [(m["node_id"], m["from"], m["to"]) for m in data["rebound"]],
             )
-            # The new version is clean, and the run it refused now starts.
-            self.assertEqual([], self.detail(client, version=2)["handler_drift"])
+            # What the catalog now serves is clean, and the run it refused
+            # starts.
+            self.assertEqual([], self.detail(client)["handler_drift"])
             started = client.post(
                 "/api/v1/runs", actor="writer", key="run-after-rebind",
                 body={"workflow_id": "workflow:drifted", "input": {"value": 1}},
@@ -1174,21 +1415,27 @@ class CatalogTests(ApiTestCase):
                 client.get(f"/api/v1/runs/{run_id}/output", actor="reader").status_code,
             )
 
-    def test_workflow_definition_read_is_versioned_and_actor_shaped(self) -> None:
+    def test_workflow_definition_read_is_current_only_and_actor_shaped(self) -> None:
         with AsgiHarness(self.app) as client:
-            reader = client.get(
-                "/api/v1/workflows/workflow:linear?version=1", actor="reader"
-            )
+            reader = client.get("/api/v1/workflows/workflow:linear", actor="reader")
             self.assertEqual(200, reader.status_code, reader.text)
             detail = reader.json()["data"]
             self.assertEqual("workflow:linear", detail["workflow_id"])
             self.assertEqual(1, detail["latest_version"])
             self.assertEqual("workflow:linear", detail["definition"]["workflow_id"])
             self.assertEqual([], detail["allowed_commands"])
+            # Superseded definitions are not addressable: no selector, and no
+            # per-version payload for a caller to walk back through.
+            self.assertNotIn("versions", detail)
+            self.assertNotIn("selected_version", detail)
 
-            missing = client.get(
-                "/api/v1/workflows/workflow:linear?version=99", actor="writer"
+            selected = client.get(
+                "/api/v1/workflows/workflow:linear?version=1", actor="writer"
             )
+            self.assertEqual(404, selected.status_code)
+            self.assertEqual("not_found", selected.json()["error"]["code"])
+
+            missing = client.get("/api/v1/workflows/workflow:absent", actor="writer")
             self.assertEqual(404, missing.status_code)
             self.assertEqual("not_found", missing.json()["error"]["code"])
 
@@ -1582,17 +1829,13 @@ class WorkflowDraftApiTests(ApiTestCase):
             ).json()["data"]
             self.assertEqual(2, refreshed["latest_version"])
             self.assertEqual("Linear, edited", refreshed["name"])
-            historical = client.get(
-                "/api/v1/workflows/workflow:draftable?version=1", actor="writer"
-            ).json()["data"]
-            self.assertEqual(1, historical["selected_version"])
-            self.assertEqual(2, historical["latest_version"])
-            self.assertEqual([2, 1], [item["version"] for item in historical["versions"]])
+            # Editing again edits what was just published: the next draft is
+            # based on the definition the catalog serves, never an older one.
             create = next(
-                item for item in historical["allowed_commands"]
+                item for item in refreshed["allowed_commands"]
                 if item["command"] == "workflow.draft.create"
             )
-            self.assertEqual(1, create["expected_version"])
+            self.assertEqual(2, create["expected_version"])
 
     def test_invalid_source_reports_diagnostics_and_blocks_publish(self) -> None:
         with AsgiHarness(self._app_with_reviser(lambda _prompt: "{}")) as client:
@@ -2002,6 +2245,13 @@ class CapabilityTests(ApiTestCase):
             self.assertFalse(data["permissions"]["start_run"])
             self.assertFalse(data["permissions"]["ops_read"])
             self.assertFalse(data["permissions"]["ops_write"])
+            self.assertEqual(
+                {
+                    "simplified_goal_ui": False,
+                    "single_goal_mode": False,
+                },
+                data["product_mode"],
+            )
             caps = data["capabilities"]
             self.assertTrue(caps["static_graph"]["available"])
             self.assertTrue(caps["human_tasks"]["available"])
@@ -2023,6 +2273,45 @@ class CapabilityTests(ApiTestCase):
             self.assertTrue(writer["permissions"]["start_run"])
             self.assertTrue(writer["permissions"]["ops_read"])
             self.assertTrue(writer["permissions"]["ops_write"])
+
+    def test_capabilities_report_simplified_single_goal_product_mode(self) -> None:
+        app = create_app(
+            self.db,
+            handlers=[transform_registration()], schemas=SCHEMAS,
+            worker_count=1, poll_seconds=0.02,
+            authenticator=lambda request: request.headers.get("x-orbit-actor"),
+            authorizer=Authorizer(lambda actor: self.scopes.get(actor, [])),
+            artifact_backend=self.artifact_backend,
+            single_goal_mode=True,
+            simplified_goal_ui=True,
+        )
+        with AsgiHarness(app) as client:
+            data = client.get(
+                "/api/v1/capabilities", actor="reader"
+            ).json()["data"]
+            self.assertEqual(
+                {
+                    "simplified_goal_ui": True,
+                    "single_goal_mode": True,
+                },
+                data["product_mode"],
+            )
+            catalog = client.get(
+                "/api/v1/workflows", actor="writer"
+            ).json()["data"]["workflows"]
+            self.assertTrue(catalog)
+            self.assertTrue(all(
+                item["goal_readiness"] in {
+                    "ready", "needs_upgrade", "needs_migration",
+                }
+                for item in catalog
+            ))
+            for item in catalog:
+                if item["goal_readiness"] != "ready":
+                    self.assertNotIn(
+                        "run.start",
+                        {command["command"] for command in item["allowed_commands"]},
+                    )
 
 
 class OperationsReadTests(ApiTestCase):

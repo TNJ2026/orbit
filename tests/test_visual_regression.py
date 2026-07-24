@@ -20,6 +20,7 @@ P9 expands this to every key page and state (plan §9.2).
 
 from __future__ import annotations
 
+import base64
 import json
 import hashlib
 import os
@@ -69,34 +70,46 @@ FREEZE_CSS = """
 """
 
 
+# A fixed 16x16 checkerboard: the catalog draws image Artifacts as themselves,
+# so the baseline needs a picture whose bytes never change.
+CHECKER_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAM0lEQVR42mN0av3CAAPL0uFMhq"
+    "iZDFjFmRhIBLTXwPjizReC7kYWH4R+YCHG3aPxQHMNAER/FF7xPoSoAAAAAElFTkSuQmCC"
+)
+
+
 def seed_visual_artifact(db, service, backend) -> str:
     run_id = RunApplicationService(db, service).start_run(
         workflow_id="workflow:linear", inputs={"value": 7}, actor="local",
-        idempotency_key="visual-artifact",
+        idempotency_key="visual-artifact", goal="Publish the visual baseline",
         now=datetime(2026, 1, 1, tzinfo=timezone.utc),
     ).run_id
-    receipt = backend.write(b"stable visual artifact", max_size_bytes=1024)
-    artifact_id = f"artifact:{receipt.checksum.value.removeprefix('sha256:')}"
     now = "2026-01-01T00:00:00+00:00"
-    with connect_workflow_database(db) as connection:
-        event_id = connection.execute(
-            "SELECT event_id FROM run_events WHERE run_id=? ORDER BY global_position LIMIT 1",
-            (run_id,),
-        ).fetchone()[0]
-        connection.execute(
-            "INSERT INTO artifacts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (
-                artifact_id, run_id, "workflow:linear", "attempt", "attempt:visual",
-                "node_run:visual", "report", "schema:text", "text/plain",
-                receipt.checksum.value, receipt.size_bytes, receipt.blob_key,
-                "run", run_id, "committed", now, now, event_id,
-            ),
-        )
-        connection.execute(
-            "INSERT INTO artifact_acl VALUES (?,'local','read','local',?)",
-            (artifact_id, now),
-        )
-        connection.commit()
+    for content, content_type, port in (
+        (b"# Stable visual artifact\n\nBody.\n", "text/markdown", "report"),
+        (CHECKER_PNG, "image/png", "chart"),
+    ):
+        receipt = backend.write(content, max_size_bytes=64 * 1024)
+        artifact_id = f"artifact:{receipt.checksum.value.removeprefix('sha256:')}"
+        with connect_workflow_database(db) as connection:
+            event_id = connection.execute(
+                "SELECT event_id FROM run_events WHERE run_id=? ORDER BY global_position LIMIT 1",
+                (run_id,),
+            ).fetchone()[0]
+            connection.execute(
+                "INSERT INTO artifacts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    artifact_id, run_id, "workflow:linear", "attempt", "attempt:visual",
+                    "node_run:visual", port, "schema:text", content_type,
+                    receipt.checksum.value, receipt.size_bytes, receipt.blob_key,
+                    "run", run_id, "committed", now, now, event_id, None,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO artifact_acl VALUES (?,'local','read','local',?)",
+                (artifact_id, now),
+            )
+            connection.commit()
     return run_id
 
 
@@ -140,7 +153,17 @@ def pixel_difference(expected: bytes, actual: bytes) -> tuple[float, bytes | Non
 
 
 @unittest.skipUnless(sync_playwright, "playwright is not installed")
-class VisualRegressionTests(unittest.TestCase):
+class VisualCaptureCase(unittest.TestCase):
+    """Boots one Runtime and screenshots it. Subclasses choose the product mode.
+
+    The simplified goal UI is a different product surface, not a skin: its
+    navigation, workspace and run page are drawn by different code. It needs
+    its own baselines, and the only difference in getting them is the flag the
+    server was started with.
+    """
+
+    SIMPLIFIED_GOAL_UI = False
+
     @classmethod
     def setUpClass(cls) -> None:
         import uvicorn
@@ -161,6 +184,8 @@ class VisualRegressionTests(unittest.TestCase):
             artifact_backend=cls.artifact_backend,
             workflow_generator=lambda _prompt: source,
             serve_ui=True,
+            simplified_goal_ui=cls.SIMPLIFIED_GOAL_UI,
+            single_goal_mode=True,
         )
         publish_linear_workflow(
             cls.db,
@@ -341,6 +366,10 @@ class VisualRegressionTests(unittest.TestCase):
                 f"(budget {MAX_DIFF_PIXEL_RATIO:.1%}); wrote {name}.actual.png"
             )
 
+
+class VisualRegressionTests(VisualCaptureCase):
+    """The full Runtime UI, at the viewports and themes it ships in."""
+
     def test_prototype_dark_1280(self) -> None:
         viewport = VIEWPORTS["1280x800"]
         image = self.capture(PROTOTYPE.as_uri(), theme="dark", viewport=viewport)
@@ -358,25 +387,11 @@ class VisualRegressionTests(unittest.TestCase):
 
     def test_p2_discovery_views_in_both_themes(self) -> None:
         viewport = VIEWPORTS["1280x800"]
-        for view in ("goals", "runs"):
-            for theme in ("dark", "light"):
-                name = f"{view}-{theme}-1280x800"
-                with self.subTest(name=name):
-                    image = self.capture(
-                        f"{self.base}/ui/#/{view}", theme=theme, viewport=viewport
-                    )
-                    self.assert_matches_baseline(name, image, viewport)
-
-    def test_runs_phone_cards_in_both_themes(self) -> None:
-        """The operator list stays usable without horizontal table panning."""
-
-        viewport = VIEWPORTS["360x800"]
         for theme in ("dark", "light"):
-            name = f"runs-{theme}-360x800"
+            name = f"goals-{theme}-1280x800"
             with self.subTest(name=name):
                 image = self.capture(
-                    f"{self.base}/ui/#/runs", theme=theme, viewport=viewport,
-                    ready_selector=".runs-table tbody tr",
+                    f"{self.base}/ui/#/goals", theme=theme, viewport=viewport
                 )
                 self.assert_matches_baseline(name, image, viewport)
 
@@ -544,6 +559,64 @@ class VisualRegressionTests(unittest.TestCase):
                     self.assert_matches_baseline(
                         f"{name}-{theme}-1280x800", image, viewport
                     )
+
+
+class SimplifiedVisualRegressionTests(VisualCaptureCase):
+    """The simplified Goal UI, which draws its own shell, workspace and run.
+
+    These are separate baselines rather than extra assertions on the full UI's:
+    the two modes share a stylesheet but almost no layout, so a regression in
+    one is invisible in the other.
+    """
+
+    SIMPLIFIED_GOAL_UI = True
+
+    def test_the_workspace_and_catalog_in_both_themes(self) -> None:
+        viewport = VIEWPORTS["1280x800"]
+        for theme in ("dark", "light"):
+            name = f"simplified-workspace-{theme}-1280x800"
+            with self.subTest(name=name):
+                image = self.capture(
+                    f"{self.base}/ui/", theme=theme, viewport=viewport,
+                    ready_selector=".simplified-workspace-composer",
+                )
+                self.assert_matches_baseline(name, image, viewport)
+
+    def test_the_run_page_in_both_themes(self) -> None:
+        viewport = VIEWPORTS["1280x800"]
+        for theme in ("dark", "light"):
+            name = f"simplified-run-{theme}-1280x800"
+            with self.subTest(name=name):
+                image = self.capture(
+                    f"{self.base}/ui/#/runs/{self.visual_run_id}",
+                    theme=theme, viewport=viewport,
+                    ready_selector=".simplified-run-hero",
+                )
+                self.assert_matches_baseline(name, image, viewport)
+
+    def test_the_history_page_in_both_themes(self) -> None:
+        viewport = VIEWPORTS["1280x800"]
+        for theme in ("dark", "light"):
+            name = f"simplified-history-{theme}-1280x800"
+            with self.subTest(name=name):
+                image = self.capture(
+                    f"{self.base}/ui/#/goals", theme=theme, viewport=viewport,
+                    ready_selector=".history-goal-row",
+                )
+                self.assert_matches_baseline(name, image, viewport)
+
+    def test_the_workspace_on_a_phone(self) -> None:
+        """The simplified UI is the one most likely to be opened on a phone."""
+
+        viewport = VIEWPORTS["360x800"]
+        for theme in ("dark", "light"):
+            name = f"simplified-workspace-{theme}-360x800"
+            with self.subTest(name=name):
+                image = self.capture(
+                    f"{self.base}/ui/", theme=theme, viewport=viewport,
+                    ready_selector=".simplified-workspace-composer",
+                )
+                self.assert_matches_baseline(name, image, viewport)
 
 
 if __name__ == "__main__":

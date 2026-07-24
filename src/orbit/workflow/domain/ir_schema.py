@@ -8,12 +8,12 @@ from typing import Any, Mapping
 from jsonschema import Draft202012Validator
 
 from .data import ArtifactVisibility, PortDataPolicy, PortTransport
-from .definitions import IREdge, IRExtension, IRHandlerRef, IRNode, IRPolicy, IRPort, WorkflowIR
+from .definitions import IREdge, IRExtension, IRHandlerRef, IRNode, IRPolicy, IRPort, IRResult, WorkflowIR
 from .schemas import SchemaValidationError
 from .serialization import freeze_json, to_primitive
 
 
-IR_SCHEMA_ID = "orbit://workflow/ir/1.2"
+IR_SCHEMA_ID = "orbit://workflow/ir/1.3"
 
 
 def _array(ref: str) -> dict[str, Any]:
@@ -30,7 +30,7 @@ _IR_SCHEMA: dict[str, Any] = {
         "outputs", "nodes", "edges", "entry", "terminals", "policies", "extensions", "indexes",
     ],
     "properties": {
-        "ir_version": {"enum": ["1.1", "1.2"]},
+        "ir_version": {"enum": ["1.1", "1.2", "1.3"]},
         "workflow_id": {"type": "string", "minLength": 1},
         "name": {"type": "string", "minLength": 1},
         "description": {"type": "string"},
@@ -44,6 +44,15 @@ _IR_SCHEMA: dict[str, Any] = {
         "policies": _array("#/$defs/policy"),
         "extensions": _array("#/$defs/extension"),
         "indexes": {"type": "object"},
+        "result": {
+            "type": ["object", "null"],
+            "additionalProperties": False,
+            "required": ["node_id", "output_port_id"],
+            "properties": {
+                "node_id": {"type": "string", "minLength": 1},
+                "output_port_id": {"type": "string", "minLength": 1},
+            },
+        },
     },
     "$defs": {
         "port": {
@@ -102,6 +111,7 @@ _IR_SCHEMA: dict[str, Any] = {
                 "policies": {"type": "array", "items": {"type": "string"}},
                 "extension": {"oneOf": [{"$ref": "#/$defs/extension"}, {"type": "null"}]},
                 "route_mode": {"type": ["string", "null"], "enum": ["exclusive", "parallel", None]},
+                "label": {"type": "string", "minLength": 1, "maxLength": 80},
             },
         },
         "edge": {
@@ -175,7 +185,7 @@ def workflow_ir_from_primitive(value: Mapping[str, Any]) -> WorkflowIR:
                 ),
                 node["config"], tuple(node["policies"]),
                 None if extension is None else _extension(extension),
-                node.get("route_mode"),
+                node.get("route_mode"), node.get("label"),
             )
         )
     return WorkflowIR(
@@ -194,4 +204,7 @@ def workflow_ir_from_primitive(value: Mapping[str, Any]) -> WorkflowIR:
         tuple(value["entry"]), tuple(value["terminals"]),
         tuple(IRPolicy(item["id"], item["kind"], item["config"]) for item in value["policies"]),
         tuple(_extension(item) for item in value["extensions"]), value["indexes"],
+        None if value.get("result") is None else IRResult(
+            value["result"]["node_id"], value["result"]["output_port_id"]
+        ),
     )

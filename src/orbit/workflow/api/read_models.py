@@ -158,6 +158,55 @@ class ReadModelService:
             found.sort(key=lambda item: (order[item["kind"]], str(item["id"])))
         return grouped
 
+    @staticmethod
+    def _node_labels(connection, run_row) -> dict[str, str]:
+        """Every step's reader-facing name, from the Run's own definition.
+
+        The label is read from the immutable Workflow version this Run is bound
+        to, never from whatever the catalog serves now: a Run shows the flow it
+        actually executed. Nodes without a label — older definitions, or ones a
+        dynamic patch added — are simply absent, and the caller says nothing
+        rather than showing an internal id.
+        """
+
+        row = connection.execute(
+            "SELECT canonical_ir_json FROM workflow_versions"
+            " WHERE workflow_id = ? AND version = ?",
+            (run_row["workflow_id"], run_row["workflow_version"]),
+        ).fetchone()
+        if row is None:
+            return {}
+        labels = {}
+        for node in json.loads(row["canonical_ir_json"]).get("nodes", ()):
+            label = node.get("label")
+            if isinstance(label, str) and label.strip():
+                labels[str(node["id"])] = label.strip()
+        return labels
+
+    def _artifact_counts_for_runs(
+        self, connection, run_ids: Sequence[str], *, actor: str | None
+    ) -> dict[str, int]:
+        """How many Artifacts of each Run this actor may see.
+
+        Counted through `artifact_acl`, exactly like the Artifact catalog: a
+        list that said "has files" about files the reader cannot open would be
+        a permission leak dressed up as a convenience.
+        """
+
+        if not run_ids or actor is None:
+            return {}
+        placeholders = ",".join("?" for _ in run_ids)
+        rows = connection.execute(
+            "SELECT a.run_id AS run_id, COUNT(DISTINCT a.artifact_id) AS total"
+            " FROM artifacts a JOIN artifact_acl acl"
+            " ON acl.artifact_id = a.artifact_id"
+            f" WHERE a.run_id IN ({placeholders}) AND a.status = 'committed'"
+            " AND acl.subject = ? AND acl.permission = 'read'"
+            " GROUP BY a.run_id",
+            (*run_ids, actor),
+        ).fetchall()
+        return {row["run_id"]: int(row["total"]) for row in rows}
+
     def _budgets_for_runs(
         self, connection, run_ids: Sequence[str]
     ) -> dict[str, dict[str, Any]]:
@@ -204,7 +253,9 @@ class ReadModelService:
         q: str = "",
         status: str | None = None,
         responsibility: str | None = None,
+        terminal_only: bool = False,
         can_act: bool = False,
+        actor: str | None = None,
     ) -> tuple[list[dict[str, Any]], str | None]:
         state = decode_cursor(cursor)
         q = q.strip().lower()
@@ -216,7 +267,8 @@ class ReadModelService:
             raise ValueError("responsibility is not valid")
         query_key = {
             "q": q, "status": status, "responsibility": responsibility,
-            "active": bool(active_only), "can_act": bool(can_act),
+            "active": bool(active_only), "terminal": bool(terminal_only),
+            "can_act": bool(can_act),
         }
         if state and state.get("query") != query_key:
             raise ValueError("cursor does not match this run query")
@@ -227,6 +279,8 @@ class ReadModelService:
             placeholders = ",".join("?" for _ in ACTIVE_RUN_STATUSES)
             clauses.append(f"wr.status IN ({placeholders})")
             params.extend(ACTIVE_RUN_STATUSES)
+        if terminal_only:
+            clauses.append("wr.status IN ('succeeded','failed','cancelled')")
         if status is not None:
             statuses = RUN_QUERY_STATUSES[status]
             placeholders = ",".join("?" for _ in statuses)
@@ -306,12 +360,14 @@ class ReadModelService:
             run_ids = tuple(row["run_id"] for row in rows)
             responsibilities = self._responsibilities_for_runs(connection, run_ids)
             budgets = self._budgets_for_runs(connection, run_ids)
+            artifact_counts = self._artifact_counts_for_runs(
+                connection, run_ids, actor=actor
+            )
             summaries = []
             for row in rows:
                 run_id = row["run_id"]
                 budget = budgets.get(run_id)
-                summaries.append(
-                    run_summary(
+                projected = run_summary(
                         dict(row),
                         self._summary_responsibilities(
                             responsibilities.get(run_id, ()), budget
@@ -319,7 +375,11 @@ class ReadModelService:
                         budget,
                         can_act=can_act,
                     )
-                )
+                # A Goal list says whether a row has anything to show. Asking
+                # per row turned one page into fifty requests, so the count
+                # travels with the page it belongs to.
+                projected["artifact_count"] = artifact_counts.get(run_id, 0)
+                summaries.append(projected)
         next_cursor = (
             encode_cursor({
                 "query": query_key,
@@ -397,10 +457,57 @@ class ReadModelService:
             summary["definition_hash"] = row["definition_hash"]
             summary["correlation_id"] = row["correlation_id"]
             plan = connection.execute(
-                "SELECT MAX(plan_version) AS version FROM execution_plans WHERE run_id = ?",
+                "SELECT plan_version AS version, canonical_plan_json"
+                " FROM execution_plans WHERE run_id = ?"
+                " ORDER BY plan_version DESC LIMIT 1",
                 (str(run_id),),
             ).fetchone()
             summary["plan_version"] = plan["version"] if plan else None
+            summary["current_step"] = None
+            if row["status"] == "running" and plan is not None:
+                definition = json.loads(plan["canonical_plan_json"])
+                order = {
+                    node_id: index
+                    for index, node_id in enumerate(
+                        definition.get("ordered_node_ids") or ()
+                    )
+                }
+                running = connection.execute(
+                    "SELECT n.node_id, n.updated_at, COUNT(a.attempt_id) AS attempts"
+                    " FROM node_runs n LEFT JOIN node_attempts a"
+                    " ON a.node_run_id=n.node_run_id"
+                    " WHERE n.run_id=? AND n.source_plan_version=?"
+                    " AND n.status='running'"
+                    " GROUP BY n.node_run_id, n.node_id, n.updated_at",
+                    (str(run_id), int(plan["version"])),
+                ).fetchall()
+                if running:
+                    selected = sorted(
+                        running,
+                        key=lambda candidate: (
+                            candidate["updated_at"],
+                            -order.get(candidate["node_id"], 1_000_000),
+                        ),
+                        reverse=True,
+                    )[0]
+                    plan_node = next(
+                        (
+                            item for item in definition.get("nodes", ())
+                            if item.get("node_id") == selected["node_id"]
+                        ),
+                        {},
+                    )
+                    summary["current_step"] = {
+                        "label": self._node_labels(connection, row).get(
+                            selected["node_id"]
+                        ),
+                        "agent": plan_node.get("handler_name"),
+                        "state": (
+                            "retrying" if int(selected["attempts"]) > 1
+                            else "running"
+                        ),
+                        "node_id": selected["node_id"],
+                    }
         return summary
 
     def _human_task_authority(self, connection, actor: str | None) -> dict[str, bool]:
@@ -622,6 +729,106 @@ class ReadModelService:
             if len(items) == limit else None
         )
         return items, next_cursor
+
+    def outcome(
+        self, run_id: EntityId, *, actor: str | None, content_visible: bool,
+    ) -> dict[str, Any]:
+        """Project the declared Goal result without asking clients to guess."""
+
+        with connect_workflow_database(self.path, read_only=True) as connection:
+            run = connection.execute(
+                "SELECT status FROM workflow_runs WHERE run_id = ?", (str(run_id),)
+            ).fetchone()
+            if run is None:
+                raise ValueError(f"run not found: {run_id}")
+            status = str(run["status"])
+            if status not in {"succeeded", "failed", "cancelled"}:
+                return {"state": "pending", "kind": None}
+            if status != "succeeded":
+                return {
+                    "state": "missing", "kind": None,
+                    "reason": "run_cancelled" if status == "cancelled" else "run_failed",
+                }
+
+            row = connection.execute(
+                """
+                SELECT canonical_plan_json FROM execution_plans
+                WHERE run_id = ? ORDER BY plan_version DESC LIMIT 1
+                """,
+                (str(run_id),),
+            ).fetchone()
+            if row is None:
+                return {"state": "unavailable_legacy", "kind": None}
+            plan = json.loads(row["canonical_plan_json"])
+            result = plan.get("result")
+            if result is None and plan.get("schema_version") == "1.2":
+                terminals = plan.get("terminal_node_ids") or []
+                incoming = [
+                    edge for edge in plan.get("edges", [])
+                    if len(terminals) == 1
+                    and edge.get("target_node_id") == terminals[0]
+                    and edge.get("route") == "success"
+                ]
+                if len(incoming) == 1 and incoming[0].get("source_port"):
+                    result = {
+                        "node_id": incoming[0]["source_node_id"],
+                        "output_port_id": incoming[0]["source_port"],
+                    }
+            if result is None:
+                return {"state": "unavailable_legacy", "kind": None}
+
+            parameters = (str(run_id), result["node_id"], result["output_port_id"])
+            value = connection.execute(
+                """
+                SELECT v.data_json
+                FROM node_runs nr
+                JOIN node_attempts a ON a.node_run_id = nr.node_run_id
+                JOIN "values" v
+                  ON v.owner_kind = 'attempt_output' AND v.owner_id = a.attempt_id
+                WHERE nr.run_id = ? AND nr.node_id = ? AND v.port_id = ?
+                  AND a.status = 'succeeded'
+                ORDER BY a.attempt_number DESC LIMIT 1
+                """,
+                parameters,
+            ).fetchone()
+            if value is not None:
+                payload = json.loads(value["data_json"])
+                projected: dict[str, Any] = {
+                    "state": "available",
+                    "kind": "text" if isinstance(payload, str) else "json",
+                    "content_visible": content_visible,
+                }
+                if content_visible:
+                    projected["value"] = payload
+                return projected
+
+            artifact = connection.execute(
+                """
+                SELECT a.artifact_id, a.content_type, a.size_bytes
+                FROM node_runs nr
+                JOIN node_attempts na ON na.node_run_id = nr.node_run_id
+                JOIN artifacts a ON a.producer_type = 'attempt'
+                  AND a.producer_id = na.attempt_id
+                WHERE nr.run_id = ? AND nr.node_id = ? AND a.output_port_id = ?
+                  AND na.status = 'succeeded' AND a.status = 'committed'
+                  AND (? IS NULL OR EXISTS (
+                    SELECT 1 FROM artifact_acl acl
+                    WHERE acl.artifact_id = a.artifact_id
+                      AND acl.subject = ? AND acl.permission = 'read'
+                  ))
+                ORDER BY na.attempt_number DESC LIMIT 1
+                """,
+                (*parameters, actor, actor),
+            ).fetchone()
+            if artifact is not None:
+                return {
+                    "state": "available", "kind": "artifact",
+                    "content_visible": content_visible,
+                    "artifact_id": artifact["artifact_id"],
+                    "content_type": artifact["content_type"],
+                    "size_bytes": artifact["size_bytes"],
+                }
+            return {"state": "missing", "kind": None, "reason": "port_empty"}
 
     def lineage(
         self, run_id: EntityId, data_id: EntityId, *, actor: str | None = None

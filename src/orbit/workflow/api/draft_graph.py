@@ -50,9 +50,11 @@ def _nodes(document: Mapping[str, Any]) -> list[dict[str, Any]]:
     # draft in the same lanes as the version it publishes into.
     for node in sorted(document.get("nodes") or (), key=lambda item: str(item["id"])):
         handler = node.get("handler") or {}
+        label = node.get("label")
         nodes.append({
             "node_id": str(node["id"]),
             "kind": str(node["kind"]),
+            "label": str(label) if isinstance(label, str) and label.strip() else None,
             "handler_name": handler.get("name"),
             "handler_version": handler.get("version"),
         })

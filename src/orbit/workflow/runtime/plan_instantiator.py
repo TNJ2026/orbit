@@ -5,7 +5,7 @@ from __future__ import annotations
 from ..domain.definitions import WorkflowIR
 from ..domain.execution_plan import (
     ExecutionPlan, GraphExecutionPlan, GRAPH_PLAN_SCHEMA_VERSION,
-    PLAN_SCHEMA_VERSION, PlanNode,
+    PLAN_SCHEMA_VERSION, RESULT_GRAPH_PLAN_SCHEMA_VERSION, PlanNode,
 )
 from ..domain.graph import EdgeRoute, PlanEdge
 from ..domain.ids import EntityId
@@ -26,7 +26,7 @@ def instantiate_execution_plan(
     workflow_version: Revision,
     workflow_definition_hash: DefinitionHash,
 ) -> ExecutionPlan | GraphExecutionPlan:
-    if ir.ir_version == "1.2":
+    if ir.ir_version in {"1.2", "1.3"}:
         return _instantiate_graph_plan(
             ir, run_id=run_id, plan_id=plan_id,
             workflow_version=workflow_version,
@@ -163,11 +163,20 @@ def _instantiate_graph_plan(
         for node_id in ordered
     }
     plan = GraphExecutionPlan(
-        GRAPH_PLAN_SCHEMA_VERSION, plan_id, run_id, Revision(1),
+        (
+            RESULT_GRAPH_PLAN_SCHEMA_VERSION
+            if ir.ir_version == "1.3"
+            else GRAPH_PLAN_SCHEMA_VERSION
+        ),
+        plan_id, run_id, Revision(1),
         EntityId.parse(ir.workflow_id), workflow_version, workflow_definition_hash,
         tuple(ir.entry), tuple(ir.terminals), tuple(ordered), tuple(nodes), edges,
         outgoing, incoming,
         {item.id: {"kind": item.kind, "config": to_primitive(item.config)} for item in ir.policies},
+        None if ir.result is None else {
+            "node_id": ir.result.node_id,
+            "output_port_id": ir.result.output_port_id,
+        },
     )
-    validate_contract(to_primitive(plan), "execution-plan/1.2")
+    validate_contract(to_primitive(plan), f"execution-plan/{plan.schema_version.value}")
     return plan

@@ -16,6 +16,7 @@ from ..domain.definitions import (
     IRNode,
     IRPolicy,
     IRPort,
+    IRResult,
     WorkflowIR,
 )
 from ..domain.data import ArtifactVisibility, PortDataPolicy, PortTransport
@@ -28,7 +29,7 @@ from .semantic import analyze_dsl
 from .validator import validate_dsl_structure
 
 
-COMPILER_VERSION = "1.2"
+COMPILER_VERSION = "1.3"
 
 
 def _port(value: dict[str, Any]) -> IRPort:
@@ -78,6 +79,7 @@ def compile_document(
                     manifest.name, manifest.version, manifest.fingerprint
                 ),
                 config=value.get("config", {}),
+                label=value.get("label"),
                 policies=tuple(sorted(value.get("policies", []))),
                 extension=_extension(value["extension"]) if "extension" in value else None,
                 route_mode=value.get("route_mode"),
@@ -166,8 +168,49 @@ def compile_document(
         "output_ports": {node.id: [port.id for port in node.outputs] for node in nodes},
     }
     metadata = data["metadata"]
+    result = data.get("result")
+    if data["dsl_version"] == "1.3" and result is None:
+        raise DiagnosticError([Diagnostic(
+            "DSL_RESULT_REQUIRED",
+            "DSL 1.3 requires a primary result declaration",
+            "compile",
+            ("result",),
+            hint="reference the node output that represents the Goal result",
+        )])
+    if result is not None:
+        result_node = node_data.get(result["node"])
+        result_port = None if result_node is None else next(
+            (item for item in result_node.get("outputs", []) if item["id"] == result["port"]),
+            None,
+        )
+        if result_port is None:
+            raise DiagnosticError([Diagnostic(
+                "DSL_RESULT_NOT_FOUND",
+                "result must reference a declared node output",
+                "compile",
+                ("result",),
+            )])
+        reachable = {result["node"]}
+        changed = True
+        while changed:
+            changed = False
+            for edge in edges:
+                if (
+                    edge.route == "success"
+                    and edge.source_node in reachable
+                    and edge.target_node not in reachable
+                ):
+                    reachable.add(edge.target_node)
+                    changed = True
+        if not reachable.intersection(data["terminals"]):
+            raise DiagnosticError([Diagnostic(
+                "DSL_RESULT_NOT_TERMINAL",
+                "result output must reach a terminal over a success path",
+                "compile",
+                ("result",),
+            )])
     ir = WorkflowIR(
-        ir_version="1.2" if data["dsl_version"] == "1.2" else "1.1",
+        ir_version=data["dsl_version"] if data["dsl_version"] in {"1.2", "1.3"} else "1.1",
         workflow_id=f"workflow:{metadata['id']}",
         name=metadata["name"],
         description=metadata.get("description", ""),
@@ -190,6 +233,7 @@ def compile_document(
             )
         ),
         indexes=indexes,
+        result=None if result is None else IRResult(result["node"], result["port"]),
     )
     catalog_fingerprint = "sha256:" + hashlib.sha256(
         canonical_json(

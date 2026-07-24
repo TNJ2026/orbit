@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 from .data import ArtifactVisibility, PortDataPolicy, PortTransport
@@ -15,6 +15,7 @@ from .versions import DefinitionHash, Revision, SchemaVersion
 
 PLAN_SCHEMA_VERSION = SchemaVersion("1.1")
 GRAPH_PLAN_SCHEMA_VERSION = SchemaVersion("1.2")
+RESULT_GRAPH_PLAN_SCHEMA_VERSION = SchemaVersion("1.3")
 
 
 def _plan_port(value: Any) -> Any:
@@ -151,10 +152,15 @@ class GraphExecutionPlan:
     outgoing_edges: Mapping[str, tuple[str, ...]]
     incoming_edges: Mapping[str, tuple[str, ...]]
     policies: Mapping[str, Any]
+    result: Mapping[str, str] | None = field(default=None, metadata={"omit_none": True})
 
     def __post_init__(self) -> None:
-        if self.schema_version != GRAPH_PLAN_SCHEMA_VERSION:
+        if self.schema_version not in {
+            GRAPH_PLAN_SCHEMA_VERSION, RESULT_GRAPH_PLAN_SCHEMA_VERSION,
+        }:
             raise ValueError("unsupported GraphExecutionPlan schema version")
+        if self.schema_version == RESULT_GRAPH_PLAN_SCHEMA_VERSION and self.result is None:
+            raise ValueError("GraphExecutionPlan 1.3 requires a result declaration")
         if self.plan_id.kind != "plan" or self.run_id.kind != "run":
             raise ValueError("invalid plan or run id kind")
         if self.workflow_id.kind != "workflow":
@@ -197,6 +203,16 @@ class GraphExecutionPlan:
         object.__setattr__(self, "outgoing_edges", freeze_json(self.outgoing_edges))
         object.__setattr__(self, "incoming_edges", freeze_json(self.incoming_edges))
         object.__setattr__(self, "policies", freeze_json(self.policies))
+        if self.result is not None:
+            result = dict(self.result)
+            if set(result) != {"node_id", "output_port_id"}:
+                raise ValueError("invalid GraphExecutionPlan result")
+            node = self.node(result["node_id"])
+            if result["output_port_id"] not in {
+                item["id"] for item in node.outputs
+            }:
+                raise ValueError("GraphExecutionPlan result references an unknown output")
+            object.__setattr__(self, "result", freeze_json(result))
 
     def node(self, node_id: str) -> PlanNode:
         for item in self.nodes:
@@ -219,7 +235,7 @@ class GraphExecutionPlan:
 
 
 def execution_plan_from_primitive(value: Mapping[str, Any]) -> ExecutionPlan | GraphExecutionPlan:
-    if value.get("schema_version") == "1.2":
+    if value.get("schema_version") in {"1.2", "1.3"}:
         return _graph_execution_plan_from_primitive(value)
     validate_contract(value, "execution-plan/1.1")
     required = {
@@ -260,7 +276,8 @@ def _plan_node_from_primitive(item: Mapping[str, Any]) -> PlanNode:
 
 
 def _graph_execution_plan_from_primitive(value: Mapping[str, Any]) -> GraphExecutionPlan:
-    validate_contract(value, "execution-plan/1.2")
+    version = value.get("schema_version")
+    validate_contract(value, f"execution-plan/{version}")
     nodes = tuple(_plan_node_from_primitive(item) for item in value["nodes"])
     edges = tuple(
         PlanEdge(
@@ -279,4 +296,5 @@ def _graph_execution_plan_from_primitive(value: Mapping[str, Any]) -> GraphExecu
         tuple(value["entry_node_ids"]), tuple(value["terminal_node_ids"]),
         tuple(value["ordered_node_ids"]), nodes, edges,
         value["outgoing_edges"], value["incoming_edges"], value["policies"],
+        value.get("result"),
     )

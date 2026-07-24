@@ -31,6 +31,54 @@
   white-space: nowrap; font-size: clamp(20px, 3vw, 26px); letter-spacing: -.02em;
 }
 .run-hero-meta { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 20px; color: var(--muted); font-size: 12px; }
+.simplified-workspace-composer { display: grid; gap: 14px; padding: 18px 22px; }
+.simplified-composer-copy { display: grid; gap: 6px; }
+.simplified-composer-copy h2 { margin: 0; font-size: clamp(22px, 3vw, 30px); }
+.simplified-composer-copy p { margin: 0; max-width: 68ch; }
+.simplified-composer-fields { display: grid; gap: 14px; }
+.simplified-goal-field textarea { min-height: 88px; resize: vertical; font-size: 15px; line-height: 1.55; }
+.simplified-composer-controls {
+  display: grid; grid-template-columns: minmax(220px, 1fr) auto;
+  align-items: end; gap: 14px;
+}
+.simplified-composer-controls .field { margin: 0; }
+.simplified-composer-controls .actions { padding-bottom: 1px; }
+.simplified-workspace-empty .panel-body { min-height: 68px; }
+.simplified-execution-head { align-items: center; }
+.simplified-execution-head > .actions { justify-content: flex-end; }
+.simplified-execution .panel-body { padding-top: 8px; }
+.simplified-step-list { display: grid; }
+.simplified-step-row {
+  display: grid; grid-template-columns: 34px minmax(0, 1fr) auto;
+  align-items: center; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--line-soft);
+}
+.simplified-step-row:last-child { border-bottom: 0; }
+.simplified-step-mark {
+  display: grid; width: 28px; height: 28px; place-items: center; border-radius: 999px;
+  color: var(--muted); background: var(--panel-2); border: 1px solid var(--line);
+  font-size: 12px; font-weight: 700;
+}
+.simplified-step-row.running .simplified-step-mark { color: var(--blue); border-color: var(--blue); background: var(--blue-soft); }
+.simplified-step-row.succeeded .simplified-step-mark { color: var(--green); border-color: var(--green); background: var(--green-soft); }
+.simplified-step-row.failed .simplified-step-mark,
+.simplified-step-row.cancelled .simplified-step-mark { color: var(--red); border-color: var(--red); background: var(--red-soft); }
+.simplified-step-copy { display: grid; gap: 3px; min-width: 0; }
+.simplified-step-copy strong { overflow-wrap: anywhere; }
+.simplified-step-copy span { font-size: 11px; }
+.simplified-attention { border-color: color-mix(in srgb, var(--amber) 28%, var(--line)); }
+.simplified-result .panel-body { font-size: 14px; line-height: 1.65; }
+.simplified-result-value { white-space: pre-wrap; overflow-wrap: anywhere; }
+.simplified-artifacts { display: grid; gap: 12px; }
+.simplified-artifacts .section-heading h2 { margin: 0; font-size: 18px; }
+/* What a modification changed, one step per line. The mark carries the kind so
+   the sentence does not have to spell out "added" before every name. */
+.change-summary { margin: 0; padding: 0; display: grid; gap: 8px; list-style: none; }
+.change-entry { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; align-items: baseline; }
+.change-mark { font-family: var(--mono); font-weight: 700; }
+.change-entry.added .change-mark { color: var(--green); }
+.change-entry.removed .change-mark { color: var(--red); }
+.change-entry.changed .change-mark { color: var(--amber); }
+.change-copy { display: grid; gap: 2px; min-width: 0; overflow-wrap: anywhere; }
 
 /* The why card is the first thing an operator reads, so it carries the
    amber "needs attention" wash from the prototype, not just a border. */
@@ -111,6 +159,9 @@
 .workspace-history { display: grid; gap: 12px; margin-top: 8px; }
 .workspace-history .section-heading h2 { margin: 3px 0; font-size: 20px; }
 .workspace-history .section-heading p { margin: 0; }
+.simplified-workflow-card .workflow-card-main { min-height: 132px; justify-content: center; }
+.simplified-workflow-card .workflow-card-main strong { font-size: 16px; }
+.workflow-card-heading { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .stat-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
 .stat-card {
   background: var(--panel); border: 1px solid var(--line-soft); border-radius: var(--radius);
@@ -167,24 +218,52 @@
 .file-icon {
   width: 34px; height: 39px; border: 1px solid var(--line); border-radius: 8px;
   display: grid; place-items: center; background: var(--panel-2); color: var(--blue);
-  font-family: var(--mono); font-size: 9px; font-weight: 700;
 }
 .artifact-size { color: var(--muted-2); font-family: var(--mono); font-size: 10px; }
-.artifact-name { margin-top: 3px; font-size: 13px; }
-.artifact-meta { font-size: 11px; line-height: 1.45; }
-.artifact-id { width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
-.artifact-flow {
-  max-width: 100%; margin-top: 4px; display: flex; align-items: center; gap: 6px;
-  color: var(--muted-2); font-size: 9px;
+/* An image card leads with the picture: the badge column collapses and the
+   thumbnail takes the width, with the size caption floating over it. */
+.artifact-top-image { position: relative; display: block; }
+.artifact-thumb {
+  /* Contain, not cover: a chart or screenshot cropped to a square stops
+     being the thing the operator is scanning for. */
+  width: 100%; height: 132px; display: block; object-fit: contain;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2);
 }
-.artifact-flow span {
-  max-width: 16ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  padding: 4px 6px; border: 1px solid var(--line-soft); border-radius: 5px;
+.artifact-top-image .artifact-size {
+  position: absolute; right: 6px; bottom: 6px; padding: 2px 5px;
+  border-radius: 5px; background: var(--panel); color: var(--muted);
 }
-.artifact-flow b { font-weight: 500; }
-.artifact-detail { margin-top: 16px; }
+.artifact-name { margin-top: 3px; font-size: 13px; overflow-wrap: anywhere; }
+/* Label over value: a goal title needs the full card width to survive on one
+   line, and an inline label eats a third of it. */
+.artifact-origin { width: 100%; display: grid; gap: 4px; min-width: 0; font-size: 11px; }
+.artifact-origin-label {
+  font-size: 9px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: .04em;
+}
+.artifact-origin-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.artifact-image {
+  /* align-self keeps the flex column from stretching a small image across the
+     panel; width/height stay intrinsic up to the ceiling. */
+  align-self: flex-start; width: auto; height: auto;
+  max-width: 100%; max-height: 420px; margin: 4px 0; display: block;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2);
+}
+/* The detail is a modal over the catalog: the head stays put, the facts and
+   the preview scroll under it. Wider than a confirm dialog because it carries
+   an image and a lineage list, not one field. */
+.artifact-dialog {
+  width: min(720px, 94vw); flex-direction: column; overflow: hidden;
+}
+.artifact-dialog .panel-head { flex: none; }
+.artifact-dialog .panel-body { min-height: 0; overflow-y: auto; }
+.artifact-dialog > .data-state { margin: 18px; }
+/* One scrollbar, and it belongs to the dialog. A box that scrolls inside a
+   box that scrolls hides how much document is left and traps the wheel. */
+.artifact-dialog .artifact-preview { max-height: none; overflow: visible; }
+.artifact-content { min-width: 0; }
 .artifact-preview {
-  max-height: 24rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+  margin: 0; max-height: 24rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
   padding: 12px; border: 1px solid var(--line); border-radius: var(--radius);
   background: var(--panel-2);
 }
@@ -221,10 +300,10 @@
   cursor: pointer; font-weight: 650; text-align: left;
 }
 .list-option-link:hover { color: var(--blue); }
-.runs-table, .inbox-table {
+.inbox-table {
   border-collapse: separate; border-spacing: 0 8px; padding: 0 10px 8px;
 }
-.runs-table th, .inbox-table th { border-bottom: 0; padding-top: 5px; padding-bottom: 5px; }
+.inbox-table th { border-bottom: 0; padding-top: 5px; padding-bottom: 5px; }
 .list-option-row td {
   background: var(--panel); border-top: 1px solid var(--line-soft);
   border-bottom: 1px solid var(--line-soft); transition: background .15s ease, border-color .15s ease;
@@ -232,42 +311,32 @@
 .list-option-row td:first-child { border-left: 1px solid var(--line-soft); border-radius: 10px 0 0 10px; }
 .list-option-row td:last-child { border-right: 1px solid var(--line-soft); border-radius: 0 10px 10px 0; }
 .list-option-row:hover td { background: var(--panel-2); border-color: var(--line); }
-.run-list-option.needs-attention td:first-child { box-shadow: inset 3px 0 var(--amber); }
 
 /* Keep the semantic table on desktop, then turn each row into a labelled
-   summary card where a five-column table would otherwise force phone users
+   summary card where a four-column table would otherwise force phone users
    to pan sideways. The labels come from the active locale in the DOM. */
 @media (max-width: 680px) {
-  .runs-table, .inbox-table { min-width: 0; padding: 0; border-spacing: 0; }
-  .runs-table thead, .inbox-table thead {
+  .inbox-table { min-width: 0; padding: 0; border-spacing: 0; }
+  .inbox-table thead {
     position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
     overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
   }
-  .runs-table tbody, .inbox-table tbody { display: grid; gap: 10px; padding: 12px; }
-  .runs-table tr, .inbox-table tr {
-    display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 14px;
+  .inbox-table tbody { display: grid; gap: 10px; padding: 12px; }
+  .inbox-table tr {
+    display: grid; grid-template-columns: 1fr; gap: 8px 14px;
     padding: 12px; border: 1px solid var(--line); border-radius: 10px;
     background: var(--panel-2);
   }
-  .runs-table td, .inbox-table td {
+  .inbox-table td {
     display: grid; grid-template-columns: minmax(84px, .42fr) minmax(0, 1fr);
     align-items: baseline; gap: 8px; padding: 0; border: 0; border-radius: 0;
     background: transparent; box-shadow: none; overflow-wrap: anywhere;
   }
-  .runs-table td::before, .inbox-table td::before {
+  .inbox-table td::before {
     content: attr(data-label); color: var(--muted); font-size: 11px;
     font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
   }
-  .runs-table td[data-field="run"],
-  .runs-table td[data-field="workflow"],
-  .runs-table td[data-field="responsibility"],
-  .runs-table td[data-field="updated"] { grid-column: 1 / -1; }
-  .runs-table td[data-field="run"] {
-    display: block; padding-bottom: 10px; border-bottom: 1px solid var(--line);
-  }
-  .runs-table td[data-field="run"]::before { display: none; }
-  .runs-table .id-button { max-width: 100%; min-height: 40px; text-align: left; }
-  .inbox-table tr { grid-template-columns: 1fr; }
+  .inbox-table .id-button { max-width: 100%; min-height: 40px; text-align: left; }
   .inbox-table td { grid-column: 1 / -1; }
   .inbox-table td[data-field="item"] {
     display: block; padding-bottom: 10px; border-bottom: 1px solid var(--line);
@@ -309,6 +378,9 @@
 .fact-grid div { padding: 10px; border-radius: 8px; background: var(--panel-2); }
 .fact-grid dt { color: var(--muted); font-size: 11px; }
 .fact-grid dd { margin: 5px 0 0; overflow-wrap: anywhere; font-size: 12px; }
+/* A goal is a prompt: its title is one line, and a paragraph must not push
+   every other fact down the panel. */
+.fact-grid dd.fact-line { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .goal-budget { display: grid; gap: 8px; }
 .goal-budget-label { display: flex; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 11px; }
 .goal-progress-bar { height: 6px; overflow: hidden; border-radius: 999px; background: var(--panel-3); }
@@ -320,6 +392,14 @@
   .goal-detail { position: static; }
 }
 @media (max-width: 520px) {
+  .simplified-workspace-composer { padding: 18px; }
+  .simplified-composer-controls { grid-template-columns: 1fr; }
+  .simplified-composer-controls .actions { justify-content: stretch; }
+  .simplified-composer-controls .actions > * { flex: 1 1 auto; }
+  .simplified-execution-head { align-items: flex-start; flex-direction: column; }
+  .simplified-execution-head > .actions { justify-content: flex-start; }
+  .simplified-step-row { grid-template-columns: 30px minmax(0, 1fr); }
+  .simplified-step-row > .pill { grid-column: 2; justify-self: start; }
   .workflow-editor-panel .panel-head { align-items: flex-start; flex-wrap: wrap; }
   .workflow-editor-panel #draftControls { width: 100%; }
   .home-hero { align-items: flex-start; flex-direction: column; padding: 20px; }

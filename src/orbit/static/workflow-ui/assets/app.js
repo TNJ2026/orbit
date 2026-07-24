@@ -33,12 +33,17 @@ let renderQueued = false;
 let activeViewCleanup = null;
 let activeViewLeaveGuard = null;
 let customSelectSequence = 0;
-const runFilters = { q: "", status: "", responsibility: "", activeOnly: false };
+// One-shot: the catalog asked the detail page to open its upgrade prompt. It
+// is consumed on the next detail render so a reload does not reopen it.
+let pendingUpgrade = null;
 const goalFilters = { q: "", status: "" };
 const artifactFilters = { q: "", runId: "", contentType: "" };
 // A catalog of dozens is browsed, not scanned. The default order answers the
 // question an author actually has — which workflow was I just running.
 const workflowFilters = { q: "", sort: "recentRun" };
+const simplifiedComposerState = { runId: null, workflowId: "", goal: "" };
+let focusSimplifiedGoalOnRender = false;
+const TERMINAL_RUN_STATUSES = new Set(["succeeded", "failed", "cancelled"]);
 // How much of one recorded value is rendered. Inline values are capped at
 // 256 KB server-side; a page that pastes all of that stops responding.
 const DATA_TEXT_LIMIT = 20_000;
@@ -85,6 +90,11 @@ function generationAgents() {
   return capability?.available ? capability.agents || [] : [];
 }
 
+function simplifiedGoalUI() {
+  const mode = shellFacts?.product_mode;
+  return Boolean(mode?.simplified_goal_ui && mode?.single_goal_mode);
+}
+
 function generationAgentField(id, selected, onchange) {
   const agents = generationAgents();
   if (agents.length < 2) return null;
@@ -97,6 +107,18 @@ function generationAgentField(id, selected, onchange) {
       }))),
     el("small", { class: "muted", text: i18n.t("generate.writtenByHint") }),
   ]);
+}
+
+/* The step's name as the server gives it.
+ *
+ * The label is a definition field the generation contract requires, so the
+ * client does not decide which node ids are "internal" and paper over them —
+ * a definition without labels shows a neutral placeholder, which is a visible
+ * problem rather than a hidden one. */
+function readableNodeName(node) {
+  const label = node?.label;
+  if (typeof label === "string" && label.trim()) return label.trim();
+  return i18n.t("simplified.workflow.step");
 }
 
 function workflowGraphView(graph) {
@@ -163,7 +185,7 @@ function workflowGraphView(graph) {
       svgEl("rect", { width, height, rx: 10 }),
       svgEl("text", {
         class: "graph-box-id", x: 12, y: 21, "clip-path": `url(#${clipId})`,
-        text: node.node_id,
+        text: simplifiedGoalUI() ? readableNodeName(node) : node.node_id,
       }),
       svgEl("text", {
         class: "graph-box-meta", x: 12, y: 38, "clip-path": `url(#${clipId})`,
@@ -488,7 +510,7 @@ function statusSelect(value, onChange, labelKey = "runs.filter.status") {
   return select;
 }
 
-async function renderHome(root, selectedRunId = null) {
+async function renderHome(root, selectedRunId = null, includeHistory = true) {
   const dashboard = (await api.dashboard()).data;
   const active = dashboard.active_goal;
   let responsibilities = [];
@@ -509,7 +531,7 @@ async function renderHome(root, selectedRunId = null) {
           statusDot(active.status), el("h2", { text: runName(active) }), pill(active.status),
         ]) : el("h2", { text: i18n.t("home.empty.heading") }),
         el("p", { class: "muted", text: active
-          ? `${active.workflow_id} · v${i18n.number(active.workflow_version)} · ${i18n.t("run.updated", { time: i18n.dateTime(active.updated_at) })}`
+          ? `${active.workflow_id} · ${i18n.t("run.updated", { time: i18n.dateTime(active.updated_at) })}`
           : i18n.t("home.empty.description") }),
       ]),
       el("div", { class: "home-hero-actions" }, [
@@ -573,6 +595,7 @@ async function renderHome(root, selectedRunId = null) {
     ]),
   ]));
 
+  if (!includeHistory) return;
   const historySection = el("section", { class: "workspace-history" }, [
     el("div", { class: "section-heading" }, [
       el("div", {}, [
@@ -584,6 +607,271 @@ async function renderHome(root, selectedRunId = null) {
   ]);
   await renderGoals(historySection, selectedRunId);
   root.append(historySection);
+}
+
+function workflowStartCommand(entry) {
+  return (entry?.allowed_commands || []).find((item) => item.command === "run.start");
+}
+
+function prepareSimplifiedComposer(summary, entries) {
+  if (summary && simplifiedComposerState.runId !== summary.run_id) {
+    simplifiedComposerState.runId = summary.run_id;
+    simplifiedComposerState.workflowId = summary.workflow_id;
+    simplifiedComposerState.goal = summary.goal || "";
+  } else if (!summary && simplifiedComposerState.runId) {
+    simplifiedComposerState.runId = null;
+    simplifiedComposerState.workflowId = "";
+    simplifiedComposerState.goal = "";
+  }
+  if (!entries.some((item) => item.workflow_id === simplifiedComposerState.workflowId)) {
+    const ready = entries.find(
+      (item) => item.goal_readiness === "ready" && workflowStartCommand(item),
+    );
+    simplifiedComposerState.workflowId = ready?.workflow_id || entries[0]?.workflow_id || "";
+  }
+}
+
+function renderSimplifiedComposer(root, entries, summary) {
+  prepareSimplifiedComposer(summary, entries);
+  const terminal = summary ? TERMINAL_RUN_STATUSES.has(summary.status) : false;
+  const locked = Boolean(summary && !terminal);
+  const selectedEntry = () => entries.find(
+    (item) => item.workflow_id === simplifiedComposerState.workflowId,
+  );
+  const workflow = el("select", {
+    id: "simplifiedWorkflow", disabled: locked ? "disabled" : null,
+    "aria-label": i18n.t("newRun.workflow"),
+    onchange: (event) => {
+      simplifiedComposerState.workflowId = event.target.value;
+      render();
+    },
+  });
+  if (summary && !entries.some((item) => item.workflow_id === summary.workflow_id)) {
+    workflow.append(el("option", {
+      value: summary.workflow_id, text: summary.workflow_id,
+      selected: simplifiedComposerState.workflowId === summary.workflow_id ? "selected" : null,
+    }));
+  }
+  for (const entry of entries) {
+    const readiness = entry.goal_readiness === "ready"
+      ? "" : ` · ${i18n.t(`workflows.readiness.${entry.goal_readiness}`)}`;
+    workflow.append(el("option", {
+      value: entry.workflow_id,
+      text: `${entry.name}${readiness}`,
+      selected: entry.workflow_id === simplifiedComposerState.workflowId ? "selected" : null,
+    }));
+  }
+  const goal = el("textarea", {
+    id: "simplifiedGoal", required: "required",
+    disabled: locked ? "disabled" : null,
+    placeholder: i18n.t("simplified.start.placeholder"),
+    text: simplifiedComposerState.goal,
+    oninput: (event) => { simplifiedComposerState.goal = event.target.value; },
+  });
+  const problem = el("div", {
+    class: "banner error simplified-composer-problem", hidden: "hidden",
+  });
+  const chosen = selectedEntry();
+  const allowed = chosen?.goal_readiness === "ready" ? workflowStartCommand(chosen) : null;
+  const start = el("button", {
+    class: "button primary", type: "submit", id: "newGoalStart",
+    disabled: locked || !allowed ? "disabled" : null,
+    text: locked
+      ? i18n.t("simplified.run.inProgress")
+      : terminal ? i18n.t("simplified.run.again") : i18n.t("newRun.submit"),
+  });
+  const form = el("form", {
+    class: "panel simplified-workspace-composer",
+    onsubmit: async (event) => {
+      event.preventDefault();
+      if (locked || !goal.value.trim() || !goal.reportValidity()) return;
+      start.disabled = true;
+      problem.hidden = true;
+      try {
+        const fresh = (await api.workflowCatalog()).data.workflows.find(
+          (item) => item.workflow_id === simplifiedComposerState.workflowId,
+        );
+        if (!fresh || fresh.goal_readiness !== "ready") {
+          problem.textContent = i18n.t("newRun.workflow.unavailable");
+          problem.hidden = false;
+          return;
+        }
+        if (chosen && fresh.latest_version !== chosen.latest_version) {
+          announce(i18n.t("newRun.workflow.changed"), "error");
+          await render();
+          return;
+        }
+        const command = workflowStartCommand(fresh);
+        if (!command) {
+          problem.textContent = i18n.t("newRun.workflow.forbidden");
+          problem.hidden = false;
+          return;
+        }
+        const goalText = goal.value.trim();
+        simplifiedComposerState.goal = goalText;
+        const started = await api.execute(command, {
+          workflow_id: fresh.workflow_id,
+          workflow_version: fresh.latest_version,
+          goal: goalText,
+          input: bindGoalInput(fresh, goalText, {}),
+        }, `run.start:${crypto.randomUUID ? crypto.randomUUID() : Date.now()}`);
+        simplifiedComposerState.runId = started.data.run_id;
+        navigate({ view: "run", runId: started.data.run_id });
+      } catch (error) {
+        if (error instanceof ApiError && error.code === "active_goal_exists") {
+          const active = error.details.active_goal;
+          announce(i18n.t("newRun.active.exists", {
+            goal: active?.display_name || active?.run_id || "",
+          }), "info");
+          if (active?.run_id) navigate({ view: "run", runId: active.run_id });
+        } else if (error instanceof ApiError && error.code === "handler_unavailable") {
+          announce(i18n.t("newRun.handler.unavailable"), "error");
+          navigate({
+            view: "workflow", workflowId: simplifiedComposerState.workflowId, runId: null,
+          });
+        } else {
+          problem.textContent = error instanceof ApiError
+            ? i18n.t(error.messageKey, { message: error.message })
+            : i18n.t("error.generic");
+          problem.hidden = false;
+          reportError(error);
+        }
+      } finally {
+        if (start.isConnected) {
+          const current = selectedEntry();
+          start.disabled = locked
+            || current?.goal_readiness !== "ready" || !workflowStartCommand(current);
+        }
+      }
+    },
+  }, [
+    el("div", { class: "simplified-composer-copy" }, [
+      el("div", { class: "eyebrow", text: i18n.t("simplified.workspace.eyebrow") }),
+      el("h2", { text: i18n.t("simplified.start.title") }),
+      el("p", { class: "muted", text: i18n.t("simplified.start.description") }),
+    ]),
+    el("div", { class: "simplified-composer-fields" }, [
+      el("div", { class: "field simplified-goal-field" }, [
+        el("label", { for: "simplifiedGoal", text: i18n.t("newRun.goal") }),
+        goal,
+      ]),
+      el("div", { class: "simplified-composer-controls" }, [
+        el("div", { class: "field" }, [
+          el("label", { for: "simplifiedWorkflow", text: i18n.t("newRun.workflow") }),
+          workflow,
+        ]),
+        el("div", { class: "actions" }, [
+          el("button", {
+            class: "button", type: "button", text: i18n.t("simplified.workflow.manage"),
+            onclick: () => navigate({ view: "workflows", runId: null }),
+          }),
+          start,
+        ]),
+      ]),
+      chosen && !allowed ? el("div", {
+        class: "banner warn", text: i18n.t("simplified.workflow.unavailable"),
+      }) : null,
+      problem,
+    ]),
+  ]);
+  root.append(form);
+  if (focusSimplifiedGoalOnRender && !locked) {
+    focusSimplifiedGoalOnRender = false;
+    setTimeout(() => goal.focus(), 0);
+  }
+}
+
+async function renderSimplifiedWorkspace(root, selectedRunId = null) {
+  const [dashboardResponse, catalogResponse] = await Promise.all([
+    api.dashboard(), api.workflowCatalog(),
+  ]);
+  const runId = selectedRunId || dashboardResponse.data.active_goal?.run_id || null;
+  const entries = catalogResponse.data.workflows;
+  const summary = runId ? (await api.runSummary(runId)).data : null;
+  renderSimplifiedComposer(root, entries, summary);
+  if (runId && summary) await renderSimplifiedRun(root, runId, summary);
+  else root.append(
+    el("section", { class: "panel simplified-workspace-empty simplified-execution" }, [
+      el("div", { class: "panel-head" }, [
+        el("div", { class: "panel-title", text: i18n.t("simplified.execution") }),
+      ]),
+      el("div", { class: "panel-body muted", text: i18n.t("simplified.workspace.empty.description") }),
+    ]),
+    el("section", { class: "panel simplified-workspace-empty simplified-result" }, [
+      el("div", { class: "panel-head" }, [
+        el("div", { class: "panel-title", text: i18n.t("simplified.result") }),
+      ]),
+      el("div", { class: "panel-body muted", text: i18n.t("simplified.result.state.pending") }),
+    ]),
+    el("section", { class: "panel simplified-workspace-empty simplified-artifacts" }, [
+      el("div", { class: "panel-head" }, [
+        el("div", { class: "panel-title", text: i18n.t("simplified.artifacts") }),
+      ]),
+      el("div", { class: "panel-body muted", text: i18n.t("simplified.artifacts.pending") }),
+    ]),
+  );
+}
+
+async function renderHistory(root, selectedRunId = null) {
+  root.append(el("header", { class: "view-intro" }, [
+    el("div", {}, [
+      el("div", { class: "eyebrow", text: i18n.t("history.eyebrow") }),
+      el("h2", { text: i18n.t("history.heading") }),
+      el("p", { class: "muted", text: i18n.t("history.description") }),
+    ]),
+  ]));
+  const search = el("input", {
+    type: "search", value: goalFilters.q,
+    placeholder: i18n.t("goals.search.placeholder"),
+    "aria-label": i18n.t("goals.search.label"),
+  });
+  root.append(el("form", {
+    class: "filter-bar",
+    onsubmit: (event) => {
+      event.preventDefault();
+      goalFilters.q = search.value.trim();
+      render();
+    },
+  }, [
+    search,
+    el("button", { class: "button", type: "submit", text: i18n.t("action.search") }),
+  ]));
+  const [response, catalogResponse] = await Promise.all([
+    api.listRuns({ limit: 25, q: goalFilters.q, terminalOnly: true }),
+    api.workflowCatalog(),
+  ]);
+  const workflowNames = new Map(
+    catalogResponse.data.workflows.map((item) => [item.workflow_id, item.name]),
+  );
+  const runs = response.data.runs;
+  if (!runs.length) {
+    root.append(el("div", { class: "empty panel", text: i18n.t("history.empty") }));
+    return;
+  }
+  root.append(el("section", { class: "history-goal-list" }, runs.map((run) =>
+    el("button", {
+      class: "goal-row history-goal-row",
+      onclick: () => navigate({ view: "run", runId: run.run_id }),
+    }, [
+      el("span", { class: "goal-row-main" }, [
+        el("strong", { class: "with-dot" }, [
+          statusDot(run.status), el("span", { text: runName(run) }),
+        ]),
+        el("span", {
+          class: "muted",
+          text: `${workflowNames.get(run.workflow_id) || run.workflow_id} · ${i18n.dateTime(run.updated_at)}`,
+        }),
+        // Whether the row has anything to open. It rides along with the page
+        // rather than costing two requests per row.
+        el("span", {
+          class: "muted",
+          text: run.status === "succeeded" || run.artifact_count
+            ? i18n.t("history.hasContent") : i18n.t("history.noContent"),
+        }),
+      ]),
+      pill(run.status),
+    ]))),
+  );
 }
 
 async function renderGoals(root, selectedRunId = null) {
@@ -656,7 +944,7 @@ async function renderGoals(root, selectedRunId = null) {
         ]),
         el("div", { class: "goal-section-label eyebrow", text: i18n.t("goals.facts") }),
         el("dl", { class: "fact-grid" }, [
-          el("div", {}, [el("dt", { text: i18n.t("run.workflow") }), el("dd", { text: `${selected.workflow_id} · v${selected.workflow_version}` })]),
+          el("div", {}, [el("dt", { text: i18n.t("run.workflow") }), el("dd", { text: selected.workflow_id })]),
           el("div", {}, [el("dt", { text: i18n.t("goals.waitingOn") }), el("dd", { text: waitText(selected) })]),
           el("div", {}, [el("dt", { text: i18n.t("runs.column.updated") }), el("dd", { text: i18n.dateTime(selected.updated_at) })]),
           el("div", {}, [el("dt", { text: i18n.t("goals.planVersion") }), el("dd", { text: selected.plan_version ? `v${i18n.number(selected.plan_version)}` : i18n.t("goals.planVersion.none") })]),
@@ -688,124 +976,172 @@ async function renderGoals(root, selectedRunId = null) {
   root.append(el("div", { class: "goals-layout" }, [list, detail]));
 }
 
-async function renderRuns(root) {
-  const body = el("tbody");
-  const table = el("table", { class: "runs-table" }, [
-    el("thead", {}, [
-      el("tr", {}, [
-        el("th", { scope: "col", text: i18n.t("runs.column.run") }),
-        el("th", { scope: "col", text: i18n.t("runs.column.workflow") }),
-        el("th", { scope: "col", text: i18n.t("runs.column.status") }),
-        el("th", { scope: "col", text: i18n.t("runs.column.responsibility") }),
-        el("th", { scope: "col", text: i18n.t("runs.column.updated") }),
-      ]),
+function simplifiedExecutionPanel(graph, summary, reload) {
+  const header = () => el("div", { class: "panel-head simplified-execution-head" }, [
+    el("div", {}, [
+      el("div", { class: "panel-title", text: i18n.t("simplified.execution") }),
+      el("div", { class: "panel-subtitle", text: TERMINAL_RUN_STATUSES.has(summary.status)
+        ? i18n.t(`simplified.run.${summary.status}`)
+        : summary.current_step?.label || i18n.t("simplified.run.inProgress") }),
     ]),
-    body,
+    el("div", { class: "actions" }, [
+      pill(summary.status),
+      ...commandButtons(summary.allowed_commands || [], reload),
+    ]),
   ]);
-  const search = el("input", {
-    type: "search", value: runFilters.q,
-    placeholder: i18n.t("runs.search.placeholder"), "aria-label": i18n.t("runs.search.label"),
-  });
-  const responsibility = el("select", {
-    "aria-label": i18n.t("runs.filter.responsibility"), onchange: (event) => {
-      runFilters.responsibility = event.target.value;
-      render();
-    },
-  });
-  // Recovery becomes selectable with API-3/P5's durable responsibility
-  // projection. The frozen API-1 vocabulary accepts it now, but showing an
-  // always-empty filter would promise a capability this deployment lacks.
-  for (const value of ["", "human", "budget", "unknown"]) {
-    responsibility.append(el("option", {
-      value, ...(value === runFilters.responsibility ? { selected: "selected" } : {}),
-      text: value ? i18n.t(`responsibility.${value}`) : i18n.t("runs.filter.allResponsibilities"),
-    }));
-  }
-  root.append(el("form", { class: "filter-bar", onsubmit: (event) => {
-    event.preventDefault();
-    runFilters.q = search.value.trim();
-    render();
-  } }, [
-    search,
-    statusSelect(runFilters.status, (event) => {
-      runFilters.status = event.target.value;
-      render();
-    }),
-    responsibility,
-    el("label", { class: "check-field" }, [
-      el("input", {
-        type: "checkbox", ...(runFilters.activeOnly ? { checked: "checked" } : {}),
-        onchange: (event) => { runFilters.activeOnly = event.target.checked; render(); },
-      }),
-      el("span", { text: i18n.t("runs.activeOnly") }),
-    ]),
-    el("button", { class: "button", type: "submit", text: i18n.t("action.search") }),
-  ]));
-  const panel = el("section", { class: "panel" }, [
-    el("div", { class: "panel-head" }, [
-      el("div", { class: "panel-title", text: i18n.t("runs.title") }),
-      el("span", { class: "muted", text: i18n.t("runs.orderHint") }),
-    ]),
-    el("div", { class: "table-scroll" }, [table]),
-  ]);
-  root.append(panel);
-
-  let cursor = null;
-  const more = el("button", { class: "button", text: i18n.t("action.loadMore") });
-
-  const page = async () => {
-    const response = await api.listRuns({ cursor, ...runFilters });
-    for (const run of response.data.runs) {
-      body.append(
-        el("tr", { class: `list-option-row run-list-option${run.requires_actor_action ? " needs-attention" : ""}` }, [
-          el("td", {
-            "data-field": "run", "data-label": i18n.t("runs.column.run"),
-          }, [
-            el("button", {
-              class: "list-option-link id-button",
-              text: runName(run),
-              title: run.run_id,
-              onclick: () => navigate({ view: "run", runId: run.run_id }),
-            }),
+  if (!graph) {
+    const status = TERMINAL_RUN_STATUSES.has(summary.status) ? summary.status : "running";
+    const mark = status === "succeeded" ? "✓"
+      : ["failed", "cancelled"].includes(status) ? "×" : "●";
+    return el("section", { class: "panel simplified-execution simplified-run-hero" }, [
+      header(),
+      el("div", { class: "panel-body" }, [
+        el("div", { class: `simplified-step-row ${status}` }, [
+          el("span", { class: "simplified-step-mark", text: mark }),
+          el("div", { class: "simplified-step-copy" }, [
+            el("strong", { text: summary.current_step?.label || i18n.t("simplified.execution.preparing") }),
+            el("span", { class: "muted", text: TERMINAL_RUN_STATUSES.has(summary.status)
+              ? i18n.t(`simplified.run.${summary.status}`)
+              : i18n.t("simplified.run.inProgress") }),
           ]),
-          el("td", {
-            "data-field": "workflow", "data-label": i18n.t("runs.column.workflow"),
-            text: run.workflow_id,
-          }),
-          el("td", {
-            "data-field": "status", "data-label": i18n.t("runs.column.status"),
-          }, [
-            el("span", { class: "with-dot" }, [statusDot(run.status), pill(run.status)]),
-          ]),
-          el("td", {
-            "data-field": "responsibility",
-            "data-label": i18n.t("runs.column.responsibility"),
-            class: run.requires_actor_action ? "needs-action" : "", text: waitText(run),
-          }),
-          el("td", {
-            "data-field": "updated", "data-label": i18n.t("runs.column.updated"),
-            text: i18n.dateTime(run.updated_at),
-          }),
+          pill(status),
         ]),
-      );
-    }
-    cursor = response.next_cursor;
-    moreWrap.hidden = !cursor;
-    if (!body.children.length) {
-      panel.append(el("div", { class: "empty", text: i18n.t("runs.empty") }));
-    }
-  };
+      ]),
+    ]);
+  }
+  if (graph.error) {
+    return el("section", { class: "panel simplified-execution simplified-run-hero" }, [
+      header(),
+      el("div", { class: "panel-body" }, [
+        dataState(el, i18n, "error", { onRetry: reload }),
+      ]),
+    ]);
+  }
+  const definition = graph.definition;
+  const overlay = graph.runtime_overlay;
+  const statuses = new Map();
+  for (const node of overlay.nodes) {
+    const current = statuses.get(node.node_id);
+    if (!current || node.generation >= current.generation) statuses.set(node.node_id, node);
+  }
+  const positions = new Map(
+    definition.layout.positions.map((item) => [item.node_id, item]),
+  );
+  const executableNodes = definition.nodes.filter((node) => node.kind !== "terminal");
+  const nodes = (executableNodes.length ? executableNodes : definition.nodes).slice().sort((left, right) => {
+    const leftPosition = positions.get(left.node_id) || { depth: 0, lane: 0 };
+    const rightPosition = positions.get(right.node_id) || { depth: 0, lane: 0 };
+    return leftPosition.depth - rightPosition.depth || leftPosition.lane - rightPosition.lane;
+  });
+  const rows = nodes.map((node, index) => {
+    const runtime = statuses.get(node.node_id);
+    const status = runtime?.status || "pending";
+    const mark = status === "succeeded" ? "✓"
+      : ["failed", "cancelled"].includes(status) ? "×"
+        : status === "running" ? "●" : String(index + 1);
+    return el("div", { class: `simplified-step-row ${status}` }, [
+      el("span", { class: "simplified-step-mark", text: mark }),
+      el("div", { class: "simplified-step-copy" }, [
+        el("strong", { text: readableNodeName(node) }),
+        runtime ? el("span", { class: "muted", text: i18n.t("simplified.execution.attempts", {
+          count: i18n.number(runtime.attempts),
+        }) }) : el("span", { class: "muted", text: i18n.t("simplified.execution.waiting") }),
+      ]),
+      pill(status),
+    ]);
+  });
+  return el("section", { class: "panel simplified-execution simplified-run-hero" }, [
+    header(),
+    el("div", { class: "panel-body simplified-step-list" }, rows),
+  ]);
+}
 
-  more.addEventListener("click", () => page().catch(reportError));
-  // Hidden until a cursor exists: an always-rendered .panel-body reads as an
-  // empty strip under the table.
-  const moreWrap = el("div", { class: "panel-body" }, [more]);
-  moreWrap.hidden = true;
-  panel.append(moreWrap);
-  await page();
+function simplifiedResultBody(outcome) {
+  if (outcome.state !== "available") {
+    return el("div", { class: "muted", text: i18n.t(
+      `simplified.result.state.${outcome.state}`,
+    ) });
+  }
+  if (!outcome.content_visible) {
+    return el("div", { class: "muted", text: i18n.t(
+      "simplified.result.contentHidden",
+    ) });
+  }
+  if (outcome.kind === "text") {
+    return el("div", { class: "simplified-result-value", text: outcome.value });
+  }
+  if (outcome.kind === "json") {
+    return el("pre", {
+      class: "code-block simplified-result-value",
+      text: JSON.stringify(outcome.value, null, 2),
+    });
+  }
+  return el("div", { class: "muted", text: outcome.content_type || i18n.t(
+    "simplified.result.artifact",
+  ) });
+}
+
+async function renderSimplifiedRun(root, runId, summary) {
+  const graphPromise = summary.plan_version
+    ? api.graph(runId).then((response) => response.data).catch((error) => ({ error }))
+    : Promise.resolve(null);
+  const [responsibilityResponse, artifactResponse, outcomeResponse, graph] = await Promise.all([
+    api.responsibilities(runId),
+    api.artifacts({ runId, limit: 25 }),
+    api.outcome(runId),
+    graphPromise,
+  ]);
+  const responsibilities = responsibilityResponse.data.responsibilities;
+  const artifacts = artifactResponse.data.artifacts;
+  const outcome = outcomeResponse.data.result;
+  const reload = () => navigate({ view: "run", runId });
+  const terminal = TERMINAL_RUN_STATUSES.has(summary.status);
+
+  root.append(simplifiedExecutionPanel(graph, summary, reload));
+
+  if (responsibilities.length) {
+    root.append(el("section", { class: "panel simplified-attention" }, [
+      el("div", { class: "panel-head" }, [
+        el("div", { class: "panel-title", text: i18n.t("simplified.attention") }),
+      ]),
+      el("div", { class: "panel-body responsibility-list" }, responsibilities.map((item) =>
+        el("div", { class: "responsibility-row" }, [
+          el("div", {}, [
+            el("strong", { text: item.label }),
+            item.detail ? el("div", { class: "muted", text: item.detail }) : null,
+          ]),
+          pill(item.status),
+          el("div", { class: "actions" }, commandButtons(item.allowed_commands || [], reload)),
+        ]))),
+    ]));
+  }
+
+  root.append(el("section", { class: "panel simplified-result" }, [
+    el("div", { class: "panel-head" }, [
+      el("div", { class: "panel-title", text: i18n.t("simplified.result") }),
+    ]),
+    el("div", { class: "panel-body" }, [simplifiedResultBody(outcome)]),
+  ]));
+
+  root.append(el("section", { class: "simplified-artifacts" }, [
+    el("div", { class: "section-heading" }, [
+      el("h2", { text: i18n.t("simplified.artifacts") }),
+    ]),
+    artifacts.length
+      ? el("div", { class: "artifact-grid" }, artifacts.map((item) => artifactCard(item)))
+      : el("div", {
+        class: "empty panel",
+        text: i18n.t(terminal
+          ? "simplified.artifacts.empty" : "simplified.artifacts.pending"),
+      }),
+  ]));
 }
 
 async function renderRun(root, runId, activeTab = "overview") {
+  if (simplifiedGoalUI()) {
+    await renderSimplifiedWorkspace(root, runId);
+    return;
+  }
   let summary;
   try {
     summary = (await api.runSummary(runId)).data;
@@ -832,7 +1168,7 @@ async function renderRun(root, runId, activeTab = "overview") {
       ]),
       el("div", { class: "panel-body" }, [
         el("div", { class: "run-hero-meta" }, [
-          el("span", { text: `${summary.workflow_id} · v${i18n.number(summary.workflow_version)}` }),
+          el("span", { text: summary.workflow_id }),
           el("span", { text: i18n.t("run.updated", { time: i18n.dateTime(summary.updated_at) }) }),
         ]),
       ]),
@@ -966,7 +1302,6 @@ async function overviewPanel(runId, summary, responsibilities) {
       el("p", { class: summary.goal ? "goal-copy" : "muted", text: summary.goal || i18n.t("goals.noDescription") }),
       el("dl", { class: "fact-grid" }, [
         el("div", {}, [el("dt", { text: i18n.t("run.workflow") }), el("dd", { class: "mono", text: summary.workflow_id })]),
-        el("div", {}, [el("dt", { text: i18n.t("run.version") }), el("dd", { text: i18n.number(summary.workflow_version) })]),
         el("div", {}, [el("dt", { text: i18n.t("run.status") }), el("dd", {}, [pill(summary.status)])]),
         el("div", {}, [el("dt", { text: i18n.t("run.responsibilities") }), el("dd", { text: i18n.number(responsibilities.length) })]),
       ]),
@@ -1095,7 +1430,7 @@ function errorItem(item) {
   ]);
 }
 
-async function graphPanel(runId) {
+async function graphPanel(runId, simplified = false) {
   const graph = (await api.graph(runId)).data;
   const definition = graph.definition;
   const overlay = graph.runtime_overlay;
@@ -1118,10 +1453,15 @@ async function graphPanel(runId) {
       style: `grid-column:${position.depth + 1};grid-row:${position.lane + 1}`,
     }, [
       el("div", { class: "graph-node-head" }, [
-        el("strong", { class: "mono", text: node.node_id }),
+        el("strong", { text: readableNodeName(node) }),
         runtime ? pill(runtime.status) : el("span", { class: "pill", text: i18n.t("graph.notStarted") }),
       ]),
-      el("span", { class: "muted", text: node.kind }),
+      el("span", {
+        class: "muted",
+        text: node.handler_name
+          ? node.handler_name.replace(/^agent\./, "")
+          : node.kind,
+      }),
       runtime ? el("span", { class: "muted", text: i18n.t("plan.overlay.counts", {
         generation: i18n.number(runtime.generation), attempts: i18n.number(runtime.attempts),
       }) }) : null,
@@ -1137,10 +1477,10 @@ async function graphPanel(runId) {
     ]),
     el("div", { class: "panel-body graph-body" }, [
       canvas,
-      el("div", { class: "graph-edges" }, definition.edges.map((edge) =>
+      simplified ? null : el("div", { class: "graph-edges" }, definition.edges.map((edge) =>
         el("span", { class: "mono", text: `${edge.from} → ${edge.to}${edge.back_edge ? ` · ${i18n.t("graph.loop")}` : ""}` }),
       )),
-      el("div", { class: "graph-facts" }, [
+      simplified ? null : el("div", { class: "graph-facts" }, [
         el("span", { text: i18n.t("graph.branches", { count: i18n.number(overlay.branch_tokens.length) }) }),
         el("span", { text: i18n.t("graph.joins", { count: i18n.number(overlay.join_groups.length) }) }),
         el("span", { text: i18n.t("graph.counters", { count: i18n.number(overlay.control_counters.length) }) }),
@@ -1743,88 +2083,221 @@ async function renderArtifacts(root, selectedArtifactId = null) {
   more.addEventListener("click", () => load().catch(reportError));
   root.append(grid, more);
   await load();
-  if (selectedArtifactId) await renderArtifactDetail(root, selectedArtifactId);
+  if (selectedArtifactId) await openArtifactDialog(selectedArtifactId);
+}
+
+/* The detail is a modal over the catalog, not a panel under it.
+ *
+ * `#/artifacts/{id}` stays the address, so the dialog is opened by the route
+ * and dismissing it navigates back — Escape, the backdrop and the Close button
+ * all end in the same place. An open dialog also suspends the live refresh, so
+ * the catalog behind it never re-renders the dialog away mid-read. */
+async function openArtifactDialog(artifactId) {
+  const dialog = el("dialog", {
+    class: "artifact-detail artifact-dialog", "aria-label": i18n.t("artifacts.detail"),
+  }, [dataState(el, i18n, "loading")]);
+  const dismiss = () => {
+    dialog.remove();
+    // Only walk back if this Artifact is still what the address names: a
+    // dialog closed by a navigation must not undo that navigation.
+    if (route.view === "artifact" && route.artifactId === artifactId) {
+      navigate({ view: "artifacts", runId: null });
+    }
+  };
+  dialog.addEventListener("close", dismiss);
+  const previous = activeViewCleanup;
+  activeViewCleanup = () => {
+    dialog.removeEventListener("close", dismiss);
+    dialog.remove();
+    if (previous) previous();
+  };
+  document.body.append(dialog);
+  dialog.showModal();
+  await renderArtifactDetail(dialog, artifactId);
+}
+
+/* A page glyph, not a four-letter type code: the card now says what the
+ * Artifact is by its title, and the exact media type is one hover away. */
+function documentIcon(contentType) {
+  return el("span", { class: "file-icon", title: contentType }, [
+    svgEl("svg", {
+      viewBox: "0 0 24 24", width: "18", height: "18", "aria-hidden": "true",
+      fill: "none", stroke: "currentColor", "stroke-width": "1.6",
+      "stroke-linecap": "round", "stroke-linejoin": "round",
+    }, [
+      svgEl("path", { d: "M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" }),
+      svgEl("path", { d: "M14 3v5h5" }),
+      svgEl("path", { d: "M9 13h6" }),
+      svgEl("path", { d: "M9 17h4" }),
+    ]),
+  ]);
+}
+
+/* An image thumbnail that degrades to the document icon.
+ *
+ * The <img> fetches the content endpoint itself, so a revoked ACL, a missing
+ * Blob or a type the server declines to inline all arrive as a load error
+ * rather than a broken picture. */
+function artifactThumb(item) {
+  const badge = documentIcon(item.content_type);
+  if (!item.image_previewable) return badge;
+  const image = el("img", {
+    class: "artifact-thumb", loading: "lazy", decoding: "async",
+    src: api.artifactContentUrl(item.artifact_id), alt: "",
+    onerror: () => {
+      image.replaceWith(badge);
+    },
+  });
+  return image;
 }
 
 function artifactCard(item, selected = false) {
-  const contentType = item.content_type || "application/octet-stream";
-  const subtype = contentType.split("/").pop() || "file";
-  const fileType = subtype === "plain" ? "TXT"
-    : subtype === "json" ? "JSON"
-      : subtype.replace(/^x-/, "").slice(0, 4).toUpperCase();
+  // The port that produced it is the fallback name: a document with no title
+  // of its own must not be given one the file does not contain.
+  const name = item.display_name || item.title || item.output_port_id;
   return el("article", { class: `artifact-card panel list-option-card${selected ? " selected" : ""}` }, [
     el("button", {
       class: "artifact-card-main",
       "aria-current": selected ? "true" : null,
       onclick: () => navigate({ view: "artifact", artifactId: item.artifact_id, runId: null }),
     }, [
-      el("span", { class: "artifact-top" }, [
-        el("span", { class: "file-icon", "aria-hidden": "true", text: fileType }),
+      el("span", { class: `artifact-top${item.image_previewable ? " artifact-top-image" : ""}` }, [
+        artifactThumb(item),
         el("span", { class: "artifact-size", text: i18n.t("artifacts.size", {
           size: i18n.number(item.size_bytes),
         }) }),
       ]),
-      el("strong", { class: "artifact-name", text: item.output_port_id }),
-      el("span", { class: "artifact-meta muted", text: `${item.workflow_id} · ${item.producer_id}` }),
-      el("span", { class: "artifact-id muted mono", text: item.artifact_id }),
-      el("span", { class: "artifact-flow", "aria-hidden": "true" }, [
-        el("span", { text: item.run_id }),
-        el("b", { text: "→" }),
-        el("span", { text: item.output_port_id }),
+      el("strong", { class: "artifact-name", text: name }),
+      el("span", { class: "artifact-origin" }, [
+        el("span", { class: "artifact-origin-label muted", text: i18n.t("artifacts.goal") }),
+        // One line, clipped by CSS; the full title stays reachable on hover.
+        el("span", {
+          class: "artifact-origin-value", text: item.goal || item.run_id,
+          title: item.goal || item.run_id,
+        }),
       ]),
+      el("span", { class: "artifact-origin" }, [
+        el("span", { class: "artifact-origin-label muted", text: i18n.t("artifacts.workflow") }),
+        // The `workflow:` prefix is the id's kind, and the row already says
+        // which kind this is. The full id stays on hover and on the detail.
+        el("span", {
+          class: "artifact-origin-value mono", title: item.workflow_id,
+          text: item.workflow_id.replace(/^workflow:/, ""),
+        }),
+      ]),
+      // Media type, producer and Artifact id are addressing, not identity:
+      // they belong on the detail panel, where one Artifact is already open.
     ]),
   ]);
 }
 
-async function renderArtifactDetail(root, artifactId) {
-  const panel = el("section", { class: "panel artifact-detail" }, [dataState(el, i18n, "loading")]);
-  root.append(panel);
+/* The Artifact as itself: the picture, or the text, or an honest note that
+ * this one cannot be shown here.
+ *
+ * The text loads on open rather than behind a button — the dialog exists to
+ * read the Artifact — and its own failure stays inside this box so a preview
+ * the actor may not read never takes the metadata down with it. */
+function artifactContent(item) {
+  if (item.image_previewable) {
+    const holder = el("div", { class: "artifact-content" });
+    const load = () => {
+      const image = el("img", {
+        // Not lazy: the image is what was asked for, and a deferred load leaves
+        // an empty box where the Artifact should be.
+        class: "artifact-image", decoding: "async",
+        src: api.artifactContentUrl(item.artifact_id),
+        alt: item.title || item.output_port_id,
+        onerror: () => holder.replaceChildren(dataState(el, i18n, "error", {
+          onRetry: load,
+        })),
+      });
+      // The browser starts an image request only once the element participates
+      // in the document; installing it here also replaces a prior error state.
+      holder.replaceChildren(image);
+    };
+    load();
+    return holder;
+  }
+  if (!item.previewable) {
+    return el("div", { class: "muted", text: i18n.t("artifacts.notPreviewable") });
+  }
+  const holder = el("div", { class: "artifact-content" }, [dataState(el, i18n, "loading")]);
+  const load = () => {
+    holder.replaceChildren(dataState(el, i18n, "loading"));
+    api.artifactPreview(item.artifact_id).then((text) => {
+      holder.replaceChildren(el("pre", { class: "artifact-preview", text }));
+    }).catch((error) => {
+      holder.replaceChildren(dataState(el, i18n, "error", {
+        message: error instanceof ApiError
+          ? i18n.t(error.messageKey, { message: error.message }) : null,
+        onRetry: load,
+      }));
+      reportError(error);
+    });
+  };
+  load();
+  return holder;
+}
+
+async function renderArtifactDetail(panel, artifactId) {
   try {
+    const simple = simplifiedGoalUI();
     const [detailResponse, lineageResponse] = await Promise.all([
-      api.artifact(artifactId), api.artifactLineage(artifactId),
+      api.artifact(artifactId),
+      simple ? Promise.resolve({ data: null }) : api.artifactLineage(artifactId),
     ]);
     const item = detailResponse.data;
     const lineage = lineageResponse.data;
-    const preview = el("pre", { class: "artifact-preview", hidden: "hidden" });
-    const links = [
+    const links = simple ? [] : [
       ...lineage.producers, ...lineage.consumers, ...lineage.derived_from,
     ];
     panel.replaceChildren(
       el("div", { class: "panel-head" }, [
         el("div", {}, [
           el("div", { class: "eyebrow", text: i18n.t("artifacts.detail") }),
-          el("div", { class: "panel-title mono", text: item.artifact_id }),
+          el("div", { class: "panel-title", text: item.display_name || item.output_port_id }),
         ]),
-        el("button", {
-          class: "button", text: i18n.t("action.close"),
-          onclick: () => navigate({ view: "artifacts", runId: null }),
-        }),
+        el("div", { class: "actions" }, [
+          el("a", {
+            class: "button", text: i18n.t("artifacts.download"),
+            href: api.artifactDownloadUrl(item.artifact_id),
+          }),
+          simple ? el("button", {
+            class: "button", text: i18n.t("artifacts.copyId"),
+            onclick: async () => {
+              await navigator.clipboard.writeText(item.artifact_id);
+              announce(i18n.t("artifacts.idCopied"));
+            },
+          }) : null,
+          el("button", {
+            class: "button", text: i18n.t("action.close"),
+            onclick: () => panel.close(),
+          }),
+        ]),
       ]),
       el("div", { class: "panel-body" }, [
-        el("dl", { class: "fact-grid" }, [
+        // The Artifact itself comes first: someone who opened it wants to read
+        // it, not to read about it. The facts follow the content.
+        artifactContent(item),
+        simple ? null : el("dl", { class: "fact-grid" }, [
+          el("div", {}, [
+            el("dt", { text: i18n.t("artifacts.goal") }),
+            el("dd", {
+              class: "fact-line", text: item.goal || item.run_id,
+              title: item.goal || item.run_id,
+            }),
+          ]),
+          el("div", {}, [el("dt", { text: i18n.t("artifacts.workflow") }), el("dd", { class: "mono", text: item.workflow_id })]),
           el("div", {}, [el("dt", { text: i18n.t("artifacts.run") }), el("dd", { class: "mono", text: item.run_id })]),
           el("div", {}, [el("dt", { text: i18n.t("artifacts.type") }), el("dd", { text: item.content_type })]),
           el("div", {}, [el("dt", { text: i18n.t("artifacts.sizeLabel") }), el("dd", { text: i18n.number(item.size_bytes) })]),
           el("div", {}, [el("dt", { text: i18n.t("artifacts.producer") }), el("dd", { class: "mono", text: item.producer_id })]),
+          // The id is addressing, not a name: it reads as one fact among the
+          // others rather than as the heading of the Artifact.
+          el("div", {}, [el("dt", { text: i18n.t("artifacts.idLabel") }), el("dd", { class: "mono", text: item.artifact_id })]),
         ]),
-        el("div", { class: "actions" }, [
-          item.previewable ? el("button", {
-            class: "button", text: i18n.t("artifacts.preview"),
-            onclick: async () => {
-              try {
-                preview.textContent = await api.artifactPreview(item.artifact_id);
-                preview.hidden = false;
-              } catch (error) { reportError(error); }
-            },
-          }) : null,
-          el("a", {
-            class: "button", href: api.artifactDownloadUrl(item.artifact_id),
-            text: i18n.t("artifacts.download"), download: "",
-          }),
-        ]),
-        preview,
-        el("div", { class: "eyebrow", text: i18n.t("artifacts.lineage") }),
-        ...(links.length ? links.map((link) => el("div", {
+        simple ? null : el("div", { class: "eyebrow", text: i18n.t("artifacts.lineage") }),
+        ...(simple ? [] : links.length ? links.map((link) => el("div", {
           class: "lineage-row mono", text: `${link.type}: ${link.source_id} → ${link.target_id}`,
         })) : [el("div", { class: "muted", text: i18n.t("artifacts.lineage.empty") })]),
       ]),
@@ -1833,7 +2306,7 @@ async function renderArtifactDetail(root, artifactId) {
     panel.replaceChildren(dataState(el, i18n, "error", {
       message: error instanceof ApiError
         ? i18n.t(error.messageKey, { message: error.message }) : null,
-      onRetry: () => renderArtifactDetail(root, artifactId),
+      onRetry: () => renderArtifactDetail(panel, artifactId),
     }));
     reportError(error);
   }
@@ -1912,7 +2385,7 @@ async function renderSettings(root) {
   // Ops and preferences share one page. The operational half needs ops_read;
   // without it the page is still useful for local preferences, and the server
   // decides what to show rather than the client guessing from a 403.
-  const opsRead = Boolean(shellFacts?.permissions?.ops_read);
+  const opsRead = !simplifiedGoalUI() && Boolean(shellFacts?.permissions?.ops_read);
   const [statusResponse, recoveryResponse] = opsRead
     ? await Promise.all([api.opsStatus(), api.recovery()])
     : [null, null];
@@ -1940,6 +2413,8 @@ async function renderSettings(root) {
       el("div", { class: "muted", text: i18n.t("settings.localOnly") }),
     ]),
   ]));
+
+  if (simplifiedGoalUI()) return;
 
   if (status) {
     root.append(
@@ -2031,9 +2506,7 @@ function resolveDraftCollision(failure, create, value) {
   const close = () => { dialog.close(); dialog.remove(); };
   dialog.append(el("div", { class: "dialog-body" }, [
     el("h3", { text: i18n.t("editor.activeDraftTitle") }),
-    el("p", { class: "muted", text: i18n.t("editor.activeDraftBody", {
-      active: existing.base_version, requested: value.selected_version,
-    }) }),
+    el("p", { class: "muted", text: i18n.t("editor.activeDraftBody") }),
     el("div", { class: "actions" }, [
       el("button", {
         type: "button", class: "button", text: i18n.t("action.cancel"), onclick: close,
@@ -2045,7 +2518,7 @@ function resolveDraftCollision(failure, create, value) {
       }),
       el("button", {
         type: "button", class: "button danger", id: "replaceActiveDraft",
-        text: i18n.t("editor.discardCreateVersion", { version: value.selected_version }),
+        text: i18n.t("editor.discardCreate"),
         onclick: async (event) => {
           event.currentTarget.disabled = true;
           try {
@@ -2058,8 +2531,8 @@ function resolveDraftCollision(failure, create, value) {
               discard, {}, `workflow.draft.discard:${existing.draft_id}:replace`,
             );
             const next = (await api.execute(
-              create, { base_version: value.selected_version },
-              `workflow.draft.create:${value.workflow_id}:${value.selected_version}:replace`,
+              create, {},
+              `workflow.draft.create:${value.workflow_id}:replace`,
             )).data;
             close();
             goToDraft(value.workflow_id, next.draft_id);
@@ -2128,10 +2601,8 @@ function handlerDriftNotice(value, redraw) {
           onclick: async (event) => {
             event.currentTarget.disabled = true;
             try {
-              const next = (await api.execute(
-                rebind, {}, `workflow.rebind:${value.workflow_id}:${value.latest_version}`,
-              )).data;
-              announce(i18n.t("workflows.drift.rebound", { version: next.version }));
+              await api.execute(rebind, {}, `workflow.rebind:${value.workflow_id}`);
+              announce(i18n.t("workflows.drift.rebound"));
               await redraw();
             } catch (error) {
               event.currentTarget.disabled = false;
@@ -2146,11 +2617,15 @@ function handlerDriftNotice(value, redraw) {
 async function renderWorkflows(root) {
   const catalog = (await api.workflowCatalog()).data;
   const entries = catalog.workflows;
+  const simplified = simplifiedGoalUI();
   // Generation appears only when the server advertised it: capability off or
   // read-only actor simply means the button does not exist.
   const generateCommand = (catalog.allowed_commands || []).find(
     (item) => item.command === "workflow.generate",
   );
+  const activeGeneration = simplified && generateCommand
+    ? (await api.authoringJobs({ active: true, type: "generate" })).data.jobs[0]
+    : null;
   root.append(el("header", { class: "view-intro" }, [
     el("div", {}, [
       el("div", { class: "eyebrow", text: i18n.t("workflows.eyebrow") }),
@@ -2159,8 +2634,10 @@ async function renderWorkflows(root) {
     ]),
     generateCommand ? el("button", {
         class: "button primary", id: "generateWorkflow",
-        text: i18n.t("generate.action"),
-        onclick: () => generateWorkflowDialog(generateCommand),
+        text: activeGeneration
+          ? i18n.t(`authoring.job.${activeGeneration.status}`)
+          : i18n.t("generate.action"),
+        onclick: () => generateWorkflowDialog(generateCommand, activeGeneration),
       }) : null,
   ]));
   const search = el("input", {
@@ -2183,7 +2660,7 @@ async function renderWorkflows(root) {
     workflowFilters.q = search.value.trim();
     render();
   } }, [
-    search, sort,
+    search, simplified ? null : sort,
     el("button", { class: "button", type: "submit", text: i18n.t("action.search") }),
   ]));
 
@@ -2211,24 +2688,40 @@ async function renderWorkflows(root) {
       class: "workflow-node more", text: `+${entry.summary.node_count - visualNodes.length}`,
     }));
     const card = el("article", {
-      class: "workflow-card panel", "data-workflow-id": entry.workflow_id,
+      class: `workflow-card panel${simplified ? " simplified-workflow-card" : ""}`,
+      "data-workflow-id": entry.workflow_id,
     }, [
       el("button", { class: "workflow-card-main" }, [
-        el("span", { class: "workflow-visual", "aria-hidden": "true" }, visualNodes),
-        el("span", { class: "eyebrow", text: entry.workflow_id }),
-        el("strong", { text: entry.name }),
+        simplified ? null : el("span", { class: "workflow-visual", "aria-hidden": "true" }, visualNodes),
+        simplified ? null : el("span", { class: "eyebrow", text: entry.workflow_id }),
+        el("span", { class: "workflow-card-heading" }, [
+          el("strong", { text: entry.name }),
+          simplified && entry.goal_readiness !== "ready" ? el("span", {
+            class: `pill ${entry.goal_readiness === "needs_upgrade" ? "waiting" : "failed"}`,
+            text: i18n.t(`workflows.readiness.${entry.goal_readiness}`),
+          }) : null,
+        ]),
         entry.description ? el("span", { class: "muted", text: entry.description }) : null,
-        el("span", { class: "workflow-meta", text: i18n.t("workflows.summary", {
+        simplified && entry.goal_readiness !== "ready" ? el("span", {
+          class: "muted",
+          // A definition that cannot be upgraded is normally answered by
+          // generating a replacement. Where this deployment has no generating
+          // Agent that answer does not exist, so the card says what is true
+          // instead of pointing at a button nobody can press.
+          text: i18n.t(
+            entry.goal_readiness === "needs_migration" && !generateCommand
+              ? "workflows.readiness.needs_migration.noAgent"
+              : `workflows.readiness.${entry.goal_readiness}.description`,
+          ),
+        }) : null,
+        simplified ? null : el("span", { class: "workflow-meta", text: i18n.t("workflows.summary", {
           nodes: i18n.number(entry.summary.node_count), inputs: i18n.number(entry.inputs.length),
         }) }),
         // Which version is current, and whether anyone has run it: the two
         // facts that tell two similarly named workflows apart.
-        el("span", { class: "workflow-card-facts", text: [
-          `v${entry.latest_version}`,
-          entry.last_run_at
-            ? i18n.t("workflows.lastRun", { when: i18n.dateTime(entry.last_run_at) })
-            : i18n.t("workflows.neverRun"),
-        ].join(" · ") }),
+        simplified ? null : el("span", { class: "workflow-card-facts", text: entry.last_run_at
+          ? i18n.t("workflows.lastRun", { when: i18n.dateTime(entry.last_run_at) })
+          : i18n.t("workflows.neverRun") }),
       ]),
       // Starting a run is the common act, so it does not require opening the
       // definition first — but only where the server advertised run.start.
@@ -2236,9 +2729,32 @@ async function renderWorkflows(root) {
         ? el("div", { class: "workflow-card-actions" }, [
             el("button", {
               class: "button", text: i18n.t("action.newGoal"),
-              onclick: () => newRunDialog(entry.workflow_id, entry.latest_version),
+              onclick: () => newRunDialog(entry.workflow_id),
             }),
           ])
+        : simplified && entry.goal_readiness === "needs_upgrade"
+          ? el("div", { class: "workflow-card-actions" }, [
+              el("button", {
+                // A class, not an id: the catalog can list several of these.
+                class: "button upgrade-workflow", text: i18n.t("workflows.upgrade"),
+                // The detail page owns the modify command, so the catalog asks
+                // it to open the upgrade prompt rather than making the author
+                // find the same button again one page later.
+                onclick: () => {
+                  pendingUpgrade = entry.workflow_id;
+                  navigate({
+                    view: "workflow", workflowId: entry.workflow_id, runId: null,
+                  });
+                },
+              }),
+            ])
+          : simplified && entry.goal_readiness === "needs_migration" && generateCommand
+            ? el("div", { class: "workflow-card-actions" }, [
+                el("button", {
+                  class: "button", text: i18n.t("generate.action"),
+                  onclick: () => generateWorkflowDialog(generateCommand),
+                }),
+              ])
         : null,
     ]);
     card.querySelector(".workflow-card-main").addEventListener("click", () => navigate({
@@ -2260,6 +2776,7 @@ async function renderWorkflows(root) {
  * it is reachable by link and survives a reload.
  */
 async function renderWorkflowDetail(root, workflowId) {
+  const simplified = simplifiedGoalUI();
   const panel = el("section", { class: "panel workflow-detail" });
   root.append(panel);
 
@@ -2271,26 +2788,40 @@ async function renderWorkflowDetail(root, workflowId) {
       panel.replaceChildren(
         el("div", { class: "panel-head" }, [
           el("div", {}, [
-            el("div", { class: "eyebrow", text: `${value.workflow_id} · v${value.selected_version}` }),
+            simplified ? null : el("div", { class: "eyebrow", text: value.workflow_id }),
             el("div", { class: "panel-title", text: value.name }),
           ]),
           el("div", { class: "actions" }, [
             el("button", {
               class: "button", id: "backToWorkflows", text: i18n.t("action.back"),
-              onclick: () => navigate({ view: "workflows", runId: null }),
+              onclick: () => navigate({ view: simplified ? "home" : "workflows", runId: null }),
             }),
             (() => {
+              const modify = value.allowed_commands.find(
+                (item) => item.command === "workflow.modify",
+              );
+              if (simplified && modify) return el("button", {
+                class: "button", id: "editWorkflow",
+                text: i18n.t(
+                  value.goal_readiness === "needs_upgrade"
+                    ? "workflows.upgrade" : "editor.edit",
+                ),
+                onclick: () => modifyWorkflowDialog(modify, value, draw),
+              });
               const create = value.allowed_commands.find(
                 (item) => item.command === "workflow.draft.create",
               );
               return create ? el("button", {
                 class: "button", id: "editWorkflow",
-                text: i18n.t("editor.edit"),
+                text: i18n.t(
+                  simplified && value.goal_readiness === "needs_upgrade"
+                    ? "workflows.upgrade" : "editor.edit",
+                ),
                 onclick: async () => {
                   try {
                     const draft = (await api.execute(
-                      create, { base_version: value.selected_version },
-                      `workflow.draft.create:${value.workflow_id}:${value.selected_version}`,
+                      create, {},
+                      `workflow.draft.create:${value.workflow_id}`,
                     )).data;
                     goToDraft(value.workflow_id, draft.draft_id);
                   } catch (error) {
@@ -2306,21 +2837,39 @@ async function renderWorkflowDetail(root, workflowId) {
             value.allowed_commands.some((item) => item.command === "run.start")
               ? el("button", {
                   class: "button primary", text: i18n.t("action.newGoal"),
-                  onclick: () => newRunDialog(value.workflow_id, value.selected_version),
+                  onclick: () => newRunDialog(value.workflow_id),
                 })
               : null,
           ]),
         ]),
         el("div", { class: "panel-body" }, [
           value.description ? el("p", { text: value.description }) : null,
-          handlerDriftNotice(value, draw),
-          el("dl", { class: "fact-grid" }, [
+          simplified && value.active_job ? el("div", {
+            class: "banner info", text: i18n.t(
+              `authoring.job.${value.active_job.status}`,
+            ),
+          }) : null,
+          simplified && value.goal_readiness !== "ready" ? el("div", {
+            class: `banner ${value.goal_readiness === "needs_upgrade" ? "warn" : "error"}`,
+            text: i18n.t(`workflows.readiness.${value.goal_readiness}.description`),
+          }) : null,
+          simplified ? null : handlerDriftNotice(value, draw),
+          simplified ? null : el("dl", { class: "fact-grid" }, [
             el("div", {}, [el("dt", { text: i18n.t("workflows.nodes") }), el("dd", { text: i18n.number(value.summary.node_count) })]),
             el("div", {}, [el("dt", { text: i18n.t("workflows.inputs") }), el("dd", { text: i18n.number(value.inputs.length) })]),
           ]),
-          workflowDefinitionTabs(value.graph, definition),
+          simplified
+            ? el("div", { class: "workflow-graph-scroll" }, [workflowGraphView(value.graph)])
+            : workflowDefinitionTabs(value.graph, definition),
         ]),
       );
+      if (pendingUpgrade === value.workflow_id) {
+        pendingUpgrade = null;
+        const modify = value.allowed_commands.find(
+          (item) => item.command === "workflow.modify",
+        );
+        if (modify) modifyWorkflowDialog(modify, value, draw);
+      }
     } catch (error) {
       panel.replaceChildren(dataState(el, i18n, "error", { onRetry: draw }));
       reportError(error);
@@ -2544,10 +3093,7 @@ async function renderWorkflowEditor(root, draftId) {
           "workflow.draft.publish", {}, `workflow.draft.publish:${draft.draft_id}`,
         );
         if (response) {
-          announce(i18n.t("editor.published", {
-            workflowId: draft.workflow_id,
-            version: i18n.number(response.data.published.version),
-          }));
+          announce(i18n.t("editor.published", { workflowId: draft.workflow_id }));
           navigate({ view: "workflows", runId: null });
         }
       },
@@ -2571,7 +3117,7 @@ async function renderWorkflowEditor(root, draftId) {
     panel.replaceChildren(
       el("div", { class: "panel-head" }, [
         el("div", {}, [
-          el("div", { class: "eyebrow", text: `${draft.workflow_id} · v${draft.base_version}` }),
+          el("div", { class: "eyebrow", text: draft.workflow_id }),
           el("div", { class: "panel-title", text: i18n.t("editor.agentTitle") }),
         ]),
         el("span", {
@@ -2742,14 +3288,142 @@ function readGeneratedInputs(container, entry) {
   return result;
 }
 
-/** Describe → draft → publish. The draft is the compiler-validated source the
- * server returned; publishing executes the AllowedCommand advertised on that
- * draft, so the dialog never invents a URL or an expected version. */
-async function generateWorkflowDialog(generateCommand) {
-  let agentHandlers = [];
+async function generateWorkflowDialog(generateCommand, initialJob = null) {
+  if (!simplifiedGoalUI()) {
+    await legacyGenerateWorkflowDialog(generateCommand);
+    return;
+  }
+  const dialog = el("dialog", { "aria-label": i18n.t("generate.title") });
+  const form = el("form", { method: "dialog" });
+  dialog.append(form);
+  let job = initialJob;
+  let promptText = initialJob?.prompt || "";
+  let timer = null;
+
+  const draw = () => {
+    const body = [el("h2", { text: i18n.t("generate.title") })];
+    const actions = el("div", { class: "actions" });
+    if (!job) {
+      const instruction = el("textarea", {
+        id: "generateInstruction", required: "required", maxlength: "4000",
+        placeholder: i18n.t("generate.instructionPh"), text: promptText,
+      });
+      body.push(
+        el("div", { class: "field" }, [
+          el("label", { for: "generateInstruction", text: i18n.t("generate.instruction") }),
+          instruction,
+          el("small", { class: "muted", text: i18n.t("generate.hint") }),
+        ]),
+      );
+      actions.append(
+        el("button", {
+          class: "button", value: "cancel", formnovalidate: "formnovalidate",
+          text: i18n.t("action.cancel"),
+        }),
+        el("button", {
+        type: "button", class: "button primary", id: "generateSubmit",
+        text: i18n.t("generate.action"),
+        onclick: async () => {
+          if (!instruction.value.trim()) return;
+          promptText = instruction.value.trim();
+          try {
+            const response = await api.execute(
+              // Step names are read here, so they are written in this locale
+              // rather than in whatever language the prompt happened to use.
+              generateCommand, { prompt: promptText, display_language: i18n.locale },
+              `workflow.generate:${Date.now()}`,
+            );
+            job = response.data;
+            draw();
+            watch();
+          } catch (error) {
+            reportError(error);
+          }
+        },
+      }));
+    } else {
+      body.push(
+        el("div", { class: `authoring-job-state ${job.status}` }, [
+          el("span", { class: "live-dot", "aria-hidden": "true" }),
+          el("strong", { text: i18n.t(`authoring.job.${job.status}`) }),
+        ]),
+        el("p", { class: "muted", text: promptText }),
+        job.error ? el("div", { class: "banner error", text: job.error.message }) : null,
+      );
+      const cancel = (job.allowed_commands || []).find(
+        (item) => item.command === "workflow.authoring.cancel",
+      );
+      if (cancel) {
+        actions.append(el("button", {
+          type: "button", class: "button", text: i18n.t("action.cancel"),
+          onclick: async () => {
+            try {
+              job = (await api.execute(
+                cancel, {}, `workflow.authoring.cancel:${job.job_id}`,
+              )).data;
+              draw();
+            } catch (error) {
+              reportError(error);
+            }
+          },
+        }));
+      } else {
+        actions.append(el("button", {
+          type: "button", class: "button", text: job.status === "done"
+            ? i18n.t("action.open") : i18n.t("action.close"),
+          onclick: () => {
+            dialog.close();
+            if (job.status === "done" && job.result?.workflow_id) {
+              navigate({
+                view: "workflow", workflowId: job.result.workflow_id,
+              });
+            }
+          },
+        }));
+        if (["failed", "cancelled"].includes(job.status)) {
+          actions.append(el("button", {
+            type: "button", class: "button primary",
+            text: i18n.t("action.retry"),
+            onclick: () => {
+              job = null;
+              draw();
+            },
+          }));
+        }
+      }
+    }
+    // replaceChildren has no opinion about null the way el() does: it would
+    // render an absent banner as the literal word "null".
+    form.replaceChildren(...body.filter(Boolean), actions);
+  };
+
+  const watch = async () => {
+    if (!job || !["queued", "running"].includes(job.status)) return;
+    clearTimeout(timer);
+    timer = setTimeout(async () => {
+      try {
+        job = (await api.get(job.href)).data;
+        draw();
+        watch();
+      } catch (error) {
+        reportError(error);
+      }
+    }, 800);
+  };
+
+  dialog.addEventListener("close", () => {
+    clearTimeout(timer);
+    dialog.remove();
+  }, { once: true });
+  document.body.append(dialog);
+  draw();
+  dialog.showModal();
+}
+
+async function legacyGenerateWorkflowDialog(generateCommand) {
+  let handlers = [];
   try {
-    const catalog = await api.handlerCatalog();
-    agentHandlers = (catalog.data.handlers || []).filter((item) =>
+    handlers = (await api.handlerCatalog()).data.handlers.filter((item) =>
       item.registration_status === "registered"
       && (item.capabilities || []).includes("agent.invoke"),
     );
@@ -2758,175 +3432,305 @@ async function generateWorkflowDialog(generateCommand) {
   }
   const dialog = el("dialog", { "aria-label": i18n.t("generate.title") });
   const form = el("form", { method: "dialog" });
-  dialog.append(form);
   let draft = null;
-  let busy = false;
-  let draftProblem = "";
   let instructionText = "";
   let descriptionText = "";
-  let defaultAgent = agentHandlers[0]?.name || "";
-  // Two different questions: which Agent writes the DSL (writerAgent) and
-  // which Agent the written workflow should call (defaultAgent).
-  let writerAgent = "";
-
+  let defaultAgent = handlers[0]?.name || "";
+  let writerAgent = generationAgents()[0] || "";
   const draw = () => {
-    const problem = el("div", { class: "banner error", hidden: "hidden", role: "alert" });
-    if (draftProblem) {
-      problem.textContent = draftProblem;
-      problem.hidden = false;
-    }
-    const actions = el("div", { class: "actions" }, [
-      // Cancel submits the dialog form (that is what closes it and sets the
-      // return value), so it must opt out of validation: otherwise a required
-      // field the user never filled in is what they are abandoning, and the
-      // browser refuses to let them leave.
-      el("button", {
-        class: "button", value: "cancel", formnovalidate: "formnovalidate",
-        text: i18n.t("action.cancel"),
-      }),
-    ]);
-    const body = [el("h2", { text: i18n.t("generate.title") }), problem];
-
+    const problem = el("div", {
+      class: "banner error", hidden: "hidden", role: "alert",
+    });
     if (!draft) {
       const instruction = el("textarea", {
         id: "generateInstruction", required: "required", maxlength: "4000",
-        placeholder: i18n.t("generate.instructionPh"), text: instructionText,
+        text: instructionText, placeholder: i18n.t("generate.instructionPh"),
       });
       const description = el("input", {
         id: "generateDescription", type: "text", maxlength: "50",
-        placeholder: i18n.t("generate.descriptionPh"), value: descriptionText,
+        value: descriptionText,
       });
-      description.addEventListener("input", () => { descriptionText = description.value; });
-      body.push(
+      form.replaceChildren(
+        el("h2", { text: i18n.t("generate.title") }),
         el("div", { class: "field" }, [
-          el("label", { for: "generateInstruction", text: i18n.t("generate.instruction") }),
+          el("label", {
+            for: "generateInstruction", text: i18n.t("generate.instruction"),
+          }),
           instruction,
-          el("small", { class: "muted", text: i18n.t("generate.hint") }),
         ]),
         el("div", { class: "field" }, [
-          el("label", { for: "generateDescription", text: i18n.t("generate.description") }),
+          el("label", {
+            for: "generateDescription", text: i18n.t("generate.description"),
+          }),
           description,
-          el("small", { class: "muted", text: i18n.t("generate.descriptionHint") }),
         ]),
-      );
-      const writerField = generationAgentField(
-        "generateWriter", writerAgent, (value) => { writerAgent = value; },
-      );
-      if (writerField) body.push(writerField);
-      if (agentHandlers.length) {
-        body.push(el("div", { class: "field" }, [
-          el("label", { for: "generateDefaultAgent", text: i18n.t("generate.defaultAgent") }),
+        handlers.length ? el("div", { class: "field" }, [
+          el("label", {
+            for: "generateDefaultAgent", text: i18n.t("generate.defaultAgent"),
+          }),
           el("select", {
             id: "generateDefaultAgent",
-            onchange: (event) => { defaultAgent = event.target.value; },
-          }, agentHandlers.map((handler) => el("option", {
-            value: handler.name,
-            text: `${handler.name}@${handler.version}`,
-            ...(handler.name === defaultAgent ? { selected: "selected" } : {}),
+            onchange: (event) => { defaultAgent = event.target.value.split("@")[0]; },
+          }, handlers.map((item) => el("option", {
+            value: `${item.name}@${item.version}`,
+            text: `${item.name}@${item.version}`,
+            ...(item.name === defaultAgent ? { selected: "selected" } : {}),
           }))),
-          el("small", { class: "muted", text: i18n.t("generate.defaultAgentHint") }),
-        ]));
-      }
-      const generate = el("button", {
-        type: "button", class: "button primary", id: "generateSubmit",
-        text: i18n.t("generate.action"),
-        onclick: async () => {
-          if (busy || !instruction.value.trim()) return;
-          busy = true;
-          generate.disabled = true;
-          generate.textContent = i18n.t("generate.generating");
-          problem.hidden = true;
-          try {
-            instructionText = instruction.value.trim();
-            const response = await api.execute(
-              generateCommand, {
-                instruction: instructionText,
-                description: descriptionText.trim(),
-                ...(defaultAgent ? { default_agent: defaultAgent } : {}),
-                ...(writerAgent ? { agent: writerAgent } : {}),
-              },
-              `workflow.generate:${Date.now()}`,
-            );
-            draft = response.data;
-            draw();
-          } catch (error) {
-            problem.textContent = describeGenerationFailure(error);
-            problem.hidden = false;
-          } finally {
-            busy = false;
-            generate.disabled = false;
-            generate.textContent = i18n.t("generate.action");
-          }
-        },
-      });
-      actions.append(generate);
-    } else {
-      const document_ = JSON.parse(draft.source);
-      body.push(
-        el("div", { class: "eyebrow", text: `${draft.workflow_id} · ${draft.definition_hash.slice(0, 19)}…` }),
-        el("p", { class: "muted", text: i18n.t("generate.preview", {
-          nodes: i18n.number(draft.node_count),
-          attempts: i18n.number(draft.attempts),
-        }) }),
-        el("div", { class: "definition-list" }, document_.nodes.map((node) => {
-          return el("div", { class: "actions" }, [
-            el("span", { class: "mono", text: node.id }),
-            el("span", { class: "pill", text: node.kind }),
-            node.handler
-              ? el("span", { class: "muted mono", text: `${node.handler.name}@${node.handler.version}` })
-              : null,
-          ]);
-        })),
-        el("details", {}, [
-          el("summary", { class: "muted", text: i18n.t("generate.source") }),
-          el("pre", { class: "artifact-preview", text: draft.source }),
+        ]) : null,
+        generationAgentField(
+          "generateWriter", writerAgent,
+          (value) => { writerAgent = value; },
+        ),
+        problem,
+        el("div", { class: "actions" }, [
+          el("button", {
+            class: "button", value: "cancel", formnovalidate: "formnovalidate",
+            text: i18n.t("action.cancel"),
+          }),
+          el("button", {
+            id: "generateSubmit", type: "button", class: "button primary",
+            text: i18n.t("generate.action"),
+            onclick: async () => {
+              if (!instruction.value.trim()) return;
+              instructionText = instruction.value.trim();
+              descriptionText = description.value.trim();
+              try {
+                draft = (await api.execute(generateCommand, {
+                  instruction: instructionText,
+                  description: descriptionText || null,
+                  default_agent: defaultAgent || null,
+                  agent: writerAgent || null,
+                }, `workflow.generate:${Date.now()}`)).data;
+                draw();
+              } catch (error) {
+                problem.textContent = describeGenerationFailure(error);
+                problem.hidden = false;
+              }
+            },
+          }),
         ]),
       );
-      const publishCommand = (draft.allowed_commands || []).find(
-        (item) => item.command === "workflow.publish",
-      );
-      const back = el("button", {
-        type: "button", class: "button", text: i18n.t("generate.back"),
-        onclick: () => { draft = null; draftProblem = ""; draw(); },
-      });
-      actions.append(back);
-      if (publishCommand) {
-        actions.append(el("button", {
-          type: "button", class: "button primary", id: "generatePublish",
+      return;
+    }
+    const publish = (draft.allowed_commands || []).find(
+      (item) => item.command === "workflow.publish",
+    );
+    let handlerRefs = "";
+    try {
+      handlerRefs = JSON.parse(draft.source).nodes
+        .filter((node) => node.handler)
+        .map((node) => `${node.handler.name}@${node.handler.version}`)
+        .join(" · ");
+    } catch {
+      handlerRefs = "";
+    }
+    form.replaceChildren(
+      el("h2", { text: i18n.t("generate.preview", {
+        nodes: i18n.number(draft.node_count),
+        attempts: i18n.number(draft.attempts),
+      }) }),
+      el("div", { class: "mono", text: draft.workflow_id }),
+      handlerRefs ? el("div", { class: "muted mono", text: handlerRefs }) : null,
+      el("pre", {
+        id: "generatePreview", class: "code-block", text: draft.source,
+      }),
+      problem,
+      el("div", { class: "actions" }, [
+        el("button", {
+          type: "button", class: "button", text: i18n.t("action.back"),
+          onclick: () => { draft = null; draw(); },
+        }),
+        publish ? el("button", {
+          id: "generatePublish", type: "button", class: "button primary",
           text: i18n.t("generate.publish"),
           onclick: async () => {
-            if (busy) return;
-            busy = true;
-            problem.hidden = true;
             try {
-              const published = await api.execute(
-                publishCommand, { source: draft.source },
+              await api.execute(
+                publish, { source: draft.source },
                 `workflow.publish:${draft.definition_hash}`,
               );
               dialog.close();
-              announce(i18n.t("generate.published", {
-                workflowId: published.data.workflow_id,
-                version: i18n.number(published.data.version),
-              }));
               await render();
             } catch (error) {
               problem.textContent = describeGenerationFailure(error);
               problem.hidden = false;
-            } finally {
-              busy = false;
             }
+          },
+        }) : null,
+      ]),
+    );
+  };
+  dialog.append(form);
+  dialog.addEventListener("close", () => dialog.remove(), { once: true });
+  document.body.append(dialog);
+  draw();
+  dialog.showModal();
+}
+
+/* What the modification changed, as steps rather than counts.
+ *
+ * The server has already decided which entries are trustworthy and whether
+ * they came from the Agent or from the structural diff; this only draws them.
+ */
+function changeSummaryView(summary) {
+  if (!summary) return [];
+  const rows = (summary.entries || []).map((entry) => el("li", {
+    class: `change-entry ${entry.kind}`,
+  }, [
+    el("span", { class: "change-mark", "aria-hidden": "true", text:
+      entry.kind === "added" ? "+" : entry.kind === "removed" ? "−" : "~" }),
+    el("span", { class: "change-copy" }, [
+      el("strong", { text: entry.label }),
+      entry.detail ? el("span", { class: "muted", text: entry.detail }) : null,
+    ]),
+  ]));
+  const edges = (summary.edges_added || 0) + (summary.edges_removed || 0);
+  return [
+    rows.length ? el("ul", { class: "change-summary" }, rows) : null,
+    !rows.length && !edges
+      ? el("p", { class: "muted", text: i18n.t("simplified.workflow.noChanges") })
+      : null,
+    edges ? el("p", { class: "muted", text: i18n.t("simplified.workflow.edgeChanges", {
+      added: i18n.number(summary.edges_added || 0),
+      removed: i18n.number(summary.edges_removed || 0),
+    }) }) : null,
+  ].filter(Boolean);
+}
+
+async function modifyWorkflowDialog(modifyCommand, workflow, onDone) {
+  const upgrading = workflow.goal_readiness === "needs_upgrade";
+  const dialog = el("dialog", {
+    "aria-label": i18n.t(upgrading ? "workflows.upgrade" : "editor.edit"),
+  });
+  const form = el("form", { method: "dialog" });
+  dialog.append(form);
+  let job = workflow.active_job || null;
+  // An upgrade opens with the instruction already written: the author asked to
+  // upgrade, not to compose the sentence that means "upgrade".
+  let promptText = upgrading ? i18n.t("workflows.upgrade.prompt") : "";
+  // Regenerate is the bigger hammer — it may redesign the whole flow — so it
+  // stays out of sight until a plain modify has actually failed.
+  let regenerateOffered = false;
+  let timer = null;
+
+  const submit = async (mode) => {
+    try {
+      job = (await api.execute(
+        modifyCommand, { prompt: promptText, mode, display_language: i18n.locale },
+        `workflow.${mode}:${workflow.workflow_id}:${Date.now()}`,
+      )).data;
+      draw();
+      watch();
+    } catch (error) {
+      reportError(error);
+    }
+  };
+
+  const draw = () => {
+    const body = [el("h2", {
+      text: i18n.t(upgrading ? "workflows.upgrade" : "editor.edit"),
+    })];
+    const actions = el("div", { class: "actions" });
+    if (!job) {
+      const prompt = el("textarea", {
+        required: "required", maxlength: "4000",
+        placeholder: i18n.t("editor.agentPromptPlaceholder"),
+        text: promptText,
+      });
+      // Focus lands in the prompt so a prefilled upgrade is one click from
+      // running and still editable in place.
+      setTimeout(() => prompt.focus(), 0);
+      body.push(prompt, el("p", {
+        class: "muted", text: i18n.t("simplified.workflow.nextGoal"),
+      }));
+      if (regenerateOffered) body.push(el("p", {
+        class: "muted", text: i18n.t("simplified.workflow.regenerate.hint"),
+      }));
+      actions.append(
+        el("button", {
+          class: "button", value: "cancel", formnovalidate: "formnovalidate",
+          text: i18n.t("action.cancel"),
+        }),
+        el("button", {
+          type: "button", class: "button primary", text: i18n.t("editor.agentRevise"),
+          onclick: () => {
+            if (!prompt.value.trim()) return;
+            promptText = prompt.value.trim();
+            submit("modify");
+          },
+        }),
+        regenerateOffered ? el("button", {
+          type: "button", class: "button", id: "regenerateWorkflow",
+          text: i18n.t("simplified.workflow.regenerate"),
+          onclick: () => {
+            if (!prompt.value.trim()) return;
+            promptText = prompt.value.trim();
+            submit("regenerate");
+          },
+        }) : null,
+      );
+    } else {
+      body.push(
+        el("strong", { text: i18n.t(`authoring.job.${job.status}`) }),
+        ...changeSummaryView(job.result?.change_summary),
+        job.error ? el("div", { class: "banner error", text: job.error.message }) : null,
+      );
+      const cancel = (job.allowed_commands || []).find(
+        (item) => item.command === "workflow.authoring.cancel",
+      );
+      if (cancel) actions.append(el("button", {
+        type: "button", class: "button", text: i18n.t("action.cancel"),
+        onclick: async () => {
+          job = (await api.execute(
+            cancel, {}, `workflow.authoring.cancel:${job.job_id}`,
+          )).data;
+          draw();
+        },
+      }));
+      else {
+        // A failed modify is where regenerate earns its place: the author has
+        // evidence that keeping the current structure did not work.
+        if (job.status === "failed") actions.append(el("button", {
+          type: "button", class: "button", id: "retryWorkflowModify",
+          text: i18n.t("simplified.workflow.tryAgain"),
+          onclick: () => {
+            regenerateOffered = true;
+            job = null;
+            draw();
+          },
+        }));
+        actions.append(el("button", {
+          type: "button", class: "button primary", text: i18n.t("action.close"),
+          onclick: async () => {
+            dialog.close();
+            if (job.status === "done") await onDone();
           },
         }));
       }
     }
-
-    actions.querySelector("button[value=cancel]").textContent = i18n.t("action.cancel");
-    form.replaceChildren(...body, actions);
+    // replaceChildren has no opinion about null the way el() does: it would
+    // render an absent banner as the literal word "null".
+    form.replaceChildren(...body.filter(Boolean), actions);
   };
-
-  dialog.addEventListener("close", () => dialog.remove(), { once: true });
+  const watch = () => {
+    if (!job || !["queued", "running"].includes(job.status)) return;
+    timer = setTimeout(async () => {
+      try {
+        job = (await api.get(job.href)).data;
+        draw();
+        watch();
+      } catch (error) {
+        reportError(error);
+      }
+    }, 800);
+  };
+  dialog.addEventListener("close", () => {
+    clearTimeout(timer);
+    dialog.remove();
+  }, { once: true });
   document.body.append(dialog);
   draw();
+  watch();
   dialog.showModal();
 }
 
@@ -2947,7 +3751,7 @@ function describeGenerationFailure(error) {
   }
 }
 
-async function newRunDialog(preselectedWorkflowId = null, preselectedVersion = null) {
+async function newRunDialog(preselectedWorkflowId = null) {
   try {
     const active = (await api.dashboard()).data.active_goal;
     if (active) {
@@ -2967,18 +3771,18 @@ async function newRunDialog(preselectedWorkflowId = null, preselectedVersion = n
     announce(i18n.t("newRun.catalog.unavailable"), "error");
     return;
   }
-  let entries = catalog.data.workflows;
-  if (preselectedWorkflowId && preselectedVersion) {
-    try {
-      const pinned = (await api.workflowDetail(
-        preselectedWorkflowId, preselectedVersion,
-      )).data;
-      entries = entries.map((item) =>
-        item.workflow_id === preselectedWorkflowId ? pinned : item);
-    } catch (error) {
-      reportError(error);
-      return;
-    }
+  const entries = catalog.data.workflows;
+  const preselected = entries.find(
+    (item) => item.workflow_id === preselectedWorkflowId,
+  );
+  if (simplifiedGoalUI()) {
+    simplifiedComposerState.runId = null;
+    simplifiedComposerState.workflowId = preselected?.goal_readiness === "ready"
+      ? preselected.workflow_id : "";
+    simplifiedComposerState.goal = "";
+    focusSimplifiedGoalOnRender = true;
+    navigate({ view: "home", runId: null });
+    return;
   }
   const state = {
     step: 0,
@@ -2986,7 +3790,6 @@ async function newRunDialog(preselectedWorkflowId = null, preselectedVersion = n
       ? preselectedWorkflowId : null,
     goal: "",
     input: {},
-    pinnedVersion: preselectedVersion,
     intent: `run.start:${crypto.randomUUID ? crypto.randomUUID() : Date.now()}`,
   };
   const dialog = el("dialog", { class: "goal-wizard", "aria-label": i18n.t("newRun.title") });
@@ -3000,7 +3803,6 @@ async function newRunDialog(preselectedWorkflowId = null, preselectedVersion = n
     problem.hidden = false;
   };
   const selectedEntry = () => entries.find((item) => item.workflow_id === state.workflowId);
-  const entryVersion = (entry) => entry.selected_version || entry.latest_version;
 
   const draw = () => {
     const entry = selectedEntry();
@@ -3023,14 +3825,13 @@ async function newRunDialog(preselectedWorkflowId = null, preselectedVersion = n
             ...(item.workflow_id === state.workflowId ? { checked: "checked" } : {}),
             onchange: () => {
               state.workflowId = item.workflow_id;
-              if (item.workflow_id !== preselectedWorkflowId) state.pinnedVersion = null;
               draw();
             },
           }),
           el("span", { class: "wizard-workflow-mark", "aria-hidden": "true", text: "⌘" }),
           el("span", { class: "wizard-workflow-copy" }, [
             el("strong", { text: item.name }),
-            el("small", { class: "muted mono", text: `${item.workflow_id} · v${entryVersion(item)}` }),
+            el("small", { class: "muted mono", text: item.workflow_id }),
             item.description ? el("span", { class: "muted", text: item.description }) : null,
           ]),
           el("span", { class: "workflow-meta", text: i18n.t("workflows.summary", {
@@ -3084,7 +3885,7 @@ async function newRunDialog(preselectedWorkflowId = null, preselectedVersion = n
       content.append(
         el("h3", { text: i18n.t("newRun.review.heading") }),
         el("dl", { class: "review-list" }, [
-          el("div", {}, [el("dt", { text: i18n.t("newRun.workflow") }), el("dd", { text: `${entry.name} · v${entryVersion(entry)}` })]),
+          el("div", {}, [el("dt", { text: i18n.t("newRun.workflow") }), el("dd", { text: entry.name })]),
           el("div", {}, [el("dt", { text: i18n.t("newRun.goal") }), el("dd", { text: state.goal })]),
           el("div", {}, [
             el("dt", { text: i18n.t(entry.goal_binding ? "newRun.input.binding" : "newRun.input") }),
@@ -3100,7 +3901,7 @@ async function newRunDialog(preselectedWorkflowId = null, preselectedVersion = n
     } else {
       content.append(
         el("h3", { text: i18n.t("newRun.start.heading") }),
-        el("p", { class: "muted", text: i18n.t("newRun.start.body", { workflow: entry.name, version: entryVersion(entry) }) }),
+        el("p", { class: "muted", text: i18n.t("newRun.start.body", { workflow: entry.name }) }),
       );
     }
 
@@ -3162,13 +3963,13 @@ async function newRunDialog(preselectedWorkflowId = null, preselectedVersion = n
           try {
             // Refetch immediately before mutation. If the published workflow or
             // the actor's permission changed, do not submit a stale command.
-            const fresh = state.pinnedVersion
-              ? (await api.workflowDetail(state.workflowId, state.pinnedVersion)).data
-              : (await api.workflowCatalog()).data.workflows.find(
-                  (item) => item.workflow_id === state.workflowId,
-                );
+            const fresh = (await api.workflowCatalog()).data.workflows.find(
+              (item) => item.workflow_id === state.workflowId,
+            );
             if (!fresh) return fail("newRun.workflow.unavailable");
-            if (!state.pinnedVersion && fresh.latest_version !== entry.latest_version) {
+            // Republished between review and submit: what the operator read is
+            // not what would run, so they confirm the current definition.
+            if (fresh.latest_version !== entry.latest_version) {
               dialog.close();
               announce(i18n.t("newRun.workflow.changed"), "error");
               return;
@@ -3177,7 +3978,7 @@ async function newRunDialog(preselectedWorkflowId = null, preselectedVersion = n
             if (!allowed) return fail("newRun.workflow.forbidden");
             const started = await api.execute(allowed, {
               workflow_id: fresh.workflow_id,
-              workflow_version: entryVersion(fresh),
+              workflow_version: fresh.latest_version,
               goal: state.goal,
               input: state.input,
             }, state.intent);
@@ -3246,8 +4047,8 @@ async function render() {
   root.append(dataState(el, i18n, "loading"));
 
   for (const button of document.querySelectorAll(".nav-button")) {
-    const section = route.view === "run" ? "runs"
-      : route.view === "goal" || route.view === "goals" ? "home"
+    const section = route.view === "run" || route.view === "goal"
+      || route.view === "goals" ? "home"
         : route.view === "artifact" ? "artifacts"
           : route.view === "workflow" ? "workflows"
             : route.view === "ops" ? "settings" : route.view;
@@ -3256,8 +4057,10 @@ async function render() {
     else button.removeAttribute("aria-current");
   }
   document.getElementById("viewTitle").textContent = i18n.t(
-    route.view === "run" ? "run.title"
-      : route.view === "goal" || route.view === "goals" ? "home.title"
+    route.view === "run" ? (simplifiedGoalUI() ? "simplified.title" : "run.title")
+      : route.view === "goal" || route.view === "goals"
+        ? (simplifiedGoalUI() ? "history.title" : "home.title")
+        : route.view === "home" && simplifiedGoalUI() ? "simplified.title"
         : route.view === "artifact" ? "artifacts.title"
           : route.view === "workflow" ? "workflows.title"
             : route.view === "ops" ? "settings.title"
@@ -3266,9 +4069,18 @@ async function render() {
 
   try {
     const fresh = el("div", { class: "content" });
-    if (route.view === "home") await renderHome(fresh);
-    else if (route.view === "goal") await renderHome(fresh, route.runId);
-    else if (route.view === "goals") await renderHome(fresh);
+    if (route.view === "home") {
+      if (simplifiedGoalUI()) await renderSimplifiedWorkspace(fresh);
+      else await renderHome(fresh);
+    }
+    else if (route.view === "goal") {
+      if (simplifiedGoalUI()) await renderHistory(fresh, route.runId);
+      else await renderHome(fresh, route.runId);
+    }
+    else if (route.view === "goals") {
+      if (simplifiedGoalUI()) await renderHistory(fresh);
+      else await renderHome(fresh);
+    }
     else if (route.view === "workflows") await renderWorkflows(fresh);
     else if (route.view === "workflow") await renderWorkflowDetail(fresh, route.workflowId);
     else if (route.view === "workflowEdit") await renderWorkflowEditor(fresh, route.draftId);
@@ -3279,7 +4091,8 @@ async function render() {
     else if (route.view === "agents") await renderAgents(fresh);
     // Ops folded into settings; #/ops stays a working deep link.
     else if (route.view === "ops" || route.view === "settings") await renderSettings(fresh);
-    else await renderRuns(fresh);
+    // The run list is gone; the workspace is the one place runs are browsed.
+    else await renderHome(fresh);
     root.replaceChildren(...fresh.childNodes);
     if (route.view !== "inbox") await refreshInboxCount();
     refreshRuntimeCard();
@@ -3319,12 +4132,29 @@ function applyStaticText() {
   document.querySelectorAll("select[data-custom-select='true']").forEach(syncCustomSelect);
 }
 
+function applyProductMode() {
+  const simplified = simplifiedGoalUI();
+  document.documentElement.dataset.productMode = simplified ? "simplified-goal" : "runtime";
+  for (const node of document.querySelectorAll("[data-simplified-only]")) {
+    node.hidden = !simplified;
+  }
+  for (const node of document.querySelectorAll("[data-full-only]")) {
+    node.hidden = simplified;
+  }
+  const homeLabel = document.getElementById("homeNavLabel");
+  if (homeLabel) {
+    homeLabel.dataset.i18n = simplified ? "nav.workflowGoal" : "nav.home";
+    homeLabel.textContent = i18n.t(homeLabel.dataset.i18n);
+  }
+}
+
 async function setLocale(locale) {
   i18n = await I18n.load(locale);
   i18n.persist();
   document.getElementById("localeSelect").value = locale;
   syncCustomSelect(document.getElementById("localeSelect"));
   applyStaticText();
+  applyProductMode();
   await render();
 }
 
@@ -3361,6 +4191,7 @@ async function boot() {
   // Permissions have been resolved, so every view now renders the command set
   // this actor really has. Views read it; automation waits on it.
   document.documentElement.dataset.shell = "ready";
+  applyProductMode();
 
   const sidebar = document.getElementById("sidebar");
   const navToggle = document.getElementById("navToggle");
@@ -3402,6 +4233,7 @@ async function boot() {
   }
 
   applyStaticText();
+  applyProductMode();
   // Awaited so the first paint already carries the runtime's own health word.
   // After applyStaticText: the static catalog must not overwrite the status.
   await refreshRuntimeCard();

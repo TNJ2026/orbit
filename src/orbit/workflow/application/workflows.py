@@ -120,6 +120,10 @@ class WorkflowDefinitionService:
             source_format=source_format,
             source_text=source,
             actor=actor,
+            dsl_version=(
+                "1.0" if compiled.ir.ir_version == "1.1"
+                else compiled.ir.ir_version
+            ),
         )
 
     def get_workflow_version(self, workflow_id: str, version: int) -> WorkflowVersionRecord | None:

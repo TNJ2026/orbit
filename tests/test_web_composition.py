@@ -151,7 +151,10 @@ class AsgiHarness:
                 m.get("body", b"") for m in messages if m["type"] == "http.response.body"
             )
             return SimpleNamespace(
-                status_code=status, text=body.decode(),
+                status_code=status,
+                # Not every response is text: Artifact content is served as
+                # the bytes it was stored as, image or otherwise.
+                text=body.decode(errors="replace"), content=body,
                 headers=response_headers,
                 json=lambda: json.loads(body.decode()),
             )
@@ -191,10 +194,23 @@ def linear_ir_for(manifest) -> WorkflowIR:
     port = IRPort("value", "example://integer/1.0", True, False, None, "")
     ref = IRHandlerRef(manifest.name, manifest.version, manifest.fingerprint)
     node_ids = ("collect", "transform", "publish")
+    # Labels are what a reader sees; the ids stay internal on purpose so tests
+    # can tell the two apart.
+    labels = {
+        "collect": "Collect the data", "transform": "Tidy it up",
+        "publish": "Write the report",
+    }
     nodes = tuple(
-        IRNode(node_id, "action", (port,), (port,), ref, {}, (), None)
+        IRNode(
+            node_id, "action", (port,), (port,), ref, {}, (), None,
+            label=labels[node_id],
+        )
         for node_id in node_ids
-    ) + (IRNode("done", "terminal", (port,), (), None, {}, (), None),)
+    ) + (
+        IRNode(
+            "done", "terminal", (port,), (), None, {}, (), None, label="Finish",
+        ),
+    )
     chain = (*node_ids, "done")
     edges = tuple(
         IREdge(
@@ -400,7 +416,7 @@ class HealthEndpointTests(unittest.TestCase):
             checks = response.json()["checks"]
             self.assertTrue(checks["database"]["ok"])
             self.assertTrue(checks["migrations"]["ok"])
-            self.assertEqual(list(range(1, 18)), checks["migrations"]["applied"])
+            self.assertEqual(list(range(1, 21)), checks["migrations"]["applied"])
             self.assertTrue(checks["handlers"]["sealed"])
             self.assertTrue(checks["components"]["ok"])
 

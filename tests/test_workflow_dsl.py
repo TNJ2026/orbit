@@ -604,6 +604,37 @@ class ArtifactEdgeTests(unittest.TestCase):
 
 
 class WorkflowDslGoldenTests(unittest.TestCase):
+    def test_dsl_1_3_result_survives_canonical_ir_round_trip(self) -> None:
+        root = Path(__file__).parent / "fixtures" / "workflow_dsl" / "v1"
+        catalogs = load_catalogs(root / "catalog.json")
+        value = json.loads((root / "linear.json").read_text(encoding="utf-8"))
+        value["dsl_version"] = "1.3"
+        value["result"] = {"node": "collect", "port": "request"}
+
+        compiled = compile_source(
+            json.dumps(value), catalogs.handlers, catalogs.schemas,
+            source_format="json", extensions=catalogs.extensions,
+        )
+        primitive = json.loads(canonical_ir_json(compiled))
+        restored = workflow_ir_from_primitive(primitive)
+
+        self.assertEqual("1.3", restored.ir_version)
+        self.assertEqual("collect", restored.result.node_id)
+        self.assertEqual("request", restored.result.output_port_id)
+
+    def test_dsl_1_3_requires_a_result(self) -> None:
+        root = Path(__file__).parent / "fixtures" / "workflow_dsl" / "v1"
+        catalogs = load_catalogs(root / "catalog.json")
+        value = json.loads((root / "linear.json").read_text(encoding="utf-8"))
+        value["dsl_version"] = "1.3"
+
+        with self.assertRaises(DiagnosticError) as raised:
+            compile_source(
+                json.dumps(value), catalogs.handlers, catalogs.schemas,
+                source_format="json", extensions=catalogs.extensions,
+            )
+        self.assertEqual("DSL_RESULT_REQUIRED", raised.exception.diagnostics[0].code)
+
     def test_yaml_and_json_match_canonical_ir_and_hash_golden(self) -> None:
         root = Path(__file__).parent / "fixtures"
         dsl_root = root / "workflow_dsl" / "v1"
@@ -668,6 +699,103 @@ class WorkflowDslGoldenTests(unittest.TestCase):
                     source_format="json", extensions=catalogs.extensions,
                 )
             self.assertIn(case["expected_code"], {item.code for item in raised.exception.diagnostics})
+
+
+class NodeLabelTests(unittest.TestCase):
+    """A step's reader-facing name is a node field, not handler config.
+
+    The label exists because people read the flow: the execution page names the
+    current step with it and the diagram draws it. It deliberately sits beside
+    `config` rather than inside, because `config` is validated against the
+    Handler's own schema — a Handler that closes its config would otherwise
+    reject the one field that was never meant for it.
+    """
+
+    def setUp(self) -> None:
+        self.schemas = InMemorySchemaCatalog(
+            {"example://request/1.0": {"type": "object"}}
+        )
+
+    def catalog(self, *, closed_config: bool):
+        return InMemoryHandlerCatalog([
+            HandlerManifest(
+                "collect", "1.2.0", ("action",), {},
+                {"request": "example://request/1.0"},
+                {"type": "object", "additionalProperties": False}
+                if closed_config else {"type": "object"},
+                ExecutionSafety.REPLAY_SAFE,
+                ResourceProfile(0, 0, 0, 60, 0, "free"),
+                "example://request/1.0", (), (), True, True,
+            )
+        ])
+
+    def document(self, **node_fields) -> dict:
+        return {
+            "dsl_version": "1.3",
+            "metadata": {"id": "labelled", "name": "Labelled"},
+            "nodes": [
+                {
+                    "id": "collect", "kind": "action",
+                    "outputs": [{"id": "request", "schema_id": "example://request/1.0"}],
+                    "handler": {"name": "collect", "version": "1.2.0"},
+                    **node_fields,
+                },
+                {
+                    "id": "done", "kind": "terminal",
+                    "inputs": [{"id": "request", "schema_id": "example://request/1.0"}],
+                },
+            ],
+            "edges": [{
+                "id": "flow", "from": {"node": "collect", "port": "request"},
+                "to": {"node": "done", "port": "request"},
+            }],
+            "entry": ["collect"], "terminals": ["done"],
+            "result": {"node": "collect", "port": "request"},
+        }
+
+    def compile(self, document, *, closed_config=False):
+        return compile_source(
+            json.dumps(document), self.catalog(closed_config=closed_config),
+            self.schemas, source_format="json",
+        )
+
+    def test_a_label_survives_a_handler_that_closes_its_config(self) -> None:
+        compiled = self.compile(
+            self.document(label="整理销售数据"), closed_config=True,
+        )
+        self.assertEqual("整理销售数据", compiled.ir.nodes[0].label)
+
+    def test_the_same_name_inside_config_is_refused_by_the_handler(self) -> None:
+        """Which is exactly why the label is not carried in config."""
+
+        with self.assertRaises(DiagnosticError) as raised:
+            self.compile(
+                self.document(config={"display_name": "整理销售数据"}),
+                closed_config=True,
+            )
+        self.assertIn(
+            "DSL_SCHEMA_ERROR", {item.code for item in raised.exception.diagnostics},
+        )
+
+    def test_a_definition_without_labels_still_compiles(self) -> None:
+        """Every definition published before labels existed must keep working."""
+
+        compiled = self.compile(self.document())
+        self.assertIsNone(compiled.ir.nodes[0].label)
+
+    def test_a_label_is_bounded_and_cannot_be_blank(self) -> None:
+        for label in ("", "   ", "x" * 81):
+            with self.subTest(label=label):
+                with self.assertRaises(DiagnosticError):
+                    self.compile(self.document(label=label))
+
+    def test_a_label_survives_the_canonical_ir_round_trip(self) -> None:
+        from orbit.workflow.domain.ir_schema import workflow_ir_from_primitive
+        from orbit.workflow.domain.serialization import to_primitive
+
+        compiled = self.compile(self.document(label="Collect the data"))
+        restored = workflow_ir_from_primitive(to_primitive(compiled.ir))
+        self.assertEqual("Collect the data", restored.nodes[0].label)
 
 
 if __name__ == "__main__":

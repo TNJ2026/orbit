@@ -416,6 +416,7 @@ def create_app(
     workflow_generator: Callable[[str], str] | None = None,
     workflow_generators: Mapping[str, Callable[[str], str]] | None = None,
     single_goal_mode: bool = True,
+    simplified_goal_ui: bool = False,
 ) -> Starlette:
     """Build the Runtime application.
 
@@ -684,6 +685,7 @@ def create_app(
             workflow_publisher=workflow_publisher,
             draft_service=draft_service,
             single_goal_mode=single_goal_mode,
+            simplified_goal_ui=simplified_goal_ui,
             operational_config={
                 "worker_count": worker_count,
                 "poll_seconds": poll_seconds,

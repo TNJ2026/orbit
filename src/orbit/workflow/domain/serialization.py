@@ -58,6 +58,10 @@ def to_primitive(value: Any) -> Any:
         return {
             field.name: to_primitive(getattr(value, field.name))
             for field in fields(value)
+            if not (
+                field.metadata.get("omit_none")
+                and getattr(value, field.name) is None
+            )
         }
     if isinstance(value, Mapping):
         result = {}

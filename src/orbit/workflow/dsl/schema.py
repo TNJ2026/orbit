@@ -8,7 +8,7 @@ from typing import Any, Mapping
 from ..domain.serialization import freeze_json
 
 
-DSL_SCHEMA_ID = "orbit://workflow/dsl/1.2"
+DSL_SCHEMA_ID = "orbit://workflow/dsl/1.3"
 _ID_PATTERN = r"^[a-zA-Z][a-zA-Z0-9_.-]{0,127}$"
 
 
@@ -23,7 +23,7 @@ _SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": ["dsl_version", "metadata", "nodes", "edges", "entry", "terminals"],
     "properties": {
-        "dsl_version": {"enum": ["1.0", "1.2"]},
+        "dsl_version": {"enum": ["1.0", "1.2", "1.3"]},
         "metadata": {"$ref": "#/$defs/metadata"},
         "inputs": _array_of("#/$defs/port"),
         "outputs": _array_of("#/$defs/port"),
@@ -35,6 +35,7 @@ _SCHEMA: dict[str, Any] = {
             "minItems": 1,
             "items": {"$ref": "#/$defs/id"},
         },
+        "result": {"$ref": "#/$defs/endpoint"},
         "policies": _array_of("#/$defs/policy"),
         "extensions": _array_of("#/$defs/extension"),
     },
@@ -98,6 +99,15 @@ _SCHEMA: dict[str, Any] = {
                 "inputs": _array_of("#/$defs/port"),
                 "outputs": _array_of("#/$defs/port"),
                 "handler": {"$ref": "#/$defs/handler"},
+                # What a reader calls this step. It sits beside `config`, not
+                # inside it: `config` belongs to the Handler, and a Handler
+                # with a closed config schema rejects a field meant for people.
+                # `\S` rejects a blank label here, so an author sees a
+                # diagnostic rather than a bare domain error later.
+                "label": {
+                    "type": "string", "minLength": 1, "maxLength": 80,
+                    "pattern": r"\S",
+                },
                 "config": {"type": "object", "default": {}},
                 "policies": {
                     "type": "array",

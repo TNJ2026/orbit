@@ -1066,6 +1066,51 @@ _MIGRATIONS: tuple[tuple[int, str, str], ...] = (
             ON attempt_output(run_id, chunk_id);
         """,
     ),
+    (
+        18,
+        "product workflow authoring jobs",
+        """
+        CREATE TABLE workflow_authoring_jobs (
+            job_id TEXT PRIMARY KEY,
+            job_type TEXT NOT NULL CHECK (job_type IN ('generate','modify')),
+            actor TEXT NOT NULL,
+            workflow_id TEXT,
+            prompt TEXT NOT NULL,
+            mode TEXT NOT NULL CHECK (mode IN ('generate','modify','regenerate')),
+            status TEXT NOT NULL CHECK (status IN (
+                'queued','running','done','failed','cancelled'
+            )),
+            idempotency_key TEXT NOT NULL,
+            deadline_at TEXT NOT NULL,
+            cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK (cancel_requested IN (0,1)),
+            result_json TEXT,
+            error_code TEXT,
+            error_message TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(actor, idempotency_key),
+            CHECK (job_id LIKE 'authoring_job:%')
+        );
+        CREATE INDEX workflow_authoring_jobs_actor_status
+            ON workflow_authoring_jobs(actor, status, created_at);
+        CREATE INDEX workflow_authoring_jobs_workflow_status
+            ON workflow_authoring_jobs(workflow_id, status, created_at);
+        """,
+    ),
+    (
+        19,
+        "artifact filenames",
+        """
+        ALTER TABLE artifacts ADD COLUMN filename TEXT;
+        """,
+    ),
+    (
+        20,
+        "authoring job display language",
+        """
+        ALTER TABLE workflow_authoring_jobs ADD COLUMN display_language TEXT;
+        """,
+    ),
 )
 
 

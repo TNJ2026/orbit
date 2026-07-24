@@ -109,11 +109,13 @@ export class Api {
   }
 
   listRuns({
-    cursor, limit = 25, activeOnly = false, q = "", status = "", responsibility = "",
+    cursor, limit = 25, activeOnly = false, terminalOnly = false,
+    q = "", status = "", responsibility = "",
   } = {}) {
     const params = new URLSearchParams({ limit: String(limit) });
     if (cursor) params.set("cursor", cursor);
     if (activeOnly) params.set("active", "true");
+    if (terminalOnly) params.set("terminal", "true");
     if (q.trim()) params.set("q", q.trim());
     if (status) params.set("status", status);
     if (responsibility) params.set("responsibility", responsibility);
@@ -130,6 +132,10 @@ export class Api {
 
   responsibilities(runId) {
     return this.get(`/api/v1/runs/${encodeURIComponent(runId)}/responsibilities`);
+  }
+
+  outcome(runId) {
+    return this.get(`/api/v1/runs/${encodeURIComponent(runId)}/outcome`);
   }
 
   runPage(runId, kind, cursor, limit = 25) {
@@ -186,8 +192,13 @@ export class Api {
     return response.text();
   }
 
+  /** Inline content, for an <img> the browser fetches itself. */
+  artifactContentUrl(artifactId) {
+    return `${this.base}/api/v1/artifacts/${encodeURIComponent(artifactId)}/content`;
+  }
+
   artifactDownloadUrl(artifactId) {
-    return `${this.base}/api/v1/artifacts/${encodeURIComponent(artifactId)}/content?download=true`;
+    return `${this.artifactContentUrl(artifactId)}?download=true`;
   }
 
   /* Plan reads are three calls on purpose. The server keeps definition,
@@ -274,11 +285,16 @@ export class Api {
     return this.get(`/api/v1/workflow-drafts/${encodeURIComponent(draftId)}`);
   }
 
-  workflowDetail(workflowId, version) {
-    const params = new URLSearchParams();
-    if (version !== undefined) params.set("version", String(version));
-    const suffix = params.size ? `?${params}` : "";
-    return this.get(`/api/v1/workflows/${encodeURIComponent(workflowId)}${suffix}`);
+  /** The current definition. There is no older one to ask for. */
+  workflowDetail(workflowId) {
+    return this.get(`/api/v1/workflows/${encodeURIComponent(workflowId)}`);
+  }
+
+  authoringJobs({ active = false, type = "" } = {}) {
+    const params = new URLSearchParams({ mine: "true" });
+    if (active) params.set("active", "true");
+    if (type) params.set("type", type);
+    return this.get(`/api/v1/workflow-authoring-jobs?${params}`);
   }
 
   recovery() {

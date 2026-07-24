@@ -14,7 +14,8 @@ import unittest
 
 from orbit.workflow.authoring import (
     UnknownGenerationAgentError,
-    AuthoringFailedError, AuthoringUnavailableError, TrustedCliDslGenerator,
+    AuthoringFailedError, AuthoringUnavailableError, AuthoringUnknownResultError,
+    TrustedCliDslGenerator,
     WorkflowAuthoringService,
 )
 from orbit.workflow.catalogs import (
@@ -281,6 +282,7 @@ class FakeOutcome:
     stderr: str = ""
     stdout_truncated: bool = False
     timed_out: bool = False
+    cancelled: bool = False
 
 
 class DescriptionTests(unittest.TestCase):
@@ -372,20 +374,109 @@ class CliGeneratorTests(unittest.TestCase):
         self.assertEqual("the prompt", calls["stdin_text"])
         self.assertEqual({"PATH", "HOME", "USER", "LOGNAME"}, set(calls["env"]))
 
-    def test_start_failures_and_timeouts_are_unavailability(self) -> None:
+    def test_the_prompt_demands_a_label_in_the_reader_s_language(self) -> None:
+        """Step names are read by whoever opened the page, not the prompt writer.
+
+        Without a stated language the Agent infers one from the instruction, so
+        a Chinese interface and an English prompt produce English step names.
+        """
+
+        model = ScriptedModel([json.dumps(valid_document())])
+        service(model).generate("build a research flow", language="zh-CN")
+        prompt = model.prompts[0]
+
+        self.assertIn('"display_language":"zh-CN"', prompt)
+        self.assertIn("Give every node a `label`", prompt)
+        self.assertIn("written in the `display_language`", prompt)
+        # The label must not be smuggled into handler config, which may be
+        # closed against unknown keys.
+        self.assertIn("Never put it inside `config`", prompt)
+        self.assertIn('"label"', prompt)
+
+    def test_the_prompt_states_a_language_even_when_the_caller_omits_one(self) -> None:
+        model = ScriptedModel([json.dumps(valid_document())])
+        service(model).generate("build a research flow")
+        self.assertIn('"display_language":"en-US"', model.prompts[0])
+
+    def test_a_revision_prompt_also_carries_the_reader_s_language(self) -> None:
+        current = json.dumps(valid_document())
+        model = ScriptedModel([current])
+        service(model).revise(
+            current, "add a step", expected_workflow_id="workflow:generated",
+            language="zh-CN",
+        )
+        self.assertIn('"display_language":"zh-CN"', model.prompts[0])
+
+    def test_a_cli_that_never_ran_is_unavailability(self) -> None:
+        """Nothing started, so nothing was asked of a model and nothing spent."""
+
         for error in (FileNotFoundError("gone"), PermissionError("no"), OSError("fork")):
-            with self.assertRaises(AuthoringUnavailableError):
-                TrustedCliDslGenerator(
-                    ["gen-cli"], runner=lambda argv, **_: (_ for _ in ()).throw(error)
-                )("prompt")
-        with self.assertRaises(AuthoringUnavailableError):
-            TrustedCliDslGenerator(
-                ["gen-cli"], runner=lambda argv, **_: FakeOutcome(timed_out=True)
-            )("prompt")
+            with self.subTest(error=type(error).__name__):
+                with self.assertRaises(AuthoringUnavailableError):
+                    TrustedCliDslGenerator(
+                        ["gen-cli"],
+                        runner=lambda argv, **_: (_ for _ in ()).throw(error),
+                    )("prompt")
         with self.assertRaises(AuthoringUnavailableError):
             TrustedCliDslGenerator(
                 ["gen-cli"], runner=lambda argv, **_: FakeOutcome(returncode=2, stderr="boom")
             )("prompt")
+
+    def test_a_silenced_cli_leaves_the_result_unknown(self) -> None:
+        """A timeout or a stop is not a failure: the call may have happened.
+
+        Reporting either as a plain failure would licence an automatic second
+        call for work a model may already have done and been paid for.
+        """
+
+        for outcome in (
+            FakeOutcome(timed_out=True), FakeOutcome(cancelled=True),
+        ):
+            with self.subTest(outcome=outcome):
+                with self.assertRaises(AuthoringUnknownResultError):
+                    TrustedCliDslGenerator(
+                        ["gen-cli"], runner=lambda argv, **_: outcome
+                    )("prompt")
+
+    def test_a_generation_reports_its_child_so_it_can_be_stopped(self) -> None:
+        """Without the handle, cancelling only discards a still-running Agent."""
+
+        from orbit.workflow.authoring.generator import CancelScope, cancellable
+
+        stopped: list[float | None] = []
+
+        class Handle:
+            def cancel(self, *, grace_seconds=None):
+                stopped.append(grace_seconds)
+
+        def runner(argv, *, on_start=None, **_):
+            on_start(Handle())
+            return FakeOutcome(cancelled=True)
+
+        scope = CancelScope()
+        with cancellable(scope):
+            with self.assertRaises(AuthoringUnknownResultError):
+                TrustedCliDslGenerator(["gen-cli"], runner=runner)("prompt")
+            scope.cancel(grace_seconds=2)
+
+        # The child was attached, and detached once the call returned, so a
+        # later cancellation cannot reach a process that already exited.
+        self.assertEqual([], stopped)
+
+    def test_a_cancellation_reaches_a_child_that_starts_afterwards(self) -> None:
+        from orbit.workflow.authoring.generator import CancelScope
+
+        stopped: list[float | None] = []
+
+        class Handle:
+            def cancel(self, *, grace_seconds=None):
+                stopped.append(grace_seconds)
+
+        scope = CancelScope()
+        scope.cancel(grace_seconds=3)
+        scope.attach(Handle())
+        self.assertTrue(scope.cancelled)
+        self.assertEqual([None], stopped)
 
     def test_truncated_output_is_a_failed_generation(self) -> None:
         with self.assertRaises(AuthoringFailedError):

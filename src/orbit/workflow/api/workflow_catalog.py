@@ -79,14 +79,19 @@ class WorkflowCatalogReadModelService:
         """
 
         entries = list(ir.get("entry") or ())
-        if len(entries) != 1 or len(inputs) != 1:
+        if len(entries) != 1:
             return None
         node = next(
             (item for item in ir.get("nodes") or () if item.get("id") == entries[0]),
             None,
         )
         handler = None if node is None else node.get("handler")
-        port = inputs[0]
+        port = next(
+            (candidate for candidate in inputs if candidate.get("id") == "prompt"),
+            None,
+        )
+        if port is None:
+            return None
         schema = port.get("schema") or {}
         if (
             not isinstance(handler, Mapping)
@@ -105,6 +110,80 @@ class WorkflowCatalogReadModelService:
         }
 
     @staticmethod
+    def _has_result(ir: Mapping[str, Any]) -> tuple[bool, str | None]:
+        """Whether a definition has one deterministic result.
+
+        DSL 1.3 carries ``result`` explicitly. Until that compiler lands, the
+        only legacy shape accepted by the simplified product is one terminal
+        input fed by one edge from one output port.
+        """
+
+        declared = ir.get("result")
+        if isinstance(declared, Mapping):
+            node_id = str(declared.get("node_id") or "")
+            port_id = str(declared.get("output_port_id") or "")
+            nodes = {str(node.get("id")): node for node in ir.get("nodes") or ()}
+            node = nodes.get(node_id)
+            outputs = () if node is None else node.get("outputs") or ()
+            if any(str(port.get("id")) == port_id for port in outputs):
+                return True, None
+            return False, "primary_result_missing"
+
+        terminals = list(ir.get("terminals") or ())
+        if len(terminals) != 1:
+            return False, "primary_result_ambiguous"
+        terminal_id = str(terminals[0])
+        terminal = next(
+            (
+                node for node in ir.get("nodes") or ()
+                if str(node.get("id")) == terminal_id
+            ),
+            None,
+        )
+        inputs = [] if terminal is None else list(terminal.get("inputs") or ())
+        incoming = [
+            edge for edge in ir.get("edges") or ()
+            if str(edge.get("target_node")) == terminal_id
+        ]
+        if len(inputs) == 1 and len(incoming) == 1 and (
+            str(incoming[0].get("target_port")) == str(inputs[0].get("id"))
+        ):
+            return True, None
+        return False, "primary_result_ambiguous"
+
+    @classmethod
+    def _goal_readiness(
+        cls,
+        ir: Mapping[str, Any],
+        inputs: list[dict[str, Any]],
+        goal_binding: Mapping[str, Any] | None,
+        *,
+        source_available: bool,
+    ) -> tuple[str, str | None]:
+        reason = None
+        if goal_binding is None:
+            reason = "goal_binding_missing"
+        else:
+            goal_input = str(goal_binding["input_id"])
+            if any(
+                port.get("required", True)
+                and not port.get("has_default", False)
+                and str(port.get("id")) != goal_input
+                for port in inputs
+            ):
+                reason = "required_input_without_default"
+            else:
+                has_result, result_reason = cls._has_result(ir)
+                if not has_result:
+                    reason = result_reason
+        if reason is None:
+            return "ready", None
+        return (
+            "needs_upgrade" if source_available else "needs_migration",
+            reason,
+        )
+
+    @staticmethod
     def _graph(ir: Mapping[str, Any]) -> dict[str, Any]:
         """The definition as a drawable graph, in the plan's vocabulary.
 
@@ -118,6 +197,9 @@ class WorkflowCatalogReadModelService:
             {
                 "node_id": node["id"],
                 "kind": node["kind"],
+                # The step's own name, so a diagram can be read by someone who
+                # has never seen a node id.
+                "label": node.get("label"),
                 "handler_name": (node.get("handler") or {}).get("name"),
                 "handler_version": (node.get("handler") or {}).get("version"),
             }
@@ -146,6 +228,10 @@ class WorkflowCatalogReadModelService:
         ir = json.loads(row["canonical_ir_json"])
         inputs, input_mode = self._inputs(ir)
         goal_binding = self._goal_binding(ir, inputs)
+        source_available = row["source_text"] is not None
+        goal_readiness, readiness_reason = self._goal_readiness(
+            ir, inputs, goal_binding, source_available=source_available,
+        )
         item = {
             "workflow_id": row["workflow_id"],
             "name": ir["name"],
@@ -157,6 +243,9 @@ class WorkflowCatalogReadModelService:
             "input_mode": input_mode,
             "inputs": inputs,
             "goal_binding": goal_binding,
+            "goal_readiness": goal_readiness,
+            "readiness_reason": readiness_reason,
+            "source_available": source_available,
             "summary": self._summary(ir),
         }
         if include_definition:
@@ -193,44 +282,27 @@ class WorkflowCatalogReadModelService:
             entries.append(item)
         return entries
 
-    def detail(self, workflow_id: str, version: int | None = None) -> dict[str, Any]:
+    def detail(self, workflow_id: str) -> dict[str, Any]:
+        """The workflow as it stands now.
+
+        Superseded versions stay in the store — a run executes the definition
+        it started with, and that history is a correctness guarantee — but they
+        are not addressable here: the catalog answers with one definition, the
+        current one, so nothing downstream can read, run or edit an old one.
+        """
+
         with connect_workflow_database(self.path, read_only=True) as connection:
-            version_rows = connection.execute(
-                "SELECT version, definition_hash, created_at, created_by, source_text "
-                "FROM workflow_versions WHERE workflow_id = ? ORDER BY version DESC",
+            row = connection.execute(
+                "SELECT * FROM workflow_versions WHERE workflow_id = ?"
+                " ORDER BY version DESC LIMIT 1",
                 (workflow_id,),
-            ).fetchall()
-            if version is None:
-                row = connection.execute(
-                    "SELECT * FROM workflow_versions WHERE workflow_id = ?"
-                    " ORDER BY version DESC LIMIT 1",
-                    (workflow_id,),
-                ).fetchone()
-            else:
-                row = connection.execute(
-                    "SELECT * FROM workflow_versions"
-                    " WHERE workflow_id = ? AND version = ?",
-                    (workflow_id, version),
-                ).fetchone()
+            ).fetchone()
         if row is None:
-            raise ValueError(f"workflow version not found: {workflow_id}")
+            raise ValueError(f"workflow not found: {workflow_id}")
         item = self._entry(row, include_definition=True)
-        item["selected_version"] = int(row["version"])
-        item["latest_version"] = int(version_rows[0]["version"])
-        item["versions"] = [
-            {
-                "version": int(value["version"]),
-                "definition_hash": value["definition_hash"],
-                "created_at": value["created_at"],
-                "created_by": value["created_by"],
-                "source_available": value["source_text"] is not None,
-            }
-            for value in version_rows
-        ]
         # The author-facing source, distinct from canonical IR (editor plan
         # §7). Early versions published without source degrade to
         # source_available=false — viewable and runnable, never "editable".
         item["source"] = row["source_text"]
         item["source_format"] = row["source_format"]
-        item["source_available"] = row["source_text"] is not None
         return item

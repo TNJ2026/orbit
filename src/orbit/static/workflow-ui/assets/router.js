@@ -5,12 +5,12 @@
  * state and never renders — app.js subscribes and decides what to draw.
  *
  * Target route shapes are the plan's (§5): `#/home`, `#/goals/{id}`,
- * `#/runs`, `#/runs/{id}`, `#/inbox`, `#/ops`. Legacy run links keep their
- * exact shape.
+ * `#/runs/{id}`, `#/inbox`, `#/ops`. Legacy run links keep their exact shape.
+ * The run list is gone, so a bare `#/runs` falls through to the workspace.
  */
 
 const KNOWN_VIEWS = [
-  "home", "goals", "workflows", "runs", "inbox", "artifacts",
+  "home", "goals", "workflows", "inbox", "artifacts",
   "agents", "ops", "settings",
 ];
 const RUN_TABS = ["overview", "timeline", "plan", "graph", "data", "errors"];

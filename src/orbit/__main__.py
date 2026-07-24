@@ -119,6 +119,95 @@ def _db_check_command(args) -> None:
         raise SystemExit(4)
 
 
+def _goal_readiness_buckets(path: Path) -> dict[str, list[dict[str, object]]]:
+    """Published Workflows grouped by whether a Goal can start them."""
+
+    from .workflow.api.workflow_catalog import WorkflowCatalogReadModelService
+    from .workflow.catalogs import InMemorySchemaCatalog
+
+    buckets: dict[str, list[dict[str, object]]] = {
+        "ready": [], "needs_upgrade": [], "needs_migration": [],
+    }
+    reads = WorkflowCatalogReadModelService(path, InMemorySchemaCatalog({}))
+    for entry in reads.list():
+        buckets.setdefault(entry["goal_readiness"], []).append({
+            "workflow_id": entry["workflow_id"],
+            "name": entry["name"],
+            "reason": entry["readiness_reason"],
+            "source_available": entry["source_available"],
+        })
+    for group in buckets.values():
+        group.sort(key=lambda item: item["workflow_id"])
+    return buckets
+
+
+def _report_goal_readiness(db_path) -> None:
+    """Say at startup which Workflows the simplified UI will not start.
+
+    Simplified mode withholds `run.start` from anything that cannot run from a
+    single Goal, so the operator who turned it on is told before their users
+    find out. It never blocks the boot: a report is information, not a gate.
+    """
+
+    try:
+        buckets = _goal_readiness_buckets(Path(db_path))
+    except Exception as exc:  # pragma: no cover - reporting must not stop serve
+        print(f"warning: could not survey workflow goal readiness: {exc}", flush=True)
+        return
+    upgrade, migrate = buckets["needs_upgrade"], buckets["needs_migration"]
+    print(
+        f"simplified goal UI: {len(buckets['ready'])} workflow(s) can start a goal, "
+        f"{len(upgrade)} need an upgrade, {len(migrate)} cannot be upgraded",
+        flush=True,
+    )
+    for label, group in (("needs upgrade", upgrade), ("cannot upgrade", migrate)):
+        for item in group:
+            print(f"  {label}: {item['workflow_id']}  {item['name']}", flush=True)
+    if upgrade or migrate:
+        print(
+            "  run `orbit workflow inventory --json` for the full report",
+            flush=True,
+        )
+
+
+def _workflow_inventory(args, machine_output: bool) -> None:
+    """Who can start a Goal today, and who cannot — before switching modes on.
+
+    Turning on the simplified UI hides every Workflow that cannot run from a
+    single Goal, so an operator deserves that list before their users find it.
+    The report only reads the catalog projection: it publishes nothing, edits
+    nothing, and is safe to run against a live database.
+    """
+
+    path = Path(_runtime_db_path(args.db))
+    if not path.exists():
+        raise SystemExit(
+            f"no runtime database at {path}; run `orbit serve` once, or pass --db"
+        )
+    buckets = _goal_readiness_buckets(path)
+    report = {
+        "database": str(path),
+        "counts": {key: len(value) for key, value in buckets.items()},
+        "workflows": buckets,
+    }
+    if machine_output:
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+        return
+    total = sum(report["counts"].values())
+    print(f"{total} published workflow(s) in {path}")
+    labels = {
+        "ready": "ready — can start a Goal",
+        "needs_upgrade": "needs upgrade — the author can fix this with a prompt",
+        "needs_migration": "needs migration — no author source; generate a replacement",
+    }
+    for key in ("ready", "needs_upgrade", "needs_migration"):
+        group = buckets.get(key) or []
+        print(f"\n{labels[key]}: {len(group)}")
+        for item in group:
+            suffix = "" if item["reason"] is None else f"  [{item['reason']}]"
+            print(f"  {item['workflow_id']}  {item['name']}{suffix}")
+
+
 def _workflow_command(args) -> None:
     from .workflow.application import WorkflowDefinitionService, load_catalogs
     from .workflow.domain.serialization import canonical_json
@@ -126,6 +215,9 @@ def _workflow_command(args) -> None:
     from .workflow.persistence import PublishConflictError, SQLiteWorkflowVersionStore
 
     machine_output = getattr(args, "json", False)
+    if args.workflow_action == "inventory":
+        _workflow_inventory(args, machine_output)
+        return
     try:
         catalogs = load_catalogs(args.catalog)
         source_path = Path(args.file)
@@ -325,6 +417,7 @@ def _serve(args) -> None:
             token_exempt_actors=(LOCAL_ACTOR,),
             # Recovery takeovers are answered by this person too.
             operator_actors=(LOCAL_ACTOR,),
+            simplified_goal_ui=args.simplified_goal_ui,
         )
     except MixedSchemaError as exc:
         raise SystemExit(f"error: {exc}") from None
@@ -339,6 +432,8 @@ def _serve(args) -> None:
         f"(db: {db_path}, artifacts: {artifact_backend.root})",
         flush=True,
     )
+    if args.simplified_goal_ui:
+        _report_goal_readiness(db_path)
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 
 
@@ -389,6 +484,14 @@ def main() -> None:
         ),
     )
     serve_cmd.add_argument(
+        "--simplified-goal-ui",
+        action="store_true",
+        help=(
+            "Use the Workflow-first simplified UI. Requires the default "
+            "single-goal Runtime mode."
+        ),
+    )
+    serve_cmd.add_argument(
         ACKNOWLEDGE_FLAG,
         action="store_true",
         help=(
@@ -403,6 +506,18 @@ def main() -> None:
     )
     workflow_sub = workflow_cmd.add_subparsers(
         dest="workflow_action", required=True
+    )
+    inventory = workflow_sub.add_parser(
+        "inventory",
+        help=(
+            "Report which published Workflows can start a Goal in simplified "
+            "mode, which the author can upgrade, and which need operator "
+            "attention. Read-only."
+        ),
+    )
+    inventory.add_argument("--db", default=None, help="SQLite database path")
+    inventory.add_argument(
+        "--json", action="store_true", help="Emit stable machine-readable JSON"
     )
     for action in ("validate", "compile", "publish"):
         command = workflow_sub.add_parser(action)

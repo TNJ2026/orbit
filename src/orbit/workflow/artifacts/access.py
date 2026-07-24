@@ -19,9 +19,10 @@ class ArtifactAccessDenied(PermissionError):
 
 
 class _ScopedWriter:
-    def __init__(self, access, name, content_type, maximum):
+    def __init__(self, access, name, content_type, maximum, filename=None):
         self.access, self.name = access, name
         self.content_type, self.maximum = content_type, maximum
+        self.filename = filename
         self._file = tempfile.SpooledTemporaryFile(
             max_size=min(maximum, 1024 * 1024), mode="w+b"
         )
@@ -49,7 +50,7 @@ class _ScopedWriter:
                         self._file, max_size_bytes=self.maximum
                     )
                     self.artifact_id = self.access._stage(
-                        self.name, self.content_type, receipt
+                        self.name, self.content_type, receipt, self.filename
                     )
         finally:
             self._file.close()
@@ -75,7 +76,10 @@ class ScopedArtifactAccess:
     def produced_artifact_ids(self):
         return tuple(self._produced[name].artifact_id for name in sorted(self._produced))
 
-    def write(self, *, name: str, content: bytes, content_type: str):
+    def write(
+        self, *, name: str, content: bytes, content_type: str,
+        filename: str | None = None,
+    ):
         specification = self.output_policies.get(name)
         if specification is None:
             raise ArtifactAccessDenied("Artifact output port was not declared")
@@ -88,9 +92,11 @@ class ScopedArtifactAccess:
         with self.backend.mutation_lock():
             assert_no_secret_values(content, self.secret_values)
             receipt = self.backend.write(content, max_size_bytes=policy.max_size_bytes)
-            return self._stage(name, normalized, receipt)
+            return self._stage(name, normalized, receipt, filename)
 
-    def open_writer(self, *, name: str, content_type: str):
+    def open_writer(
+        self, *, name: str, content_type: str, filename: str | None = None,
+    ):
         specification = self.output_policies.get(name)
         if specification is None or specification[1].transport is not PortTransport.ARTIFACT_REF:
             raise ArtifactAccessDenied("Artifact output port was not declared")
@@ -98,7 +104,9 @@ class ScopedArtifactAccess:
         policy = specification[1]
         if normalized not in policy.content_types:
             raise ArtifactAccessDenied("Artifact content type is not allowed")
-        return _ScopedWriter(self, name, normalized, policy.max_size_bytes)
+        return _ScopedWriter(
+            self, name, normalized, policy.max_size_bytes, filename,
+        )
 
     def _scan_stream(self, source):
         secrets = tuple(value.encode("utf-8") for value in self.secret_values if value)
@@ -112,7 +120,7 @@ class ScopedArtifactAccess:
                 raise ValueError("resolved Secret value detected in Artifact stream")
             overlap = combined[-width:] if width else b""
 
-    def _stage(self, name, normalized, receipt):
+    def _stage(self, name, normalized, receipt, filename=None):
         schema_id, policy = self.output_policies[name]
         artifact_id = derive_artifact_id(self.attempt_id, name, name)
         visibility = policy.visibility
@@ -125,6 +133,7 @@ class ScopedArtifactAccess:
             self.node_run_id, name, schema_id, normalized, receipt.checksum,
             receipt.size_bytes, receipt.blob_key, visibility, scope_id,
             ArtifactStatus.STAGED, self.clock(),
+            None, None, filename,
         )
         prior = self._produced.get(name)
         if prior is not None:
@@ -147,6 +156,7 @@ class ScopedArtifactAccess:
             "artifact_id", "run_id", "workflow_id", "producer_type", "producer_id",
             "producer_node_run_id", "output_port_id", "schema_id", "content_type",
             "checksum", "size_bytes", "blob_key", "visibility", "scope_id", "status",
+            "filename",
         )
         return all(getattr(left, field) == getattr(right, field) for field in fields)
 
