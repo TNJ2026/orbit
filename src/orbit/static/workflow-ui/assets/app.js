@@ -3001,6 +3001,31 @@ async function setLocale(locale) {
   await render();
 }
 
+function installMoreMenu() {
+  const trigger = document.getElementById("moreButton");
+  const menu = document.getElementById("moreMenu");
+  if (!trigger || !menu) return;
+  const setOpen = (open) => {
+    menu.hidden = !open;
+    trigger.setAttribute("aria-expanded", String(open));
+  };
+  trigger.addEventListener("click", (event) => {
+    event.stopPropagation();
+    setOpen(menu.hidden);
+  });
+  // A click inside the popover must not dismiss it — changing theme, language
+  // or interval keeps the menu open. A click anywhere else closes it, and so
+  // does Escape (which returns focus to the trigger).
+  menu.addEventListener("click", (event) => event.stopPropagation());
+  document.addEventListener("click", () => setOpen(false));
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !menu.hidden) {
+      setOpen(false);
+      trigger.focus();
+    }
+  });
+}
+
 async function boot() {
   i18n = await I18n.load(preferredLocale());
   router = new Router((next) => {
@@ -3021,12 +3046,23 @@ async function boot() {
   refreshInterval.addEventListener("change", () => saveRefreshInterval(refreshInterval));
   installCustomSelects();
 
-  document.getElementById("themeToggle").addEventListener("click", () => {
-    const next = document.documentElement.dataset.theme === "light" ? "dark" : "light";
-    document.documentElement.dataset.theme = next;
-    localStorage.setItem("orbit.theme", next);
-  });
-  document.documentElement.dataset.theme = localStorage.getItem("orbit.theme") || "dark";
+  const themeOptions = [...document.querySelectorAll(".theme-option")];
+  const applyTheme = (value) => {
+    document.documentElement.dataset.theme = value;
+    for (const option of themeOptions) {
+      const active = option.dataset.themeValue === value;
+      option.classList.toggle("active", active);
+      option.setAttribute("aria-pressed", String(active));
+    }
+  };
+  for (const option of themeOptions) {
+    option.addEventListener("click", () => {
+      localStorage.setItem("orbit.theme", option.dataset.themeValue);
+      applyTheme(option.dataset.themeValue);
+    });
+  }
+  applyTheme(localStorage.getItem("orbit.theme") || "dark");
+  installMoreMenu();
 
   try {
     shellFacts = (await api.capabilities()).data;

@@ -149,7 +149,9 @@ class AccessibilityTests(unittest.TestCase):
         self.assertIn('aria-live="polite"', self.index)
 
     def test_icon_only_controls_carry_labels(self) -> None:
-        self.assertIn('data-i18n-label="theme.toggle"', self.index)
+        self.assertIn('data-i18n-label="action.more"', self.index)
+        self.assertIn('data-i18n-label="theme.light"', self.index)
+        self.assertIn('data-i18n-label="theme.dark"', self.index)
         self.assertIn('data-i18n-label="locale.switch"', self.index)
 
     def test_focus_is_visible(self) -> None:

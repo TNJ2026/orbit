@@ -53,10 +53,38 @@
 .topbar-controls .button {
   height: 36px; display: inline-flex; align-items: center; justify-content: center;
 }
-.topbar-refresh-control {
-  display: inline-flex; align-items: center; gap: var(--space-2);
-  min-width: 0; margin-left: var(--space-2);
+
+/* "More" popover: theme, language and refresh interval tucked behind one
+   button. An overlay, so it uses the reading surface with a 1px border and a
+   backdrop blur (DESIGN.md), and it sits above the sticky top bar. */
+.more-menu { position: relative; display: inline-flex; }
+.more-menu-popover {
+  position: absolute; top: calc(100% + 8px); right: 0; z-index: 40;
+  min-width: 248px; display: grid; gap: 2px; padding: 8px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: var(--shadow); backdrop-filter: blur(8px);
 }
+.more-menu-popover[hidden] { display: none; }
+.more-menu-row {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 16px; padding: 6px 8px; border-radius: 8px;
+}
+.more-menu-label { font-size: 13px; color: var(--muted); white-space: nowrap; }
+.more-menu-row .custom-select { flex: 0 1 auto; min-width: 132px; }
+/* Theme is a two-option segmented control: a sun and a moon, the active one
+   carrying the accent so the current theme reads at a glance. */
+.theme-toggle {
+  display: inline-flex; flex: 0 0 auto; overflow: hidden;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2);
+}
+.theme-option {
+  display: grid; place-items: center; width: 36px; height: 30px; padding: 0;
+  border: 0; background: transparent; color: var(--muted); cursor: pointer;
+  font-size: 14px; line-height: 1;
+}
+.theme-option + .theme-option { border-left: 1px solid var(--line); }
+.theme-option:hover { background: var(--hover); color: var(--text); }
+.theme-option.active { background: var(--blue-soft); color: var(--blue); }
 
 /* Runtime health lives as a floating badge pinned to the bottom-right of the
    viewport rather than in the top bar: an always-visible liveness probe that
@@ -94,10 +122,5 @@
   }
   .content { padding: 14px 12px; }
   #liveRegion { margin: 12px 12px 0; }
-}
-@media (max-width: 560px) {
-  /* The interval select keeps its aria-label; the words go where they no
-     longer fit. */
-  .topbar-refresh-control label { display: none; }
 }
 [hidden] { display: none !important; }

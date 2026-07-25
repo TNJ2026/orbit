@@ -50,13 +50,33 @@
             <span id="runtimeStatus" data-i18n="shell.runtime.checking">Checking runtime…</span>
             <span id="runtimeDetail" class="muted"></span>
           </div>
-          <button class="button" id="themeToggle" data-i18n-label="theme.toggle" aria-label="Toggle theme">◐</button>
           <button class="button" id="refresh" data-i18n="action.refresh">Refresh</button>
-          <select id="localeSelect" data-i18n-label="locale.switch" aria-label="Change language"></select>
-          <span class="topbar-refresh-control">
-            <label for="refreshInterval" data-i18n="settings.refresh">Live refresh interval</label>
-            <select id="refreshInterval" data-i18n-label="settings.refresh" aria-label="Live refresh interval"></select>
-          </span>
+          <!-- Theme, language and refresh interval are secondary settings, so
+               they live behind one "More" button instead of crowding the bar. -->
+          <div class="more-menu">
+            <button class="button more-menu-trigger" id="moreButton" type="button"
+                    aria-haspopup="true" aria-expanded="false"
+                    data-i18n-label="action.more" aria-label="More settings">⋯</button>
+            <div class="more-menu-popover" id="moreMenu" role="menu" hidden>
+              <div class="more-menu-row">
+                <span class="more-menu-label" data-i18n="settings.theme">Theme</span>
+                <div class="theme-toggle" role="group" data-i18n-label="settings.theme" aria-label="Theme">
+                  <button class="theme-option" id="themeLight" type="button" data-theme-value="light"
+                          data-i18n-label="theme.light" aria-label="Light">☀</button>
+                  <button class="theme-option" id="themeDark" type="button" data-theme-value="dark"
+                          data-i18n-label="theme.dark" aria-label="Dark">☾</button>
+                </div>
+              </div>
+              <div class="more-menu-row">
+                <span class="more-menu-label" data-i18n="settings.language">Language</span>
+                <select id="localeSelect" data-i18n-label="locale.switch" aria-label="Change language"></select>
+              </div>
+              <div class="more-menu-row">
+                <span class="more-menu-label" data-i18n="settings.refresh">Live refresh interval</span>
+                <select id="refreshInterval" data-i18n-label="settings.refresh" aria-label="Live refresh interval"></select>
+              </div>
+            </div>
+          </div>
         </div>
       </header>
       <!-- The page's one heading: invisible, but a screen reader still hears
