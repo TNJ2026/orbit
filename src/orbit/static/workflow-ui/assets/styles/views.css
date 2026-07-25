@@ -313,7 +313,17 @@
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
 }
 .workflow-editor .actions { justify-content: flex-end; }
-.workflow-edit-page { min-height: min(760px, calc(100vh - 150px)); overflow: hidden; }
+/* A whole-page route swap, so the entrance is just a short fade with a hair of
+   rise — enough to soften the jump in from the detail drawer, never enough to
+   make a frequent edit feel like it waits on an animation. */
+.workflow-edit-page {
+  min-height: min(760px, calc(100vh - 150px)); overflow: hidden;
+  animation: workflow-edit-in .14s ease-out;
+}
+@keyframes workflow-edit-in {
+  from { opacity: 0; transform: translateY(3px); }
+  to { opacity: 1; transform: none; }
+}
 .workflow-edit-page > .panel-head { align-items: flex-start; }
 .workflow-edit-canvas { min-width: 0; overflow: auto; }
 .workflow-edit-page > .workflow-editor-wrap {
@@ -322,6 +332,7 @@
 .workflow-edit-page .workflow-editor { padding: 16px 18px; }
 @media (prefers-reduced-motion: reduce) {
   .workflow-drawer, .workflow-drawer-scrim, .workflow-editor-wrap { transition: none; }
+  .workflow-edit-page { animation: none; }
 }
 .artifact-content { min-width: 0; }
 .artifact-preview {
