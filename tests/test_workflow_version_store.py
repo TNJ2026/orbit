@@ -40,9 +40,11 @@ class WorkflowVersionStoreTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
-    def compile(self, *, name: str = "Approval flow"):
+    def compile(self, *, name: str = "Approval flow", wf_id: str | None = None):
         value = json.loads(json.dumps(VALID_DSL))
         value["metadata"]["name"] = name
+        if wf_id is not None:
+            value["metadata"]["id"] = wf_id
         return compile_source(
             json.dumps(value), self.handlers, self.schemas, source_format="json"
         )
@@ -55,6 +57,38 @@ class WorkflowVersionStoreTests(unittest.TestCase):
             source_text="{}",
             actor="test",
         )
+
+    def test_display_name_is_deduplicated_across_workflows(self) -> None:
+        first = self.publish(self.compile(name="Approval flow", wf_id="approval_one"), 0)
+        second = self.publish(self.compile(name="Approval flow", wf_id="approval_two"), 0)
+        third = self.publish(self.compile(name="Approval flow", wf_id="approval_three"), 0)
+        with connect_workflow_database(self.db_path, read_only=True) as db:
+            names = {
+                row["workflow_id"]: row["name"]
+                for row in db.execute("SELECT workflow_id, name FROM workflow_definitions")
+            }
+        self.assertEqual(names[first.workflow_id], "Approval flow")
+        self.assertEqual(names[second.workflow_id], "Approval flow 2")
+        self.assertEqual(names[third.workflow_id], "Approval flow 3")
+
+    def test_a_workflow_keeps_its_own_name_across_versions(self) -> None:
+        """Re-publishing a workflow must not treat its own title as taken."""
+        self.publish(self.compile(name="Approval flow", wf_id="solo"), 0)
+        # A second version with different content but the same name and id.
+        value = json.loads(json.dumps(VALID_DSL))
+        value["metadata"]["name"] = "Approval flow"
+        value["metadata"]["id"] = "solo"
+        value["metadata"]["description"] = "second version"
+        revised = compile_source(
+            json.dumps(value), self.handlers, self.schemas, source_format="json"
+        )
+        self.publish(revised, 1)
+        with connect_workflow_database(self.db_path, read_only=True) as db:
+            name = db.execute(
+                "SELECT name FROM workflow_definitions WHERE workflow_id = ?",
+                (revised.ir.workflow_id,),
+            ).fetchone()["name"]
+        self.assertEqual(name, "Approval flow")
 
     def test_publish_is_immutable_idempotent_and_round_trips_ir(self) -> None:
         compiled = self.compile()

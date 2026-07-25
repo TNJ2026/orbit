@@ -235,9 +235,14 @@ class WorkflowCatalogReadModelService:
         goal_readiness, readiness_reason = self._goal_readiness(
             ir, inputs, goal_binding, source_available=source_available,
         )
+        # The catalog title is the de-duplicated name from the definitions row
+        # when the query joined it in; the IR name is the fallback (and the
+        # value before any collision suffix was applied).
+        keys = row.keys()
+        display_name = row["display_name"] if "display_name" in keys else None
         item = {
             "workflow_id": row["workflow_id"],
-            "name": ir["name"],
+            "name": display_name or ir["name"],
             "description": ir.get("description") or "",
             "labels": dict(ir.get("labels") or {}),
             "latest_version": int(row["version"]),
@@ -259,7 +264,10 @@ class WorkflowCatalogReadModelService:
     def list(self) -> list[dict[str, Any]]:
         with connect_workflow_database(self.path, read_only=True) as connection:
             rows = connection.execute(
-                """SELECT current.* FROM workflow_versions current
+                """SELECT current.*, d.name AS display_name
+                   FROM workflow_versions current
+                   LEFT JOIN workflow_definitions d
+                     ON d.workflow_id = current.workflow_id
                    WHERE version = (
                      SELECT MAX(version) FROM workflow_versions
                      WHERE workflow_id = current.workflow_id
@@ -297,8 +305,9 @@ class WorkflowCatalogReadModelService:
 
         with connect_workflow_database(self.path, read_only=True) as connection:
             row = connection.execute(
-                "SELECT * FROM workflow_versions WHERE workflow_id = ?"
-                " ORDER BY version DESC LIMIT 1",
+                "SELECT v.*, d.name AS display_name FROM workflow_versions v"
+                " LEFT JOIN workflow_definitions d ON d.workflow_id = v.workflow_id"
+                " WHERE v.workflow_id = ? ORDER BY v.version DESC LIMIT 1",
                 (workflow_id,),
             ).fetchone()
         if row is None:

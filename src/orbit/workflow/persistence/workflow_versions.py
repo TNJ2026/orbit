@@ -163,6 +163,13 @@ class SQLiteWorkflowVersionStore:
             if latest != expected_latest_version:
                 connection.rollback()
                 raise PublishConflictError(workflow_id, expected_latest_version, latest)
+            # The display name is de-duplicated against other workflows so two
+            # generated flows never show the same title in the catalog. Only
+            # the definitions row (what the catalog reads) is adjusted — the IR
+            # name is part of the hashed definition and must stay untouched.
+            display_name = self._unique_display_name(
+                connection, workflow_id, compiled.ir.name,
+            )
             connection.execute(
                 """
                 INSERT INTO workflow_definitions(
@@ -170,7 +177,7 @@ class SQLiteWorkflowVersionStore:
                 ) VALUES (?, ?, ?, ?)
                 ON CONFLICT(workflow_id) DO UPDATE SET name = excluded.name
                 """,
-                (workflow_id, compiled.ir.name, now, actor),
+                (workflow_id, display_name, now, actor),
             )
             version = latest + 1
             connection.execute(
@@ -199,6 +206,27 @@ class SQLiteWorkflowVersionStore:
             raise
         finally:
             connection.close()
+
+    def _unique_display_name(
+        self, connection: sqlite3.Connection, workflow_id: str, name: str,
+    ) -> str:
+        """The name, or the first ``Name N`` free of other workflows' titles.
+
+        Only names owned by *other* workflow ids count as taken, so a workflow
+        keeping or reusing its own title never collides with itself.
+        """
+        taken = {
+            row[0] for row in connection.execute(
+                "SELECT name FROM workflow_definitions WHERE workflow_id != ?",
+                (workflow_id,),
+            )
+        }
+        if name not in taken:
+            return name
+        suffix = 2
+        while f"{name} {suffix}" in taken:
+            suffix += 1
+        return f"{name} {suffix}"
 
     def get(self, workflow_id: str, version: int) -> WorkflowVersionRecord | None:
         with self._connect() as connection:
