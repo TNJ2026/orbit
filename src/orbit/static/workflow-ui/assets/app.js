@@ -2917,8 +2917,7 @@ async function render() {
   root.append(dataState(el, i18n, "loading"));
 
   for (const button of document.querySelectorAll(".nav-button")) {
-    const section = route.view === "run" || route.view === "goal"
-      || route.view === "goals" ? "home"
+    const section = route.view === "run" || route.view === "goal" ? "home"
         : route.view === "workflow" || route.view === "workflowEdit"
           ? "workflows" : route.view;
     const active = button.dataset.view === section;
