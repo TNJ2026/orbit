@@ -1871,7 +1871,7 @@ async function renderWorkflows(root) {
     }, [
       el("button", { class: "workflow-card-main" }, [
         el("span", { class: "workflow-visual", "aria-hidden": "true" }, visualNodes),
-        el("span", { class: "eyebrow", text: entry.workflow_id }),
+        el("span", { class: "eyebrow", text: entry.workflow_id.replace(/^workflow:/i, "") }),
         el("span", { class: "workflow-card-heading" }, [
           el("strong", { text: entry.name }),
           entry.goal_readiness !== "ready" ? el("span", {

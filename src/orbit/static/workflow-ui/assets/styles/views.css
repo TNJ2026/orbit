@@ -518,6 +518,13 @@
 }
 .workflow-card-main:hover { background: var(--panel-2); }
 .workflow-card-main strong { font-size: 15px; }
+/* The workflow id is secondary ASCII metadata, so it drops below the shared
+   eyebrow size to sit quieter above the name, and a long id is truncated to
+   one line rather than wrapping or stretching the card. */
+.workflow-card .eyebrow {
+  font-size: 10px; max-width: 100%; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .workflow-meta { color: var(--blue); font-size: 13px; }
 .workflow-card-facts { color: var(--muted); font-family: var(--mono); font-size: 12px; }
 /* The card's own action sits outside its clickable body: a button inside a
