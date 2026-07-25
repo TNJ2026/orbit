@@ -73,9 +73,11 @@ class RunApplicationService:
     """Start runs and answer "what is this run doing" for every adapter."""
 
     def __init__(
-        self, path: Path | str, durable_service, *, enforce_single_goal: bool = False
+        self, path: Path | str, durable_service, *, enforce_single_goal: bool = False,
+        workflow_db_path: Path | str | None = None,
     ) -> None:
         self.path = Path(path)
+        self.workflow_path = Path(workflow_db_path or path)
         self.service = durable_service
         self.reads = ReadModelService(self.path)
         self.enforce_single_goal = enforce_single_goal
@@ -116,7 +118,7 @@ class RunApplicationService:
     ) -> tuple[int, str]:
         """Latest published version and its hash, or the exact one requested."""
 
-        with connect_workflow_database(self.path, read_only=True) as connection:
+        with connect_workflow_database(self.workflow_path, read_only=True) as connection:
             if version is None:
                 row = connection.execute(
                     "SELECT version, definition_hash FROM workflow_versions"
@@ -135,6 +137,80 @@ class RunApplicationService:
                 + (f"@{version}" if version is not None else " (no published version)")
             )
         return int(row["version"]), row["definition_hash"]
+
+    def _materialize_workflow(self, workflow_id: str, version: int) -> None:
+        """Mirror one public immutable version into the project's FK boundary.
+
+        Runs remain project-local and the schema deliberately references a
+        WorkflowVersion. The mirror is immutable execution evidence, not a
+        second authoring authority; catalog and publishing continue to use the
+        public library.
+        """
+
+        if self.workflow_path == self.path:
+            return
+        with connect_workflow_database(self.workflow_path, read_only=True) as source:
+            row = source.execute(
+                "SELECT * FROM workflow_versions WHERE workflow_id=? AND version=?",
+                (workflow_id, version),
+            ).fetchone()
+            definition = source.execute(
+                "SELECT * FROM workflow_definitions WHERE workflow_id=?",
+                (workflow_id,),
+            ).fetchone()
+        if row is None or definition is None:
+            raise RunStartError(f"workflow version not found: {workflow_id}@{version}")
+        columns = (
+            "workflow_id", "version", "definition_hash", "dsl_version", "ir_version",
+            "compiler_version", "canonical_ir_json", "source_format", "source_text",
+            "catalog_fingerprint", "created_at", "created_by",
+        )
+        with connect_workflow_database(self.path) as target:
+            target.execute("BEGIN IMMEDIATE")
+            target.execute(
+                "INSERT OR IGNORE INTO workflow_definitions"
+                "(workflow_id,name,created_at,created_by) VALUES (?,?,?,?)",
+                tuple(definition[key] for key in (
+                    "workflow_id", "name", "created_at", "created_by",
+                )),
+            )
+            existing = target.execute(
+                "SELECT definition_hash FROM workflow_versions"
+                " WHERE workflow_id=? AND version=?",
+                (workflow_id, version),
+            ).fetchone()
+            if existing is not None and existing["definition_hash"] != row["definition_hash"]:
+                target.rollback()
+                raise RunStartError(
+                    f"project WorkflowVersion conflicts with public library:"
+                    f" {workflow_id}@{version}"
+                )
+            if existing is None:
+                target.execute(
+                    f"INSERT INTO workflow_versions({','.join(columns)})"
+                    f" VALUES ({','.join('?' for _ in columns)})",
+                    tuple(row[key] for key in columns),
+                )
+            target.commit()
+
+    def _ensure_handlers_available(self, workflow_id: str, version: int) -> None:
+        registry = getattr(self.service, "execution_registry", None)
+        versions = getattr(self.service, "workflow_versions", None)
+        if registry is None or versions is None:
+            return
+        record = versions.get(workflow_id, version)
+        if record is None:
+            raise RunStartError(f"workflow version not found: {workflow_id}@{version}")
+        for node in record.ir.nodes:
+            if node.handler is None:
+                continue
+            try:
+                registry.resolve(
+                    node.handler.name, node.handler.version,
+                    expected_manifest_fingerprint=node.handler.manifest_fingerprint,
+                )
+            except (LookupError, ValueError) as exc:
+                raise RunStartError(f"HANDLER_UNAVAILABLE: {exc}") from None
 
     def start_run(
         self,
@@ -156,6 +232,8 @@ class RunApplicationService:
             raise RunStartError("budget_microunits must not be negative")
 
         resolved_version, digest = self.resolve_workflow(workflow_id, version)
+        self._ensure_handlers_available(workflow_id, resolved_version)
+        self._materialize_workflow(workflow_id, resolved_version)
         run_id = derive_run_id(workflow_id, resolved_version, idempotency_key)
         issued_at = now or datetime.now(timezone.utc)
 

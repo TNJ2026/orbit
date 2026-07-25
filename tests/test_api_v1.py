@@ -1255,6 +1255,8 @@ class CatalogTests(ApiTestCase):
             self.assertEqual("transform", entry["name"])
             self.assertEqual("registered", entry["registration_status"])
             self.assertIsNone(entry["recent_attempt"])
+            self.assertEqual(0, entry["attempt_count"])
+            self.assertEqual(0, entry["failed_count"])
             self.assertEqual(
                 "registration_only", response.json()["data"]["status_semantics"]
             )
@@ -1698,6 +1700,128 @@ class WorkflowDraftApiTests(ApiTestCase):
             single_goal_mode=False,
         )
 
+    @staticmethod
+    def _agent_registration(name="agent.codex", version="1.0.0"):
+        manifest = HandlerManifest(
+            name, version, ("action",),
+            {"value": "example://integer/1.0"},
+            {"value": "example://integer/1.0"},
+            {"type": "object"}, ExecutionSafety.REPLAY_SAFE,
+            ResourceProfile(100_000, 100_000, 0, 300, 0, "agent"),
+            "schema://object/1.0", ("agent.invoke",), (), True, True,
+        )
+        return HandlerRegistration(manifest, TransformHandler(), f"{name}@{version}")
+
+    def _app_with_action_agents(self):
+        return create_app(
+            self.db,
+            handlers=[
+                transform_registration(), self._agent_registration(),
+                self._agent_registration("agent.claude", "2.0.0"),
+            ],
+            schemas=SCHEMAS, worker_count=1, poll_seconds=0.02,
+            authenticator=lambda request: request.headers.get("x-orbit-actor"),
+            authorizer=Authorizer(lambda actor: self.scopes.get(actor, [])),
+            single_goal_mode=False,
+        )
+
+    def test_action_editor_updates_only_action_fields_as_a_new_version(self) -> None:
+        with AsgiHarness(self._app_with_action_agents()) as client:
+            detail = client.get(
+                "/api/v1/workflows/workflow:draftable", actor="writer",
+            ).json()["data"]
+            self.assertEqual({"work"}, set(detail["action_editors"]))
+            editor = detail["action_editors"]["work"]
+            self.assertEqual(
+                [
+                    {"name": "agent.claude", "version": "2.0.0"},
+                    {"name": "agent.codex", "version": "1.0.0"},
+                ],
+                editor["handlers"],
+            )
+            response = client.post(
+                editor["allowed_command"]["href"], actor="writer", key="action-edit-1",
+                body={
+                    "expected_version": editor["allowed_command"]["expected_version"],
+                    "label": "Search web",
+                    "handler": {"name": "agent.codex", "version": "1.0.0"},
+                    "prompt": "Find reliable primary sources.",
+                },
+            )
+            self.assertEqual(200, response.status_code, response.json())
+            self.assertEqual(2, response.json()["data"]["version"])
+            updated = client.get(
+                "/api/v1/workflows/workflow:draftable", actor="writer",
+            ).json()["data"]
+            work = next(node for node in updated["definition"]["nodes"] if node["id"] == "work")
+            self.assertEqual("Search web", work["label"])
+            self.assertEqual("agent.codex", work["handler"]["name"])
+            self.assertEqual("1.0.0", work["handler"]["version"])
+            self.assertEqual("Find reliable primary sources.", work["config"]["prompt"])
+            self.assertEqual(["done"], updated["definition"]["terminals"])
+
+    def test_action_editor_is_not_offered_to_readers_or_terminal_nodes(self) -> None:
+        with AsgiHarness(self._app_with_action_agents()) as client:
+            reader = client.get(
+                "/api/v1/workflows/workflow:draftable", actor="reader",
+            ).json()["data"]
+            self.assertEqual({}, reader["action_editors"])
+            denied = client.post(
+                "/api/v1/workflows/workflow:draftable/actions/done",
+                actor="writer", key="action-edit-terminal",
+                body={
+                    "expected_version": 1, "label": "Not allowed",
+                    "handler": {"name": "agent.codex", "version": "1.0.0"},
+                    "prompt": "No.",
+                },
+            )
+            self.assertEqual(409, denied.status_code)
+
+    def test_agent_cli_version_change_is_not_reported_as_handler_drift(self) -> None:
+        import json as json_module
+        from orbit.workflow.application.workflows import (
+            WorkflowCatalogs, WorkflowDefinitionService,
+        )
+        from orbit.workflow.catalogs import InMemoryHandlerCatalog, InMemorySchemaCatalog
+        from orbit.workflow.catalogs.extensions import InMemoryExtensionRegistry
+        from orbit.workflow.persistence.workflow_versions import SQLiteWorkflowVersionStore
+        from tests.test_workflow_drafts import dsl as editable_dsl
+
+        source = editable_dsl(workflow_id="agent-drift", name="Agent drift")
+        source["nodes"][0]["handler"] = {
+            "name": "agent.codex", "version": "1.1.5",
+        }
+        old_agent = self._agent_registration("agent.codex", "1.1.5").manifest
+        WorkflowDefinitionService(
+            WorkflowCatalogs(
+                InMemoryHandlerCatalog([old_agent]),
+                InMemorySchemaCatalog(SCHEMAS), InMemoryExtensionRegistry(),
+            ),
+            SQLiteWorkflowVersionStore(self.db),
+        ).publish_workflow(
+            json_module.dumps(source), source_name="<agent-drift>",
+            source_format="json", expected_latest_version=0, actor="fixture",
+        )
+        app = create_app(
+            self.db,
+            handlers=[self._agent_registration("agent.codex", "1.1.7")],
+            schemas=SCHEMAS, worker_count=1, poll_seconds=0.02,
+            authenticator=lambda request: request.headers.get("x-orbit-actor"),
+            authorizer=Authorizer(lambda actor: self.scopes.get(actor, [])),
+            single_goal_mode=False,
+        )
+        with AsgiHarness(app) as client:
+            detail = client.get(
+                "/api/v1/workflows/workflow:agent-drift", actor="writer",
+            ).json()["data"]
+            self.assertEqual([], detail["handler_drift"])
+            self.assertEqual("current", detail["handler_bindings"][0]["status"])
+            self.assertNotIn(
+                "workflow.rebind",
+                [command["command"] for command in detail["allowed_commands"]],
+            )
+
+
     def test_detail_advertises_editing_only_to_writers_with_source(self) -> None:
         with AsgiHarness(self.app) as client:
             command, detail = self._edit_command(client)
@@ -1720,6 +1844,16 @@ class WorkflowDraftApiTests(ApiTestCase):
                 c for c in legacy["allowed_commands"]
                 if c["command"] == "workflow.draft.create"
             ])
+
+    def test_catalog_advertises_card_editing_only_to_writers_with_source(self) -> None:
+        with AsgiHarness(self.app) as client:
+            writer = client.get("/api/v1/workflows", actor="writer").json()["data"]
+            reader = client.get("/api/v1/workflows", actor="reader").json()["data"]
+            writer_items = {item["workflow_id"]: item for item in writer["workflows"]}
+            reader_items = {item["workflow_id"]: item for item in reader["workflows"]}
+            self.assertTrue(writer_items["workflow:draftable"]["editing_available"])
+            self.assertFalse(writer_items["workflow:linear"]["editing_available"])
+            self.assertFalse(reader_items["workflow:draftable"]["editing_available"])
 
     def test_detail_does_not_offer_editing_without_an_agent_reviser(self) -> None:
         with AsgiHarness(self._app_without_reviser()) as client:
@@ -1905,7 +2039,43 @@ class WorkflowDraftApiTests(ApiTestCase):
                 body={"instruction": "a flow", "agent": "codex"},
             )
             self.assertEqual(200, response.status_code, response.json())
+            self.assertEqual("codex", response.json()["data"]["requested_agent"])
             self.assertEqual(["codex"], asked)
+
+    def test_quick_modify_names_the_agent_that_revises_the_workflow(self) -> None:
+        import json as json_module
+        from tests.test_workflow_drafts import dsl as editable_dsl
+
+        asked = []
+
+        def codex(_prompt):
+            asked.append("codex")
+            return json_module.dumps(editable_dsl(name="Modified by Codex"))
+
+        app = self._app_with_named_agents({"codex": codex, "claude": lambda _p: "{}"})
+        with AsgiHarness(app) as client:
+            response = client.post(
+                "/api/v1/workflows/workflow:draftable/modify",
+                actor="writer", key="modify-codex",
+                body={"prompt": "rename it", "mode": "modify", "agent": "codex"},
+            )
+            self.assertEqual(200, response.status_code, response.json())
+            self.assertEqual("codex", response.json()["data"]["requested_agent"])
+            self.assertEqual(["codex"], asked)
+
+    def test_quick_modify_rejects_an_unknown_agent_before_queueing(self) -> None:
+        app = self._app_with_named_agents({"codex": lambda _prompt: "{}"})
+        with AsgiHarness(app) as client:
+            response = client.post(
+                "/api/v1/workflows/workflow:draftable/modify",
+                actor="writer", key="modify-unknown",
+                body={"prompt": "rename it", "mode": "modify", "agent": "gpt-9"},
+            )
+            self.assertEqual(400, response.status_code)
+            jobs = client.get(
+                "/api/v1/workflow-authoring-jobs", actor="writer"
+            ).json()["data"]["jobs"]
+            self.assertEqual([], jobs)
 
     def test_a_revision_records_the_agent_the_author_chose(self) -> None:
         import json as json_module
@@ -2185,6 +2355,57 @@ class WorkflowDraftApiTests(ApiTestCase):
                 settled["revision_history"][0]["revision_id"],
                 reloaded["revision_history"][0]["revision_id"],
             )
+
+
+class PublicWorkflowLibraryTests(unittest.TestCase):
+    def test_workflow_published_in_one_project_runs_from_another(self) -> None:
+        import json as json_module
+        from tests.test_workflow_drafts import dsl as shared_dsl
+
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        shared = root / "workflows" / "library.db"
+        project_a = root / "projects" / "a" / "runtime.db"
+        project_b = root / "projects" / "b" / "runtime.db"
+        authorizer = Authorizer(lambda _actor: [READ_SCOPE, WRITE_SCOPE])
+
+        def app(path):
+            return create_app(
+                path, workflow_db_path=shared,
+                handlers=[transform_registration()], schemas=SCHEMAS,
+                worker_count=1, poll_seconds=0.02,
+                authenticator=lambda request: request.headers.get("x-orbit-actor"),
+                authorizer=authorizer, single_goal_mode=False,
+            )
+
+        app_a, app_b = app(project_a), app(project_b)
+        source = json_module.dumps(
+            shared_dsl(workflow_id="shared-workflow", name="Shared workflow")
+        )
+        with AsgiHarness(app_a) as client_a:
+            response = client_a.post(
+                "/api/v1/workflows/workflow:shared-workflow/versions",
+                actor="writer", key="publish-shared",
+                body={"source": source, "expected_version": 0},
+            )
+            self.assertEqual(200, response.status_code, response.text)
+        with AsgiHarness(app_b) as client_b:
+            catalog = client_b.get("/api/v1/workflows", actor="writer").json()["data"]
+            self.assertIn("workflow:shared-workflow", [
+                item["workflow_id"] for item in catalog["workflows"]
+            ])
+            response = client_b.post(
+                "/api/v1/runs", actor="writer", key="run-shared",
+                body={"workflow_id": "workflow:shared-workflow", "input": {"value": 1}},
+            )
+            self.assertEqual(200, response.status_code, response.text)
+        with connect_workflow_database(project_a, read_only=True) as db:
+            self.assertEqual(0, db.execute("SELECT COUNT(*) FROM workflow_runs").fetchone()[0])
+        with connect_workflow_database(project_b, read_only=True) as db:
+            self.assertEqual(1, db.execute("SELECT COUNT(*) FROM workflow_runs").fetchone()[0])
+        with connect_workflow_database(shared, read_only=True) as db:
+            self.assertEqual(1, db.execute("SELECT COUNT(*) FROM workflow_versions").fetchone()[0])
 
 
 class CapabilityTests(ApiTestCase):

@@ -18,8 +18,11 @@ from .graph_layout import graph_layout
 
 
 class WorkflowCatalogReadModelService:
-    def __init__(self, path: Path | str, schema_catalog) -> None:
+    def __init__(
+        self, path: Path | str, schema_catalog, *, usage_path: Path | str | None = None,
+    ) -> None:
         self.path = Path(path)
+        self.usage_path = Path(usage_path or path)
         self.schemas = schema_catalog
 
     @staticmethod
@@ -266,6 +269,7 @@ class WorkflowCatalogReadModelService:
             # How recently a definition was actually used is a fact about runs,
             # not about the definition. A catalog of dozens is ordered by it far
             # more often than by workflow_id, so the projection carries it.
+        with connect_workflow_database(self.usage_path, read_only=True) as connection:
             usage = {
                 row["workflow_id"]: row
                 for row in connection.execute(

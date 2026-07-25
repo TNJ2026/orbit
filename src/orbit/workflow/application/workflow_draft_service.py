@@ -231,9 +231,10 @@ def _revision_record(row) -> DraftRevisionRecord:
 class WorkflowDraftApplicationService:
     def __init__(
         self, path: Path | str, definitions: WorkflowDefinitionService,
-        *, reviser=None,
+        *, reviser=None, workflow_db_path: Path | str | None = None,
     ) -> None:
         self.path = Path(path)
+        self.workflow_path = Path(workflow_db_path or path)
         self.definitions = definitions
         # Callable[[current_source, instruction], GenerationOutcome]. None when
         # no generation-capable agent CLI was discovered; the editor then has
@@ -310,7 +311,10 @@ class WorkflowDraftApplicationService:
                 (workflow_id, actor),
             ).fetchone()
             if base_version is None:
-                latest = db.execute(
+                with connect_workflow_database(
+                    self.workflow_path, read_only=True,
+                ) as definitions_db:
+                    latest = definitions_db.execute(
                     "SELECT MAX(version) FROM workflow_versions WHERE workflow_id=?",
                     (workflow_id,),
                 ).fetchone()[0]
@@ -328,11 +332,14 @@ class WorkflowDraftApplicationService:
                     "base_version": record.base_version,
                     "updated_at": record.updated_at,
                 })
-            version = db.execute(
-                "SELECT source_format, source_text FROM workflow_versions"
-                " WHERE workflow_id=? AND version=?",
-                (workflow_id, int(base_version)),
-            ).fetchone()
+            with connect_workflow_database(
+                self.workflow_path, read_only=True,
+            ) as definitions_db:
+                version = definitions_db.execute(
+                    "SELECT source_format, source_text FROM workflow_versions"
+                    " WHERE workflow_id=? AND version=?",
+                    (workflow_id, int(base_version)),
+                ).fetchone()
             if version is None:
                 raise DraftNotFoundError(
                     f"workflow version not found: {workflow_id} v{base_version}"
@@ -1075,14 +1082,17 @@ class WorkflowDraftApplicationService:
         with connect_workflow_database(self.path) as db:
             if self._pending(db, EntityId.parse(record.draft_id)) is not None:
                 return None
-            row = db.execute(
+            with connect_workflow_database(
+                self.workflow_path, read_only=True,
+            ) as definitions_db:
+                row = definitions_db.execute(
                 "SELECT version FROM workflow_versions"
                 " WHERE workflow_id=? AND definition_hash=? AND version>=?",
                 (
                     record.workflow_id, record.validated_definition_hash,
                     record.base_version,
                 ),
-            ).fetchone()
+                ).fetchone()
             if row is None:
                 return None
             db.execute("BEGIN IMMEDIATE")

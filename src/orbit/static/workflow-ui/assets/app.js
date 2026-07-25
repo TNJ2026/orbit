@@ -34,7 +34,6 @@ let activeViewCleanup = null;
 let activeViewLeaveGuard = null;
 let customSelectSequence = 0;
 const goalFilters = { q: "", status: "" };
-const artifactFilters = { q: "", runId: "", contentType: "" };
 // A catalog of dozens is browsed, not scanned. The default order answers the
 // question an author actually has — which workflow was I just running.
 const simplifiedComposerState = { runId: null, workflowId: "", goal: "" };
@@ -63,6 +62,7 @@ const svgEl = (tag, props = {}, children = []) => {
   const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
   for (const [key, value] of Object.entries(props)) {
     if (key === "text") node.textContent = value;
+    else if (key.startsWith("on")) node.addEventListener(key.slice(2).toLowerCase(), value);
     else if (value !== null && value !== undefined) node.setAttribute(key, value);
   }
   for (const child of [].concat(children)) {
@@ -74,7 +74,9 @@ const svgEl = (tag, props = {}, children = []) => {
 // Box geometry. The server hands us depth (column) and lane (row); turning
 // those into pixels is the only thing the browser decides about this picture.
 const GRAPH_BOX = {
-  width: 168, height: 60, gapX: 64, gapY: 22, pad: 16,
+  // The vertical gap also carries back/rework edges.  Keep enough clearance
+  // that their dashed stroke does not visually cling to the card above it.
+  width: 168, height: 60, gapX: 64, gapY: 40, pad: 16,
   // A one-lane flow would otherwise draw as a thin strip under the tabs,
   // and the panel would jump in height on every tab switch.
   minHeight: 260,
@@ -90,7 +92,11 @@ function generationAgents() {
 
 function generationAgentField(id, selected, onchange) {
   const agents = generationAgents();
-  if (agents.length < 2) return null;
+  if (!agents.length) return null;
+  if (agents.length === 1) return el("div", { class: "field" }, [
+    el("span", { class: "field-label", text: i18n.t("generate.writtenBy") }),
+    el("div", { class: "agent-choice-static mono", text: agents[0] }),
+  ]);
   return el("div", { class: "field" }, [
     el("label", { for: id, text: i18n.t("generate.writtenBy") }),
     el("select", { id, onchange: (event) => onchange(event.target.value) },
@@ -114,7 +120,7 @@ function readableNodeName(node) {
   return i18n.t("simplified.workflow.step");
 }
 
-function workflowGraphView(graph) {
+function workflowGraphView(graph, actionEditors = {}, onEditAction = null) {
   const { width, height, gapX, gapY, pad, minHeight } = GRAPH_BOX;
   const at = new Map();
   for (const position of graph.layout.positions) {
@@ -123,6 +129,18 @@ function workflowGraphView(graph) {
       y: pad + position.lane * (height + gapY),
     });
   }
+  const geometry = new Map(graph.nodes.map((node) => {
+    const spot = at.get(node.node_id);
+    if (!spot) return [node.node_id, null];
+    const nodeWidth = width;
+    const nodeHeight = height;
+    return [node.node_id, {
+      x: spot.x + (width - nodeWidth) / 2,
+      y: spot.y + (height - nodeHeight) / 2,
+      width: nodeWidth,
+      height: nodeHeight,
+    }];
+  }));
   const columns = Math.max(...graph.layout.positions.map((p) => p.depth), 0) + 1;
   const lanes = Math.max(...graph.layout.positions.map((p) => p.lane), 0) + 1;
   const canvasWidth = pad * 2 + columns * width + (columns - 1) * gapX;
@@ -132,16 +150,17 @@ function workflowGraphView(graph) {
   const offsetY = Math.round((canvasHeight - drawnHeight) / 2);
 
   const edges = graph.edges.map((edge) => {
-    const from = at.get(edge.from);
-    const to = at.get(edge.to);
+    const from = geometry.get(edge.from);
+    const to = geometry.get(edge.to);
     if (!from || !to) return null;
-    const start = { x: from.x + width, y: from.y + height / 2 };
-    const end = { x: to.x, y: to.y + height / 2 };
+    const start = { x: from.x + from.width, y: from.y + from.height / 2 };
+    const end = { x: to.x, y: to.y + to.height / 2 };
     // A back edge points at an earlier column, so route it under the row it
     // came from instead of drawing a line straight through the boxes.
     const path = edge.back_edge
-      ? `M${start.x - width / 2} ${from.y + height} V${from.y + height + gapY / 2}`
-        + ` H${end.x + width / 2} V${to.y + height}`
+      ? `M${start.x - from.width / 2} ${from.y + from.height}`
+        + ` V${from.y + from.height + gapY / 2}`
+        + ` H${end.x + to.width / 2} V${to.y + to.height}`
       : `M${start.x} ${start.y} H${start.x + gapX / 2} V${end.y} H${end.x}`;
     return svgEl("path", {
       class: `graph-edge${edge.back_edge ? " back" : ""} route-${edge.route}`,
@@ -150,7 +169,7 @@ function workflowGraphView(graph) {
   });
 
   const boxes = graph.nodes.map((node, index) => {
-    const spot = at.get(node.node_id);
+    const spot = geometry.get(node.node_id);
     if (!spot) return null;
     // Node kinds are DSL vocabulary, shown verbatim here as they are in the
     // definition list below the picture. A handler gets one short line: the
@@ -163,9 +182,25 @@ function workflowGraphView(graph) {
     // box. Clip each line to the box interior and keep the full value in a
     // <title> for hover — the drawing stays tidy, nothing is lost.
     const clipId = `graph-clip-${index}`;
+    const editable = node.kind === "action" && Boolean(actionEditors[node.node_id]);
+    const edit = () => {
+      if (editable && onEditAction) onEditAction(node.node_id);
+    };
     return svgEl("g", {
-      class: `graph-box kind-${node.kind}`,
+      class: `graph-box kind-${node.kind}${editable ? " editable" : ""}`,
       transform: `translate(${spot.x} ${spot.y})`,
+      role: editable ? "button" : null,
+      tabindex: editable ? "0" : null,
+      "aria-label": editable ? i18n.t("workflows.editActionNamed", {
+        name: readableNodeName(node),
+      }) : null,
+      onclick: edit,
+      onkeydown: (event) => {
+        if (editable && (event.key === "Enter" || event.key === " ")) {
+          event.preventDefault();
+          edit();
+        }
+      },
     }, [
       svgEl("title", {
         text: node.handler_name
@@ -173,14 +208,23 @@ function workflowGraphView(graph) {
           : node.node_id,
       }),
       svgEl("clipPath", { id: clipId }, [
-        svgEl("rect", { x: 10, y: 0, width: width - 20, height }),
+        svgEl("rect", { x: 8, y: 0, width: spot.width - 16, height: spot.height }),
       ]),
-      svgEl("rect", { width, height, rx: 10 }),
-      svgEl("text", {
-        class: "graph-box-id", x: 12, y: 21, "clip-path": `url(#${clipId})`,
-        text: readableNodeName(node),
+      svgEl("rect", {
+        width: spot.width, height: spot.height,
+        rx: node.kind === "terminal" ? spot.height / 2 : 10,
       }),
-      svgEl("text", {
+      node.kind === "terminal"
+        ? svgEl("text", {
+            class: "graph-terminal-label", x: spot.width / 2, y: spot.height / 2 + 4,
+            "text-anchor": "middle", "clip-path": `url(#${clipId})`,
+            text: i18n.t("workflows.completed"),
+          })
+        : svgEl("text", {
+            class: "graph-box-id", x: 12, y: 21, "clip-path": `url(#${clipId})`,
+            text: readableNodeName(node),
+          }),
+      node.kind === "terminal" ? null : svgEl("text", {
         class: "graph-box-meta", x: 12, y: 38, "clip-path": `url(#${clipId})`,
         text: label,
       }),
@@ -196,6 +240,7 @@ function workflowGraphView(graph) {
     class: "workflow-graph", role: "img",
     viewBox: `0 0 ${canvasWidth} ${canvasHeight}`,
     width: canvasWidth, height: canvasHeight,
+    "data-canvas-width": canvasWidth, "data-canvas-height": canvasHeight,
     "aria-label": i18n.t("workflows.graphAria", {
       nodes: i18n.number(graph.nodes.length), edges: i18n.number(graph.edges.length),
     }),
@@ -205,14 +250,31 @@ function workflowGraphView(graph) {
   ]);
 }
 
-function definitionList(definition) {
-  return el("div", { class: "definition-list" }, (definition?.nodes || []).map((node) =>
+function definitionList(definition, graph = null, actionEditors = {}, onEditAction = null) {
+  const positions = new Map(
+    (graph?.layout?.positions || []).map((item) => [item.node_id, item]),
+  );
+  const nodes = [...(definition?.nodes || [])];
+  if (positions.size) nodes.sort((left, right) => {
+    const a = positions.get(left.id);
+    const b = positions.get(right.id);
+    if (!a && !b) return left.id.localeCompare(right.id);
+    if (!a) return 1;
+    if (!b) return -1;
+    return a.depth - b.depth || a.lane - b.lane || left.id.localeCompare(right.id);
+  });
+  return el("div", { class: "definition-list" }, nodes.map((node) =>
     el("div", { class: "definition-node" }, [
       el("div", { class: "actions" }, [
         el("span", { class: "mono", text: node.id }),
         el("span", { class: "pill", text: node.kind }),
         node.handler ? el("span", {
           class: "muted mono", text: `${node.handler.name}@${node.handler.version}`,
+        }) : null,
+        node.kind === "action" && actionEditors[node.id] ? el("button", {
+          type: "button", class: "button compact",
+          text: i18n.t("workflows.editAction"),
+          onclick: () => onEditAction?.(node.id),
         }) : null,
       ]),
       // The authored prompt is what this step actually asks its Agent; a
@@ -221,6 +283,83 @@ function definitionList(definition) {
       stepPrompt(node.config),
     ]),
   ));
+}
+
+function openActionEditorDialog(workflow, nodeId, onSaved) {
+  const editor = workflow.action_editors?.[nodeId];
+  const node = workflow.definition?.nodes?.find((item) => item.id === nodeId);
+  if (!editor || !node || node.kind !== "action") return;
+
+  const titleId = `actionTitle-${nodeId}`;
+  const agentId = `actionAgent-${nodeId}`;
+  const promptId = `actionPrompt-${nodeId}`;
+  const currentHandler = `${node.handler?.name || ""}@${node.handler?.version || ""}`;
+  const title = el("input", {
+    id: titleId, type: "text", required: "required", maxlength: "80",
+    value: node.label || "",
+  });
+  const agent = el("select", { id: agentId, required: "required" },
+    editor.handlers.map((handler) => {
+      const value = `${handler.name}@${handler.version}`;
+      return el("option", {
+        value, text: handler.name.replace(/^agent\./, ""),
+        ...(value === currentHandler ? { selected: "selected" } : {}),
+      });
+    }));
+  const prompt = el("textarea", {
+    id: promptId, required: "required", maxlength: "4000",
+    text: typeof node.config?.prompt === "string" ? node.config.prompt : "",
+  });
+  const save = el("button", {
+    type: "submit", class: "button primary", text: i18n.t("workflows.saveAction"),
+  });
+  const dialog = el("dialog", {
+    class: "action-editor-dialog",
+    "aria-label": i18n.t("workflows.editActionNamed", { name: readableNodeName(node) }),
+  });
+  const form = el("form", {}, [
+    el("h2", { text: i18n.t("workflows.editAction") }),
+    el("div", { class: "field" }, [
+      el("label", { for: titleId, text: i18n.t("workflows.actionTitle") }), title,
+    ]),
+    el("div", { class: "field" }, [
+      el("label", { for: agentId, text: i18n.t("workflows.actionAgent") }), agent,
+    ]),
+    el("div", { class: "field" }, [
+      el("label", { for: promptId, text: i18n.t("workflows.actionPrompt") }), prompt,
+    ]),
+    el("div", { class: "actions" }, [
+      el("button", {
+        type: "button", class: "button", text: i18n.t("action.cancel"),
+        onclick: () => dialog.close(),
+      }),
+      save,
+    ]),
+  ]);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (!form.reportValidity()) return;
+    const selected = editor.handlers.find(
+      (handler) => `${handler.name}@${handler.version}` === agent.value,
+    );
+    if (!selected) return;
+    save.disabled = true;
+    try {
+      await api.execute(editor.allowed_command, {
+        label: title.value.trim(), handler: selected, prompt: prompt.value.trim(),
+      }, `workflow.action.update:${workflow.workflow_id}:${nodeId}:${workflow.latest_version}`);
+      dialog.close();
+      await onSaved();
+    } catch (error) {
+      save.disabled = false;
+      reportError(error);
+    }
+  });
+  dialog.append(form);
+  dialog.addEventListener("close", () => dialog.remove(), { once: true });
+  document.body.append(dialog);
+  dialog.showModal();
+  title.focus();
 }
 
 function stepPrompt(config, extraClass = "") {
@@ -238,13 +377,62 @@ function stepPrompt(config, extraClass = "") {
 // which tab you are on is not worth a URL when the selected workflow is not
 // in one either. A draft the server could not lay out has no drawing, so
 // there is nothing to tab between and the list stands alone.
-function workflowDefinitionTabs(graph, definition, definitionKey = "workflows.definition") {
-  if (!graph) return definitionList(definition);
+function workflowDefinitionTabs(
+  graph, definition, definitionKey = "workflows.definition",
+  actionEditors = {}, onEditAction = null,
+) {
+  if (!graph) return definitionList(
+    definition, null, actionEditors, onEditAction,
+  );
+  let graphZoom = 1;
+  const graphPane = () => {
+    const drawing = workflowGraphView(graph, actionEditors, onEditAction);
+    const level = el("output", {
+      class: "graph-zoom-level mono", "aria-live": "polite",
+    });
+    const zoomOut = el("button", {
+      type: "button", class: "button graph-zoom-button",
+      "aria-label": i18n.t("workflows.zoomOut"),
+      title: i18n.t("workflows.zoomOut"), text: "−",
+    });
+    const zoomIn = el("button", {
+      type: "button", class: "button graph-zoom-button",
+      "aria-label": i18n.t("workflows.zoomIn"),
+      title: i18n.t("workflows.zoomIn"), text: "+",
+    });
+    const applyZoom = () => {
+      const width = Number(drawing.dataset.canvasWidth);
+      const height = Number(drawing.dataset.canvasHeight);
+      drawing.setAttribute("width", String(Math.round(width * graphZoom)));
+      drawing.setAttribute("height", String(Math.round(height * graphZoom)));
+      level.textContent = i18n.t("workflows.zoomLevel", {
+        percent: i18n.number(Math.round(graphZoom * 100)),
+      });
+      zoomOut.disabled = graphZoom <= 0.5;
+      zoomIn.disabled = graphZoom >= 1.5;
+    };
+    zoomOut.addEventListener("click", () => {
+      graphZoom = Math.max(0.5, Number((graphZoom - 0.1).toFixed(1)));
+      applyZoom();
+    });
+    zoomIn.addEventListener("click", () => {
+      graphZoom = Math.min(1.5, Number((graphZoom + 0.1).toFixed(1)));
+      applyZoom();
+    });
+    applyZoom();
+    return el("div", { class: "workflow-graph-pane" }, [
+      el("div", {
+        class: "graph-zoom-controls",
+        "aria-label": i18n.t("workflows.zoomControls"),
+      }, [zoomOut, level, zoomIn]),
+      el("div", { class: "workflow-graph-scroll" }, [drawing]),
+    ]);
+  };
   const panes = {
-    graph: () => el("div", { class: "workflow-graph-scroll" }, [
-      workflowGraphView(graph),
-    ]),
-    definition: () => definitionList(definition),
+    graph: graphPane,
+    definition: () => definitionList(
+      definition, graph, actionEditors, onEditAction,
+    ),
   };
   const content = el("section", { class: "run-tab-content workflow-tab-content" });
   const tabs = el("nav", {
@@ -1228,80 +1416,17 @@ async function refreshRuntimeCard() {
     : "";
 }
 
-async function renderArtifacts(root, selectedArtifactId = null) {
-  const search = el("input", {
-    type: "search", value: artifactFilters.q,
-    placeholder: i18n.t("artifacts.search.placeholder"),
-    "aria-label": i18n.t("artifacts.search.label"),
-  });
-  const run = el("input", {
-    value: artifactFilters.runId, placeholder: i18n.t("artifacts.filter.run"),
-    "aria-label": i18n.t("artifacts.filter.run"),
-  });
-  const type = el("input", {
-    value: artifactFilters.contentType,
-    placeholder: i18n.t("artifacts.filter.contentType"),
-    "aria-label": i18n.t("artifacts.filter.contentType"),
-  });
-  root.append(el("form", { class: "filter-bar", onsubmit: (event) => {
-    event.preventDefault();
-    artifactFilters.q = search.value.trim();
-    artifactFilters.runId = run.value.trim();
-    artifactFilters.contentType = type.value.trim();
-    render();
-  } }, [
-    search, run, type,
-    el("button", { class: "button", type: "submit", text: i18n.t("action.search") }),
-  ]));
 
-  const grid = el("section", { class: "artifact-grid", "aria-label": i18n.t("artifacts.list") });
-  let cursor = null;
-  const more = el("button", { class: "button", text: i18n.t("action.loadMore") });
-  const load = async () => {
-    const response = await api.artifacts({ cursor, ...artifactFilters });
-    for (const item of response.data.artifacts) {
-      grid.append(artifactCard(item, item.artifact_id === selectedArtifactId));
-    }
-    cursor = response.next_cursor;
-    more.hidden = !cursor;
-    if (!grid.children.length) {
-      grid.append(el("div", { class: "empty panel", text: i18n.t("artifacts.empty") }));
-    }
-  };
-  more.addEventListener("click", () => load().catch(reportError));
-  root.append(grid, more);
-  await load();
-  if (selectedArtifactId) await openArtifactDialog(selectedArtifactId);
-}
-
-/* The detail is a modal over the catalog, not a panel under it.
- *
- * `#/artifacts/{id}` stays the address, so the dialog is opened by the route
- * and dismissing it navigates back — Escape, the backdrop and the Close button
- * all end in the same place. An open dialog also suspends the live refresh, so
- * the catalog behind it never re-renders the dialog away mid-read. */
-async function openArtifactDialog(artifactId) {
+/* The Artifact opens as a modal over whatever page listed it — the Run shows
+ * its outputs inline, and the detail is one click away, no route between. */
+function openArtifactDialog(artifactId) {
   const dialog = el("dialog", {
     class: "artifact-detail artifact-dialog", "aria-label": i18n.t("artifacts.detail"),
   }, [dataState(el, i18n, "loading")]);
-  const dismiss = () => {
-    dialog.remove();
-    // Only walk back if this Artifact is still what the address names: a
-    // dialog closed by a navigation must not undo that navigation.
-    if (route.view === "artifact" && route.artifactId === artifactId) {
-      navigate({ view: "artifacts", runId: null });
-    }
-  };
-  dialog.addEventListener("close", dismiss);
-  const previous = activeViewCleanup;
-  activeViewCleanup = () => {
-    dialog.removeEventListener("close", dismiss);
-    dialog.remove();
-    if (previous) previous();
-  };
+  dialog.addEventListener("close", () => dialog.remove(), { once: true });
   document.body.append(dialog);
   dialog.showModal();
-  await renderArtifactDetail(dialog, artifactId);
+  renderArtifactDetail(dialog, artifactId);
 }
 
 /* A page glyph, not a four-letter type code: the card now says what the
@@ -1347,7 +1472,7 @@ function artifactCard(item, selected = false) {
     el("button", {
       class: "artifact-card-main",
       "aria-current": selected ? "true" : null,
-      onclick: () => navigate({ view: "artifact", artifactId: item.artifact_id, runId: null }),
+      onclick: () => openArtifactDialog(item.artifact_id),
     }, [
       el("span", { class: `artifact-top${item.image_previewable ? " artifact-top-image" : ""}` }, [
         artifactThumb(item),
@@ -1529,7 +1654,7 @@ function scheduleLivePolling() {
         failures = 0;
         // An Editor owns unsaved local text. Background projection changes
         // must never tear down that view; explicit Draft commands redraw it.
-        if (live.changed && route.view !== "workflowEdit") await render();
+        if (live.changed) await render();
       } catch (error) {
         // Programming errors must stay loud; only transport failures back off.
         if (!(error instanceof ApiError)) throw error;
@@ -1544,63 +1669,6 @@ function scheduleLivePolling() {
 
 
 /* ------------------------------------------------ workflow catalog / wizard */
-
-const goToDraft = (workflowId, draftId) => navigate({
-  view: "workflowEdit", workflowId, draftId, runId: null,
-});
-
-/** Two drafts of one workflow would be two answers to the same question, so
- *  the server refuses the second. The author decides which one survives. */
-function resolveDraftCollision(failure, create, value) {
-  const existing = failure.details.draft;
-  const dialog = el("dialog", {
-    class: "command-dialog", "aria-label": i18n.t("editor.activeDraftTitle"),
-  });
-  const close = () => { dialog.close(); dialog.remove(); };
-  dialog.append(el("div", { class: "dialog-body" }, [
-    el("h3", { text: i18n.t("editor.activeDraftTitle") }),
-    el("p", { class: "muted", text: i18n.t("editor.activeDraftBody") }),
-    el("div", { class: "actions" }, [
-      el("button", {
-        type: "button", class: "button", text: i18n.t("action.cancel"), onclick: close,
-      }),
-      el("button", {
-        type: "button", class: "button", id: "continueActiveDraft",
-        text: i18n.t("editor.continueActiveDraft"),
-        onclick: () => { close(); goToDraft(value.workflow_id, existing.draft_id); },
-      }),
-      el("button", {
-        type: "button", class: "button danger", id: "replaceActiveDraft",
-        text: i18n.t("editor.discardCreate"),
-        onclick: async (event) => {
-          event.currentTarget.disabled = true;
-          try {
-            const current = (await api.workflowDraft(existing.draft_id)).data;
-            const discard = current.allowed_commands.find(
-              (item) => item.command === "workflow.draft.discard",
-            );
-            if (!discard) return;
-            await api.execute(
-              discard, {}, `workflow.draft.discard:${existing.draft_id}:replace`,
-            );
-            const next = (await api.execute(
-              create, {},
-              `workflow.draft.create:${value.workflow_id}:replace`,
-            )).data;
-            close();
-            goToDraft(value.workflow_id, next.draft_id);
-          } catch (error) {
-            event.currentTarget.disabled = false;
-            reportError(error);
-          }
-        },
-      }),
-    ]),
-  ]));
-  document.body.append(dialog);
-  dialog.addEventListener("close", () => dialog.remove(), { once: true });
-  dialog.showModal();
-}
 
 /** Order the catalog the way the author is looking for it.
  *
@@ -1777,6 +1845,26 @@ async function renderWorkflows(root) {
     if (entry.summary.node_count > visualNodes.length) visualNodes.push(el("span", {
       class: "workflow-node more", text: `+${entry.summary.node_count - visualNodes.length}`,
     }));
+    const cardActions = [];
+    if (entry.editing_available) cardActions.push(el("button", {
+      class: `button${entry.goal_readiness === "needs_upgrade" ? " upgrade-workflow" : " edit-workflow"}`,
+      text: i18n.t(entry.goal_readiness === "needs_upgrade"
+        ? "workflows.upgrade" : "workflows.editWorkflow"),
+      onclick: () => navigate({
+        view: "workflowEdit", workflowId: entry.workflow_id, runId: null,
+      }),
+    }));
+    if ((entry.allowed_commands || []).some((item) => item.command === "run.start")) {
+      cardActions.push(el("button", {
+        class: "button", text: i18n.t("action.newGoal"),
+        onclick: () => newRunDialog(entry.workflow_id),
+      }));
+    } else if (entry.goal_readiness === "needs_migration" && generateCommand) {
+      cardActions.push(el("button", {
+        class: "button", text: i18n.t("generate.action"),
+        onclick: () => generateWorkflowDialog(generateCommand),
+      }));
+    }
     const card = el("article", {
       class: "workflow-card panel",
       "data-workflow-id": entry.workflow_id,
@@ -1813,35 +1901,8 @@ async function renderWorkflows(root) {
           ? i18n.t("workflows.lastRun", { when: i18n.dateTime(entry.last_run_at) })
           : i18n.t("workflows.neverRun") }),
       ]),
-      // Starting a run is the common act, so it does not require opening the
-      // definition first — but only where the server advertised run.start.
-      (entry.allowed_commands || []).some((item) => item.command === "run.start")
-        ? el("div", { class: "workflow-card-actions" }, [
-            el("button", {
-              class: "button", text: i18n.t("action.newGoal"),
-              onclick: () => newRunDialog(entry.workflow_id),
-            }),
-          ])
-        : entry.goal_readiness === "needs_upgrade"
-          ? el("div", { class: "workflow-card-actions" }, [
-              el("button", {
-                // A class, not an id: the catalog can list several of these.
-                class: "button upgrade-workflow", text: i18n.t("workflows.upgrade"),
-                // The detail drawer opens the revision band by itself; the
-                // card only has to point at the definition.
-                onclick: () => navigate({
-                  view: "workflow", workflowId: entry.workflow_id, runId: null,
-                }),
-              }),
-            ])
-          : entry.goal_readiness === "needs_migration" && generateCommand
-            ? el("div", { class: "workflow-card-actions" }, [
-                el("button", {
-                  class: "button", text: i18n.t("generate.action"),
-                  onclick: () => generateWorkflowDialog(generateCommand),
-                }),
-              ])
-        : null,
+      cardActions.length
+        ? el("div", { class: "workflow-card-actions" }, cardActions) : null,
     ]);
     card.querySelector(".workflow-card-main").addEventListener("click", () => navigate({
       view: "workflow", workflowId: entry.workflow_id, runId: null,
@@ -1852,6 +1913,52 @@ async function renderWorkflows(root) {
     cards.append(el("div", { class: "empty panel", text: i18n.t("workflows.empty") }));
   }
   root.append(cards);
+}
+
+/* Registered Agent handlers: identity and durable-attempt facts from the
+ * catalog. The Runtime collects no heartbeats, so "registered" is the only
+ * status honestly on offer. */
+async function renderAgents(root) {
+  const catalog = (await api.handlerCatalog()).data;
+  const agents = catalog.handlers.filter((handler) => handler.name.startsWith("agent."));
+  root.append(el("section", { class: "panel" }, [
+    el("div", { class: "panel-head" }, [
+      el("div", { class: "panel-title", text: i18n.t("agents.handlers") }),
+    ]),
+    el("div", { class: "panel-body agents-grid" }, agents.length
+      ? agents.map((handler) => {
+        const initials = handler.name.replace(/^agent\./, "").slice(0, 2).toUpperCase();
+        const capabilities = (handler.capabilities || []).filter(
+          (capability) => capability !== "agent.invoke",
+        );
+        return el("article", { class: "data-card list-option-card agent-card" }, [
+          el("div", { class: "agent-head" }, [
+            el("span", { class: "agent-avatar", "aria-hidden": "true", text: initials }),
+            el("div", {}, [
+              el("div", { class: "panel-title mono", text: handler.name }),
+              el("div", { class: "muted mono agent-version", text: handler.version }),
+            ]),
+          ]),
+          capabilities.length
+            ? el("div", { class: "capabilities" }, capabilities.map((capability) =>
+                el("span", { class: "capability", text: capability })))
+            : null,
+          el("div", {
+            class: "muted mono",
+            text: i18n.t("agents.runCount", {
+              count: i18n.number(handler.attempt_count ?? 0),
+            }),
+          }),
+          handler.failed_count > 0 ? el("div", {
+            class: "muted mono",
+            text: i18n.t("agents.failedCount", {
+              count: i18n.number(handler.failed_count),
+            }),
+          }) : null,
+        ]);
+      })
+      : [el("div", { class: "muted", text: i18n.t("agents.empty") })]),
+  ]));
 }
 
 /* The detail slides in from the right over the catalog, not a page under it.
@@ -1938,11 +2045,6 @@ async function renderWorkflowDetail(root, workflowId, dismiss = null) {
     try {
       const value = (await api.workflowDetail(workflowId)).data;
       const definition = value.definition;
-      const openEditor = (modify) => {
-        // One editor at a time: the band owns the drawer's top until closed.
-        if (root.querySelector(".workflow-editor-wrap")) return;
-        root.prepend(workflowEditorPanel(modify, value, draw));
-      };
       panel.replaceChildren(
         el("div", { class: "panel-head" }, [
           el("div", {}, [
@@ -1957,36 +2059,6 @@ async function renderWorkflowDetail(root, workflowId, dismiss = null) {
                 ? dismiss()
                 : navigate({ view: "workflows", runId: null }),
             }),
-            (() => {
-              const create = value.allowed_commands.find(
-                (item) => item.command === "workflow.draft.create",
-              );
-              return create ? el("button", {
-                class: "button", id: "editWorkflow",
-                text: i18n.t("editor.edit"),
-                onclick: async () => {
-                  try {
-                    const draft = (await api.execute(
-                      create, {},
-                      `workflow.draft.create:${value.workflow_id}`,
-                    )).data;
-                    goToDraft(value.workflow_id, draft.draft_id);
-                  } catch (error) {
-                    if (error instanceof ApiError && error.code === "draft_already_active") {
-                      resolveDraftCollision(error, create, value);
-                      return;
-                    }
-                    reportError(error);
-                  }
-                },
-              }) : null;
-            })(),
-            value.allowed_commands.some((item) => item.command === "run.start")
-              ? el("button", {
-                  class: "button primary", text: i18n.t("action.newGoal"),
-                  onclick: () => newRunDialog(value.workflow_id),
-                })
-              : null,
           ]),
         ]),
         el("div", { class: "panel-body" }, [
@@ -1998,17 +2070,86 @@ async function renderWorkflowDetail(root, workflowId, dismiss = null) {
           ]),
           // The drawing answers "what shape is this", the definition list
           // answers "what exactly is in it" — one layout for both modes.
-          workflowDefinitionTabs(value.graph, definition),
+          workflowDefinitionTabs(
+            value.graph, definition, "workflows.definition",
+          ),
         ]),
       );
-      // The revision band is the point of this drawer: it opens with the
-      // definition — no button stands between the author and the prompt.
+    } catch (error) {
+      panel.replaceChildren(dataState(el, i18n, "error", { onRetry: draw }));
+      reportError(error);
+    }
+  };
+
+  await draw();
+}
+
+async function renderWorkflowEdit(root, workflowId) {
+  const page = el("section", { class: "panel workflow-edit-page" });
+  root.replaceChildren(page);
+
+  const draw = async () => {
+    page.replaceChildren(dataState(el, i18n, "loading"));
+    try {
+      const value = (await api.workflowDetail(workflowId)).data;
       const modify = value.allowed_commands.find(
         (item) => item.command === "workflow.modify",
       );
-      if (modify) openEditor(modify);
+      const editors = value.action_editors || {};
+      if (!modify && !Object.keys(editors).length) {
+        navigate({ view: "workflow", workflowId, runId: null });
+        return;
+      }
+      const workflowTitle = el("div", { class: "panel-title", text: value.name });
+      const editingVersion = el("div", {
+        class: "muted mono workflow-editing-version",
+        text: i18n.t("workflows.editingVersion", {
+          version: i18n.number(value.latest_version),
+        }),
+      });
+      const canvas = el("div", { class: "panel-body workflow-edit-canvas" });
+      const drawDefinition = (current) => {
+        const currentEditors = current.action_editors || {};
+        workflowTitle.textContent = current.name;
+        editingVersion.textContent = i18n.t("workflows.editingVersion", {
+          version: i18n.number(current.latest_version),
+        });
+        canvas.replaceChildren(...[
+          handlerDriftNotice(current, refreshPublished),
+          workflowDefinitionTabs(
+            current.graph, current.definition, "workflows.definition",
+            currentEditors,
+            (nodeId) => openActionEditorDialog(current, nodeId, refreshPublished),
+          ),
+        ].filter(Boolean));
+      };
+      const refreshPublished = async () => {
+        const current = (await api.workflowDetail(workflowId)).data;
+        drawDefinition(current);
+      };
+      page.replaceChildren(
+        el("div", { class: "panel-head" }, [
+          el("div", {}, [
+            el("div", { class: "eyebrow", text: value.workflow_id }),
+            workflowTitle,
+            editingVersion,
+          ]),
+          el("div", { class: "actions" }, [
+            el("button", {
+              class: "button", id: "closeWorkflowEditor",
+              text: i18n.t("action.close"),
+              onclick: () => navigate({ view: "workflows", runId: null }),
+            }),
+          ]),
+        ]),
+        canvas,
+      );
+      drawDefinition(value);
+      if (modify) page.append(
+        workflowEditorPanel(modify, value, draw, refreshPublished),
+      );
     } catch (error) {
-      panel.replaceChildren(dataState(el, i18n, "error", { onRetry: draw }));
+      page.replaceChildren(dataState(el, i18n, "error", { onRetry: draw }));
       reportError(error);
     }
   };
@@ -2030,7 +2171,7 @@ async function renderWorkflowEditor(root, draftId) {
   let discardArmed = false;
   let instructionText = "";
   // The Agent chosen to write the revision, kept across redraws.
-  let writerAgent = "";
+  let writerAgent = generationAgents()[0] || "";
   let revisionDiagnostics = [];
   // The Agent call is a durable job, so the editor polls until it settles
   // rather than holding a request open. A reload re-enters here and picks the
@@ -2520,11 +2661,9 @@ function changeSummaryView(summary) {
   ].filter(Boolean);
 }
 
-/* The revision editor is a band at the top of the detail drawer, not a
- * floating dialog: the graph it revises stays visible underneath, and the
- * detail slides down to make room — a grid row animates the height so nothing
- * jumps. Closing the drawer closes the editor with it. */
-function workflowEditorPanel(modifyCommand, workflow, onDone) {
+/* The revision editor is the lower band of the dedicated edit page. It stays
+ * beside the graph it revises instead of becoming a second floating dialog. */
+function workflowEditorPanel(modifyCommand, workflow, onDone, onPublished = null) {
   const upgrading = workflow.goal_readiness === "needs_upgrade";
   const title = i18n.t(upgrading ? "workflows.upgrade" : "editor.edit");
   const section = el("section", { class: "workflow-editor", "aria-label": title });
@@ -2533,11 +2672,13 @@ function workflowEditorPanel(modifyCommand, workflow, onDone) {
   // An upgrade opens with the instruction already written: the author asked to
   // upgrade, not to compose the sentence that means "upgrade".
   let promptText = upgrading ? i18n.t("workflows.upgrade.prompt") : "";
+  let writerAgent = generationAgents()[0] || "";
   // Regenerate is the bigger hammer — it may redesign the whole flow — so it
   // stays out of sight until a plain modify has actually failed.
   let regenerateOffered = false;
   let timer = null;
   let collapsed = false;
+  let publishedRefreshDone = false;
 
   const collapse = (refresh) => {
     if (collapsed) return;
@@ -2557,7 +2698,12 @@ function workflowEditorPanel(modifyCommand, workflow, onDone) {
   const submit = async (mode) => {
     try {
       job = (await api.execute(
-        modifyCommand, { prompt: promptText, mode, display_language: i18n.locale },
+        modifyCommand, {
+          prompt: promptText,
+          mode,
+          display_language: i18n.locale,
+          ...(writerAgent ? { agent: writerAgent } : {}),
+        },
         `workflow.${mode}:${workflow.workflow_id}:${Date.now()}`,
       )).data;
       draw();
@@ -2579,6 +2725,9 @@ function workflowEditorPanel(modifyCommand, workflow, onDone) {
     const body = [];
     const actions = el("div", { class: "actions" });
     if (!job) {
+      const writerField = generationAgentField(
+        "workflowModifyAgent", writerAgent, (value) => { writerAgent = value; },
+      );
       const prompt = el("textarea", {
         required: "required", maxlength: "4000",
         placeholder: i18n.t("editor.agentPromptPlaceholder"),
@@ -2587,16 +2736,11 @@ function workflowEditorPanel(modifyCommand, workflow, onDone) {
       // Focus lands in the prompt so a prefilled upgrade is one click from
       // running and still editable in place.
       setTimeout(() => prompt.focus(), 0);
-      body.push(prompt);
+      body.push(writerField, prompt);
       if (regenerateOffered) body.push(el("p", {
         class: "muted", text: i18n.t("simplified.workflow.regenerate.hint"),
       }));
-      actions.append(
-        el("button", {
-          type: "button", class: "button",
-          text: i18n.t("action.cancel"),
-          onclick: () => collapse(false),
-        }),
+      actions.append(...[
         el("button", {
           type: "button", class: "button primary", text: i18n.t("editor.agentRevise"),
           onclick: () => {
@@ -2614,7 +2758,7 @@ function workflowEditorPanel(modifyCommand, workflow, onDone) {
             submit("regenerate");
           },
         }) : null,
-      );
+      ].filter(Boolean));
     } else {
       body.push(
         ...changeSummaryView(job.result?.change_summary),
@@ -2668,11 +2812,15 @@ function workflowEditorPanel(modifyCommand, workflow, onDone) {
   const watch = () => {
     if (!job || !["queued", "running"].includes(job.status)) return;
     timer = setTimeout(async () => {
-      // A closed drawer detaches the editor: stop spending requests on it.
+      // Leaving the edit page detaches the editor: stop spending requests on it.
       if (!section.isConnected) return;
       try {
         job = (await api.get(job.href)).data;
         draw();
+        if (job.status === "done" && !publishedRefreshDone && onPublished) {
+          publishedRefreshDone = true;
+          await onPublished();
+        }
         watch();
       } catch (error) {
         reportError(error);
@@ -2749,7 +2897,7 @@ function navigate(next) {
 
 async function render() {
   // Old bookmarks to retired views land on the workspace instead of a 404.
-  if (["ops", "settings", "inbox", "agents"].includes(route.view)) {
+  if (["ops", "settings", "inbox", "artifacts"].includes(route.view)) {
     navigate({ view: "home", runId: null });
     return;
   }
@@ -2771,8 +2919,8 @@ async function render() {
   for (const button of document.querySelectorAll(".nav-button")) {
     const section = route.view === "run" || route.view === "goal"
       || route.view === "goals" ? "home"
-        : route.view === "artifact" ? "artifacts"
-          : route.view === "workflow" ? "workflows" : route.view;
+        : route.view === "workflow" || route.view === "workflowEdit"
+          ? "workflows" : route.view;
     const active = button.dataset.view === section;
     if (active) button.setAttribute("aria-current", "page");
     else button.removeAttribute("aria-current");
@@ -2780,9 +2928,10 @@ async function render() {
   document.getElementById("viewTitle").textContent = i18n.t(
     route.view === "run" || route.view === "home" ? "simplified.title"
       : route.view === "goal" || route.view === "goals" ? "history.title"
-        : route.view === "artifact" ? "artifacts.title"
-          : route.view === "workflow" ? "workflows.title"
-            : route.view === "workflowEdit" ? "editor.title" : `${route.view}.title`,
+        : route.view === "agents" ? "agents.title"
+          : route.view === "workflow" || route.view === "workflowEdit"
+            ? "workflows.title"
+            : `${route.view}.title`,
   );
 
   try {
@@ -2797,10 +2946,11 @@ async function render() {
       await renderWorkflows(fresh);
       await openWorkflowDrawer(route.workflowId);
     }
-    else if (route.view === "workflowEdit") await renderWorkflowEditor(fresh, route.draftId);
+    else if (route.view === "workflowEdit") {
+      await renderWorkflowEdit(fresh, route.workflowId);
+    }
     else if (route.view === "run") await renderSimplifiedWorkspace(fresh, route.runId);
-    else if (route.view === "artifacts") await renderArtifacts(fresh);
-    else if (route.view === "artifact") await renderArtifacts(fresh, route.artifactId);
+    else if (route.view === "agents") await renderAgents(fresh);
     // The workspace is the one place runs are browsed.
     else await renderSimplifiedWorkspace(fresh);
     root.replaceChildren(...fresh.childNodes);
@@ -2889,28 +3039,6 @@ async function boot() {
   // this actor really has. Views read it; automation waits on it.
   document.documentElement.dataset.shell = "ready";
 
-  const sidebar = document.getElementById("sidebar");
-  const navToggle = document.getElementById("navToggle");
-  const navBackdrop = document.getElementById("navBackdrop");
-  const compactNavigation = matchMedia("(max-width: 860px)");
-  const setNavOpen = (open, restoreFocus = false) => {
-    document.body.dataset.navOpen = open ? "true" : "false";
-    navToggle.setAttribute("aria-expanded", String(open));
-    const hidden = !open && compactNavigation.matches;
-    sidebar.setAttribute("aria-hidden", String(hidden));
-    sidebar.inert = hidden;
-    if (restoreFocus) navToggle.focus();
-  };
-  navToggle.addEventListener("click", () => setNavOpen(document.body.dataset.navOpen !== "true"));
-  navBackdrop.addEventListener("click", () => setNavOpen(false, true));
-  compactNavigation.addEventListener("change", () => setNavOpen(false));
-  document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && document.body.dataset.navOpen === "true") {
-      setNavOpen(false, true);
-    }
-  });
-  setNavOpen(false);
-
   document.getElementById("refresh").addEventListener("click", () => render());
   window.addEventListener("orbit:refresh", () => render());
   scheduleLivePolling();
@@ -2918,7 +3046,6 @@ async function boot() {
     button.addEventListener("click", () => {
       // A message about the page you just left is noise on the next one.
       announce("");
-      setNavOpen(false, compactNavigation.matches);
       navigate({ view: button.dataset.view, runId: null });
     });
   }

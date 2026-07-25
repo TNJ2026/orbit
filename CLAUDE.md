@@ -2,7 +2,7 @@
 
 本地 agent 工作流 Runtime：工作流是一张静态图，运行时按事件溯源推进；每个节点交给一个注册过的 Handler 执行。Python + Starlette + uvicorn（依赖 `starlette`、`uvicorn`、`jsonschema`、`PyYAML`）。
 
-- 启动：`uv run orbit serve`（Runtime + API + UI + worker + timer 在一个进程；UI 在 127.0.0.1:8848/ui，db 默认按项目目录分开存到 `~/.orbit/projects/<project>/runtime.db`）
+- 启动：`uv run orbit serve`（Runtime + API + UI + worker + timer 在一个进程；UI 在 127.0.0.1:8848/ui；运行数据按项目存到 `~/.orbit/projects/<project>/runtime.db`，工作流定义共享于 `~/.orbit/workflows/library.db`）
 - 测试：`.venv/bin/python -m unittest discover -s tests`
 
 ## 代码结构

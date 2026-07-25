@@ -5,6 +5,7 @@ from .workflow_versions import (
     PublishConflictError,
     SQLiteWorkflowVersionStore,
     WorkflowVersionRecord,
+    merge_workflow_library,
 )
 from .uow import SQLiteReadSession, SQLiteUnitOfWork
 from .event_store import SQLiteEventStore

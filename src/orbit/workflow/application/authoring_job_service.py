@@ -32,10 +32,12 @@ class AuthoringJobConflict(ValueError):
 
 class AuthoringJobService:
     def __init__(
-        self, path, authoring, publisher, *, timeout_seconds=300, clock=None,
+        self, path, authoring, publisher, *, workflow_db_path=None,
+        timeout_seconds=300, clock=None,
         cancel_grace_seconds=CANCEL_GRACE_SECONDS,
     ):
         self.path = Path(path)
+        self.workflow_path = Path(workflow_db_path or path)
         self.authoring, self.publisher = authoring, publisher
         self.timeout_seconds = max(30, int(timeout_seconds))
         self.cancel_grace_seconds = float(cancel_grace_seconds)
@@ -107,6 +109,7 @@ class AuthoringJobService:
             "job_id": row["job_id"], "type": row["job_type"],
             "workflow_id": row["workflow_id"], "prompt": row["prompt"],
             "mode": row["mode"], "status": status,
+            "requested_agent": row["requested_agent"],
             "deadline_at": row["deadline_at"],
             "result": None if row["result_json"] is None else json.loads(row["result_json"]),
             "error": None if row["error_code"] is None else {
@@ -158,7 +161,7 @@ class AuthoringJobService:
 
     def create(
         self, *, actor, prompt, idempotency_key, workflow_id=None, mode="generate",
-        display_language=None,
+        display_language=None, agent=None,
     ):
         prompt = prompt.strip()
         if not prompt:
@@ -202,11 +205,11 @@ class AuthoringJobService:
             db.execute(
                 "INSERT INTO workflow_authoring_jobs("
                 "job_id,job_type,actor,workflow_id,prompt,mode,status,idempotency_key,"
-                "display_language,deadline_at,created_at,updated_at)"
-                " VALUES (?,?,?,?,?,?,'queued',?,?,?,?,?)",
+                "display_language,requested_agent,deadline_at,created_at,updated_at)"
+                " VALUES (?,?,?,?,?,?,'queued',?,?,?,?,?,?)",
                 (
                     job_id, job_type, actor, workflow_id, prompt, mode,
-                    idempotency_key, display_language,
+                    idempotency_key, display_language, agent,
                     self._time(now + timedelta(seconds=self.timeout_seconds)),
                     stamp, stamp,
                 ),
@@ -273,10 +276,13 @@ class AuthoringJobService:
                 if row["job_type"] == "generate":
                     outcome = self.authoring.generate(
                         row["prompt"], language=row["display_language"],
+                        agent=row["requested_agent"],
                     )
                     latest = 0
                 else:
-                    with connect_workflow_database(self.path, read_only=True) as db:
+                    with connect_workflow_database(
+                        self.workflow_path, read_only=True,
+                    ) as db:
                         current = db.execute(
                             "SELECT version,source_text,canonical_ir_json"
                             " FROM workflow_versions"
@@ -296,6 +302,7 @@ class AuthoringJobService:
                         current["source_text"], instruction,
                         expected_workflow_id=row["workflow_id"],
                         language=row["display_language"],
+                        agent=row["requested_agent"],
                     )
                     latest = int(current["version"])
                 with connect_workflow_database(self.path, read_only=True) as db:

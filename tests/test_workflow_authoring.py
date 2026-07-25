@@ -203,6 +203,19 @@ class AuthoringServiceTests(unittest.TestCase):
         self.assertIn("FINDINGS", model.prompts[1])
         self.assertIn("DSL_HANDLER_NOT_FOUND", model.prompts[1])
 
+    def test_unicode_replacement_character_is_repaired_before_publish(self) -> None:
+        broken = valid_document()
+        broken["metadata"]["name"] = "网��搜索"
+        model = ScriptedModel([
+            json.dumps(broken, ensure_ascii=False), json.dumps(valid_document()),
+        ])
+
+        outcome = service(model).generate("flow")
+
+        self.assertEqual(2, outcome.attempts)
+        self.assertIn("Unicode replacement character U+FFFD", model.prompts[1])
+        self.assertNotIn("�", outcome.source)
+
     def test_exhausted_retries_surface_diagnostics_and_raw_output(self) -> None:
         model = ScriptedModel(["not json at all"] * 3)
         with self.assertRaises(AuthoringFailedError) as caught:
@@ -388,6 +401,8 @@ class CliGeneratorTests(unittest.TestCase):
         self.assertIn('"display_language":"zh-CN"', prompt)
         self.assertIn("Give every node a `label`", prompt)
         self.assertIn("written in the `display_language`", prompt)
+        self.assertIn("Keep it as short as practical", prompt)
+        self.assertIn("avoid sentences, explanations and redundant words", prompt)
         # The label must not be smuggled into handler config, which may be
         # closed against unknown keys.
         self.assertIn("Never put it inside `config`", prompt)

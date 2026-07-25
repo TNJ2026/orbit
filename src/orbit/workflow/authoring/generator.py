@@ -443,7 +443,7 @@ class WorkflowAuthoringService:
                 "The DSL document's own top level: dsl_version, metadata{id,name}, nodes[], edges[], entry[], terminals[], result{node,port}, and optional policies[]. It carries no other keys.",
                 "Set dsl_version to 1.3 and declare exactly one result that references the output representing the user's Goal outcome; that output must reach a terminal on a success path.",
                 "Give every node a concise business-meaningful id in the user's language (or a readable transliteration when the id grammar requires ASCII); never use generic ids such as transform, step1, or node2.",
-                "Give every node a `label`: the business action it performs, 1-80 characters, written in the `display_language` above. It is shown to people instead of the node id, so never put a handler name, a node id or an internal word like transform or step1 in it.",
+                "Give every node a `label`: a concise title for the business action it performs, 1-80 characters, written in the `display_language` above. Keep it as short as practical while preserving a clear meaning; avoid sentences, explanations and redundant words. It is shown to people instead of the node id, so never put a handler name, a node id or an internal word like transform or step1 in it.",
                 "`label` is a node field of its own. Never put it inside `config`, which belongs to the handler and may reject unknown keys.",
                 "Every action node needs handler{name,version} chosen from `handlers` and ports typed with ids from `schema_ids`.",
                 "Use preferred_handler for action nodes when it is set, unless the instruction explicitly requires a different available handler for a distinct role.",
@@ -481,6 +481,11 @@ class WorkflowAuthoringService:
 
     @staticmethod
     def _extract_json(text: str) -> Mapping[str, Any]:
+        if "\ufffd" in text:
+            raise ValueError(
+                "the response contains the Unicode replacement character U+FFFD; "
+                "return valid, uncorrupted text"
+            )
         candidate = text.strip()
         fenced = _FENCE.search(candidate)
         if fenced:

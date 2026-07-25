@@ -195,6 +195,7 @@ def build_api_v1(
     db_path: Path | str,
     durable_service,
     *,
+    workflow_db_path: Path | str | None = None,
     authenticator: Callable[[Request], str | None] | None = None,
     authorizer: Authorizer | None = None,
     rate_limiter: RateLimiter | None = None,
@@ -217,6 +218,7 @@ def build_api_v1(
     """Routes for `/api/v1`, ready to mount on the composition root."""
 
     path = Path(db_path)
+    workflow_path = Path(workflow_db_path or db_path)
     reads = ReadModelService(path)
     artifact_backend = artifact_backend or getattr(durable_service, "artifact_backend", None)
 
@@ -227,16 +229,18 @@ def build_api_v1(
 
     artifact_reads = ArtifactReadModelService(path, blob_reader=read_preview_blob)
     runs = RunApplicationService(
-        path, durable_service, enforce_single_goal=single_goal_mode
+        path, durable_service, enforce_single_goal=single_goal_mode,
+        workflow_db_path=workflow_path,
     )
     plans = PlanReadModelService(path)
     dynamic_reads = DynamicReadModelService(path)
     workflow_reads = WorkflowCatalogReadModelService(
-        path, schema_catalog or InMemorySchemaCatalog({})
+        workflow_path, schema_catalog or InMemorySchemaCatalog({}), usage_path=path,
     )
     authoring_jobs = (
         AuthoringJobService(
             path, authoring_service, workflow_publisher,
+            workflow_db_path=workflow_path,
             timeout_seconds=int(operational_config.get("authoring_timeout_seconds", 300))
             if operational_config else 300,
             clock=clock,
@@ -275,10 +279,30 @@ def build_api_v1(
     now = clock or (lambda: datetime.now(timezone.utc))
     operational_config = dict(operational_config or {})
 
-    def recent_handler_attempts() -> dict[str, Mapping[str, Any]]:
-        """Latest durable attempt per handler name, never a heartbeat proxy."""
+    def recent_handler_attempts() -> tuple[
+        dict[str, Mapping[str, Any]], dict[str, int], dict[str, int]
+    ]:
+        """Latest durable attempt plus total and failed job counts per handler.
+
+        A job is one scheduled execution of a node (retries stay inside it),
+        so the count answers "how many times has this handler run" without
+        ever posing as a heartbeat.
+        """
 
         with connect_workflow_database(path) as connection:
+            count_rows = connection.execute(
+                "SELECT job_kind AS handler_name, COUNT(*) AS total,"
+                " SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed"
+                " FROM jobs GROUP BY job_kind"
+            ).fetchall()
+            counts = {
+                str(row["handler_name"]): int(row["total"])
+                for row in count_rows
+            }
+            failed_counts = {
+                str(row["handler_name"]): int(row["failed"])
+                for row in count_rows
+            }
             rows = connection.execute(
                 """
                 WITH ranked AS (
@@ -296,7 +320,7 @@ def build_api_v1(
                 FROM ranked WHERE rank = 1
                 """
             ).fetchall()
-        return {
+        recent = {
             str(row["handler_name"]): {
                 "run_id": row["run_id"], "node_id": row["node_id"],
                 "attempt_id": row["attempt_id"], "status": row["status"],
@@ -304,6 +328,7 @@ def build_api_v1(
             }
             for row in rows
         }
+        return recent, counts, failed_counts
 
     def change_marker() -> Mapping[str, Any]:
         with connect_workflow_database(path) as connection:
@@ -889,7 +914,7 @@ def build_api_v1(
                     "status_semantics": "registration_only",
                 })
             )
-        recent = recent_handler_attempts()
+        recent, attempt_counts, failed_counts = recent_handler_attempts()
         handlers = [
             {
                 "name": entry.manifest.name,
@@ -909,6 +934,8 @@ def build_api_v1(
                 "supports_recover": entry.manifest.supports_recover,
                 "registration_status": "registered",
                 "recent_attempt": recent.get(entry.manifest.name),
+                "attempt_count": attempt_counts.get(entry.manifest.name, 0),
+                "failed_count": failed_counts.get(entry.manifest.name, 0),
             }
             for entry in registry.entries()
         ]
@@ -1047,8 +1074,30 @@ def build_api_v1(
         if isinstance(actor, JSONResponse):
             return actor
         may_start = guard.allows(actor, WRITE_SCOPE)
+        registry = getattr(durable_service, "execution_registry", None)
+        has_action_agent = bool(
+            registry is not None and registry.sealed
+            and any(
+                "agent.invoke" in entry.manifest.capabilities
+                for entry in registry.entries()
+            )
+        )
         workflows = workflow_reads.list()
         for item in workflows:
+            bindings = handler_bindings(workflow_reads.detail(item["workflow_id"]))
+            incompatible = [
+                binding for binding in bindings if binding["status"] != "current"
+            ]
+            item["handler_compatibility"] = {
+                "compatible": not incompatible,
+                "bindings": bindings,
+            }
+            if incompatible:
+                item["goal_readiness"] = (
+                    "needs_upgrade" if item.get("source_available")
+                    else "needs_migration"
+                )
+                item["readiness_reason"] = "handler_binding_unavailable"
             item["active_job"] = (
                 None if authoring_jobs is None
                 else authoring_jobs.active_for_workflow(item["workflow_id"], actor=actor)
@@ -1062,6 +1111,10 @@ def build_api_v1(
                     "expected_version": 0,
                     "payload_schema": "run-start/1.0",
                 }] if may_start and item["goal_readiness"] == "ready" else [])
+            item["editing_available"] = bool(
+                may_start and item.get("source_available")
+                and (authoring_jobs is not None or has_action_agent)
+            )
         # Generation is a catalog-level act — there is no aggregate yet — so
         # its command is advertised beside the list, not on an entry.
         catalog_commands = ([{
@@ -1117,12 +1170,16 @@ def build_api_v1(
         def command(body: Mapping[str, Any], actor: str, key: str) -> Mapping[str, Any]:
             if authoring_jobs is None:
                 raise ValueError("workflow generation jobs are unavailable")
+            agent = _generation_agent(body)
+            if agent is not None:
+                agent = authoring_service.ensure_agent(agent)
             try:
                 return authoring_jobs.create(
                     actor=actor,
                     prompt=str(body.get("prompt", body.get("instruction", ""))),
                     idempotency_key=key,
                     display_language=_display_language(body),
+                    agent=agent,
                 )
             except AuthoringJobConflict as exc:
                 raise ValueError(json.dumps({
@@ -1137,12 +1194,16 @@ def build_api_v1(
         workflow_id = str(EntityId.parse(request.path_params["workflow_id"]))
 
         def command(body: Mapping[str, Any], actor: str, key: str):
+            agent = _generation_agent(body)
+            if agent is not None:
+                agent = authoring_service.ensure_agent(agent)
             try:
                 return authoring_jobs.create(
                     actor=actor, workflow_id=workflow_id,
                     prompt=str(body.get("prompt", "")),
                     mode=str(body.get("mode", "modify")),
                     display_language=_display_language(body),
+                    agent=agent,
                     idempotency_key=key,
                 )
             except AuthoringJobConflict as exc:
@@ -1290,10 +1351,10 @@ def build_api_v1(
         """
 
         registry = getattr(durable_service, "execution_registry", None)
-        available: dict[str, str] = {}
+        available: dict[str, Any] = {}
         if registry is not None and registry.sealed:
             for entry in registry.entries():
-                available[entry.manifest.name] = entry.manifest.version
+                available[entry.manifest.name] = entry.manifest
         bindings = []
         for node in item.get("definition", {}).get("nodes", ()):
             handler = node.get("handler")
@@ -1301,17 +1362,73 @@ def build_api_v1(
                 continue
             name, pinned = handler["name"], handler["version"]
             current = available.get(name)
+            current_version = None if current is None else current.version
+            agent_binding = (
+                current is not None and "agent.invoke" in current.capabilities
+            )
             bindings.append({
                 "node_id": node["id"],
                 "handler_name": name,
                 "pinned_version": pinned,
-                "available_version": current,
+                "available_version": current_version,
                 "status": (
-                    "current" if current == pinned
+                    "current" if current_version == pinned or agent_binding
                     else "missing" if current is None else "version_changed"
                 ),
             })
         return bindings
+
+    def action_editors(item: Mapping[str, Any], actor: str) -> dict[str, Any]:
+        """Editable Action fields and compatible Agent choices, server-owned.
+
+        A Handler switch is offered only when its port contract exactly matches
+        the node already wired into the graph.  The browser never infers this
+        from names or rewrites ports and edges to make a choice fit.
+        """
+
+        if (
+            workflow_publisher is None
+            or not item.get("source_available")
+            or not guard.allows(actor, WRITE_SCOPE)
+        ):
+            return {}
+        registry = getattr(durable_service, "execution_registry", None)
+        if registry is None or not registry.sealed:
+            return {}
+        agent_manifests = [
+            entry.manifest for entry in registry.entries()
+            if "agent.invoke" in entry.manifest.capabilities
+        ]
+        editors: dict[str, Any] = {}
+        for node in item.get("definition", {}).get("nodes", ()):
+            if node.get("kind") != "action" or not node.get("handler"):
+                continue
+            inputs = {port["id"]: port["schema_id"] for port in node.get("inputs", ())}
+            outputs = {port["id"]: port["schema_id"] for port in node.get("outputs", ())}
+            choices = [
+                {"name": manifest.name, "version": manifest.version}
+                for manifest in agent_manifests
+                if dict(manifest.inputs) == inputs and dict(manifest.outputs) == outputs
+            ]
+            if not choices:
+                continue
+            node_id = str(node["id"])
+            editors[node_id] = {
+                "handlers": choices,
+                "allowed_command": {
+                    "command": "workflow.action.update",
+                    "label": "Update action",
+                    "method": "POST",
+                    "href": (
+                        f"/api/v1/workflows/{quote(item['workflow_id'], safe=':')}"
+                        f"/actions/{quote(node_id, safe='')}"
+                    ),
+                    "target_aggregate_id": item["workflow_id"],
+                    "expected_version": item["latest_version"],
+                    "payload_schema": "workflow-action-update/1.0",
+                },
+            }
+        return editors
 
     async def workflow_detail(request: Request) -> JSONResponse:
         actor = authenticate(request, READ_SCOPE)
@@ -1376,6 +1493,7 @@ def build_api_v1(
             if binding["status"] != "current"
         ]
         item["handler_drift"] = stale
+        item["action_editors"] = action_editors(item, actor)
         # Rebinding recompiles the same source against what is installed now.
         # Offered only when every stale binding has somewhere to land: a
         # Handler that is gone entirely is not a version to move to.
@@ -1397,6 +1515,91 @@ def build_api_v1(
                 "confirmation": "explicit",
             })
         return JSONResponse(envelope(item))
+
+    async def workflow_action_update(request: Request) -> JSONResponse:
+        if workflow_publisher is None:
+            return error("publish_unavailable", "workflow publishing is not wired", 503)
+        workflow_id = str(EntityId.parse(request.path_params["workflow_id"]))
+        node_id = request.path_params["node_id"]
+
+        def command(body: Mapping[str, Any], actor: str, key: str) -> Mapping[str, Any]:
+            from ..workflow.persistence import PublishConflictError
+
+            unexpected = set(body) - {"expected_version", "label", "handler", "prompt"}
+            if unexpected:
+                raise ValueError(f"unknown action update field: {sorted(unexpected)[0]}")
+            expected = _required_version(body)
+            label = body.get("label")
+            prompt = body.get("prompt")
+            handler = body.get("handler")
+            if not isinstance(label, str) or not label.strip() or len(label.strip()) > 80:
+                raise ValueError("label must be 1-80 characters")
+            if not isinstance(prompt, str) or not prompt.strip() or len(prompt.strip()) > 4000:
+                raise ValueError("prompt must be 1-4000 characters")
+            if not isinstance(handler, Mapping) or set(handler) != {"name", "version"}:
+                raise ValueError("handler must contain exactly name and version")
+            handler_name = handler.get("name")
+            handler_version = handler.get("version")
+            if not isinstance(handler_name, str) or not isinstance(handler_version, str):
+                raise ValueError("handler name and version must be strings")
+
+            item = workflow_reads.detail(workflow_id)
+            if int(item["latest_version"]) != expected:
+                raise ValueError(
+                    f"publish conflict: expected {expected}, actual {item['latest_version']}"
+                )
+            editor = action_editors(item, actor).get(node_id)
+            if editor is None:
+                raise ValueError("node is not an editable action")
+            choice = {"name": handler_name.strip(), "version": handler_version.strip()}
+            if choice not in editor["handlers"]:
+                raise ValueError("handler is not compatible with this action's ports")
+
+            source = item.get("source")
+            source_format = item.get("source_format")
+            if not isinstance(source, str) or source_format not in {"json", "yaml"}:
+                raise ValueError("workflow source is unavailable")
+            document = json.loads(source) if source_format == "json" else yaml.safe_load(source)
+            nodes = document.get("nodes") if isinstance(document, Mapping) else None
+            node = next(
+                (entry for entry in nodes or () if isinstance(entry, Mapping)
+                 and str(entry.get("id")) == node_id),
+                None,
+            )
+            if node is None or node.get("kind") != "action":
+                raise ValueError("node is not an editable action")
+            node["label"] = label.strip()
+            node["handler"] = choice
+            config = node.get("config")
+            if config is None:
+                config = {}
+                node["config"] = config
+            if not isinstance(config, dict):
+                raise ValueError("action config must be an object")
+            config["prompt"] = prompt.strip()
+            rewritten = (
+                json.dumps(document, ensure_ascii=False, indent=2)
+                if source_format == "json"
+                else yaml.safe_dump(document, allow_unicode=True, sort_keys=False)
+            )
+            try:
+                record = workflow_publisher.publish_workflow(
+                    rewritten, source_name="<action-update>", source_format=source_format,
+                    expected_latest_version=expected, actor=actor,
+                )
+            except PublishConflictError as exc:
+                raise ValueError(
+                    f"publish conflict: expected {exc.expected}, actual {exc.actual}"
+                ) from None
+            return {
+                "workflow_id": record.workflow_id,
+                "version": record.version.value,
+                "definition_hash": record.definition_hash.value,
+                "node_id": node_id,
+                "changed_fields": ["label", "handler", "prompt"],
+            }
+
+        return await mutate(request, WRITE_SCOPE, "workflow.action.update", command)
 
     async def workflow_rebind(request: Request) -> JSONResponse:
         """Republish this workflow, moving each node to the installed Handler.
@@ -2162,6 +2365,10 @@ def build_api_v1(
         Route(
             "/api/v1/workflows/{workflow_id}/modify",
             workflow_modify, methods=["POST"],
+        ),
+        Route(
+            "/api/v1/workflows/{workflow_id}/actions/{node_id}",
+            workflow_action_update, methods=["POST"],
         ),
         Route(
             "/api/v1/workflows/{workflow_id}/versions", workflow_publish,

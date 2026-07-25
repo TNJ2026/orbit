@@ -152,8 +152,10 @@ class RuntimeComposition:
         revision_agent_command: str | None = None,
         revision_agent_commands: Mapping[str, str] | None = None,
         revision_model_id: str | None = None,
+        workflow_db_path: Path | str | None = None,
     ) -> None:
         self.db_path = Path(db_path)
+        self.workflow_db_path = Path(workflow_db_path or db_path)
         self.clock = clock
         self.worker_count = max(1, int(worker_count))
         self.poll_seconds = poll_seconds
@@ -211,6 +213,7 @@ class RuntimeComposition:
             human_task_delivery=self.human_delivery.deliver,
             planner_service=planner_service,
             budget_service=self.budget_service,
+            workflow_db_path=self.workflow_db_path,
         )
         # The executor is built before the service (it seals the registry the
         # service binds to), so the Artifact capability is attached now that the
@@ -416,6 +419,7 @@ def create_app(
     workflow_generator: Callable[[str], str] | None = None,
     workflow_generators: Mapping[str, Callable[[str], str]] | None = None,
     single_goal_mode: bool = True,
+    workflow_db_path: Path | str | None = None,
 ) -> Starlette:
     """Build the Runtime application.
 
@@ -494,7 +498,12 @@ def create_app(
         artifact_backend=artifact_backend,
         planner_service=planner_service,
         human_delivery=human_delivery,
+        workflow_db_path=workflow_db_path,
     )
+    if composition.workflow_db_path != composition.db_path:
+        from ..workflow.persistence.workflow_versions import merge_workflow_library
+
+        merge_workflow_library(composition.db_path, composition.workflow_db_path)
 
     @asynccontextmanager
     async def lifespan(app: Starlette):
@@ -616,7 +625,7 @@ def create_app(
         InMemoryExtensionRegistry(),
     )
     workflow_publisher = WorkflowDefinitionService(
-        authoring_catalogs, SQLiteWorkflowVersionStore(composition.db_path)
+        authoring_catalogs, SQLiteWorkflowVersionStore(composition.workflow_db_path)
     )
     from ..workflow.application.workflow_draft_service import (
         WorkflowDraftApplicationService,
@@ -649,6 +658,7 @@ def create_app(
     draft_service = WorkflowDraftApplicationService(
         composition.db_path, workflow_publisher,
         reviser=authoring_service.revise if authoring_service is not None else None,
+        workflow_db_path=composition.workflow_db_path,
     )
     # Hand the service to the composition before lifespan startup builds its
     # loops, so the revision dispatcher and its recovery pass are supervised
@@ -671,6 +681,7 @@ def create_app(
         Route("/health/ready", health_ready, methods=["GET"]),
         *build_api_v1(
             composition.db_path, composition.service,
+            workflow_db_path=composition.workflow_db_path,
             authenticator=authenticator, authorizer=authorizer,
             rate_limiter=rate_limiter,
             unlimited_actors=unlimited_actors,
@@ -693,6 +704,7 @@ def create_app(
         # services and the same identity, not a second implementation.
         *build_mcp(
             composition.db_path, composition.service,
+            workflow_db_path=composition.workflow_db_path,
             authenticator=authenticator, authorizer=authorizer,
             single_goal_mode=single_goal_mode,
         ),

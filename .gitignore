@@ -26,6 +26,9 @@ docs/ui/*
 !docs/ui/runtime-ui-prototype-delivery-plan.md
 !docs/ui/workflow-editor-implementation-plan.md
 
+# Design spec, kept local to the repo but out of version control
+DESIGN.md
+
 # Visual regression scratch output (baselines themselves are committed)
 tests/visual_baselines/*.actual.png
 tests/visual_baselines/*.diff.png

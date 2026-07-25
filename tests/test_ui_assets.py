@@ -71,6 +71,7 @@ class CatalogTests(unittest.TestCase):
             "run.data.kind.artifact",
             "shell.breadcrumb.root",
             "wait.none",
+            "workflows.zoomLevel",
         }
         self.assertEqual(
             set(), shared - intentional,
@@ -194,13 +195,6 @@ class AccessibilityTests(unittest.TestCase):
     def test_the_layout_responds_to_small_screens(self) -> None:
         css = stylesheet_source()
         self.assertIn("@media (max-width", css)
-
-    def test_mobile_navigation_is_a_real_drawer(self) -> None:
-        css = stylesheet_source()
-        self.assertIn('body[data-nav-open="true"] .sidebar', css)
-        self.assertIn('id="navToggle"', self.index)
-        self.assertIn('aria-controls="sidebar"', self.index)
-
 
 class CapacityRenderingTests(unittest.TestCase):
     def test_the_console_follows_only_while_the_run_is_alive(self) -> None:

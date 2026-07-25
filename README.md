@@ -25,7 +25,9 @@ workflow definition ──▶ plan ──▶ jobs ──▶ handlers
   before the first worker starts, and a plan is bound to the exact manifest
   fingerprint it was compiled against.
 - **One process.** `orbit serve` is the runtime, the API, the UI, the workers
-  and the timer dispatcher. State lives in SQLite under `~/.orbit/projects/`.
+  and the timer dispatcher. Runs stay in per-project SQLite databases under
+  `~/.orbit/projects/`; published Workflow definitions are shared through
+  `~/.orbit/workflows/library.db`.
 
 ## Scope
 
@@ -104,7 +106,7 @@ Start the runtime.
 | --- | --- | --- |
 | `--host` | `127.0.0.1` | Bind address. |
 | `--port` | `8848` | Port. |
-| `--db` | per-project | Database path; defaults to `~/.orbit/projects/<project>/runtime.db`. |
+| `--db` | per-project | Runtime database path. With the default, definitions use the public `~/.orbit/workflows/library.db`; an explicit path keeps definitions and runs self-contained. |
 | `--artifact-root` | beside database | Local content-addressed Artifact directory; defaults to `artifacts/` beside the selected database. |
 | `--runner-concurrency` | `5` | Jobs the in-process workers run in parallel. |
 | `--no-agent-discovery` | off | Skip probing for installed agent CLIs. |

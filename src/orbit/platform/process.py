@@ -13,6 +13,7 @@ node is — callers pass a process spec and get a handle back.
 
 from __future__ import annotations
 
+import codecs
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
@@ -299,6 +300,8 @@ def stream_output(
 
     if stream is None:
         return
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="strict")
+    reached_eof = False
     try:
         while True:
             try:
@@ -306,10 +309,15 @@ def stream_output(
             except (OSError, ValueError):
                 break
             if not raw:
+                reached_eof = True
                 break
-            chunk = raw.decode("utf-8", errors="replace")
+            # A UTF-8 code point may straddle two os.read() calls.  Decoding
+            # each block independently turns that valid character into U+FFFD;
+            # the incremental decoder retains an incomplete suffix until the
+            # next block arrives.
+            chunk = decoder.decode(raw, final=False)
             if not chunk:
-                break
+                continue
             kept = buffer.append(chunk)
             if kept and on_chunk is not None:
                 try:
@@ -318,6 +326,15 @@ def stream_output(
                     # A failing sink must not kill the drain loop; the process
                     # still needs to be reaped.
                     pass
+        if reached_eof:
+            tail = decoder.decode(b"", final=True)
+            if tail:
+                kept = buffer.append(tail)
+                if kept and on_chunk is not None:
+                    try:
+                        on_chunk(kept)
+                    except Exception:
+                        pass
     finally:
         try:
             stream.close()
@@ -368,6 +385,7 @@ class ProcessHandle:
         self._lock = threading.Lock()
         self._cancelled = False
         self._threads: list[threading.Thread] = []
+        self._drain_errors: list[BaseException] = []
 
         self._process = subprocess.Popen(
             self.argv,
@@ -412,14 +430,20 @@ class ProcessHandle:
         self._threads.append(thread)
 
     def _start_drains(self) -> None:
+        def drain(stream, buffer, sink) -> None:
+            try:
+                stream_output(stream, buffer, on_chunk=sink)
+            except BaseException as exc:  # surfaced by wait() on the owner thread
+                with self._lock:
+                    self._drain_errors.append(exc)
+
         for stream, buffer, sink, name in (
             (self._process.stdout, self.stdout, self._on_stdout, "stdout"),
             (self._process.stderr, self.stderr, self._on_stderr, "stderr"),
         ):
             thread = threading.Thread(
-                target=stream_output,
-                args=(stream, buffer),
-                kwargs={"on_chunk": sink},
+                target=drain,
+                args=(stream, buffer, sink),
                 name=f"process-{name}",
                 daemon=True,
             )
@@ -442,6 +466,12 @@ class ProcessHandle:
                 pass
         for thread in self._threads:
             thread.join(timeout=DEFAULT_KILL_GRACE_SECONDS)
+        # Timeout/cancellation deliberately closes pipes and can leave a final
+        # partial byte sequence; preserve their unknown-result semantics.  A
+        # normally completed process, however, must emit valid UTF-8 rather
+        # than having corrupt bytes silently replaced and persisted.
+        if self._drain_errors and not timed_out and not self.cancelled:
+            raise self._drain_errors[0]
         return ProcessResult(
             returncode=self._process.returncode,
             stdout=self.stdout.text,

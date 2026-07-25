@@ -1,73 +1,98 @@
-/* Design tokens carried over from the reviewed prototype (delivery plan P1).
-   Only tokens and generic primitives live here; anything that knows what a
-   run or an inbox is belongs in views.css. */
-/* Surfaces follow the Claude app: warm neutrals instead of the cool blue-grey
-   the prototype shipped with, and the chrome (sidebar, top bar) sits a step
-   *below* the reading surface rather than above it. Only the surface/line/text
-   ramp moved — status accents keep their hues so every state reads the same. */
+/* Design tokens. Palette + typography follow DESIGN.md ("Precision Logic
+   Dark"): a Deep-Space canvas built from tonal layering rather than pure
+   black, a luminous blue accent, and a systematic surface ramp. Only tokens
+   and generic primitives live here; anything that knows what a run or an inbox
+   is belongs in views.css. */
+/* Elevation is conveyed by luminosity, not shadow: each surface tier sits a
+   step lighter than the one below it, and 1px outlines define boundaries.
+   Status accents keep distinct hues so every state reads the same. Chip fills
+   are low-alpha washes of their accent so they never vibrate on the dark
+   canvas while their saturated text stays legible. */
 :root {
   color-scheme: dark;
-  --chrome: #1f1e1d;
-  --bg: #262624;
-  --panel: #2b2b28;
-  --panel-2: #30302e;
-  --panel-3: #3a3a37;
-  --line: #46453f;
-  --line-soft: #383733;
-  /* Hover surface. It sits a clear step above --panel-3 so the lift reads on
-     a dark screen; --panel-3 alone differed by ~5 levels and vanished. */
-  --hover: #403f3a;
-  --text: #f5f4ee;
-  --muted: #b3afa5;
-  --muted-2: #8f8b81;
-  --blue: #6da7ff;
-  --blue-soft: #142640;
-  --amber: #f1b756;
-  --amber-soft: #302513;
-  --green: #58c694;
-  --green-soft: #142b23;
-  --red: #f07d83;
-  --red-soft: #351b20;
-  --purple: #ae8cff;
-  --purple-soft: #241d3a;
-  --shadow: 0 18px 50px rgba(0, 0, 0, .24);
+  --chrome: #0b0e15;        /* surface-container-lowest — sits below the page */
+  --bg: #10131a;            /* Deep-Space base / surface */
+  --panel: #1d2027;         /* surface-container — cards */
+  --panel-2: #272a31;       /* surface-container-high — inputs, buttons */
+  --panel-3: #32353c;       /* surface-container-highest */
+  --line: #424754;          /* outline-variant — component boundaries */
+  --line-soft: #2a2d35;     /* quieter dividers inside a card */
+  /* Hover surface: a clear step above --panel-3 so the lift reads on a dark
+     screen. */
+  --hover: #363941;         /* surface-bright */
+  --text: #e1e2ec;          /* on-surface — primary text */
+  --muted: #c2c6d6;         /* on-surface-variant — secondary text */
+  --muted-2: #8c909f;       /* outline — tertiary / metadata text */
+  --blue: #adc6ff;          /* primary accent — links, icons, active state */
+  --blue-soft: rgba(77, 142, 255, .16);
+  --amber: #ffb786;         /* tertiary */
+  --amber-soft: rgba(255, 183, 134, .15);
+  --green: #56d6a0;
+  --green-soft: rgba(86, 214, 160, .15);
+  --red: #ffb4ab;           /* error */
+  --red-soft: rgba(240, 86, 86, .17);
+  --purple: #c3b0ff;
+  --purple-soft: rgba(174, 140, 255, .18);
+  /* Filled primary control: the vibrant blue with white text DESIGN.md calls
+     for, distinct from the lighter --blue used for accented text. */
+  --primary: #3b82f6;
+  --on-primary: #ffffff;
+  /* Overlays keep a shadow (with a backdrop blur); flat cards do not. */
+  --shadow: 0 18px 50px rgba(0, 0, 0, .38);
   --radius: 12px;
   --space-2: 8px;
   --space-3: 12px;
   --font: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  --font-display: "Hanken Grotesk", Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --mono: "JetBrains Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
 }
 
+/* A cool-slate light theme that keeps the same layering discipline: the page
+   sits below white cards, borders stay 1px, accents drop to AA-safe 600s. */
 html[data-theme="light"] {
   color-scheme: light;
-  --chrome: #f0eee6;
-  --bg: #faf9f5;
+  --chrome: #eef1f6;
+  --bg: #f6f8fc;
   --panel: #ffffff;
-  --panel-2: #f5f3ec;
-  --panel-3: #eceadf;
-  --line: #dcd8ca;
-  --line-soft: #e9e6db;
-  --hover: #e4e0d2;
-  --text: #141413;
-  --muted: #63605a;   /* >= 4.5:1 on --panel */
-  --muted-2: #63605a; /* decorative/secondary text; kept at --muted for contrast */
-  --blue: #1f5fc0;
-  --blue-soft: #e7f0ff;
-  --amber: #8a5a08;
-  --amber-soft: #fff2d9;
-  --green: #146845;
-  --green-soft: #e4f6ee;
-  --red: #a5333e;
-  --red-soft: #ffeaec;
-  --purple: #7350c4;
-  --purple-soft: #efe9ff;
-  --shadow: 0 18px 50px rgba(60, 56, 46, .10);
+  --panel-2: #eef1f6;
+  --panel-3: #e2e7f0;
+  --line: #cdd4e0;
+  --line-soft: #e4e8f0;
+  --hover: #e2e8f2;
+  --text: #171a21;
+  --muted: #4a5164;   /* >= 4.5:1 on --panel */
+  --muted-2: #5a6274; /* decorative/secondary text */
+  --blue: #2563eb;
+  --blue-soft: rgba(37, 99, 235, .10);
+  --amber: #b45309;
+  --amber-soft: rgba(180, 83, 9, .13);
+  --green: #047857;
+  --green-soft: rgba(4, 120, 87, .12);
+  --red: #b91c1c;
+  --red-soft: rgba(185, 28, 28, .10);
+  --purple: #6d28d9;
+  --purple-soft: rgba(109, 40, 217, .11);
+  --primary: #3b82f6;
+  --on-primary: #ffffff;
+  --shadow: 0 18px 50px rgba(30, 41, 59, .14);
 }
 
 * { box-sizing: border-box; }
 html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--text); font-family: var(--font); }
+/* Hanken Grotesk carries the headlines; Inter handles everything else. */
+h1, h2, h3, h4 { font-family: var(--font-display); }
 button, input, select, textarea { font: inherit; color: inherit; }
 :focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+/* Form controls already carry a border, so the global outline above reads as a
+   second frame. Turn the control's own border blue and add the 2px outer glow
+   DESIGN.md specifies for focused inputs — one focus ring, not two.
+   The doubled :focus is a specificity lift (0,2,1): container rules like
+   `.field input` in components.css load later and would otherwise win the
+   border-color tie while this rule's outline:none still applies. */
+input:focus:focus-visible, textarea:focus:focus-visible, select:focus:focus-visible {
+  outline: none; border-color: var(--blue);
+  box-shadow: 0 0 0 2px var(--blue-soft);
+}
 
 .sr-only {
   position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;

@@ -13,7 +13,6 @@ failing, so a plain checkout still runs green.
 
 from __future__ import annotations
 
-import base64
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
@@ -577,23 +576,20 @@ class SimplifiedUpgradeTests(BrowserE2ETestCase):
         page.wait_for_selector(".workflow-editor textarea")
         prompt = page.locator(".workflow-editor textarea")
         self.assertIn("Upgrade this workflow", prompt.input_value())
-        # Regenerate is the bigger hammer and stays hidden until modify fails.
         self.assertEqual(0, page.locator("#regenerateWorkflow").count())
 
-        page.get_by_role("button", name="Revise with Agent").click()
+        page.get_by_role("button", name="Revise").click()
         page.wait_for_selector(".workflow-editor .change-summary", timeout=30_000)
         summary = page.locator(".workflow-editor .change-summary").inner_text()
         self.assertIn("Fact check", summary)
         self.assertIn("runs before the report", summary)
-
+        page.wait_for_function(
+            "() => document.querySelector('.workflow-editing-version')"
+            "?.textContent.includes('v2')"
+        )
+        self.assertIn("Fact Check", page.locator(".workflow-graph").text_content())
 
 class SimplifiedRegenerateTests(BrowserE2ETestCase):
-    """Regenerate appears only once keeping the structure has demonstrably failed.
-
-    It discards a structure the author already accepted, so offering it before
-    there is any evidence that modifying cannot work would put the largest
-    action in the easiest place to hit by accident.
-    """
 
     @classmethod
     def extra_app_kwargs(cls) -> dict:
@@ -637,31 +633,65 @@ class SimplifiedRegenerateTests(BrowserE2ETestCase):
         )
 
     def open_dialog(self):
-        page = self.open("en-US", "/ui/#/workflows/workflow:research")
+        page = self.open("en-US", "/ui/#/workflows/workflow:research/edit")
         page.wait_for_selector(".workflow-editor textarea")
         return page
+
+    def test_detail_is_read_only_and_editing_has_its_own_route(self) -> None:
+        page = self.open("en-US", "/ui/#/workflows")
+        card = page.locator('[data-workflow-id="workflow:research"]')
+        card.locator(".edit-workflow, .upgrade-workflow").click()
+        page.wait_for_url("**/ui/#/workflows/workflow%3Aresearch/edit")
+        page.wait_for_selector(".workflow-edit-page .workflow-editor textarea")
+        self.assertEqual(1, page.locator("#closeWorkflowEditor").count())
+
+        page.goto(f"{self.base}/ui/#/workflows/workflow:research")
+        page.wait_for_selector(".workflow-detail")
+        self.assertEqual(0, page.locator(".workflow-editor").count())
+        self.assertEqual(0, page.locator(".graph-box.editable").count())
+        self.assertEqual(0, page.locator("#editWorkflow").count())
+
+    def test_workflow_graph_zoom_is_bounded_between_50_and_150_percent(self) -> None:
+        page = self.open_dialog()
+        graph = page.locator(".workflow-graph")
+        terminal = graph.locator(".graph-box.kind-terminal")
+        terminal_shape = terminal.locator(":scope > rect")
+        self.assertEqual("168", terminal_shape.get_attribute("width"))
+        self.assertEqual("60", terminal_shape.get_attribute("height"))
+        self.assertEqual("30", terminal_shape.get_attribute("rx"))
+        self.assertEqual("Done", terminal.locator(".graph-terminal-label").text_content())
+        original_width = int(graph.get_attribute("data-canvas-width"))
+        zoom_in = page.get_by_role("button", name="Zoom in workflow graph")
+        zoom_out = page.get_by_role("button", name="Zoom out workflow graph")
+
+        for _ in range(5):
+            zoom_in.click()
+        self.assertEqual(round(original_width * 1.5), int(graph.get_attribute("width")))
+        self.assertTrue(zoom_in.is_disabled())
+        self.assertEqual("150%", page.locator(".graph-zoom-level").inner_text())
+
+        for _ in range(10):
+            zoom_out.click()
+        self.assertEqual(round(original_width * 0.5), int(graph.get_attribute("width")))
+        self.assertTrue(zoom_out.is_disabled())
+        self.assertEqual("50%", page.locator(".graph-zoom-level").inner_text())
 
     def test_regenerate_is_offered_only_after_a_modification_fails(self) -> None:
         page = self.open_dialog()
 
-        # 1. The first form offers modifying and nothing larger.
         self.assertEqual(0, page.locator("#regenerateWorkflow").count())
         page.locator(".workflow-editor textarea").fill("Add a fact check step")
-        page.get_by_role("button", name="Revise with Agent").click()
+        page.get_by_role("button", name="Revise").click()
 
-        # 2. The failure offers a retry rather than a dead end.
         page.wait_for_selector("#retryWorkflowModify", timeout=30_000)
         page.locator("#retryWorkflowModify").click()
 
-        # 3. Only now are both offered, and the prompt survived the round trip.
         page.wait_for_selector("#regenerateWorkflow")
         self.assertEqual(
             "Add a fact check step",
             page.locator(".workflow-editor textarea").input_value(),
         )
-        self.assertEqual(
-            1, page.get_by_role("button", name="Revise with Agent").count(),
-        )
+        self.assertEqual(1, page.get_by_role("button", name="Revise").count())
         self.assertIn(
             "Regenerate lets the system redesign",
             page.locator(".workflow-editor").inner_text(),
@@ -670,7 +700,7 @@ class SimplifiedRegenerateTests(BrowserE2ETestCase):
     def test_a_failed_modification_leaves_the_workflow_alone(self) -> None:
         page = self.open_dialog()
         page.locator(".workflow-editor textarea").fill("Break everything")
-        page.get_by_role("button", name="Revise with Agent").click()
+        page.get_by_role("button", name="Revise").click()
         page.wait_for_selector("#retryWorkflowModify", timeout=30_000)
 
         latest = page.evaluate(
@@ -679,138 +709,6 @@ class SimplifiedRegenerateTests(BrowserE2ETestCase):
         )
         self.assertEqual(1, latest)
 
-
-PIXEL_PNG = (
-    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
-    b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00"
-    b"\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
-)
-CHECKER_PNG = base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAM0lEQVR42mN0av3CAAPL0uFMhq"
-    "iZDFjFmRhIBLTXwPjizReC7kYWH4R+YCHG3aPxQHMNAER/FF7xPoSoAAAAAElFTkSuQmCC"
-)
-
-
-class ArtifactCatalogTests(BrowserE2ETestCase):
-    def artifact(
-        self, *, content=b"reviewable artifact text", content_type="text/plain",
-        key="browser-artifact", goal=None, output_port="report",
-    ) -> str:
-        from orbit.workflow.persistence.database import connect_workflow_database
-
-        run_id = (
-            self.start_goal(key, goal) if goal is not None else self.start_run(key)
-        )
-        receipt = self.artifact_backend.write(content, max_size_bytes=1024 * 1024)
-        artifact_id = f"artifact:{receipt.checksum.value.removeprefix('sha256:')}"
-        with connect_workflow_database(self.db) as connection:
-            event_id = connection.execute(
-                "SELECT event_id FROM run_events WHERE run_id=? ORDER BY global_position LIMIT 1",
-                (run_id,),
-            ).fetchone()[0]
-            now = "2026-01-01T00:00:00+00:00"
-            connection.execute(
-                "INSERT INTO artifacts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    artifact_id, run_id, "workflow:linear", "attempt", "attempt:browser",
-                    "node_run:browser", output_port, "schema:text", content_type,
-                    receipt.checksum.value, receipt.size_bytes, receipt.blob_key,
-                    "run", run_id, "committed", now, now, event_id, None,
-                ),
-            )
-            connection.execute(
-                "INSERT INTO artifact_acl VALUES (?,'local','read','local',?)",
-                (artifact_id, now),
-            )
-            connection.execute(
-                "INSERT INTO artifact_links VALUES (?,?,?,?,?,?,?,?)",
-                (
-                    f"artifact_link:{key}-producer", "workflow:linear", run_id,
-                    artifact_id, "producer", "attempt:browser", event_id, now,
-                ),
-            )
-            connection.commit()
-        return artifact_id
-
-    def test_the_detail_dialog_closes_back_to_the_catalog(self) -> None:
-        artifact_id = self.artifact(
-            content=b"dialog artifact text", key="browser-artifact-dialog",
-        )
-        page = self.open("en-US", path=f"/ui/#/artifacts/{artifact_id}")
-        page.wait_for_selector("dialog[open].artifact-detail .panel-title")
-        page.keyboard.press("Escape")
-        page.wait_for_selector("dialog.artifact-detail", state="detached")
-        # Escape and Close must both leave the address on the catalog: a
-        # dismissed dialog that keeps its own URL reopens on reload.
-        page.wait_for_function("() => location.hash === '#/artifacts'")
-        page.wait_for_selector(".artifact-card-main")
-
-        page.locator(".artifact-card-main").first.click()
-        page.wait_for_selector("dialog[open].artifact-detail .panel-title")
-        page.get_by_role("button", name="Close").click()
-        page.wait_for_selector("dialog.artifact-detail", state="detached")
-        page.wait_for_function("() => location.hash === '#/artifacts'")
-
-    def test_a_document_card_leads_with_its_title_goal_and_workflow(self) -> None:
-        self.artifact(
-            content=b"# Launch checklist\n\nStep one.\n", content_type="text/markdown",
-            key="browser-artifact-document", goal="Ship the launch",
-        )
-        page = self.open("en-US", path="/ui/#/artifacts")
-        card = page.locator(".artifact-card", has_text="Launch checklist").first
-        card.wait_for()
-        self.assertEqual("Launch checklist", card.locator(".artifact-name").inner_text())
-        text = card.inner_text()
-        self.assertIn("Ship the launch", text)
-        # The workflow reads by name; `workflow:` is the id's kind, not a fact
-        # the card has to spend a line on.
-        self.assertIn("linear", text)
-        self.assertNotIn("workflow:linear", text)
-        # Addressing — the output port, the producer, the Artifact id — belongs
-        # to the detail panel, not to a card being scanned.
-        self.assertNotIn("report", text)
-        self.assertNotIn("attempt:browser", text)
-
-    def test_an_image_card_shows_the_image(self) -> None:
-        artifact_id = self.artifact(
-            content=PIXEL_PNG, content_type="image/png", key="browser-artifact-image",
-        )
-        page = self.open("en-US", path="/ui/#/artifacts")
-        thumb = page.locator(".artifact-thumb").first
-        thumb.wait_for()
-        self.assertIn(quote(artifact_id, safe=""), thumb.get_attribute("src"))
-        # A broken thumbnail would still be an <img>; only a decoded one has
-        # intrinsic dimensions. The fetch is the browser's own, so wait for it
-        # rather than sampling the frame the assertion happens to land on.
-        page.wait_for_function(
-            "() => { const img = document.querySelector('.artifact-thumb');"
-            " return !!img && img.complete && img.naturalWidth > 0; }"
-        )
-
-    def test_z_failed_detail_image_can_be_retried(self) -> None:
-        artifact_id = self.artifact(
-            content=CHECKER_PNG, content_type="image/png",
-            key="browser-artifact-image-error", output_port="report-error",
-        )
-        page = self.open("en-US", path="/ui/#/artifacts")
-        content_path = "**/api/v1/artifacts/*/content"
-        page.route(content_path, lambda route: route.abort())
-        page.goto(f"{self.base}/ui/#/artifacts/{quote(artifact_id, safe='')}")
-        dialog = page.locator("dialog[open].artifact-detail")
-        dialog.wait_for()
-        retry = dialog.get_by_role("button", name="Try again")
-        retry.wait_for()
-        self.assertEqual(0, dialog.locator(".artifact-image").count())
-
-        page.unroute(content_path)
-        retry.click()
-        page.wait_for_function(
-            "() => { const img = document.querySelector("
-            "'dialog.artifact-detail .artifact-image');"
-            " return !!img && img.complete && img.naturalWidth > 0; }"
-        )
-
-
 class ReleaseHardeningTests(BrowserE2ETestCase):
     def test_all_primary_views_fit_the_mobile_viewport(self) -> None:
         context = self.browser.new_context(
@@ -818,7 +716,7 @@ class ReleaseHardeningTests(BrowserE2ETestCase):
         )
         self.addCleanup(context.close)
         page = context.new_page()
-        for view in ("home", "goals", "workflows", "artifacts"):
+        for view in ("home", "goals", "workflows", "agents"):
             with self.subTest(view=view):
                 page.goto(f"{self.base}/ui/#/{view}")
                 page.wait_for_function(
@@ -829,19 +727,6 @@ class ReleaseHardeningTests(BrowserE2ETestCase):
                     "() => document.documentElement.scrollWidth - window.innerWidth"
                 )
                 self.assertLessEqual(overflow, 1, f"{view} overflows by {overflow}px")
-
-    def test_mobile_navigation_closes_with_escape(self) -> None:
-        context = self.browser.new_context(
-            locale="en-US", viewport={"width": 360, "height": 800}
-        )
-        self.addCleanup(context.close)
-        page = context.new_page()
-        page.goto(f"{self.base}/ui/")
-        page.click("#navToggle")
-        self.assertEqual("true", page.get_attribute("#navToggle", "aria-expanded"))
-        page.keyboard.press("Escape")
-        self.assertEqual("false", page.get_attribute("#navToggle", "aria-expanded"))
-        self.assertEqual("navToggle", page.evaluate("document.activeElement.id"))
 
     def test_network_failure_is_localised_and_retryable(self) -> None:
         page = self.open("en-US")

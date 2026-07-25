@@ -43,6 +43,67 @@ class WorkflowVersionRecord:
     created_by: str
 
 
+def merge_workflow_library(source_path: Path | str, library_path: Path | str) -> int:
+    """Idempotently merge project definitions into the host-wide library.
+
+    Equal definition hashes collapse. Divergent histories sharing a Workflow
+    id are appended as new immutable public versions instead of overwriting
+    either project's history.
+    """
+
+    source_path, library_path = Path(source_path), Path(library_path)
+    if source_path.resolve() == library_path.resolve():
+        return 0
+    SQLiteWorkflowVersionStore(source_path)
+    SQLiteWorkflowVersionStore(library_path)
+    with connect_workflow_database(source_path, read_only=True) as source:
+        definitions = {
+            row["workflow_id"]: dict(row)
+            for row in source.execute("SELECT * FROM workflow_definitions")
+        }
+        versions = [
+            dict(row) for row in source.execute(
+                "SELECT * FROM workflow_versions ORDER BY workflow_id,version"
+            )
+        ]
+    columns = (
+        "workflow_id", "version", "definition_hash", "dsl_version", "ir_version",
+        "compiler_version", "canonical_ir_json", "source_format", "source_text",
+        "catalog_fingerprint", "created_at", "created_by",
+    )
+    inserted = 0
+    with connect_workflow_database(library_path) as library:
+        library.execute("BEGIN IMMEDIATE")
+        for row in versions:
+            workflow_id = row["workflow_id"]
+            if library.execute(
+                "SELECT 1 FROM workflow_versions"
+                " WHERE workflow_id=? AND definition_hash=?",
+                (workflow_id, row["definition_hash"]),
+            ).fetchone() is not None:
+                continue
+            definition = definitions[workflow_id]
+            library.execute(
+                "INSERT INTO workflow_definitions(workflow_id,name,created_at,created_by)"
+                " VALUES (?,?,?,?) ON CONFLICT(workflow_id) DO UPDATE SET name=excluded.name",
+                tuple(definition[key] for key in (
+                    "workflow_id", "name", "created_at", "created_by",
+                )),
+            )
+            row["version"] = int(library.execute(
+                "SELECT COALESCE(MAX(version),0) FROM workflow_versions"
+                " WHERE workflow_id=?", (workflow_id,),
+            ).fetchone()[0]) + 1
+            library.execute(
+                f"INSERT INTO workflow_versions({','.join(columns)})"
+                f" VALUES ({','.join('?' for _ in columns)})",
+                tuple(row[key] for key in columns),
+            )
+            inserted += 1
+        library.commit()
+    return inserted
+
+
 class SQLiteWorkflowVersionStore:
     def __init__(
         self,

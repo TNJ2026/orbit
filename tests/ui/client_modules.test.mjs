@@ -231,21 +231,28 @@ test("live reads use their versioned API view", async () => {
 test("router parses deep links and serialises navigation", () => {
   assert.deepEqual(readRoute("#/runs/run%3A7"), { view: "run", runId: "run:7" });
   assert.deepEqual(readRoute("#/goals/run%3A7"), { view: "goal", runId: "run:7" });
-  assert.deepEqual(readRoute("#/artifacts/artifact%3A7"), {
-    view: "artifact", artifactId: "artifact:7", runId: null,
-  });
   assert.deepEqual(readRoute("#/workflows"), { view: "workflows", runId: null });
+  assert.deepEqual(
+    readRoute("#/workflows/workflow%3Ashared/edit"),
+    { view: "workflowEdit", workflowId: "workflow:shared", runId: null },
+  );
+  assert.deepEqual(
+    readRoute("#/workflows/workflow%3Aold/edit/draft%3Aold"),
+    { view: "workflow", workflowId: "workflow:old", runId: null },
+  );
   // Retired views still parse (render() redirects them to the workspace,
-  // normalising the hash); unknown ones fall straight through.
-  assert.deepEqual(readRoute("#/inbox"), { view: "inbox", runId: null });
+  // normalising the hash); artifacts deep links fall through to home;
+  // unknown ones land on the workspace too.
   assert.deepEqual(readRoute("#/agents"), { view: "agents", runId: null });
+  assert.deepEqual(readRoute("#/inbox"), { view: "inbox", runId: null });
   assert.deepEqual(readRoute("#/settings"), { view: "settings", runId: null });
+  assert.deepEqual(readRoute("#/artifacts"), { view: "artifacts", runId: null });
   assert.deepEqual(readRoute("#/not-a-view"), { view: "home", runId: null });
   assert.equal(routeHash({ view: "run", runId: "run:7" }), "#/runs/run%3A7");
   assert.equal(routeHash({ view: "goal", runId: "run:7" }), "#/goals/run%3A7");
   assert.equal(
-    routeHash({ view: "artifact", artifactId: "artifact:7" }),
-    "#/artifacts/artifact%3A7",
+    routeHash({ view: "workflowEdit", workflowId: "workflow:shared" }),
+    "#/workflows/workflow%3Ashared/edit",
   );
 });
 

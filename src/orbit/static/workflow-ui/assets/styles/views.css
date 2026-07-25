@@ -36,7 +36,7 @@
 .simplified-composer-actions { justify-content: flex-end; }
 .simplified-workflow-generator { display: grid; gap: 16px; padding: 18px 22px; }
 .simplified-workflow-generator-copy { display: grid; gap: 5px; }
-.simplified-workflow-generator-copy h2 { margin: 0; font-size: clamp(20px, 3vw, 26px); }
+.simplified-workflow-generator-copy h2 { margin: 0; font-size: clamp(22px, 3vw, 24px); }
 .simplified-workflow-generator-copy p { margin: 0; max-width: 68ch; }
 .simplified-workflow-generator-form {
   display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 12px;
@@ -59,7 +59,7 @@
 .simplified-step-mark {
   display: grid; width: 28px; height: 28px; place-items: center; border-radius: 999px;
   color: var(--muted); background: var(--panel-2); border: 1px solid var(--line);
-  font-size: 12px; font-weight: 700;
+  font-size: 13px; font-weight: 700;
 }
 .simplified-step-row.running .simplified-step-mark { color: var(--blue); border-color: var(--blue); background: var(--blue-soft); }
 .simplified-step-row.succeeded .simplified-step-mark { color: var(--green); border-color: var(--green); background: var(--green-soft); }
@@ -67,8 +67,8 @@
 .simplified-step-row.cancelled .simplified-step-mark { color: var(--red); border-color: var(--red); background: var(--red-soft); }
 .simplified-step-copy { display: grid; gap: 3px; min-width: 0; }
 .simplified-step-copy strong { overflow-wrap: anywhere; }
-.simplified-step-copy span { font-size: 11px; }
-.simplified-step-prompt { font-size: 12px; -webkit-line-clamp: 2; }
+.simplified-step-copy span { font-size: 12px; }
+.simplified-step-prompt { font-size: 13px; -webkit-line-clamp: 2; }
 .simplified-step-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 5px 10px; }
 .simplified-step-runner {
   display: inline-flex; align-items: center; max-width: 100%; padding: 2px 7px;
@@ -86,7 +86,7 @@
 }
 .simplified-step-output { grid-column: 2 / -1; min-width: 0; }
 .simplified-step-output > summary {
-  width: fit-content; cursor: pointer; color: var(--blue); font-size: 12px; font-weight: 650;
+  width: fit-content; cursor: pointer; color: var(--blue); font-size: 13px; font-weight: 650;
 }
 .simplified-step-output-body { display: grid; gap: 4px; padding-top: 6px; }
 .simplified-step-output-log { min-height: 0; max-height: 240px; margin-top: 2px; }
@@ -123,7 +123,7 @@
 .run-tab {
   padding: 10px 12px; border: 0; border-bottom: 2px solid transparent;
   background: transparent; color: var(--muted); cursor: pointer; white-space: nowrap;
-  font-size: 12px;
+  font-size: 13px;
 }
 .run-tab:hover { color: var(--text); }
 .run-tab.active { color: var(--blue); border-bottom-color: var(--blue); font-weight: 650; }
@@ -167,22 +167,22 @@
 .workflow-card-heading { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .stat-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
 .stat-card {
-  background: var(--panel); border: 1px solid var(--line-soft); border-radius: var(--radius);
-  padding: 14px 16px; box-shadow: var(--shadow);
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 14px 16px;
 }
 .stat-label {
-  color: var(--muted-2); font-size: 10px; font-weight: 700;
+  color: var(--muted-2); font-size: 12px; font-weight: 700;
   text-transform: uppercase; letter-spacing: .12em;
 }
 .stat-value {
-  margin-top: 8px; font-size: 24px; font-weight: 720; letter-spacing: -.04em;
-  font-variant-numeric: tabular-nums;
+  margin-top: 8px; font-family: var(--font-display); font-size: 24px;
+  font-weight: 720; letter-spacing: -.04em; font-variant-numeric: tabular-nums;
 }
 .stat-card.waiting { border-bottom: 3px solid var(--amber); }
 .stat-card.failed { border-bottom: 3px solid var(--red); }
 .home-grid { display: grid; grid-template-columns: minmax(240px, .8fr) minmax(360px, 1.4fr); gap: 16px; }
 .attention-panel .panel-body { align-items: flex-start; }
-.panel-subtitle { margin-top: 3px; color: var(--muted); font-size: 10px; }
+.panel-subtitle { margin-top: 3px; color: var(--muted); font-size: 12px; }
 .attention-home-list { padding: 0; gap: 0; }
 .home-attention-row {
   width: 100%; display: grid; grid-template-columns: auto minmax(0, 1fr) auto;
@@ -193,7 +193,7 @@
 .home-attention-row:hover { background: var(--panel-2); }
 .attention-symbol {
   width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center;
-  background: var(--amber-soft); color: var(--amber); font-size: 11px; font-weight: 800;
+  background: var(--amber-soft); color: var(--amber); font-size: 12px; font-weight: 800;
 }
 .attention-symbol.budget { background: var(--red-soft); color: var(--red); }
 .attention-symbol.unknown { background: var(--blue-soft); color: var(--blue); }
@@ -222,7 +222,7 @@
   width: 34px; height: 39px; border: 1px solid var(--line); border-radius: 8px;
   display: grid; place-items: center; background: var(--panel-2); color: var(--blue);
 }
-.artifact-size { color: var(--muted-2); font-family: var(--mono); font-size: 10px; }
+.artifact-size { color: var(--muted-2); font-family: var(--mono); font-size: 12px; }
 /* An image card leads with the picture: the badge column collapses and the
    thumbnail takes the width, with the size caption floating over it. */
 .artifact-top-image { position: relative; display: block; }
@@ -239,9 +239,9 @@
 .artifact-name { margin-top: 3px; font-size: 13px; overflow-wrap: anywhere; }
 /* Label over value: a goal title needs the full card width to survive on one
    line, and an inline label eats a third of it. */
-.artifact-origin { width: 100%; display: grid; gap: 4px; min-width: 0; font-size: 11px; }
+.artifact-origin { width: 100%; display: grid; gap: 4px; min-width: 0; font-size: 12px; }
 .artifact-origin-label {
-  font-size: 9px; font-weight: 600; text-transform: uppercase;
+  font-size: 12px; font-weight: 600; text-transform: uppercase;
   letter-spacing: .04em;
 }
 .artifact-origin-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -271,7 +271,7 @@
 .workflow-drawer-root { position: fixed; inset: 0; z-index: 100; }
 .workflow-drawer-scrim {
   position: absolute; inset: 0; background: rgba(0, 0, 0, .42);
-  opacity: 0; transition: opacity .22s ease;
+  opacity: 0; transition: opacity .32s cubic-bezier(.45, .05, .35, 1);
 }
 .workflow-drawer {
   position: absolute; top: 0; right: 0; bottom: 0; width: 50vw;
@@ -279,8 +279,13 @@
   background: var(--panel); border-left: 1px solid var(--line);
   border-radius: var(--radius) 0 0 var(--radius);
   box-shadow: -18px 0 50px rgba(0, 0, 0, .22);
+  /* A straight slide from the right edge — translation only, never scale.
+     The easing ramps up from rest so the eye catches the panel leaving the
+     edge; a front-loaded curve lands it so fast it reads as a pop from the
+     corner. */
   transform: translateX(103%);
-  transition: transform .3s cubic-bezier(.32, .72, .22, 1);
+  transition: transform .32s cubic-bezier(.45, .05, .35, 1);
+  will-change: transform;
 }
 .workflow-drawer-root.open .workflow-drawer-scrim { opacity: 1; }
 .workflow-drawer-root.open .workflow-drawer { transform: none; }
@@ -293,9 +298,7 @@
 }
 .workflow-drawer .panel-head { flex: none; }
 .workflow-drawer .panel-body { min-height: 0; overflow-y: auto; }
-/* The revision editor band: opens by growing a grid row so the detail slides
-   down rather than jumping, and reads as a distinct surface from the detail
-   it revises. */
+/* The revision editor band is shared by the dedicated Workflow edit page. */
 .workflow-editor-wrap {
   display: grid; grid-template-rows: 0fr; flex: none;
   transition: grid-template-rows .3s cubic-bezier(.32, .72, .22, 1);
@@ -304,12 +307,19 @@
 .workflow-editor {
   display: grid; gap: 10px; min-height: 0; overflow: hidden;
   padding: 12px 14px; background: var(--panel-2);
-  border-bottom: 1px solid var(--line);
+  border-top: 1px solid var(--line);
 }
 .workflow-editor-head {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
 }
 .workflow-editor .actions { justify-content: flex-end; }
+.workflow-edit-page { min-height: min(760px, calc(100vh - 150px)); overflow: hidden; }
+.workflow-edit-page > .panel-head { align-items: flex-start; }
+.workflow-edit-canvas { min-width: 0; overflow: auto; }
+.workflow-edit-page > .workflow-editor-wrap {
+  border-top: 1px solid var(--line); background: var(--panel-2);
+}
+.workflow-edit-page .workflow-editor { padding: 16px 18px; }
 @media (prefers-reduced-motion: reduce) {
   .workflow-drawer, .workflow-drawer-scrim, .workflow-editor-wrap { transition: none; }
 }
@@ -341,7 +351,7 @@
 .history-day-group + .history-day-group { border-top: 1px solid var(--line); }
 .history-day-heading {
   margin: 0; padding: 12px 18px 8px; color: var(--muted);
-  background: var(--panel-2); font-size: 11px; letter-spacing: .08em;
+  background: var(--panel-2); font-size: 12px; letter-spacing: .08em;
   text-transform: uppercase;
 }
 .history-day-rows { display: grid; }
@@ -359,8 +369,8 @@
   display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical;
   -webkit-line-clamp: 2; line-clamp: 2; line-height: 1.35;
 }
-.history-goal-meta { overflow-wrap: anywhere; font-size: 12px; }
-.history-goal-artifacts { color: var(--muted); font-size: 12px; font-weight: 650; }
+.history-goal-meta { overflow-wrap: anywhere; font-size: 13px; }
+.history-goal-artifacts { color: var(--muted); font-size: 13px; font-weight: 650; }
 .history-goal-artifacts.available { color: var(--blue); }
 .history-goal-tail { display: inline-flex; align-items: center; gap: 12px; }
 .history-goal-chevron { color: var(--muted); font-size: 24px; line-height: 1; }
@@ -368,7 +378,7 @@
   display: flex; align-items: center; justify-content: space-between;
   gap: 12px; min-height: 36px; margin-top: 12px;
 }
-.history-result-count { margin: 0; font-size: 12px; }
+.history-result-count { margin: 0; font-size: 13px; }
 
 
 
@@ -422,8 +432,8 @@
 
 .fact-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin: 0; }
 .fact-grid div { padding: 10px; border-radius: 8px; background: var(--panel-2); }
-.fact-grid dt { color: var(--muted); font-size: 11px; }
-.fact-grid dd { margin: 5px 0 0; overflow-wrap: anywhere; font-size: 12px; }
+.fact-grid dt { color: var(--muted); font-size: 12px; }
+.fact-grid dd { margin: 5px 0 0; overflow-wrap: anywhere; font-size: 13px; }
 /* A goal is a prompt: its title is one line, and a paragraph must not push
    every other fact down the panel. */
 .fact-grid dd.fact-line { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -479,8 +489,8 @@
   display: flex; align-items: flex-end; justify-content: space-between; gap: 20px;
   padding: 4px 0 2px;
 }
-.view-intro h2 { margin: 5px 0; font-size: clamp(20px, 3vw, 26px); letter-spacing: -.02em; }
-.view-intro p { margin: 0; max-width: 68ch; font-size: 12px; }
+.view-intro h2 { margin: 5px 0; font-size: clamp(22px, 3vw, 24px); letter-spacing: -.02em; }
+.view-intro p { margin: 0; max-width: 68ch; font-size: 13px; }
 /* Grid and flex children default to min-width:auto, so a wide drawing would
    stretch the whole panel instead of scrolling inside its own strip. */
 .workflow-detail .panel-body { min-width: 0; }
@@ -497,8 +507,8 @@
 }
 .workflow-card-main:hover { background: var(--panel-2); }
 .workflow-card-main strong { font-size: 15px; }
-.workflow-meta { color: var(--blue); font-size: 12px; }
-.workflow-card-facts { color: var(--muted); font-family: var(--mono); font-size: 11px; }
+.workflow-meta { color: var(--blue); font-size: 13px; }
+.workflow-card-facts { color: var(--muted); font-family: var(--mono); font-size: 12px; }
 /* The card's own action sits outside its clickable body: a button inside a
    button is not markup a browser will honour. */
 .workflow-card-actions {
@@ -514,7 +524,7 @@
 .workflow-node {
   width: 32px; height: 32px; display: grid; place-items: center; position: relative;
   border: 1px solid var(--line); border-radius: 9px; background: var(--panel);
-  color: var(--blue); font-family: var(--mono); font-size: 11px; font-weight: 700;
+  color: var(--blue); font-family: var(--mono); font-size: 12px; font-weight: 700;
 }
 .workflow-node + .workflow-node { margin-left: 17px; }
 .workflow-node + .workflow-node::before {
@@ -553,8 +563,8 @@
 
 .review-list { display: grid; gap: 10px; margin: 0; }
 .review-list div { padding: 12px; border-radius: 8px; background: var(--panel-2); }
-.review-list dt { color: var(--muted); font-size: 11px; }
-.review-list dd { margin: 6px 0 0; white-space: pre-wrap; font-size: 12px; }
+.review-list dt { color: var(--muted); font-size: 12px; }
+.review-list dd { margin: 6px 0 0; white-space: pre-wrap; font-size: 13px; }
 
 @media (max-width: 900px) {
   .workflow-grid { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
@@ -607,7 +617,11 @@
   background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px;
   padding: 12px; font: inherit; line-height: 1.55;
 }
-.agent-editor-prompt textarea:focus { outline: 2px solid var(--blue); outline-offset: 1px; }
+.field-label { display: block; margin-bottom: 6px; font-size: 13px; font-weight: 600; }
+.agent-choice-static {
+  padding: 9px 10px; border: 1px solid var(--line-soft); border-radius: 8px;
+  background: var(--panel); color: var(--text); font-size: 13px;
+}
 .agent-editor-preview .definition-list { max-height: 280px; overflow: auto; }
 .agent-editor-preview .artifact-preview { max-height: 360px; overflow: auto; }
 .agent-editor-diff {
@@ -648,18 +662,54 @@
 .workflow-graph-scroll {
   overflow-x: auto; padding-bottom: 4px; max-width: 100%; min-width: 0;
 }
+.workflow-graph-pane { display: grid; gap: 8px; min-width: 0; }
+.graph-zoom-controls {
+  display: flex; align-items: center; justify-content: flex-end; gap: 6px;
+}
+.graph-zoom-button {
+  width: 30px; height: 30px; padding: 0; display: grid; place-items: center;
+  font-size: 18px; line-height: 1;
+}
+.graph-zoom-level { min-width: 54px; color: var(--muted); text-align: center; font-size: 13px; }
 .workflow-graph { display: block; max-width: none; }
 .graph-box rect {
   fill: var(--panel-2); stroke: var(--line); stroke-width: 1;
 }
+.graph-box.editable { cursor: pointer; }
+.graph-box.editable:hover rect,
+.graph-box.editable:focus rect { stroke-width: 2; }
+.graph-box.editable:focus { outline: none; }
+.action-editor-dialog textarea { min-height: 150px; resize: vertical; }
 .graph-box.kind-terminal rect { fill: var(--green-soft); stroke: var(--green); }
+.graph-terminal-label { fill: var(--green); font-size: 12px; font-weight: 700; }
 .graph-box.kind-human rect { fill: var(--amber-soft); stroke: var(--amber); }
 .graph-box.kind-decision rect { fill: var(--blue-soft); stroke: var(--blue); }
 .graph-box-id {
-  fill: var(--text); font-family: var(--mono); font-size: 12px; font-weight: 600;
+  fill: var(--text); font-family: var(--mono); font-size: 13px; font-weight: 600;
 }
-.graph-box-meta { fill: var(--muted); font-family: var(--mono); font-size: 11px; }
+.graph-box-meta { fill: var(--muted); font-family: var(--mono); font-size: 12px; }
 .graph-edge { fill: none; stroke: var(--muted-2); stroke-width: 1.5; }
 .graph-edge.back { stroke-dasharray: 4 3; }
 .graph-edge.route-failure { stroke: var(--red); }
 #graphArrow path { fill: var(--muted-2); }
+
+/* Registered Agent handlers, one card each. */
+.data-card {
+  padding: 14px; border: 1px solid var(--line-soft); border-radius: 10px;
+  background: var(--panel); display: grid; gap: 8px; align-content: start;
+}
+.agents-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
+.agent-card:hover { transform: translateY(-2px); border-color: var(--muted-2); }
+.agent-head { display: flex; align-items: center; gap: 10px; }
+.agent-avatar {
+  width: 34px; height: 34px; border-radius: 9px; flex: 0 0 auto;
+  display: grid; place-items: center;
+  background: var(--blue-soft); color: var(--blue);
+  font-family: var(--mono); font-size: 12px; font-weight: 700;
+}
+.agent-version { font-size: 13px; margin-top: 6px; }
+.capabilities { display: flex; flex-wrap: wrap; gap: 5px; }
+.capability {
+  padding: 3px 6px; border: 1px solid var(--line-soft); border-radius: 5px;
+  color: var(--muted); font-family: var(--mono); font-size: 12px;
+}

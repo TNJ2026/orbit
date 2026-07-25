@@ -59,6 +59,7 @@ def build_mcp(
     db_path: Path | str,
     durable_service,
     *,
+    workflow_db_path: Path | str | None = None,
     authenticator: Callable[[Request], str | None] | None = None,
     authorizer: Authorizer | None = None,
     single_goal_mode: bool = True,
@@ -66,7 +67,8 @@ def build_mcp(
     path = Path(db_path)
     reads = ReadModelService(path)
     runs = RunApplicationService(
-        path, durable_service, enforce_single_goal=single_goal_mode
+        path, durable_service, enforce_single_goal=single_goal_mode,
+        workflow_db_path=workflow_db_path,
     )
     guard = authorizer or Authorizer()
 

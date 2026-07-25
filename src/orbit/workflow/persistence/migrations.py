@@ -1111,6 +1111,13 @@ _MIGRATIONS: tuple[tuple[int, str, str], ...] = (
         ALTER TABLE workflow_authoring_jobs ADD COLUMN display_language TEXT;
         """,
     ),
+    (
+        21,
+        "authoring job requested agent",
+        """
+        ALTER TABLE workflow_authoring_jobs ADD COLUMN requested_agent TEXT;
+        """,
+    ),
 )
 
 

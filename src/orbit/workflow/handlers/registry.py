@@ -98,11 +98,27 @@ class ExecutionRegistry:
             raise RuntimeError("ExecutionRegistry must be sealed before resolve")
         _version_tuple(exact_version)
         entry = self._entries.get((name, exact_version))
+        # Agent CLI releases are operational upgrades, not Workflow contract
+        # migrations. A published Workflow keeps the logical Agent name while
+        # execution follows the currently installed build. Other Handler kinds
+        # remain exact-version and fingerprint pinned.
+        if entry is None:
+            compatible_agents = [
+                candidate for (candidate_name, _), candidate in self._entries.items()
+                if candidate_name == name
+                and "agent.invoke" in candidate.manifest.capabilities
+            ]
+            if compatible_agents:
+                entry = max(
+                    compatible_agents,
+                    key=lambda candidate: _version_tuple(candidate.manifest.version),
+                )
         if entry is None:
             raise HandlerNotAvailableError(f"handler not available: {name}@{exact_version}")
         if (
             expected_manifest_fingerprint is not None
             and entry.manifest.fingerprint != expected_manifest_fingerprint
+            and "agent.invoke" not in entry.manifest.capabilities
         ):
             raise HandlerContractMismatchError(
                 f"handler manifest mismatch: {name}@{exact_version}"

@@ -207,6 +207,10 @@ export class Api {
   }
 
 
+  handlerCatalog() {
+    return this.get("/api/v1/handler-catalog");
+  }
+
   workflowCatalog() {
     return this.get("/api/v1/workflows");
   }

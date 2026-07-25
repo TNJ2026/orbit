@@ -16,10 +16,20 @@ from .platform.cutover import (
 )
 from .platform.projects import (
     project_db_path,
+    public_workflow_db_path,
     project_state_dir,
     resolve_project_root,
     upsert_project,
 )
+
+
+def _workflow_db_path(explicit: str | None) -> str:
+    """Shared definitions by default; an explicit database remains self-contained."""
+
+    if explicit:
+        return explicit
+    _runtime_db_path(None)  # Preserve the existing cutover acknowledgement gate.
+    return str(public_workflow_db_path())
 
 
 def _runtime_db_path(explicit: str | None, *, acknowledged: bool = False) -> str:
@@ -179,7 +189,7 @@ def _workflow_inventory(args, machine_output: bool) -> None:
     safe to run against a live database.
     """
 
-    path = Path(_runtime_db_path(args.db))
+    path = Path(_workflow_db_path(args.db))
     if not path.exists():
         raise SystemExit(
             f"no runtime database at {path}; run `orbit serve` once, or pass --db"
@@ -225,7 +235,7 @@ def _workflow_command(args) -> None:
         source_format = "json" if source_path.suffix.lower() == ".json" else "yaml"
         store = None
         if args.workflow_action == "publish":
-            store = SQLiteWorkflowVersionStore(_runtime_db_path(args.db))
+            store = SQLiteWorkflowVersionStore(_workflow_db_path(args.db))
         service = WorkflowDefinitionService(catalogs, store)
         if args.workflow_action == "validate":
             compiled = service.validate_workflow(
@@ -297,9 +307,13 @@ def _run_command(args) -> None:
     )
 
     db_path = _runtime_db_path(args.db)
+    workflow_db_path = _workflow_db_path(args.db)
     service = RunApplicationService(
-        db_path, DurableRuntimeApplicationService(db_path),
+        db_path, DurableRuntimeApplicationService(
+            db_path, workflow_db_path=workflow_db_path,
+        ),
         enforce_single_goal=True,
+        workflow_db_path=workflow_db_path,
     )
 
     try:
@@ -399,6 +413,7 @@ def _serve(args) -> None:
     try:
         app = create_app(
             db_path,
+            workflow_db_path=(db_path if args.db else public_workflow_db_path()),
             handlers=handlers,
             schemas=BUILTIN_SCHEMAS,
             artifact_backend=artifact_backend,
@@ -431,7 +446,7 @@ def _serve(args) -> None:
         f"(db: {db_path}, artifacts: {artifact_backend.root})",
         flush=True,
     )
-    _report_goal_readiness(db_path)
+    _report_goal_readiness(db_path if args.db else public_workflow_db_path())
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 
 

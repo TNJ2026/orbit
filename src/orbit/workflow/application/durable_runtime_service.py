@@ -137,13 +137,13 @@ class DurableRuntimeApplicationService:
         artifact_backend=None,
         uow_factory=None,
         human_task_delivery=None,
-        planner_service=None,
+        planner_service=None, workflow_db_path=None,
         budget_service=None,
     ) -> None:
         self.path = Path(path)
         self.execution_registry = execution_registry
         self.artifact_backend = artifact_backend
-        self.workflow_versions = SQLiteWorkflowVersionStore(self.path)
+        self.workflow_versions = SQLiteWorkflowVersionStore(workflow_db_path or self.path)
         self.budget_service = budget_service or BudgetService(self.path)
         # Injectable so the memory adapter can be driven through the same
         # service the production one uses. Assigning `service.uow_factory`

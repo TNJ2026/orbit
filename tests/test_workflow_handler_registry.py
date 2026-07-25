@@ -32,6 +32,15 @@ def manifest(version="1.0.0"):
     )
 
 
+def agent_manifest(version="1.0.0"):
+    return HandlerManifest(
+        "agent.codex", version, ("action",), {}, {},
+        {"type": "object"}, ExecutionSafety.UNKNOWN_ON_LEASE_LOSS,
+        ResourceProfile(0, 0, 0, 60, 0, "agent"), "schema://object/1.0",
+        ("agent.invoke",),
+    )
+
+
 class HandlerRegistryTests(unittest.TestCase):
     def test_manifest_is_versioned_validated_and_fingerprinted(self):
         value = manifest()
@@ -65,6 +74,20 @@ class HandlerRegistryTests(unittest.TestCase):
                 value.name, value.version,
                 expected_manifest_fingerprint="sha256:" + "0" * 64,
             )
+
+    def test_agent_cli_upgrade_resolves_the_installed_version(self):
+        registry = ExecutionRegistry()
+        installed = registry.register(
+            agent_manifest("1.1.7"), _Handler(), implementation_id="agent.codex.1.1.7",
+        )
+        registry.seal()
+
+        resolved = registry.resolve(
+            "agent.codex", "1.1.5",
+            expected_manifest_fingerprint="sha256:" + "0" * 64,
+        )
+
+        self.assertEqual(installed, resolved)
 
 
 if __name__ == "__main__": unittest.main()

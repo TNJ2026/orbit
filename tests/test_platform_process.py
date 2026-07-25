@@ -128,6 +128,22 @@ class RunTests(unittest.TestCase):
 
 
 class OutputLimitTests(unittest.TestCase):
+    def test_utf8_character_split_across_reads_is_preserved(self) -> None:
+        read_fd, write_fd = os.pipe()
+        try:
+            os.write(write_fd, "网络搜索".encode("utf-8"))
+        finally:
+            os.close(write_fd)
+        buffer = process.OutputBuffer()
+        with os.fdopen(read_fd, "rb", buffering=0) as stream:
+            process.stream_output(stream, buffer, read_size=1)
+        self.assertEqual("网络搜索", buffer.text)
+        self.assertNotIn("�", buffer.text)
+
+    def test_invalid_utf8_is_rejected_instead_of_replaced(self) -> None:
+        with self.assertRaises(UnicodeDecodeError):
+            process.run([PY, "-c", "import os;os.write(1,b'\\xff')"])
+
     def test_output_bomb_is_truncated_not_unbounded(self) -> None:
         result = process.run(
             [PY, "-c", "print('x'*100000)"], max_output_bytes=1000, timeout=30

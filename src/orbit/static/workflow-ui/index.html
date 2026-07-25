@@ -5,22 +5,27 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Orbit Runtime</title>
   <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <!-- DESIGN.md type system: Hanken Grotesk (headlines), Inter (body),
+       JetBrains Mono (technical labels). display=swap keeps the fallback
+       stack rendering instantly, so an offline local runtime never blocks. -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&display=swap">
   <link rel="stylesheet" href="assets/app.css">
 </head>
 <body>
   <a class="skip-link" href="#content" data-i18n="app.skipToContent">Skip to main content</a>
   <div class="app">
-    <aside class="sidebar" id="sidebar">
-      <div class="brand">
-        <div class="brand-mark" aria-hidden="true"></div>
-        <div class="brand-copy">
-          <div data-i18n="app.title">Orbit Runtime</div>
-          <div class="brand-sub" data-i18n="app.subtitle">Mission control</div>
+    <main class="main">
+      <header class="topbar">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true"></div>
+          <div class="brand-copy">
+            <div data-i18n="app.title">Orbit Runtime</div>
+          </div>
         </div>
-      </div>
-      <nav class="nav" data-i18n-label="nav.label" aria-label="Main navigation">
-        <div class="nav-group">
-          <div class="nav-group-title" data-i18n="nav.group.workspace">Workspace</div>
+
+        <nav class="nav" data-i18n-label="nav.label" aria-label="Main navigation">
           <button class="nav-button" data-view="home" aria-current="page">
             <span class="nav-icon" aria-hidden="true">⌂</span>
             <span id="homeNavLabel" data-i18n="nav.home">Workspace</span>
@@ -33,40 +38,30 @@
             <span class="nav-icon" aria-hidden="true">◷</span>
             <span data-i18n="nav.goals">History</span>
           </button>
-          <button class="nav-button" data-view="artifacts">
-            <span class="nav-icon" aria-hidden="true">◇</span>
-            <span data-i18n="nav.artifacts">Artifacts</span>
+          <button class="nav-button" data-view="agents">
+            <span class="nav-icon" aria-hidden="true">∆</span>
+            <span data-i18n="nav.agents">Agents</span>
           </button>
-        </div>
-      </nav>
-      <div class="sidebar-foot">
-        <div class="runtime-card" id="runtimeCard">
-          <div class="runtime-line">
-            <span class="live-dot" id="runtimeDot" aria-hidden="true"></span>
-            <strong id="runtimeStatus" data-i18n="shell.runtime.checking">Checking runtime…</strong>
-          </div>
-          <div class="runtime-line muted"><span id="runtimeDetail"></span></div>
-        </div>
-      </div>
-    </aside>
+        </nav>
 
-    <button class="nav-backdrop" id="navBackdrop" data-i18n-label="nav.close" aria-label="Close navigation" tabindex="-1"></button>
-    <main class="main">
-      <header class="topbar">
-        <button class="button nav-toggle" id="navToggle" aria-controls="sidebar" aria-expanded="false" data-i18n-label="nav.toggle" aria-label="Open navigation">☰</button>
-        <div class="breadcrumb">
-          <span data-i18n="shell.breadcrumb.root">Orbit</span>
-          <span class="crumb-sep" aria-hidden="true">/</span>
-          <h1 id="viewTitle">Workspace</h1>
+        <div class="topbar-controls">
+          <div class="runtime-card-inline" id="runtimeCard">
+            <span class="live-dot" id="runtimeDot" aria-hidden="true"></span>
+            <span id="runtimeStatus" data-i18n="shell.runtime.checking">Checking runtime…</span>
+            <span id="runtimeDetail" class="muted"></span>
+          </div>
+          <button class="button" id="themeToggle" data-i18n-label="theme.toggle" aria-label="Toggle theme">◐</button>
+          <button class="button" id="refresh" data-i18n="action.refresh">Refresh</button>
+          <select id="localeSelect" data-i18n-label="locale.switch" aria-label="Change language"></select>
+          <span class="topbar-refresh-control">
+            <label for="refreshInterval" data-i18n="settings.refresh">Live refresh interval</label>
+            <select id="refreshInterval" data-i18n-label="settings.refresh" aria-label="Live refresh interval"></select>
+          </span>
         </div>
-        <button class="button" id="refresh" data-i18n="action.refresh">Refresh</button>
-        <select id="localeSelect" data-i18n-label="locale.switch" aria-label="Change language"></select>
-        <button class="button" id="themeToggle" data-i18n-label="theme.toggle" aria-label="Toggle theme">◐</button>
-        <span class="topbar-refresh-control">
-          <label for="refreshInterval" data-i18n="settings.refresh">Live refresh interval</label>
-          <select id="refreshInterval" data-i18n-label="settings.refresh" aria-label="Live refresh interval"></select>
-        </span>
       </header>
+      <!-- The page's one heading: invisible, but a screen reader still hears
+           which view it is on. -->
+      <h1 id="viewTitle" class="sr-only">Workspace</h1>
       <!-- Command outcomes are announced here rather than shown as a toast, so
            a screen reader hears the same result a sighted operator reads. -->
       <div id="liveRegion" class="banner info" role="status" aria-live="polite" hidden></div>
