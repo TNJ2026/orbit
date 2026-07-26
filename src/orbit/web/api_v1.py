@@ -1239,6 +1239,42 @@ def build_api_v1(
             return error("not_found", "authoring job not found", 404)
         return JSONResponse(envelope(job))
 
+    async def authoring_job_output(request: Request) -> JSONResponse:
+        """What the Agent CLI printed while it wrote this job's DSL.
+
+        A tail, like a run's console: the client asks "what is new since chunk
+        N". Sensitive scope, because a console holds whatever the Agent echoed,
+        and the job lookup is what proves this actor owns it.
+        """
+
+        actor = authenticate(request, SENSITIVE_SCOPE)
+        if isinstance(actor, JSONResponse):
+            return actor
+        allowed_params = {"after", "limit"}
+        unknown = set(request.query_params) - allowed_params
+        if unknown:
+            return error(
+                "invalid_request", f"unknown output parameter: {sorted(unknown)[0]}"
+            )
+        try:
+            after = int(request.query_params.get("after") or 0)
+            limit = page_size(request.query_params.get("limit"))
+        except ValueError as exc:
+            return error("invalid_request", str(exc))
+        job_id = request.path_params["job_id"]
+        try:
+            authoring_jobs.get(job_id, actor=actor)
+        except (AttributeError, LookupError):
+            return error("not_found", "authoring job not found", 404)
+        chunks, next_after = authoring_jobs.output(
+            job_id, after_chunk_id=after, limit=limit,
+        )
+        return JSONResponse(envelope({
+            "chunks": chunks,
+            "next_after": next_after,
+            "has_more": next_after is not None,
+        }))
+
     async def authoring_job_cancel(request: Request) -> JSONResponse:
         if authoring_jobs is None:
             return error("generation_unavailable", "authoring jobs are unavailable", 503)
@@ -2354,6 +2390,10 @@ def build_api_v1(
         Route(
             "/api/v1/workflow-authoring-jobs/{job_id}",
             authoring_job_read, methods=["GET"],
+        ),
+        Route(
+            "/api/v1/workflow-authoring-jobs/{job_id}/output",
+            authoring_job_output, methods=["GET"],
         ),
         Route(
             "/api/v1/workflow-authoring-jobs/{job_id}/cancel",

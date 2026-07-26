@@ -371,6 +371,7 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
 
     def test_refresh_interval_moves_to_the_topbar_and_settings_are_removed(self) -> None:
         page = self.open("en-US")
+        page.get_by_role("button", name="More", exact=True).click()
         interval = page.get_by_role("combobox", name="Live refresh interval")
         interval.wait_for()
         self.assertTrue(page.evaluate("""
@@ -491,7 +492,7 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
 
         self.assertEqual([], per_row)
         self.assertIn(
-            "content", page.locator(".history-goal-row").first.inner_text().lower(),
+            "artifacts", page.locator(".history-goal-row").first.inner_text().lower(),
         )
 
 

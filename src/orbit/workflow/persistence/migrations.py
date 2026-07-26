@@ -1118,6 +1118,24 @@ _MIGRATIONS: tuple[tuple[int, str, str], ...] = (
         ALTER TABLE workflow_authoring_jobs ADD COLUMN requested_agent TEXT;
         """,
     ),
+    (
+        22,
+        "authoring job console output",
+        # What the Agent CLI printed while it wrote the DSL. An observation of
+        # a child process, like attempt_output, not a projection of events —
+        # so it is written straight through and read as a tail by chunk_id.
+        """
+        CREATE TABLE authoring_job_output (
+            chunk_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id TEXT NOT NULL,
+            stream TEXT NOT NULL CHECK (stream IN ('stdout', 'stderr')),
+            text TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX authoring_job_output_by_job
+            ON authoring_job_output(job_id, chunk_id);
+        """,
+    ),
 )
 
 

@@ -89,6 +89,16 @@ function generationAgents() {
   return capability?.available ? capability.agents || [] : [];
 }
 
+/** The Agent this Runtime writes with when a request names none.
+ *
+ * The list is sorted for display, so its first entry is not the fallback the
+ * server would actually use; the server names that one for us. */
+function defaultGenerationAgent() {
+  const agents = generationAgents();
+  const preferred = shellFacts?.capabilities?.workflow_generation?.default_agent;
+  return agents.includes(preferred) ? preferred : agents[0] || "";
+}
+
 
 function generationAgentField(id, selected, onchange) {
   const agents = generationAgents();
@@ -97,6 +107,8 @@ function generationAgentField(id, selected, onchange) {
     el("span", { class: "field-label", text: i18n.t("generate.writtenBy") }),
     el("div", { class: "agent-choice-static mono", text: agents[0] }),
   ]);
+  // No helper line: the field opens on the Agent the Runtime would use anyway,
+  // so there is no "leave it unset" case left to explain.
   return el("div", { class: "field" }, [
     el("label", { for: id, text: i18n.t("generate.writtenBy") }),
     el("select", { id, onchange: (event) => onchange(event.target.value) },
@@ -104,7 +116,6 @@ function generationAgentField(id, selected, onchange) {
         value: name, text: name,
         ...(name === selected ? { selected: "selected" } : {}),
       }))),
-    el("small", { class: "muted", text: i18n.t("generate.writtenByHint") }),
   ]);
 }
 
@@ -250,6 +261,65 @@ function workflowGraphView(graph, actionEditors = {}, onEditAction = null) {
   ]);
 }
 
+/* Each node kind owns an accent; the glyph tile and prompt key pick it up via
+ * --row-accent. Terminal reads as neutral slate, matching the design list. */
+const KIND_COLOR = {
+  action: "blue", human: "amber", decision: "purple", terminal: "muted",
+};
+
+/* Inline glyphs (no icon-font dependency): one per kind, plus the row tools.
+ * Anything we have no shape for falls back to the action brackets. */
+function kindGlyph(kind) {
+  const paths = {
+    action: ["M9 8l-4 4 4 4", "M15 8l4 4-4 4"],
+    human: ["M12 12a3.5 3.5 0 100-7 3.5 3.5 0 000 7", "M5 19a7 7 0 0114 0"],
+    decision: ["M12 3l8 9-8 9-8-9z"],
+    terminal: ["M4 5h16v14H4z", "M8 10l3 2-3 2", "M13 15h4"],
+  };
+  return svgEl("svg", {
+    width: "20", height: "20", viewBox: "0 0 24 24", fill: "none",
+    stroke: "currentColor", "stroke-width": "1.8",
+    "stroke-linecap": "round", "stroke-linejoin": "round",
+  }, (paths[kind] || paths.action).map((d) => svgEl("path", { d })));
+}
+function editGlyph() {
+  return svgEl("svg", {
+    width: "16", height: "16", viewBox: "0 0 24 24", fill: "none",
+    stroke: "currentColor", "stroke-width": "1.8",
+    "stroke-linecap": "round", "stroke-linejoin": "round",
+  }, [
+    svgEl("path", { d: "M4 20h4L18.5 9.5a2.1 2.1 0 00-3-3L5 17z" }),
+    svgEl("path", { d: "M13.5 6.5l3 3" }),
+  ]);
+}
+function noteGlyph() {
+  return svgEl("svg", {
+    width: "15", height: "15", viewBox: "0 0 24 24", fill: "none",
+    stroke: "currentColor", "stroke-width": "1.8",
+    "stroke-linecap": "round", "stroke-linejoin": "round",
+  }, [svgEl("path", { d: "M7 7h10l-3-3 M17 17H7l3 3" })]);
+}
+
+/* No authored prompt? Show the real I/O signature (and a human's task kind)
+ * instead of the design's placeholder copy — same slot, truthful content. */
+function stepNote(node) {
+  const ins = (node.inputs || []).map((port) => port.id).filter(Boolean);
+  const outs = (node.outputs || []).map((port) => port.id).filter(Boolean);
+  const taskKind = node.kind === "human" ? node.config?.task_kind : null;
+  if (!ins.length && !outs.length && !taskKind) return null;
+  return el("div", { class: "defn-note" }, [
+    noteGlyph(),
+    ins.length
+      ? el("span", { class: "defn-io" }, ins.map((id) => el("span", { class: "defn-chip in", text: id })))
+      : null,
+    ins.length && outs.length ? el("span", { class: "defn-arrow", text: "→" }) : null,
+    outs.length
+      ? el("span", { class: "defn-io" }, outs.map((id) => el("span", { class: "defn-chip out", text: id })))
+      : null,
+    taskKind ? el("span", { class: "defn-kind defn-kind-amber", text: taskKind }) : null,
+  ]);
+}
+
 function definitionList(definition, graph = null, actionEditors = {}, onEditAction = null) {
   const positions = new Map(
     (graph?.layout?.positions || []).map((item) => [item.node_id, item]),
@@ -263,26 +333,48 @@ function definitionList(definition, graph = null, actionEditors = {}, onEditActi
     if (!b) return -1;
     return a.depth - b.depth || a.lane - b.lane || left.id.localeCompare(right.id);
   });
-  return el("div", { class: "definition-list" }, nodes.map((node) =>
-    el("div", { class: "definition-node" }, [
-      el("div", { class: "actions" }, [
-        el("span", { class: "mono", text: node.id }),
-        el("span", { class: "pill", text: node.kind }),
-        node.handler ? el("span", {
-          class: "muted mono", text: `${node.handler.name}@${node.handler.version}`,
-        }) : null,
-        node.kind === "action" && actionEditors[node.id] ? el("button", {
-          type: "button", class: "button compact",
-          text: i18n.t("workflows.editAction"),
-          onclick: () => onEditAction?.(node.id),
-        }) : null,
+  return el("div", { class: "definition-list defn-list" }, nodes.map((node) => {
+    const color = KIND_COLOR[node.kind] || "muted";
+    const prompt = typeof node.config?.prompt === "string" ? node.config.prompt.trim() : "";
+    const editable = node.kind === "action" && actionEditors[node.id];
+    return el("div", { class: `defn-row kind-${node.kind}` }, [
+      el("div", { class: "defn-id" }, [
+        el("span", { class: `defn-glyph glyph-${color}`, "aria-hidden": "true" }, [kindGlyph(node.kind)]),
+        el("div", { class: "defn-id-text" }, [
+          el("div", { class: "defn-name", text: node.id }),
+          el("div", { class: "defn-meta" }, [
+            el("span", {
+              class: `defn-kind${color === "amber" || color === "purple" ? ` defn-kind-${color}` : ""}`,
+              text: node.kind,
+            }),
+            node.handler ? el("span", {
+              class: "defn-handler", text: node.handler.name.replace(/^agent\./, ""),
+            }) : null,
+          ]),
+        ]),
       ]),
       // The authored prompt is what this step actually asks its Agent; a
       // reader scanning the definition wants it next to the handler name, not
-      // buried in the source.
-      stepPrompt(node.config),
-    ]),
-  ));
+      // buried in the source. No prompt → the I/O signature fills the slot.
+      prompt
+        ? el("div", { class: "defn-prompt" }, [
+          el("div", { class: "defn-prompt-bar", text: i18n.t("workflows.promptConfig") }),
+          el("div", { class: "defn-prompt-body", title: prompt }, [
+            el("span", { class: "defn-prompt-key", text: "prompt:" }),
+            el("span", { text: prompt }),
+          ]),
+        ])
+        : stepNote(node),
+      editable ? el("div", { class: "defn-tools" }, [
+        el("button", {
+          type: "button", class: "defn-edit",
+          "aria-label": i18n.t("workflows.editAction"),
+          title: i18n.t("workflows.editAction"),
+          onclick: () => onEditAction?.(node.id),
+        }, [editGlyph()]),
+      ]) : null,
+    ]);
+  }));
 }
 
 function openActionEditorDialog(workflow, nodeId, onSaved) {
@@ -1918,66 +2010,99 @@ async function renderWorkflows(root) {
 /* Registered Agent handlers: identity and durable-attempt facts from the
  * catalog. The Runtime collects no heartbeats, so "registered" is the only
  * status honestly on offer. */
+const AGENT_HUES = [
+  "hue-blue", "hue-purple", "hue-emerald", "hue-indigo",
+  "hue-amber", "hue-cyan", "hue-rose", "hue-pink",
+];
+/* A handler family shares one hue: hash the name up to the first dash, so
+ * hermes-* all land on the same color and colors survive new registrations.
+ * A few handlers get a hand-picked hue that reads as their identity. */
+const AGENT_HUE_OVERRIDE = { claude: "hue-amber" };
+function agentHue(shortName) {
+  if (AGENT_HUE_OVERRIDE[shortName]) return AGENT_HUE_OVERRIDE[shortName];
+  const base = shortName.split("-")[0];
+  let hash = 5381;
+  for (const char of base) hash = (hash * 33 + char.codePointAt(0)) >>> 0;
+  return AGENT_HUES[hash % AGENT_HUES.length];
+}
+
 async function renderAgents(root) {
   const catalog = (await api.handlerCatalog()).data;
   const agents = catalog.handlers.filter((handler) => handler.name.startsWith("agent."));
-  root.append(el("section", { class: "panel" }, [
-    el("div", { class: "panel-head" }, [
-      el("div", { class: "panel-title", text: i18n.t("agents.handlers") }),
+  root.append(el("header", { class: "view-intro" }, [
+    el("div", {}, [
+      el("h2", { text: i18n.t("agents.handlers") }),
+      el("p", { class: "muted", text: i18n.t("agents.subtitle") }),
     ]),
-    el("div", { class: "panel-body agents-grid" }, agents.length
-      ? agents.map((handler) => {
-        const initials = handler.name.replace(/^agent\./, "").slice(0, 2).toUpperCase();
-        const capabilities = (handler.capabilities || []).filter(
-          (capability) => capability !== "agent.invoke",
-        );
-        return el("article", { class: "data-card list-option-card agent-card" }, [
-          el("div", { class: "agent-head" }, [
-            el("span", { class: "agent-avatar", "aria-hidden": "true", text: initials }),
-            el("div", {}, [
-              el("div", { class: "panel-title mono", text: handler.name }),
-              el("div", { class: "muted mono agent-version", text: handler.version }),
-            ]),
+    el("div", { class: "agents-online" }, [
+      el("span", { class: "agents-online-dot", "aria-hidden": "true" }),
+      el("span", { text: i18n.t("agents.online", { count: i18n.number(agents.length) }) }),
+    ]),
+  ]));
+  root.append(el("div", { class: "agents-grid" }, agents.length
+    ? agents.map((handler) => {
+      const shortName = handler.name.replace(/^agent\./, "");
+      return el("article", { class: "agent-card" }, [
+        el("div", { class: "agent-head" }, [
+          el("span", {
+            class: `agent-avatar ${agentHue(shortName)}`,
+            "aria-hidden": "true", text: shortName.slice(0, 2).toUpperCase(),
+          }),
+          el("div", { class: "agent-id" }, [
+            el("h3", { class: "agent-name", text: shortName, title: handler.name }),
+            el("div", { class: "mono agent-version", text: handler.version }),
           ]),
-          capabilities.length
-            ? el("div", { class: "capabilities" }, capabilities.map((capability) =>
-                el("span", { class: "capability", text: capability })))
-            : null,
-          el("div", {
-            class: "muted mono",
+        ]),
+        el("div", { class: "agent-stat" }, [
+          el("span", { class: "agent-stat-label", text: i18n.t("agents.runCountLabel") }),
+          el("span", {
+            class: "agent-stat-pill",
             text: i18n.t("agents.runCount", {
               count: i18n.number(handler.attempt_count ?? 0),
             }),
           }),
-          handler.failed_count > 0 ? el("div", {
-            class: "muted mono",
-            text: i18n.t("agents.failedCount", {
+        ]),
+        handler.failed_count > 0 ? el("div", { class: "agent-stat" }, [
+          el("span", { class: "agent-stat-label", text: i18n.t("agents.failedLabel") }),
+          el("span", {
+            class: "agent-stat-pill err",
+            text: i18n.t("agents.failedTimes", {
               count: i18n.number(handler.failed_count),
             }),
-          }) : null,
-        ]);
-      })
-      : [el("div", { class: "muted", text: i18n.t("agents.empty") })]),
-  ]));
+          }),
+        ]) : null,
+      ]);
+    })
+    : [el("div", { class: "muted", text: i18n.t("agents.empty") })]));
 }
 
-/* The detail slides in from the right over the catalog, not a page under it.
+/* The detail reads as a centred modal over the catalog, not a page under it.
  *
- * `#/workflows/{id}` stays the address, so the drawer is opened by the route
+ * `#/workflows/{id}` stays the address, so the modal is opened by the route
  * and dismissing it navigates back — Escape, the scrim and the Close button
- * all end in the same place. The catalog behind it stays rendered (and
- * visible), so a dismissal is one gesture instead of one fetch. */
-async function openWorkflowDrawer(workflowId) {
-  const panel = el("aside", {
-    class: "workflow-drawer", role: "dialog", "aria-modal": "true",
+ * all end in the same place. The catalog behind it stays rendered (dimmed),
+ * so a dismissal is one gesture instead of one fetch. The root lives one
+ * layer under the sticky topbar, leaving the bar live and un-dimmed. */
+async function openWorkflowModal(workflowId) {
+  const panel = el("div", {
+    class: "workflow-modal-panel", role: "dialog", "aria-modal": "true",
     "aria-label": i18n.t("workflows.detail"), tabindex: "-1",
   }, [dataState(el, i18n, "loading")]);
-  const scrim = el("div", { class: "workflow-drawer-scrim" });
-  const root = el("div", { class: "workflow-drawer-root" }, [scrim, panel]);
+  const scrim = el("div", { class: "workflow-modal-scrim" });
+  const stage = el("div", { class: "workflow-modal" }, [panel]);
+  const root = el("div", { class: "workflow-modal-root" }, [scrim, stage]);
+
+  // The scrim starts below the topbar; measure it once and on resize so a
+  // wrapping bar never leaves a gap or eats the modal's top edge.
+  const topbar = document.querySelector(".topbar");
+  const syncTopbar = () => root.style.setProperty(
+    "--topbar-h", `${topbar ? topbar.offsetHeight : 0}px`,
+  );
 
   let settled = false;
   const teardown = () => {
     document.removeEventListener("keydown", onKeydown);
+    window.removeEventListener("resize", syncTopbar);
     document.body.style.overflow = previousOverflow;
   };
   const dismiss = () => {
@@ -1988,7 +2113,7 @@ async function openWorkflowDrawer(workflowId) {
     const finish = () => {
       if (root.isConnected) root.remove();
       // Only walk back if this Workflow is still what the address names: a
-      // drawer closed by a navigation must not undo that navigation.
+      // modal closed by a navigation must not undo that navigation.
       if (route.view === "workflow" && route.workflowId === workflowId) {
         navigate({ view: "workflows", runId: null });
       }
@@ -1996,12 +2121,12 @@ async function openWorkflowDrawer(workflowId) {
     panel.addEventListener("transitionend", (event) => {
       if (event.target === panel) finish();
     }, { once: true });
-    setTimeout(finish, 340);
+    setTimeout(finish, 300);
   };
   const onKeydown = (event) => {
     if (event.key !== "Escape") return;
     // A stacked <dialog> (the modify flow) owns Escape while it is open; the
-    // drawer only answers once the top layer is empty again.
+    // modal only answers once the top layer is empty again.
     if (document.querySelector("dialog[open]")) return;
     event.preventDefault();
     dismiss();
@@ -2010,7 +2135,12 @@ async function openWorkflowDrawer(workflowId) {
   const previousOverflow = document.body.style.overflow;
   document.body.style.overflow = "hidden";
   document.addEventListener("keydown", onKeydown);
-  scrim.addEventListener("click", dismiss);
+  window.addEventListener("resize", syncTopbar);
+  // Clicking the dimmed surround (not the panel) closes, same as the scrim.
+  stage.addEventListener("click", (event) => {
+    if (event.target === stage) dismiss();
+  });
+  syncTopbar();
   const previous = activeViewCleanup;
   activeViewCleanup = () => {
     if (!settled) {
@@ -2035,9 +2165,8 @@ async function openWorkflowDrawer(workflowId) {
  * is reachable by link and survives a reload.
  */
 async function renderWorkflowDetail(root, workflowId, dismiss = null) {
-  const panel = el("section", { class: "panel workflow-detail" });
-  // replaceChildren drops the drawer's loading placeholder; append would stack
-  // the panel beside it.
+  const panel = el("section", { class: "workflow-detail" });
+  // replaceChildren clears any loading placeholder; append would stack beside it.
   root.replaceChildren(panel);
 
   const draw = async () => {
@@ -2045,36 +2174,32 @@ async function renderWorkflowDetail(root, workflowId, dismiss = null) {
     try {
       const value = (await api.workflowDetail(workflowId)).data;
       const definition = value.definition;
-      panel.replaceChildren(
-        el("div", { class: "panel-head" }, [
-          el("div", {}, [
-            el("div", { class: "eyebrow", text: value.workflow_id }),
-            el("div", { class: "panel-title", text: value.name }),
+      // replaceChildren stringifies a bare null argument into a "null" text
+      // node, so the optional drift notice is filtered out of the child list.
+      panel.replaceChildren(...[
+        el("header", { class: "workflow-detail-head" }, [
+          el("div", { class: "workflow-detail-headline" }, [
+            el("div", { class: "eyebrow workflow-detail-id", text: value.workflow_id }),
+            el("h1", { class: "workflow-detail-name", text: value.name }),
+            value.description
+              ? el("p", { class: "workflow-detail-desc", text: value.description })
+              : null,
           ]),
-          el("div", { class: "actions" }, [
-            el("button", {
-              class: "button", id: "backToWorkflows",
-              text: i18n.t(dismiss ? "action.close" : "action.back"),
-              onclick: () => dismiss
-                ? dismiss()
-                : navigate({ view: "workflows", runId: null }),
-            }),
-          ]),
+          el("button", {
+            class: "button workflow-detail-back", id: "backToWorkflows",
+            text: i18n.t(dismiss ? "action.close" : "action.back"),
+            onclick: () => dismiss
+              ? dismiss()
+              : navigate({ view: "workflows", runId: null }),
+          }),
         ]),
-        el("div", { class: "panel-body" }, [
-          value.description ? el("p", { text: value.description }) : null,
-          handlerDriftNotice(value, draw),
-          el("dl", { class: "fact-grid" }, [
-            el("div", {}, [el("dt", { text: i18n.t("workflows.nodes") }), el("dd", { text: i18n.number(value.summary.node_count) })]),
-            el("div", {}, [el("dt", { text: i18n.t("workflows.inputs") }), el("dd", { text: i18n.number(value.inputs.length) })]),
-          ]),
-          // The drawing answers "what shape is this", the definition list
-          // answers "what exactly is in it" — one layout for both modes.
-          workflowDefinitionTabs(
-            value.graph, definition, "workflows.definition",
-          ),
-        ]),
-      );
+        handlerDriftNotice(value, draw),
+        // The drawing answers "what shape is this", the definition list
+        // answers "what exactly is in it" — one tabbed surface for both.
+        workflowDefinitionTabs(
+          value.graph, definition, "workflows.definition",
+        ),
+      ].filter(Boolean));
     } catch (error) {
       panel.replaceChildren(dataState(el, i18n, "error", { onRetry: draw }));
       reportError(error);
@@ -2100,17 +2225,15 @@ async function renderWorkflowEdit(root, workflowId) {
         navigate({ view: "workflow", workflowId, runId: null });
         return;
       }
-      const workflowTitle = el("div", { class: "panel-title", text: value.name });
-      const editingVersion = el("div", {
-        class: "muted mono workflow-editing-version",
+      const canvas = el("div", { class: "panel-body workflow-edit-canvas" });
+      const editingVersion = el("span", {
+        class: "workflow-editing-version",
         text: i18n.t("workflows.editingVersion", {
           version: i18n.number(value.latest_version),
         }),
       });
-      const canvas = el("div", { class: "panel-body workflow-edit-canvas" });
       const drawDefinition = (current) => {
         const currentEditors = current.action_editors || {};
-        workflowTitle.textContent = current.name;
         editingVersion.textContent = i18n.t("workflows.editingVersion", {
           version: i18n.number(current.latest_version),
         });
@@ -2127,14 +2250,21 @@ async function renderWorkflowEdit(root, workflowId) {
         const current = (await api.workflowDetail(workflowId)).data;
         drawDefinition(current);
       };
-      page.replaceChildren(
-        el("div", { class: "panel-head" }, [
-          el("div", {}, [
-            el("div", { class: "eyebrow", text: value.workflow_id }),
-            workflowTitle,
-            editingVersion,
+      page.replaceChildren(...[
+        el("div", { class: "panel-head workflow-edit-head" }, [
+          el("div", { class: "workflow-edit-heading" }, [
+            el("h1", {
+              class: "workflow-edit-title", text: i18n.t("workflows.editWorkflow"),
+            }),
+            el("div", { class: "eyebrow workflow-edit-id", text: value.workflow_id }),
           ]),
           el("div", { class: "actions" }, [
+            el("span", {
+              class: "workflow-edit-status",
+            }, [
+              el("span", { text: i18n.t("editor.state.awaitingPrompt") }),
+              editingVersion,
+            ]),
             el("button", {
               class: "button", id: "closeWorkflowEditor",
               text: i18n.t("action.close"),
@@ -2142,12 +2272,12 @@ async function renderWorkflowEdit(root, workflowId) {
             }),
           ]),
         ]),
+        // The revise panel is the editing surface — lead with it, above the
+        // diagram, so the primary "change this workflow" action comes first.
+        modify ? workflowEditorPanel(modify, value, draw, refreshPublished) : null,
         canvas,
-      );
+      ].filter(Boolean));
       drawDefinition(value);
-      if (modify) page.append(
-        workflowEditorPanel(modify, value, draw, refreshPublished),
-      );
     } catch (error) {
       page.replaceChildren(dataState(el, i18n, "error", { onRetry: draw }));
       reportError(error);
@@ -2171,7 +2301,7 @@ async function renderWorkflowEditor(root, draftId) {
   let discardArmed = false;
   let instructionText = "";
   // The Agent chosen to write the revision, kept across redraws.
-  let writerAgent = generationAgents()[0] || "";
+  let writerAgent = defaultGenerationAgent();
   let revisionDiagnostics = [];
   // The Agent call is a durable job, so the editor polls until it settles
   // rather than holding a request open. A reload re-enters here and picks the
@@ -2672,13 +2802,51 @@ function workflowEditorPanel(modifyCommand, workflow, onDone, onPublished = null
   // An upgrade opens with the instruction already written: the author asked to
   // upgrade, not to compose the sentence that means "upgrade".
   let promptText = upgrading ? i18n.t("workflows.upgrade.prompt") : "";
-  let writerAgent = generationAgents()[0] || "";
+  let writerAgent = defaultGenerationAgent();
   // Regenerate is the bigger hammer — it may redesign the whole flow — so it
   // stays out of sight until a plain modify has actually failed.
   let regenerateOffered = false;
   let timer = null;
   let collapsed = false;
   let publishedRefreshDone = false;
+  // The Agent CLI's console. Created once and kept across redraws so the tail
+  // an operator is reading is never thrown away when the job's state changes.
+  const consoleLog = el("pre", {
+    class: "console-log workflow-authoring-console", role: "log", tabindex: "0",
+  });
+  const consoleView = el("section", { class: "workflow-authoring-output" }, [
+    el("h3", { class: "field-label", text: i18n.t("editor.agentConsole") }),
+    consoleLog,
+  ]);
+  let outputAfter = 0;
+  let outputStalled = false;
+
+  /** Append whatever the CLI has printed since the last chunk we showed. */
+  const pumpOutput = async () => {
+    if (outputStalled || !job || !job.output_href) return;
+    try {
+      for (let page = 0; page < 20; page += 1) {
+        const data = (await api.get(
+          `${job.output_href}?after=${outputAfter}`
+        )).data;
+        for (const chunk of data.chunks) {
+          consoleLog.append(el("span", {
+            class: `console-chunk ${chunk.stream}`, text: chunk.text,
+          }));
+          outputAfter = chunk.chunk_id;
+        }
+        if (!data.has_more) break;
+      }
+      if (consoleLog.childElementCount) consoleLog.scrollTop = consoleLog.scrollHeight;
+    } catch (error) {
+      // Reading a console needs the sensitive scope. Where the operator does
+      // not have it the panel simply carries no console — the job itself is
+      // still reported in full. Transport and server failures are temporary;
+      // the next job-status tick retries them.
+      outputStalled = error instanceof ApiError
+        && (error.status === 401 || error.status === 403);
+    }
+  };
 
   const collapse = (refresh) => {
     if (collapsed) return;
@@ -2729,14 +2897,26 @@ function workflowEditorPanel(modifyCommand, workflow, onDone, onPublished = null
         "workflowModifyAgent", writerAgent, (value) => { writerAgent = value; },
       );
       const prompt = el("textarea", {
-        required: "required", maxlength: "4000",
+        class: "mono workflow-modify-input", required: "required", maxlength: "4000",
         placeholder: i18n.t("editor.agentPromptPlaceholder"),
         text: promptText,
       });
       // Focus lands in the prompt so a prefilled upgrade is one click from
       // running and still editable in place.
       setTimeout(() => prompt.focus(), 0);
-      body.push(writerField, prompt);
+      // An "authored by" section over a titled prompt section whose textarea
+      // carries a syntax hint.
+      const promptSection = el("section", { class: "workflow-modify-prompt" }, [
+        el("h3", { class: "field-label", text: i18n.t("editor.agentPromptTitle") }),
+        el("p", { class: "muted", text: i18n.t("editor.agentPromptHint") }),
+        el("div", { class: "workflow-modify-input-wrap" }, [
+          prompt,
+          el("span", {
+            class: "workflow-modify-syntax", text: i18n.t("editor.promptSyntaxHint"),
+          }),
+        ]),
+      ]);
+      body.push(writerField, promptSection);
       if (regenerateOffered) body.push(el("p", {
         class: "muted", text: i18n.t("simplified.workflow.regenerate.hint"),
       }));
@@ -2796,18 +2976,16 @@ function workflowEditorPanel(modifyCommand, workflow, onDone, onPublished = null
     }
     // replaceChildren has no opinion about null the way el() does: it would
     // render an absent banner as the literal word "null".
-    section.replaceChildren(
-      el("div", { class: "workflow-editor-head" }, [
-        el("div", { class: "panel-title", text: title }),
-        statePill,
-      ]),
-      el("section", { class: "agent-editor-prompt" }, [
-        el("div", { class: "panel-title", text: i18n.t("editor.agentPromptTitle") }),
-        el("p", { class: "muted", text: i18n.t("editor.agentPromptHint") }),
-        ...body.filter(Boolean),
-      ]),
+    // The page header carries the title and the awaiting-state badge (per the
+    // design prototype), so the form leads straight with its own sections. A
+    // live job state pill only appears once a job is running or settled.
+    section.replaceChildren(...[
+      job ? el("div", { class: "workflow-editor-head" }, [statePill]) : null,
+      ...body.filter(Boolean),
+      // What the Agent printed, once there is a job and it has said something.
+      job && consoleLog.childElementCount ? consoleView : null,
       actions,
-    );
+    ].filter(Boolean));
   };
   const watch = () => {
     if (!job || !["queued", "running"].includes(job.status)) return;
@@ -2816,6 +2994,9 @@ function workflowEditorPanel(modifyCommand, workflow, onDone, onPublished = null
       if (!section.isConnected) return;
       try {
         job = (await api.get(job.href)).data;
+        // Pull the console before redrawing, so a tick that ends the job still
+        // paints the last thing the Agent said.
+        await pumpOutput();
         draw();
         if (job.status === "done" && !publishedRefreshDone && onPublished) {
           publishedRefreshDone = true;
@@ -2830,6 +3011,9 @@ function workflowEditorPanel(modifyCommand, workflow, onDone, onPublished = null
 
   draw();
   watch();
+  // A job that settled before this panel opened is never polled, so its
+  // console is fetched once here rather than never.
+  if (job) pumpOutput().then(() => { if (section.isConnected) draw(); });
   // Two frames: the grid-row transition needs the zero-height pose committed
   // before the growing class lands, or the opening never animates.
   requestAnimationFrame(() => requestAnimationFrame(() => wrap.classList.add("open")));
@@ -2940,10 +3124,9 @@ async function render() {
     else if (route.view === "goals") await renderHistory(fresh);
     else if (route.view === "workflows") await renderWorkflows(fresh);
     else if (route.view === "workflow") {
-      // The detail is a drawer over the catalog, same contract as the Artifact
-      // dialog: the address stays, dismissing walks back.
+      // The catalog stays rendered (dimmed) behind the centred detail modal.
       await renderWorkflows(fresh);
-      await openWorkflowDrawer(route.workflowId);
+      await openWorkflowModal(route.workflowId);
     }
     else if (route.view === "workflowEdit") {
       await renderWorkflowEdit(fresh, route.workflowId);

@@ -6,6 +6,7 @@ from .generator import (
     AuthoringUnknownResultError,
     CancelScope,
     GenerationOutcome,
+    active_scope,
     cancellable,
     TrustedCliDslGenerator,
     UnknownGenerationAgentError,
@@ -16,5 +17,5 @@ __all__ = [
     "AuthoringFailedError", "AuthoringUnavailableError",
     "AuthoringUnknownResultError", "CancelScope", "GenerationOutcome",
     "TrustedCliDslGenerator", "UnknownGenerationAgentError",
-    "WorkflowAuthoringService", "cancellable",
+    "WorkflowAuthoringService", "active_scope", "cancellable",
 ]

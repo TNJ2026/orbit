@@ -225,6 +225,8 @@ class ApiTestCase(unittest.TestCase):
             "ops-reader": [READ_SCOPE, OPS_READ_SCOPE],
             "sensitive": [READ_SCOPE, SENSITIVE_SCOPE],
             "other-sensitive": [READ_SCOPE, SENSITIVE_SCOPE],
+            # Authors a workflow and may read the Agent console it produced.
+            "author": [READ_SCOPE, WRITE_SCOPE, SENSITIVE_SCOPE],
             "nobody": [],
         }
         self.app = create_app(
@@ -2041,6 +2043,82 @@ class WorkflowDraftApiTests(ApiTestCase):
             self.assertEqual(200, response.status_code, response.json())
             self.assertEqual("codex", response.json()["data"]["requested_agent"])
             self.assertEqual(["codex"], asked)
+
+    def test_authoring_job_keeps_the_agent_cli_console(self) -> None:
+        """A job that thinks for a minute must not be a black box.
+
+        What the CLI printed is read back as a tail, in order, through the
+        address the job itself advertises.
+        """
+        import json as json_module
+        import time
+        from orbit.workflow.authoring import active_scope
+        from tests.test_workflow_drafts import dsl as editable_dsl
+
+        def writer(_prompt):
+            scope = active_scope()
+            scope.on_output("stderr", "planning the flow\n")
+            scope.on_output("stderr", "writing nodes\n")
+            return json_module.dumps(
+                editable_dsl(workflow_id="talkative", name="Talkative")
+            )
+
+        app = self._app_with_named_agents({"chatty": writer})
+        with AsgiHarness(app) as client:
+            job = client.post(
+                "/api/v1/workflows/generate", actor="author", key="gen-console",
+                body={"instruction": "a flow"},
+            ).json()["data"]
+            for _ in range(200):
+                job = client.get(job["href"], actor="author").json()["data"]
+                if job["status"] not in ("queued", "running"):
+                    break
+                time.sleep(0.02)
+            self.assertEqual("done", job["status"], job.get("error"))
+            output = client.get(job["output_href"], actor="author")
+            self.assertEqual(200, output.status_code, output.json())
+            chunks = output.json()["data"]["chunks"]
+        self.assertEqual(
+            ["planning the flow\n", "writing nodes\n"],
+            [chunk["text"] for chunk in chunks],
+        )
+        self.assertEqual({"stderr"}, {chunk["stream"] for chunk in chunks})
+
+    def test_capabilities_name_the_agent_used_when_none_is_requested(self) -> None:
+        """The advertised default is the one an unnamed request really gets.
+
+        The agent list is sorted for display, so its first entry is not the
+        fallback; a UI that preselected it would name the wrong writer.
+        """
+        import json as json_module
+        from tests.test_workflow_drafts import dsl as editable_dsl
+
+        asked = []
+
+        def writer(name):
+            def generate(_prompt):
+                asked.append(name)
+                return json_module.dumps(editable_dsl(name=f"By {name}"))
+            return generate
+
+        app = self._app_with_named_agents(
+            {"codex": writer("codex"), "claude": writer("claude")}
+        )
+        with AsgiHarness(app) as client:
+            caps = client.get(
+                "/api/v1/capabilities", actor="writer"
+            ).json()["data"]["capabilities"]
+            self.assertEqual(
+                ["claude", "codex"], caps["workflow_generation"]["agents"]
+            )
+            self.assertEqual("codex", caps["workflow_generation"]["default_agent"])
+            self.assertEqual("codex", caps["workflow_editing"]["default_agent"])
+            response = client.post(
+                "/api/v1/workflows/generate", actor="writer", key="gen-default",
+                body={"instruction": "a flow"},
+            )
+            self.assertEqual(200, response.status_code, response.json())
+        self.assertEqual(["codex"], asked)
 
     def test_quick_modify_names_the_agent_that_revises_the_workflow(self) -> None:
         import json as json_module

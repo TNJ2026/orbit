@@ -540,6 +540,17 @@ def create_app(
     if workflow_generator is None and generation_agents:
         workflow_generator = next(iter(generation_agents.values()))
 
+    # Which name in the list the Runtime actually falls back to. The list is
+    # sorted for display, so the default is not simply its first entry; it is
+    # settled above and identified here by identity, whichever path set it.
+    default_generation_agent = next(
+        (
+            name for name, generator in generation_agents.items()
+            if generator is workflow_generator
+        ),
+        None,
+    )
+
     capabilities = {
         "static_graph": {"available": True},
         "human_tasks": {"available": True},
@@ -592,7 +603,10 @@ def create_app(
         "workflow_generation": (
             # The names an author may pick from. Empty means this Runtime has
             # exactly one way to write DSL and the choice is not offered.
-            {"available": True, "agents": sorted(generation_agents)}
+            {
+                "available": True, "agents": sorted(generation_agents),
+                "default_agent": default_generation_agent,
+            }
             if workflow_generator is not None
             else {
                 "available": False,
@@ -604,6 +618,7 @@ def create_app(
         ),
         "workflow_editing": {
             "available": True, "agents": sorted(generation_agents),
+            "default_agent": default_generation_agent,
         },
     }
 

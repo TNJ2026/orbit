@@ -1,0 +1,347 @@
+<!DOCTYPE html><html class="dark" lang="zh-CN"><head>
+<meta charset="utf-8">
+<meta content="width=device-width, initial-scale=1.0" name="viewport">
+<title>Orbit Runtime - Registered Agents</title>
+<!-- Tailwind CSS v3 CDN -->
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<!-- Google Fonts: Hanken Grotesk -->
+<link href="https://fonts.googleapis.com" rel="preconnect">
+<link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect">
+<link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@300;400;500;600;700&amp;display=swap" rel="stylesheet">
+<script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Hanken Grotesk', 'Inter', 'system-ui', 'sans-serif'],
+          },
+          colors: {
+            surface: {
+              DEFAULT: '#10131a',
+              dim: '#10131a',
+              bright: '#363941',
+              lowest: '#0b0e15',
+              low: '#191b23',
+              container: '#1c202a',
+            },
+            brand: '#3b82f6',
+          },
+          borderRadius: {
+            'custom': '4px',
+          }
+        }
+      }
+    }
+  </script>
+<style data-purpose="custom-layout-styles">
+    body {
+      background-color: #0b0e15;
+      color: #e2e8f0;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* Custom scrollbar for dark theme */
+    ::-webkit-scrollbar {
+      width: 8px;
+    }
+    ::-webkit-scrollbar-track {
+      background: #0b0e15;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #1f2937;
+      border-radius: 4px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: #374151;
+    }
+
+    .agent-card {
+      transition: all 0.2s ease-in-out;
+      border: 1px solid rgba(255, 255, 255, 0.05);
+    }
+    .agent-card:hover {
+      border-color: rgba(59, 130, 246, 0.5);
+      background-color: #1c202a;
+    }
+  </style>
+</head>
+<body class="font-sans">
+<!-- BEGIN: MainHeader -->
+<header class="sticky top-0 z-50 w-full border-b border-white/5 bg-surface-dim/80 backdrop-blur-md">
+<div class="flex h-16 items-center justify-between px-6">
+<!-- Left: Brand and Navigation -->
+<div class="flex items-center gap-8">
+<div class="flex items-center gap-2" data-purpose="logo">
+<div class="flex h-8 w-8 items-center justify-center rounded-custom bg-brand">
+<svg class="h-5 w-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+<path d="M13 10V3L4 14h7v7l9-11h-7z" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path>
+</svg>
+</div>
+<span class="text-lg font-bold tracking-tight">Orbit Runtime</span>
+</div>
+<nav class="hidden md:flex items-center gap-1">
+<a class="px-3 py-2 text-sm font-medium text-slate-400 hover:text-white transition-colors" href="#">
+<span class="mr-1.5 opacity-50">⌂</span> 目标
+          </a>
+<a class="px-3 py-2 text-sm font-medium text-slate-400 hover:text-white transition-colors" href="#">
+<span class="mr-1.5 opacity-50">⌘</span> 工作流
+          </a>
+<a class="px-3 py-2 text-sm font-medium text-slate-400 hover:text-white transition-colors" href="#">
+<span class="mr-1.5 opacity-50">🕒</span> 历史
+          </a>
+<a class="ml-2 flex items-center px-4 py-1.5 text-sm font-medium text-white bg-brand/10 border border-brand/20 rounded-custom" href="#">
+<span class="mr-1.5">Δ</span> Agent
+          </a>
+</nav>
+</div>
+<!-- Right: Actions -->
+<div class="flex items-center gap-3">
+<button class="p-2 text-slate-400 hover:text-white rounded-custom hover:bg-white/5 transition-all">
+<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"></path></svg>
+</button>
+<button class="px-4 py-1.5 text-sm font-medium text-slate-300 border border-white/10 rounded-custom hover:bg-white/5 transition-all">
+          刷新
+        </button>
+<div class="relative">
+<select class="appearance-none bg-white/5 border border-white/10 text-sm font-medium text-slate-300 px-4 py-1.5 pr-8 rounded-custom focus:outline-none focus:ring-1 focus:ring-brand/50">
+<option>简体中文</option>
+<option>English</option>
+</select>
+<div class="pointer-events-none absolute inset-y-0 right-0 flex items-center px-2 text-slate-500">
+<svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M19 9l-7 7-7-7"></path></svg>
+</div>
+</div>
+<div class="flex items-center gap-2 bg-white/5 border border-white/10 rounded-custom px-3 py-1.5">
+<span class="text-xs text-slate-500 uppercase font-semibold">实时刷新间隔</span>
+<select class="bg-transparent border-none text-sm font-medium text-slate-300 p-0 focus:ring-0">
+<option>15 秒</option>
+<option>30 秒</option>
+<option>60 秒</option>
+</select>
+</div>
+</div>
+</div>
+</header>
+<!-- END: MainHeader -->
+<!-- BEGIN: MainContent -->
+<main class="max-w-[1600px] mx-auto p-8">
+<!-- BEGIN: PageTitle -->
+<div class="mb-8 flex items-center justify-between border-b border-white/5 pb-4">
+<div>
+<h1 class="text-xl font-semibold text-white">已注册 Agent</h1>
+<p class="text-sm text-slate-500 mt-1">管理并监控当前正在运行的所有代理服务实例</p>
+</div>
+<div class="flex items-center gap-2 text-xs text-slate-500">
+<span class="flex h-2 w-2 rounded-full bg-green-500"></span>
+<span class="">在线: 11</span>
+</div>
+</div>
+<!-- END: PageTitle -->
+<!-- BEGIN: AgentGrid -->
+<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-4">
+<!-- Agent Card Template -->
+<!-- Agent: antigravity -->
+<div class="agent-card bg-surface-low p-5 rounded-custom flex flex-col gap-4" data-purpose="agent-card">
+<div class="flex items-start gap-3">
+<div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-custom bg-blue-500/10 text-blue-400 font-bold text-xs">
+            AN
+          </div>
+<div class="flex-1 min-w-0">
+<h3 class="text-sm font-semibold text-slate-200 truncate">agent.antigravity</h3>
+<p class="text-xs text-slate-500 font-mono mt-0.5">1.1.7</p>
+</div>
+</div>
+<div class="flex items-center justify-between mt-2 pt-4 border-t border-white/5">
+<span class="text-[11px] text-slate-500">运行次数</span>
+<span class="text-[11px] font-medium text-slate-300 bg-white/5 px-2 py-0.5 rounded-full">运行0次</span>
+</div>
+</div>
+<!-- Agent: claude -->
+<div class="agent-card bg-surface-low p-5 rounded-custom flex flex-col gap-4" data-purpose="agent-card">
+<div class="flex items-start gap-3">
+<div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-custom bg-purple-500/10 text-purple-400 font-bold text-xs">
+            CL
+          </div>
+<div class="flex-1 min-w-0">
+<h3 class="text-sm font-semibold text-slate-200 truncate">agent.claude</h3>
+<p class="text-xs text-slate-500 font-mono mt-0.5">2.1.220</p>
+</div>
+</div>
+<div class="flex items-center justify-between mt-2 pt-4 border-t border-white/5">
+<span class="text-[11px] text-slate-500">运行次数</span>
+<span class="text-[11px] font-medium text-slate-300 bg-white/5 px-2 py-0.5 rounded-full">运行0次</span>
+</div>
+</div>
+<!-- Agent: codex -->
+<div class="agent-card bg-surface-low p-5 rounded-custom flex flex-col gap-4" data-purpose="agent-card">
+<div class="flex items-start gap-3">
+<div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-custom bg-emerald-500/10 text-emerald-400 font-bold text-xs">
+            CO
+          </div>
+<div class="flex-1 min-w-0">
+<h3 class="text-sm font-semibold text-slate-200 truncate">agent.codex</h3>
+<p class="text-xs text-slate-500 font-mono mt-0.5">0.145.0</p>
+</div>
+</div>
+<div class="flex items-center justify-between mt-2 pt-4 border-t border-white/5">
+<span class="text-[11px] text-slate-500">运行次数</span>
+<span class="text-[11px] font-medium text-slate-300 bg-white/5 px-2 py-0.5 rounded-full">运行0次</span>
+</div>
+</div>
+<!-- Agent: gemini -->
+<div class="agent-card bg-surface-low p-5 rounded-custom flex flex-col gap-4" data-purpose="agent-card">
+<div class="flex items-start gap-3">
+<div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-custom bg-indigo-500/10 text-indigo-400 font-bold text-xs">
+            GE
+          </div>
+<div class="flex-1 min-w-0">
+<h3 class="text-sm font-semibold text-slate-200 truncate">agent.gemini</h3>
+<p class="text-xs text-slate-500 font-mono mt-0.5">0.51.0</p>
+</div>
+</div>
+<div class="flex items-center justify-between mt-2 pt-4 border-t border-white/5">
+<span class="text-[11px] text-slate-500">运行次数</span>
+<span class="text-[11px] font-medium text-slate-300 bg-white/5 px-2 py-0.5 rounded-full">运行0次</span>
+</div>
+</div>
+<!-- Agent: hermes -->
+<div class="agent-card bg-surface-low p-5 rounded-custom flex flex-col gap-4" data-purpose="agent-card">
+<div class="flex items-start gap-3">
+<div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-custom bg-amber-500/10 text-amber-400 font-bold text-xs">
+            HE
+          </div>
+<div class="flex-1 min-w-0">
+<h3 class="text-sm font-semibold text-slate-200 truncate">agent.hermes</h3>
+<p class="text-xs text-slate-500 font-mono mt-0.5">0.19.0</p>
+</div>
+</div>
+<div class="flex items-center justify-between mt-2 pt-4 border-t border-white/5">
+<span class="text-[11px] text-slate-500">运行次数</span>
+<span class="text-[11px] font-medium text-slate-300 bg-white/5 px-2 py-0.5 rounded-full">运行0次</span>
+</div>
+</div>
+<!-- Agent: hermes-anctrl -->
+<div class="agent-card bg-surface-low p-5 rounded-custom flex flex-col gap-4" data-purpose="agent-card">
+<div class="flex items-start gap-3">
+<div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-custom bg-amber-500/10 text-amber-400 font-bold text-xs">
+            HE
+          </div>
+<div class="flex-1 min-w-0">
+<h3 class="text-sm font-semibold text-slate-200 truncate">agent.hermes-anctrl</h3>
+<p class="text-xs text-slate-500 font-mono mt-0.5">0.19.0</p>
+</div>
+</div>
+<div class="flex items-center justify-between mt-2 pt-4 border-t border-white/5">
+<span class="text-[11px] text-slate-500">运行次数</span>
+<span class="text-[11px] font-medium text-slate-300 bg-white/5 px-2 py-0.5 rounded-full">运行0次</span>
+</div>
+</div>
+<!-- Agent: hermes-developer -->
+<div class="agent-card bg-surface-low p-5 rounded-custom flex flex-col gap-4" data-purpose="agent-card">
+<div class="flex items-start gap-3">
+<div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-custom bg-amber-500/10 text-amber-400 font-bold text-xs">
+            HE
+          </div>
+<div class="flex-1 min-w-0">
+<h3 class="text-sm font-semibold text-slate-200 truncate">agent.hermes-developer</h3>
+<p class="text-xs text-slate-500 font-mono mt-0.5">0.19.0</p>
+</div>
+</div>
+<div class="flex items-center justify-between mt-2 pt-4 border-t border-white/5">
+<span class="text-[11px] text-slate-500">运行次数</span>
+<span class="text-[11px] font-medium text-slate-300 bg-white/5 px-2 py-0.5 rounded-full">运行0次</span>
+</div>
+</div>
+<!-- Agent: hermes-manager -->
+<div class="agent-card bg-surface-low p-5 rounded-custom flex flex-col gap-4" data-purpose="agent-card">
+<div class="flex items-start gap-3">
+<div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-custom bg-amber-500/10 text-amber-400 font-bold text-xs">
+            HE
+          </div>
+<div class="flex-1 min-w-0">
+<h3 class="text-sm font-semibold text-slate-200 truncate">agent.hermes-manager</h3>
+<p class="text-xs text-slate-500 font-mono mt-0.5">0.19.0</p>
+</div>
+</div>
+<div class="flex items-center justify-between mt-2 pt-4 border-t border-white/5">
+<span class="text-[11px] text-slate-500">运行次数</span>
+<span class="text-[11px] font-medium text-slate-300 bg-white/5 px-2 py-0.5 rounded-full">运行0次</span>
+</div>
+<div class="flex items-center justify-between mt-1 pt-2 border-t border-white/5"><span class="text-[11px] text-slate-500">运行错误</span><span class="text-[11px] font-medium text-rose-400 bg-rose-500/10 px-2 py-0.5 rounded-full">2次</span></div></div>
+<!-- Agent: hermes-researcher -->
+<div class="agent-card bg-surface-low p-5 rounded-custom flex flex-col gap-4" data-purpose="agent-card">
+<div class="flex items-start gap-3">
+<div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-custom bg-amber-500/10 text-amber-400 font-bold text-xs">
+            HE
+          </div>
+<div class="flex-1 min-w-0">
+<h3 class="text-sm font-semibold text-slate-200 truncate">agent.hermes-researcher</h3>
+<p class="text-xs text-slate-500 font-mono mt-0.5">0.19.0</p>
+</div>
+</div>
+<div class="flex items-center justify-between mt-2 pt-4 border-t border-white/5">
+<span class="text-[11px] text-slate-500">运行次数</span>
+<span class="text-[11px] font-medium text-slate-300 bg-white/5 px-2 py-0.5 rounded-full">运行0次</span>
+</div>
+</div>
+<!-- Agent: kimi -->
+<div class="agent-card bg-surface-low p-5 rounded-custom flex flex-col gap-4" data-purpose="agent-card">
+<div class="flex items-start gap-3">
+<div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-custom bg-cyan-500/10 text-cyan-400 font-bold text-xs">
+            KI
+          </div>
+<div class="flex-1 min-w-0">
+<h3 class="text-sm font-semibold text-slate-200 truncate">agent.kimi</h3>
+<p class="text-xs text-slate-500 font-mono mt-0.5">0.28.1</p>
+</div>
+</div>
+<div class="flex items-center justify-between mt-2 pt-4 border-t border-white/5">
+<span class="text-[11px] text-slate-500">运行次数</span>
+<span class="text-[11px] font-medium text-slate-300 bg-white/5 px-2 py-0.5 rounded-full">运行0次</span>
+</div>
+<div class="flex items-center justify-between mt-1 pt-2 border-t border-white/5"><span class="text-[11px] text-slate-500">运行错误</span><span class="text-[11px] font-medium text-rose-400 bg-rose-500/10 px-2 py-0.5 rounded-full">5次</span></div></div>
+<!-- Agent: opencode -->
+<div class="agent-card bg-surface-low p-5 rounded-custom flex flex-col gap-4" data-purpose="agent-card">
+<div class="flex items-start gap-3">
+<div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-custom bg-rose-500/10 text-rose-400 font-bold text-xs">
+            OP
+          </div>
+<div class="flex-1 min-w-0">
+<h3 class="text-sm font-semibold text-slate-200 truncate">agent.opencode</h3>
+<p class="text-xs text-slate-500 font-mono mt-0.5">1.17.15</p>
+</div>
+</div>
+<div class="flex items-center justify-between mt-2 pt-4 border-t border-white/5">
+<span class="text-[11px] text-slate-500">运行次数</span>
+<span class="text-[11px] font-medium text-slate-300 bg-white/5 px-2 py-0.5 rounded-full">运行0次</span>
+</div>
+</div>
+<!-- Agent: pi -->
+<div class="agent-card bg-surface-low p-5 rounded-custom flex flex-col gap-4" data-purpose="agent-card">
+<div class="flex items-start gap-3">
+<div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-custom bg-pink-500/10 text-pink-400 font-bold text-xs">
+            PI
+          </div>
+<div class="flex-1 min-w-0">
+<h3 class="text-sm font-semibold text-slate-200 truncate">agent.pi</h3>
+<p class="text-xs text-slate-500 font-mono mt-0.5">0.81.1</p>
+</div>
+</div>
+<div class="flex items-center justify-between mt-2 pt-4 border-t border-white/5">
+<span class="text-[11px] text-slate-500">运行次数</span>
+<span class="text-[11px] font-medium text-slate-300 bg-white/5 px-2 py-0.5 rounded-full">运行0次</span>
+</div>
+</div>
+</div>
+<!-- END: AgentGrid -->
+</main>
+<!-- END: MainContent -->
+<!-- BEGIN: Footer -->
+<footer class="mt-12 py-8 border-t border-white/5 text-center">
+<p class="text-xs text-slate-600">© 2024 Orbit Runtime. FlowState Management Interface.</p>
+</footer>
+<!-- END: Footer -->
+
+
+</body></html>

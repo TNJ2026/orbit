@@ -18,6 +18,7 @@ from orbit.workflow.domain.persistence import (
 from orbit.workflow.domain.states import BranchTokenStatus, WorkflowRunStatus
 from orbit.workflow.domain.versions import AggregateVersion, DefinitionHash, Revision, SchemaVersion
 from orbit.workflow.persistence import SQLiteReadSession, SQLiteUnitOfWork
+from orbit.workflow.persistence.authoring_output import SQLiteAuthoringOutputStore
 from orbit.workflow.persistence.database import connect_workflow_database
 from orbit.workflow.persistence.migrations import migrate_workflow_database
 
@@ -78,6 +79,20 @@ class WorkflowMigrationAndUnitOfWorkTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
+    def test_authoring_output_cap_counts_utf8_bytes(self) -> None:
+        store = SQLiteAuthoringOutputStore(self.path, max_bytes=5)
+
+        store.append(job_id="job:one", stream="stdout", text="中文A", now=NOW)
+        chunks, cursor = store.read("job:one")
+
+        self.assertIsNone(cursor)
+        self.assertEqual(["中"], [chunk["text"] for chunk in chunks])
+        with connect_workflow_database(self.path, read_only=True) as connection:
+            stored_bytes = connection.execute(
+                "SELECT LENGTH(CAST(text AS BLOB)) FROM authoring_job_output"
+            ).fetchone()[0]
+        self.assertLessEqual(stored_bytes, 5)
+
     def test_migration_three_adds_only_durable_execution_tables(self) -> None:
         with connect_workflow_database(self.path) as connection:
             tables = {
@@ -100,7 +115,7 @@ class WorkflowMigrationAndUnitOfWorkTests(unittest.TestCase):
         self.assertTrue({"jobs", "job_leases", "durable_timers"} <= tables)
         self.assertTrue({"planner_attempts", "planner_proposals"} <= tables)
         self.assertIn("human_tasks", tables)
-        self.assertEqual(list(range(1, 22)), versions)
+        self.assertEqual(list(range(1, 23)), versions)
 
     def test_migration_is_repeatable_after_workflow_drafts_exist(self) -> None:
         with connect_workflow_database(self.path) as connection:

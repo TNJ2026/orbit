@@ -78,10 +78,14 @@ class CancelScope:
     cancelled and stops whatever attaches later.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, on_output: Callable[[str, str], None] | None = None) -> None:
         self._lock = threading.Lock()
         self._handle: Any = None
         self._cancelled = False
+        # Where the child's console goes, if the caller wants to keep it. The
+        # scope already travels with the call, so the sink rides along rather
+        # than threading a second parameter through every generator.
+        self.on_output = on_output
 
     @property
     def cancelled(self) -> bool:
@@ -235,6 +239,22 @@ class TrustedCliDslGenerator:
 
     def __call__(self, prompt: str) -> str:
         scope = active_scope()
+        # A sink is optional, and a failure to record must never fail the
+        # generation it is only observing.
+        sink = None if scope is None else getattr(scope, "on_output", None)
+
+        def forward(stream: str):
+            if sink is None:
+                return None
+
+            def emit(text: str) -> None:
+                try:
+                    sink(stream, text)
+                except Exception:  # noqa: BLE001 - observation, never the work
+                    pass
+
+            return emit
+
         try:
             outcome = self.runner(
                 list(self.command),
@@ -245,6 +265,8 @@ class TrustedCliDslGenerator:
                 # Reporting the child is what makes a cancelled job actually
                 # stop the Agent instead of quietly discarding its answer.
                 on_start=None if scope is None else scope.attach,
+                on_stdout=forward("stdout"),
+                on_stderr=forward("stderr"),
             )
         except (FileNotFoundError, PermissionError) as exc:
             raise AuthoringUnavailableError(f"generator CLI cannot run: {exc}") from None

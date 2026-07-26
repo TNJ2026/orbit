@@ -33,10 +33,24 @@
   --red-soft: rgba(240, 86, 86, .17);
   --purple: #c3b0ff;
   --purple-soft: rgba(174, 140, 255, .18);
+  /* Avatar hues for the Agent grid: eight saturated accents, each paired with
+     a low-alpha wash, so every handler family reads as its own color. */
+  --hue-blue: #60a5fa;    --hue-blue-soft: rgba(59, 130, 246, .12);
+  --hue-purple: #c084fc;  --hue-purple-soft: rgba(168, 85, 247, .12);
+  --hue-emerald: #34d399; --hue-emerald-soft: rgba(16, 185, 129, .12);
+  --hue-indigo: #818cf8;  --hue-indigo-soft: rgba(99, 102, 241, .12);
+  --hue-amber: #fbbf24;   --hue-amber-soft: rgba(245, 158, 11, .12);
+  --hue-cyan: #22d3ee;    --hue-cyan-soft: rgba(6, 182, 212, .12);
+  --hue-rose: #fb7185;    --hue-rose-soft: rgba(244, 63, 94, .12);
+  --hue-pink: #f472b6;    --hue-pink-soft: rgba(236, 72, 153, .12);
   /* Filled primary control: the vibrant blue with white text DESIGN.md calls
      for, distinct from the lighter --blue used for accented text. */
   --primary: #3b82f6;
   --on-primary: #ffffff;
+  /* Card border when an Agent card is hovered: the brand blue at half alpha. */
+  --brand-line: rgba(59, 130, 246, .5);
+  /* Neutral chip fill behind count pills. */
+  --chip-bg: rgba(255, 255, 255, .06);
   /* Overlays keep a shadow (with a backdrop blur); flat cards do not. */
   --shadow: 0 18px 50px rgba(0, 0, 0, .38);
   --radius: 12px;
@@ -72,8 +86,18 @@ html[data-theme="light"] {
   --red-soft: rgba(185, 28, 28, .10);
   --purple: #6d28d9;
   --purple-soft: rgba(109, 40, 217, .11);
+  --hue-blue: #2563eb;    --hue-blue-soft: rgba(37, 99, 235, .10);
+  --hue-purple: #9333ea;  --hue-purple-soft: rgba(147, 51, 234, .10);
+  --hue-emerald: #059669; --hue-emerald-soft: rgba(5, 150, 105, .10);
+  --hue-indigo: #4f46e5;  --hue-indigo-soft: rgba(79, 70, 229, .10);
+  --hue-amber: #d97706;   --hue-amber-soft: rgba(217, 119, 6, .12);
+  --hue-cyan: #0891b2;    --hue-cyan-soft: rgba(8, 145, 178, .10);
+  --hue-rose: #e11d48;    --hue-rose-soft: rgba(225, 29, 72, .10);
+  --hue-pink: #db2777;    --hue-pink-soft: rgba(219, 39, 119, .10);
   --primary: #3b82f6;
   --on-primary: #ffffff;
+  --brand-line: rgba(37, 99, 235, .45);
+  --chip-bg: rgba(15, 23, 42, .06);
   --shadow: 0 18px 50px rgba(30, 41, 59, .14);
 }
 

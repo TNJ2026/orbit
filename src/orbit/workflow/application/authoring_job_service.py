@@ -10,6 +10,7 @@ from threading import Lock, Thread
 from typing import Any, Mapping
 
 from ..authoring import AuthoringUnknownResultError, CancelScope, cancellable
+from ..persistence.authoring_output import SQLiteAuthoringOutputStore
 from ..persistence.control import audit as persist_audit
 from ..persistence.database import connect_workflow_database
 
@@ -47,10 +48,30 @@ class AuthoringJobService:
         # not here, which is what the deadline and restart recovery are for.
         self._scopes: dict[str, CancelScope] = {}
         self._scope_lock = Lock()
+        # What the Agent CLI prints while it writes: an observation of a child
+        # process, kept so a job that thinks for a minute is not a black box.
+        self._output = SQLiteAuthoringOutputStore(self.path)
         self._recover()
 
+    def output(self, job_id: str, *, after_chunk_id: int = 0, limit: int = 500):
+        """What the Agent CLI printed, in the order it printed it."""
+
+        return self._output.read(
+            job_id, after_chunk_id=after_chunk_id, limit=limit,
+        )
+
     def _open_scope(self, job_id: str) -> CancelScope:
-        scope = CancelScope()
+        def record(stream: str, text: str) -> None:
+            try:
+                self._output.append(
+                    job_id=job_id, stream=stream, text=text, now=self.clock(),
+                )
+            except Exception:
+                # Console output is diagnostic data. A locked or unavailable
+                # store must not change the authoring job it merely observes.
+                pass
+
+        scope = CancelScope(on_output=record)
         with self._scope_lock:
             self._scopes[job_id] = scope
         return scope
@@ -117,6 +138,11 @@ class AuthoringJobService:
             },
             "created_at": row["created_at"], "updated_at": row["updated_at"],
             "href": f"/api/v1/workflow-authoring-jobs/{row['job_id']}",
+            # The client never builds a URL: where this job's console lives is
+            # something the server says, like every other address it follows.
+            "output_href": (
+                f"/api/v1/workflow-authoring-jobs/{row['job_id']}/output"
+            ),
             "allowed_commands": commands,
         }
 

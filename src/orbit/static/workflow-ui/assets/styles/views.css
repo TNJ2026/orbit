@@ -268,36 +268,97 @@
    from the right, so a tall graph gets vertical room a centered dialog never
    has. The catalog stays rendered (and visible) under the scrim. The inner
    panel drops its own chrome — the drawer already draws the card. */
-.workflow-drawer-root { position: fixed; inset: 0; z-index: 100; }
-.workflow-drawer-scrim {
-  position: absolute; inset: 0; background: rgba(0, 0, 0, .42);
-  opacity: 0; transition: opacity .32s cubic-bezier(.45, .05, .35, 1);
+/* Workflow detail opens as a centred modal over the dimmed catalog. The root
+   sits one layer below the sticky topbar, so the bar stays live and un-dimmed
+   while everything under it darkens; Escape, the scrim and × all walk back. */
+.workflow-modal-root { position: fixed; inset: 0; z-index: 8; }
+.workflow-modal-scrim {
+  position: absolute; top: var(--topbar-h, 0px); left: 0; right: 0; bottom: 0;
+  background: rgba(0, 0, 0, .5);
+  -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px);
+  opacity: 0; transition: opacity .24s ease;
 }
-.workflow-drawer {
-  position: absolute; top: 0; right: 0; bottom: 0; width: 50vw;
-  display: flex; flex-direction: column; overflow: hidden; outline: none;
-  background: var(--panel); border-left: 1px solid var(--line);
-  border-radius: var(--radius) 0 0 var(--radius);
-  box-shadow: -18px 0 50px rgba(0, 0, 0, .22);
-  /* A straight slide from the right edge — translation only, never scale.
-     The easing ramps up from rest so the eye catches the panel leaving the
-     edge; a front-loaded curve lands it so fast it reads as a pop from the
-     corner. */
-  transform: translateX(103%);
-  transition: transform .32s cubic-bezier(.45, .05, .35, 1);
-  will-change: transform;
+.workflow-modal {
+  position: absolute; top: var(--topbar-h, 0px); left: 0; right: 0; bottom: 0;
+  display: flex; align-items: center; justify-content: center; padding: 24px;
 }
-.workflow-drawer-root.open .workflow-drawer-scrim { opacity: 1; }
-.workflow-drawer-root.open .workflow-drawer { transform: none; }
-.workflow-drawer-root.closing .workflow-drawer-scrim { opacity: 0; }
-.workflow-drawer-root.closing .workflow-drawer { transform: translateX(103%); }
-.workflow-drawer > .data-state { margin: 18px; }
-.workflow-drawer .workflow-detail {
-  display: flex; flex-direction: column; flex: 1; min-height: 0;
-  border: 0; border-radius: 0; background: none; box-shadow: none;
+.workflow-modal-panel {
+  width: min(1120px, 100%); max-height: 100%; overflow: auto;
+  padding: 24px 28px; background: var(--bg); border: 1px solid var(--line);
+  border-radius: var(--radius); box-shadow: var(--shadow); outline: none;
+  opacity: 0; transform: translateY(10px) scale(.985);
+  transition: opacity .24s ease, transform .24s cubic-bezier(.45, .05, .35, 1);
 }
-.workflow-drawer .panel-head { flex: none; }
-.workflow-drawer .panel-body { min-height: 0; overflow-y: auto; }
+.workflow-modal-root.open .workflow-modal-scrim { opacity: 1; }
+.workflow-modal-root.open .workflow-modal-panel { opacity: 1; transform: none; }
+.workflow-modal-root.closing .workflow-modal-scrim { opacity: 0; }
+.workflow-modal-root.closing .workflow-modal-panel {
+  opacity: 0; transform: translateY(8px) scale(.99);
+}
+.workflow-modal-panel > .data-state { margin: 8px 0; }
+/* The panel owns the entrance, so the inner page animation would double up. */
+.workflow-modal-panel .workflow-detail { animation: none; }
+
+/* Workflow detail is its own page (design/workflow_detail.html): an identity
+   header, a two-up stat row, then one bordered, tabbed surface that holds the
+   diagram. The graph SVG the catalog draws is left byte-for-byte as-is — only
+   the frame around it changes. */
+.workflow-detail {
+  display: flex; flex-direction: column; gap: 24px; padding: 4px 0 0;
+  animation: workflow-detail-in .16s ease-out;
+}
+@keyframes workflow-detail-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+.workflow-detail-head {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 20px;
+}
+.workflow-detail-id { font-size: 11px; letter-spacing: .16em; }
+.workflow-detail-name {
+  margin: 7px 0 0; font-size: 24px; font-weight: 600; line-height: 1.2;
+  letter-spacing: -.01em;
+}
+.workflow-detail-desc { margin: 8px 0 0; max-width: 70ch; color: var(--muted); font-size: 13px; }
+/* Ghost button, top-right: a quiet filled surface that lifts on hover. */
+.workflow-detail-back {
+  flex: 0 0 auto; padding: 9px 22px; border-radius: 4px;
+  background: var(--chip-bg); border: 1px solid var(--line-soft); color: var(--text);
+}
+.workflow-detail-back:hover { background: var(--panel-2); border-color: var(--line); }
+/* Tabs + diagram share one bordered surface; the tab bar is its top edge.
+   Shared verbatim by the read-only detail and the editor — both render the
+   same workflowDefinitionTabs, so the chrome must match. (The run view uses
+   .run-tabs too but never inside .workflow-tabs / these ancestors, so it is
+   untouched.) */
+.workflow-detail .workflow-tabs, .workflow-edit-page .workflow-tabs {
+  gap: 0; min-height: 600px; overflow: hidden;
+  border: 1px solid var(--line-soft); border-radius: 8px; background: var(--panel);
+}
+.workflow-detail .run-tabs, .workflow-edit-page .run-tabs {
+  gap: 0; border-bottom: 1px solid var(--line-soft); background: transparent;
+}
+.workflow-detail .run-tab, .workflow-edit-page .run-tab {
+  padding: 12px 24px; border: 0; border-bottom: 2px solid transparent; border-radius: 0;
+  background: transparent; color: var(--muted-2); font-weight: 500;
+}
+.workflow-detail .run-tab:hover, .workflow-edit-page .run-tab:hover { background: transparent; color: var(--muted); }
+.workflow-detail .run-tab.active, .workflow-edit-page .run-tab.active {
+  background: transparent; color: var(--primary); border-bottom-color: var(--primary);
+}
+.workflow-detail .workflow-tab-content, .workflow-edit-page .workflow-tab-content { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+/* The definition list reads as prose inside the frame; the graph is full-bleed. */
+.workflow-detail .workflow-tab-content > .definition-list, .workflow-edit-page .workflow-tab-content > .definition-list { padding: 18px 20px; }
+.workflow-detail .workflow-graph-pane, .workflow-edit-page .workflow-graph-pane {
+  flex: 1; grid-template-rows: auto 1fr; gap: 0;
+  background-image: radial-gradient(
+    color-mix(in srgb, var(--muted-2) 26%, transparent) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+.workflow-detail .graph-zoom-controls, .workflow-edit-page .graph-zoom-controls { padding: 16px 18px 0; }
+.workflow-detail .workflow-graph-scroll, .workflow-edit-page .workflow-graph-scroll {
+  display: flex; align-items: center; justify-content: center; padding: 8px 24px 24px;
+}
 /* The revision editor band is shared by the dedicated Workflow edit page. */
 .workflow-editor-wrap {
   display: grid; grid-template-rows: 0fr; flex: none;
@@ -313,6 +374,37 @@
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
 }
 .workflow-editor .actions { justify-content: flex-end; }
+/* Modify form: an authored-by field over a titled prompt section whose mono
+   textarea carries a floating syntax hint. */
+.workflow-edit-page .workflow-editor { gap: 14px; }
+.workflow-modify-prompt { display: grid; gap: 6px; }
+/* The grid gap owns the spacing here, so the heading drops the margin a
+   browser gives an h3 by default — it stacked on top of the gap above. */
+.workflow-modify-prompt > .field-label { margin: 0; }
+/* Helper prose sits a step quieter than the heading above it: the tertiary
+   grey, not the secondary one used for reading text. */
+.workflow-modify-prompt .muted { margin: 0; font-size: 13px; color: var(--muted-2); }
+/* The Agent CLI's console while it writes: a terminal tail, so it keeps its
+   newlines, scrolls inside its own box, and never stretches the form. */
+.workflow-authoring-output { display: grid; gap: 6px; min-width: 0; }
+.workflow-authoring-console {
+  margin: 0; max-height: 240px; min-width: 0; overflow: auto;
+  padding: 12px; background: var(--panel-2);
+  border: 1px solid var(--line); border-radius: var(--radius);
+  font-family: var(--mono); font-size: 12px; line-height: 1.55;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.workflow-modify-input-wrap { position: relative; }
+.workflow-modify-input {
+  width: 100%; min-height: 140px; resize: vertical; display: block;
+  padding: 14px; background: var(--panel-2); color: var(--text);
+  border: 1px solid var(--line); border-radius: var(--radius);
+  font-size: 13px; line-height: 1.6;
+}
+.workflow-modify-syntax {
+  position: absolute; right: 12px; bottom: 12px; pointer-events: none;
+  font-size: 11px; color: var(--muted-2);
+}
 /* A whole-page route swap, so the entrance is just a short fade with a hair of
    rise — enough to soften the jump in from the detail drawer, never enough to
    make a frequent edit feel like it waits on an animation. */
@@ -325,14 +417,32 @@
   to { opacity: 1; transform: none; }
 }
 .workflow-edit-page > .panel-head { align-items: flex-start; }
-.workflow-edit-canvas { min-width: 0; overflow: auto; }
-.workflow-edit-page > .workflow-editor-wrap {
-  border-top: 1px solid var(--line); background: var(--panel-2);
+/* Edit-page header: a large action title over the workflow id and the version
+   it builds on, with the editor's status as an amber badge to the right. */
+.workflow-edit-head { padding: 18px 20px; }
+.workflow-edit-head > .actions { align-items: center; }
+.workflow-edit-heading { display: grid; gap: 4px; min-width: 0; }
+.workflow-edit-title { margin: 0; font-size: 24px; font-weight: 700; letter-spacing: -.01em; }
+.workflow-edit-id { overflow-wrap: anywhere; }
+.workflow-edit-status {
+  padding: 4px 10px; border-radius: 6px; font-size: 12px; font-weight: 600;
+  white-space: nowrap; background: var(--amber-soft); color: var(--amber);
+  border: 1px solid color-mix(in srgb, var(--amber) 32%, transparent);
 }
-.workflow-edit-page .workflow-editor { padding: 16px 18px; }
+.workflow-edit-canvas { min-width: 0; overflow: auto; }
+/* On the edit page the form is the page, not a band laid over it: it inherits
+   the surrounding surface instead of carrying its own tone. */
+.workflow-edit-page > .workflow-editor-wrap {
+  border-top: 1px solid var(--line); background: transparent;
+}
+.workflow-edit-page .workflow-editor {
+  padding: 16px 18px; background: transparent; border-top: 0;
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .workflow-drawer, .workflow-drawer-scrim, .workflow-editor-wrap { transition: none; }
-  .workflow-edit-page { animation: none; }
+  .workflow-editor-wrap, .workflow-modal-scrim, .workflow-modal-panel { transition: none; }
+  .defn-row, .defn-glyph, .defn-tools, .defn-edit { transition: none; }
+  .workflow-edit-page, .workflow-detail { animation: none; }
 }
 .artifact-content { min-width: 0; }
 .artifact-preview {
@@ -502,9 +612,6 @@
 }
 .view-intro h2 { margin: 5px 0; font-size: clamp(22px, 3vw, 24px); letter-spacing: -.02em; }
 .view-intro p { margin: 0; max-width: 68ch; font-size: 13px; }
-/* Grid and flex children default to min-width:auto, so a wide drawing would
-   stretch the whole panel instead of scrolling inside its own strip. */
-.workflow-detail .panel-body { min-width: 0; }
 .workflow-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 12px; }
 .workflow-card {
   padding: 0 14px; overflow: hidden; display: flex; flex-direction: column;
@@ -555,8 +662,120 @@
 .workflow-node.more { color: var(--muted); }
 .workflow-detail { scroll-margin-top: 72px; }
 .definition-list { display: grid; gap: 8px; }
-.definition-node { padding: 8px 0; border-bottom: 1px solid var(--line); }
 .definition-list .actions { padding: 0; border-bottom: 0; }
+/* Published-definition list (design/workflow_detail2.html): each node is a
+   card row — a tinted kind glyph, the id with its kind/handler, the authored
+   prompt in a framed well (or an I/O signature when there is none), and an
+   edit affordance that fades in on hover/focus. */
+.defn-list { gap: 12px; }
+.defn-row {
+  display: grid; grid-template-columns: 260px minmax(0, 1fr) auto; align-items: center; gap: 16px;
+  padding: 16px 18px; border: 1px solid var(--line-soft); border-radius: 8px;
+  background: color-mix(in srgb, var(--panel) 72%, transparent);
+  transition: border-color .18s ease, background-color .18s ease, transform .18s ease;
+}
+.defn-row:hover {
+  transform: translateY(-1px);
+  border-color: var(--row-accent, var(--line));
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+}
+.defn-row.kind-action   { --row-accent: var(--blue); }
+.defn-row.kind-human    { --row-accent: var(--amber); }
+.defn-row.kind-decision { --row-accent: var(--purple); }
+.defn-row.kind-terminal { --row-accent: var(--muted-2); }
+.defn-id { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.defn-id-text { min-width: 0; flex: 1; }
+.defn-glyph {
+  width: 40px; height: 40px; border-radius: 4px; flex: 0 0 auto;
+  display: grid; place-items: center;
+  background: color-mix(in srgb, currentColor 12%, transparent);
+  transition: background-color .18s ease, color .18s ease;
+}
+.defn-glyph svg { display: block; }
+.glyph-blue   { color: var(--blue); }
+.glyph-amber  { color: var(--amber); }
+.glyph-purple { color: var(--purple); }
+.glyph-muted  { color: var(--muted-2); }
+.defn-row:hover .glyph-blue   { background: var(--blue);   color: var(--on-primary); }
+.defn-row:hover .glyph-amber  { background: var(--amber);  color: var(--chrome); }
+.defn-row:hover .glyph-purple { background: var(--purple); color: var(--chrome); }
+.defn-row:hover .glyph-muted  { background: var(--muted-2); color: var(--chrome); }
+.defn-name {
+  font-family: var(--mono); font-weight: 700; font-size: 14px; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.defn-meta { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; margin-top: 5px; }
+.defn-kind {
+  font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 2px; background: var(--panel-3); color: var(--muted-2);
+}
+.defn-kind-amber  { background: var(--amber-soft);  color: var(--amber); }
+.defn-kind-purple { background: var(--purple-soft); color: var(--purple); }
+.defn-handler {
+  font-family: var(--mono); font-size: 12px; color: var(--muted-2);
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* Prompt reads as a little panel (design/workflow_detail3.html): a captioned
+   bar over a clamped body — five lines, then truncated, full text on hover. */
+.defn-prompt {
+  flex: 1 1 280px; min-width: 0;
+  --defn-prompt-bg: color-mix(in srgb, var(--panel) 62%, var(--bg));
+  border: 1px solid color-mix(in srgb, var(--line) 45%, transparent);
+  border-radius: 4px; overflow: hidden;
+  background: var(--defn-prompt-bg);
+}
+.defn-prompt-bar {
+  padding: 5px 12px; border-bottom: 1px solid color-mix(in srgb, var(--line) 30%, transparent);
+  background: color-mix(in srgb, var(--panel-3) 50%, transparent);
+  font-size: 10px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase;
+  color: var(--muted-2);
+}
+/* Five lines, then a fade into the panel floor — a line-clamp-free clip that
+   renders identically everywhere (the webkit box path mis-clips a 6th line in
+   some engines). Full text stays on the title tooltip. */
+.defn-prompt-body {
+  position: relative; box-sizing: content-box;
+  padding: 10px 14px; color: var(--muted);
+  font-family: var(--mono); font-size: 13px; line-height: 20px;
+  max-height: 100px; overflow: hidden;
+}
+.defn-prompt-body::after {
+  content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 22px;
+  background: linear-gradient(to bottom, transparent, var(--defn-prompt-bg));
+  pointer-events: none;
+}
+.defn-prompt-key { font-weight: 700; margin-right: 8px; color: var(--row-accent, var(--blue)); }
+.defn-note {
+  flex: 1 1 280px; min-width: 0; display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+  color: var(--muted-2); font-size: 13px; font-style: italic;
+}
+.defn-note > svg { flex: 0 0 auto; opacity: .8; }
+.defn-io { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+.defn-chip {
+  font-family: var(--mono); font-style: normal; font-size: 11px;
+  padding: 2px 8px; border-radius: 12px; border: 1px solid var(--line-soft);
+  background: var(--panel-2); color: var(--muted);
+}
+.defn-chip.in  { color: var(--blue);  border-color: color-mix(in srgb, var(--blue) 35%, transparent); }
+.defn-chip.out { color: var(--green); border-color: color-mix(in srgb, var(--green) 35%, transparent); }
+.defn-arrow { color: var(--muted-2); font-style: normal; }
+.defn-tools {
+  display: flex; align-items: center; gap: 6px; justify-self: end;
+  opacity: 0; transition: opacity .18s ease;
+}
+.defn-row:hover .defn-tools, .defn-row:focus-within .defn-tools { opacity: 1; }
+.defn-edit {
+  width: 32px; height: 32px; padding: 0; display: grid; place-items: center;
+  border: 1px solid var(--line-soft); border-radius: 4px; background: transparent;
+  color: var(--muted-2); cursor: pointer;
+  transition: color .15s ease, border-color .15s ease, background-color .15s ease;
+}
+.defn-edit:hover { color: var(--blue); border-color: var(--blue); background: var(--blue-soft); }
+/* Narrow modal: stack the columns so the prompt never gets squeezed to zero. */
+@media (max-width: 600px) {
+  .defn-row { grid-template-columns: 1fr; gap: 10px; }
+  .defn-tools { justify-self: end; }
+}
 .step-prompt {
   margin-top: 4px; white-space: pre-wrap; overflow: hidden;
   display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
@@ -606,11 +825,6 @@
 
 
 
-/* Agents: registration facts on prototype-styled cards. */
-.data-card {
-  padding: 14px; border: 1px solid var(--line-soft); border-radius: 10px;
-  background: var(--panel); display: grid; gap: 8px; align-content: start;
-}
 
 
 
@@ -711,23 +925,64 @@
 .graph-edge.route-failure { stroke: var(--red); }
 #graphArrow path { fill: var(--muted-2); }
 
-/* Registered Agent handlers, one card each. */
-.data-card {
-  padding: 14px; border: 1px solid var(--line-soft); border-radius: 10px;
-  background: var(--panel); display: grid; gap: 8px; align-content: start;
+/* Registered Agent handlers: identity tiles from design/agents.html. Sharp
+   4px corners on purpose — the Agent grid is the one view the design specs
+   tighter corners for. */
+.agents-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(236px, 1fr)); gap: 16px; }
+.agent-card {
+  padding: 20px; border: 1px solid var(--line-soft); border-radius: 4px;
+  background: var(--panel); display: grid; gap: 14px; align-content: start;
+  transition: transform .2s ease, border-color .2s ease, background-color .2s ease;
 }
-.agents-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
-.agent-card:hover { transform: translateY(-2px); border-color: var(--muted-2); }
-.agent-head { display: flex; align-items: center; gap: 10px; }
+.agent-card:hover {
+  transform: translateY(-2px);
+  border-color: var(--brand-line);
+  background: var(--panel-2);
+}
+.agent-head { display: flex; align-items: flex-start; gap: 12px; }
 .agent-avatar {
-  width: 34px; height: 34px; border-radius: 9px; flex: 0 0 auto;
+  width: 40px; height: 40px; border-radius: 4px; flex: 0 0 auto;
   display: grid; place-items: center;
-  background: var(--blue-soft); color: var(--blue);
-  font-family: var(--mono); font-size: 12px; font-weight: 700;
+  font-family: var(--mono); font-size: 12px; font-weight: 700; letter-spacing: .04em;
 }
-.agent-version { font-size: 13px; margin-top: 6px; }
-.capabilities { display: flex; flex-wrap: wrap; gap: 5px; }
-.capability {
-  padding: 3px 6px; border: 1px solid var(--line-soft); border-radius: 5px;
-  color: var(--muted); font-family: var(--mono); font-size: 12px;
+.agent-avatar.hue-blue    { background: var(--hue-blue-soft);    color: var(--hue-blue); }
+.agent-avatar.hue-purple  { background: var(--hue-purple-soft);  color: var(--hue-purple); }
+.agent-avatar.hue-emerald { background: var(--hue-emerald-soft); color: var(--hue-emerald); }
+.agent-avatar.hue-indigo  { background: var(--hue-indigo-soft);  color: var(--hue-indigo); }
+.agent-avatar.hue-amber   { background: var(--hue-amber-soft);   color: var(--hue-amber); }
+.agent-avatar.hue-cyan    { background: var(--hue-cyan-soft);    color: var(--hue-cyan); }
+.agent-avatar.hue-rose    { background: var(--hue-rose-soft);    color: var(--hue-rose); }
+.agent-avatar.hue-pink    { background: var(--hue-pink-soft);    color: var(--hue-pink); }
+.agent-id { min-width: 0; }
+.agent-name {
+  margin: 0; font-size: 14px; font-weight: 600; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.agent-version { font-size: 12px; margin-top: 3px; color: var(--muted-2); }
+/* Fact rows under the identity: label left, count pill right, hairline above. */
+.agent-stat {
+  display: flex; align-items: center; justify-content: space-between;
+  border-top: 1px solid var(--line-soft); padding-top: 11px;
+}
+.agent-stat-label { font-size: 11px; color: var(--muted-2); }
+.agent-stat-pill {
+  font-size: 11px; font-weight: 600; color: var(--muted);
+  background: var(--chip-bg); border-radius: 999px; padding: 2px 9px;
+}
+.agent-stat-pill.err { background: var(--red-soft); color: var(--red); }
+/* Live counter in the intro row; the dot breathes while the Runtime is up. */
+.agents-online {
+  display: flex; align-items: center; gap: 8px;
+  color: var(--muted-2); font-size: 12px; white-space: nowrap;
+}
+.agents-online-dot {
+  width: 8px; height: 8px; border-radius: 50%; background: var(--green);
+  animation: agents-pulse 2.4s ease-out infinite;
+}
+@keyframes agents-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(86, 214, 160, .45); }
+  70%, 100% { box-shadow: 0 0 0 7px rgba(86, 214, 160, 0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .agents-online-dot { animation: none; }
 }
