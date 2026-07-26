@@ -130,3 +130,10 @@ class WorkflowDefinitionService:
         if self.store is None:
             raise RuntimeError("get requires a WorkflowVersion store")
         return self.store.get(workflow_id, version)
+
+    def delete_workflow(self, workflow_id: str, *, expected_latest_version: int) -> None:
+        if self.store is None:
+            raise RuntimeError("delete requires a WorkflowVersion store")
+        self.store.delete(
+            workflow_id, expected_latest_version=expected_latest_version,
+        )

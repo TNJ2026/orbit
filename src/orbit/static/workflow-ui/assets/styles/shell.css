@@ -86,15 +86,13 @@
 .theme-option:hover { background: var(--hover); color: var(--text); }
 .theme-option.active { background: var(--blue-soft); color: var(--blue); }
 
-/* Runtime health lives as a floating badge pinned to the bottom-right of the
-   viewport rather than in the top bar: an always-visible liveness probe that
-   stays out of the primary controls. It is display-only, so it lets clicks
-   pass through to whatever sits under it. */
+/* Runtime health sits in the top-bar action group immediately before Refresh.
+   The markup owns that order; this rule keeps the status compact without
+   turning it into a viewport-level floating layer. */
 .runtime-card-inline {
-  position: fixed; right: 24px; bottom: 24px; z-index: 8;
   display: inline-flex; align-items: center; gap: 8px;
   border: 1px solid var(--line); border-radius: 999px;
-  padding: 6px 12px; background: var(--panel); box-shadow: var(--shadow);
+  min-height: 36px; padding: 6px 12px; background: var(--panel);
   font-size: 12px; pointer-events: none;
 }
 .live-dot {
@@ -116,7 +114,7 @@
     margin-left: auto; flex-wrap: wrap; row-gap: 8px;
     justify-content: flex-end; min-width: 0; max-width: 100%;
   }
-  .runtime-card-inline { min-width: 0; right: 12px; bottom: 12px; }
+  .runtime-card-inline { min-width: 0; }
   .runtime-card-inline #runtimeDetail {
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 34vw;
   }

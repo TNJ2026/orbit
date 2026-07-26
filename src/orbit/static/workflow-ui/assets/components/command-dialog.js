@@ -169,12 +169,19 @@ export function cancelRunDialog({ el, i18n }) {
 
 /** Running a step again may repeat whatever the Agent already did outside the
  *  Runtime, so the operator confirms rather than clicks once. */
-export function retryNodeDialog({ el, i18n }, allowed) {
+export function retryNodeDialog({ el, i18n, retryAgents = [] }, allowed) {
+  const agent = el("select", { id: "retryAgent" }, [
+    el("option", { value: "", text: i18n.t("retry.agent.current") }),
+    ...retryAgents.map((name) => el("option", { value: name, text: name })),
+  ]);
   const dialog = el("dialog", { "aria-label": i18n.t("retry.title") }, [
     el("form", { method: "dialog" }, [
       el("h2", { text: i18n.t("retry.title") }),
       el("p", { text: i18n.t("retry.confirm") }),
       el("div", { class: "mono muted", text: allowed.target_aggregate_id }),
+      ...(retryAgents.length ? [el("div", { class: "field" }, [
+        el("label", { for: "retryAgent", text: i18n.t("retry.agent") }), agent,
+      ])] : []),
       el("div", { class: "actions" }, [
         el("button", { class: "button", value: "cancel", text: i18n.t("action.cancel") }),
         el("button", {
@@ -184,7 +191,7 @@ export function retryNodeDialog({ el, i18n }, allowed) {
       ]),
     ]),
   ]);
-  return dialogResult(dialog, () => ({}));
+  return dialogResult(dialog, () => (agent.value ? { agent: agent.value } : {}));
 }
 
 export function recoveryDialog({ el, i18n }, allowed) {

@@ -443,7 +443,17 @@ RUNTIME_COMMAND_PAYLOAD_SCHEMAS = {
     ),
     "cancel-run": _object_schema([], {"reason": {"type": "string"}}),
     "cancel-node": _object_schema([], {"reason": {"type": "string"}}),
-    "retry-node-run": _object_schema([], {"reason": {"type": "string"}}),
+    "retry-node-run": _object_schema([], {
+        "reason": {"type": "string"},
+        "handler_override": _object_schema(
+            ["name", "version", "manifest_fingerprint"],
+            {
+                "name": {"type": "string", "minLength": 1},
+                "version": {"type": "string", "minLength": 1},
+                "manifest_fingerprint": {"type": "string", "minLength": 1},
+            },
+        ),
+    }),
     "advance-graph": _object_schema([], {"plan_version": _REVISION}),
     "apply-planner-proposal": _object_schema(
         ["proposal_id"],
@@ -502,7 +512,18 @@ RUNTIME_EVENT_PAYLOAD_SCHEMAS = {
     ),
     "node-input-prepared": _object_schema(
         ["run_id", "node_id", "input"],
-        {"run_id": _ID, "node_id": {"type": "string"}, "input": {"type": "object"}},
+        {
+            "run_id": _ID, "node_id": {"type": "string"},
+            "input": {"type": "object"},
+            "handler_override": _object_schema(
+                ["name", "version", "manifest_fingerprint"],
+                {
+                    "name": {"type": "string", "minLength": 1},
+                    "version": {"type": "string", "minLength": 1},
+                    "manifest_fingerprint": {"type": "string", "minLength": 1},
+                },
+            ),
+        },
     ),
     "attempt-output-recorded": _object_schema(
         ["run_id", "node_run_id", "output"],

@@ -28,6 +28,18 @@ from ..runtime.work_scheduler import DurableWorkScheduler
 from .budget_service import BudgetService
 
 
+# Graph-control metadata is carried in PlanNode.config for the routing kernel,
+# but it is not part of an Action Handler's declared business configuration.
+_RUNTIME_PLAN_CONFIG_KEYS = frozenset({"route_mode", "policy_refs"})
+
+
+def _handler_config(plan_node):
+    return {
+        key: value for key, value in dict(plan_node.config).items()
+        if key not in _RUNTIME_PLAN_CONFIG_KEYS
+    }
+
+
 def _time(value: datetime) -> str:
     return value.isoformat(timespec="microseconds").replace("+00:00", "Z")
 
@@ -287,21 +299,29 @@ class DurableRuntimeApplicationService:
             plan_record = uow.plans.get(job.run_id, node.source_plan_version)
             plan = execution_plan_from_primitive(plan_record.plan)
             plan_node = plan.node(node.node_id)
-            input_value = next(
-                item.envelope.payload["input"]
+            prepared_payload = next(
+                item.envelope.payload
                 for item in uow.events.read_stream(node.node_run_id, limit=1000)
                 if item.envelope.event_type == "node_input_prepared"
             )
-        entry = self.execution_registry.resolve(
-            plan_node.handler_name, plan_node.handler_version,
-            expected_manifest_fingerprint=plan_node.handler_manifest_fingerprint,
-        )
+            input_value = prepared_payload["input"]
+        override = prepared_payload.get("handler_override")
+        if override is None:
+            entry = self.execution_registry.resolve(
+                plan_node.handler_name, plan_node.handler_version,
+                expected_manifest_fingerprint=plan_node.handler_manifest_fingerprint,
+            )
+        else:
+            entry = self.execution_registry.resolve(
+                override["name"], override["version"],
+                expected_manifest_fingerprint=override["manifest_fingerprint"],
+            )
         manifest = entry.manifest
         return ExecutorRequest(
             job.run_id, plan.plan_id, plan.plan_version, node.node_run_id,
             attempt.attempt_id, attempt.attempt_number, job.job_id,
             lease.lease_id, node.node_id, manifest.name, manifest.version,
-            manifest.fingerprint, plan_node.config, input_value,
+            manifest.fingerprint, _handler_config(plan_node), input_value,
             manifest.inputs, manifest.outputs,
             f"{job.run_id}+{node.node_run_id}+{attempt.attempt_number.value}",
             now + timedelta(seconds=manifest.resource_profile.max_duration_seconds),
@@ -311,6 +331,27 @@ class DurableRuntimeApplicationService:
             tuple(plan_node.outputs),
             tuple(plan_node.inputs),
         )
+
+    def resolve_retry_handler(self, agent: str) -> Mapping[str, str]:
+        """Resolve a UI Agent name to trusted, exact execution evidence."""
+
+        if self.execution_registry is None or not self.execution_registry.sealed:
+            raise RuntimeError("a sealed ExecutionRegistry is required")
+        handler_name = agent if agent.startswith("agent.") else f"agent.{agent}"
+        candidates = [
+            entry for entry in self.execution_registry.entries()
+            if entry.manifest.name == handler_name
+            and "agent.invoke" in entry.manifest.capabilities
+        ]
+        if not candidates:
+            raise ValueError(f"Agent is not available: {agent}")
+        from ..catalogs.handlers import _version_tuple
+        entry = max(candidates, key=lambda item: _version_tuple(item.manifest.version))
+        return {
+            "name": entry.manifest.name,
+            "version": entry.manifest.version,
+            "manifest_fingerprint": entry.manifest.fingerprint,
+        }
 
     def build_artifact_access(self, request: ExecutorRequest):
         """The Artifact capability a Handler sees, scoped to this attempt.

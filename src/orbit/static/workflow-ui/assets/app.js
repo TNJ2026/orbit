@@ -292,6 +292,15 @@ function editGlyph() {
     svgEl("path", { d: "M13.5 6.5l3 3" }),
   ]);
 }
+function deleteGlyph() {
+  return svgEl("svg", {
+    width: "24", height: "24", viewBox: "0 0 24 24", fill: "currentColor",
+  }, [
+    svgEl("path", {
+      d: "M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zm2-10h8v10H8V9zm7.5-5-1-1h-5l-1 1H5v2h14V4z",
+    }),
+  ]);
+}
 function noteGlyph() {
   return svgEl("svg", {
     width: "15", height: "15", viewBox: "0 0 24 24", fill: "none",
@@ -452,6 +461,56 @@ function openActionEditorDialog(workflow, nodeId, onSaved) {
   document.body.append(dialog);
   dialog.showModal();
   title.focus();
+}
+
+function openWorkflowDeleteDialog(workflow, allowed, onDeleted) {
+  const titleId = `deleteWorkflowTitle-${workflow.workflow_id.replace(/[^a-z0-9]/gi, "-")}`;
+  const problem = el("div", { class: "banner error", hidden: "hidden" });
+  const confirm = el("button", {
+    type: "submit", class: "button danger workflow-delete-confirm",
+    text: i18n.t("workflows.deleteAction"),
+  });
+  const cancel = el("button", {
+    type: "button", class: "button", text: i18n.t("action.cancel"),
+  });
+  const dialog = el("dialog", {
+    class: "workflow-delete-dialog", "aria-labelledby": titleId,
+  });
+  cancel.addEventListener("click", () => dialog.close());
+  const form = el("form", {}, [
+    el("h2", { id: titleId, text: i18n.t("workflows.deleteTitle") }),
+    el("p", {
+      class: "workflow-delete-warning",
+      text: i18n.t("workflows.deleteConfirm", { name: workflow.name }),
+    }),
+    el("div", { class: "mono workflow-delete-id", text: workflow.workflow_id }),
+    problem,
+    el("div", { class: "actions" }, [cancel, confirm]),
+  ]);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    confirm.disabled = true;
+    cancel.disabled = true;
+    problem.hidden = true;
+    try {
+      await api.execute(allowed, {}, `workflow.delete:${workflow.workflow_id}`);
+      dialog.close();
+      await onDeleted();
+    } catch (error) {
+      confirm.disabled = false;
+      cancel.disabled = false;
+      problem.textContent = error instanceof ApiError
+        ? i18n.t(error.messageKey, { message: error.message })
+        : i18n.t("error.generic");
+      problem.hidden = false;
+      reportError(error);
+    }
+  });
+  dialog.append(form);
+  dialog.addEventListener("close", () => dialog.remove(), { once: true });
+  document.body.append(dialog);
+  dialog.showModal();
+  cancel.focus();
 }
 
 function stepPrompt(config, extraClass = "") {
@@ -728,6 +787,7 @@ function commandButtons(commands, onDone) {
 async function promptAndExecute(allowed, onDone, siblings = []) {
   const context = {
     api, el, i18n, reportError,
+    retryAgents: shellFacts?.capabilities?.agent_handlers?.agents || [],
     // Server-stated, never inferred: on a single-operator Runtime the
     // approval token is minted and spent server-side.
     tokenRequired: shellFacts?.permissions?.human_token_required !== false,
@@ -1827,6 +1887,170 @@ function handlerDriftNotice(value, redraw) {
   ]);
 }
 
+function workflowGenerationProgress(initialJob, onSettled) {
+  const refreshIntervalMs = 3000;
+  let job = initialJob;
+  let after = 0;
+  let timer = null;
+  let stopped = false;
+  let outputUnavailable = false;
+  let progressStage = job.status === "queued" ? "preparing" : "generating";
+  let progressAttempt = null;
+  let progressMaximum = null;
+  const progressSteps = ["preparing", "generating", "validating", "publishing"];
+  const progressItems = progressSteps.map((stage, index) => el("li", {
+    class: "workflow-generation-step pending",
+  }, [
+    el("span", { class: "workflow-generation-step-marker", text: String(index + 1) }),
+    el("span", { class: "workflow-generation-step-label", text: i18n.t(`generate.progress.${stage}`) }),
+  ]));
+  const progressDetail = el("span", { class: "muted workflow-generation-progress-detail" });
+
+  const updateProgress = (stage, attempt = null, maximum = null, failed = false) => {
+    progressStage = stage || progressStage;
+    progressAttempt = attempt ?? progressAttempt;
+    progressMaximum = maximum ?? progressMaximum;
+    const normalized = progressStage === "repairing"
+      || (progressStage === "generating" && progressAttempt > 1)
+      ? "validating"
+      : progressStage === "validated" ? "publishing" : progressStage;
+    const current = Math.max(0, progressSteps.indexOf(normalized));
+    progressItems.forEach((item, index) => {
+      item.className = `workflow-generation-step ${index < current ? "completed"
+        : index === current ? (failed ? "failed" : "current") : "pending"}`;
+    });
+    progressDetail.textContent = progressAttempt && progressMaximum
+      ? i18n.t("generate.progress.attempt", { current: progressAttempt, total: progressMaximum })
+      : "";
+  };
+  updateProgress(progressStage);
+  const state = el("strong", { text: i18n.t(`authoring.job.${job.status}`) });
+  const jobState = el("div", { class: `authoring-job-state ${job.status}` }, [
+    el("span", { class: "live-dot", "aria-hidden": "true" }), state,
+  ]);
+  const empty = el("span", {
+    class: "muted workflow-generation-output-empty",
+    text: i18n.t("generate.outputWaiting"),
+  });
+  const log = el("pre", {
+    class: "console-log workflow-generation-console", role: "log", tabindex: "0",
+    "aria-label": i18n.t("editor.agentConsole"),
+  });
+  const failure = el("div", {
+    class: "banner error workflow-generation-failure", hidden: "hidden",
+  });
+  const retry = el("button", {
+    type: "button", class: "button primary", hidden: "hidden",
+    text: i18n.t("generate.tryAgain"), onclick: () => onSettled(),
+  });
+
+  const pumpOutput = async () => {
+    if (outputUnavailable || !job.output_href) return;
+    try {
+      for (let page = 0; page < 20; page += 1) {
+        const payload = (await api.get(`${job.output_href}?after=${after}`)).data;
+        for (const chunk of payload.chunks) {
+          if (chunk.text.startsWith("\x1eorbit-progress:")) {
+            try {
+              const event = JSON.parse(chunk.text.slice("\x1eorbit-progress:".length));
+              updateProgress(event.stage, event.attempt, event.max_attempts);
+            } catch (_) {
+              // A malformed diagnostic event must not hide the Agent's output.
+            }
+            after = chunk.chunk_id;
+            continue;
+          }
+          log.append(el("span", {
+            class: `console-chunk ${chunk.stream}`, text: chunk.text,
+          }));
+          after = chunk.chunk_id;
+        }
+        if (!payload.has_more) break;
+      }
+      empty.hidden = Boolean(log.childElementCount);
+    } catch (error) {
+      if (error instanceof ApiError && [401, 403].includes(error.status)) {
+        outputUnavailable = true;
+        empty.textContent = i18n.t("generate.outputUnavailable");
+      }
+    }
+  };
+
+  const poll = async () => {
+    if (stopped) return;
+    try {
+      job = (await api.get(job.href)).data;
+      state.textContent = i18n.t(`authoring.job.${job.status}`);
+      jobState.className = `authoring-job-state ${job.status}`;
+      await pumpOutput();
+      if (["queued", "running"].includes(job.status)) {
+        timer = setTimeout(poll, refreshIntervalMs);
+      } else if (job.status === "done") {
+        updateProgress("publishing");
+        progressItems.forEach((item) => { item.className = "workflow-generation-step completed"; });
+        stopped = true;
+        await onSettled();
+      } else {
+        // A failed generation produced no card. Keep its request, Agent and
+        // console visible so the author sees why, and let them explicitly
+        // return to the editor instead of making the failure disappear.
+        stopped = true;
+        updateProgress(progressStage, progressAttempt, progressMaximum, true);
+        failure.textContent = job.error?.message
+          || i18n.t(`authoring.job.${job.status}`);
+        failure.hidden = false;
+        retry.hidden = false;
+      }
+    } catch (error) {
+      if (!(error instanceof ApiError)) throw error;
+      timer = setTimeout(poll, refreshIntervalMs);
+    }
+  };
+
+  const previous = activeViewCleanup;
+  activeViewCleanup = () => {
+    stopped = true;
+    if (timer) clearTimeout(timer);
+    if (previous) previous();
+  };
+  pumpOutput().then(() => {
+    if (!stopped) timer = setTimeout(poll, refreshIntervalMs);
+  });
+
+  return el("section", { class: "workflow-generation-progress" }, [
+    el("div", { class: "workflow-generation-request" }, [
+      el("div", { class: "workflow-generation-prompt" }, [
+        el("div", { class: "field-label", text: i18n.t("generate.instruction") }),
+        el("div", { class: "workflow-generation-prompt-value", text: job.prompt }),
+      ]),
+      el("div", { class: "workflow-generation-agent" }, [
+        el("div", { class: "field-label", text: i18n.t("generate.writtenBy") }),
+        el("div", {
+          class: "agent-choice-static mono",
+          text: job.requested_agent || defaultGenerationAgent(),
+        }),
+      ]),
+    ]),
+    el("section", { class: "workflow-generation-stages", "aria-label": i18n.t("generate.progress.title") }, [
+      el("div", { class: "workflow-generation-stages-head" }, [
+        el("h3", { text: i18n.t("generate.progress.title") }),
+        progressDetail,
+      ]),
+      el("ol", { class: "workflow-generation-step-list" }, progressItems),
+    ]),
+    el("section", { class: "workflow-generation-output" }, [
+      el("div", { class: "workflow-generation-output-head" }, [
+        el("h3", { text: i18n.t("editor.agentConsole") }),
+        jobState,
+      ]),
+      empty,
+      log,
+      failure,
+      el("div", { class: "actions workflow-generation-failure-actions" }, [retry]),
+    ]),
+  ]);
+}
+
 async function renderWorkflows(root) {
   let catalog = (await api.workflowCatalog()).data;
   let entries = catalog.workflows;
@@ -1849,6 +2073,7 @@ async function renderWorkflows(root) {
   }
 
   {
+    let writerAgent = defaultGenerationAgent();
     const instruction = el("textarea", {
       id: "generateInstruction", required: "required", maxlength: "4000",
       disabled: activeGeneration ? "disabled" : null,
@@ -1861,64 +2086,73 @@ async function renderWorkflows(root) {
     const submit = el("button", {
       class: "button primary", type: "submit", id: "generateWorkflow",
       disabled: !generateCommand || activeGeneration ? "disabled" : null,
-      text: activeGeneration
+    }, [
+      el("span", { class: "generate-spark", "aria-hidden": "true", text: "✦" }),
+      el("span", { text: activeGeneration
         ? i18n.t(`authoring.job.${activeGeneration.status}`)
-        : i18n.t("generate.action"),
-    });
+        : i18n.t("generate.action") }),
+    ]);
+    const form = el("form", {
+      class: "simplified-workflow-generator-form",
+      onsubmit: async (event) => {
+        event.preventDefault();
+        if (!generateCommand || activeGeneration
+            || !instruction.value.trim() || !instruction.reportValidity()) return;
+        submit.disabled = true;
+        problem.hidden = true;
+        try {
+          await api.execute(
+            generateCommand,
+            {
+              prompt: instruction.value.trim(),
+              display_language: i18n.locale,
+              ...(writerAgent ? { agent: writerAgent } : {}),
+            },
+            `workflow.generate:${Date.now()}`,
+          );
+          simplifiedWorkflowGenerationPending = true;
+          render();
+        } catch (error) {
+          problem.textContent = error instanceof ApiError
+            ? i18n.t(error.messageKey, { message: error.message })
+            : i18n.t("error.generic");
+          problem.hidden = false;
+          reportError(error);
+          submit.disabled = false;
+        }
+      },
+    }, [
+      el("div", { class: "simplified-workflow-generator-agent" }, [
+        generationAgentField(
+          "workflowGenerateAgent", writerAgent,
+          (value) => { writerAgent = value; },
+        ),
+      ]),
+      el("div", { class: "field" }, [
+        el("label", {
+          class: "sr-only", for: "generateInstruction",
+          text: i18n.t("generate.instruction"),
+        }),
+        instruction,
+      ]),
+      el("div", { class: "actions simplified-workflow-generator-actions" }, [submit]),
+      problem,
+    ]);
     root.append(el("section", { class: "panel simplified-workflow-generator" }, [
       el("div", { class: "simplified-workflow-generator-copy" }, [
         el("h2", { text: i18n.t("generate.title") }),
         el("p", { class: "muted", text: i18n.t("generate.hint") }),
       ]),
-      el("form", {
-        class: "simplified-workflow-generator-form",
-        onsubmit: async (event) => {
-          event.preventDefault();
-          if (!generateCommand || activeGeneration
-              || !instruction.value.trim() || !instruction.reportValidity()) return;
-          submit.disabled = true;
-          problem.hidden = true;
-          try {
-            await api.execute(
-              generateCommand,
-              { prompt: instruction.value.trim(), display_language: i18n.locale },
-              `workflow.generate:${Date.now()}`,
-            );
-            simplifiedWorkflowGenerationPending = true;
-            render();
-          } catch (error) {
-            problem.textContent = error instanceof ApiError
-              ? i18n.t(error.messageKey, { message: error.message })
-              : i18n.t("error.generic");
-            problem.hidden = false;
-            reportError(error);
-            submit.disabled = false;
-          }
-        },
-      }, [
-        el("div", { class: "field" }, [
-          el("label", { for: "generateInstruction", text: i18n.t("generate.instruction") }),
-          instruction,
-        ]),
-        el("div", { class: "actions simplified-workflow-generator-actions" }, [submit]),
-        activeGeneration ? el("div", { class: `authoring-job-state ${activeGeneration.status}` }, [
-          el("span", { class: "live-dot", "aria-hidden": "true" }),
-          el("strong", { text: i18n.t(`authoring.job.${activeGeneration.status}`) }),
-        ]) : null,
-        problem,
-      ]),
+      activeGeneration
+        ? workflowGenerationProgress(activeGeneration, render)
+        : form,
     ]));
     root.append(el("header", { class: "view-intro simplified-workflow-list-heading" }, [
       el("div", {}, [
-        el("div", { class: "eyebrow", text: i18n.t("workflows.generated.eyebrow") }),
         el("h2", { text: i18n.t("workflows.generated.heading") }),
         el("p", { class: "muted", text: i18n.t("workflows.generated.description") }),
       ]),
     ]));
-    if (activeGeneration) {
-      const timer = setTimeout(() => render(), 800);
-      activeViewCleanup = () => clearTimeout(timer);
-    }
   }
   const cards = el("section", { class: "workflow-grid", "aria-label": i18n.t("workflows.list") });
 
@@ -1957,6 +2191,14 @@ async function renderWorkflows(root) {
         onclick: () => generateWorkflowDialog(generateCommand),
       }));
     }
+    const deleteCommand = (entry.allowed_commands || []).find(
+      (item) => item.command === "workflow.delete",
+    );
+    const deleteButton = deleteCommand ? el("button", {
+      class: "workflow-delete-icon delete-workflow",
+      "aria-label": i18n.t("workflows.delete"), title: i18n.t("workflows.delete"),
+      onclick: () => openWorkflowDeleteDialog(entry, deleteCommand, render),
+    }, [deleteGlyph()]) : null;
     const card = el("article", {
       class: "workflow-card panel",
       "data-workflow-id": entry.workflow_id,
@@ -1984,17 +2226,25 @@ async function renderWorkflows(root) {
               : `workflows.readiness.${entry.goal_readiness}.description`,
           ),
         }) : null,
-        el("span", { class: "workflow-meta", text: i18n.t("workflows.summary", {
-          nodes: i18n.number(entry.summary.node_count), inputs: i18n.number(entry.inputs.length),
-        }) }),
+        el("span", { class: "workflow-meta workflow-stats" }, [
+          el("span", { text: i18n.t("workflows.nodeCount", {
+            count: i18n.number(entry.summary.node_count),
+          }) }),
+          el("span", { text: i18n.t("workflows.inputCount", {
+            count: i18n.number(entry.inputs.length),
+          }) }),
+        ]),
         // Which version is current, and whether anyone has run it: the two
         // facts that tell two similarly named workflows apart.
         el("span", { class: "workflow-card-facts", text: entry.last_run_at
           ? i18n.t("workflows.lastRun", { when: i18n.dateTime(entry.last_run_at) })
           : i18n.t("workflows.neverRun") }),
       ]),
-      cardActions.length
-        ? el("div", { class: "workflow-card-actions" }, cardActions) : null,
+      cardActions.length || deleteButton
+        ? el("div", { class: "workflow-card-actions" }, [
+          el("div", { class: "workflow-card-primary-actions" }, cardActions),
+          deleteButton,
+        ]) : null,
     ]);
     card.querySelector(".workflow-card-main").addEventListener("click", () => navigate({
       view: "workflow", workflowId: entry.workflow_id, runId: null,

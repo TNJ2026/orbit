@@ -9,7 +9,9 @@ import time
 import unittest
 from types import SimpleNamespace
 
-from orbit.workflow.application.durable_runtime_service import DurableRuntimeApplicationService
+from orbit.workflow.application.durable_runtime_service import (
+    DurableRuntimeApplicationService, _handler_config,
+)
 from orbit.workflow.application.handler_runtime_service import HandlerRuntimeBuilder
 from orbit.workflow.catalogs import HandlerManifest, InMemorySchemaCatalog
 from orbit.workflow.domain.accounting import UsageSnapshot
@@ -101,6 +103,17 @@ class _Tool:
 
 
 class HandlerRuntimeContractTests(unittest.TestCase):
+    def test_runtime_routing_metadata_is_not_sent_to_action_handler(self):
+        node = SimpleNamespace(config={
+            "prompt": "research", "timeout_seconds": 300,
+            "route_mode": "parallel", "policy_refs": ["retry"],
+        })
+
+        self.assertEqual(
+            {"prompt": "research", "timeout_seconds": 300},
+            _handler_config(node),
+        )
+
     def test_usage_reporter_deduplicates_and_rejects_regression(self):
         reporter = InMemoryUsageReporter()
         first = usage()

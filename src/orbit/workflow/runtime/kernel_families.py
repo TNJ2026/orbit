@@ -1097,6 +1097,7 @@ class RuntimeKernel:
     def _schedule_graph(
         self, uow, command, events, plan: GraphExecutionPlan, node_id: str,
         input_value: Mapping[str, Any], *, generation: int, activation_key: str,
+        handler_override: Mapping[str, Any] | None = None,
     ):
         node = plan.node(node_id)
         run = uow.runs.get(plan.run_id)
@@ -1117,9 +1118,15 @@ class RuntimeKernel:
             command.issued_at, generation, activation_key,
         )
         uow.node_runs.create(record)
+        prepared_payload = {
+            "run_id": str(plan.run_id), "node_id": node_id,
+            "input": dict(input_value),
+        }
+        if handler_override is not None:
+            prepared_payload["handler_override"] = dict(handler_override)
         prepared = events.make(
             node_run_id, 1, "node_input_prepared",
-            {"run_id": str(plan.run_id), "node_id": node_id, "input": dict(input_value)},
+            prepared_payload,
         )
         ready = events.make(
             node_run_id, 2, "node_run_transitioned",
@@ -2610,8 +2617,22 @@ class RuntimeKernel:
         if node.kind == "terminal":
             ids.extend(self._maybe_complete_graph(uow, command, events, plan))
         else:
+            source_value = input_value
+            if node.kind == "join":
+                # A Join is a controller, not a Handler, but it still has to
+                # honour its declared output contract.  Propagating its input
+                # envelope verbatim only works accidentally when input and
+                # output port ids are identical.  When the author gives the
+                # merged result a new name (for example findings -> merged),
+                # expose the assembled input envelope through that output.
+                output_ids = tuple(port["id"] for port in node.outputs)
+                if len(output_ids) != 1:
+                    raise ValueError("join node requires exactly one output port")
+                if set(input_value) != {output_ids[0]}:
+                    source_value = {output_ids[0]: dict(input_value)}
+                self._validate_ports(node.outputs, source_value, "output")
             ids.extend(self._propagate_graph(
-                uow, command, events, plan, succeeded_record, input_value,
+                uow, command, events, plan, succeeded_record, source_value,
             ))
         return ids
 
@@ -3098,6 +3119,7 @@ class RuntimeKernel:
         ids.extend(self._schedule_graph(
             uow, command, events, plan, node.node_id, input_value,
             generation=node.generation + 1, activation_key=node.activation_key,
+            handler_override=command.payload.get("handler_override"),
         ))
         current = uow.node_runs.get(node.node_run_id)
         return ids, current.aggregate_version, node.run_id, {

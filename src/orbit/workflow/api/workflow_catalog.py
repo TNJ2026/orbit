@@ -268,7 +268,10 @@ class WorkflowCatalogReadModelService:
                    FROM workflow_versions current
                    LEFT JOIN workflow_definitions d
                      ON d.workflow_id = current.workflow_id
-                   WHERE version = (
+                   WHERE NOT EXISTS (
+                     SELECT 1 FROM archived_workflows x
+                     WHERE x.workflow_id = current.workflow_id
+                   ) AND version = (
                      SELECT MAX(version) FROM workflow_versions
                      WHERE workflow_id = current.workflow_id
                    )
@@ -307,7 +310,10 @@ class WorkflowCatalogReadModelService:
             row = connection.execute(
                 "SELECT v.*, d.name AS display_name FROM workflow_versions v"
                 " LEFT JOIN workflow_definitions d ON d.workflow_id = v.workflow_id"
-                " WHERE v.workflow_id = ? ORDER BY v.version DESC LIMIT 1",
+                " WHERE v.workflow_id = ? AND NOT EXISTS ("
+                " SELECT 1 FROM archived_workflows x"
+                " WHERE x.workflow_id=v.workflow_id)"
+                " ORDER BY v.version DESC LIMIT 1",
                 (workflow_id,),
             ).fetchone()
         if row is None:

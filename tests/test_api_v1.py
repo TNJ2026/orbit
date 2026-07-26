@@ -1247,6 +1247,59 @@ class HandlerDriftTests(unittest.TestCase):
 
 
 class CatalogTests(ApiTestCase):
+    def test_writer_can_delete_workflow_from_advertised_card_command(self) -> None:
+        with AsgiHarness(self.app) as client:
+            catalog = client.get("/api/v1/workflows", actor="writer").json()["data"]
+            item = next(
+                value for value in catalog["workflows"]
+                if value["workflow_id"] == "workflow:linear"
+            )
+            command = next(
+                value for value in item["allowed_commands"]
+                if value["command"] == "workflow.delete"
+            )
+            denied = client.request(
+                command["method"], command["href"], actor="reader",
+                headers={"idempotency-key": "delete-denied"},
+                body={"expected_version": command["expected_version"]},
+            )
+            self.assertEqual(403, denied.status_code)
+
+            stale = client.request(
+                command["method"], command["href"], actor="writer",
+                headers={"idempotency-key": "delete-stale"},
+                body={"expected_version": 0},
+            )
+            self.assertEqual(409, stale.status_code)
+
+            deleted = client.request(
+                command["method"], command["href"], actor="writer",
+                headers={"idempotency-key": "delete-linear"},
+                body={"expected_version": command["expected_version"]},
+            )
+            self.assertEqual(200, deleted.status_code, deleted.text)
+            self.assertTrue(deleted.json()["data"]["deleted"])
+            remaining = client.get(
+                "/api/v1/workflows", actor="writer"
+            ).json()["data"]["workflows"]
+            self.assertNotIn(
+                "workflow:linear", [value["workflow_id"] for value in remaining]
+            )
+            self.assertEqual(
+                404,
+                client.get("/api/v1/workflows/workflow:linear", actor="writer").status_code,
+            )
+            stale_start = client.post(
+                "/api/v1/runs", actor="writer", key="start-deleted",
+                body={
+                    "workflow_id": "workflow:linear",
+                    "workflow_version": command["expected_version"],
+                    "input": {"value": 1},
+                },
+            )
+            self.assertEqual(409, stale_start.status_code)
+            self.assertIn("no longer available", stale_start.json()["error"]["message"])
+
     def test_handler_catalog_exposes_identity_not_commands(self) -> None:
         with AsgiHarness(self.app) as client:
             response = client.get("/api/v1/handler-catalog", actor="reader")
@@ -1410,7 +1463,10 @@ class CatalogTests(ApiTestCase):
             self.assertEqual("integer", linear["inputs"][0]["schema"]["type"])
             self.assertEqual(4, linear["summary"]["node_count"])
             # Not goal-ready: no start command, even for a writer.
-            self.assertEqual([], linear["allowed_commands"])
+            self.assertNotIn(
+                "run.start",
+                [value["command"] for value in linear["allowed_commands"]],
+            )
             entry = entries["workflow:research"]
             command = entry["allowed_commands"][0]
             self.assertEqual("run.start", command["command"])
@@ -2080,7 +2136,10 @@ class WorkflowDraftApiTests(ApiTestCase):
             chunks = output.json()["data"]["chunks"]
         self.assertEqual(
             ["planning the flow\n", "writing nodes\n"],
-            [chunk["text"] for chunk in chunks],
+            [
+                chunk["text"] for chunk in chunks
+                if not chunk["text"].startswith("\x1eorbit-progress:")
+            ],
         )
         self.assertEqual({"stderr"}, {chunk["stream"] for chunk in chunks})
 
@@ -2122,6 +2181,7 @@ class WorkflowDraftApiTests(ApiTestCase):
 
     def test_quick_modify_names_the_agent_that_revises_the_workflow(self) -> None:
         import json as json_module
+        import time
         from tests.test_workflow_drafts import dsl as editable_dsl
 
         asked = []
@@ -2139,6 +2199,12 @@ class WorkflowDraftApiTests(ApiTestCase):
             )
             self.assertEqual(200, response.status_code, response.json())
             self.assertEqual("codex", response.json()["data"]["requested_agent"])
+            job = response.json()["data"]
+            for _ in range(200):
+                if asked or job["status"] not in ("queued", "running"):
+                    break
+                time.sleep(0.02)
+                job = client.get(job["href"], actor="writer").json()["data"]
             self.assertEqual(["codex"], asked)
 
     def test_quick_modify_rejects_an_unknown_agent_before_queueing(self) -> None:

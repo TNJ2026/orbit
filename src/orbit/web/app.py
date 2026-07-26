@@ -479,7 +479,11 @@ def create_app(
 
             if not generation_agents:
                 generation_agents = {
-                    agent.name: TrustedCliDslGenerator((agent.executable_path,))
+                    agent.name: TrustedCliDslGenerator(
+                        (agent.executable_path, *agent.spec.invocation.args),
+                        prompt_flag=agent.spec.invocation.prompt_flag,
+                        prompt_positional=agent.spec.invocation.prompt_positional,
+                    )
                     for agent in invokable_agents
                 }
             if workflow_generator is None:
@@ -595,6 +599,10 @@ def create_app(
         ),
         "agent_handlers": {
             "available": bool(agent_catalog),
+            "agents": sorted(
+                str(item["agent"]) for item in agent_catalog
+                if "agent" in item and "agent.invoke" in item.get("capabilities", ())
+            ),
             **({} if agent_catalog else {"reason": "no_discovered_agents"}),
         },
         "foreach": {"available": True},
@@ -668,6 +676,11 @@ def create_app(
                 }
                 for manifest in manifests
             ],
+            # Discovered Agent generation serves the simplified Goal UI and
+            # must produce a directly runnable prompt ingress. Explicitly
+            # injected generators are an embedding seam and may intentionally
+            # target a different input contract.
+            require_goal_binding=discover_agents,
         )
 
     draft_service = WorkflowDraftApplicationService(

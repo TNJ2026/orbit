@@ -86,6 +86,49 @@ class ScriptedModel:
 
 
 class AuthoringServiceTests(unittest.TestCase):
+    def test_generation_retries_when_goal_cannot_bind_to_one_entry(self) -> None:
+        agent_manifest = HandlerManifest(
+            "agent.test", "1.0.0", ("action",),
+            {"prompt": "schema://object/1.0"},
+            {"value": "example://integer/1.0"},
+            {"type": "object"}, ExecutionSafety.REPLAY_SAFE,
+            ResourceProfile(100_000, 100_000, 0, 300, 0, "builtin"),
+            "schema://object/1.0", (), (), True, True,
+        )
+        corrected = valid_document()
+        corrected["nodes"][0]["inputs"] = [
+            {"id": "prompt", "schema_id": "schema://object/1.0"},
+        ]
+        corrected["nodes"][0]["handler"] = {
+            "name": "agent.test", "version": "1.0.0",
+        }
+        artifact_policy = {
+            "transport": "artifact_ref", "max_size_bytes": 262144,
+            "content_types": ["text/markdown"], "visibility": "run",
+        }
+        corrected["nodes"][0]["outputs"][0].update(artifact_policy)
+        corrected["nodes"][1]["inputs"][0].update(artifact_policy)
+        corrected["dsl_version"] = "1.3"
+        corrected["result"] = {"node": "work", "port": "value"}
+        broken = json.loads(json.dumps(corrected))
+        broken["entry"] = ["work", "done"]
+        model = ScriptedModel([json.dumps(broken), json.dumps(corrected)])
+        authoring = WorkflowAuthoringService(
+            InMemoryHandlerCatalog([agent_manifest]), SCHEMAS, model,
+            handler_facts=[{
+                "name": "agent.test", "version": "1.0.0",
+                "inputs": {"prompt": "schema://object/1.0"},
+                "outputs": {"value": "example://integer/1.0"},
+            }],
+            require_goal_binding=True,
+        )
+
+        outcome = authoring.generate("research then report")
+
+        self.assertEqual(2, outcome.attempts)
+        self.assertIn("GOAL_BINDING_MISSING", model.prompts[1])
+        self.assertIn("exactly one entry", model.prompts[0])
+
     def test_a_valid_fenced_answer_compiles_on_the_first_attempt(self) -> None:
         model = ScriptedModel([
             "Here you go:\n```json\n" + json.dumps(valid_document()) + "\n```",
@@ -117,6 +160,8 @@ class AuthoringServiceTests(unittest.TestCase):
         self.assertIn("never source.approved", prompt)
         self.assertIn("top-level join policy", prompt)
         self.assertIn("must never form a cycle", prompt)
+        self.assertIn("content_types:['text/markdown']", prompt)
+        self.assertIn("Never return such a deliverable only as inline JSON", prompt)
 
     def test_preferred_handler_is_allowlisted_and_added_to_the_prompt(self) -> None:
         model = ScriptedModel([json.dumps(valid_document())])
@@ -200,8 +245,10 @@ class AuthoringServiceTests(unittest.TestCase):
         ])
         outcome = service(model).generate("flow")
         self.assertEqual(2, outcome.attempts)
-        self.assertIn("FINDINGS", model.prompts[1])
+        self.assertIn("RETRY-CONTEXT", model.prompts[1])
         self.assertIn("DSL_HANDLER_NOT_FOUND", model.prompts[1])
+        self.assertIn('\\"name\\": \\"missing\\"', model.prompts[1])
+        self.assertIn("Do not return a repair summary", model.prompts[1])
 
     def test_unicode_replacement_character_is_repaired_before_publish(self) -> None:
         broken = valid_document()
@@ -217,7 +264,7 @@ class AuthoringServiceTests(unittest.TestCase):
         self.assertNotIn("�", outcome.source)
 
     def test_exhausted_retries_surface_diagnostics_and_raw_output(self) -> None:
-        model = ScriptedModel(["not json at all"] * 3)
+        model = ScriptedModel(["not json at all"] * 5)
         with self.assertRaises(AuthoringFailedError) as caught:
             service(model).generate("flow")
         self.assertEqual(
@@ -232,7 +279,7 @@ class AuthoringServiceTests(unittest.TestCase):
              "inputs": [{"id": "value", "schema_id": "example://integer/1.0"}]}
             for i in range(40)
         ]
-        model = ScriptedModel([json.dumps(huge)] * 3)
+        model = ScriptedModel([json.dumps(huge)] * 5)
         with self.assertRaises(AuthoringFailedError) as caught:
             service(model).generate("flow")
         self.assertIn("cap is 30", caught.exception.diagnostics[0]["message"])
@@ -274,7 +321,7 @@ class AuthoringReviseTests(unittest.TestCase):
 
     def test_persistent_id_drift_exhausts_and_fails(self) -> None:
         drifted = json.dumps(valid_document(workflow_id="hijacked"))
-        model = ScriptedModel([drifted, drifted, drifted])
+        model = ScriptedModel([drifted] * 5)
         with self.assertRaises(AuthoringFailedError) as caught:
             self._revise(model)
         self.assertIn("revision failed", str(caught.exception))
@@ -386,6 +433,25 @@ class CliGeneratorTests(unittest.TestCase):
         self.assertEqual(["gen-cli"], calls["argv"])
         self.assertEqual("the prompt", calls["stdin_text"])
         self.assertEqual({"PATH", "HOME", "USER", "LOGNAME"}, set(calls["env"]))
+
+    def test_positional_prompt_uses_non_interactive_cli_command(self) -> None:
+        calls = {}
+
+        def runner(argv, **kwargs):
+            calls.update(kwargs, argv=argv)
+            return FakeOutcome(stdout="answer")
+
+        generator = TrustedCliDslGenerator(
+            ["codex", "exec", "--skip-git-repo-check"],
+            prompt_positional=True, runner=runner,
+        )
+
+        self.assertEqual("answer", generator("build a workflow"))
+        self.assertEqual(
+            ["codex", "exec", "--skip-git-repo-check", "--", "build a workflow"],
+            calls["argv"],
+        )
+        self.assertEqual("", calls["stdin_text"])
 
     def test_the_prompt_demands_a_label_in_the_reader_s_language(self) -> None:
         """Step names are read by whoever opened the page, not the prompt writer.

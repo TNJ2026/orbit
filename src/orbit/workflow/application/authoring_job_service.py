@@ -34,7 +34,7 @@ class AuthoringJobConflict(ValueError):
 class AuthoringJobService:
     def __init__(
         self, path, authoring, publisher, *, workflow_db_path=None,
-        timeout_seconds=300, clock=None,
+        timeout_seconds=600, clock=None,
         cancel_grace_seconds=CANCEL_GRACE_SECONDS,
     ):
         self.path = Path(path)
@@ -79,6 +79,21 @@ class AuthoringJobService:
     def _close_scope(self, job_id: str) -> None:
         with self._scope_lock:
             self._scopes.pop(job_id, None)
+
+    def _record_progress(self, job_id, stage, attempt=None, max_attempts=None):
+        try:
+            self._output.append(
+                job_id=job_id,
+                stream="stderr",
+                text="\x1eorbit-progress:" + json.dumps({
+                    "stage": stage, "attempt": attempt,
+                    "max_attempts": max_attempts,
+                }, separators=(",", ":")),
+                now=self.clock(),
+            )
+        except Exception:
+            # Progress is observational and must never change the authoring job.
+            pass
 
     @staticmethod
     def _time(value):
@@ -303,6 +318,9 @@ class AuthoringJobService:
                     outcome = self.authoring.generate(
                         row["prompt"], language=row["display_language"],
                         agent=row["requested_agent"],
+                        on_progress=lambda stage, attempt, maximum: self._record_progress(
+                            job_id, stage, attempt, maximum,
+                        ),
                     )
                     latest = 0
                 else:
@@ -329,6 +347,9 @@ class AuthoringJobService:
                         expected_workflow_id=row["workflow_id"],
                         language=row["display_language"],
                         agent=row["requested_agent"],
+                        on_progress=lambda stage, attempt, maximum: self._record_progress(
+                            job_id, stage, attempt, maximum,
+                        ),
                     )
                     latest = int(current["version"])
                 with connect_workflow_database(self.path, read_only=True) as db:
@@ -343,6 +364,7 @@ class AuthoringJobService:
                 ):
                     self._expire_due()
                     return
+                self._record_progress(job_id, "publishing")
                 record = self.publisher.publish_workflow(
                     outcome.source, source_name="<authoring-job>", source_format="json",
                     expected_latest_version=latest, actor=row["actor"],

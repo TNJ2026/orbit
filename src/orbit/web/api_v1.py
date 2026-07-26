@@ -241,7 +241,7 @@ def build_api_v1(
         AuthoringJobService(
             path, authoring_service, workflow_publisher,
             workflow_db_path=workflow_path,
-            timeout_seconds=int(operational_config.get("authoring_timeout_seconds", 300))
+            timeout_seconds=int(operational_config.get("authoring_timeout_seconds", 600))
             if operational_config else 300,
             clock=clock,
         )
@@ -1111,6 +1111,20 @@ def build_api_v1(
                     "expected_version": 0,
                     "payload_schema": "run-start/1.0",
                 }] if may_start and item["goal_readiness"] == "ready" else [])
+            if may_start and workflow_publisher is not None:
+                item["allowed_commands"].append({
+                    "command": "workflow.delete",
+                    "label": "Delete workflow",
+                    "method": "DELETE",
+                    "href": (
+                        f"/api/v1/workflows/"
+                        f"{quote(item['workflow_id'], safe=':')}"
+                    ),
+                    "target_aggregate_id": item["workflow_id"],
+                    "expected_version": item["latest_version"],
+                    "payload_schema": "workflow-delete/1.0",
+                    "confirmation": "explicit",
+                })
             item["editing_available"] = bool(
                 may_start and item.get("source_available")
                 and (authoring_jobs is not None or has_action_agent)
@@ -1212,6 +1226,33 @@ def build_api_v1(
                 }, ensure_ascii=False)) from None
 
         return await mutate(request, WRITE_SCOPE, "workflow.modify", command)
+
+    async def workflow_delete(request: Request) -> JSONResponse:
+        if workflow_publisher is None:
+            return error("delete_unavailable", "workflow deletion is unavailable", 503)
+        workflow_id = str(EntityId.parse(request.path_params["workflow_id"]))
+
+        def command(body: Mapping[str, Any], actor: str, key: str):
+            from ..workflow.persistence import PublishConflictError
+
+            with connect_workflow_database(path, read_only=True) as connection:
+                active = connection.execute(
+                    "SELECT 1 FROM workflow_authoring_jobs WHERE workflow_id=?"
+                    " AND status IN ('queued','running') LIMIT 1",
+                    (workflow_id,),
+                ).fetchone()
+            if active is not None:
+                raise ValueError("workflow authoring is still active")
+            try:
+                workflow_publisher.delete_workflow(
+                    workflow_id,
+                    expected_latest_version=_required_version(body),
+                )
+            except PublishConflictError as exc:
+                raise ValueError(str(exc)) from None
+            return {"workflow_id": workflow_id, "deleted": True}
+
+        return await mutate(request, WRITE_SCOPE, "workflow.delete", command)
 
     async def authoring_job_list(request: Request) -> JSONResponse:
         actor = authenticate(request, READ_SCOPE)
@@ -1495,6 +1536,17 @@ def build_api_v1(
             "payload_schema": "run-start/1.0",
         }] if guard.allows(actor, WRITE_SCOPE)
         and item["goal_readiness"] == "ready" else [])
+        if guard.allows(actor, WRITE_SCOPE) and workflow_publisher is not None:
+            item["allowed_commands"].append({
+                "command": "workflow.delete",
+                "label": "Delete workflow",
+                "method": "DELETE",
+                "href": f"/api/v1/workflows/{quote(workflow_id, safe=':')}",
+                "target_aggregate_id": workflow_id,
+                "expected_version": item["latest_version"],
+                "payload_schema": "workflow-delete/1.0",
+                "confirmation": "explicit",
+            })
         if (
             draft_service is not None
             and getattr(draft_service, "reviser", None) is not None
@@ -2009,6 +2061,16 @@ def build_api_v1(
             workflow_id = str(body.get("workflow_id", "")).strip()
             if not workflow_id:
                 raise RunStartError("workflow_id is required")
+            # A previously advertised start command may be replayed after the
+            # Workflow is removed from the catalog. Historical versions remain
+            # readable for existing runs, but cannot seed a new one.
+            with connect_workflow_database(workflow_path, read_only=True) as connection:
+                deleted = connection.execute(
+                    "SELECT 1 FROM archived_workflows WHERE workflow_id=?",
+                    (workflow_id,),
+                ).fetchone()
+            if deleted is not None:
+                raise RunStartError("workflow is no longer available")
             version = body.get("workflow_version")
             started = runs.start_run(
                 workflow_id=workflow_id,
@@ -2105,6 +2167,7 @@ def build_api_v1(
                 run_id, node_run_id, _required_version(body),
                 actor=actor, idempotency_key=key,
                 reason=str(body.get("reason", "retried by operator")),
+                agent=(str(body["agent"]) if body.get("agent") else None),
             )
 
         return await mutate(request, WRITE_SCOPE, "node.retry", command)
@@ -2401,6 +2464,9 @@ def build_api_v1(
         ),
         Route(
             "/api/v1/workflows/{workflow_id}", workflow_detail, methods=["GET"]
+        ),
+        Route(
+            "/api/v1/workflows/{workflow_id}", workflow_delete, methods=["DELETE"]
         ),
         Route(
             "/api/v1/workflows/{workflow_id}/modify",

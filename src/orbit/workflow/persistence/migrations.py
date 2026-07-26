@@ -1136,6 +1136,17 @@ _MIGRATIONS: tuple[tuple[int, str, str], ...] = (
             ON authoring_job_output(job_id, chunk_id);
         """,
     ),
+    (
+        23,
+        "archived workflow definitions",
+        """
+        CREATE TABLE archived_workflows (
+            workflow_id TEXT PRIMARY KEY
+                REFERENCES workflow_definitions(workflow_id),
+            archived_at TEXT NOT NULL
+        );
+        """,
+    ),
 )
 
 

@@ -947,15 +947,15 @@ class GraphRuntimeE2ETests(unittest.TestCase):
                 {"id": "fork", "kind": "decision", "inputs": PORT("value"), "outputs": PORT("value"), "route_mode": "parallel"},
                 {"id": "left", "kind": "decision", "inputs": PORT("value"), "outputs": PORT("value")},
                 {"id": "right", "kind": "decision", "inputs": PORT("value"), "outputs": PORT("value")},
-                {"id": "join", "kind": "join", "inputs": PORT("items"), "outputs": PORT("items"), "policies": ["join_all"]},
-                {"id": "done", "kind": "terminal", "inputs": PORT("items")},
+                {"id": "join", "kind": "join", "inputs": PORT("items"), "outputs": PORT("merged"), "policies": ["join_all"]},
+                {"id": "done", "kind": "terminal", "inputs": PORT("result")},
             ],
             "edges": [
                 {"id": "fork_left", "from": {"node": "fork", "port": "value"}, "to": {"node": "left", "port": "value"}},
                 {"id": "fork_right", "from": {"node": "fork", "port": "value"}, "to": {"node": "right", "port": "value"}},
                 {"id": "left_join", "from": {"node": "left", "port": "value"}, "to": {"node": "join", "port": "items"}},
                 {"id": "right_join", "from": {"node": "right", "port": "value"}, "to": {"node": "join", "port": "items"}},
-                {"id": "join_done", "from": {"node": "join", "port": "items"}, "to": {"node": "done", "port": "items"}},
+                {"id": "join_done", "from": {"node": "join", "port": "merged"}, "to": {"node": "done", "port": "result"}},
             ],
             "entry": ["fork"], "terminals": ["done"],
             "policies": [{"id": "join_all", "kind": "join", "config": {"mode": "all", "merge_mode": "array_by_edge"}}],
@@ -1193,10 +1193,15 @@ class GraphRuntimeE2ETests(unittest.TestCase):
 
     def test_an_operator_can_run_the_parked_node_again(self):
         service, run_id, parked = self._park_on_unknown()
+        override = {
+            "name": "agent.codex", "version": "1.2.3",
+            "manifest_fingerprint": "sha256:test",
+        }
         retry = CommandEnvelope(
             EntityId("command", "unknown-retry"), "retry_node_run",
             parked.node_run_id, run_id, parked.aggregate_version,
-            "retry:unknown", "operator", NOW, {"reason": "the Agent never ran"},
+            "retry:unknown", "operator", NOW,
+            {"reason": "the Agent never ran", "handler_override": override},
         )
         self.assertEqual("applied", service.submit(retry).disposition.value)
         self.assertIs(WorkflowRunStatus.RUNNING, service.get_run(run_id).status)
@@ -1207,11 +1212,18 @@ class GraphRuntimeE2ETests(unittest.TestCase):
                 if item.node_id == "work"
             ]
             attempt = uow.attempts.list_by_node_run(parked.node_run_id)[0]
+            retried = next(item for item in work if item.generation == 2)
+            prepared = next(
+                item.envelope.payload
+                for item in uow.events.read_stream(retried.node_run_id, limit=10)
+                if item.envelope.event_type == "node_input_prepared"
+            )
         # The Runtime still does not know what the first attempt did, and does
         # not pretend to: a later generation supersedes it.
         self.assertIs(AttemptStatus.UNKNOWN_EXTERNAL_RESULT, attempt.status)
         self.assertEqual([1, 2], sorted(item.generation for item in work))
         self.assertEqual({"cancelled", "ready"}, {item.status.value for item in work})
+        self.assertEqual(override, prepared["handler_override"])
 
         second = service.claim_job("worker", NOW)
         self.assertIsNotNone(second)

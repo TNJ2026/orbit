@@ -149,6 +149,14 @@ class SQLiteWorkflowVersionStore:
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
+            deleted = connection.execute(
+                "SELECT 1 FROM archived_workflows WHERE workflow_id=?",
+                (workflow_id,),
+            ).fetchone()
+            if deleted is not None:
+                raise ValueError(
+                    f"workflow id was permanently deleted: {workflow_id}"
+                )
             existing = connection.execute(
                 "SELECT * FROM workflow_versions WHERE workflow_id = ? AND definition_hash = ?",
                 (workflow_id, compiled.definition_hash.value),
@@ -244,6 +252,36 @@ class SQLiteWorkflowVersionStore:
                     (workflow_id,),
                 ).fetchone()[0]
             )
+
+    def delete(self, workflow_id: str, *, expected_latest_version: int) -> None:
+        """Permanently retire an id while retaining versions for old runs."""
+
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT x.workflow_id AS deleted_id,"
+                " COALESCE(MAX(v.version), 0) AS latest"
+                " FROM workflow_definitions d"
+                " LEFT JOIN workflow_versions v ON v.workflow_id=d.workflow_id"
+                " LEFT JOIN archived_workflows x ON x.workflow_id=d.workflow_id"
+                " WHERE d.workflow_id=? GROUP BY d.workflow_id,x.workflow_id",
+                (workflow_id,),
+            ).fetchone()
+            if row is None or row["deleted_id"] is not None:
+                raise ValueError(f"workflow not found: {workflow_id}")
+            actual = int(row["latest"])
+            if actual != expected_latest_version:
+                raise PublishConflictError(workflow_id, expected_latest_version, actual)
+            connection.execute(
+                "INSERT INTO archived_workflows(workflow_id,archived_at) VALUES (?,?)",
+                (
+                    workflow_id,
+                    self._clock().astimezone(timezone.utc).isoformat(
+                        timespec="microseconds"
+                    ).replace("+00:00", "Z"),
+                ),
+            )
+            connection.commit()
 
     @staticmethod
     def _record(row: sqlite3.Row) -> WorkflowVersionRecord:

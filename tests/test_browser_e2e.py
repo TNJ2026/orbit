@@ -496,6 +496,76 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
         )
 
 
+class SimplifiedGenerationProgressTests(BrowserE2ETestCase):
+    @classmethod
+    def extra_app_kwargs(cls) -> dict:
+        from orbit.workflow.authoring import active_scope
+        from tests.test_workflow_authoring_jobs import dsl
+
+        def writer(_prompt):
+            active_scope().on_output(
+                "stderr",
+                "Planning workflow nodes…\n" + ("unbroken-output-" * 120) + "\n"
+                + ("streaming output\n" * 40),
+            )
+            if "fail visibly" in _prompt:
+                time.sleep(0.2)
+                raise RuntimeError("Agent could not produce a workflow")
+            time.sleep(1.2)
+            return json.dumps(dsl(workflow_id="generation_progress"))
+
+        return {"single_goal_mode": True, "workflow_generator": writer}
+
+    def test_generation_shows_prompt_agent_and_live_output(self) -> None:
+        page = self.open("en-US", "/ui/#/workflows")
+        prompt = "Collect sources and produce a concise report"
+        page.fill("#generateInstruction", prompt)
+        page.locator("#generateWorkflow").click()
+
+        progress = page.locator(".workflow-generation-progress")
+        progress.wait_for()
+        self.assertIn(prompt, progress.locator(".workflow-generation-prompt").inner_text())
+        self.assertTrue(progress.locator(".workflow-generation-agent").is_visible())
+        self.assertEqual(4, progress.locator(".workflow-generation-step").count())
+        self.assertTrue(progress.locator(".workflow-generation-step.current").is_visible())
+        page.wait_for_function(
+            "() => document.querySelector('.workflow-generation-console')"
+            "?.textContent.includes('Planning workflow nodes')"
+        )
+        bounds = progress.locator(".workflow-generation-console").evaluate("""
+          node => {
+            const box = node.getBoundingClientRect();
+            const panel = node.closest('.simplified-workflow-generator')
+              .getBoundingClientRect();
+            return {
+              inside: box.left >= panel.left && box.right <= panel.right,
+              height: box.height,
+              overflowY: getComputedStyle(node).overflowY,
+              scrollTop: node.scrollTop,
+            };
+          }
+        """)
+        self.assertTrue(bounds["inside"])
+        self.assertLessEqual(bounds["height"], 322)
+        self.assertEqual("auto", bounds["overflowY"])
+        self.assertEqual(0, bounds["scrollTop"])
+
+    def test_failed_generation_keeps_context_and_offers_retry(self) -> None:
+        page = self.open("en-US", "/ui/#/workflows")
+        page.fill("#generateInstruction", "fail visibly")
+        page.locator("#generateWorkflow").click()
+
+        failure = page.locator(".workflow-generation-failure")
+        failure.wait_for()
+        self.assertIn("Agent could not produce a workflow", failure.inner_text())
+        self.assertIn(
+            "fail visibly",
+            page.locator(".workflow-generation-prompt-value").inner_text(),
+        )
+        page.get_by_role("button", name="Generate again").click()
+        page.locator("#generateInstruction").wait_for()
+
+
 class SimplifiedUpgradeTests(BrowserE2ETestCase):
     """A published Workflow that cannot start a Goal is fixed by prompting."""
 
@@ -563,12 +633,27 @@ class SimplifiedUpgradeTests(BrowserE2ETestCase):
         card = self.card(page)
 
         self.assertIn("Upgrade needed", card.inner_text())
-        # Visible, explained, and without a way to start a Goal that would fail:
-        # upgrading is the only action the card offers.
+        # Visible, explained, and without a way to start a Goal that would fail.
+        # Destructive catalog removal remains available as a separate action.
         self.assertEqual(
-            ["Upgrade workflow"],
-            card.locator(".workflow-card-actions button").all_inner_texts(),
+            ["Upgrade workflow", "Delete"],
+            card.locator(".workflow-card-actions button").evaluate_all(
+                "nodes => nodes.map(node => node.getAttribute('aria-label')"
+                " || node.textContent.trim())"
+            ),
         )
+
+    def test_delete_uses_an_application_dialog(self) -> None:
+        page = self.open("en-US", "/ui/#/workflows")
+        self.card(page).locator(".delete-workflow").click()
+
+        dialog = page.get_by_role("dialog", name="Permanently delete workflow?")
+        dialog.wait_for()
+        self.assertIn("cannot be undone", dialog.inner_text())
+        self.assertIn("workflow:legacy", dialog.inner_text())
+        self.assertTrue(dialog.get_by_role("button", name="Permanently delete").is_visible())
+        dialog.get_by_role("button", name="Cancel").click()
+        page.locator(".workflow-delete-dialog").wait_for(state="detached")
 
     def test_upgrading_opens_a_prefilled_prompt_and_reports_what_changed(self) -> None:
         page = self.open("en-US", "/ui/#/workflows")

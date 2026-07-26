@@ -314,6 +314,7 @@ class RunApplicationService:
         actor: str,
         idempotency_key: str,
         reason: str = "retried by operator",
+        agent: str | None = None,
         now: datetime | None = None,
     ) -> dict[str, Any]:
         """Run a NodeRun parked on an unknown external result once more.
@@ -323,6 +324,9 @@ class RunApplicationService:
         """
 
         identifier = EntityId.parse(node_run_id)
+        payload: dict[str, Any] = {"reason": reason}
+        if agent:
+            payload["handler_override"] = self.service.resolve_retry_handler(agent)
         command = CommandEnvelope(
             EntityId("command", hashlib.sha256(
                 f"retry|{node_run_id}|{idempotency_key}".encode("utf-8")
@@ -330,7 +334,7 @@ class RunApplicationService:
             "retry_node_run", identifier, EntityId.parse(run_id),
             AggregateVersion(int(expected_version)),
             f"retry_node_run:{idempotency_key}", actor,
-            now or datetime.now(timezone.utc), {"reason": reason},
+            now or datetime.now(timezone.utc), payload,
         )
         result = self.service.submit(command)
         if result.disposition.value not in {"applied", "replayed"}:

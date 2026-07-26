@@ -90,7 +90,7 @@ _COMMAND_FIELDS = MappingProxyType(
         "apply_planner_proposal": ({"proposal_id"}, {"plan_version"}),
         "reject_planner_proposal": ({"proposal_id", "error"}, set()),
         "apply_subflow_result": ({"link_id"}, set()),
-        "retry_node_run": (set(), {"reason"}),
+        "retry_node_run": (set(), {"reason", "handler_override"}),
     }
 )
 
@@ -110,6 +110,7 @@ def validate_runtime_command_payload(command_type: str, payload: Mapping[str, An
         "start_run": ("input",), "schedule_node": ("input",),
         "complete_attempt": ("output",), "fail_attempt": ("error",),
         "reject_planner_proposal": ("error",),
+        "retry_node_run": ("handler_override",),
     }.get(command_type, ())
     for field in object_fields:
         if field in payload and not isinstance(payload[field], Mapping):
@@ -150,7 +151,7 @@ def validate_runtime_event_payload(event_type: str, payload: Mapping[str, Any]) 
         },
         "node_run_transitioned": {"run_id", "plan_version", "generation", "activation_key"},
         "attempt_transitioned": {"run_id"},
-        "node_input_prepared": set(),
+        "node_input_prepared": {"handler_override"},
         "attempt_output_recorded": {"artifact_refs"},
         "attempt_failed_recorded": set(),
         "graph_route_decided": set(),

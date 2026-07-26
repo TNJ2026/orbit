@@ -117,6 +117,27 @@ class WorkflowVersionStoreTests(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual("Approval flow v2", display_name)
 
+    def test_delete_hides_definition_and_permanently_reserves_its_id(self) -> None:
+        compiled = self.compile()
+        record = self.publish(compiled, 0)
+
+        self.store.delete(record.workflow_id, expected_latest_version=1)
+
+        self.assertIsNotNone(self.store.get(record.workflow_id, 1))
+        with connect_workflow_database(self.db_path, read_only=True) as connection:
+            deleted_at = connection.execute(
+                "SELECT archived_at FROM archived_workflows WHERE workflow_id=?",
+                (record.workflow_id,),
+            ).fetchone()[0]
+        self.assertIsNotNone(deleted_at)
+        with self.assertRaisesRegex(ValueError, "permanently deleted"):
+            self.publish(compiled, 1)
+
+    def test_delete_rejects_a_stale_version(self) -> None:
+        record = self.publish(self.compile(), 0)
+        with self.assertRaises(PublishConflictError):
+            self.store.delete(record.workflow_id, expected_latest_version=0)
+
     def test_database_triggers_reject_update_and_delete(self) -> None:
         record = self.publish(self.compile(), 0)
         connection = connect_workflow_database(self.db_path)
@@ -156,7 +177,7 @@ class WorkflowVersionStoreTests(unittest.TestCase):
             versions = connection.execute(
                 "SELECT version FROM workflow_schema_migrations ORDER BY version"
             ).fetchall()
-            self.assertEqual(list(range(1, 23)), [row[0] for row in versions])
+            self.assertEqual(list(range(1, 24)), [row[0] for row in versions])
 
 
 if __name__ == "__main__":
