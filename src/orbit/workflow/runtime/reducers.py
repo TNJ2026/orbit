@@ -95,7 +95,10 @@ def reduce_run_view(state: Mapping[str, Any], stored: StoredEvent) -> dict[str, 
         result["outputs"][str(event.aggregate_id)] = event.payload["output"]
     elif event.event_type == "attempt_usage_recorded":
         result["usage"][str(event.aggregate_id)] = dict(event.payload)
-    elif event.event_type in {"node_input_prepared", "attempt_failed_recorded"}:
+    elif event.event_type in {
+        "node_input_prepared", "attempt_failed_recorded",
+        "unknown_result_accepted",
+    }:
         pass
     elif event.event_type == "job_created":
         result["jobs"][str(event.aggregate_id)] = {

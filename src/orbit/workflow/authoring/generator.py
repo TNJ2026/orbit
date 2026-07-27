@@ -38,9 +38,9 @@ from ..catalogs.handlers import HandlerCatalog
 from ..catalogs.schemas import InMemorySchemaCatalog
 from ..domain.serialization import canonical_json
 from ..dsl import DiagnosticError, compile_source
+from ..dsl.schema import ID_PATTERN
 
 
-DEFAULT_TIMEOUT_SECONDS = 600
 MAX_RESPONSE_BYTES = 256 * 1024
 MAX_INSTRUCTION_CHARS = 4000
 MAX_DESCRIPTION_CHARS = 50
@@ -111,7 +111,9 @@ DIAGNOSTIC_RULES = {
     ),
     "DSL_JOIN_INVALID": (
         "A join node needs at least two incoming non-back edges and exactly one "
-        "node policy reference to one top-level join policy."
+        "node policy reference to one top-level join policy. Its merge_mode must "
+        "match its output schema: object_by_edge produces an object; "
+        "array_by_edge produces an array."
     ),
     "DSL_POLICY_INVALID": (
         "Nodes carry policy ids only; full policy objects live in top-level "
@@ -137,10 +139,11 @@ DIAGNOSTIC_RULES = {
     ),
     "DSL_DUPLICATE_ID": "Node, edge and policy ids must each be unique.",
     "DSL_SCHEMA_ERROR": (
-        "The document's top level is dsl_version, metadata{id,name}, nodes[], "
-        "edges[], entry[], terminals[], result{node,port} and optional "
+        "The document's top level is dsl_version, metadata{id,slug,name}, "
+        "nodes[], edges[], entry[], terminals[], result{node,port} and optional "
         "policies[]; edges carry only the fields in shape_contract.edge_fields, "
-        "and `label` is a node field that never goes inside `config`."
+        "`label` is a node field that never goes inside `config`, and every "
+        f"id and slug must match {ID_PATTERN} — no spaces."
     ),
     "DSL_UNSUPPORTED_VERSION": "Set dsl_version to 1.3.",
     "GENERATION_PROTOCOL": (
@@ -393,14 +396,14 @@ class TrustedCliDslGenerator:
         *,
         prompt_flag: str | None = None,
         prompt_positional: bool = False,
-        timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
+        timeout_seconds: int | None = None,
         max_response_bytes: int = MAX_RESPONSE_BYTES,
         environment: Mapping[str, str] | None = None,
         runner: Callable[..., Any] = process_port.run,
     ) -> None:
         if not command or any(not str(part).strip() for part in command):
             raise ValueError("a trusted generator CLI command is required")
-        if timeout_seconds <= 0 or max_response_bytes < 1:
+        if (timeout_seconds is not None and timeout_seconds <= 0) or max_response_bytes < 1:
             raise ValueError("generator timeout and output limit must be positive")
         if prompt_flag is not None and prompt_positional:
             raise ValueError("a prompt is passed one way: flag or positional")
@@ -475,14 +478,39 @@ class TrustedCliDslGenerator:
         return outcome.stdout
 
 
-def _description_setter(
+def _assign_identity(metadata: dict, workflow_id: str) -> None:
+    """Stamp the assigned id, keeping a readable slug only when there is one.
+
+    The model is told to copy the assigned id into metadata.id, so once it
+    obeys, that field holds an opaque uuid and is worthless as a fallback
+    slug — a workflow would be listed under `wf_3f2a…`. Only an id the model
+    chose itself carries meaning, and no slug at all beats a meaningless one.
+    """
+
+    assigned = workflow_id.removeprefix("workflow:")
+    slug = metadata.get("slug")
+    if not isinstance(slug, str) or not slug.strip():
+        chosen = metadata.get("id")
+        slug = chosen if isinstance(chosen, str) and chosen != assigned else None
+    metadata["id"] = assigned
+    if isinstance(slug, str) and slug.strip():
+        metadata["slug"] = slug.strip()
+    else:
+        # An empty slug is not a slug; leaving it would only fail the schema.
+        metadata.pop("slug", None)
+
+
+def _metadata_setter(
     description: str | None, workflow_id: str | None = None,
 ):
-    """Force metadata.description to the author's value, or clear it.
+    """Force the metadata the Runtime owns onto whatever the model wrote.
 
-    Returns None when the author gave nothing to say — including an empty
-    string, which explicitly means "no description", not "keep the model's".
-    A None factory leaves the document untouched (revision keeps its own).
+    Identity is assigned before the CLI runs, so metadata.id is overwritten
+    rather than trusted; metadata.description is the author's value, or
+    cleared when they gave nothing to say — an empty string explicitly means
+    "no description", not "keep the model's". Returns None when there is
+    nothing to force, and a None factory leaves the document untouched
+    (revision keeps its own identity and description).
     """
 
     if description is None and workflow_id is None:
@@ -492,10 +520,7 @@ def _description_setter(
         metadata = document.get("metadata")
         if isinstance(metadata, dict):
             if workflow_id is not None:
-                generated_slug = metadata.get("slug") or metadata.get("id")
-                metadata["id"] = workflow_id.removeprefix("workflow:")
-                if isinstance(generated_slug, str) and generated_slug.strip():
-                    metadata["slug"] = generated_slug.strip()
+                _assign_identity(metadata, workflow_id)
             if description:
                 metadata["description"] = description
             elif description is not None:
@@ -612,9 +637,13 @@ class WorkflowAuthoringService:
             f"At most {self.max_nodes} nodes.",
         ]
         shape = [
+            "Keep every action bounded and single-purpose. A coding action may include targeted tests for its own change, but requirements analysis, cross-module implementation, a full test suite, and final reporting must not be combined in one action.",
+            "Put full test suites, long builds, and end-to-end tests in a separate validation action. Agent actions should prefer targeted tests and must be able to return a useful partial result when time is short, a test fails, or progress is blocked.",
+            "Never instruct an Agent to keep fixing until every test passes. Repetition requires an explicit back_edge and a bounded loop or rework policy.",
             "Each input port on a non-join node may have at most one incoming non-back edge. A back edge may return to an already-bound input when it has a bounded loop or rework policy.",
             "When two or more forward branches converge, target an explicit join node: use join mode any for mutually-exclusive alternatives and all for parallel branches, then use one edge from the join to the downstream node.",
             "Use a join node only for real fan-in: it needs at least two incoming non-back edges and exactly one node policy reference to one top-level join policy.",
+            "A join's merge_mode determines its real output type: use object_by_edge when its output schema is an object, and array_by_edge only when its output schema is an array. The downstream port must accept that same type.",
             "Only use a back edge when the requested workflow truly loops; it must reference one top-level loop or rework policy with a positive bound.",
             "Do not invent policy kinds or place policy objects inside nodes; nodes contain policy ids and full policy objects live only in top-level policies[].",
             "For exclusive routes, allow at most one default edge per route.",
@@ -697,7 +726,7 @@ class WorkflowAuthoringService:
                     "node_reference": {"kind": "join", "policies": ["join_policy_id"]},
                     "config": {
                         "mode": "all|any|n_of_m|all_successful|deadline",
-                        "merge_mode": "array_by_edge",
+                        "merge_mode": "object_by_edge",
                     },
                     "conditional_fields": {
                         "n_of_m": {"threshold": "positive integer"},
@@ -727,7 +756,9 @@ class WorkflowAuthoringService:
         if assigned_workflow_id is not None and current_source is None:
             tiers["HARD"].insert(1,
                 "Copy assigned_workflow_id without the workflow: prefix into metadata.id. "
-                "Generate metadata.slug as a concise readable English semantic name. "
+                "Generate metadata.slug as a concise readable English semantic name "
+                f"matching {ID_PATTERN}: join words with _ or -, never a space, "
+                "for example research_report. "
                 "The Runtime owns metadata.id; never derive or replace it yourself."
             )
         rule_lines = []
@@ -898,7 +929,7 @@ class WorkflowAuthoringService:
     def generate(
         self, instruction: str, *, preferred_handler: str | None = None,
         agent: str | None = None, description: str | None = None,
-        language: str | None = None, on_progress=None,
+        language: str | None = None, on_progress=None, on_diagnostics=None,
         workflow_id: str | None = None,
     ) -> GenerationOutcome:
         instruction = instruction.strip()
@@ -938,13 +969,15 @@ class WorkflowAuthoringService:
             # The author's description is authoritative: it overwrites whatever
             # the model put in metadata.description, and an empty one leaves no
             # description rather than the model's guess.
-            document_transform=_description_setter(description, workflow_id),
+            document_transform=_metadata_setter(description, workflow_id),
             on_progress=on_progress,
+            on_diagnostics=on_diagnostics,
         )
 
     def revise(
         self, current_source: str, instruction: str, *, expected_workflow_id: str,
         agent: str | None = None, language: str | None = None, on_progress=None,
+        on_diagnostics=None,
     ) -> GenerationOutcome:
         """Apply a natural-language change to an existing workflow's source.
 
@@ -984,16 +1017,24 @@ class WorkflowAuthoringService:
             source_name="<revised>", failure="revision", extra_check=guard,
             write=self._writer(agent),
             on_progress=on_progress,
+            on_diagnostics=on_diagnostics,
         )
 
     def _run_funnel(
         self, build_prompt, *, source_name: str, failure: str, extra_check=None,
-        write=None, document_transform=None, on_progress=None,
+        write=None, document_transform=None, on_progress=None, on_diagnostics=None,
     ) -> GenerationOutcome:
         def progress(stage: str, attempt: int) -> None:
             if on_progress is not None:
                 try:
                     on_progress(stage, attempt, self.max_attempts)
+                except Exception:
+                    pass
+
+        def report_diagnostics(attempt: int, findings) -> None:
+            if on_diagnostics is not None:
+                try:
+                    on_diagnostics(attempt, self.max_attempts, _with_rules(findings))
                 except Exception:
                     pass
 
@@ -1022,6 +1063,7 @@ class WorkflowAuthoringService:
                     extra_check(compiled)
             except DiagnosticError as exc:
                 last_diagnostics = tuple(item.to_dict() for item in exc.diagnostics)
+                report_diagnostics(attempt, last_diagnostics)
                 feedback = canonical_json({
                     "findings": _with_rules(last_diagnostics),
                     "previous_answer": raw[:MAX_RETRY_CONTEXT_CHARS],
@@ -1030,6 +1072,7 @@ class WorkflowAuthoringService:
                 continue
             except (ValueError, json.JSONDecodeError) as exc:
                 last_diagnostics = (_protocol_finding(exc),)
+                report_diagnostics(attempt, last_diagnostics)
                 feedback = canonical_json({
                     "findings": _with_rules(last_diagnostics),
                     "previous_answer": raw[:MAX_RETRY_CONTEXT_CHARS],

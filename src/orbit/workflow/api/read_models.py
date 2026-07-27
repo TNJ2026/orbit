@@ -473,7 +473,8 @@ class ReadModelService:
                     )
                 }
                 running = connection.execute(
-                    "SELECT n.node_id, n.updated_at, COUNT(a.attempt_id) AS attempts"
+                    "SELECT n.node_run_id, n.node_id, n.updated_at,"
+                    " COUNT(a.attempt_id) AS attempts"
                     " FROM node_runs n LEFT JOIN node_attempts a"
                     " ON a.node_run_id=n.node_run_id"
                     " WHERE n.run_id=? AND n.source_plan_version=?"
@@ -507,8 +508,49 @@ class ReadModelService:
                             else "running"
                         ),
                         "node_id": selected["node_id"],
+                        "node_run_id": selected["node_run_id"],
+                        **self._liveness(connection, selected["node_run_id"]),
                     }
         return summary
+
+    @staticmethod
+    def _liveness(connection, node_run_id: str) -> dict[str, Any]:
+        """Evidence that a running step is still alive, rather than merely open.
+
+        "Running" is a status; it survives a Handler that stopped talking, a
+        worker that died and a lease nobody renews. Two facts distinguish a
+        step that is working from one that is only recorded as working: when
+        its process last printed something, and how long its lease is still
+        good for. Both are real rows — neither is inferred from the status.
+
+        The lease's expiry is reported rather than a derived "last renewed at":
+        the renewal interval is a worker setting that can change, so
+        subtracting it from the expiry would produce a timestamp that looks
+        precise and is guessed. How long the lease still has left is the fact
+        the database actually holds, and it answers the same question.
+        """
+
+        output = connection.execute(
+            "SELECT created_at FROM attempt_output WHERE node_run_id = ?"
+            " ORDER BY chunk_id DESC LIMIT 1",
+            (node_run_id,),
+        ).fetchone()
+        lease = connection.execute(
+            "SELECT l.expires_at, l.renewal_revision, l.worker_id"
+            " FROM job_leases l JOIN jobs j ON j.job_id = l.job_id"
+            " WHERE j.node_run_id = ? AND l.status = 'active'"
+            " ORDER BY l.fencing_token DESC LIMIT 1",
+            (node_run_id,),
+        ).fetchone()
+        return {
+            "last_output_at": output["created_at"] if output else None,
+            "lease_expires_at": lease["expires_at"] if lease else None,
+            # How many times the lease has been renewed. A step that has been
+            # running for minutes with zero renewals is a step whose supervisor
+            # is not doing its job, and no other field says so.
+            "lease_renewals": lease["renewal_revision"] if lease else None,
+            "worker_id": lease["worker_id"] if lease else None,
+        }
 
     def _human_task_authority(self, connection, actor: str | None) -> dict[str, bool]:
         """Which HumanTasks this actor may actually answer.
@@ -1124,6 +1166,13 @@ def default_allowed_commands(
     if kind == "unknown" and row.get("node_run_id"):
         node_run_id = str(row["node_run_id"])
         return (
+            AllowedCommand(
+                "unknown.accept", "Accept captured result", "POST",
+                f"/api/v1/runs/{run_id}/node-runs/{node_run_id}"
+                f"/accept/{row['id']}",
+                node_run_id, int(row["node_version"]),
+                "unknown-accept/1.0",
+            ),
             AllowedCommand(
                 "node.retry", "Run this step again", "POST",
                 f"/api/v1/runs/{run_id}/node-runs/{node_run_id}/retry",

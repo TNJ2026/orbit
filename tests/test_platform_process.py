@@ -228,6 +228,27 @@ class CancellationTests(unittest.TestCase):
         self.assertTrue(done.wait(15), "wait() stayed wedged after kill")
         thread.join(timeout=5)
 
+    def test_completion_is_checked_again_when_parent_exits_with_marker(self) -> None:
+        """A marker and parent exit can land in the same polling slice."""
+
+        script = (
+            "import subprocess,sys;"
+            "subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'],"
+            "stdout=sys.stdout,stderr=sys.stderr);"
+            "print('answer\\nORBIT_RESULT_COMPLETE',flush=True)"
+        )
+        handle = process.ProcessHandle([PY, "-u", "-c", script])
+        started = time.monotonic()
+        result = handle.wait(
+            timeout=10, kill_grace_seconds=.2,
+            completion_predicate=lambda value: (
+                value.rstrip().endswith("ORBIT_RESULT_COMPLETE")
+            ),
+        )
+        self.assertEqual("completed_output", result.termination_reason)
+        self.assertIn("ORBIT_RESULT_COMPLETE", result.stdout)
+        self.assertLess(time.monotonic() - started, 3)
+
 
 class ProcessTreeTests(unittest.TestCase):
     def test_kill_reaps_a_detached_grandchild(self) -> None:

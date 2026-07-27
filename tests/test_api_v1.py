@@ -519,6 +519,15 @@ class RunLifecycleTests(ApiTestCase):
                     {"Collect the data", "Tidy it up", "Write the report"},
                 )
                 self.assertNotIn(current_step["label"], {"collect", "transform"})
+                # Whether the step is alive, not merely open. "running" is a
+                # status a wedged Handler keeps; these are the facts that
+                # separate working from stuck, so the keys must always be
+                # present even when there is nothing to report yet.
+                for key in (
+                    "last_output_at", "lease_expires_at", "lease_renewals",
+                    "worker_id", "node_run_id",
+                ):
+                    self.assertIn(key, current_step)
 
             responsibilities = client.get(
                 f"/api/v1/runs/{run_id}/responsibilities", actor="reader"
@@ -2097,7 +2106,15 @@ class WorkflowDraftApiTests(ApiTestCase):
                 body={"instruction": "a flow", "agent": "codex"},
             )
             self.assertEqual(200, response.status_code, response.json())
-            self.assertEqual("codex", response.json()["data"]["requested_agent"])
+            job = response.json()["data"]
+            self.assertEqual("codex", job["requested_agent"])
+            for _ in range(200):
+                if job["status"] not in ("queued", "running"):
+                    break
+                import time
+                time.sleep(0.02)
+                job = client.get(job["href"], actor="writer").json()["data"]
+            self.assertEqual("done", job["status"], job.get("error"))
             self.assertEqual(["codex"], asked)
 
     def test_authoring_job_keeps_the_agent_cli_console(self) -> None:
@@ -2177,6 +2194,14 @@ class WorkflowDraftApiTests(ApiTestCase):
                 body={"instruction": "a flow"},
             )
             self.assertEqual(200, response.status_code, response.json())
+            job = response.json()["data"]
+            for _ in range(200):
+                if job["status"] not in ("queued", "running"):
+                    break
+                import time
+                time.sleep(0.02)
+                job = client.get(job["href"], actor="writer").json()["data"]
+            self.assertEqual("done", job["status"], job.get("error"))
         self.assertEqual(["codex"], asked)
 
     def test_quick_modify_names_the_agent_that_revises_the_workflow(self) -> None:

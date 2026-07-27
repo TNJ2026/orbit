@@ -26,47 +26,95 @@
 
 
 
-.simplified-workspace-composer { display: grid; gap: 14px; padding: 18px 22px; }
-.simplified-composer-fields { display: grid; gap: 14px; }
+.simplified-goal-page {
+  width: min(960px, 100%); margin: 0 auto; padding-block: clamp(20px, 5vh, 56px);
+}
+.simplified-goal-intro { margin-bottom: 28px; }
+.simplified-goal-intro h1 {
+  margin: 0 0 10px; font-size: clamp(26px, 4vw, 36px); letter-spacing: -.035em;
+}
+.simplified-goal-intro p { max-width: 68ch; margin: 0; font-size: 14px; line-height: 1.65; }
+.simplified-workspace-composer {
+  display: grid; gap: 24px; padding: clamp(22px, 4vw, 36px);
+  border-color: var(--line-soft);
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
+  box-shadow: 0 20px 60px color-mix(in srgb, var(--bg) 55%, transparent);
+}
+.simplified-composer-fields { display: grid; gap: 26px; }
+.simplified-composer-fields > .field { display: grid; gap: 9px; margin: 0; }
+.simplified-composer-fields label {
+  margin: 0; color: var(--text); font-size: 12px; font-weight: 700;
+  letter-spacing: .08em; text-transform: uppercase;
+}
 .simplified-workflow-picker {
   display: grid; grid-template-columns: minmax(0, 1fr) auto;
-  align-items: stretch; gap: 10px;
+  align-items: stretch; gap: 12px;
 }
 .simplified-workflow-picker > select,
 .simplified-workflow-picker > .custom-select { width: 100%; min-width: 0; }
-.simplified-workflow-picker > .button { white-space: nowrap; }
-.simplified-goal-field textarea { min-height: 88px; resize: vertical; font-size: 15px; line-height: 1.55; }
-.simplified-composer-actions { justify-content: flex-end; }
-.simplified-workflow-generator {
-  display: grid; gap: 24px; padding: 24px;
+.simplified-workflow-picker > select,
+.simplified-workflow-picker > .custom-select,
+.simplified-workflow-picker > .button { min-height: 46px; }
+.simplified-workflow-picker > .button { padding-inline: 20px; white-space: nowrap; }
+.simplified-goal-field { position: relative; }
+.simplified-goal-field textarea {
+  min-height: 200px; resize: vertical; padding: 18px 18px 42px;
+  border-color: var(--line-soft); background: var(--bg);
+  font-size: 15px; line-height: 1.6;
 }
+.simplified-goal-field textarea:focus {
+  border-color: var(--blue); box-shadow: 0 0 0 1px var(--blue);
+}
+.simplified-goal-shortcut {
+  position: absolute; right: 14px; bottom: 12px;
+  pointer-events: none; font-size: 11px;
+}
+.simplified-composer-actions { justify-content: flex-end; }
+.simplified-composer-actions .button.primary {
+  min-height: 46px; padding-inline: 28px; font-weight: 700;
+  box-shadow: 0 10px 28px color-mix(in srgb, var(--blue) 22%, transparent);
+}
+.workflows-page {
+  width: min(1180px, 100%); margin: 0 auto;
+  display: grid; gap: 0;
+}
+.simplified-workflow-generator {
+  display: block; margin-top: 28px; padding: 28px 24px;
+  border-color: var(--line-soft);
+  background: color-mix(in srgb, var(--panel) 74%, transparent);
+}
+.simplified-workflow-generator-inner { width: 100%; margin: 0 auto; }
 .simplified-workflow-generator-copy { display: grid; gap: 5px; }
-.simplified-workflow-generator-copy h2 { margin: 0; font-size: clamp(18px, 3vw, 20px); }
-.simplified-workflow-generator-copy p { margin: 0; max-width: 68ch; font-size: 12px; }
+.simplified-workflow-generator-copy h2 { margin: 0 0 2px; font-size: clamp(22px, 3vw, 24px); }
+.simplified-workflow-generator-copy p { margin: 0; max-width: 68ch; font-size: 13px; }
 .simplified-workflow-generator-form {
-  display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px;
+  display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px;
 }
 .simplified-workflow-generator-form .field { margin: 0; }
 .simplified-workflow-generator-agent { width: min(280px, 100%); }
 .simplified-workflow-generator-agent:empty { display: none; }
-.simplified-workflow-generator-agent > .field { display: grid; gap: 6px; }
+.simplified-workflow-generator-agent > .field { display: grid; gap: 8px; }
 .simplified-workflow-generator-agent label,
 .simplified-workflow-generator-agent .field-label {
-  margin: 0; color: var(--muted); font-size: 12px; font-weight: 600;
+  margin: 0; color: var(--muted); font-size: 11px; font-weight: 700;
+  letter-spacing: .08em; text-transform: uppercase;
 }
 .simplified-workflow-generator-agent select,
 .simplified-workflow-generator-agent .agent-choice-static {
-  min-height: 38px; background: var(--panel-2);
+  min-height: 42px; border-radius: var(--radius); background: var(--bg);
 }
 .simplified-workflow-generator-form textarea {
-  min-height: 160px; resize: vertical; padding: 16px;
-  border-color: var(--line); border-radius: 8px; background: var(--bg);
-  font-family: var(--mono); font-size: 13px; line-height: 1.6;
+  min-height: 150px; resize: vertical; padding: 16px;
+  border-color: var(--line-soft); border-radius: var(--radius); background: var(--bg);
+  font-family: inherit; font-size: 14px; line-height: 1.55;
+}
+.simplified-workflow-generator-form textarea:focus {
+  border-color: var(--blue); box-shadow: 0 0 0 1px var(--blue);
 }
 .simplified-workflow-generator-actions { justify-content: flex-end; padding-bottom: 0; }
 .simplified-workflow-generator-actions .button {
-  min-height: 40px; display: inline-flex; align-items: center;
-  padding-inline: 22px; gap: 8px; font-weight: 700;
+  min-height: 42px; display: inline-flex; align-items: center;
+  padding-inline: 24px; gap: 8px; border-radius: var(--radius); font-weight: 700;
   box-shadow: 0 8px 24px color-mix(in srgb, var(--blue) 18%, transparent);
 }
 .generate-spark { font-size: 18px; line-height: 1; }
@@ -81,13 +129,13 @@
 .workflow-generation-agent .field-label { margin: 0; color: var(--muted); font-size: 12px; }
 .workflow-generation-prompt-value {
   min-height: 74px; padding: 12px 14px; border: 1px solid var(--line);
-  border-radius: 8px; background: var(--bg); white-space: pre-wrap;
+  border-radius: var(--radius); background: var(--bg); white-space: pre-wrap;
   overflow-wrap: anywhere; font-family: var(--mono); font-size: 13px; line-height: 1.55;
 }
 .workflow-generation-agent .agent-choice-static { min-height: 38px; }
 .workflow-generation-stages {
   display: grid; gap: 8px; padding: 11px 16px;
-  border: 1px solid var(--line); border-radius: 10px; background: var(--bg);
+  border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg);
 }
 .workflow-generation-stages-head {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
@@ -139,16 +187,16 @@
 .workflow-generation-console {
   width: 100%; max-width: 100%; min-width: 0; box-sizing: border-box;
   min-height: 180px; max-height: 320px; margin: 0; padding: 14px; overflow: auto;
-  border: 1px solid var(--line); border-radius: 8px; background: var(--bg);
+  border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg);
   white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
 }
 .workflow-generation-failure { margin-top: 2px; }
 .workflow-generation-failure-actions { justify-content: flex-end; }
 .simplified-workflow-generator-form > .authoring-job-state,
 .simplified-workflow-generation-problem { grid-column: 1 / -1; }
-.simplified-workflow-list-heading { margin-top: 4px; }
-.simplified-workflow-list-heading h2 { font-size: 18px; }
-.simplified-workflow-list-heading p { font-size: 11px; }
+.simplified-workflow-list-heading { margin-top: 44px; margin-bottom: 20px; }
+.simplified-workflow-list-heading h2 { font-size: 20px; }
+.simplified-workflow-list-heading p { font-size: 12px; }
 .simplified-execution-head { align-items: center; }
 .simplified-execution-head > .actions { justify-content: flex-end; }
 .simplified-execution .panel-body { padding-top: 8px; }
@@ -172,6 +220,9 @@
 .simplified-step-copy span { font-size: 12px; }
 .simplified-step-prompt { font-size: 13px; -webkit-line-clamp: 2; }
 .simplified-step-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 5px 10px; }
+/* Liveness evidence sits under the step it describes, quieter than the step's
+   own status: it qualifies "running", it does not compete with it. */
+.simplified-step-liveness { font-size: 12px; font-variant-numeric: tabular-nums; }
 .simplified-step-runner {
   display: inline-flex; align-items: center; max-width: 100%; padding: 2px 7px;
   overflow: hidden; border: 1px solid var(--line); border-radius: 999px;
@@ -294,7 +345,7 @@
 }
 .home-attention-row:hover { background: var(--panel-2); }
 .attention-symbol {
-  width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center;
+  width: 28px; height: 28px; border-radius: var(--radius); display: grid; place-items: center;
   background: var(--amber-soft); color: var(--amber); font-size: 12px; font-weight: 800;
 }
 .attention-symbol.budget { background: var(--red-soft); color: var(--red); }
@@ -321,7 +372,7 @@
 .artifact-card-main .mono { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 .artifact-top { width: 100%; display: flex; justify-content: space-between; align-items: flex-start; }
 .file-icon {
-  width: 34px; height: 39px; border: 1px solid var(--line); border-radius: 8px;
+  width: 34px; height: 39px; border: 1px solid var(--line); border-radius: var(--radius);
   display: grid; place-items: center; background: var(--panel-2); color: var(--blue);
 }
 .artifact-size { color: var(--muted-2); font-family: var(--mono); font-size: 12px; }
@@ -332,11 +383,11 @@
   /* Contain, not cover: a chart or screenshot cropped to a square stops
      being the thing the operator is scanning for. */
   width: 100%; height: 132px; display: block; object-fit: contain;
-  border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2);
+  border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel-2);
 }
 .artifact-top-image .artifact-size {
   position: absolute; right: 6px; bottom: 6px; padding: 2px 5px;
-  border-radius: 5px; background: var(--panel); color: var(--muted);
+  border-radius: var(--radius); background: var(--panel); color: var(--muted);
 }
 .artifact-name { margin-top: 3px; font-size: 13px; overflow-wrap: anywhere; }
 /* Label over value: a goal title needs the full card width to survive on one
@@ -352,7 +403,7 @@
      panel; width/height stay intrinsic up to the ceiling. */
   align-self: flex-start; width: auto; height: auto;
   max-width: 100%; max-height: 420px; margin: 4px 0; display: block;
-  border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2);
+  border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel-2);
 }
 /* The detail is a modal over the catalog: the head stays put, the facts and
    the preview scroll under it. Wider than a confirm dialog because it carries
@@ -424,7 +475,7 @@
 .workflow-detail-desc { margin: 8px 0 0; max-width: 70ch; color: var(--muted); font-size: 13px; }
 /* Ghost button, top-right: a quiet filled surface that lifts on hover. */
 .workflow-detail-back {
-  flex: 0 0 auto; padding: 9px 22px; border-radius: 4px;
+  flex: 0 0 auto; padding: 9px 22px; border-radius: var(--radius);
   background: var(--chip-bg); border: 1px solid var(--line-soft); color: var(--text);
 }
 .workflow-detail-back:hover { background: var(--panel-2); border-color: var(--line); }
@@ -435,7 +486,7 @@
    untouched.) */
 .workflow-detail .workflow-tabs, .workflow-edit-page .workflow-tabs {
   gap: 0; min-height: 600px; overflow: hidden;
-  border: 1px solid var(--line-soft); border-radius: 8px; background: var(--panel);
+  border: 1px solid var(--line-soft); border-radius: var(--radius); background: var(--panel);
 }
 .workflow-detail .run-tabs, .workflow-edit-page .run-tabs {
   gap: 0; border-bottom: 1px solid var(--line-soft); background: transparent;
@@ -527,7 +578,7 @@
 .workflow-edit-title { margin: 0; font-size: 24px; font-weight: 700; letter-spacing: -.01em; }
 .workflow-edit-id { overflow-wrap: anywhere; }
 .workflow-edit-status {
-  padding: 4px 10px; border-radius: 6px; font-size: 12px; font-weight: 600;
+  padding: 4px 10px; border-radius: var(--radius); font-size: 12px; font-weight: 600;
   white-space: nowrap; background: var(--amber-soft); color: var(--amber);
   border: 1px solid color-mix(in srgb, var(--amber) 32%, transparent);
 }
@@ -609,7 +660,7 @@
    a quiet card at rest, a lifted surface on hover, and a bounded selected
    state. Tables keep their semantics while each row reads as one option. */
 .list-option-card {
-  border: 1px solid var(--line-soft); border-radius: 11px; background: var(--panel);
+  border: 1px solid var(--line-soft); border-radius: var(--radius); background: var(--panel);
   transition: transform .15s ease, border-color .15s ease, background .15s ease;
 }
 .list-option-card:hover { transform: translateY(-2px); border-color: var(--muted-2); }
@@ -628,8 +679,8 @@
   background: var(--panel); border-top: 1px solid var(--line-soft);
   border-bottom: 1px solid var(--line-soft); transition: background .15s ease, border-color .15s ease;
 }
-.list-option-row td:first-child { border-left: 1px solid var(--line-soft); border-radius: 10px 0 0 10px; }
-.list-option-row td:last-child { border-right: 1px solid var(--line-soft); border-radius: 0 10px 10px 0; }
+.list-option-row td:first-child { border-left: 1px solid var(--line-soft); border-radius: var(--radius) 0 0 var(--radius); }
+.list-option-row td:last-child { border-right: 1px solid var(--line-soft); border-radius: 0 var(--radius) var(--radius) 0; }
 .list-option-row:hover td { background: var(--panel-2); border-color: var(--line); }
 
 /* Keep the semantic table on desktop, then turn each row into a labelled
@@ -654,7 +705,7 @@
 
 
 .fact-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin: 0; }
-.fact-grid div { padding: 10px; border-radius: 8px; background: var(--panel-2); }
+.fact-grid div { padding: 10px; border-radius: var(--radius); background: var(--panel-2); }
 .fact-grid dt { color: var(--muted); font-size: 12px; }
 .fact-grid dd { margin: 5px 0 0; overflow-wrap: anywhere; font-size: 13px; }
 /* A goal is a prompt: its title is one line, and a paragraph must not push
@@ -671,10 +722,14 @@
   
 }
 @media (max-width: 520px) {
-  .simplified-workspace-composer { padding: 18px; }
+  .simplified-goal-page { padding-block: 16px; }
+  .simplified-goal-intro { margin-bottom: 20px; }
+  .simplified-workspace-composer { padding: 20px 16px; }
+  .simplified-workflow-picker { grid-template-columns: 1fr; }
+  .simplified-workflow-picker > .button { width: 100%; }
   .simplified-composer-actions { justify-content: stretch; }
-  .simplified-composer-actions > * { flex: 1 1 auto; }
-  .simplified-workflow-generator { padding: 18px; }
+  .simplified-composer-actions > * { width: 100%; flex: 1 1 auto; }
+  .simplified-workflow-generator { padding: 18px 16px; }
   .simplified-workflow-generator-form { grid-template-columns: 1fr; }
   .simplified-workflow-generator-actions { justify-content: stretch; }
   .simplified-workflow-generator-actions > * { flex: 1 1 auto; }
@@ -715,25 +770,27 @@
 }
 .view-intro h2 { margin: 5px 0; font-size: clamp(22px, 3vw, 24px); letter-spacing: -.02em; }
 .view-intro p { margin: 0; max-width: 68ch; font-size: 13px; }
-.workflow-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 24px; }
+.workflow-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px; }
 .workflow-card {
   padding: 0; overflow: hidden; display: flex; flex-direction: column;
+  min-width: 0; border-radius: var(--radius);
+  background: color-mix(in srgb, var(--panel) 74%, transparent);
   transition: border-color .2s ease, box-shadow .2s ease;
 }
 .workflow-card:hover { border-color: color-mix(in srgb, var(--blue) 50%, var(--line)); }
 .workflow-card-main {
   display: grid; gap: 8px; width: 100%; margin: 0;
-  padding: 24px; border: 0; flex: 1 1 auto; align-content: start;
+  padding: 20px; border: 0; flex: 1 1 auto; align-content: start;
   background: transparent; color: inherit; text-align: left; cursor: pointer;
 }
 .workflow-card-main:hover { background: transparent; }
-.workflow-card-main strong { font-size: 18px; line-height: 1.35; transition: color .2s ease; }
+.workflow-card-main strong { min-width: 0; overflow-wrap: anywhere; font-size: 17px; line-height: 1.3; transition: color .2s ease; }
 .workflow-card:hover .workflow-card-main strong { color: var(--blue); }
 /* The workflow id is secondary ASCII metadata, so it drops below the shared
    eyebrow size to sit quieter above the name, and a long id is truncated to
    one line rather than wrapping or stretching the card. */
 .workflow-card .eyebrow {
-  margin-top: 8px; font-size: 10px; letter-spacing: .12em; text-transform: uppercase;
+  margin-top: 4px; font-size: 10px; letter-spacing: .12em; text-transform: uppercase;
   max-width: 100%; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
@@ -746,37 +803,37 @@
    button is not markup a browser will honour. */
 .workflow-card-actions {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
-  padding: 16px 24px; border-top: 1px solid var(--line-soft);
-  background: color-mix(in srgb, var(--panel-2) 50%, transparent);
+  padding: 14px 20px; border-top: 1px solid var(--line-soft);
+  background: transparent;
 }
 .workflow-card-primary-actions { display: flex; flex-wrap: wrap; gap: 8px; }
-.workflow-card-primary-actions .button { min-height: 32px; padding: 6px 12px; font-size: 12px; }
+.workflow-card-primary-actions .button { min-height: 30px; padding: 5px 11px; border-radius: var(--radius); font-size: 12px; }
 .workflow-delete-icon {
-  width: 32px; height: 32px; flex: 0 0 32px; display: grid; place-items: center;
-  padding: 4px; border: 0; background: transparent; color: var(--red);
-  opacity: .6; cursor: pointer; transition: opacity .15s ease;
+  width: 30px; height: 30px; flex: 0 0 30px; display: grid; place-items: center;
+  padding: 5px; border: 0; background: transparent; color: var(--muted);
+  opacity: .65; cursor: pointer; transition: color .15s ease, opacity .15s ease;
 }
 .workflow-delete-icon:hover, .workflow-delete-icon:focus-visible {
-  opacity: 1; outline: 1px solid transparent;
+  color: var(--red); opacity: 1; outline: 1px solid transparent;
 }
 .workflow-delete-dialog { width: min(480px, 92vw); }
 .workflow-delete-warning { margin: 0; color: var(--text); line-height: 1.6; }
 .workflow-delete-id {
-  padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px;
+  padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius);
   background: var(--panel-2); color: var(--muted); overflow-wrap: anywhere;
 }
 .workflow-visual {
-  min-height: 40px; display: flex; align-items: center; gap: 0;
-  margin: 0 0 8px; padding: 0; background: transparent; border: 0;
+  min-height: 24px; display: flex; align-items: center; gap: 0;
+  margin: 0 0 14px; padding: 0; overflow: hidden; background: transparent; border: 0;
 }
 .workflow-node {
-  width: 32px; height: 32px; display: grid; place-items: center; position: relative;
-  border: 1px solid var(--line); border-radius: 9px; background: var(--panel);
-  color: var(--blue); font-family: var(--mono); font-size: 12px; font-weight: 700;
+  width: 24px; height: 24px; flex: 0 0 24px; display: grid; place-items: center; position: relative;
+  border: 1px solid var(--line); border-radius: 50%; background: var(--panel);
+  color: var(--blue); font-family: var(--mono); font-size: 10px; font-weight: 700;
 }
-.workflow-node + .workflow-node { margin-left: 17px; }
+.workflow-node + .workflow-node { margin-left: 12px; }
 .workflow-node + .workflow-node::before {
-  content: ""; position: absolute; right: 100%; top: 50%; width: 18px;
+  content: ""; position: absolute; right: 100%; top: 50%; width: 12px;
   border-top: 1px solid var(--muted-2);
 }
 .workflow-node.human { color: var(--amber); }
@@ -793,7 +850,7 @@
 .defn-list { gap: 12px; }
 .defn-row {
   display: grid; grid-template-columns: 260px minmax(0, 1fr) auto; align-items: center; gap: 16px;
-  padding: 16px 18px; border: 1px solid var(--line-soft); border-radius: 8px;
+  padding: 16px 18px; border: 1px solid var(--line-soft); border-radius: var(--radius);
   background: color-mix(in srgb, var(--panel) 72%, transparent);
   transition: border-color .18s ease, background-color .18s ease, transform .18s ease;
 }
@@ -809,7 +866,7 @@
 .defn-id { display: flex; align-items: center; gap: 12px; min-width: 0; }
 .defn-id-text { min-width: 0; flex: 1; }
 .defn-glyph {
-  width: 40px; height: 40px; border-radius: 4px; flex: 0 0 auto;
+  width: 40px; height: 40px; border-radius: var(--radius); flex: 0 0 auto;
   display: grid; place-items: center;
   background: color-mix(in srgb, currentColor 12%, transparent);
   transition: background-color .18s ease, color .18s ease;
@@ -830,7 +887,7 @@
 .defn-meta { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; margin-top: 5px; }
 .defn-kind {
   font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
-  padding: 2px 7px; border-radius: 2px; background: var(--panel-3); color: var(--muted-2);
+  padding: 2px 7px; border-radius: var(--radius); background: var(--panel-3); color: var(--muted-2);
 }
 .defn-kind-amber  { background: var(--amber-soft);  color: var(--amber); }
 .defn-kind-purple { background: var(--purple-soft); color: var(--purple); }
@@ -844,7 +901,7 @@
   flex: 1 1 280px; min-width: 0;
   --defn-prompt-bg: color-mix(in srgb, var(--panel) 62%, var(--bg));
   border: 1px solid color-mix(in srgb, var(--line) 45%, transparent);
-  border-radius: 4px; overflow: hidden;
+  border-radius: var(--radius); overflow: hidden;
   background: var(--defn-prompt-bg);
 }
 .defn-prompt-bar {
@@ -876,7 +933,7 @@
 .defn-io { display: inline-flex; gap: 6px; flex-wrap: wrap; }
 .defn-chip {
   font-family: var(--mono); font-style: normal; font-size: 11px;
-  padding: 2px 8px; border-radius: 12px; border: 1px solid var(--line-soft);
+  padding: 2px 8px; border-radius: var(--radius); border: 1px solid var(--line-soft);
   background: var(--panel-2); color: var(--muted);
 }
 .defn-chip.in  { color: var(--blue);  border-color: color-mix(in srgb, var(--blue) 35%, transparent); }
@@ -889,7 +946,7 @@
 .defn-row:hover .defn-tools, .defn-row:focus-within .defn-tools { opacity: 1; }
 .defn-edit {
   width: 32px; height: 32px; padding: 0; display: grid; place-items: center;
-  border: 1px solid var(--line-soft); border-radius: 4px; background: transparent;
+  border: 1px solid var(--line-soft); border-radius: var(--radius); background: transparent;
   color: var(--muted-2); cursor: pointer;
   transition: color .15s ease, border-color .15s ease, background-color .15s ease;
 }
@@ -922,17 +979,22 @@
 
 
 .review-list { display: grid; gap: 10px; margin: 0; }
-.review-list div { padding: 12px; border-radius: 8px; background: var(--panel-2); }
+.review-list div { padding: 12px; border-radius: var(--radius); background: var(--panel-2); }
 .review-list dt { color: var(--muted); font-size: 12px; }
 .review-list dd { margin: 6px 0 0; white-space: pre-wrap; font-size: 13px; }
 
 @media (max-width: 900px) {
-  .workflow-grid { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
+  .workflow-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 520px) {
   .view-intro { align-items: flex-start; flex-direction: column; }
   .view-intro .button { width: 100%; min-height: 40px; }
   .workflow-grid { grid-template-columns: 1fr; }
+  .simplified-workflow-generator { margin-top: 20px; padding: 18px 16px; }
+  .simplified-workflow-list-heading { margin-top: 34px; }
+  .workflow-card-heading { align-items: flex-start; flex-direction: column; }
+  .workflow-card-actions { align-items: flex-end; }
+  .workflow-card-primary-actions { flex: 1 1 auto; }
   
   
   
@@ -969,12 +1031,12 @@
 .agent-editor-prompt[hidden] { display: none; }
 .agent-editor-prompt textarea {
   width: 100%; min-height: 150px; resize: vertical; color: var(--text);
-  background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--radius);
   padding: 12px; font: inherit; line-height: 1.55;
 }
 .field-label { display: block; margin-bottom: 6px; font-size: 13px; font-weight: 600; }
 .agent-choice-static {
-  padding: 9px 10px; border: 1px solid var(--line-soft); border-radius: 8px;
+  padding: 9px 10px; border: 1px solid var(--line-soft); border-radius: var(--radius);
   background: var(--panel); color: var(--text); font-size: 13px;
 }
 .agent-editor-preview .definition-list { max-height: 280px; overflow: auto; }
@@ -986,13 +1048,13 @@
 .agent-editor-diff .artifact-preview { max-height: 300px; overflow: auto; }
 .agent-editor-semantic-diff {
   display: grid; gap: 10px; padding: 12px; background: var(--panel-2);
-  border: 1px solid var(--line); border-radius: 12px;
+  border: 1px solid var(--line); border-radius: var(--radius);
 }
 .agent-editor-semantic-diff > .actions { justify-content: space-between; }
 .semantic-diff-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .semantic-diff-group {
   min-width: 0; padding: 10px; border-left: 3px solid var(--blue);
-  background: color-mix(in srgb, var(--panel) 82%, transparent); border-radius: 8px;
+  background: color-mix(in srgb, var(--panel) 82%, transparent); border-radius: var(--radius);
 }
 .semantic-diff-group.added { border-left-color: var(--green); }
 .semantic-diff-group.removed { border-left-color: var(--red); }
@@ -1053,7 +1115,7 @@
    tighter corners for. */
 .agents-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(236px, 1fr)); gap: 16px; }
 .agent-card {
-  padding: 20px; border: 1px solid var(--line-soft); border-radius: 4px;
+  padding: 20px; border: 1px solid var(--line-soft); border-radius: var(--radius);
   background: var(--panel); display: grid; gap: 14px; align-content: start;
   transition: transform .2s ease, border-color .2s ease, background-color .2s ease;
 }
@@ -1064,7 +1126,7 @@
 }
 .agent-head { display: flex; align-items: flex-start; gap: 12px; }
 .agent-avatar {
-  width: 40px; height: 40px; border-radius: 4px; flex: 0 0 auto;
+  width: 40px; height: 40px; border-radius: var(--radius); flex: 0 0 auto;
   display: grid; place-items: center;
   font-family: var(--mono); font-size: 12px; font-weight: 700; letter-spacing: .04em;
 }
@@ -1108,4 +1170,139 @@
 }
 @media (prefers-reduced-motion: reduce) {
   .agents-online-dot { animation: none; }
+}
+
+/* Goal run detail: summary, 2:1 working area and a server-backed execution
+   timeline. This is deliberately scoped so the application shell is unchanged. */
+.simplified-run-page { display: grid; gap: 24px; min-width: 0; }
+.simplified-goal-summary {
+  position: relative; display: grid; grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start; gap: 16px; padding: 24px; overflow: hidden;
+}
+.simplified-goal-icon {
+  display: grid; place-items: center; width: 44px; height: 44px;
+  border-radius: var(--radius); color: var(--blue); background: var(--blue-soft);
+  font-size: 25px; font-weight: 700;
+}
+.simplified-goal-copy { min-width: 0; }
+.simplified-goal-copy h1 { margin: 0 0 7px; font-size: 18px; }
+.simplified-goal-copy p {
+  max-width: 780px; margin: 0; color: var(--muted); line-height: 1.65;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.simplified-goal-status {
+  display: inline-flex; align-items: center; gap: 8px; max-width: 280px;
+  padding: 8px 12px; border: 1px solid var(--line); border-radius: 999px;
+  color: var(--muted); background: var(--panel-2); font-size: 12px; font-weight: 650;
+}
+.simplified-goal-status-dot { width: 8px; height: 8px; flex: none; border-radius: 50%; background: currentColor; }
+.simplified-goal-status.running { color: var(--blue); border-color: color-mix(in srgb, var(--blue) 28%, var(--line)); background: var(--blue-soft); }
+.simplified-goal-status.succeeded { color: var(--green); }
+.simplified-goal-status.failed, .simplified-goal-status.cancelled { color: var(--red); }
+.simplified-goal-status.running .simplified-goal-status-dot { animation: simplified-run-pulse 1.8s ease-out infinite; }
+@keyframes simplified-run-pulse {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--blue) 45%, transparent); }
+  70%, 100% { box-shadow: 0 0 0 7px transparent; }
+}
+.simplified-run-columns {
+  display: grid; grid-template-columns: minmax(0, 2fr) minmax(260px, 1fr);
+  align-items: start; gap: 24px; min-width: 0;
+}
+.simplified-run-main, .simplified-run-side { display: grid; gap: 16px; min-width: 0; }
+.simplified-run-side { position: sticky; top: calc(var(--topbar-h, 64px) + 20px); }
+.simplified-run-side .panel-head, .simplified-run-side .panel-body { padding-left: 16px; padding-right: 16px; }
+.simplified-run-info dd { overflow-wrap: anywhere; word-break: break-word; }
+.simplified-result-value { max-height: 260px; overflow: auto; }
+.simplified-attention {
+  border-color: color-mix(in srgb, var(--amber) 42%, var(--line));
+  background: color-mix(in srgb, var(--amber-soft) 45%, var(--panel));
+}
+.simplified-attention .responsibility-row {
+  grid-template-columns: minmax(0, 1fr) auto; align-items: start;
+}
+.simplified-attention .responsibility-row > .actions { grid-column: 1 / -1; justify-content: stretch; }
+.simplified-attention .responsibility-row > .actions > button { flex: 1; }
+.simplified-execution { min-width: 0; }
+.simplified-execution .panel-body.simplified-step-list {
+  display: grid; gap: 0; max-height: 620px; padding: 16px 18px 20px;
+  overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin;
+}
+.simplified-live-label {
+  padding: 4px 7px; color: var(--muted-2); background: var(--panel-2);
+  border-radius: var(--radius); font-family: var(--mono); font-size: 10px;
+  font-weight: 650; letter-spacing: .06em; text-transform: uppercase;
+}
+.simplified-step-row {
+  position: relative; display: grid; grid-template-columns: 38px minmax(0, 1fr);
+  align-items: stretch; gap: 14px; padding: 0 0 16px; border: 0;
+}
+.simplified-step-row:last-child { padding-bottom: 0; }
+.simplified-step-track { position: relative; display: flex; justify-content: center; z-index: 0; }
+.simplified-step-track::after {
+  content: ""; position: absolute; z-index: -1; top: 32px; bottom: -16px;
+  width: 2px; background: var(--line);
+}
+.simplified-step-row:last-child .simplified-step-track::after { display: none; }
+.simplified-step-mark { width: 34px; height: 34px; flex: none; }
+.simplified-step-card {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 11px 16px;
+  min-width: 0; padding: 16px; border: 1px solid var(--line);
+  border-radius: var(--radius); background: var(--panel-2);
+  transition: border-color .18s ease, background-color .18s ease;
+}
+.simplified-step-card:hover { border-color: color-mix(in srgb, var(--blue) 30%, var(--line)); }
+.simplified-step-card-head {
+  grid-column: 1 / -1; display: flex; align-items: flex-start;
+  justify-content: space-between; gap: 12px; min-width: 0;
+}
+.simplified-step-card-head .simplified-step-copy { display: flex; flex-wrap: wrap; align-items: baseline; gap: 7px; }
+.simplified-step-order {
+  padding: 2px 6px; border-radius: var(--radius); color: var(--muted-2);
+  background: var(--panel-3); font-family: var(--mono); font-size: 10px;
+  font-weight: 700; text-transform: uppercase;
+}
+.simplified-step-card > .simplified-step-meta,
+.simplified-step-card > .simplified-step-prompt,
+.simplified-step-card > .simplified-step-liveness,
+.simplified-step-card > .simplified-step-output { grid-column: 1 / -1; }
+.simplified-step-card > .simplified-step-prompt {
+  margin: 0; padding: 10px 12px; border: 1px solid var(--line-soft);
+  border-radius: var(--radius); background: var(--bg); font-family: var(--mono);
+  line-height: 1.55;
+}
+.simplified-step-output { min-width: 0; }
+.simplified-artifacts .section-heading p { margin: 5px 0 0; font-size: 12px; }
+.simplified-artifacts-empty {
+  display: grid; place-items: center; align-content: center; gap: 8px;
+  min-height: 250px; padding: 30px; text-align: center;
+  border: 1px dashed var(--line); border-radius: var(--radius);
+  background: color-mix(in srgb, var(--panel) 55%, transparent);
+}
+.simplified-artifacts-empty-mark {
+  display: grid; place-items: center; width: 48px; height: 48px;
+  margin-bottom: 4px; border-radius: var(--radius); color: var(--blue);
+  background: var(--blue-soft); font-size: 26px;
+}
+.simplified-artifacts-empty .muted { max-width: 480px; font-size: 13px; }
+@media (max-width: 900px) {
+  .simplified-run-columns { grid-template-columns: 1fr; }
+  .simplified-run-side { position: static; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .simplified-attention { grid-column: 1 / -1; }
+}
+@media (max-width: 620px) {
+  .simplified-goal-summary { grid-template-columns: auto minmax(0, 1fr); padding: 18px; }
+  .simplified-goal-status { grid-column: 1 / -1; max-width: none; justify-self: stretch; }
+  .simplified-run-side { grid-template-columns: 1fr; }
+  .simplified-execution-head { align-items: flex-start; flex-direction: column; }
+  .simplified-execution-head > .actions { width: 100%; justify-content: flex-start; }
+  .simplified-execution .panel-body.simplified-step-list { padding-inline: 12px; }
+  .simplified-step-row { grid-template-columns: 30px minmax(0, 1fr); gap: 9px; }
+  .simplified-step-mark { width: 28px; height: 28px; }
+  .simplified-step-track::after { top: 28px; }
+  .simplified-step-card { padding: 13px; }
+  .simplified-step-card-head { align-items: stretch; flex-direction: column; }
+  .simplified-step-card-head > .pill { align-self: flex-start; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .simplified-goal-status-dot { animation: none !important; }
 }

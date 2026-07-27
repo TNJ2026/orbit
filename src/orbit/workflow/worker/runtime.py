@@ -5,12 +5,18 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 import json
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from threading import Event
 from typing import Any, Callable
 
 from jsonschema import Draft202012Validator
 
-from ..domain.handlers import HandlerResultStatus
+from ..domain.deadlines import (
+    AGENT_KILL_GRACE_SECONDS, MAX_CONSECUTIVE_RENEWAL_FAILURES,
+    validate_lease_budget,
+)
+from ..domain.durable_execution import ExecutionSafety
+from ..domain.handlers import ExternalEffect, HandlerResultStatus
 from ..domain.runtime import CommandResultDisposition
 from ..domain.envelopes import CommandEnvelope
 from ..domain.execution_plan import execution_plan_from_primitive
@@ -24,6 +30,41 @@ from .supervisor import LeaseSupervisor
 
 class SettlementRejected(RuntimeError):
     """The kernel refused the outcome a worker reported for its attempt."""
+
+
+def _isoformat(value):
+    return None if value is None else value.isoformat()
+
+
+def _settled_within(future, seconds: float) -> bool:
+    """Whether the Handler finished within ``seconds``; never raises."""
+
+    try:
+        future.exception(timeout=seconds)
+    except FutureTimeout:
+        return False
+    except BaseException:  # noqa: BLE001 - the caller re-raises from result()
+        return True
+    return True
+
+
+@dataclass(frozen=True)
+class _ForcedUnknownResult:
+    """The shape `report_unknown_job_result` reads, for a Handler that is silent.
+
+    Not a `HandlerResult`: that type requires a real `ErrorInfo` and usage
+    accounting, and there is none — the Handler never returned to produce
+    either. What the service needs from it is the error and the execution
+    metadata, so this carries exactly that and nothing it would have to invent.
+    """
+
+    error: Mapping[str, Any]
+    usage: None = None
+    usage_incomplete: bool = True
+    provider_request_id: None = None
+    external_effect: ExternalEffect = ExternalEffect.UNKNOWN
+    artifact_refs: tuple = ()
+    diagnostics: tuple = ()
 
 
 class CancellationToken:
@@ -67,7 +108,18 @@ JOB_LEASE_TTL = timedelta(seconds=120)
 
 
 class WorkerRuntime:
-    def __init__(self, service, executor: Callable[[str, dict, CancellationToken], dict], *, worker_id="worker-1", clock: Callable[[], datetime], metrics=None, renew_interval_seconds=10.0, lease_ttl: timedelta = JOB_LEASE_TTL) -> None:
+    def __init__(self, service, executor: Callable[[str, dict, CancellationToken], dict], *, worker_id="worker-1", clock: Callable[[], datetime], metrics=None, renew_interval_seconds=10.0, lease_ttl: timedelta = JOB_LEASE_TTL, kill_grace_seconds: float = AGENT_KILL_GRACE_SECONDS) -> None:
+        # Refused here rather than capped silently, the way PlannerDispatcher
+        # refuses a provider timeout it cannot fence. A lease too short for
+        # "notice the renewals are failing, then settle the attempt" does not
+        # fail visibly — it produces a reaper and a worker writing the same
+        # attempt's terminal state from two directions, occasionally.
+        validate_lease_budget(
+            lease_ttl_seconds=lease_ttl.total_seconds(),
+            renew_interval_seconds=renew_interval_seconds,
+            max_consecutive_renewal_failures=MAX_CONSECUTIVE_RENEWAL_FAILURES,
+            kill_grace_seconds=kill_grace_seconds,
+        )
         self.service = service
         self.executor = executor
         self.worker_id = worker_id
@@ -76,19 +128,218 @@ class WorkerRuntime:
         self.current_token = None
         self.renew_interval_seconds = renew_interval_seconds
         self.lease_ttl = lease_ttl
+        self.kill_grace_seconds = float(kill_grace_seconds)
+        # The pool Handlers run on, and the ones abandoned to a Handler that
+        # outlived its attempt. Each abandoned future holds a thread this
+        # worker can never reuse; see `degraded`.
+        self._pool: ThreadPoolExecutor | None = None
+        self._abandoned_handlers: list = []
 
     def _increment(self, name):
         try: self.metrics.increment(name)
         except Exception: pass
 
+    def _record_renewal_failures(self, claimed, supervisor) -> None:
+        """Persist the supervisor's account, now that the handler is done.
+
+        Deliberately after `stop()` rather than during the failures: the
+        renewals were failing because the database would not take writes, so
+        this is the first moment the write has any chance of landing. It is
+        still allowed to fail — a missing diagnostic must not change how the
+        attempt settles — and a failure to record is itself counted.
+        """
+
+        summary = getattr(supervisor, "summary", None)
+        if summary is None or not summary.observed:
+            return
+        self._increment("lease_renewal_failure_window")
+        recorder = getattr(self.service, "record_lease_renewal_failures", None)
+        recorded = False
+        if recorder is not None:
+            try:
+                recorded = bool(recorder(claimed, summary, self.clock()))
+            except Exception:  # noqa: BLE001 - the service swallows its own
+                recorded = False
+        if not recorded:
+            self._increment("lease_renewal_summary_unrecorded")
+
+    # How often the control thread looks up from waiting on the Handler to
+    # check whether the supervisor is still alive and the settlement deadline
+    # has arrived.
+    SETTLEMENT_POLL_SECONDS = 0.5
+
+    def _await_handler(self, request, token, supervisor):
+        """Run the Handler on its own thread and outlive it if necessary.
+
+        `executor.execute` blocks. Running it on this thread means that when a
+        Handler wedges, the worker wedges with it: there is no line of code
+        left to notice the supervisor died, and no line left to settle the
+        attempt. Every "check afterwards" design fails for the same reason —
+        afterwards never comes.
+
+        So the Handler gets a thread and this one becomes a controller, waiting
+        on three things at once: the Handler finishing, the supervisor dying,
+        and the settlement deadline arriving. Returns the Handler's result, or
+        None when the deadline won and the caller must settle without one.
+        """
+
+        def run_handler():
+            try:
+                return self.executor.execute(request, token)
+            finally:
+                # Drop the token here, on this thread, before the controller
+                # wakes. A finished Handler cannot be cancelled, and a shutdown
+                # that asks it to stop must not turn a delivered result into a
+                # cancelled attempt. Leaving this to the control thread would
+                # hold the window open for however long that thread waits to be
+                # scheduled — under a loaded worker pool, long enough to lose
+                # results.
+                self.current_token = None
+
+        # A pooled thread, reused across attempts. Creating one per attempt
+        # costs real time when several workers, the timer loop and recovery are
+        # all contending for the interpreter, and that time comes out of every
+        # node's execution.
+        future = self._handler_pool().submit(run_handler)
+        if not self._wait_for_handler(future, supervisor, request):
+            # The Handler is still running and will keep running. It owns this
+            # worker's whole pool until it returns; see `degraded`.
+            self._abandon_handler_pool(future)
+            self._increment("worker_forced_settlement")
+            return None
+        # Raises whatever the Handler raised, on this thread.
+        return future.result()
+
+    def _handler_pool(self) -> ThreadPoolExecutor:
+        if self._pool is None:
+            self._pool = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix=f"{self.worker_id}-handler",
+            )
+        return self._pool
+
+    def _abandon_handler_pool(self, future) -> None:
+        """Give up on the pool holding a Handler that will not return."""
+
+        pool, self._pool = self._pool, None
+        if pool is not None:
+            # Never wait: waiting is what the settlement deadline just decided
+            # not to do. The pool keeps its thread until the Handler returns.
+            pool.shutdown(wait=False)
+        self._abandoned_handlers.append(future)
+
+    def _wait_for_handler(self, future, supervisor, request) -> bool:
+        """Wait for the Handler; True when it returned in time.
+
+        A supervisor that died is not a reason to stop waiting — it is a reason
+        to do the cancelling it can no longer do, and then keep waiting for the
+        Handler to notice.
+        """
+
+        settlement = getattr(request, "settlement_deadline", None)
+        supervisor_lost = False
+        while not _settled_within(future, self.SETTLEMENT_POLL_SECONDS):
+            if not supervisor_lost and supervisor.abandoned:
+                supervisor_lost = True
+                self._increment("worker_supervisor_abandoned")
+                try:
+                    supervisor.cancel_now("lease_lost")
+                except Exception:  # noqa: BLE001 - keep watching regardless
+                    pass
+            if settlement is None:
+                # A caller that builds requests without a schedule keeps the
+                # old behaviour: wait for the Handler, however long it takes.
+                continue
+            if self.clock() >= settlement:
+                return False
+        return True
+
+    def _force_settlement(self, claimed, request, supervisor) -> None:
+        """Settle an attempt whose Handler never came back.
+
+        What it settles *as* is decided by the handler's declared execution
+        safety, not by the fact that it timed out. A replay-safe handler that
+        ran out of time is an ordinary timeout and may be retried; one that may
+        have touched the world outside is unknown, and a retry could repeat
+        whatever it already did.
+        """
+
+        now = self.clock()
+        safety = getattr(request, "execution_safety", None)
+        replay_safe = safety is ExecutionSafety.REPLAY_SAFE
+        reason = getattr(supervisor.summary, "cancel_reason", None) or "deadline_exceeded"
+        details = {
+            "reason": reason,
+            "settlement_deadline": _isoformat(
+                getattr(request, "settlement_deadline", None)
+            ),
+        }
+        if replay_safe:
+            error = {
+                "code": "attempt_timeout", "category": "timeout",
+                "message": "handler did not return before the settlement deadline",
+                "source": "worker", "details": details, "cause": None,
+            }
+            self._settled("fail_job", self.service.fail_job(claimed, now, error))
+            self._increment("worker_forced_timeout")
+            return
+        error = {
+            "code": "external_result_unknown", "category": "unknown_external_result",
+            "message": "handler did not return before the settlement deadline",
+            "source": "worker", "details": details, "cause": None,
+        }
+        self._settled(
+            "report_unknown_job_result",
+            self.service.report_unknown_job_result(
+                claimed, now, _ForcedUnknownResult(error),
+            ),
+        )
+        self._increment("worker_forced_unknown")
+
+    def _reap_leaked_threads(self) -> None:
+        self._abandoned_handlers = [
+            future for future in self._abandoned_handlers if not future.done()
+        ]
+
+    @property
+    def degraded(self) -> bool:
+        """Whether this worker's slot is held by a Handler that never returned.
+
+        The slot is deliberately *not* returned when the attempt is settled.
+        The thread is still running, may still be writing files and may still
+        hold a child process; handing its capacity to a second attempt would
+        mean two Handlers doing work this worker believes it is doing once.
+        Python cannot kill a thread, so waiting for it is the only recovery —
+        and while waiting, this worker must be visibly out of service rather
+        than quietly idle.
+        """
+
+        self._reap_leaked_threads()
+        return bool(self._abandoned_handlers)
+
     def run_once(self) -> bool:
+        if self.degraded:
+            self._increment("worker_degraded")
+            return False
         now = self.clock()
         self._increment("worker_heartbeat")
         claimed = self.service.claim_job(self.worker_id, now, lease_ttl=self.lease_ttl)
         if claimed is None:
             self._increment("worker_empty")
             return False
-        started = self.service.start_job(claimed, now)
+        # Built before the job starts, not after: the durable timeout timer is
+        # armed inside StartJob, and it has to be armed from the same schedule
+        # the worker will hold itself to. Computing it afterwards would give
+        # the timer and the worker two different ideas of when this attempt is
+        # late. The request only reads state that `claim_job` already
+        # established, so building it first is safe.
+        request = (
+            self.service.build_executor_request(claimed, now)
+            if hasattr(self.executor, "execute") else None
+        )
+        started = self.service.start_job(
+            claimed, now,
+            settlement_deadline=getattr(request, "settlement_deadline", None),
+        )
         if started.disposition.value != "applied":
             self._increment("worker_start_rejected")
             return True
@@ -97,22 +348,30 @@ class WorkerRuntime:
         )
         self.current_token = token
         try:
-            if hasattr(self.executor, "execute"):
-                request = self.service.build_executor_request(claimed, self.clock())
+            if request is not None:
                 supervisor = LeaseSupervisor(
                     self.service, claimed, token, clock=self.clock,
-                    deadline=request.deadline,
+                    # The process deadline, not the node's: cancelling at the
+                    # node deadline leaves no time to kill the tree and settle
+                    # the attempt inside its own budget, which is how the lease
+                    # reaper used to reach it first.
+                    deadline=request.process_deadline or request.deadline,
                     renew_interval_seconds=self.renew_interval_seconds,
                     lease_ttl=self.lease_ttl,
                     on_cancel=lambda: getattr(
                         self.executor, "cancel_current", lambda *_: None
                     )(request.attempt_id),
+                    metrics=self.metrics,
                 )
                 supervisor.start()
                 try:
-                    result = self.executor.execute(request, token)
+                    result = self._await_handler(request, token, supervisor)
                 finally:
                     supervisor.stop()
+                    self._record_renewal_failures(claimed, supervisor)
+                if result is None:
+                    self._force_settlement(claimed, request, supervisor)
+                    return True
                 if result.status is HandlerResultStatus.SUCCEEDED:
                     self._settled("complete_job", self.service.complete_job(
                         claimed, self.clock(), dict(result.output),

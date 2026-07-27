@@ -54,6 +54,15 @@ def _port_policy(value: Mapping[str, Any]) -> PortDataPolicy:
     )
 
 
+def _schema_accepts_type(schema: Mapping[str, Any], expected: str) -> bool:
+    declared = schema.get("type")
+    if declared is None:
+        return True
+    if isinstance(declared, str):
+        return declared == expected
+    return isinstance(declared, list) and expected in declared
+
+
 def _is_default_condition(value: Any) -> bool:
     """Recognize every DSL spelling that compiles to literal true fallback."""
     return (
@@ -721,6 +730,32 @@ def analyze_dsl(
                 diagnostics.append(_diagnostic(document, "DSL_JOIN_INVALID", "join node requires at least two incoming edges", path))
             if len(join_policies) != 1:
                 diagnostics.append(_diagnostic(document, "DSL_JOIN_INVALID", "join node requires exactly one join policy", path + ("policies",)))
+            else:
+                merge_mode = join_policies[0]["config"].get(
+                    "merge_mode", "array_by_edge"
+                )
+                expected_type = {
+                    "array_by_edge": "array",
+                    "object_by_edge": "object",
+                }.get(merge_mode)
+                if expected_type is not None:
+                    for output_index, output in enumerate(node.get("outputs", ())):
+                        schema = schemas.get(output["schema_id"])
+                        if schema is not None and not _schema_accepts_type(
+                            schema, expected_type,
+                        ):
+                            diagnostics.append(_diagnostic(
+                                document,
+                                "DSL_JOIN_INVALID",
+                                f"join merge_mode {merge_mode!r} produces an "
+                                f"{expected_type}, but output {output['id']!r} "
+                                f"uses schema {output['schema_id']!r}",
+                                path + ("outputs", output_index, "schema_id"),
+                                hint=(
+                                    "use object_by_edge for an object output, or "
+                                    "declare an array schema for array_by_edge"
+                                ),
+                            ))
         elif degree > 1:
             diagnostics.append(_diagnostic(
                 document, "DSL_GRAPH_AMBIGUOUS_MERGE",

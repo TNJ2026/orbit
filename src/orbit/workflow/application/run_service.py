@@ -13,6 +13,8 @@ from datetime import datetime, timezone
 from contextlib import contextmanager
 import fcntl
 import hashlib
+import json
+import re
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -349,6 +351,52 @@ class RunApplicationService:
             "generation": summary.get("generation"),
             "disposition": result.disposition.value,
         }
+
+    def accept_unknown_result(
+        self, run_id: str, node_run_id: str, expected_version: int, *,
+        attempt_id: str, actor: str, idempotency_key: str,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        with connect_workflow_database(self.path, read_only=True) as db:
+            rows = db.execute(
+                "SELECT stream,text FROM attempt_output WHERE attempt_id=?"
+                " AND run_id=? ORDER BY chunk_id",
+                (attempt_id, run_id),
+            ).fetchall()
+        stdout = "".join(row["text"] for row in rows if row["stream"] == "stdout")
+        lines = stdout.rstrip().splitlines()
+        if not lines or lines[-1].strip() != "ORBIT_RESULT_COMPLETE":
+            raise RunStartError("captured stdout has no terminal completion marker")
+        body = "\n".join(lines[:-1]).strip()
+        matches = re.findall(r"```json\s*(\{.*?\})\s*```", body, re.S)
+        if not matches:
+            raise RunStartError("captured stdout has no JSON result")
+        try:
+            value = json.loads(matches[-1])
+        except json.JSONDecodeError as exc:
+            raise RunStartError("captured JSON result is invalid") from exc
+        if not isinstance(value, dict):
+            raise RunStartError("captured result must be an object")
+        identifier = EntityId.parse(node_run_id)
+        command = CommandEnvelope(
+            EntityId("command", hashlib.sha256(
+                f"accept|{attempt_id}|{idempotency_key}".encode()
+            ).hexdigest()),
+            "accept_unknown_result", identifier, EntityId.parse(run_id),
+            AggregateVersion(int(expected_version)),
+            f"accept_unknown_result:{idempotency_key}", actor,
+            now or datetime.now(timezone.utc),
+            {"attempt_id": attempt_id, "output": {"result": value},
+             "reason": "accepted captured completed output"},
+        )
+        result = self.service.submit(command)
+        if result.disposition.value not in {"applied", "replayed"}:
+            reasons = "; ".join(
+                f"{item.code}: {item.message}" for item in result.diagnostics
+            ) or "accept rejected"
+            raise RunStartError(reasons)
+        return {"node_run_id": node_run_id, "attempt_id": attempt_id,
+                "disposition": result.disposition.value}
 
     # -- inspect ----------------------------------------------------------
 

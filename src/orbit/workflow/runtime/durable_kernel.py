@@ -8,6 +8,7 @@ import hashlib
 from typing import Any
 
 from ..domain.concurrency import CommandDisposition
+from ..domain.deadlines import TIMER_GRACE_SECONDS
 from ..domain.durable_execution import (
     DURABLE_COMMAND_TYPES, DurableTimerRecord, ExecutionSafety, LeaseRecord,
     MAX_JOB_LEASE_TTL, TimerPurpose,
@@ -292,7 +293,76 @@ class DurableRuntimeKernel(RuntimeKernel):
         uow.jobs.update(replace(job, status=JobStatus.RUNNING, aggregate_version=new_version, updated_at=command.issued_at), job.aggregate_version)
         uow.attempts.update(replace(attempt, status=AttemptStatus.RUNNING, aggregate_version=attempt.aggregate_version.next(), updated_at=command.issued_at), attempt.aggregate_version)
         uow.node_runs.update(replace(node, status=NodeRunStatus.RUNNING, aggregate_version=node.aggregate_version.next(), updated_at=command.issued_at), node.aggregate_version)
-        return [job_event.event_id, attempt_event.event_id, node_event.event_id], new_version, job.run_id, {"job_id": str(job.job_id), "status": "running"}
+        timer_ids = self._arm_node_timeout(uow, command, events, job, attempt)
+        return [job_event.event_id, attempt_event.event_id, node_event.event_id, *timer_ids], new_version, job.run_id, {"job_id": str(job.job_id), "status": "running"}
+
+    def _disarm_node_timeout(self, uow, command, events, job, attempt):
+        """Retire the backstop for an attempt that settled on its own.
+
+        Not required for correctness — the fire branch checks that the job is
+        still running, and the settlement gate and fencing tokens already stop
+        a late timer from writing anything. It is required for the *metric*:
+        `node_timeout_timer_fired` is meant to count attempts the worker
+        failed to settle, and a timer left armed on every completed attempt
+        would fire harmlessly forever and drown that signal.
+        """
+
+        timer = uow.timers.get_by_dedupe(
+            job.run_id, TimerPurpose.NODE_TIMEOUT.value,
+            f"{job.job_id}:node_timeout:{attempt.attempt_number.value}",
+        )
+        if timer is None or timer.status not in {
+            TimerStatus.SCHEDULED, TimerStatus.LEASED,
+        }:
+            return []
+        event = events.make(
+            timer.timer_id, timer.aggregate_version.value + 1,
+            "timer_transitioned",
+            _transition_payload("timer", timer.status, TimerStatus.CANCELLED),
+        )
+        uow.events.append(timer.run_id, timer.timer_id, timer.aggregate_version, (event,))
+        uow.timers.update(
+            replace(
+                timer, status=TimerStatus.CANCELLED, lease_owner=None,
+                lease_token_hash=None, lease_expires_at=None,
+                aggregate_version=timer.aggregate_version.next(),
+                updated_at=command.issued_at,
+            ),
+            timer.aggregate_version,
+        )
+        return [event.event_id]
+
+    def _arm_node_timeout(self, uow, command, events, job, attempt):
+        """Schedule the durable backstop for an attempt that starts now.
+
+        In the same transaction as the transition to RUNNING, so an attempt can
+        never be running without the timer that will eventually answer for it.
+
+        The timer fires after the worker's own settlement deadline plus a
+        grace: the worker is expected to settle first, and this exists for the
+        case where the thread that was supposed to do it is gone. Firing at the
+        same moment would make the two race, and the timer's fire count would
+        stop meaning "the worker failed".
+
+        A command without a deadline arms nothing — that is how callers from
+        before the schedule existed keep their old behaviour, and how the
+        legacy executor path stays untouched.
+        """
+
+        raw = command.payload.get("settlement_deadline")
+        if not raw:
+            return []
+        due_at = datetime.fromisoformat(
+            str(raw).replace("Z", "+00:00")
+        ) + timedelta(seconds=TIMER_GRACE_SECONDS)
+        _, timer_ids = self._make_timer(
+            uow, command, events, run_id=job.run_id,
+            purpose=TimerPurpose.NODE_TIMEOUT,
+            dedupe_key=f"{job.job_id}:node_timeout:{attempt.attempt_number.value}",
+            target_type="job", target_id=job.job_id,
+            payload={"job_id": str(job.job_id)}, due_at=due_at,
+        )
+        return timer_ids
 
     def _finish_authority(self, uow, command):
         job = uow.jobs.get(command.aggregate_id)
@@ -372,7 +442,8 @@ class DurableRuntimeKernel(RuntimeKernel):
         lease_event, job_event, version = self._terminal_lease(
             uow, command, events, job, lease, JobStatus.COMPLETED
         )
-        return [*core_ids, *usage_ids, lease_event.event_id, job_event.event_id], version, job.run_id, {"job_id": str(job.job_id), "status": "completed"}
+        timer_ids = self._disarm_node_timeout(uow, command, events, job, attempt)
+        return [*core_ids, *usage_ids, lease_event.event_id, job_event.event_id, *timer_ids], version, job.run_id, {"job_id": str(job.job_id), "status": "completed"}
 
     def _durable_fail_job(self, uow, command, events):
         job, lease, attempt = self._finish_authority(uow, command)
@@ -400,6 +471,12 @@ class DurableRuntimeKernel(RuntimeKernel):
                 target_type="job", target_id=job.job_id,
                 payload={"job_id": str(job.job_id)}, due_at=due,
             )
+            # This attempt is over even though the job will run again: the
+            # retry gets its own attempt number and therefore its own timer.
+            timer_ids = [
+                *timer_ids,
+                *self._disarm_node_timeout(uow, command, events, job, attempt),
+            ]
             return (
                 [*core_ids, *usage_ids, lease_event.event_id, job_event.event_id, *timer_ids],
                 version, job.run_id,
@@ -408,7 +485,8 @@ class DurableRuntimeKernel(RuntimeKernel):
         lease_event, job_event, version = self._terminal_lease(
             uow, command, events, job, lease, JobStatus.FAILED
         )
-        return [*core_ids, *usage_ids, lease_event.event_id, job_event.event_id], version, job.run_id, {"job_id": str(job.job_id), "status": "failed"}
+        timer_ids = self._disarm_node_timeout(uow, command, events, job, attempt)
+        return [*core_ids, *usage_ids, lease_event.event_id, job_event.event_id, *timer_ids], version, job.run_id, {"job_id": str(job.job_id), "status": "failed"}
 
     def _durable_report_unknown_job_result(self, uow, command, events):
         job, lease, attempt = self._finish_authority(uow, command)
@@ -473,9 +551,10 @@ class DurableRuntimeKernel(RuntimeKernel):
         lease_event, job_event, version = self._terminal_lease(
             uow, command, events, job, lease, JobStatus.FAILED
         )
+        timer_ids = self._disarm_node_timeout(uow, command, events, job, attempt)
         return (
             [recorded.event_id, transitioned.event_id, node_event.event_id,
-             *usage_ids, lease_event.event_id, job_event.event_id],
+             *usage_ids, lease_event.event_id, job_event.event_id, *timer_ids],
             version, job.run_id,
             {"job_id": str(job.job_id), "status": "unknown_external_result"},
         )
@@ -643,13 +722,31 @@ class DurableRuntimeKernel(RuntimeKernel):
             lease = None if job is None else uow.leases.get_active_for_job(job.job_id)
             if job is not None and job.status is JobStatus.RUNNING and lease is not None:
                 attempt = uow.attempts.get(lease.attempt_id)
+                # What a lapsed deadline *means* depends on what the handler
+                # was allowed to touch. A replay-safe one that ran out of time
+                # is an ordinary timeout and may be retried; one that may have
+                # acted on the world outside is unknown, and retrying it could
+                # repeat whatever it already did. The two error codes carry
+                # different retry policies, so choosing the code here is the
+                # whole of the routing — `_fail_attempt` does the rest.
+                unknown = job.execution_safety is ExecutionSafety.UNKNOWN_ON_LEASE_LOSS
+                error = (
+                    {
+                        "code": "external_result_unknown",
+                        "category": "unknown_external_result",
+                        "message": "node execution deadline expired with the "
+                                   "handler's external effect unknown",
+                    } if unknown else {
+                        "code": "attempt_timeout", "category": "timeout",
+                        "message": "node execution deadline expired",
+                    }
+                )
                 synthetic = CommandEnvelope(
                     command.command_id, "fail_attempt", attempt.attempt_id,
                     command.correlation_id, attempt.aggregate_version,
                     command.idempotency_key, command.actor, command.issued_at,
                     {"error": {
-                        "code": "attempt_timeout", "category": "timeout",
-                        "message": "node execution deadline expired",
+                        **error,
                         "source": "durable_timer", "details": {}, "cause": None,
                     }},
                 )

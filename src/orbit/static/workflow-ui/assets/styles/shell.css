@@ -3,7 +3,7 @@
    inbox badge, runtime health card in the sidebar foot. */
 .skip-link {
   position: absolute; left: 8px; top: -60px; z-index: 20;
-  background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
   padding: 10px 14px; transition: top .15s;
 }
 .skip-link:focus { top: 8px; }
@@ -19,7 +19,7 @@
 
 .brand { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
 .brand-mark {
-  width: 30px; height: 30px; border: 1px solid var(--line); border-radius: 9px;
+  width: 30px; height: 30px; border: 1px solid var(--line); border-radius: var(--radius);
   display: grid; place-items: center; background: var(--panel-2);
   position: relative; flex: 0 0 auto;
 }
@@ -36,7 +36,7 @@
 .nav { display: flex; align-items: center; gap: 6px; flex: 1; margin-left: 12px; }
 .nav-button {
   display: inline-flex; align-items: center; gap: 6px;
-  background: none; border: 0; border-radius: 8px; padding: 6px 12px;
+  background: none; border: 0; border-radius: var(--radius); padding: 6px 12px;
   cursor: pointer; color: var(--muted); font-size: 13px; font-weight: 500;
   white-space: nowrap;
 }
@@ -61,13 +61,13 @@
 .more-menu-popover {
   position: absolute; top: calc(100% + 8px); right: 0; z-index: 40;
   min-width: 248px; display: grid; gap: 2px; padding: 8px;
-  background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
   box-shadow: var(--shadow); backdrop-filter: blur(8px);
 }
 .more-menu-popover[hidden] { display: none; }
 .more-menu-row {
   display: flex; align-items: center; justify-content: space-between;
-  gap: 16px; padding: 6px 8px; border-radius: 8px;
+  gap: 16px; padding: 6px 8px; border-radius: var(--radius);
 }
 .more-menu-label { font-size: 13px; color: var(--muted); white-space: nowrap; }
 .more-menu-row .custom-select { flex: 0 1 auto; min-width: 132px; }
@@ -75,7 +75,7 @@
    carrying the accent so the current theme reads at a glance. */
 .theme-toggle {
   display: inline-flex; flex: 0 0 auto; overflow: hidden;
-  border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2);
+  border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel-2);
 }
 .theme-option {
   display: grid; place-items: center; width: 36px; height: 30px; padding: 0;
@@ -91,7 +91,7 @@
    turning it into a viewport-level floating layer. */
 .runtime-card-inline {
   display: inline-flex; align-items: center; gap: 8px;
-  border: 1px solid var(--line); border-radius: 999px;
+  border: 1px solid var(--line); border-radius: var(--radius);
   min-height: 36px; padding: 6px 12px; background: var(--panel);
   font-size: 12px; pointer-events: none;
 }

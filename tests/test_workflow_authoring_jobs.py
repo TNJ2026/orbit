@@ -138,7 +138,7 @@ class GenerationJobTests(AuthoringJobTestCase):
         created = jobs.create(actor="author", prompt="Research a topic", idempotency_key="g1")
         # The worker thread may already have claimed it; both are "in flight".
         self.assertIn(created["status"], {"queued", "running"})
-        self.assertTrue(created["deadline_at"])
+        self.assertIsNone(created["deadline_at"])
 
         job = self.settled(jobs, created["job_id"])
         self.assertEqual("done", job["status"])
@@ -198,6 +198,13 @@ class GenerationJobTests(AuthoringJobTestCase):
         self.assertEqual(5, failed["attempts"])
         codes = [item.get("code") for item in failed["error"]["diagnostics"]]
         self.assertIn("GENERATION_PROTOCOL", codes)
+        chunks, _ = jobs.output(failed["job_id"])
+        validation_log = "".join(
+            chunk["text"] for chunk in chunks if chunk["stream"] == "stderr"
+        )
+        self.assertIn("[validation 1/5] rejected", validation_log)
+        self.assertIn("GENERATION_PROTOCOL", validation_log)
+        self.assertIn("rule:", validation_log)
 
     def test_an_interrupted_job_is_failed_as_an_unknown_result(self) -> None:
         """A process that died mid-call cannot claim the Agent did nothing."""

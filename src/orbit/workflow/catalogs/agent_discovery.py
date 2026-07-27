@@ -28,6 +28,7 @@ import subprocess
 from typing import Callable, Iterable, Mapping, Sequence
 
 from ..cli_environment import trusted_cli_environment
+from ..domain.deadlines import MIN_AGENT_DURATION_SECONDS
 from ..domain.durable_execution import ExecutionSafety
 from ..handlers.agent import AGENT_RESULT_PORT
 from ..domain.handlers import ResourceProfile
@@ -60,6 +61,7 @@ class AgentInvocation:
     args: tuple[str, ...] = ()
     prompt_flag: str | None = None
     prompt_positional: bool = False
+    process_timeout_flag: str | None = None
 
     def __post_init__(self) -> None:
         for argument in self.args:
@@ -71,6 +73,11 @@ class AgentInvocation:
             raise AgentDiscoveryError(
                 f"prompt flag must be a flag, got {self.prompt_flag!r}"
             )
+        if (
+            self.process_timeout_flag is not None
+            and not self.process_timeout_flag.startswith("--")
+        ):
+            raise AgentDiscoveryError("process timeout flag must be a long flag")
 
 
 @dataclass(frozen=True)
@@ -127,7 +134,10 @@ TRUSTED_AGENT_CLIS: tuple[AgentCliSpec, ...] = (
     AgentCliSpec("gemini", "gemini", invocation=AgentInvocation(
         args=("--skip-trust",), prompt_flag="-p",
     )),
-    AgentCliSpec("antigravity", "agy", invocation=AgentInvocation(prompt_flag="-p")),
+    AgentCliSpec("antigravity", "agy", invocation=AgentInvocation(
+        args=("--dangerously-skip-permissions",), prompt_flag="-p",
+        process_timeout_flag="--print-timeout",
+    )),
     # `kimi -p "<prompt>"` runs one prompt non-interactively and prints the
     # reply on stdout; probed against kimi 0.28.1.
     AgentCliSpec("kimi", "kimi", invocation=AgentInvocation(prompt_flag="-p")),
@@ -308,7 +318,15 @@ def agent_manifest(
             "type": "object",
             "properties": {
                 "prompt": {"type": "string"},
-                "timeout_seconds": {"type": "integer", "minimum": 1},
+                # The floor is the same constant the Runtime validates against
+                # and the editor offers. A one-second budget passed the old
+                # schema and then could not be scheduled at all: stopping the
+                # process group and settling the attempt costs more than that,
+                # and both have to fit inside the budget.
+                "timeout_seconds": {
+                    "type": "integer", "minimum": MIN_AGENT_DURATION_SECONDS,
+                    "maximum": agent.spec.max_duration_seconds,
+                },
             },
             "additionalProperties": False,
         },

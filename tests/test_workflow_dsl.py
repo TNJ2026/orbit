@@ -330,6 +330,49 @@ class WorkflowDslSemanticTests(unittest.TestCase):
         )
         self.assertEqual("human", compiled.ir.nodes[0].kind)
 
+    def test_join_merge_mode_must_match_its_declared_output_schema(self) -> None:
+        port = lambda name: [{
+            "id": name, "schema_id": "example://request/1.0",
+        }]
+        value = {
+            "dsl_version": "1.2",
+            "metadata": {"id": "typed_join", "name": "Typed join"},
+            "nodes": [
+                {"id": "fork", "kind": "decision", "outputs": port("value"), "route_mode": "parallel"},
+                {"id": "left", "kind": "decision", "inputs": port("value"), "outputs": port("value")},
+                {"id": "right", "kind": "decision", "inputs": port("value"), "outputs": port("value")},
+                {"id": "join", "kind": "join", "inputs": port("value"), "outputs": port("value"), "policies": ["join_all"]},
+                {"id": "done", "kind": "terminal", "inputs": port("value")},
+            ],
+            "edges": [
+                {"id": "fork_left", "from": {"node": "fork", "port": "value"}, "to": {"node": "left", "port": "value"}},
+                {"id": "fork_right", "from": {"node": "fork", "port": "value"}, "to": {"node": "right", "port": "value"}},
+                {"id": "left_join", "from": {"node": "left", "port": "value"}, "to": {"node": "join", "port": "value"}},
+                {"id": "right_join", "from": {"node": "right", "port": "value"}, "to": {"node": "join", "port": "value"}},
+                {"id": "join_done", "from": {"node": "join", "port": "value"}, "to": {"node": "done", "port": "value"}},
+            ],
+            "entry": ["fork"], "terminals": ["done"],
+            "policies": [{
+                "id": "join_all", "kind": "join",
+                "config": {"mode": "all", "merge_mode": "array_by_edge"},
+            }],
+        }
+
+        with self.assertRaises(DiagnosticError) as raised:
+            compile_source(
+                json.dumps(value), self.handlers, self.schemas, source_format="json",
+            )
+        finding = next(
+            item for item in raised.exception.diagnostics
+            if item.code == "DSL_JOIN_INVALID"
+        )
+        self.assertIn("produces an array", finding.message)
+
+        value["policies"][0]["config"]["merge_mode"] = "object_by_edge"
+        compile_source(
+            json.dumps(value), self.handlers, self.schemas, source_format="json",
+        )
+
     def test_artifact_and_secret_edges_fail_closed(self) -> None:
         artifact = json.loads(json.dumps(VALID_DSL))
         for port in (

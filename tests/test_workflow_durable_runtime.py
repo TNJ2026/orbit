@@ -299,6 +299,111 @@ class DurableRuntimeTests(unittest.TestCase):
         self.assertIs(JobStatus.FAILED, self.service.list_jobs(self.run_id)[0].status)
         self.assertIs(WorkflowRunStatus.FAILED, self.service.get_run(self.run_id).status)
 
+    def node_timeout_timers(self, service=None):
+        target = service or self.service
+        with target.uow_factory() as uow:
+            return [
+                timer for timer in uow.timers.list_by_run(self.run_id)
+                if timer.purpose.value == "node_timeout"
+            ]
+
+    def test_starting_a_job_arms_its_durable_timeout(self):
+        """The backstop is armed in the same transaction as the transition.
+
+        An attempt can never be running without the timer that will eventually
+        answer for it — a separate call could be interrupted in between.
+        """
+
+        self.service.submit(self.start)
+        claimed = self.service.claim_job("w1", NOW)
+        settlement = NOW + timedelta(seconds=295)
+
+        self.service.start_job(claimed, NOW, settlement_deadline=settlement)
+
+        timers = self.node_timeout_timers()
+        self.assertEqual(1, len(timers))
+        # Fired after the worker's own deadline, not at it: the worker settles
+        # first, and this only speaks when nothing did.
+        self.assertGreater(timers[0].due_at, settlement)
+
+    def test_a_start_without_a_deadline_arms_nothing(self):
+        """Callers from before the schedule keep exactly their old behaviour."""
+
+        self.service.submit(self.start)
+        claimed = self.service.claim_job("w1", NOW)
+
+        self.service.start_job(claimed, NOW)
+
+        self.assertEqual([], self.node_timeout_timers())
+
+    def test_settling_normally_retires_the_timer(self):
+        """Not for correctness — for the metric.
+
+        The fire branch already checks the job is still running, so a stale
+        timer changes nothing. But `node_timeout_timer_fired` is supposed to
+        count attempts the worker failed to settle, and a timer left armed on
+        every completed attempt would drown that signal in noise.
+        """
+
+        self.service.submit(self.start)
+        claimed = self.service.claim_job("w1", NOW)
+        self.service.start_job(
+            claimed, NOW, settlement_deadline=NOW + timedelta(seconds=295),
+        )
+
+        self.service.complete_job(claimed, NOW, {"value": 1})
+
+        self.assertEqual(
+            ["cancelled"], [timer.status.value for timer in self.node_timeout_timers()]
+        )
+
+    def test_a_replay_safe_timeout_stays_retryable(self):
+        """Nothing outside was touched, so the ordinary retry policy applies."""
+
+        self.service.submit(self.start)
+        claimed = self.service.claim_job("w1", NOW)
+        self.service.start_job(claimed, NOW, settlement_deadline=NOW)
+        due = NOW + timedelta(seconds=30)
+
+        TimerDispatcher(self.service, clock=lambda: due).run_once()
+
+        job = self.service.list_jobs(self.run_id)[0]
+        self.assertIn(job.status, {JobStatus.RETRY_WAIT, JobStatus.FAILED})
+        self.assertEqual(
+            "attempt_timeout", self.attempt_error_code(),
+        )
+
+    def test_an_unknown_effect_timeout_is_never_retried(self):
+        """A handler that may already have acted must not be replayed.
+
+        The error code carries the retry policy, so choosing it by the job's
+        declared execution safety is the whole of the routing.
+        """
+
+        service = DurableRuntimeApplicationService(
+            self.path, execution_safety=ExecutionSafety.UNKNOWN_ON_LEASE_LOSS
+        )
+        service.submit(self.start)
+        claimed = service.claim_job("w1", NOW)
+        service.start_job(claimed, NOW, settlement_deadline=NOW)
+        due = NOW + timedelta(seconds=30)
+
+        TimerDispatcher(service, clock=lambda: due).run_once()
+
+        self.assertIs(JobStatus.FAILED, service.list_jobs(self.run_id)[0].status)
+        self.assertEqual("external_result_unknown", self.attempt_error_code())
+
+    def attempt_error_code(self):
+        from orbit.workflow.persistence.database import connect_workflow_database
+
+        with connect_workflow_database(self.path) as db:
+            for row in db.execute(
+                "SELECT payload_json FROM run_events"
+                " WHERE event_type='attempt_failed_recorded' ORDER BY rowid DESC"
+            ):
+                return json.loads(row["payload_json"])["error"]["code"]
+        return None
+
     def test_metrics_failure_cannot_change_worker_result(self):
         class BrokenMetrics:
             def increment(self, *args, **kwargs): raise RuntimeError("metrics down")
@@ -311,6 +416,131 @@ class DurableRuntimeTests(unittest.TestCase):
         self.assertIn(
             JobStatus.COMPLETED,
             {item.status for item in self.service.list_jobs(self.run_id)},
+        )
+
+    def audit_rows(self, action: str):
+        from orbit.workflow.persistence.database import connect_workflow_database
+
+        with connect_workflow_database(self.path) as db:
+            return [
+                dict(row) for row in db.execute(
+                    "SELECT target_id, decision, details_json FROM audit_records"
+                    " WHERE action=?", (action,),
+                ).fetchall()
+            ]
+
+    def running_claim(self):
+        self.service.submit(self.start)
+        claimed = self.service.claim_job("w1", NOW)
+        self.service.start_job(claimed, NOW)
+        return claimed
+
+    def test_a_running_step_reports_whether_it_is_still_alive(self):
+        """"Running" is a status a wedged Handler keeps holding.
+
+        A worker that died and a Handler that stopped talking both leave the
+        step exactly as running, so the status alone cannot tell a working run
+        from a stuck one. The lease it holds can.
+        """
+
+        from orbit.workflow.api.read_models import ReadModelService
+
+        claimed = self.running_claim()
+
+        summary = ReadModelService(self.path).run_summary(self.run_id)
+        step = summary["current_step"]
+
+        self.assertIsNotNone(step, "a started job leaves a running step")
+        self.assertIsNotNone(step["lease_expires_at"])
+        self.assertEqual("w1", step["worker_id"])
+        self.assertEqual(0, step["lease_renewals"])
+        # Nothing has been printed yet, and the field says so rather than
+        # being absent — a missing key reads as "not supported", not "silent".
+        self.assertIsNone(step["last_output_at"])
+
+    def test_a_step_that_printed_reports_when_it_last_did(self):
+        from orbit.workflow.api.read_models import ReadModelService
+        from orbit.workflow.persistence.attempt_output import SQLiteAttemptOutputStore
+
+        claimed = self.running_claim()
+        node_run_id = self.service.list_jobs(self.run_id)[0].node_run_id
+        SQLiteAttemptOutputStore(self.path).append(
+            run_id=str(self.run_id), node_run_id=str(node_run_id),
+            attempt_id=str(claimed.attempt_id), stream="stdout",
+            text="working on it", now=NOW,
+        )
+
+        step = ReadModelService(self.path).run_summary(self.run_id)["current_step"]
+
+        self.assertIsNotNone(step["last_output_at"])
+
+    def test_a_renewal_failure_window_lands_as_one_audit_row(self):
+        """The evidence that used to be missing: which rule of the outage held.
+
+        Without it a failed attempt reports only that it ended unknown, and
+        nothing distinguishes a node that ran out of time from a database that
+        stopped taking writes.
+        """
+
+        from orbit.workflow.worker.supervisor import RenewalFailureSummary
+
+        claimed = self.running_claim()
+        summary = RenewalFailureSummary(
+            failures=4, consecutive_failures=3, cancel_reason="lease_lost",
+            last_error_code="renewal_unavailable",
+            last_error_type="OperationalError",
+            first_failure_at=NOW, last_failure_at=NOW + timedelta(seconds=30),
+            termination_dispatched=True,
+        )
+
+        self.assertTrue(
+            self.service.record_lease_renewal_failures(claimed, summary, NOW)
+        )
+
+        rows = self.audit_rows("lease_renewal_failure_summary")
+        self.assertEqual(1, len(rows))
+        self.assertEqual(str(claimed.attempt_id), rows[0]["target_id"])
+        self.assertEqual("lease_lost", rows[0]["decision"])
+        details = json.loads(rows[0]["details_json"])
+        self.assertEqual(4, details["failures"])
+        self.assertEqual("renewal_unavailable", details["last_error_code"])
+        self.assertTrue(details["termination_dispatched"])
+        # Forced settlement does not exist yet, and an open question must not
+        # be recorded as a negative answer.
+        self.assertIsNone(details["settled"])
+
+    def test_one_row_per_window_not_one_per_renewal_interval(self):
+        """A per-interval record would hammer the database it is documenting."""
+
+        from orbit.workflow.worker.supervisor import RenewalFailureSummary
+
+        claimed = self.running_claim()
+        summary = RenewalFailureSummary(failures=9, cancel_reason="lease_lost")
+
+        self.service.record_lease_renewal_failures(claimed, summary, NOW)
+        self.service.record_lease_renewal_failures(claimed, summary, NOW)
+
+        self.assertEqual(1, len(self.audit_rows("lease_renewal_failure_summary")))
+
+    def test_an_unrecordable_summary_is_reported_not_raised(self):
+        """The write fails exactly when it matters most; it must stay silent.
+
+        Renewals fail because the database will not take writes, so this call
+        is expected to fail in the case it exists for. Raising here would turn
+        a lost diagnostic into a lost settlement.
+        """
+
+        from orbit.workflow.worker.supervisor import RenewalFailureSummary
+
+        claimed = self.running_claim()
+        broken = DurableRuntimeApplicationService(
+            Path(self.temp.name) / "no" / "such" / "runtime.db"
+        )
+
+        self.assertFalse(
+            broken.record_lease_renewal_failures(
+                claimed, RenewalFailureSummary(failures=1), NOW,
+            )
         )
 
     def test_recovery_materializes_job_for_step4_ready_node(self):

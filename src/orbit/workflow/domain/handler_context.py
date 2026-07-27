@@ -45,6 +45,17 @@ class ExecutorRequest:
     # input needs the transport to know a `{artifact_id}` value is a reference
     # to resolve, not an inline object to pass through.
     input_ports: tuple[Mapping[str, Any], ...] = ()
+    # `deadline` above is the node's whole budget. These are the points inside
+    # it: when to start killing the process group, and by when the attempt has
+    # to be in a definite state. Both fall before `deadline` — the reserve is
+    # taken out of the budget, not appended to it. None for callers that build
+    # a request without a schedule; they keep the old behaviour of treating
+    # `deadline` as the only moment that matters.
+    process_deadline: datetime | None = None
+    settlement_deadline: datetime | None = None
+    # When to stop starting new work. None when the budget is too short for a
+    # wind-down phase to mean anything — a caller must not invent one.
+    soft_deadline: datetime | None = None
 
     def __post_init__(self) -> None:
         for value, kind in (
@@ -62,6 +73,13 @@ class ExecutorRequest:
                 raise ValueError("ExecutorRequest string fields are required")
         if self.deadline.tzinfo is None or self.deadline.utcoffset() is None:
             raise ValueError("deadline must be timezone-aware")
+        for value in (
+            self.process_deadline, self.settlement_deadline, self.soft_deadline,
+        ):
+            if value is not None and (
+                value.tzinfo is None or value.utcoffset() is None
+            ):
+                raise ValueError("attempt deadlines must be timezone-aware")
         object.__setattr__(self, "config", freeze_json(self.config))
         object.__setattr__(self, "input", freeze_json(self.input))
         object.__setattr__(self, "input_manifest", freeze_json(self.input_manifest))

@@ -3127,6 +3127,114 @@ class RuntimeKernel:
             "generation": node.generation + 1,
         }
 
+    def _accept_unknown_result(self, uow, command, events):
+        """Adopt completed captured output without rewriting the unknown Attempt."""
+
+        node = uow.node_runs.get(command.aggregate_id)
+        if node is None:
+            raise ValueError("NodeRun was not found")
+        self._check_version(node, command)
+        if node.status is not NodeRunStatus.WAITING:
+            raise ValueError("AcceptUnknownResult requires a waiting NodeRun")
+        attempt = uow.attempts.get(EntityId.parse(command.payload["attempt_id"]))
+        if (
+            attempt is None or attempt.node_run_id != node.node_run_id
+            or attempt.status is not AttemptStatus.UNKNOWN_EXTERNAL_RESULT
+        ):
+            raise ValueError("AcceptUnknownResult requires this NodeRun's unknown Attempt")
+        run = uow.runs.get(node.run_id)
+        if run is None or run.status not in {
+            WorkflowRunStatus.RUNNING, WorkflowRunStatus.WAITING,
+        }:
+            raise ValueError("AcceptUnknownResult requires an active Run")
+        plan = self._load_plan(uow, node.run_id, node.source_plan_version.value)
+        if not isinstance(plan, GraphExecutionPlan):
+            raise ValueError("AcceptUnknownResult requires ExecutionPlan 1.2")
+        output = dict(_require_object(command.payload["output"], "output"))
+        plan_node = plan.node(node.node_id)
+        self._validate_ports(plan_node.outputs, output, "output")
+        ids = []
+        if run.status is WorkflowRunStatus.WAITING:
+            resumed = events.make(
+                run.run_id, run.aggregate_version.value + 1,
+                "workflow_run_transitioned",
+                _transition_payload(
+                    "workflow_run", WorkflowRunStatus.WAITING,
+                    WorkflowRunStatus.RUNNING, reason="unknown_result_accepted",
+                ),
+            )
+            uow.events.append(run.run_id, run.run_id, run.aggregate_version, (resumed,))
+            uow.runs.update(
+                replace(run, status=WorkflowRunStatus.RUNNING,
+                        aggregate_version=run.aggregate_version.next(),
+                        updated_at=command.issued_at),
+                run.aggregate_version,
+            )
+            ids.append(resumed.event_id)
+        accepted = events.make(
+            node.node_run_id, node.aggregate_version.value + 1,
+            "unknown_result_accepted",
+            {"run_id": str(node.run_id), "node_id": node.node_id,
+             "attempt_id": str(attempt.attempt_id), "output": output,
+             "reason": command.payload.get("reason", "")},
+        )
+        succeeded = events.make(
+            node.node_run_id, node.aggregate_version.value + 2,
+            "node_run_transitioned",
+            _transition_payload(
+                "node_run", NodeRunStatus.WAITING, NodeRunStatus.SUCCEEDED,
+                run_id=str(node.run_id), node_id=node.node_id,
+            ),
+        )
+        uow.events.append(
+            node.run_id, node.node_run_id, node.aggregate_version,
+            (accepted, succeeded),
+        )
+        self._record_inline_values(
+            uow, node.run_id, DataOwnerKind.ATTEMPT_OUTPUT, attempt.attempt_id,
+            plan_node.outputs, output, accepted.event_id, command.issued_at,
+        )
+        succeeded_node = replace(
+            node, status=NodeRunStatus.SUCCEEDED,
+            aggregate_version=AggregateVersion(node.aggregate_version.value + 2),
+            updated_at=command.issued_at,
+        )
+        uow.node_runs.update(succeeded_node, node.aggregate_version)
+        ids.extend((accepted.event_id, succeeded.event_id))
+        job_ids = {
+            item.job_id for item in uow.jobs.list_by_run(node.run_id)
+            if item.node_run_id == node.node_run_id
+        }
+        for timer in uow.timers.list_by_run(node.run_id):
+            if (
+                timer.status in {TimerStatus.SCHEDULED, TimerStatus.LEASED}
+                and timer.target_id in job_ids
+            ):
+                event = events.make(
+                    timer.timer_id, timer.aggregate_version.value + 1,
+                    "timer_transitioned",
+                    _transition_payload("timer", timer.status, TimerStatus.CANCELLED),
+                )
+                uow.events.append(
+                    timer.run_id, timer.timer_id, timer.aggregate_version, (event,)
+                )
+                uow.timers.update(
+                    replace(timer, status=TimerStatus.CANCELLED,
+                            lease_owner=None, lease_token_hash=None,
+                            lease_expires_at=None,
+                            aggregate_version=timer.aggregate_version.next(),
+                            updated_at=command.issued_at),
+                    timer.aggregate_version,
+                )
+                ids.append(event.event_id)
+        ids.extend(self._propagate_graph(
+            uow, command, events, plan, succeeded_node, output,
+        ))
+        return ids, succeeded_node.aggregate_version, node.run_id, {
+            "node_run_id": str(node.node_run_id),
+            "attempt_id": str(attempt.attempt_id), "status": "succeeded",
+        }
+
     def _fail_graph_run(self, uow, command, events, run_id, reason):
         run = uow.runs.get(run_id)
         if run.status not in {

@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import json
-import os
-import subprocess
 import shutil
-from threading import Event, Lock, Thread
 import hashlib
+from threading import Lock
 from typing import Any, Mapping, Protocol, runtime_checkable
 
+from ...platform.process import ProcessHandle
 from ..cli_environment import trusted_cli_environment
+from ..domain.deadlines import AGENT_KILL_GRACE_SECONDS
 from ..domain.ids import EntityId
 from ..domain.accounting import UsageSnapshot
 from ..domain.durable_execution import ExecutionSafety
@@ -35,28 +36,14 @@ AGENT_RESULT_PORT = "result"
 # is rejected as "not of type object", which is where an Agent chain used to die
 # one node after the Agent that actually answered.
 AGENT_RESULT_TEXT_KEY = "text"
+AGENT_COMPLETION_MARKER = "ORBIT_RESULT_COMPLETE"
 
-
-def _abandon_pipe(stream) -> None:
-    """Release a pipe we can no longer drain, without waiting on its reader.
-
-    `close()` on a buffered pipe waits for the thread parked inside `read()`,
-    and that thread is waiting for an EOF that will never arrive: the CLI has
-    exited, but a process it left behind still holds the write end. Hermes
-    keeps an MCP gateway alive exactly this way, and the wait is unbounded —
-    a Handler that had already collected its answer would sit there until the
-    lease expired and the attempt was written off as unsettled.
-
-    Closing the descriptor ends the blocked read, the reader thread leaves,
-    and the buffered object goes with it.
-    """
-
-    if stream is None:
-        return
-    try:
-        os.close(stream.fileno())
-    except (OSError, ValueError):
-        pass
+AGENT_RUNTIME_COMPLETION_PROTOCOL = """RUNTIME EXECUTION CONSTRAINTS
+Work within the available time and stop starting new operations when time is short.
+Prefer tests targeted at the changes; do not run the full test suite by default.
+When asked to wrap up, a test fails, or progress is blocked, return immediately with the current result.
+Always report completed changes, tests run, errors, and remaining work, even when the task is only partially complete.
+After the complete final response, print ORBIT_RESULT_COMPLETE on a line by itself and do not print anything after it."""
 
 
 @dataclass(frozen=True)
@@ -104,7 +91,7 @@ class TrustedCliAgentClient:
 
     def __init__(
         self, command: tuple[str, ...], *, timeout_seconds=3600,
-        kill_grace_seconds=2, max_output_bytes=1_048_576,
+        kill_grace_seconds=AGENT_KILL_GRACE_SECONDS, max_output_bytes=1_048_576,
         environment: Mapping[str, str] | None = None,
     ) -> None:
         if not command or any(not item for item in command):
@@ -118,6 +105,10 @@ class TrustedCliAgentClient:
         self.environment = dict(
             environment if environment is not None else trusted_cli_environment()
         )
+        # Reader threads this client could not get back. Never reset: it is a
+        # cumulative account of leaked capacity, which is what makes the leak
+        # visible to whoever reads the metric.
+        self.leaked_reader_threads = 0
         self._lock = Lock()
         self._executions = {}
 
@@ -140,7 +131,10 @@ class TrustedCliAgentClient:
             value.get("finish_reason", "completed"),
         )
 
-    def _run(self, extra_args, payload, context, *, max_output_bytes=None):
+    def _run(
+        self, extra_args, payload, context, *, max_output_bytes=None,
+        completion_marker: str | None = None,
+    ):
         """Spawn, feed, bound and reap. Subclasses decide argv tail and parsing.
 
         Everything here is about surviving the process, not about what it says:
@@ -152,111 +146,103 @@ class TrustedCliAgentClient:
         big to go inline is still fully read on its way to the blob store.
         """
 
-        process = subprocess.Popen(
-            (*self.command, *extra_args), stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.environment,
+        sink = getattr(context, "output", None)
+
+        def publish(name):
+            def emit(chunk):
+                if sink is None:
+                    return
+                try:
+                    sink.emit(name, chunk)
+                except Exception:  # noqa: BLE001 - output is observational
+                    pass
+            return emit
+
+        handle = ProcessHandle(
+            (*self.command, *extra_args),
+            env=self.environment,
+            stdin_text=payload.decode("utf-8"),
+            max_output_bytes=max_output_bytes or self.max_output_bytes,
+            on_stdout=publish("stdout"),
+            on_stderr=publish("stderr"),
         )
         execution_ref = f"agent:{context.request.attempt_id}"
         with self._lock:
             if execution_ref in self._executions:
-                process.kill()
+                handle.cancel(
+                    grace_seconds=self.kill_grace_seconds,
+                    reason="duplicate_execution",
+                )
                 raise RuntimeError("duplicate concurrent Agent execution reference")
-            self._executions[execution_ref] = {"process": process, "cancelled": False}
+            self._executions[execution_ref] = handle
         try:
-            stdout, stderr, overflow = self._communicate_bounded(
-                process, payload, sink=getattr(context, "output", None),
-                max_output_bytes=max_output_bytes,
+            outcome = handle.wait(
+                timeout=self._attempt_timeout(context),
+                kill_grace_seconds=self.kill_grace_seconds,
+                completion_predicate=(
+                    None if completion_marker is None
+                    else lambda stdout: _has_terminal_marker(
+                        stdout, completion_marker
+                    )
+                ),
             )
-        except TimeoutError:
-            process.terminate()
-            try:
-                process.wait(timeout=self.kill_grace_seconds)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
-            raise UnknownExternalResultError("agent CLI timed out after request submission")
         finally:
             with self._lock:
-                state = self._executions.pop(execution_ref, None)
-                cancelled = bool(state and state["cancelled"])
-            if process.stdin is not None and not process.stdin.closed:
-                process.stdin.close()
-            _abandon_pipe(process.stdout)
-            _abandon_pipe(process.stderr)
-        if cancelled:
+                self._executions.pop(execution_ref, None)
+        self.leaked_reader_threads += outcome.leaked_drain_threads
+        stdout = outcome.stdout
+        completed = bool(
+            completion_marker
+            and _has_terminal_marker(stdout, completion_marker)
+            and not outcome.stdout_truncated
+        )
+        if outcome.timed_out and not completed:
+            raise UnknownExternalResultError("agent CLI timed out after request submission")
+        if outcome.cancelled:
             raise UnknownExternalResultError("agent CLI cancellation outcome is unknown")
-        if overflow:
+        if outcome.stdout_truncated:
             raise HandlerValidationError("agent CLI output exceeds size limit")
-        if process.returncode != 0:
+        if outcome.returncode != 0 and not completed:
+            stderr = outcome.stderr.encode("utf-8")
             digest = hashlib.sha256(stderr).hexdigest()[:16]
             raise UnknownExternalResultError(
-                f"agent CLI exited with code {process.returncode} after request submission "
+                f"agent CLI exited with code {outcome.returncode} after request submission "
                 f"(stderr_bytes={len(stderr)}, stderr_sha256={digest})"
             )
-        return stdout
+        if completed:
+            stdout = _strip_terminal_marker(stdout, completion_marker)
+        return stdout.encode("utf-8")
 
-    def _communicate_bounded(self, process, payload, *, sink=None, max_output_bytes=None):
-        stdout_limit = max_output_bytes or self.max_output_bytes
-        stdout_chunks, stderr_chunks = [], []
-        stdout_size = 0
-        overflow = Event()
-        errors = []
+    def _attempt_timeout(self, context) -> float:
+        """How long *this* attempt may run, not how long any attempt may run.
 
-        def write_input():
-            try:
-                process.stdin.write(payload); process.stdin.close()
-            except (BrokenPipeError, OSError) as exc:
-                errors.append(exc)
+        `timeout_seconds` is set once when the registry is built, so every node
+        shares it. The Runtime, meanwhile, gives each attempt its own schedule
+        from the node's budget. Waiting the constructor's value on a node
+        configured for ten minutes means the CLI is still running when the
+        Runtime has already written the attempt off — every timeout becomes a
+        late result. The schedule wins; the constructor value stays as the
+        ceiling for callers that have no request to read.
 
-        def publish(name, chunk):
-            # Forwarded as it is read, so a long-running Agent is watchable and
-            # a failed one still leaves an account. Never lets a reporting
-            # problem interfere with reading the pipe.
-            if sink is None:
-                return
-            try:
-                sink.emit(name, chunk.decode("utf-8", errors="replace"))
-            except Exception:  # noqa: BLE001
-                return
+        The point aimed at is `process_deadline`, not the node's deadline:
+        stopping the tree and settling the attempt has to happen *inside* the
+        budget, so the CLI has to be finished before the budget is. Callers
+        that predate the schedule fall back to the node deadline, which is
+        what they always meant by it.
+        """
 
-        def read_output(pipe, chunks, limit, enforce, name):
-            nonlocal stdout_size
-            # `read` waits for a full buffer or EOF, which turns a five-minute
-            # Agent into one silent block at the end. `read1` returns whatever
-            # has arrived, which is what makes following the console possible.
-            read = getattr(pipe, "read1", pipe.read)
-            while True:
-                try:
-                    chunk = read(65_536)
-                except (OSError, ValueError):
-                    # The descriptor was dropped because nothing more could be
-                    # drained from it. There is no output left to miss.
-                    return
-                if not chunk: break
-                publish(name, chunk)
-                current = stdout_size if enforce else sum(map(len, chunks))
-                remaining = max(0, limit - current)
-                if remaining: chunks.append(chunk[:remaining])
-                if enforce:
-                    stdout_size += len(chunk)
-                    if stdout_size > limit and not overflow.is_set():
-                        overflow.set()
-                        try: process.terminate()
-                        except OSError: pass
-
-        threads = (
-            Thread(target=write_input, daemon=True),
-            Thread(target=read_output, args=(process.stdout, stdout_chunks, stdout_limit, True, "stdout"), daemon=True),
-            Thread(target=read_output, args=(process.stderr, stderr_chunks, 65_536, False, "stderr"), daemon=True),
+        request = getattr(context, "request", None)
+        deadline = (
+            getattr(request, "process_deadline", None)
+            or getattr(request, "deadline", None)
         )
-        for thread in threads: thread.start()
-        try:
-            process.wait(timeout=self.timeout_seconds)
-        except subprocess.TimeoutExpired:
-            raise TimeoutError from None
-        finally:
-            for thread in threads: thread.join(timeout=self.kill_grace_seconds)
-        return b"".join(stdout_chunks), b"".join(stderr_chunks), overflow.is_set()
+        if deadline is None:
+            return self.timeout_seconds
+        remaining = (deadline - datetime.now(timezone.utc)).total_seconds()
+        # A deadline already in the past still gets one positive tick: the
+        # process is spawned by now, and killing it through the timeout path
+        # keeps one exit route instead of two.
+        return max(0.001, min(float(self.timeout_seconds), remaining))
 
     def preflight(self) -> None:
         if shutil.which(self.command[0]) is None:
@@ -264,17 +250,12 @@ class TrustedCliAgentClient:
 
     def cancel(self, execution_ref):
         with self._lock:
-            state = self._executions.get(execution_ref)
-            process = None if state is None else state["process"]
-            if state is not None:
-                state["cancelled"] = True
-        if process is None: return CancelAck(CancelDisposition.CONFIRMED_STOPPED)
-        process.terminate()
-        try:
-            process.wait(timeout=self.kill_grace_seconds)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
+            handle = self._executions.get(execution_ref)
+        if handle is None: return CancelAck(CancelDisposition.CONFIRMED_STOPPED)
+        handle.cancel(
+            grace_seconds=self.kill_grace_seconds,
+            reason="cancelled",
+        )
         return CancelAck(CancelDisposition.UNKNOWN, "termination requested")
 
     def recover(self, recovery_ref):
@@ -306,7 +287,8 @@ class TrustedPromptCliAgentClient(TrustedCliAgentClient):
 
     def __init__(
         self, command, *, prompt_flag: str | None = None,
-        prompt_positional: bool = False, max_prompt_bytes: int = 131_072, **kwargs,
+        prompt_positional: bool = False, max_prompt_bytes: int = 131_072,
+        process_timeout_flag: str | None = None, **kwargs,
     ) -> None:
         super().__init__(command, **kwargs)
         if prompt_flag is not None and prompt_positional:
@@ -315,9 +297,12 @@ class TrustedPromptCliAgentClient(TrustedCliAgentClient):
             raise ValueError(f"prompt flag must be a flag, got {prompt_flag!r}")
         if max_prompt_bytes < 1:
             raise ValueError("prompt limit must be positive")
+        if process_timeout_flag is not None and not process_timeout_flag.startswith("--"):
+            raise ValueError("process timeout flag must be a long flag")
         self.prompt_flag = prompt_flag
         self.prompt_positional = prompt_positional
         self.max_prompt_bytes = max_prompt_bytes
+        self.process_timeout_flag = process_timeout_flag
 
     def execute(self, request, context):
         # An upstream Agent may have handed this one its answer as an artifact
@@ -343,14 +328,23 @@ class TrustedPromptCliAgentClient(TrustedCliAgentClient):
             raise HandlerValidationError(
                 f"prompt exceeds {prompt_limit} bytes for this Agent CLI{hint}"
             )
+        timeout_args = ()
+        if self.process_timeout_flag is not None:
+            # The CLI must give control back before Orbit's own process
+            # deadline. That leaves the adapter its reserved grace to stop any
+            # descendants, drain output, and settle under the lease.
+            internal = max(
+                1, int(self._attempt_timeout(context) - self.kill_grace_seconds)
+            )
+            timeout_args = (f"{self.process_timeout_flag}={internal}s",)
         if self.prompt_flag is not None:
-            extra, payload = (self.prompt_flag, prompt), b""
+            extra, payload = (*timeout_args, self.prompt_flag, prompt), b""
         elif self.prompt_positional:
             # `--` first: a prompt that happens to start with a dash stays an
             # argument to read, not a flag to obey.
-            extra, payload = ("--", prompt), b""
+            extra, payload = (*timeout_args, "--", prompt), b""
         else:
-            extra, payload = (), encoded
+            extra, payload = timeout_args, encoded
         # An artifact result port lifts the read ceiling to its size limit, so a
         # reply too large for the inline path is still fully captured.
         result_port = _artifact_port(
@@ -360,9 +354,26 @@ class TrustedPromptCliAgentClient(TrustedCliAgentClient):
         max_output_bytes = None
         if result_port is not None:
             max_output_bytes = result_port.get("data_policy", {}).get("max_size_bytes")
-        stdout = self._run(extra, payload, context, max_output_bytes=max_output_bytes)
+        stdout = self._run(
+            extra, payload, context, max_output_bytes=max_output_bytes,
+            completion_marker=AGENT_COMPLETION_MARKER,
+        )
         text = stdout.decode("utf-8", errors="replace").strip()
         return _agent_result(text, context)
+
+
+def _has_terminal_marker(stdout: str, marker: str) -> bool:
+    """True only when the last non-empty line is the exact protocol marker."""
+
+    lines = stdout.rstrip().splitlines()
+    return bool(lines and lines[-1].strip() == marker)
+
+
+def _strip_terminal_marker(stdout: str, marker: str) -> str:
+    lines = stdout.rstrip().splitlines()
+    if lines and lines[-1].strip() == marker:
+        lines.pop()
+    return "\n".join(lines)
 
 
 def _artifact_port(ports, port_id: str):
@@ -464,6 +475,7 @@ def render_agent_prompt(
         parts.append(f"INPUT-BEGIN\n{rendered}\nINPUT-END")
     else:
         parts.append(rendered)
+    parts.append(AGENT_RUNTIME_COMPLETION_PROTOCOL)
     return "\n\n".join(parts)
 
 

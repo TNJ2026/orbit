@@ -454,6 +454,12 @@ RUNTIME_COMMAND_PAYLOAD_SCHEMAS = {
             },
         ),
     }),
+    "accept-unknown-result": _object_schema(
+        ["attempt_id", "output"], {
+            "attempt_id": _ID, "output": {"type": "object"},
+            "reason": {"type": "string"},
+        },
+    ),
     "advance-graph": _object_schema([], {"plan_version": _REVISION}),
     "apply-planner-proposal": _object_schema(
         ["proposal_id"],
@@ -482,6 +488,14 @@ _TRANSITION_BASE = {
     "to": {"type": "string", "minLength": 1},
 }
 RUNTIME_EVENT_PAYLOAD_SCHEMAS = {
+    "unknown-result-accepted": _object_schema(
+        ["run_id", "node_id", "attempt_id", "output", "reason"],
+        {
+            "run_id": _ID, "node_id": {"type": "string", "minLength": 1},
+            "attempt_id": _ID, "output": {"type": "object"},
+            "reason": {"type": "string"},
+        },
+    ),
     "workflow-run-transitioned": _object_schema(
         ["machine", "from", "to"],
         {
@@ -599,7 +613,12 @@ DURABLE_COMMAND_PAYLOAD_SCHEMAS = {
             "lease_expires_at": _DATE_TIME, "observed_at": _DATE_TIME,
         },
     ),
-    "start-job": _object_schema(list(_LEASE_AUTH), dict(_LEASE_AUTH)),
+    # `settlement_deadline` is optional so a command written before the
+    # schedule existed still validates: without it the kernel arms no durable
+    # timeout, which is exactly the behaviour those callers had.
+    "start-job": _object_schema(
+        list(_LEASE_AUTH), {**_LEASE_AUTH, "settlement_deadline": _DATE_TIME},
+    ),
     "release-job": _object_schema(list(_LEASE_AUTH), dict(_LEASE_AUTH)),
     "defer-job": _object_schema(
         [*list(_LEASE_AUTH), "available_at", "reason"],

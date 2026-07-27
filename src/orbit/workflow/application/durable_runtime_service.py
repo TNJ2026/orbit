@@ -8,6 +8,7 @@ from typing import Mapping
 from pathlib import Path
 import secrets
 
+from ..domain.deadlines import AGENT_KILL_GRACE_SECONDS, attempt_deadlines
 from ..domain.durable_execution import ExecutionSafety
 from ..domain.states import JobStatus, LeaseStatus, TimerStatus
 from ..domain.envelopes import CommandEnvelope
@@ -17,6 +18,8 @@ from ..domain.ids import EntityId, new_id
 from ..domain.versions import AggregateVersion
 from ..domain.serialization import to_primitive
 from ..domain.serialization import definition_hash
+from ..persistence.control import audit as persist_audit
+from ..persistence.database import connect_workflow_database
 from ..persistence.uow import SQLiteUnitOfWork
 from ..persistence.workflow_versions import SQLiteWorkflowVersionStore
 from ..runtime.durable_kernel import DurableRuntimeKernel, token_hash
@@ -38,6 +41,28 @@ def _handler_config(plan_node):
         key: value for key, value in dict(plan_node.config).items()
         if key not in _RUNTIME_PLAN_CONFIG_KEYS
     }
+
+
+def _attempt_budget_seconds(manifest, config) -> float:
+    """How long this node may run, which is not always what its handler allows.
+
+    The agent manifest has always declared a `timeout_seconds` config field
+    and nothing has ever read it: the budget came from the manifest's resource
+    profile alone, so the control an author was offered in the editor did
+    nothing. Reading it here is what connects the two.
+
+    The manifest value stays the ceiling. A node may ask for less than its
+    handler permits; it may not grant itself more, because the profile is what
+    the Runtime admitted the handler on.
+    """
+
+    ceiling = float(manifest.resource_profile.max_duration_seconds)
+    requested = config.get("timeout_seconds") if isinstance(config, Mapping) else None
+    if isinstance(requested, bool) or not isinstance(requested, (int, float)):
+        return ceiling
+    if requested <= 0:
+        return ceiling
+    return min(ceiling, float(requested))
 
 
 def _time(value: datetime) -> str:
@@ -151,8 +176,14 @@ class DurableRuntimeApplicationService:
         human_task_delivery=None,
         planner_service=None, workflow_db_path=None,
         budget_service=None,
+        kill_grace_seconds: float = AGENT_KILL_GRACE_SECONDS,
     ) -> None:
         self.path = Path(path)
+        # How long a killed process tree gets before we stop waiting on it.
+        # It belongs here rather than only in the adapter because it is also
+        # subtracted from every node's budget: whatever stopping costs has to
+        # be reserved out of the working time, not discovered afterwards.
+        self.kill_grace_seconds = float(kill_grace_seconds)
         self.execution_registry = execution_registry
         self.artifact_backend = artifact_backend
         self.workflow_versions = SQLiteWorkflowVersionStore(workflow_db_path or self.path)
@@ -317,19 +348,27 @@ class DurableRuntimeApplicationService:
                 expected_manifest_fingerprint=override["manifest_fingerprint"],
             )
         manifest = entry.manifest
+        config = _handler_config(plan_node)
+        schedule = attempt_deadlines(
+            now, _attempt_budget_seconds(manifest, config),
+            kill_grace_seconds=self.kill_grace_seconds,
+        )
         return ExecutorRequest(
             job.run_id, plan.plan_id, plan.plan_version, node.node_run_id,
             attempt.attempt_id, attempt.attempt_number, job.job_id,
             lease.lease_id, node.node_id, manifest.name, manifest.version,
-            manifest.fingerprint, _handler_config(plan_node), input_value,
+            manifest.fingerprint, config, input_value,
             manifest.inputs, manifest.outputs,
             f"{job.run_id}+{node.node_run_id}+{attempt.attempt_number.value}",
-            now + timedelta(seconds=manifest.resource_profile.max_duration_seconds),
+            schedule.node_deadline,
             manifest.execution_safety, manifest.resource_profile,
             # The port transports a Handler needs to route its own output and to
             # recognise an artifact input; the manifest carries only schemas.
             tuple(plan_node.outputs),
             tuple(plan_node.inputs),
+            process_deadline=schedule.process_deadline,
+            settlement_deadline=schedule.settlement_deadline,
+            soft_deadline=schedule.soft_deadline,
         )
 
     def resolve_retry_handler(self, agent: str) -> Mapping[str, str]:
@@ -469,7 +508,22 @@ class DurableRuntimeApplicationService:
             },
         ))
 
-    def start_job(self, claimed, now): return self._job_command(claimed, "start_job", now)
+    def start_job(self, claimed, now, *, settlement_deadline=None):
+        """Move the job to running, optionally arming its durable timeout.
+
+        The deadline is passed in rather than recomputed here so that the timer
+        and the worker are working from one schedule. Recomputing would use a
+        second `now` and produce a second, slightly different set of moments —
+        two components disagreeing about when an attempt is late.
+
+        Omitting it arms no timer, which is what callers that predate the
+        schedule get: exactly the behaviour they had before.
+        """
+
+        extra = None
+        if settlement_deadline is not None:
+            extra = {"settlement_deadline": _time(settlement_deadline)}
+        return self._job_command(claimed, "start_job", now, extra)
     def release_job(self, claimed, now): return self._job_command(claimed, "release_job", now)
     @staticmethod
     def _execution_metadata(result):
@@ -530,6 +584,35 @@ class DurableRuntimeApplicationService:
             )
             uow.commit()
             return result
+
+    def record_lease_renewal_failures(self, claimed, summary, now) -> bool:
+        """Persist one aggregated account of a renewal failure window.
+
+        Best effort by design, and audit rather than a domain event: the thing
+        being recorded is usually the database refusing writes, so this call
+        is expected to fail exactly when it matters most. It returns whether
+        the row landed and raises nothing — a lost diagnostic must never stop
+        the cancellation or settlement it describes.
+
+        One row per window, never one per renewal interval. Writing on every
+        failed renewal would hammer a database already unable to keep up,
+        which is how a diagnostic turns into a second outage.
+        """
+
+        try:
+            run_id = self._job_run(claimed.job_id)
+            with connect_workflow_database(self.path) as db:
+                persist_audit(
+                    db, run_id=run_id, actor="system:lease-supervisor",
+                    action="lease_renewal_failure_summary",
+                    target_id=str(claimed.attempt_id),
+                    decision=summary.cancel_reason or "observed",
+                    details=summary.to_primitive(), occurred_at=now,
+                )
+                db.commit()
+            return True
+        except Exception:  # noqa: BLE001 - see the docstring
+            return False
 
     def expire_lease(self, lease_id, now):
         with self.uow_factory() as uow:

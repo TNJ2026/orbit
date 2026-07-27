@@ -241,8 +241,6 @@ def build_api_v1(
         AuthoringJobService(
             path, authoring_service, workflow_publisher,
             workflow_db_path=workflow_path,
-            timeout_seconds=int(operational_config.get("authoring_timeout_seconds", 600))
-            if operational_config else 300,
             clock=clock,
         )
         if authoring_service is not None and workflow_publisher is not None
@@ -2172,6 +2170,19 @@ def build_api_v1(
 
         return await mutate(request, WRITE_SCOPE, "node.retry", command)
 
+    async def accept_unknown_result(request: Request) -> JSONResponse:
+        run_id = request.path_params["run_id"]
+        node_run_id = request.path_params["node_run_id"]
+        attempt_id = request.path_params["attempt_id"]
+
+        def command(body: Mapping[str, Any], actor: str, key: str) -> Mapping[str, Any]:
+            return runs.accept_unknown_result(
+                run_id, node_run_id, _required_version(body),
+                attempt_id=attempt_id, actor=actor, idempotency_key=key,
+            )
+
+        return await mutate(request, WRITE_SCOPE, "unknown.accept", command)
+
     async def claim_human_task(request: Request) -> JSONResponse:
         task_id = request.path_params["task_id"]
 
@@ -2402,6 +2413,10 @@ def build_api_v1(
         Route(
             "/api/v1/runs/{run_id}/node-runs/{node_run_id}/retry",
             retry_node_run, methods=["POST"],
+        ),
+        Route(
+            "/api/v1/runs/{run_id}/node-runs/{node_run_id}/accept/{attempt_id}",
+            accept_unknown_result, methods=["POST"],
         ),
         Route("/api/v1/runs/{run_id}/plan", plan_definition, methods=["GET"]),
         Route("/api/v1/runs/{run_id}/plan/overlay", plan_overlay, methods=["GET"]),

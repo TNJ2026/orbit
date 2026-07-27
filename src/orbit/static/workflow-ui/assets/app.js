@@ -14,7 +14,7 @@ import { Api, ApiError } from "./api.js";
 import { I18n, LOCALES, preferredLocale } from "./i18n.js";
 import { Router } from "./router.js";
 import {
-  budgetDialog, cancelRunDialog, humanSubmitDialog, recoveryDialog,
+  acceptUnknownResultDialog, budgetDialog, cancelRunDialog, humanSubmitDialog, recoveryDialog,
   retryNodeDialog,
 } from "./components/command-dialog.js";
 import { dataState } from "./components/data-state.js";
@@ -154,7 +154,11 @@ function workflowGraphView(graph, actionEditors = {}, onEditAction = null) {
   }));
   const columns = Math.max(...graph.layout.positions.map((p) => p.depth), 0) + 1;
   const lanes = Math.max(...graph.layout.positions.map((p) => p.lane), 0) + 1;
-  const canvasWidth = pad * 2 + columns * width + (columns - 1) * gapX;
+  const hasSelfLoop = graph.edges.some((edge) => edge.back_edge && edge.from === edge.to);
+  // A self-loop returns through the right side of its card and needs half a
+  // column gap beyond the normal graph bounds when it sits in the last column.
+  const canvasWidth = pad * 2 + columns * width + (columns - 1) * gapX
+    + (hasSelfLoop ? gapX / 2 : 0);
   const drawnHeight = pad * 2 + lanes * height + (lanes - 1) * gapY;
   const canvasHeight = Math.max(drawnHeight, minHeight);
   // Centre a short graph in the taller canvas instead of pinning it to the top.
@@ -168,10 +172,16 @@ function workflowGraphView(graph, actionEditors = {}, onEditAction = null) {
     const end = { x: to.x, y: to.y + to.height / 2 };
     // A back edge points at an earlier column, so route it under the row it
     // came from instead of drawing a line straight through the boxes.
-    const path = edge.back_edge
-      ? `M${start.x - from.width / 2} ${from.y + from.height}`
+    const selfLoop = edge.back_edge && edge.from === edge.to;
+    const path = selfLoop
+      ? `M${from.x + from.width / 2} ${from.y + from.height}`
         + ` V${from.y + from.height + gapY / 2}`
-        + ` H${end.x + to.width / 2} V${to.y + to.height}`
+        + ` H${from.x + from.width + gapX / 2}`
+        + ` V${from.y + from.height / 2} H${from.x + from.width}`
+      : edge.back_edge
+        ? `M${start.x - from.width / 2} ${from.y + from.height}`
+          + ` V${from.y + from.height + gapY / 2}`
+          + ` H${end.x + to.width / 2} V${to.y + to.height}`
       : `M${start.x} ${start.y} H${start.x + gapX / 2} V${end.y} H${end.x}`;
     return svgEl("path", {
       class: `graph-edge${edge.back_edge ? " back" : ""} route-${edge.route}`,
@@ -803,6 +813,8 @@ async function promptAndExecute(allowed, onDone, siblings = []) {
     payload = await recoveryDialog(context, allowed);
   } else if (allowed.payload_schema.startsWith("node-retry")) {
     payload = await retryNodeDialog(context, allowed);
+  } else if (allowed.payload_schema.startsWith("unknown-accept")) {
+    payload = await acceptUnknownResultDialog(context, allowed);
   } else {
     announce(i18n.t("command.schemaUnsupported", { schema: allowed.payload_schema }), "error");
     return;
@@ -903,6 +915,12 @@ function renderSimplifiedComposer(root, entries, summary) {
     placeholder: i18n.t("simplified.start.placeholder"),
     text: simplifiedComposerState.goal,
     oninput: (event) => { simplifiedComposerState.goal = event.target.value; },
+    onkeydown: (event) => {
+      if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+        event.preventDefault();
+        event.currentTarget.form?.requestSubmit();
+      }
+    },
   });
   const problem = el("div", {
     class: "banner error simplified-composer-problem", hidden: "hidden",
@@ -996,6 +1014,10 @@ function renderSimplifiedComposer(root, entries, summary) {
       el("div", { class: "field simplified-goal-field" }, [
         el("label", { for: "simplifiedGoal", text: i18n.t("newRun.goal") }),
         goal,
+        el("span", {
+          class: "simplified-goal-shortcut muted",
+          text: i18n.t("simplified.start.shortcut"),
+        }),
       ]),
       el("div", { class: "actions simplified-composer-actions" }, [start]),
       chosen && !allowed ? el("div", {
@@ -1004,7 +1026,19 @@ function renderSimplifiedComposer(root, entries, summary) {
       problem,
     ]),
   ]);
-  root.append(form);
+  root.append(el("section", {
+    class: "simplified-goal-page", "aria-labelledby": "simplifiedGoalTitle",
+  }, [
+    el("header", { class: "simplified-goal-intro" }, [
+      el("h1", {
+        id: "simplifiedGoalTitle", text: i18n.t("simplified.start.title"),
+      }),
+      el("p", {
+        class: "muted", text: i18n.t("simplified.start.description"),
+      }),
+    ]),
+    form,
+  ]));
   if (focusSimplifiedGoalOnRender && !locked) {
     focusSimplifiedGoalOnRender = false;
     setTimeout(() => goal.focus(), 0);
@@ -1308,6 +1342,34 @@ function simplifiedStepOutput(runId, nodeRunId, { live }) {
   return details;
 }
 
+/* Whether the running step is still alive, or only still recorded as running.
+ *
+ * "Running" survives a Handler that stopped talking and a worker that died,
+ * so on its own it is the status a stuck run and a working run share. These
+ * two facts separate them: when the process last printed, and how long its
+ * lease is still good for. Rendered only while the step is actually running —
+ * on a finished step they would describe a moment that no longer matters.
+ */
+function stepLiveness(step) {
+  if (!step) return null;
+  const parts = [];
+  if (step.last_output_at) {
+    parts.push(i18n.t("simplified.execution.lastOutput", {
+      at: i18n.relativeTime(step.last_output_at),
+    }));
+  }
+  if (step.lease_expires_at) {
+    parts.push(i18n.t("simplified.execution.leaseUntil", {
+      at: i18n.relativeTime(step.lease_expires_at),
+      renewals: i18n.number(step.lease_renewals ?? 0),
+    }));
+  }
+  if (!parts.length) return null;
+  return el("div", {
+    class: "simplified-step-liveness muted", text: parts.join(" · "),
+  });
+}
+
 function simplifiedExecutionPanel(graph, summary, reload) {
   const header = () => el("div", { class: "panel-head simplified-execution-head" }, [
     el("div", {}, [
@@ -1317,9 +1379,12 @@ function simplifiedExecutionPanel(graph, summary, reload) {
         : summary.current_step?.label || i18n.t("simplified.run.inProgress") }),
     ]),
     el("div", { class: "actions" }, [
+      !TERMINAL_RUN_STATUSES.has(summary.status)
+        ? el("span", { class: "simplified-live-label", text: i18n.t("simplified.execution.live") })
+        : null,
       pill(summary.status),
       ...commandButtons(summary.allowed_commands || [], reload),
-    ]),
+    ].filter(Boolean)),
   ]);
   if (!graph) {
     const status = TERMINAL_RUN_STATUSES.has(summary.status) ? summary.status : "running";
@@ -1329,14 +1394,20 @@ function simplifiedExecutionPanel(graph, summary, reload) {
       header(),
       el("div", { class: "panel-body" }, [
         el("div", { class: `simplified-step-row ${status}` }, [
-          el("span", { class: "simplified-step-mark", text: mark }),
-          el("div", { class: "simplified-step-copy" }, [
+          el("div", { class: "simplified-step-track" }, [
+            el("span", { class: "simplified-step-mark", text: mark }),
+          ]),
+          el("div", { class: "simplified-step-card" }, [
+            el("div", { class: "simplified-step-copy" }, [
             el("strong", { text: summary.current_step?.label || i18n.t("simplified.execution.preparing") }),
             el("span", { class: "muted", text: TERMINAL_RUN_STATUSES.has(summary.status)
               ? i18n.t(`simplified.run.${summary.status}`)
               : i18n.t("simplified.run.inProgress") }),
+            TERMINAL_RUN_STATUSES.has(summary.status)
+              ? null : stepLiveness(summary.current_step),
+            ].filter(Boolean)),
+            pill(status),
           ]),
-          pill(status),
         ]),
       ]),
     ]);
@@ -1373,10 +1444,19 @@ function simplifiedExecutionPanel(graph, summary, reload) {
       : ["failed", "cancelled"].includes(status) ? "×"
         : status === "running" ? "●" : String(index + 1);
     return el("div", { class: `simplified-step-row ${status}` }, [
-      el("span", { class: "simplified-step-mark", text: mark }),
-      el("div", { class: "simplified-step-copy" }, [
-        el("strong", { text: simplifiedStepName(node) }),
-        stepPrompt(node.config, "simplified-step-prompt"),
+      el("div", { class: "simplified-step-track" }, [
+        el("span", { class: "simplified-step-mark", text: mark }),
+      ]),
+      el("div", { class: "simplified-step-card" }, [
+        el("div", { class: "simplified-step-card-head" }, [
+          el("div", { class: "simplified-step-copy" }, [
+            el("strong", { text: simplifiedStepName(node) }),
+            el("span", { class: "simplified-step-order", text: i18n.t("simplified.execution.step", {
+              count: i18n.number(index + 1),
+            }) }),
+          ]),
+          pill(status),
+        ]),
         el("div", { class: "simplified-step-meta" }, [
           runner ? el("span", {
             class: `simplified-step-runner ${runner.kind}`, text: runner.text,
@@ -1385,11 +1465,13 @@ function simplifiedExecutionPanel(graph, summary, reload) {
             count: i18n.number(runtime.attempts),
           }) }) : el("span", { class: "muted", text: i18n.t("simplified.execution.waiting") }),
         ]),
-      ]),
-      pill(status),
-      runtime?.node_run_id && node.handler_name
-        ? simplifiedStepOutput(summary.run_id, runtime.node_run_id, { live: status === "running" })
-        : null,
+        stepPrompt(node.config, "simplified-step-prompt"),
+        status === "running" && summary.current_step?.node_id === node.node_id
+          ? stepLiveness(summary.current_step) : null,
+        runtime?.node_run_id && node.handler_name
+          ? simplifiedStepOutput(summary.run_id, runtime.node_run_id, { live: status === "running" })
+          : null,
+      ].filter(Boolean)),
     ]);
   });
   return el("section", { class: "panel simplified-execution simplified-run-hero" }, [
@@ -1436,11 +1518,11 @@ async function renderSimplifiedRun(root, runId, summary) {
   const outcome = outcomeResponse.data.result;
   const reload = () => navigate({ view: "run", runId });
   const terminal = TERMINAL_RUN_STATUSES.has(summary.status);
-
-  root.append(simplifiedExecutionPanel(graph, summary, reload));
+  const goalText = summary.goal || summary.name || summary.workflow_id || summary.run_id;
+  const side = el("aside", { class: "simplified-run-side" });
 
   if (responsibilities.length) {
-    root.append(el("section", { class: "panel simplified-attention" }, [
+    side.append(el("section", { class: "panel simplified-attention" }, [
       el("div", { class: "panel-head" }, [
         el("div", { class: "panel-title", text: i18n.t("simplified.attention") }),
       ]),
@@ -1456,7 +1538,7 @@ async function renderSimplifiedRun(root, runId, summary) {
     ]));
   }
 
-  root.append(el("section", { class: "panel simplified-run-info" }, [
+  side.append(el("section", { class: "panel simplified-run-info" }, [
     el("div", { class: "panel-head" }, [
       el("div", { class: "panel-title", text: i18n.t("simplified.runInfo") }),
     ]),
@@ -1486,7 +1568,7 @@ async function renderSimplifiedRun(root, runId, summary) {
     ]),
   ]));
 
-  root.append(el("section", { class: "panel simplified-result" }, [
+  side.append(el("section", { class: "panel simplified-result" }, [
     el("div", { class: "panel-head" }, [
       el("div", { class: "panel-title", text: i18n.t("simplified.result") }),
     ]),
@@ -1496,17 +1578,49 @@ async function renderSimplifiedRun(root, runId, summary) {
     ]),
   ]));
 
-  root.append(el("section", { class: "simplified-artifacts" }, [
+  root.append(el("div", { class: "simplified-run-page" }, [
+    el("section", { class: "panel simplified-goal-summary" }, [
+      el("div", { class: "simplified-goal-icon", "aria-hidden": "true", text: "◎" }),
+      el("div", { class: "simplified-goal-copy" }, [
+        el("h1", { text: i18n.t("simplified.goal") }),
+        el("p", { text: goalText }),
+      ]),
+      el("div", {
+        class: `simplified-goal-status ${summary.status}`,
+        role: "status",
+        "aria-label": i18n.status(summary.status),
+      }, [
+        el("span", { class: "simplified-goal-status-dot", "aria-hidden": "true" }),
+        el("span", { text: terminal
+          ? i18n.t(`simplified.run.${summary.status}`)
+          : i18n.t("simplified.run.inProgress") }),
+      ]),
+    ]),
+    el("div", { class: "simplified-run-columns" }, [
+      el("main", { class: "simplified-run-main" }, [
+        simplifiedExecutionPanel(graph, summary, reload),
+      ]),
+      side,
+    ]),
+    el("section", { class: "simplified-artifacts" }, [
     el("div", { class: "section-heading" }, [
-      el("h2", { text: i18n.t("simplified.artifacts") }),
+      el("div", {}, [
+        el("h2", { text: i18n.t("simplified.artifacts") }),
+        el("p", { class: "muted", text: i18n.t("simplified.artifacts.description") }),
+      ]),
     ]),
     artifacts.length
       ? el("div", { class: "artifact-grid" }, artifacts.map((item) => artifactCard(item)))
       : el("div", {
-        class: "empty panel",
-        text: i18n.t(terminal
-          ? "simplified.artifacts.empty" : "simplified.artifacts.pending"),
-      }),
+        class: "simplified-artifacts-empty",
+      }, [
+        el("div", { class: "simplified-artifacts-empty-mark", "aria-hidden": "true", text: "＋" }),
+        el("strong", { text: i18n.t(terminal
+          ? "simplified.artifacts.empty" : "simplified.artifacts.pending") }),
+        el("span", { class: "muted", text: i18n.t(terminal
+          ? "simplified.artifacts.emptyHint" : "simplified.artifacts.pendingHint") }),
+      ]),
+    ]),
   ]));
 }
 
@@ -2052,6 +2166,7 @@ function workflowGenerationProgress(initialJob, onSettled) {
 }
 
 async function renderWorkflows(root) {
+  const page = el("div", { class: "workflows-page" });
   let catalog = (await api.workflowCatalog()).data;
   let entries = catalog.workflows;
   // Generation appears only when the server advertised it: capability off or
@@ -2138,16 +2253,22 @@ async function renderWorkflows(root) {
       el("div", { class: "actions simplified-workflow-generator-actions" }, [submit]),
       problem,
     ]);
-    root.append(el("section", { class: "panel simplified-workflow-generator" }, [
-      el("div", { class: "simplified-workflow-generator-copy" }, [
+    page.append(el("header", {
+      class: "view-intro simplified-workflow-generator-copy",
+    }, [
+      el("div", {}, [
         el("h2", { text: i18n.t("generate.title") }),
         el("p", { class: "muted", text: i18n.t("generate.hint") }),
       ]),
+    ]));
+    page.append(el("section", { class: "panel simplified-workflow-generator" }, [
+      el("div", { class: "simplified-workflow-generator-inner" }, [
       activeGeneration
         ? workflowGenerationProgress(activeGeneration, render)
         : form,
+      ]),
     ]));
-    root.append(el("header", { class: "view-intro simplified-workflow-list-heading" }, [
+    page.append(el("header", { class: "view-intro simplified-workflow-list-heading" }, [
       el("div", {}, [
         el("h2", { text: i18n.t("workflows.generated.heading") }),
         el("p", { class: "muted", text: i18n.t("workflows.generated.description") }),
@@ -2255,7 +2376,8 @@ async function renderWorkflows(root) {
   if (!entries.length) {
     cards.append(el("div", { class: "empty panel", text: i18n.t("workflows.empty") }));
   }
-  root.append(cards);
+  page.append(cards);
+  root.append(page);
 }
 
 /* Registered Agent handlers: identity and durable-attempt facts from the
@@ -3012,15 +3134,11 @@ async function generateWorkflowDialog(generateCommand, initialJob = null) {
 }
 
 
-/* What the modification changed, as steps rather than counts.
- *
- * The server has already decided which entries are trustworthy and whether
- * they came from the Agent or from the structural diff; this only draws them.
- */
-/** A failed authoring job: what it said, and what the compiler refused.
+/* A failed authoring job: what it said, and what the compiler refused.
  *
  * The message alone reads as "it did not work". The finding codes are what
- * tells an operator — and whoever tunes the prompt — which rule was broken. */
+ * tells an operator — and whoever tunes the prompt — which rule was broken.
+ */
 function authoringFailureView(error) {
   if (!error) return [];
   const codes = [...new Set(
@@ -3034,6 +3152,11 @@ function authoringFailureView(error) {
   ].filter(Boolean);
 }
 
+/* What the modification changed, as steps rather than counts.
+ *
+ * The server has already decided which entries are trustworthy and whether
+ * they came from the Agent or from the structural diff; this only draws them.
+ */
 function changeSummaryView(summary) {
   if (!summary) return [];
   const rows = (summary.entries || []).map((entry) => el("li", {

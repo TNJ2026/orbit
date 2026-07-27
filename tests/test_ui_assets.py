@@ -198,6 +198,40 @@ class AccessibilityTests(unittest.TestCase):
         css = stylesheet_source()
         self.assertIn("@media (max-width", css)
 
+    def test_goal_composer_has_designed_structure_and_shortcut(self) -> None:
+        app_js = (ASSETS / "app.js").read_text(encoding="utf-8")
+        css = stylesheet_source()
+        for marker in (
+            "simplified-goal-page", "simplifiedGoalTitle",
+            "simplified.start.description", "simplified.start.shortcut",
+        ):
+            self.assertIn(marker, app_js)
+        self.assertIn("event.currentTarget.form?.requestSubmit()", app_js)
+        self.assertRegex(css, r"\.simplified-goal-field textarea\s*\{[^}]*min-height:\s*200px")
+        self.assertIn(".simplified-workflow-picker { grid-template-columns: 1fr; }", css)
+
+    def test_goal_run_detail_has_timeline_and_responsive_columns(self) -> None:
+        app_js = (ASSETS / "app.js").read_text(encoding="utf-8")
+        css = stylesheet_source()
+        for marker in (
+            "simplified-run-page", "simplified-goal-summary",
+            "simplified-run-columns", "simplified-step-track",
+            "simplified-step-card", "simplified-artifacts-empty",
+        ):
+            self.assertIn(marker, app_js)
+            self.assertIn(f".{marker}", css)
+        self.assertRegex(
+            css,
+            r"\.simplified-run-columns\s*\{[^}]*grid-template-columns:"
+            r"\s*minmax\(0,\s*2fr\)\s*minmax\(260px,\s*1fr\)",
+        )
+        self.assertIn("@media (max-width: 900px)", css)
+        self.assertIn(".simplified-run-columns { grid-template-columns: 1fr; }", css)
+        self.assertIn("max-height: 620px", css)
+        self.assertIn("overflow-y: auto", css)
+        self.assertIn("summary.goal || summary.name || summary.workflow_id", app_js)
+        self.assertIn("commandButtons(item.allowed_commands || [], reload)", app_js)
+
 class CapacityRenderingTests(unittest.TestCase):
     def test_the_console_follows_only_while_the_run_is_alive(self) -> None:
         """Polling a finished run's console forever is a busy loop for nothing."""

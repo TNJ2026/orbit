@@ -75,6 +75,29 @@ export class I18n {
     }).format(parsed);
   }
 
+  /** How long ago, or how long until — for facts whose age is the point.
+   *
+   * "Last printed 12 seconds ago" answers a question that "last printed at
+   * 14:03:51" makes the reader compute: whether the thing is still alive.
+   * Future instants read as "in 40 seconds", which is what a lease expiry is.
+   */
+  relativeTime(value, now = Date.now()) {
+    if (!value) return "";
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return value;
+    const seconds = Math.round((parsed.getTime() - now) / 1000);
+    const format = new Intl.RelativeTimeFormat(this.locale, { numeric: "auto" });
+    const scale = [
+      ["day", 86400], ["hour", 3600], ["minute", 60], ["second", 1],
+    ];
+    for (const [unit, size] of scale) {
+      if (Math.abs(seconds) >= size || unit === "second") {
+        return format.format(Math.trunc(seconds / size), unit);
+      }
+    }
+    return format.format(seconds, "second");
+  }
+
   persist() {
     // A UI preference, deliberately client-side: locale is not Runtime state.
     localStorage.setItem(STORAGE_KEY, this.locale);

@@ -194,6 +194,26 @@ export function retryNodeDialog({ el, i18n, retryAgents = [] }, allowed) {
   return dialogResult(dialog, () => (agent.value ? { agent: agent.value } : {}));
 }
 
+/** Accepting captured output resolves an ambiguous attempt without rerunning
+ *  its external side effects, so make that operator decision explicit. */
+export function acceptUnknownResultDialog({ el, i18n }, allowed) {
+  const dialog = el("dialog", { "aria-label": i18n.t("unknown.accept.title") }, [
+    el("form", { method: "dialog" }, [
+      el("h2", { text: i18n.t("unknown.accept.title") }),
+      el("p", { text: i18n.t("unknown.accept.confirm") }),
+      el("div", { class: "mono muted", text: allowed.target_aggregate_id }),
+      el("div", { class: "actions" }, [
+        el("button", { class: "button", value: "cancel", text: i18n.t("action.cancel") }),
+        el("button", {
+          class: "button primary", value: "confirm",
+          text: i18n.t("command.unknown.accept"),
+        }),
+      ]),
+    ]),
+  ]);
+  return dialogResult(dialog, () => ({}));
+}
+
 export function recoveryDialog({ el, i18n }, allowed) {
   const actionId = allowed.action_id || allowed.target_aggregate_id;
   const dialog = el("dialog", { "aria-label": i18n.t("recovery.title") }, [

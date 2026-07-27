@@ -17,6 +17,7 @@ docs/orbit-与-loop-engineering.md
 docs/*
 !docs/workflow-runtime-clean-migration-plan.md
 !docs/agentic-workflow-implementation-plan.md
+!docs/agent-cli-execution-reliability-plan.md
 !docs/migration/
 !docs/adr/
 !docs/ui/

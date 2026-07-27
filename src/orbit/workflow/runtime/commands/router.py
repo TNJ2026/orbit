@@ -14,6 +14,7 @@ FAMILIES = {
     "reject_planner_proposal": "planner",
     "apply_subflow_result": "subflow",
     "retry_node_run": "graph",
+    "accept_unknown_result": "graph",
 }
 
 

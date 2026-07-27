@@ -23,6 +23,7 @@ from orbit.workflow.catalogs import (
 )
 from orbit.workflow.domain.durable_execution import ExecutionSafety
 from orbit.workflow.domain.handlers import ResourceProfile
+from orbit.workflow.dsl.schema import ID_PATTERN
 
 
 MANIFEST = HandlerManifest(
@@ -161,6 +162,10 @@ class AuthoringServiceTests(unittest.TestCase):
         self.assertIn("must never form a cycle", prompt)
         self.assertIn("content_types:['text/markdown']", prompt)
         self.assertIn("Never return such a deliverable only as inline JSON", prompt)
+        self.assertIn("full test suites", prompt)
+        self.assertIn("prefer targeted tests", prompt)
+        self.assertIn("useful partial result", prompt)
+        self.assertIn("explicit back_edge", prompt)
 
     def test_prompt_tiers_its_rules_and_shows_one_whole_document(self) -> None:
         """Two dozen peer rules give no way to tell a compile error from taste."""
@@ -201,6 +206,51 @@ class AuthoringServiceTests(unittest.TestCase):
             [{"id": "value", "schema_id": "example://integer/1.0"}], ports["inputs"]
         )
         self.assertEqual(ports["inputs"], ports["outputs"])
+
+    def test_the_slug_rule_states_the_grammar_it_is_validated_against(self) -> None:
+        """"A readable name" invites a space, and a space is a failed compile."""
+
+        model = ScriptedModel([json.dumps(valid_document())])
+        service(model).generate("flow", workflow_id="workflow:wf_1")
+        prompt = model.prompts[0]
+        self.assertIn(ID_PATTERN, prompt)
+        self.assertIn("never a space", prompt)
+
+    def test_an_assigned_identity_overwrites_the_model_id(self) -> None:
+        """The Runtime owns identity; what the model called it becomes the slug."""
+
+        model = ScriptedModel([json.dumps(valid_document(workflow_id="research"))])
+        outcome = service(model).generate("flow", workflow_id="workflow:wf_1")
+
+        metadata = json.loads(outcome.source)["metadata"]
+        self.assertEqual("wf_1", metadata["id"])
+        self.assertEqual("research", metadata["slug"])
+        self.assertEqual("workflow:wf_1", outcome.workflow_id)
+
+    def test_an_obeyed_assignment_leaves_no_slug_rather_than_a_uuid_one(self) -> None:
+        """A model that copies the assigned id has not named anything.
+
+        The prompt asks for both the assigned id and a slug. When only the
+        first arrives, metadata.id holds an opaque uuid — using it as the slug
+        would list the workflow under `wf_1` and call that a readable name.
+        """
+
+        model = ScriptedModel([json.dumps(valid_document(workflow_id="wf_1"))])
+        outcome = service(model).generate("flow", workflow_id="workflow:wf_1")
+
+        metadata = json.loads(outcome.source)["metadata"]
+        self.assertEqual("wf_1", metadata["id"])
+        self.assertNotIn("slug", metadata)
+
+    def test_an_empty_slug_is_dropped_instead_of_failing_the_schema(self) -> None:
+        """A blank string is not a name, and the id grammar rejects it."""
+
+        blank = valid_document(workflow_id="wf_1")
+        blank["metadata"]["slug"] = "   "
+        model = ScriptedModel([json.dumps(blank)])
+        outcome = service(model).generate("flow", workflow_id="workflow:wf_1")
+
+        self.assertNotIn("slug", json.loads(outcome.source)["metadata"])
 
     def test_preferred_handler_is_allowlisted_and_added_to_the_prompt(self) -> None:
         model = ScriptedModel([json.dumps(valid_document())])
@@ -304,6 +354,23 @@ class AuthoringServiceTests(unittest.TestCase):
         self.assertIn("DSL_HANDLER_NOT_FOUND", retry)
         self.assertIn("must name one of the entries in `handlers`", retry)
         self.assertIn("fix EVERY finding listed", retry)
+
+    def test_each_rejected_attempt_reports_structured_diagnostics(self) -> None:
+        broken = valid_document()
+        broken["nodes"][0]["handler"] = {"name": "missing", "version": "1.0.0"}
+        reports = []
+        model = ScriptedModel([json.dumps(broken), json.dumps(valid_document())])
+
+        service(model).generate(
+            "flow",
+            on_diagnostics=lambda attempt, maximum, findings: reports.append(
+                (attempt, maximum, findings)
+            ),
+        )
+
+        self.assertEqual((1, 5), reports[0][:2])
+        self.assertEqual("DSL_HANDLER_NOT_FOUND", reports[0][2][0]["code"])
+        self.assertIn("rule", reports[0][2][0])
 
     def test_retry_context_keeps_the_head_of_a_long_answer(self) -> None:
         """Truncating from the front drops metadata and nodes — the part to fix."""
@@ -531,6 +598,7 @@ class CliGeneratorTests(unittest.TestCase):
         self.assertEqual("answer", generator("the prompt"))
         self.assertEqual(["gen-cli"], calls["argv"])
         self.assertEqual("the prompt", calls["stdin_text"])
+        self.assertIsNone(calls["timeout"])
         self.assertEqual({"PATH", "HOME", "USER", "LOGNAME"}, set(calls["env"]))
 
     def test_positional_prompt_uses_non_interactive_cli_command(self) -> None:

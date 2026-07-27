@@ -43,8 +43,7 @@ class SQLiteAuthoringOutputStore:
         # already exists. Creating one would resurrect a database another
         # component (or a finished test) has already taken away, and an
         # observation is never worth conjuring storage for.
-        absolute_path = self.path.expanduser().absolute()
-        uri = f"file:{absolute_path.as_uri()[len('file:'):]}?mode=rw"
+        uri = self.path.expanduser().absolute().as_uri() + "?mode=rw"
         with sqlite3.connect(
             uri, uri=True, timeout=OUTPUT_BUSY_TIMEOUT_MS / 1000,
             isolation_level=None,

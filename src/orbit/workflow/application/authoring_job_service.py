@@ -37,13 +37,15 @@ class AuthoringJobConflict(ValueError):
 class AuthoringJobService:
     def __init__(
         self, path, authoring, publisher, *, workflow_db_path=None,
-        timeout_seconds=600, clock=None,
+        timeout_seconds=None, clock=None,
         cancel_grace_seconds=CANCEL_GRACE_SECONDS,
     ):
         self.path = Path(path)
         self.workflow_path = Path(workflow_db_path or path)
         self.authoring, self.publisher = authoring, publisher
-        self.timeout_seconds = max(30, int(timeout_seconds))
+        self.timeout_seconds = (
+            None if timeout_seconds is None else max(30, int(timeout_seconds))
+        )
         self.cancel_grace_seconds = float(cancel_grace_seconds)
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         # Jobs in flight in *this* process, so a cancellation can reach the
@@ -98,6 +100,26 @@ class AuthoringJobService:
             # Progress is observational and must never change the authoring job.
             pass
 
+    def _record_validation_diagnostics(
+        self, job_id, attempt, max_attempts, diagnostics,
+    ):
+        lines = [f"[validation {attempt}/{max_attempts}] rejected"]
+        for finding in diagnostics[:20]:
+            code = str(finding.get("code") or "VALIDATION_ERROR")
+            message = str(finding.get("message") or "").strip()
+            lines.append(f"{code}: {message}" if message else code)
+            rule = str(finding.get("rule") or "").strip()
+            if rule:
+                lines.append(f"  rule: {rule}")
+        try:
+            self._output.append(
+                job_id=job_id, stream="stderr", text="\n".join(lines) + "\n",
+                now=self.clock(),
+            )
+        except Exception:
+            # Validation logging is observational, just like CLI output.
+            pass
+
     @staticmethod
     def _time(value):
         return value.astimezone(timezone.utc).isoformat(
@@ -149,7 +171,7 @@ class AuthoringJobService:
             "workflow_id": row["workflow_id"], "prompt": row["prompt"],
             "mode": row["mode"], "status": status,
             "requested_agent": row["requested_agent"],
-            "deadline_at": row["deadline_at"],
+            "deadline_at": row["deadline_at"] or None,
             "result": None if row["result_json"] is None else json.loads(row["result_json"]),
             # How many rounds the Agent needed, and what the compiler refused
             # on the last one: the facts a failed job is otherwise silent about.
@@ -263,7 +285,10 @@ class AuthoringJobService:
                 (
                     job_id, job_type, actor, workflow_id, prompt, mode,
                     idempotency_key, display_language, agent,
-                    self._time(now + timedelta(seconds=self.timeout_seconds)),
+                    (
+                        "" if self.timeout_seconds is None
+                        else self._time(now + timedelta(seconds=self.timeout_seconds))
+                    ),
                     stamp, stamp,
                 ),
             )
@@ -334,6 +359,11 @@ class AuthoringJobService:
                         on_progress=lambda stage, attempt, maximum: self._record_progress(
                             job_id, stage, attempt, maximum,
                         ),
+                        on_diagnostics=lambda attempt, maximum, findings: (
+                            self._record_validation_diagnostics(
+                                job_id, attempt, maximum, findings,
+                            )
+                        ),
                     )
                     latest = 0
                 else:
@@ -363,6 +393,11 @@ class AuthoringJobService:
                         on_progress=lambda stage, attempt, maximum: self._record_progress(
                             job_id, stage, attempt, maximum,
                         ),
+                        on_diagnostics=lambda attempt, maximum, findings: (
+                            self._record_validation_diagnostics(
+                                job_id, attempt, maximum, findings,
+                            )
+                        ),
                     )
                     latest = int(current["version"])
                 with connect_workflow_database(self.path, read_only=True) as db:
@@ -372,8 +407,12 @@ class AuthoringJobService:
                     ).fetchone()["cancel_requested"]
                 if cancelled:
                     return
-                if self.clock() >= datetime.fromisoformat(
-                    str(row["deadline_at"]).replace("Z", "+00:00")
+                if (
+                    self.timeout_seconds is not None
+                    and row["deadline_at"]
+                    and self.clock() >= datetime.fromisoformat(
+                        str(row["deadline_at"]).replace("Z", "+00:00")
+                    )
                 ):
                     self._expire_due()
                     return
@@ -519,6 +558,8 @@ class AuthoringJobService:
         }
 
     def _expire_due(self):
+        if self.timeout_seconds is None:
+            return
         stamp = self._time(self.clock())
         with connect_workflow_database(self.path) as db:
             expired = list(db.execute(

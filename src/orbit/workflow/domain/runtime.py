@@ -50,7 +50,7 @@ class CommandResult:
 
 RUNTIME_COMMAND_TYPES = frozenset(
     {"start_run", "schedule_node", "start_attempt", "complete_attempt", "fail_attempt", "cancel_node", "cancel_run", "advance_graph", "advance_foreach", "submit_human_task", "apply_planner_proposal", "reject_planner_proposal", "apply_subflow_result",
-     "retry_node_run"}
+     "retry_node_run", "accept_unknown_result"}
 )
 
 RUNTIME_EVENT_VERSIONS = MappingProxyType(
@@ -61,6 +61,7 @@ RUNTIME_EVENT_VERSIONS = MappingProxyType(
         "node_input_prepared": 1,
         "attempt_output_recorded": 1,
         "attempt_failed_recorded": 1,
+        "unknown_result_accepted": 1,
         "graph_route_decided": 1,
         "branch_token_transitioned": 1,
         "join_decided": 1,
@@ -91,6 +92,7 @@ _COMMAND_FIELDS = MappingProxyType(
         "reject_planner_proposal": ({"proposal_id", "error"}, set()),
         "apply_subflow_result": ({"link_id"}, set()),
         "retry_node_run": (set(), {"reason", "handler_override"}),
+        "accept_unknown_result": ({"attempt_id", "output"}, {"reason"}),
     }
 )
 
@@ -111,6 +113,7 @@ def validate_runtime_command_payload(command_type: str, payload: Mapping[str, An
         "complete_attempt": ("output",), "fail_attempt": ("error",),
         "reject_planner_proposal": ("error",),
         "retry_node_run": ("handler_override",),
+        "accept_unknown_result": ("output",),
     }.get(command_type, ())
     for field in object_fields:
         if field in payload and not isinstance(payload[field], Mapping):
@@ -135,6 +138,7 @@ def validate_runtime_event_payload(event_type: str, payload: Mapping[str, Any]) 
         "node_input_prepared": {"run_id", "node_id", "input"},
         "attempt_output_recorded": {"run_id", "node_run_id", "output"},
         "attempt_failed_recorded": {"run_id", "node_run_id", "error"},
+        "unknown_result_accepted": {"run_id", "node_id", "attempt_id", "output", "reason"},
         "graph_route_decided": {"run_id", "node_run_id", "decision"},
         "branch_token_transitioned": {"machine", "from", "to", "run_id", "edge_id", "target_node_id", "target_generation"},
         "join_decided": {"run_id", "join_group_id", "decision"},
@@ -154,6 +158,7 @@ def validate_runtime_event_payload(event_type: str, payload: Mapping[str, Any]) 
         "node_input_prepared": {"handler_override"},
         "attempt_output_recorded": {"artifact_refs"},
         "attempt_failed_recorded": set(),
+        "unknown_result_accepted": set(),
         "graph_route_decided": set(),
         "branch_token_transitioned": {"scope"},
         "join_decided": {"input"},

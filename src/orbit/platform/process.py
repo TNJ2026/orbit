@@ -21,6 +21,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from typing import Callable, Mapping, Sequence
 
 
@@ -211,16 +212,20 @@ def terminate_pid_tree(pid: int) -> bool:
         return False
 
 
-def kill_pid_tree(pid: int) -> bool:
-    """Force-kill a process tree, including children that escaped the group."""
+def kill_pid_tree(pid: int, *, known_descendants: Sequence[int] = ()) -> bool:
+    """Force-kill a process tree, including children that escaped the group.
+
+    ``known_descendants`` is a snapshot the caller took *earlier*, before it
+    sent any signal. Taking one here is too late for a caller that already
+    terminated the group: the parent is gone, its escapees have reparented to
+    init, and no walk of the current tree can reach them any more.
+    """
 
     if not pid:
         return False
     if IS_WINDOWS:
         return _taskkill_tree(pid, force=True)
-    # Snapshot first: after the group dies, escaped children reparent to init
-    # and are no longer reachable from this pid.
-    escaped = descendant_pids(pid)
+    escaped = list(dict.fromkeys([*known_descendants, *descendant_pids(pid)]))
     dispatched = False
     try:
         os.killpg(os.getpgid(pid), signal.SIGKILL)
@@ -234,6 +239,70 @@ def kill_pid_tree(pid: int) -> bool:
         except (ProcessLookupError, PermissionError, OSError):
             pass
     return dispatched
+
+
+def stop_pid_tree(
+    pid: int,
+    *,
+    grace_seconds: float = DEFAULT_KILL_GRACE_SECONDS,
+    wait_for: Callable[[float], object] | None = None,
+) -> bool:
+    """TERM a process tree, then KILL whatever outlived the grace period.
+
+    The descendant snapshot is taken before the first signal, which is the
+    only moment it is still complete: a child that called ``setsid`` never
+    receives the group signal, and once its parent dies it is no longer a
+    descendant of anything this caller knows about. Everything after that
+    point works from the snapshot.
+
+    ``wait_for`` is the caller's own way of waiting on the main process — for
+    a ``Popen`` that is ``process.wait``. Without it the grace period is spent
+    sleeping instead of watching, which is correct but slower.
+    """
+
+    if not pid:
+        return False
+    escaped = descendant_pids(pid)
+    dispatched = terminate_pid_tree(pid)
+    # An escapee is outside the group, so the group TERM never reached it.
+    for child in escaped:
+        try:
+            os.kill(child, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    exited = _await_exit(wait_for, grace_seconds)
+    if exited and not any(_pid_alive(child) for child in escaped):
+        return dispatched
+    dispatched = kill_pid_tree(pid, known_descendants=escaped) or dispatched
+    _await_exit(wait_for, grace_seconds)
+    return dispatched
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0 or IS_WINDOWS:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except (PermissionError, OSError):
+        return True
+    return True
+
+
+def _await_exit(wait_for: Callable[[float], object] | None, seconds: float) -> bool:
+    """Give the main process ``seconds`` to exit; True when it did."""
+
+    if wait_for is None:
+        time.sleep(seconds)
+        return False
+    try:
+        wait_for(seconds)
+        return True
+    except subprocess.TimeoutExpired:
+        return False
+    except (OSError, ValueError):
+        return True
 
 
 # --- streaming -------------------------------------------------------------
@@ -354,6 +423,16 @@ class ProcessResult:
     stderr_truncated: bool = False
     cancelled: bool = False
     timed_out: bool = False
+    # What first asked this process to stop. `cancelled` and `timed_out` say
+    # *that* it was stopped; a caller deciding whether an attempt may be
+    # retried needs to know *why*, and the two booleans cannot express a race
+    # between them — whichever arrived first is the reason that counts.
+    termination_reason: str | None = None
+    # Drain threads still alive when the bounded join gave up. They hold a
+    # pipe an escaped descendant keeps open, and nothing can safely kill a
+    # Python thread — so the only honest thing is to count them. Silently
+    # returning here is how a leak becomes invisible.
+    leaked_drain_threads: int = 0
 
 
 class ProcessHandle:
@@ -384,6 +463,7 @@ class ProcessHandle:
         self._on_stderr = on_stderr
         self._lock = threading.Lock()
         self._cancelled = False
+        self._termination_reason: str | None = None
         self._threads: list[threading.Thread] = []
         self._drain_errors: list[BaseException] = []
 
@@ -450,28 +530,88 @@ class ProcessHandle:
             thread.start()
             self._threads.append(thread)
 
-    def wait(self, timeout: float | None = None) -> ProcessResult:
+    def wait(
+        self, timeout: float | None = None,
+        *, kill_grace_seconds: float = DEFAULT_KILL_GRACE_SECONDS,
+        completion_predicate: Callable[[str], bool] | None = None,
+    ) -> ProcessResult:
         """Run to completion, killing the tree on timeout."""
 
         self._start_drains()
         timed_out = False
-        try:
-            self._process.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            self.kill()
+        completed_output = False
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            remaining = (
+                None if deadline is None
+                else max(0.0, deadline - time.monotonic())
+            )
+            poll_timeout = remaining
+            if completion_predicate is not None:
+                poll_timeout = (
+                    0.1 if remaining is None else min(0.1, remaining)
+                )
             try:
-                self._process.wait(timeout=DEFAULT_KILL_GRACE_SECONDS)
+                self._process.wait(timeout=poll_timeout)
+                # The process can exit in the same polling slice that emitted
+                # the marker. Check once more after wait() succeeds: otherwise
+                # this race skips the marker branch and descendants that
+                # inherited the pipes can keep the drains alive.
+                if (
+                    completion_predicate is not None
+                    and completion_predicate(self.stdout.text)
+                ):
+                    completed_output = True
+                    self._note_reason("completed_output")
+                    kill_pid_tree(self._process.pid)
+                    self._unwedge_readers()
+                break
             except subprocess.TimeoutExpired:
-                pass
+                if (
+                    completion_predicate is not None
+                    and completion_predicate(self.stdout.text)
+                ):
+                    completed_output = True
+                    self._note_reason("completed_output")
+                elif deadline is None or time.monotonic() < deadline:
+                    continue
+                else:
+                    timed_out = True
+                    self._note_reason("timeout")
+            # A terminal output marker is as authoritative as process exit for
+            # a prompt CLI. Stop descendants now instead of waiting for a
+            # gateway/tool child that kept the parent or its pipes alive.
+            # Snapshot descendants before the first signal. A child may have
+            # called setsid() and escaped the process group; killing the group
+            # first reparents that child and makes it undiscoverable.
+            stop_pid_tree(
+                self._process.pid,
+                grace_seconds=kill_grace_seconds,
+                wait_for=self._process.wait,
+            )
+            self._unwedge_readers()
+            break
+        leaked = 0
         for thread in self._threads:
-            thread.join(timeout=DEFAULT_KILL_GRACE_SECONDS)
+            thread.join(timeout=kill_grace_seconds)
+            # A thread still alive here is parked in read() on a pipe some
+            # escaped descendant still holds open. It cannot be killed, and it
+            # will not be waited on again — so it is counted, and the count is
+            # what lets a caller notice the leak instead of inferring it from
+            # a process that mysteriously never frees its slot.
+            if thread.is_alive():
+                leaked += 1
         # Timeout/cancellation deliberately closes pipes and can leave a final
         # partial byte sequence; preserve their unknown-result semantics.  A
         # normally completed process, however, must emit valid UTF-8 rather
         # than having corrupt bytes silently replaced and persisted.
-        if self._drain_errors and not timed_out and not self.cancelled:
+        if (
+            self._drain_errors and not timed_out and not self.cancelled
+            and not completed_output
+        ):
             raise self._drain_errors[0]
+        with self._lock:
+            reason = self._termination_reason
         return ProcessResult(
             returncode=self._process.returncode,
             stdout=self.stdout.text,
@@ -480,7 +620,21 @@ class ProcessHandle:
             stderr_truncated=self.stderr.truncated,
             cancelled=self.cancelled,
             timed_out=timed_out,
+            termination_reason=reason,
+            leaked_drain_threads=leaked,
         )
+
+    def _note_reason(self, reason: str) -> None:
+        """Record why this process was stopped, first writer wins.
+
+        A cancel arriving while the timeout kill is already underway must not
+        rewrite history: the caller needs the reason that actually initiated
+        the stop, not the last one to reach the lock.
+        """
+
+        with self._lock:
+            if self._termination_reason is None:
+                self._termination_reason = reason
 
     def terminate(self) -> bool:
         return terminate_pid_tree(self._process.pid)
@@ -493,28 +647,42 @@ class ProcessHandle:
             self._process.kill()
         except OSError:
             pass
-        # An escaped child can keep the write end open, leaving our drain thread
-        # blocked on read forever. Closing our read end is what unwedges it.
+        self._unwedge_readers()
+        return dispatched
+
+    def _unwedge_readers(self) -> None:
+        """Close our read ends so a drain thread cannot wait on a dead writer.
+
+        An escaped child can keep the write end open, leaving the drain thread
+        blocked on read forever. Closing our side is what ends that read.
+        """
+
         for stream in (self._process.stdout, self._process.stderr):
             try:
                 if stream is not None:
                     stream.close()
             except OSError:
                 pass
-        return dispatched
 
-    def cancel(self, *, grace_seconds: float = DEFAULT_KILL_GRACE_SECONDS) -> bool:
+    def cancel(
+        self, *, grace_seconds: float = DEFAULT_KILL_GRACE_SECONDS,
+        reason: str = "cancelled",
+    ) -> bool:
         """Cooperative stop: terminate, then force-kill if it does not exit."""
 
         with self._lock:
             self._cancelled = True
-        self.terminate()
-        try:
-            self._process.wait(timeout=grace_seconds)
-            return True
-        except subprocess.TimeoutExpired:
-            self.kill()
-            return False
+        self._note_reason(reason)
+        # Through stop_pid_tree rather than terminate()-then-kill(): the
+        # escapee snapshot has to be taken before the first signal, and a
+        # kill() reached only after terminate() has already killed the parent
+        # can no longer find what escaped.
+        stop_pid_tree(
+            self._process.pid, grace_seconds=grace_seconds,
+            wait_for=self._process.wait,
+        )
+        self._unwedge_readers()
+        return self._process.poll() is not None
 
 
 def run(
@@ -529,6 +697,7 @@ def run(
     on_stdout: Callable[[str], None] | None = None,
     on_stderr: Callable[[str], None] | None = None,
     on_start: Callable[[ProcessHandle], None] | None = None,
+    kill_grace_seconds: float = DEFAULT_KILL_GRACE_SECONDS,
 ) -> ProcessResult:
     """Spawn, stream and reap a child process in one call.
 
@@ -536,6 +705,11 @@ def run(
     which is the only way another thread can stop this child: without it a
     cancelled job would keep an Agent CLI running to completion and simply
     throw the answer away.
+
+    ``kill_grace_seconds`` is how long a killed tree gets to actually die and
+    its drain threads to unblock. Two seconds suits a quick command; an Agent
+    CLI killed mid-write to a worktree deserves longer, which is why callers
+    can raise it.
     """
 
     handle = ProcessHandle(
@@ -545,4 +719,4 @@ def run(
     )
     if on_start is not None:
         on_start(handle)
-    return handle.wait(timeout=timeout)
+    return handle.wait(timeout=timeout, kill_grace_seconds=kill_grace_seconds)

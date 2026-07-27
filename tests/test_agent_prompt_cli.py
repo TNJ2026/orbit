@@ -24,9 +24,12 @@ from orbit.workflow.domain.handlers import (
     CancelDisposition, HandlerValidationError, UnknownExternalResultError,
 )
 from orbit.workflow.handlers.agent import (
-    AGENT_RESULT_PORT, AGENT_RESULT_TEXT_KEY, AgentRequest,
+    AGENT_RESULT_PORT, AGENT_RESULT_TEXT_KEY, AGENT_RUNTIME_COMPLETION_PROTOCOL, AgentRequest,
     TrustedPromptCliAgentClient, render_agent_prompt,
 )
+
+def runtime_prompt(value: str) -> str:
+    return f"{value}\n\n{AGENT_RUNTIME_COMPLETION_PROTOCOL}"
 
 
 def context(attempt_id: str = "attempt-1") -> SimpleNamespace:
@@ -77,14 +80,14 @@ class PromptTransportTests(unittest.TestCase):
     def test_a_flag_carries_the_prompt_as_its_value(self) -> None:
         client = self.client(ECHO_ARGV, args=("chat", "-Q"), prompt_flag="-q")
         seen = json.loads(self.call(client))
-        self.assertEqual(["chat", "-Q", "-q", "do the thing"], seen["argv"])
+        self.assertEqual(["chat", "-Q", "-q", runtime_prompt("do the thing")], seen["argv"])
         self.assertEqual("", seen["stdin"])
 
     def test_stdin_carries_the_prompt_when_no_flag_is_declared(self) -> None:
         client = self.client(ECHO_ARGV, args=("run",))
         seen = json.loads(self.call(client))
         self.assertEqual(["run"], seen["argv"])
-        self.assertEqual("do the thing", seen["stdin"])
+        self.assertEqual(runtime_prompt("do the thing"), seen["stdin"])
 
     def test_a_positional_prompt_is_fenced_behind_a_double_dash(self) -> None:
         """A prompt that starts with a dash must stay data, not become a flag."""
@@ -93,16 +96,55 @@ class PromptTransportTests(unittest.TestCase):
             ECHO_ARGV, args=("exec",), prompt_positional=True,
         )
         seen = json.loads(self.call(client, {"prompt": "--version please"}))
-        self.assertEqual(["exec", "--", "--version please"], seen["argv"])
+        self.assertEqual(["exec", "--", runtime_prompt("--version please")], seen["argv"])
 
     def test_a_prompt_is_never_split_into_several_arguments(self) -> None:
         client = self.client(ECHO_ARGV, prompt_flag="-p")
         seen = json.loads(self.call(client, {"prompt": "one; rm -rf / && two"}))
-        self.assertEqual(["-p", "one; rm -rf / && two"], seen["argv"])
+        self.assertEqual(["-p", runtime_prompt("one; rm -rf / && two")], seen["argv"])
 
     def test_the_reply_is_returned_as_text(self) -> None:
-        client = self.client("print('  the answer  ')", prompt_flag="-p")
+        client = self.client(
+            "print('  the answer  \\nORBIT_RESULT_COMPLETE')", prompt_flag="-p"
+        )
         self.assertEqual("the answer", self.call(client))
+
+    def test_a_completed_reply_survives_a_cli_that_hangs_after_output(self) -> None:
+        started = time.monotonic()
+        client = self.client(
+            "import time; print('answer\\nORBIT_RESULT_COMPLETE', flush=True); time.sleep(30)",
+            prompt_flag="-p", timeout_seconds=20, kill_grace_seconds=.1,
+        )
+        self.assertEqual("answer", self.call(client))
+        self.assertLess(time.monotonic() - started, 3)
+
+    def test_a_complete_untruncated_marker_is_not_invalidated_by_drain_health(
+        self,
+    ) -> None:
+        """Pipe cleanup is a capacity signal, not evidence about the reply."""
+
+        from unittest.mock import patch
+        from orbit.platform.process import ProcessResult
+
+        client = self.client("print('unused')", prompt_flag="-p")
+        outcome = ProcessResult(
+            returncode=-15, stdout="answer\nORBIT_RESULT_COMPLETE\n",
+            stderr="", stdout_truncated=False, stderr_truncated=False,
+            cancelled=False, timed_out=False,
+            termination_reason="completed_output", leaked_drain_threads=1,
+        )
+        with patch("orbit.workflow.handlers.agent.ProcessHandle") as handle_type:
+            handle_type.return_value.wait.return_value = outcome
+            self.assertEqual("answer", self.call(client))
+
+    def test_an_internal_timeout_is_derived_from_the_attempt_budget(self) -> None:
+        client = self.client(
+            ECHO_ARGV, prompt_flag="-p", process_timeout_flag="--print-timeout",
+            timeout_seconds=60, kill_grace_seconds=5,
+        )
+        seen = json.loads(self.call(client))
+        self.assertRegex(seen["argv"][0], r"^--print-timeout=\d+s$")
+        self.assertEqual("-p", seen["argv"][1])
 
     def test_an_oversized_prompt_is_refused_before_the_cli_runs(self) -> None:
         client = self.client(ECHO_ARGV, prompt_flag="-p", max_prompt_bytes=16)
@@ -293,7 +335,7 @@ class AgentArtifactRoutingTests(unittest.TestCase):
             ),
         )
         seen = json.loads(response.output[AGENT_RESULT_PORT][AGENT_RESULT_TEXT_KEY])
-        self.assertEqual(["-q", "upstream prose"], seen["argv"])
+        self.assertEqual(["-q", runtime_prompt("upstream prose")], seen["argv"])
 
     def test_a_large_prompt_via_a_flag_is_refused_with_a_hint(self) -> None:
         from orbit.workflow.domain.ids import EntityId
@@ -329,19 +371,20 @@ class AgentArtifactRoutingTests(unittest.TestCase):
 
 class PromptRenderingTests(unittest.TestCase):
     def test_a_string_input_is_the_prompt(self) -> None:
-        self.assertEqual("go", render_agent_prompt({"prompt": "go"}, {}))
+        self.assertEqual(runtime_prompt("go"), render_agent_prompt({"prompt": "go"}, {}))
 
     def test_a_structured_input_is_rendered_as_stable_json(self) -> None:
         rendered = render_agent_prompt({"prompt": {"b": 2, "a": 1}}, {})
-        self.assertEqual('{"a": 1, "b": 2}', rendered)
+        self.assertEqual(runtime_prompt('{"a": 1, "b": 2}'), rendered)
 
     def test_an_authored_preamble_precedes_the_runtime_value(self) -> None:
         rendered = render_agent_prompt({"prompt": "x"}, {"prompt": "You summarize."})
         self.assertTrue(rendered.startswith("You summarize."))
         self.assertIn("INPUT-BEGIN\nx\nINPUT-END", rendered)
+        self.assertTrue(rendered.endswith(AGENT_RUNTIME_COMPLETION_PROTOCOL))
 
     def test_an_input_without_a_prompt_port_is_rendered_whole(self) -> None:
-        self.assertEqual('{"value": 3}', render_agent_prompt({"value": 3}, {}))
+        self.assertEqual(runtime_prompt('{"value": 3}'), render_agent_prompt({"value": 3}, {}))
 
 
 class InvocationSpecTests(unittest.TestCase):
@@ -352,6 +395,13 @@ class InvocationSpecTests(unittest.TestCase):
             with self.subTest(agent=spec.name):
                 self.assertIsNotNone(spec.invocation, spec.name)
                 self.assertTrue(spec.runtime_compatible)
+
+    def test_antigravity_headless_mode_auto_approves_tools(self) -> None:
+        spec = next(item for item in TRUSTED_AGENT_CLIS if item.name == "antigravity")
+        self.assertEqual(
+            ("--dangerously-skip-permissions",),
+            spec.invocation.args,
+        )
 
     def test_an_argument_that_is_not_a_plain_token_is_refused(self) -> None:
         for argument in ("$(whoami)", "a b", "; rm -rf /", "`id`", "|tee"):

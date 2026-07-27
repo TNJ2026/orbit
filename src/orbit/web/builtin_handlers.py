@@ -106,6 +106,7 @@ def agent_client(agent: Any, *, timeout_seconds: int = 1800):
         (agent.executable_path, *invocation.args),
         prompt_flag=invocation.prompt_flag,
         prompt_positional=invocation.prompt_positional,
+        process_timeout_flag=invocation.process_timeout_flag,
         timeout_seconds=timeout_seconds,
     )
 
