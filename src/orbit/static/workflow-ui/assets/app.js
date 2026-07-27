@@ -1480,6 +1480,29 @@ function simplifiedExecutionPanel(graph, summary, reload) {
   ]);
 }
 
+/** The mark on the empty Artifacts panel: a document, not a plus.
+ *
+ * A `+` is the universal invitation to add something, and this panel accepts
+ * nothing — Artifacts arrive because a step produced them. Drawn to the same
+ * spec as the navigation icons (currentColor, 1.5 stroke, round joins) so the
+ * two icon sets stay one family.
+ */
+function artifactsMark() {
+  return svgEl("svg", {
+    class: "empty-mark-icon", viewBox: "0 0 24 24",
+    "aria-hidden": "true", focusable: "false",
+  }, [
+    svgEl("path", {
+      d: "M13.5 3.5H8A2 2 0 0 0 6 5.5v13a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V8z",
+    }),
+    // The folded corner, drawn as its own edge so it reads as paper rather
+    // than as a notch cut out of a rectangle.
+    svgEl("path", { d: "M13.5 3.5V6.5A1.5 1.5 0 0 0 15 8h3" }),
+    svgEl("path", { d: "M9.5 12.75h5M9.5 15.75h3" }),
+  ]);
+}
+
+
 function simplifiedResultBody(outcome) {
   if (outcome.state !== "available") {
     return el("div", { class: "muted", text: i18n.t(
@@ -1548,14 +1571,9 @@ async function renderSimplifiedRun(root, runId, summary) {
           el("dt", { text: i18n.t("simplified.runInfo.id") }),
           el("dd", { class: "mono", text: summary.run_id }),
         ]),
-        el("div", {}, [
-          el("dt", { text: i18n.t("simplified.runInfo.workflow") }),
-          el("dd", { text: summary.workflow_id }),
-        ]),
-        el("div", {}, [
-          el("dt", { text: i18n.t("simplified.runInfo.version") }),
-          el("dd", { text: summary.workflow_version ? `v${i18n.number(summary.workflow_version)}` : "—" }),
-        ]),
+        // Which workflow and which version of it are answers to a question
+        // this page is not asking: the Goal view is about one run in flight,
+        // and the definition behind it is one click away in Workflows.
         el("div", {}, [
           el("dt", { text: i18n.t("simplified.runInfo.started") }),
           el("dd", { text: i18n.dateTime(summary.created_at) }),
@@ -1614,7 +1632,9 @@ async function renderSimplifiedRun(root, runId, summary) {
       : el("div", {
         class: "simplified-artifacts-empty",
       }, [
-        el("div", { class: "simplified-artifacts-empty-mark", "aria-hidden": "true", text: "＋" }),
+        el("div", { class: "simplified-artifacts-empty-mark", "aria-hidden": "true" }, [
+          artifactsMark(),
+        ]),
         el("strong", { text: i18n.t(terminal
           ? "simplified.artifacts.empty" : "simplified.artifacts.pending") }),
         el("span", { class: "muted", text: i18n.t(terminal

@@ -233,8 +233,6 @@
   "simplified.runInfo.id": "Run ID",
   "simplified.runInfo.started": "Started",
   "simplified.runInfo.updated": "Updated",
-  "simplified.runInfo.version": "Workflow version",
-  "simplified.runInfo.workflow": "Workflow",
   "simplified.start.description": "Choose a defined workflow or generate a new sequence to accomplish your technical or business goal.",
   "simplified.start.placeholder": "What do you want to accomplish?",
   "simplified.start.shortcut": "Cmd/Ctrl + Enter to launch",

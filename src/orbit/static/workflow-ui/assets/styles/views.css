@@ -1281,7 +1281,14 @@
 .simplified-artifacts-empty-mark {
   display: grid; place-items: center; width: 48px; height: 48px;
   margin-bottom: 4px; border-radius: var(--radius); color: var(--blue);
-  background: var(--blue-soft); font-size: 26px;
+  background: var(--blue-soft);
+}
+/* Drawn marks inherit their weight from the stroke and their colour from the
+   tile around them, the same way the navigation icons do. */
+.empty-mark-icon {
+  width: 24px; height: 24px;
+  fill: none; stroke: currentColor; stroke-width: 1.5;
+  stroke-linecap: round; stroke-linejoin: round;
 }
 .simplified-artifacts-empty .muted { max-width: 480px; font-size: 13px; }
 @media (max-width: 900px) {

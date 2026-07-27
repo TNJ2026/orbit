@@ -33,16 +33,43 @@
 }
 .brand-copy { font-family: var(--font-display); font-weight: 700; font-size: 15px; letter-spacing: .02em; line-height: 1.25; color: var(--text); }
 
-.nav { display: flex; align-items: center; gap: 6px; flex: 1; margin-left: 12px; }
+/* Navigation: one segmented control, sized to its labels.
+   `flex: 0 0 auto` rather than `flex: 1` — stretching four fixed choices
+   across whatever the runtime card leaves over made the group's width a
+   function of the status text beside it, so the same nav sat differently on
+   two pages. It now stays put next to the brand and the controls keep their
+   `margin-left: auto`. 36px matches the Refresh button and the theme toggle,
+   so the whole bar shares one baseline. */
+.nav {
+  display: inline-flex; align-items: center; flex: 0 0 auto;
+  height: 36px; margin-left: 16px; overflow: hidden;
+  border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--panel-2);
+}
+/* The height is the group's, not the button's: the 36px the top bar's other
+   controls use is an outer measurement, and a button sized to it inside a
+   bordered group would stand 2px taller than the Refresh button beside it. */
 .nav-button {
-  display: inline-flex; align-items: center; gap: 6px;
-  background: none; border: 0; border-radius: var(--radius); padding: 6px 12px;
+  display: inline-flex; align-items: center; gap: 7px;
+  height: 100%; padding: 0 14px;
+  background: none; border: 0; border-radius: 0;
   cursor: pointer; color: var(--muted); font-size: 13px; font-weight: 500;
   white-space: nowrap;
 }
+.nav-button + .nav-button { border-left: 1px solid var(--line); }
 .nav-button:hover { background: var(--hover); color: var(--text); }
-.nav-button[aria-current="page"] { background: var(--blue-soft); color: var(--blue); font-weight: 600; }
-.nav-icon { width: 16px; height: 16px; display: grid; place-items: center; font-family: var(--mono); font-size: 13px; flex: 0 0 auto; }
+.nav-button[aria-current="page"] {
+  background: var(--blue-soft); color: var(--blue); font-weight: 600;
+}
+/* Drawn icons, so the weight comes from the stroke and not from a font that
+   happens to have the glyph. `currentColor` is what carries the active state
+   into the artwork; the filled dots inside an icon opt out of the stroke
+   locally rather than needing a rule of their own. */
+.nav-icon {
+  width: 16px; height: 16px; flex: 0 0 auto;
+  fill: none; stroke: currentColor; stroke-width: 1.5;
+  stroke-linecap: round; stroke-linejoin: round;
+}
 
 .topbar-controls {
   display: flex; align-items: center; gap: 12px; flex: 0 0 auto; margin-left: auto;
@@ -107,7 +134,14 @@
 
 @media (max-width: 860px) {
   .topbar { gap: 12px; padding: 10px 12px; }
-  .nav { overflow-x: auto; flex: 1 1 100%; order: 3; padding-top: 6px; }
+  /* Icons only, rather than a full-width row that scrolls sideways. Four
+     destinations fit on a phone once the labels go; a scroll container hides
+     some of them behind a gesture nothing on the page suggests. The label
+     stays in the accessibility tree — `aria-label` copied from it — so the
+     button is still named for a screen reader. */
+  .nav { margin-left: 12px; }
+  .nav-button { padding: 0; width: 44px; justify-content: center; gap: 0; }
+  .nav-label { display: none; }
   /* Controls wrap under the brand instead of pushing the page wider than
      the viewport; the runtime detail ellipsizes rather than forcing width. */
   .topbar-controls {

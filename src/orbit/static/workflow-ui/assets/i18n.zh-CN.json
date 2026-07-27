@@ -233,8 +233,6 @@
   "simplified.runInfo.id": "运行 ID",
   "simplified.runInfo.started": "开始时间",
   "simplified.runInfo.updated": "更新时间",
-  "simplified.runInfo.version": "Workflow 版本",
-  "simplified.runInfo.workflow": "工作流",
   "simplified.start.description": "选择一个已定义的工作流，或生成一个全新的执行序列，以实现你的技术或业务目标。",
   "simplified.start.placeholder": "你想完成什么？",
   "simplified.start.shortcut": "Cmd/Ctrl + Enter 启动",
