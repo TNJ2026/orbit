@@ -297,13 +297,19 @@ class DurableRuntimeKernel(RuntimeKernel):
         return [job_event.event_id, attempt_event.event_id, node_event.event_id, *timer_ids], new_version, job.run_id, {"job_id": str(job.job_id), "status": "running"}
 
     def _disarm_node_timeout(self, uow, command, events, job, attempt):
-        """Retire the backstop for an attempt that settled on its own.
+        """Retire the backstop for an attempt that is over.
 
-        Not required for correctness — the fire branch checks that the job is
-        still running, and the settlement gate and fencing tokens already stop
-        a late timer from writing anything. It is required for the *metric*:
-        `node_timeout_timer_fired` is meant to count attempts the worker
-        failed to settle, and a timer left armed on every completed attempt
+        Called from every path that ends an attempt, including the ones that
+        leave the Job runnable — defer and lease expiry both hand the Job back
+        for another delivery. A timer left armed there outlives the attempt it
+        was armed for, and the next attempt is the one holding the lease when
+        it fires.
+
+        The fire branch refuses a timer whose attempt number is not the one
+        currently leased, so this is not the only thing standing between a
+        stale timer and the wrong attempt. It is what keeps the *metric*
+        honest: `node_timeout_timer_fired` is meant to count attempts the
+        worker failed to settle, and timers left armed on settled attempts
         would fire harmlessly forever and drown that signal.
         """
 
@@ -332,6 +338,24 @@ class DurableRuntimeKernel(RuntimeKernel):
         )
         return [event.event_id]
 
+    @staticmethod
+    def _timer_matches_attempt(timer, attempt) -> bool:
+        """Whether this timer was armed for the attempt now holding the lease.
+
+        A Job outlives its attempts: defer and lease expiry both return it for
+        another delivery, and the next attempt claims the same Job. A timer
+        carries the deadline of *one* attempt, so firing it against whichever
+        attempt happens to be leased would apply an expired schedule to work
+        that has barely started.
+
+        A timer without an attempt number predates this check. It is honoured
+        rather than discarded: those were armed when a Job had at most one
+        armed timer, so the leased attempt is the only one it could mean.
+        """
+
+        recorded = timer.payload.get("attempt_number")
+        return recorded is None or int(recorded) == attempt.attempt_number.value
+
     def _arm_node_timeout(self, uow, command, events, job, attempt):
         """Schedule the durable backstop for an attempt that starts now.
 
@@ -347,6 +371,14 @@ class DurableRuntimeKernel(RuntimeKernel):
         A command without a deadline arms nothing — that is how callers from
         before the schedule existed keep their old behaviour, and how the
         legacy executor path stays untouched.
+
+        The attempt number goes in the payload because the Job alone does not
+        identify what this timer answers for. A Job is delivered more than
+        once — defer and lease expiry both put it back — and each delivery
+        gets a new attempt with a new schedule. Without the number in the
+        payload, a timer armed for one attempt cannot be told apart from the
+        one armed for the next, and the fire branch would apply an old
+        deadline to whichever attempt happens to hold the lease.
         """
 
         raw = command.payload.get("settlement_deadline")
@@ -360,7 +392,11 @@ class DurableRuntimeKernel(RuntimeKernel):
             purpose=TimerPurpose.NODE_TIMEOUT,
             dedupe_key=f"{job.job_id}:node_timeout:{attempt.attempt_number.value}",
             target_type="job", target_id=job.job_id,
-            payload={"job_id": str(job.job_id)}, due_at=due_at,
+            payload={
+                "job_id": str(job.job_id),
+                "attempt_number": attempt.attempt_number.value,
+            },
+            due_at=due_at,
         )
         return timer_ids
 
@@ -618,6 +654,12 @@ class DurableRuntimeKernel(RuntimeKernel):
             dedupe_key=f"{job.job_id}:delivery:{job.delivery_count}", target_type="job",
             target_id=job.job_id, payload={"job_id": str(job.job_id)}, due_at=due,
         )
+        # This attempt is over even though the Job will be delivered again:
+        # the next delivery gets its own attempt number and its own timer.
+        timer_ids = [
+            *timer_ids,
+            *self._disarm_node_timeout(uow, command, events, job, attempt),
+        ]
         return [attempt_event.event_id, node_event.event_id, lease_event.event_id, job_event.event_id, *timer_ids], version, job.run_id, {"job_id": str(job.job_id), "timer_id": str(timer.timer_id)}
 
     def _durable_expire_lease(self, uow, command, events):
@@ -666,6 +708,13 @@ class DurableRuntimeKernel(RuntimeKernel):
                 due_at=observed + timedelta(seconds=1),
             )
             ids.extend(timer_ids)
+        if started:
+            # The lease is gone, so this attempt is over however the Job
+            # continues. Its node timeout must not outlive it and reach the
+            # attempt that takes over the next delivery.
+            ids.extend(
+                self._disarm_node_timeout(uow, command, events, job, attempt)
+            )
         return ids, new_lease_version, job.run_id, {"lease_id": str(lease.lease_id), "outcome": attempt_target.value}
 
     def _durable_schedule_timer(self, uow, command, events):
@@ -720,8 +769,12 @@ class DurableRuntimeKernel(RuntimeKernel):
         elif timer.purpose is TimerPurpose.NODE_TIMEOUT:
             job = uow.jobs.get(timer.target_id)
             lease = None if job is None else uow.leases.get_active_for_job(job.job_id)
-            if job is not None and job.status is JobStatus.RUNNING and lease is not None:
-                attempt = uow.attempts.get(lease.attempt_id)
+            attempt = None if lease is None else uow.attempts.get(lease.attempt_id)
+            if (
+                job is not None and job.status is JobStatus.RUNNING
+                and attempt is not None
+                and self._timer_matches_attempt(timer, attempt)
+            ):
                 # What a lapsed deadline *means* depends on what the handler
                 # was allowed to touch. A replay-safe one that ran out of time
                 # is an ordinary timeout and may be retried; one that may have

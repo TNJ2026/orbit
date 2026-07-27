@@ -318,14 +318,25 @@ def agent_manifest(
             "type": "object",
             "properties": {
                 "prompt": {"type": "string"},
-                # The floor is the same constant the Runtime validates against
-                # and the editor offers. A one-second budget passed the old
-                # schema and then could not be scheduled at all: stopping the
-                # process group and settling the attempt costs more than that,
-                # and both have to fit inside the budget.
+                # The ceiling is a rule and the floor is not. A budget above
+                # the profile is a request the Runtime never admitted this
+                # handler for, so it is refused; a budget below the schedulable
+                # minimum is raised to it when the attempt is scheduled.
+                #
+                # Refusing the small ones here instead would reject documents
+                # that were valid when they were published — the field has
+                # existed, and gone unread, since before it meant anything —
+                # and a workflow that ran yesterday would stop compiling for a
+                # value that never had an effect.
                 "timeout_seconds": {
-                    "type": "integer", "minimum": MIN_AGENT_DURATION_SECONDS,
+                    "type": "integer", "minimum": 1,
                     "maximum": agent.spec.max_duration_seconds,
+                    "description": (
+                        "How long this step may run. Values below "
+                        f"{MIN_AGENT_DURATION_SECONDS}s are raised to it: a "
+                        "shorter budget cannot pay for stopping the process "
+                        "and settling the attempt."
+                    ),
                 },
             },
             "additionalProperties": False,

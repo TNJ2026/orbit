@@ -249,6 +249,59 @@ class CancellationTests(unittest.TestCase):
         self.assertIn("ORBIT_RESULT_COMPLETE", result.stdout)
         self.assertLess(time.monotonic() - started, 3)
 
+    def test_the_marker_is_found_after_output_larger_than_the_tail(self) -> None:
+        """The predicate sees the end of stdout, not a fixed early window."""
+
+        script = (
+            "print('x' * 200_000, flush=True);"
+            "print('ORBIT_RESULT_COMPLETE', flush=True)"
+        )
+        handle = process.ProcessHandle([PY, "-u", "-c", script])
+
+        result = handle.wait(
+            timeout=10, kill_grace_seconds=.2,
+            completion_predicate=lambda value: (
+                value.rstrip().endswith("ORBIT_RESULT_COMPLETE")
+            ),
+        )
+
+        self.assertEqual("completed_output", result.termination_reason)
+
+    def test_the_predicate_is_not_re_run_while_nothing_is_printed(self) -> None:
+        """A poll several times a second must not re-scan a silent buffer.
+
+        The cost that matters is per-poll, not per-run: an Agent printing a
+        megabyte over half an hour would otherwise have every byte of it
+        copied and scanned thousands of times, under the lock the drain
+        threads need to append.
+        """
+
+        calls: list[int] = []
+
+        def predicate(value: str) -> bool:
+            calls.append(len(value))
+            return value.rstrip().endswith("ORBIT_RESULT_COMPLETE")
+
+        script = "import time;print('one', flush=True);time.sleep(1.2)"
+        handle = process.ProcessHandle([PY, "-u", "-c", script])
+
+        handle.wait(timeout=10, kill_grace_seconds=.2, completion_predicate=predicate)
+
+        # Roughly a dozen polls happen in that second; only the slices that saw
+        # new bytes may reach the predicate.
+        self.assertLessEqual(len(calls), 3, f"predicate ran {len(calls)} times")
+
+    def test_a_bounded_tail_reports_the_buffer_progress(self) -> None:
+        buffer = process.OutputBuffer()
+        buffer.append("a" * 10)
+        buffer.append("tail")
+
+        text, size = buffer.tail(6)
+
+        self.assertEqual("aatail", text)
+        self.assertEqual(14, size)
+        self.assertEqual(("", 0), process.OutputBuffer().tail(6))
+
 
 class ProcessTreeTests(unittest.TestCase):
     def test_kill_reaps_a_detached_grandchild(self) -> None:

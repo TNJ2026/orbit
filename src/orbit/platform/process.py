@@ -30,6 +30,10 @@ IS_WINDOWS = os.name == "nt"
 DEFAULT_READ_SIZE = 4096
 DEFAULT_MAX_OUTPUT_BYTES = 8 * 1024 * 1024
 DEFAULT_KILL_GRACE_SECONDS = 2.0
+# How much of the end of stdout a completion predicate is shown. A terminal
+# marker is by definition on the last line, so this only has to be longer than
+# any single line a CLI might end with.
+COMPLETION_TAIL_CHARS = 8192
 
 Redactor = Callable[[str], str]
 
@@ -351,6 +355,31 @@ class OutputBuffer:
         with self._lock:
             return "".join(self.chunks)
 
+    def tail(self, limit_chars: int) -> tuple[str, int]:
+        """The last ``limit_chars`` characters, and the byte count they end at.
+
+        For a caller polling for a terminal marker. Joining the whole buffer
+        for that — several times a second, for the length of an Agent run —
+        copies everything the process has ever printed in order to look at its
+        last line, while holding the lock the drain threads need to append.
+
+        The byte count comes back with the text so the caller can skip the
+        work entirely while nothing new has arrived; it is the buffer's own
+        progress counter, not a length of what is returned.
+        """
+
+        with self._lock:
+            if not self.chunks:
+                return "", self.byte_count
+            collected: list[str] = []
+            size = 0
+            for chunk in reversed(self.chunks):
+                collected.append(chunk)
+                size += len(chunk)
+                if size >= limit_chars:
+                    break
+            return "".join(reversed(collected))[-limit_chars:], self.byte_count
+
 
 def stream_output(
     stream,
@@ -541,6 +570,26 @@ class ProcessHandle:
         timed_out = False
         completed_output = False
         deadline = None if timeout is None else time.monotonic() + timeout
+        seen_bytes = -1
+
+        def marker_reached() -> bool:
+            """Whether the terminal marker is in stdout, cheaply and often.
+
+            Two economies, both about a check that runs several times a second
+            for as long as the process does. Nothing new since the last look
+            means the answer cannot have changed, and when something has, only
+            the tail can hold a *terminal* marker.
+            """
+
+            nonlocal seen_bytes
+            if completion_predicate is None:
+                return False
+            tail, size = self.stdout.tail(COMPLETION_TAIL_CHARS)
+            if size == seen_bytes:
+                return False
+            seen_bytes = size
+            return completion_predicate(tail)
+
         while True:
             remaining = (
                 None if deadline is None
@@ -557,20 +606,14 @@ class ProcessHandle:
                 # the marker. Check once more after wait() succeeds: otherwise
                 # this race skips the marker branch and descendants that
                 # inherited the pipes can keep the drains alive.
-                if (
-                    completion_predicate is not None
-                    and completion_predicate(self.stdout.text)
-                ):
+                if marker_reached():
                     completed_output = True
                     self._note_reason("completed_output")
                     kill_pid_tree(self._process.pid)
                     self._unwedge_readers()
                 break
             except subprocess.TimeoutExpired:
-                if (
-                    completion_predicate is not None
-                    and completion_predicate(self.stdout.text)
-                ):
+                if marker_reached():
                     completed_output = True
                     self._note_reason("completed_output")
                 elif deadline is None or time.monotonic() < deadline:

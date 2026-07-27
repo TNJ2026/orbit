@@ -8,7 +8,9 @@ from typing import Mapping
 from pathlib import Path
 import secrets
 
-from ..domain.deadlines import AGENT_KILL_GRACE_SECONDS, attempt_deadlines
+from ..domain.deadlines import (
+    AGENT_KILL_GRACE_SECONDS, MIN_AGENT_DURATION_SECONDS, attempt_deadlines,
+)
 from ..domain.durable_execution import ExecutionSafety
 from ..domain.states import JobStatus, LeaseStatus, TimerStatus
 from ..domain.envelopes import CommandEnvelope
@@ -54,6 +56,14 @@ def _attempt_budget_seconds(manifest, config) -> float:
     The manifest value stays the ceiling. A node may ask for less than its
     handler permits; it may not grant itself more, because the profile is what
     the Runtime admitted the handler on.
+
+    The floor is applied here rather than refused at the schema, because a
+    budget too small to schedule is a value that predates the field being read
+    at all. Raising it keeps a workflow that ran yesterday running; refusing it
+    would fail a document for a number that never had an effect when it was
+    written. The floor never overrides the ceiling: a handler whose whole
+    profile is smaller than the floor gets its profile, and `attempt_deadlines`
+    is the one that decides whether that is schedulable.
     """
 
     ceiling = float(manifest.resource_profile.max_duration_seconds)
@@ -62,7 +72,7 @@ def _attempt_budget_seconds(manifest, config) -> float:
         return ceiling
     if requested <= 0:
         return ceiling
-    return min(ceiling, float(requested))
+    return min(ceiling, max(float(requested), float(MIN_AGENT_DURATION_SECONDS)))
 
 
 def _time(value: datetime) -> str:

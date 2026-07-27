@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 import json
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from threading import Event
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from jsonschema import Draft202012Validator
 
@@ -316,6 +316,34 @@ class WorkerRuntime:
         self._reap_leaked_threads()
         return bool(self._abandoned_handlers)
 
+    def _reject_unbuildable_request(self, claimed, now, exc) -> bool:
+        """Fail an attempt whose request could not be built at all.
+
+        The Job has to be started before it can be failed — `fail_job` is the
+        settlement of a running attempt, and there is no other way to give this
+        Job a terminal state. Starting it arms no timer: there is no schedule
+        to arm one from, which is the whole reason we are here.
+
+        A permanent error rather than a retryable one. The budget, the handler
+        and the plan are all the same on the next delivery, so a retry would
+        rebuild the same request and fail the same way, once per backoff, for
+        as many attempts as the node is allowed.
+        """
+
+        self._increment("worker_request_unbuildable")
+        started = self.service.start_job(claimed, now)
+        if started.disposition.value != "applied":
+            self._increment("worker_start_rejected")
+            return True
+        self.service.fail_job(claimed, self.clock(), {
+            "code": "handler_permanent", "category": "permanent_error",
+            "message": f"executor request could not be built: {type(exc).__name__}",
+            "source": "worker", "details": {"reason": str(exc)[:500]},
+            "cause": None,
+        })
+        self._increment("worker_failed")
+        return True
+
     def run_once(self) -> bool:
         if self.degraded:
             self._increment("worker_degraded")
@@ -332,10 +360,19 @@ class WorkerRuntime:
         # the timer and the worker two different ideas of when this attempt is
         # late. The request only reads state that `claim_job` already
         # established, so building it first is safe.
-        request = (
-            self.service.build_executor_request(claimed, now)
-            if hasattr(self.executor, "execute") else None
-        )
+        #
+        # Guarded because building it early also moved it outside the body's
+        # `except`. A request that cannot be built — an unschedulable budget,
+        # a handler the registry no longer admits — is a permanent failure of
+        # this attempt, and letting it escape would leave the Job claimed and
+        # leased with nobody to settle it until the reaper arrives.
+        try:
+            request = (
+                self.service.build_executor_request(claimed, now)
+                if hasattr(self.executor, "execute") else None
+            )
+        except Exception as exc:  # noqa: BLE001 - reported as a failed attempt
+            return self._reject_unbuildable_request(claimed, now, exc)
         started = self.service.start_job(
             claimed, now,
             settlement_deadline=getattr(request, "settlement_deadline", None),

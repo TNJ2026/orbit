@@ -3152,6 +3152,20 @@ class RuntimeKernel:
             raise ValueError("AcceptUnknownResult requires ExecutionPlan 1.2")
         output = dict(_require_object(command.payload["output"], "output"))
         plan_node = plan.node(node.node_id)
+        # Said before `_validate_ports` reaches the same conclusion by way of a
+        # missing `artifact_id`. What is being accepted here is text scraped
+        # from a console; an Artifact port expects a reference to stored bytes,
+        # and nothing on this path stores any. The reason is the useful part.
+        artifact_ports = sorted(
+            port["id"] for port in plan_node.outputs
+            if port["id"] in output
+            and port["data_policy"]["transport"] == PortTransport.ARTIFACT_REF.value
+        )
+        if artifact_ports:
+            raise ValueError(
+                "captured output cannot be accepted for Artifact ports "
+                f"{artifact_ports}: they carry a stored reference, not inline text"
+            )
         self._validate_ports(plan_node.outputs, output, "output")
         ids = []
         if run.status is WorkflowRunStatus.WAITING:

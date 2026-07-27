@@ -189,7 +189,12 @@ class TrustedCliAgentClient:
         finally:
             with self._lock:
                 self._executions.pop(execution_ref, None)
-        self.leaked_reader_threads += outcome.leaked_drain_threads
+        with self._lock:
+            # Under the lock because one client serves every concurrent attempt
+            # and `+=` is a read then a write. A dropped increment is the one
+            # failure this counter cannot afford: being exact about leaked
+            # capacity is the whole reason it exists.
+            self.leaked_reader_threads += outcome.leaked_drain_threads
         stdout = outcome.stdout
         completed = bool(
             completion_marker

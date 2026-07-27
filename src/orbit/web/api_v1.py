@@ -241,6 +241,12 @@ def build_api_v1(
         AuthoringJobService(
             path, authoring_service, workflow_publisher,
             workflow_db_path=workflow_path,
+            # Without a deadline an authoring job has no terminal state of its
+            # own: the generator CLI bounds each call, but nothing bounds the
+            # retries and the publish that follow them, so a wedged job stays
+            # `running` for as long as the process lives.
+            timeout_seconds=int(operational_config.get("authoring_timeout_seconds", 600))
+            if operational_config else 300,
             clock=clock,
         )
         if authoring_service is not None and workflow_publisher is not None

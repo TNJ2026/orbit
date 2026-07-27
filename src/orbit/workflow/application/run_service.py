@@ -22,6 +22,7 @@ from ..api.read_models import ReadModelService
 from ..domain.envelopes import CommandEnvelope
 from ..domain.ids import EntityId
 from ..domain.versions import AggregateVersion
+from ..handlers.agent import AGENT_COMPLETION_MARKER, AGENT_RESULT_PORT
 from ..persistence.database import connect_workflow_database
 
 
@@ -365,7 +366,10 @@ class RunApplicationService:
             ).fetchall()
         stdout = "".join(row["text"] for row in rows if row["stream"] == "stdout")
         lines = stdout.rstrip().splitlines()
-        if not lines or lines[-1].strip() != "ORBIT_RESULT_COMPLETE":
+        # The marker and the port id come from the Agent handler rather than
+        # being spelled again here: this reads output written to that handler's
+        # protocol, so a change to the protocol has to reach this code.
+        if not lines or lines[-1].strip() != AGENT_COMPLETION_MARKER:
             raise RunStartError("captured stdout has no terminal completion marker")
         body = "\n".join(lines[:-1]).strip()
         matches = re.findall(r"```json\s*(\{.*?\})\s*```", body, re.S)
@@ -386,7 +390,7 @@ class RunApplicationService:
             AggregateVersion(int(expected_version)),
             f"accept_unknown_result:{idempotency_key}", actor,
             now or datetime.now(timezone.utc),
-            {"attempt_id": attempt_id, "output": {"result": value},
+            {"attempt_id": attempt_id, "output": {AGENT_RESULT_PORT: value},
              "reason": "accepted captured completed output"},
         )
         result = self.service.submit(command)

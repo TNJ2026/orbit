@@ -13,6 +13,7 @@ from threading import Event
 from types import SimpleNamespace
 import unittest
 
+from orbit.workflow.domain.deadlines import UnsafeDeadlineConfiguration
 from orbit.workflow.domain.durable_execution import ExecutionSafety
 from orbit.workflow.domain.handlers import HandlerResultStatus
 from orbit.workflow.worker.runtime import CancellationToken, WorkerRuntime
@@ -332,6 +333,49 @@ class NoScheduleTests(unittest.TestCase):
         executor.release.set()
         self.assertTrue(finished.wait(timeout=5))
         self.assertEqual("complete_job", service.settlements[0][0])
+
+
+class UnbuildableRequestTests(unittest.TestCase):
+    """A Job whose request cannot be built still reaches a terminal state.
+
+    The request is built before StartJob so the worker and the durable timer
+    work from one schedule, which also puts it outside the body that turns a
+    raising Handler into a failed attempt. An unschedulable budget or a
+    handler the registry no longer admits raises exactly there, and letting it
+    escape would leave the Job claimed and leased with nobody to settle it.
+    """
+
+    def setUp(self) -> None:
+        self.service, self.clock = Service(), Clock()
+
+        def refuse(claimed, now):
+            raise UnsafeDeadlineConfiguration("a 5s budget leaves nothing")
+
+        self.service.build_executor_request = refuse
+        self.worker = worker(self.service, WedgedExecutor(), self.clock)
+
+    def test_the_attempt_is_failed_rather_than_left_leased(self) -> None:
+        self.assertTrue(self.worker.run_once())
+
+        self.assertEqual(1, len(self.service.settlements))
+        kind, error = self.service.settlements[0]
+        self.assertEqual("fail_job", kind)
+        self.assertEqual("handler_permanent", error["code"])
+        self.assertIn("UnsafeDeadlineConfiguration", error["message"])
+        self.assertIn("5s budget", error["details"]["reason"])
+
+    def test_it_arms_no_timer_it_has_no_schedule_for(self) -> None:
+        self.worker.run_once()
+
+        self.assertIsNone(self.service.armed_deadline)
+
+    def test_the_refusal_is_counted(self) -> None:
+        counted: list[str] = []
+        self.worker.metrics = SimpleNamespace(increment=counted.append)
+
+        self.worker.run_once()
+
+        self.assertIn("worker_request_unbuildable", counted)
 
 
 if __name__ == "__main__":

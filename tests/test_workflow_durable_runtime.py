@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 import json
 import tempfile
 import threading
@@ -356,6 +357,103 @@ class DurableRuntimeTests(unittest.TestCase):
         self.assertEqual(
             ["cancelled"], [timer.status.value for timer in self.node_timeout_timers()]
         )
+
+    def test_deferring_retires_the_timeout_of_the_attempt_it_ends(self):
+        """A deferred Job comes back; the attempt it was deferred from does not.
+
+        Deferral hands the Job to a later delivery with a new attempt number
+        and a new schedule. A timer armed for the deferred attempt would still
+        be due at that attempt's deadline — by then usually in the past.
+        """
+
+        self.service.submit(self.start)
+        claimed = self.service.claim_job("w1", NOW)
+        self.service.start_job(
+            claimed, NOW, settlement_deadline=NOW + timedelta(seconds=295),
+        )
+
+        self.service.defer_job(claimed, NOW, NOW + timedelta(seconds=10), "transport")
+
+        self.assertEqual(
+            ["cancelled"], [timer.status.value for timer in self.node_timeout_timers()]
+        )
+
+    def test_lease_expiry_retires_the_timeout_of_the_attempt_it_ends(self):
+        """The lease is gone, so the attempt is over however the Job goes on."""
+
+        self.service.submit(self.start)
+        claimed = self.service.claim_job("w1", NOW)
+        self.service.start_job(
+            claimed, NOW, settlement_deadline=NOW + timedelta(seconds=295),
+        )
+
+        self.service.expire_lease(claimed.lease_id, NOW + timedelta(seconds=121))
+
+        self.assertEqual(
+            ["cancelled"], [timer.status.value for timer in self.node_timeout_timers()]
+        )
+
+    def test_a_timeout_names_the_attempt_it_answers_for(self):
+        """Each delivery's timer is identifiable, not just each Job's.
+
+        A Job is delivered more than once and each delivery gets its own
+        attempt, its own budget and its own timer. Without the attempt number
+        in the payload the fire branch cannot tell an expired schedule from
+        the current one, and would apply whichever timer came due to whichever
+        attempt holds the lease.
+        """
+
+        self.service.submit(self.start)
+        first = self.service.claim_job("w1", NOW)
+        self.service.start_job(
+            first, NOW, settlement_deadline=NOW + timedelta(seconds=295),
+        )
+        self.service.defer_job(first, NOW, NOW + timedelta(seconds=10), "transport")
+        later = NOW + timedelta(seconds=11)
+        TimerDispatcher(self.service, clock=lambda: later).run_once()
+        second = self.service.claim_job("w2", later)
+        self.service.start_job(
+            second, later, settlement_deadline=later + timedelta(seconds=295),
+        )
+
+        timers = self.node_timeout_timers()
+
+        self.assertEqual(
+            [1, 2], sorted(timer.payload["attempt_number"] for timer in timers)
+        )
+        # And only the live one is still armed.
+        self.assertEqual(
+            [("cancelled", 1), ("scheduled", 2)],
+            sorted(
+                (timer.status.value, timer.payload["attempt_number"])
+                for timer in timers
+            ),
+        )
+
+    def test_a_timer_has_no_authority_over_a_later_attempt(self):
+        """The guard itself, without staging a Job that survives its disarm.
+
+        Disarming on every path that ends an attempt is what normally keeps a
+        timer from outliving one. This is the check underneath it: a timer
+        that did survive still cannot speak for an attempt it was not armed
+        for, and one armed before the payload carried a number still speaks
+        for the only attempt it could have meant.
+        """
+
+        def timer(payload):
+            return SimpleNamespace(payload=payload)
+
+        def attempt(number):
+            return SimpleNamespace(attempt_number=SimpleNamespace(value=number))
+
+        matches = DurableRuntimeKernel._timer_matches_attempt
+        armed_for_first = timer({"job_id": "j", "attempt_number": 1})
+
+        self.assertFalse(matches(armed_for_first, attempt(2)))
+        self.assertTrue(matches(armed_for_first, attempt(1)))
+        # Armed before the payload carried a number: honoured, because back
+        # then a Job had at most one armed timer.
+        self.assertTrue(matches(timer({"job_id": "j"}), attempt(2)))
 
     def test_a_replay_safe_timeout_stays_retryable(self):
         """Nothing outside was touched, so the ordinary retry policy applies."""

@@ -152,6 +152,30 @@ class NodeBudgetTests(unittest.TestCase):
                     _attempt_budget_seconds(self.profile(900), {"timeout_seconds": value}),
                 )
 
+    def test_a_budget_too_small_to_schedule_is_raised_to_the_floor(self) -> None:
+        """Raised here, not refused at the schema.
+
+        The field has existed, and gone unread, since before it meant
+        anything. Refusing a small value would stop a published workflow from
+        compiling over a number that never had an effect when it was written.
+        """
+
+        budget = _attempt_budget_seconds(self.profile(900), {"timeout_seconds": 5})
+
+        self.assertEqual(float(MIN_AGENT_DURATION_SECONDS), budget)
+
+    def test_the_floor_never_overrides_the_ceiling(self) -> None:
+        """A handler admitted on a small profile keeps it.
+
+        Whether that profile is schedulable at all is `attempt_deadlines`'
+        question, and it answers by refusing — quietly handing the node more
+        time than the Runtime admitted its handler for would not.
+        """
+
+        budget = _attempt_budget_seconds(self.profile(30), {"timeout_seconds": 5})
+
+        self.assertEqual(30.0, budget)
+
 
 class LeaseBudgetTests(unittest.TestCase):
     """Settlement has to finish inside the lease it is settling."""

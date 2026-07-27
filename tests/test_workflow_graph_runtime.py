@@ -1121,17 +1121,18 @@ class GraphRuntimeE2ETests(unittest.TestCase):
         self.assertEqual(1, len([item for item in nodes if item.node_id == "work"]))
         self.assertEqual([1, 2], [item.attempt_number.value for item in attempts])
 
-    def _park_on_unknown(self):
+    def _park_on_unknown(self, *, artifact_result=False):
         """Drive one action node to an external result nobody can settle."""
 
+        result_port = ARTIFACT_PORT if artifact_result else PORT
         dsl = {
             "dsl_version": "1.2",
             "metadata": {"id": "unknown_graph", "name": "Unknown"},
             "nodes": [
                 {"id": "work", "kind": "action", "inputs": PORT("value"),
-                 "outputs": PORT("value"),
+                 "outputs": result_port("value"),
                  "handler": {"name": "work", "version": "1.0.0"}},
-                {"id": "done", "kind": "terminal", "inputs": PORT("value")},
+                {"id": "done", "kind": "terminal", "inputs": result_port("value")},
             ],
             "edges": [{"id": "done", "from": {"node": "work", "port": "value"},
                        "to": {"node": "done", "port": "value"}}],
@@ -1230,6 +1231,46 @@ class GraphRuntimeE2ETests(unittest.TestCase):
         service.start_job(second, NOW)
         service.complete_job(second, NOW, {"value": 2})
         self.assertIs(WorkflowRunStatus.SUCCEEDED, service.get_run(run_id).status)
+
+    def _accept(self, service, run_id, parked, output):
+        return service.submit(CommandEnvelope(
+            EntityId("command", "unknown-accept"), "accept_unknown_result",
+            parked.node_run_id, run_id, parked.aggregate_version,
+            "accept:unknown", "operator", NOW,
+            {"attempt_id": str(
+                self._parked_attempt(service, parked).attempt_id
+            ), "output": output, "reason": "accepted captured output"},
+        ))
+
+    @staticmethod
+    def _parked_attempt(service, parked):
+        with service.uow_factory() as uow:
+            return uow.attempts.list_by_node_run(parked.node_run_id)[0]
+
+    def test_an_operator_can_accept_the_output_the_step_did_print(self):
+        service, run_id, parked = self._park_on_unknown()
+
+        result = self._accept(service, run_id, parked, {"value": 7})
+
+        self.assertEqual("applied", result.disposition.value)
+        self.assertIs(WorkflowRunStatus.SUCCEEDED, service.get_run(run_id).status)
+
+    def test_captured_text_is_refused_for_an_artifact_port(self):
+        """An Artifact port holds a reference to stored bytes.
+
+        Nothing on the accept path stores any, so the value would be inline
+        text in a port that promises a `{artifact_id}`. Refused with the
+        reason rather than as a generic shape complaint.
+        """
+
+        service, run_id, parked = self._park_on_unknown(artifact_result=True)
+
+        result = self._accept(service, run_id, parked, {"value": "a report"})
+
+        self.assertEqual("rejected", result.disposition.value)
+        self.assertIn(
+            "Artifact ports", " ".join(item.message for item in result.diagnostics)
+        )
 
     def test_retrying_a_node_nobody_is_waiting_on_is_refused(self):
         compiled = compile_graph(decision_graph())
