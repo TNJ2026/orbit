@@ -44,6 +44,7 @@ _IR_SCHEMA: dict[str, Any] = {
         "policies": _array("#/$defs/policy"),
         "extensions": _array("#/$defs/extension"),
         "indexes": {"type": "object"},
+        "slug": {"type": "string", "minLength": 1},
         "result": {
             "type": ["object", "null"],
             "additionalProperties": False,
@@ -207,4 +208,5 @@ def workflow_ir_from_primitive(value: Mapping[str, Any]) -> WorkflowIR:
         None if value.get("result") is None else IRResult(
             value["result"]["node_id"], value["result"]["output_port_id"]
         ),
+        value.get("slug"),
     )

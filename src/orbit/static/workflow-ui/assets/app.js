@@ -2202,6 +2202,7 @@ async function renderWorkflows(root) {
     const card = el("article", {
       class: "workflow-card panel",
       "data-workflow-id": entry.workflow_id,
+      "data-workflow-slug": entry.slug || "",
     }, [
       el("button", { class: "workflow-card-main" }, [
         el("span", { class: "workflow-visual", "aria-hidden": "true" }, visualNodes),
@@ -2938,7 +2939,7 @@ async function generateWorkflowDialog(generateCommand, initialJob = null) {
           el("strong", { text: i18n.t(`authoring.job.${job.status}`) }),
         ]),
         el("p", { class: "muted", text: promptText }),
-        job.error ? el("div", { class: "banner error", text: job.error.message }) : null,
+        ...authoringFailureView(job.error),
       );
       const cancel = (job.allowed_commands || []).find(
         (item) => item.command === "workflow.authoring.cancel",
@@ -3016,6 +3017,23 @@ async function generateWorkflowDialog(generateCommand, initialJob = null) {
  * The server has already decided which entries are trustworthy and whether
  * they came from the Agent or from the structural diff; this only draws them.
  */
+/** A failed authoring job: what it said, and what the compiler refused.
+ *
+ * The message alone reads as "it did not work". The finding codes are what
+ * tells an operator — and whoever tunes the prompt — which rule was broken. */
+function authoringFailureView(error) {
+  if (!error) return [];
+  const codes = [...new Set(
+    (error.diagnostics || []).map((item) => item.code).filter(Boolean)
+  )];
+  return [
+    el("div", { class: "banner error", text: error.message }),
+    codes.length ? el("p", {
+      class: "muted mono authoring-failure-codes", text: codes.join(" · "),
+    }) : null,
+  ].filter(Boolean);
+}
+
 function changeSummaryView(summary) {
   if (!summary) return [];
   const rows = (summary.entries || []).map((entry) => el("li", {
@@ -3192,7 +3210,7 @@ function workflowEditorPanel(modifyCommand, workflow, onDone, onPublished = null
     } else {
       body.push(
         ...changeSummaryView(job.result?.change_summary),
-        job.error ? el("div", { class: "banner error", text: job.error.message }) : null,
+        ...authoringFailureView(job.error),
       );
       const cancel = (job.allowed_commands || []).find(
         (item) => item.command === "workflow.authoring.cancel",

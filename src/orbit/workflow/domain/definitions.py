@@ -175,6 +175,7 @@ class WorkflowIR:
     extensions: tuple[IRExtension, ...]
     indexes: Any
     result: IRResult | None = field(default=None, metadata={"omit_none": True})
+    slug: str | None = field(default=None, metadata={"omit_none": True})
 
     def __post_init__(self) -> None:
         if self.ir_version not in {"1.1", "1.2", "1.3"}:
@@ -185,6 +186,8 @@ class WorkflowIR:
             raise TypeError("result must be IRResult")
         _required(self.workflow_id, "workflow id")
         _required(self.name, "workflow name")
+        if self.slug is not None:
+            _required(self.slug, "workflow slug")
         object.__setattr__(self, "labels", MappingProxyType(dict(self.labels)))
         for field in ("inputs", "outputs", "nodes", "edges", "entry", "terminals", "policies", "extensions"):
             object.__setattr__(self, field, tuple(getattr(self, field)))

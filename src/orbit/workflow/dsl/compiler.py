@@ -234,6 +234,7 @@ def compile_document(
         ),
         indexes=indexes,
         result=None if result is None else IRResult(result["node"], result["port"]),
+        slug=metadata.get("slug"),
     )
     catalog_fingerprint = "sha256:" + hashlib.sha256(
         canonical_json(

@@ -47,6 +47,7 @@ _SCHEMA: dict[str, Any] = {
             "required": ["id", "name"],
             "properties": {
                 "id": {"$ref": "#/$defs/id"},
+                "slug": {"$ref": "#/$defs/id"},
                 "name": {"type": "string", "minLength": 1},
                 "description": {"type": "string", "default": ""},
                 "labels": {

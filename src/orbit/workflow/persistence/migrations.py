@@ -1147,6 +1147,18 @@ _MIGRATIONS: tuple[tuple[int, str, str], ...] = (
         );
         """,
     ),
+    (
+        24,
+        "authoring job attempts and diagnostics",
+        # How many rounds the Agent needed, and what the compiler refused on
+        # the last one. Without these a failed job reports only "failed
+        # validation after N attempts", so nothing can say which rule the
+        # models actually break — the one input prompt tuning needs.
+        """
+        ALTER TABLE workflow_authoring_jobs ADD COLUMN attempts INTEGER;
+        ALTER TABLE workflow_authoring_jobs ADD COLUMN diagnostics_json TEXT;
+        """,
+    ),
 )
 
 

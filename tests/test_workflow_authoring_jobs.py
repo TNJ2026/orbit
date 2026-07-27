@@ -142,7 +142,16 @@ class GenerationJobTests(AuthoringJobTestCase):
 
         job = self.settled(jobs, created["job_id"])
         self.assertEqual("done", job["status"])
-        self.assertEqual("workflow:research", job["result"]["workflow_id"])
+        self.assertRegex(
+            job["result"]["workflow_id"],
+            r"^workflow:wf_[0-9a-f]{8}-[0-9a-f-]{27}$",
+        )
+        with connect_workflow_database(self.path, read_only=True) as connection:
+            stored = json.loads(connection.execute(
+                "SELECT canonical_ir_json FROM workflow_versions WHERE workflow_id=?",
+                (job["result"]["workflow_id"],),
+            ).fetchone()["canonical_ir_json"])
+        self.assertEqual("research", stored["slug"])
         # A generation has nothing to compare against, so it reports no summary.
         self.assertNotIn("change_summary", job["result"])
 
@@ -170,6 +179,25 @@ class GenerationJobTests(AuthoringJobTestCase):
                 "SELECT COUNT(*) AS total FROM workflow_versions"
             ).fetchone()["total"]
         self.assertEqual(0, published)
+
+    def test_a_settled_job_records_attempts_and_failing_diagnostics(self) -> None:
+        """Prompt tuning has no input unless failures say what was refused."""
+
+        jobs = self.service()
+        done = self.settled(jobs, jobs.create(
+            actor="author", prompt="Research", idempotency_key="ok",
+        )["job_id"])
+        self.assertEqual("done", done["status"])
+        self.assertEqual(1, done["attempts"])
+
+        self.answer = "this is not a workflow"
+        failed = self.settled(jobs, jobs.create(
+            actor="author", prompt="Research", idempotency_key="bad",
+        )["job_id"])
+        self.assertEqual("failed", failed["status"])
+        self.assertEqual(5, failed["attempts"])
+        codes = [item.get("code") for item in failed["error"]["diagnostics"]]
+        self.assertIn("GENERATION_PROTOCOL", codes)
 
     def test_an_interrupted_job_is_failed_as_an_unknown_result(self) -> None:
         """A process that died mid-call cannot claim the Agent did nothing."""

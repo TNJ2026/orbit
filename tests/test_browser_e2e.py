@@ -237,21 +237,25 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
         ))
         page.fill("#generateInstruction", "Collect the input and finish")
         page.click("#generateWorkflow")
-        page.locator(
-            '.workflow-card[data-workflow-id="workflow:research"]'
-        ).wait_for(timeout=30_000)
+        generated = page.locator(
+            '.workflow-card[data-workflow-slug="research"]'
+        )
+        generated.wait_for(timeout=30_000)
+        generated_id = generated.get_attribute("data-workflow-id")
+        self.assertRegex(generated_id, r"^workflow:wf_[0-9a-f-]+$")
 
         page.locator('[data-view="home"]').click()
         page.wait_for_function(
-            "() => [...document.querySelectorAll('#simplifiedWorkflow option')]"
-            ".some(node => node.value === 'workflow:research')"
+            "(id => [...document.querySelectorAll('#simplifiedWorkflow option')]"
+            ".some(node => node.value === id))",
+            arg=generated_id,
         )
 
         current_values = page.locator("#simplifiedWorkflow option").evaluate_all(
             "nodes => nodes.map(node => node.value)"
         )
-        self.assertNotIn("workflow:research", original_values)
-        self.assertIn("workflow:research", current_values)
+        self.assertNotIn(generated_id, original_values)
+        self.assertIn(generated_id, current_values)
 
     def test_goal_starts_and_stays_in_one_workspace(self) -> None:
         page = self.open("en-US")

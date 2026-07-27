@@ -154,7 +154,6 @@ class AuthoringServiceTests(unittest.TestCase):
         self.assertIn("policy_contract", prompt)
         self.assertIn("shape_contract", prompt)
         self.assertIn("There is no edge field named default", prompt)
-        self.assertIn("arrays of port objects", prompt)
         self.assertIn("at most one incoming non-back edge", prompt)
         self.assertIn("source.result.approved", prompt)
         self.assertIn("never source.approved", prompt)
@@ -162,6 +161,46 @@ class AuthoringServiceTests(unittest.TestCase):
         self.assertIn("must never form a cycle", prompt)
         self.assertIn("content_types:['text/markdown']", prompt)
         self.assertIn("Never return such a deliverable only as inline JSON", prompt)
+
+    def test_prompt_tiers_its_rules_and_shows_one_whole_document(self) -> None:
+        """Two dozen peer rules give no way to tell a compile error from taste."""
+
+        model = ScriptedModel([json.dumps(valid_document())])
+        service(model).generate("flow")
+        prompt = model.prompts[0]
+        for tier in ("[HARD]", "[SHAPE]", "[STYLE]"):
+            self.assertIn(tier, prompt)
+        # A whole example, not only fragments: entry, a typed edge, a terminal
+        # and a result that names a port which exists.
+        example = prompt.split("SHAPE-EXAMPLE", 1)[1]
+        for key in ('"entry"', '"terminals"', '"result"', '"dsl_version"'):
+            self.assertIn(key, example)
+        # The constraints models actually break are repeated last, next to the
+        # instruction they apply to.
+        tail = prompt.split("BEFORE YOU ANSWER, RE-CHECK", 1)[1]
+        self.assertIn("no edge field named `default`", tail)
+        self.assertIn("source.<from.port>", tail)
+
+    def test_handler_ports_are_pre_rendered_for_the_model_to_copy(self) -> None:
+        """A conversion the model performs by hand is a conversion it can botch."""
+
+        model = ScriptedModel([json.dumps(valid_document())])
+        WorkflowAuthoringService(
+            InMemoryHandlerCatalog([MANIFEST]), SCHEMAS, model,
+            handler_facts=[{
+                "name": "transform", "version": "1.0.0",
+                "inputs": {"value": "example://integer/1.0"},
+                "outputs": {"value": "example://integer/1.0"},
+            }],
+        ).generate("flow")
+        facts = json.loads(
+            model.prompts[0].split("FACTS: ", 1)[1].split("\n\n", 1)[0]
+        )
+        ports = facts["handlers"][0]["ports"]
+        self.assertEqual(
+            [{"id": "value", "schema_id": "example://integer/1.0"}], ports["inputs"]
+        )
+        self.assertEqual(ports["inputs"], ports["outputs"])
 
     def test_preferred_handler_is_allowlisted_and_added_to_the_prompt(self) -> None:
         model = ScriptedModel([json.dumps(valid_document())])
@@ -249,6 +288,66 @@ class AuthoringServiceTests(unittest.TestCase):
         self.assertIn("DSL_HANDLER_NOT_FOUND", model.prompts[1])
         self.assertIn('\\"name\\": \\"missing\\"', model.prompts[1])
         self.assertIn("Do not return a repair summary", model.prompts[1])
+
+    def test_retry_names_the_rule_each_finding_came_from(self) -> None:
+        """A complaint is not a constraint; repair needs the rule itself."""
+
+        broken = valid_document()
+        broken["nodes"][0]["handler"] = {"name": "missing", "version": "1.0.0"}
+        model = ScriptedModel([
+            json.dumps(broken), json.dumps(valid_document()),
+        ])
+
+        service(model).generate("flow")
+
+        retry = model.prompts[1]
+        self.assertIn("DSL_HANDLER_NOT_FOUND", retry)
+        self.assertIn("must name one of the entries in `handlers`", retry)
+        self.assertIn("fix EVERY finding listed", retry)
+
+    def test_retry_context_keeps_the_head_of_a_long_answer(self) -> None:
+        """Truncating from the front drops metadata and nodes — the part to fix."""
+
+        from orbit.workflow.authoring.generator import MAX_RETRY_CONTEXT_CHARS
+
+        broken = valid_document()
+        broken["metadata"]["padding"] = "x" * (MAX_RETRY_CONTEXT_CHARS + 1000)
+        model = ScriptedModel([
+            json.dumps(broken), json.dumps(valid_document()),
+        ])
+
+        service(model).generate("flow")
+
+        retry = model.prompts[1]
+        self.assertIn("dsl_version", retry)
+
+    def test_a_trailing_comma_is_repaired_instead_of_costing_a_retry(self) -> None:
+        """A stray comma should not buy another CLI call and another charge."""
+
+        extract = WorkflowAuthoringService._extract_json
+        self.assertEqual({"a": 1}, extract('{"a": 1,}'))
+        self.assertEqual({"a": [1, 2]}, extract('{"a": [1, 2,],}'))
+        self.assertEqual(
+            {"text": ",} and ,]"},
+            extract('{"text": ",} and ,]",}'),
+        )
+        # Corrupted text still fails: a mangled name must never reach publish.
+        with self.assertRaisesRegex(ValueError, "U\\+FFFD"):
+            extract('{"a": "�"}')
+
+    def test_a_guard_failure_keeps_its_own_code(self) -> None:
+        """Flattening every guard to GENERATION_PROTOCOL hides which one fired."""
+
+        from orbit.workflow.authoring.generator import _protocol_finding
+
+        self.assertEqual(
+            "GOAL_BINDING_MISSING",
+            _protocol_finding(ValueError("GOAL_BINDING_MISSING: no entry"))["code"],
+        )
+        self.assertEqual(
+            "GENERATION_PROTOCOL",
+            _protocol_finding(ValueError("no JSON object in the response"))["code"],
+        )
 
     def test_unicode_replacement_character_is_repaired_before_publish(self) -> None:
         broken = valid_document()

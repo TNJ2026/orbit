@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import os
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -93,6 +94,20 @@ class WorkflowMigrationAndUnitOfWorkTests(unittest.TestCase):
             ).fetchone()[0]
         self.assertLessEqual(stored_bytes, 5)
 
+    def test_authoring_output_accepts_a_relative_database_path(self) -> None:
+        previous = Path.cwd()
+        try:
+            os.chdir(self.temp_dir.name)
+            store = SQLiteAuthoringOutputStore("runtime.db")
+            store.append(
+                job_id="job:relative", stream="stdout", text="working", now=NOW,
+            )
+            chunks, _ = store.read("job:relative")
+        finally:
+            os.chdir(previous)
+
+        self.assertEqual(["working"], [chunk["text"] for chunk in chunks])
+
     def test_migration_three_adds_only_durable_execution_tables(self) -> None:
         with connect_workflow_database(self.path) as connection:
             tables = {
@@ -115,7 +130,7 @@ class WorkflowMigrationAndUnitOfWorkTests(unittest.TestCase):
         self.assertTrue({"jobs", "job_leases", "durable_timers"} <= tables)
         self.assertTrue({"planner_attempts", "planner_proposals"} <= tables)
         self.assertIn("human_tasks", tables)
-        self.assertEqual(list(range(1, 24)), versions)
+        self.assertEqual(list(range(1, 25)), versions)
 
     def test_migration_is_repeatable_after_workflow_drafts_exist(self) -> None:
         with connect_workflow_database(self.path) as connection:

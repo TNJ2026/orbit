@@ -242,6 +242,7 @@ class WorkflowCatalogReadModelService:
         display_name = row["display_name"] if "display_name" in keys else None
         item = {
             "workflow_id": row["workflow_id"],
+            "slug": ir.get("slug"),
             "name": display_name or ir["name"],
             "description": ir.get("description") or "",
             "labels": dict(ir.get("labels") or {}),

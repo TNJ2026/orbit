@@ -5,11 +5,14 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import uuid
 from pathlib import Path
 from threading import Lock, Thread
 from typing import Any, Mapping
 
-from ..authoring import AuthoringUnknownResultError, CancelScope, cancellable
+from ..authoring import (
+    AuthoringFailedError, AuthoringUnknownResultError, CancelScope, cancellable,
+)
 from ..persistence.authoring_output import SQLiteAuthoringOutputStore
 from ..persistence.control import audit as persist_audit
 from ..persistence.database import connect_workflow_database
@@ -148,8 +151,15 @@ class AuthoringJobService:
             "requested_agent": row["requested_agent"],
             "deadline_at": row["deadline_at"],
             "result": None if row["result_json"] is None else json.loads(row["result_json"]),
+            # How many rounds the Agent needed, and what the compiler refused
+            # on the last one: the facts a failed job is otherwise silent about.
+            "attempts": None if row["attempts"] is None else int(row["attempts"]),
             "error": None if row["error_code"] is None else {
                 "code": row["error_code"], "message": row["error_message"],
+                "diagnostics": (
+                    [] if row["diagnostics_json"] is None
+                    else json.loads(row["diagnostics_json"])
+                ),
             },
             "created_at": row["created_at"], "updated_at": row["updated_at"],
             "href": f"/api/v1/workflow-authoring-jobs/{row['job_id']}",
@@ -208,6 +218,8 @@ class AuthoringJobService:
         if not prompt:
             raise ValueError("prompt is required")
         job_type = "generate" if workflow_id is None else "modify"
+        if job_type == "generate":
+            workflow_id = f"workflow:wf_{uuid.uuid4()}"
         allowed = {"generate"} if job_type == "generate" else {"modify", "regenerate"}
         if mode not in allowed:
             raise ValueError("invalid authoring mode")
@@ -318,6 +330,7 @@ class AuthoringJobService:
                     outcome = self.authoring.generate(
                         row["prompt"], language=row["display_language"],
                         agent=row["requested_agent"],
+                        workflow_id=row["workflow_id"],
                         on_progress=lambda stage, attempt, maximum: self._record_progress(
                             job_id, stage, attempt, maximum,
                         ),
@@ -379,7 +392,10 @@ class AuthoringJobService:
                     result["change_summary"] = self._change_summary(
                         previous_ir, record.ir, getattr(outcome, "change_summary", ()),
                     )
-                self._settle(job_id, "done", result=result)
+                self._settle(
+                    job_id, "done", result=result,
+                    attempts=getattr(outcome, "attempts", None),
+                )
         except AuthoringUnknownResultError as exc:
             # Started and then silenced. Nothing is published and nothing is
             # retried: the Agent may already have done — and been charged for
@@ -387,6 +403,16 @@ class AuthoringJobService:
             self._settle_quietly(
                 job_id, "failed", error_code="unknown_external_result",
                 error_message=str(exc)[:1000],
+            )
+        except AuthoringFailedError as exc:
+            # Every attempt produced something the compiler refused. Keep the
+            # findings: which rule the Agent broke is the only evidence there
+            # is for whether the prompt needs to say something differently.
+            self._settle_quietly(
+                job_id, "failed", error_code=type(exc).__name__,
+                error_message=str(exc)[:1000],
+                attempts=exc.attempts,
+                diagnostics=list(exc.diagnostics),
             )
         except Exception as exc:
             self._settle_quietly(
@@ -517,18 +543,27 @@ class AuthoringJobService:
                 )
             db.commit()
 
-    def _settle(self, job_id, status, *, result=None, error_code=None, error_message=None):
+    def _settle(
+        self, job_id, status, *, result=None, error_code=None, error_message=None,
+        attempts=None, diagnostics=None,
+    ):
         with connect_workflow_database(self.path) as db:
             row = db.execute(
                 "SELECT actor FROM workflow_authoring_jobs WHERE job_id=?", (job_id,)
             ).fetchone()
             changed = db.execute(
                 "UPDATE workflow_authoring_jobs SET status=?,result_json=?,"
-                " error_code=?,error_message=?,updated_at=?"
+                " error_code=?,error_message=?,attempts=?,diagnostics_json=?,"
+                " updated_at=?"
                 " WHERE job_id=? AND status='running' AND cancel_requested=0",
                 (
                     status, None if result is None else json.dumps(result, ensure_ascii=False),
-                    error_code, error_message, self._time(self.clock()), job_id,
+                    error_code, error_message,
+                    None if attempts is None else int(attempts),
+                    None if not diagnostics else json.dumps(
+                        list(diagnostics), ensure_ascii=False,
+                    ),
+                    self._time(self.clock()), job_id,
                 ),
             ).rowcount
             if changed and row is not None:

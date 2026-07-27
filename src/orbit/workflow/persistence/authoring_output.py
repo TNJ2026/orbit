@@ -39,8 +39,14 @@ class SQLiteAuthoringOutputStore:
             raise ValueError(f"unknown output stream: {stream}")
         if not text:
             return
+        # mode=rw, never rwc: a console write must attach to a database that
+        # already exists. Creating one would resurrect a database another
+        # component (or a finished test) has already taken away, and an
+        # observation is never worth conjuring storage for.
+        absolute_path = self.path.expanduser().absolute()
+        uri = f"file:{absolute_path.as_uri()[len('file:'):]}?mode=rw"
         with sqlite3.connect(
-            str(self.path), timeout=OUTPUT_BUSY_TIMEOUT_MS / 1000,
+            uri, uri=True, timeout=OUTPUT_BUSY_TIMEOUT_MS / 1000,
             isolation_level=None,
         ) as connection:
             connection.execute(f"PRAGMA busy_timeout = {OUTPUT_BUSY_TIMEOUT_MS}")

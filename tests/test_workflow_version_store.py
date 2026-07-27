@@ -177,7 +177,7 @@ class WorkflowVersionStoreTests(unittest.TestCase):
             versions = connection.execute(
                 "SELECT version FROM workflow_schema_migrations ORDER BY version"
             ).fetchall()
-            self.assertEqual(list(range(1, 24)), [row[0] for row in versions])
+            self.assertEqual(list(range(1, 25)), [row[0] for row in versions])
 
 
 if __name__ == "__main__":
