@@ -292,8 +292,10 @@ class DurableRuntimeTests(unittest.TestCase):
         self.service.start_job(claimed, NOW)
         due = NOW + timedelta(seconds=5)
         self.service.schedule_timer(
-            self.run_id, purpose="node_timeout", dedupe_key="node-timeout-1",
-            target_type="job", target_id=claimed.job_id, payload={},
+            self.run_id, purpose="node_timeout",
+            dedupe_key=f"{claimed.job_id}:node_timeout:1",
+            target_type="job", target_id=claimed.job_id,
+            payload={"attempt_number": 1},
             due_at=due, now=NOW,
         )
         self.assertTrue(TimerDispatcher(self.service, clock=lambda: due).run_once())
@@ -440,8 +442,11 @@ class DurableRuntimeTests(unittest.TestCase):
         for the only attempt it could have meant.
         """
 
-        def timer(payload):
-            return SimpleNamespace(payload=payload)
+        def timer(payload, attempt_number=1):
+            return SimpleNamespace(
+                payload=payload, target_id="job:j",
+                dedupe_key=f"job:j:node_timeout:{attempt_number}",
+            )
 
         def attempt(number):
             return SimpleNamespace(attempt_number=SimpleNamespace(value=number))
@@ -451,9 +456,16 @@ class DurableRuntimeTests(unittest.TestCase):
 
         self.assertFalse(matches(armed_for_first, attempt(2)))
         self.assertTrue(matches(armed_for_first, attempt(1)))
-        # Armed before the payload carried a number: honoured, because back
-        # then a Job had at most one armed timer.
-        self.assertTrue(matches(timer({"job_id": "j"}), attempt(2)))
+        # An old payload still gets its authority from the attempt number that
+        # has always been present in the semantic dedupe key.
+        legacy_first = timer({"job_id": "j"}, attempt_number=1)
+        self.assertFalse(matches(legacy_first, attempt(2)))
+        self.assertTrue(matches(legacy_first, attempt(1)))
+        malformed = SimpleNamespace(
+            payload={"job_id": "j"}, target_id="job:j",
+            dedupe_key="job:j:node_timeout:not-a-number",
+        )
+        self.assertFalse(matches(malformed, attempt(1)))
 
     def test_a_replay_safe_timeout_stays_retryable(self):
         """Nothing outside was touched, so the ordinary retry policy applies."""

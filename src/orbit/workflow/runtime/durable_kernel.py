@@ -348,13 +348,21 @@ class DurableRuntimeKernel(RuntimeKernel):
         attempt happens to be leased would apply an expired schedule to work
         that has barely started.
 
-        A timer without an attempt number predates this check. It is honoured
-        rather than discarded: those were armed when a Job had at most one
-        armed timer, so the leased attempt is the only one it could mean.
+        A timer without an attempt number predates this payload field, but its
+        semantic dedupe key still names the attempt it was armed for.
         """
 
         recorded = timer.payload.get("attempt_number")
-        return recorded is None or int(recorded) == attempt.attempt_number.value
+        if recorded is not None:
+            return int(recorded) == attempt.attempt_number.value
+        prefix = f"{timer.target_id}:node_timeout:"
+        if not timer.dedupe_key.startswith(prefix):
+            return False
+        try:
+            legacy_attempt = int(timer.dedupe_key[len(prefix):])
+        except ValueError:
+            return False
+        return legacy_attempt == attempt.attempt_number.value
 
     def _arm_node_timeout(self, uow, command, events, job, attempt):
         """Schedule the durable backstop for an attempt that starts now.

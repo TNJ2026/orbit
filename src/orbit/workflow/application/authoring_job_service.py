@@ -7,7 +7,7 @@ import hashlib
 import json
 import uuid
 from pathlib import Path
-from threading import Lock, Thread
+from threading import Lock, Thread, Timer
 from typing import Any, Mapping
 
 from ..authoring import (
@@ -52,6 +52,7 @@ class AuthoringJobService:
         # Agent CLI rather than only marking a row. Another process's jobs are
         # not here, which is what the deadline and restart recovery are for.
         self._scopes: dict[str, CancelScope] = {}
+        self._deadline_timers: dict[str, Timer] = {}
         self._scope_lock = Lock()
         # What the Agent CLI prints while it writes: an observation of a child
         # process, kept so a job that thinks for a minute is not a black box.
@@ -84,6 +85,25 @@ class AuthoringJobService:
     def _close_scope(self, job_id: str) -> None:
         with self._scope_lock:
             self._scopes.pop(job_id, None)
+            timer = self._deadline_timers.pop(job_id, None)
+        if timer is not None:
+            timer.cancel()
+
+    def _watch_deadline(self, job_id: str, deadline_at: str) -> None:
+        """Enforce a Job deadline without depending on an API reader polling it."""
+
+        if not deadline_at:
+            return
+        deadline = datetime.fromisoformat(deadline_at.replace("Z", "+00:00"))
+        delay = max(0.0, (deadline - self.clock()).total_seconds())
+        timer = Timer(delay, self._expire_due)
+        timer.daemon = True
+        with self._scope_lock:
+            previous = self._deadline_timers.pop(job_id, None)
+            self._deadline_timers[job_id] = timer
+        if previous is not None:
+            previous.cancel()
+        timer.start()
 
     def _record_progress(self, job_id, stage, attempt=None, max_attempts=None):
         try:
@@ -148,13 +168,14 @@ class AuthoringJobService:
                     details={"reason": "process_restart"}, occurred_at=self.clock(),
                 )
             queued = [
-                row["job_id"] for row in db.execute(
-                    "SELECT job_id FROM workflow_authoring_jobs"
+                (row["job_id"], row["deadline_at"]) for row in db.execute(
+                    "SELECT job_id,deadline_at FROM workflow_authoring_jobs"
                     " WHERE status='queued' AND cancel_requested=0"
                 )
             ]
             db.commit()
-        for job_id in queued:
+        for job_id, deadline_at in queued:
+            self._watch_deadline(job_id, deadline_at or "")
             Thread(target=self._execute, args=(job_id,), daemon=True).start()
 
     def _dto(self, row):
@@ -293,6 +314,10 @@ class AuthoringJobService:
                 ),
             )
             db.commit()
+        if self.timeout_seconds is not None:
+            self._watch_deadline(
+                job_id, self._time(now + timedelta(seconds=self.timeout_seconds))
+            )
         Thread(target=self._execute, args=(job_id,), daemon=True).start()
         return self.get(job_id, actor=actor)
 
@@ -583,6 +608,14 @@ class AuthoringJobService:
                     details={}, occurred_at=self.clock(),
                 )
             db.commit()
+        # Mark durable state first, then stop any child owned by this process.
+        # CancelScope remembers cancellation, so this is also safe in the
+        # narrow window before the generator attaches its process handle.
+        for row in expired:
+            with self._scope_lock:
+                scope = self._scopes.get(row["job_id"])
+            if scope is not None:
+                scope.cancel(grace_seconds=self.cancel_grace_seconds)
 
     def _settle(
         self, job_id, status, *, result=None, error_code=None, error_message=None,

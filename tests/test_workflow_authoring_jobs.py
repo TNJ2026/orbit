@@ -10,6 +10,7 @@ rather than taken on the Agent's word.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import tempfile
 import threading
@@ -507,6 +508,53 @@ class UnknownResultTests(AuthoringJobTestCase):
         details = dict(self.audits(created["job_id"]))["workflow.authoring.cancel"]
         # The Agent was mid-call, so what it had already done is unknowable.
         self.assertIs(True, details["unknown_result"])
+
+    def test_deadline_expires_without_a_reader_and_stops_the_agent(self) -> None:
+        """The watchdog, not a GET/list poll, owns deadline enforcement."""
+
+        from orbit.workflow.authoring.generator import active_scope
+
+        stopped = threading.Event()
+        started = threading.Event()
+        now = [datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)]
+
+        class Handle:
+            def cancel(self, *, grace_seconds=None):
+                self.grace = grace_seconds
+                stopped.set()
+
+        handle = Handle()
+
+        def slow(_prompt):
+            active_scope().attach(handle)
+            started.set()
+            stopped.wait(timeout=10)
+            return json.dumps(dsl())
+
+        authoring = self.authoring()
+        authoring.generate_text = slow
+        jobs = AuthoringJobService(
+            self.path, authoring, self.definitions, timeout_seconds=30,
+            cancel_grace_seconds=2, clock=lambda: now[0],
+        )
+        created = jobs.create(actor="author", prompt="Research", idempotency_key="g1")
+        self.assertTrue(started.wait(timeout=5))
+
+        # Invoke what the independently scheduled Timer invokes, after moving
+        # the deterministic clock past the stored deadline.
+        now[0] += timedelta(seconds=31)
+        with jobs._scope_lock:
+            watchdog = jobs._deadline_timers[created["job_id"]]
+        watchdog.function()
+
+        self.assertTrue(stopped.is_set())
+        self.assertEqual(2, handle.grace)
+        with connect_workflow_database(self.path, read_only=True) as connection:
+            row = connection.execute(
+                "SELECT status,error_code FROM workflow_authoring_jobs WHERE job_id=?",
+                (created["job_id"],),
+            ).fetchone()
+        self.assertEqual(("failed", "authoring_timeout"), tuple(row))
 
     def test_cancelling_a_queued_job_claims_no_unknown_effect(self) -> None:
         release = threading.Event()
