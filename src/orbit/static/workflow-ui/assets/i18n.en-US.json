@@ -118,7 +118,7 @@
   "error.unauthenticated": "You need to sign in to continue.",
   "generate.action": "Generate workflow",
   "generate.failed": "Generation failed validation: {codes}",
-  "generate.hint": "A local agent CLI drafts the workflow; the compiler validates it and nothing is published until you confirm.",
+  "generate.hint": "The agent you pick drafts the workflow; the compiler validates it and nothing is published until you confirm.",
   "generate.instruction": "Describe the workflow",
   "generate.instructionPh": "e.g. Transform the input, then require an approval from ops before finishing",
   "generate.outputUnavailable": "Agent output is unavailable for this account.",

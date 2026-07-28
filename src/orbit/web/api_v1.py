@@ -191,6 +191,20 @@ def _retarget_handlers(
     return moved
 
 
+def authoring_timeout_seconds(operational_config) -> int:
+    """How long an authoring job may take, wherever it was started from.
+
+    Lives here rather than inline so the composition root can build one
+    AuthoringJobService for every protocol without either of them having to
+    restate the deadline. A job started over MCP and one started from the UI
+    are the same job.
+    """
+
+    if not operational_config:
+        return 300
+    return int(operational_config.get("authoring_timeout_seconds", 600))
+
+
 def build_api_v1(
     db_path: Path | str,
     durable_service,
@@ -214,6 +228,7 @@ def build_api_v1(
     workflow_publisher=None,
     draft_service=None,
     single_goal_mode: bool = True,
+    authoring_jobs=None,
 ) -> list[Route]:
     """Routes for `/api/v1`, ready to mount on the composition root."""
 
@@ -237,7 +252,11 @@ def build_api_v1(
     workflow_reads = WorkflowCatalogReadModelService(
         workflow_path, schema_catalog or InMemorySchemaCatalog({}), usage_path=path,
     )
-    authoring_jobs = (
+    # One per process, never one per protocol. Constructing a second against
+    # the same database means two recoveries: each restarts every queued job on
+    # its own thread, so one authoring job runs the Agent CLI twice, and the
+    # one built second marks the first one's running jobs as failed.
+    authoring_jobs = authoring_jobs or (
         AuthoringJobService(
             path, authoring_service, workflow_publisher,
             workflow_db_path=workflow_path,
@@ -245,8 +264,7 @@ def build_api_v1(
             # own: the generator CLI bounds each call, but nothing bounds the
             # retries and the publish that follow them, so a wedged job stays
             # `running` for as long as the process lives.
-            timeout_seconds=int(operational_config.get("authoring_timeout_seconds", 600))
-            if operational_config else 300,
+            timeout_seconds=authoring_timeout_seconds(operational_config),
             clock=clock,
         )
         if authoring_service is not None and workflow_publisher is not None

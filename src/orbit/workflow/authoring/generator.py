@@ -215,7 +215,12 @@ class CancelScope:
     cancelled and stops whatever attaches later.
     """
 
-    def __init__(self, *, on_output: Callable[[str, str], None] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        on_output: Callable[[str, str], None] | None = None,
+        job_id: str | None = None,
+    ) -> None:
         self._lock = threading.Lock()
         self._handle: Any = None
         self._cancelled = False
@@ -223,6 +228,10 @@ class CancelScope:
         # scope already travels with the call, so the sink rides along rather
         # than threading a second parameter through every generator.
         self.on_output = on_output
+        # Which job this generation belongs to. A forked CLI never needs it,
+        # but a generator that hands the prompt to somebody else does: the
+        # scope is the only thing that travels from the job to the generator.
+        self.job_id = job_id
 
     @property
     def cancelled(self) -> bool:
@@ -548,8 +557,11 @@ class WorkflowAuthoringService:
         self.generate_text = generate
         # Which Agent writes the DSL is a choice, not a startup constant. The
         # caller names one; the command behind that name was fixed at
-        # composition, so naming is all a caller can do.
-        self.generators = dict(generators or {})
+        # composition, so naming is all a caller can do. Held rather than
+        # copied: connected clients come and go while the Runtime runs, and a
+        # snapshot taken at composition would offer names that have left and
+        # refuse names that have arrived.
+        self.generators = {} if generators is None else generators
         self.handler_facts = tuple(handler_facts)
         self.max_nodes = max_nodes
         self.max_attempts = max_attempts

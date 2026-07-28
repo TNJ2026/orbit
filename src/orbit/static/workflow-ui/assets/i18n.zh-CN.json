@@ -118,7 +118,7 @@
   "error.unauthenticated": "需要登录后才能继续。",
   "generate.action": "生成工作流",
   "generate.failed": "生成结果未通过校验：{codes}",
-  "generate.hint": "由本机 Agent CLI 起草，编译器完成校验；确认发布前不会写入任何内容。",
+  "generate.hint": "由你选择的 Agent 起草，编译器完成校验；确认发布前不会写入任何内容。",
   "generate.instruction": "描述这个工作流",
   "generate.instructionPh": "例如：先转换输入，再交运维审批，通过后结束",
   "generate.outputUnavailable": "当前账号无法查看 Agent 输出。",

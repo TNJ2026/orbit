@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import sys
 
 import uvicorn
 
@@ -134,11 +135,17 @@ def _goal_readiness_buckets(path: Path) -> dict[str, list[dict[str, object]]]:
 
     from .workflow.api.workflow_catalog import WorkflowCatalogReadModelService
     from .workflow.catalogs import InMemorySchemaCatalog
+    from .web.builtin_handlers import BUILTIN_SCHEMAS
 
     buckets: dict[str, list[dict[str, object]]] = {
         "ready": [], "needs_upgrade": [], "needs_migration": [],
     }
-    reads = WorkflowCatalogReadModelService(path, InMemorySchemaCatalog({}))
+    # Goal readiness is a projection of the same entry-port contract the
+    # Runtime advertises.  An empty schema catalog makes every object prompt
+    # opaque and falsely reports that its conventional goal binding is absent.
+    reads = WorkflowCatalogReadModelService(
+        path, InMemorySchemaCatalog(BUILTIN_SCHEMAS)
+    )
     for entry in reads.list():
         buckets.setdefault(entry["goal_readiness"], []).append({
             "workflow_id": entry["workflow_id"],
@@ -450,6 +457,75 @@ def _serve(args) -> None:
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 
 
+def _mcp(args) -> None:
+    """Serve MCP over stdin/stdout, with the Runtime running in this process.
+
+    Not a client for a `serve` that is already up: this stands up the same
+    composition and starts its workers, so a run an agent starts here actually
+    executes. A client that can only speak stdio therefore needs nothing else
+    running — but it does mean two of these against one database are two
+    Runtimes, exactly as two `serve` processes would be.
+
+    Everything diagnostic goes to stderr. stdout carries the protocol, and one
+    stray line on it is a parse error at the other end.
+    """
+
+    from .web.app import create_app
+    from .web.builtin_handlers import BUILTIN_SCHEMAS, builtin_handlers
+    from .web.local_identity import LOCAL_ACTOR, local_authorizer
+    from .web.mcp import serve_stdio
+    from .web.schema_guard import MixedSchemaError, assert_runtime_schema
+    from .workflow.artifacts import LocalCASBackend
+
+    db_path = _runtime_db_path(args.db)
+    try:
+        assert_runtime_schema(db_path)
+    except MixedSchemaError as exc:
+        raise SystemExit(f"error: {exc}") from None
+
+    artifact_root = _artifact_root_path(args.artifact_root, db_path)
+    try:
+        artifact_backend = LocalCASBackend(artifact_root)
+    except (OSError, ValueError) as exc:
+        raise SystemExit(
+            f"orbit mcp: cannot initialize Artifact store at "
+            f"{artifact_root}: {exc}"
+        ) from None
+
+    app = create_app(
+        db_path,
+        workflow_db_path=(db_path if args.db else public_workflow_db_path()),
+        handlers=list(builtin_handlers()),
+        schemas=BUILTIN_SCHEMAS,
+        artifact_backend=artifact_backend,
+        worker_count=args.runner_concurrency,
+        discover_agents=not args.no_agent_discovery,
+        serve_ui=False,
+        # There is no connection to authenticate. The person who started this
+        # process is the caller, and on a local runtime that is `local` —
+        # the same actor loopback would have resolved to.
+        authorizer=local_authorizer(),
+        unlimited_actors=(LOCAL_ACTOR,),
+        token_exempt_actors=(LOCAL_ACTOR,),
+        operator_actors=(LOCAL_ACTOR,),
+    )
+    composition = app.state.runtime
+    # Started by hand because no ASGI server will run the lifespan here.
+    composition.start()
+    print(
+        f"orbit MCP on stdio (db: {db_path}, workers: {args.runner_concurrency})",
+        file=sys.stderr, flush=True,
+    )
+    try:
+        serve_stdio(app.state.mcp_dispatch, LOCAL_ACTOR)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stragglers = composition.stop()
+        if stragglers:
+            print(f"loops still running at exit: {stragglers}", file=sys.stderr)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="orbit", description="Local multi-agent workflow orchestrator")
     parser.add_argument(
@@ -503,6 +579,30 @@ def main() -> None:
             "Acknowledge, once, that pre-migration data from the legacy engine "
             "is abandoned. orbit never opens, imports or deletes those files."
         ),
+    )
+
+    mcp_cmd = sub.add_parser(
+        "mcp",
+        help="Serve the MCP tools over stdio, Runtime included",
+    )
+    mcp_cmd.add_argument(
+        "--db", default=None,
+        help="SQLite path (default: per-project database under ~/.orbit/projects/)",
+    )
+    mcp_cmd.add_argument(
+        "--artifact-root", default=None,
+        help=(
+            "Local content-addressed Artifact directory "
+            "(default: artifacts/ beside the Runtime database)"
+        ),
+    )
+    mcp_cmd.add_argument(
+        "--runner-concurrency", type=int, default=5,
+        help="How many jobs the in-process worker runs in parallel (default: 5).",
+    )
+    mcp_cmd.add_argument(
+        "--no-agent-discovery", action="store_true",
+        help="Skip probing for installed Agent CLIs at startup",
     )
 
     workflow_cmd = sub.add_parser(
@@ -583,6 +683,10 @@ def main() -> None:
 
     if args.command == "serve":
         _serve(args)
+        return
+
+    if args.command == "mcp":
+        _mcp(args)
         return
 
 

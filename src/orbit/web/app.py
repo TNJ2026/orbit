@@ -12,6 +12,7 @@ planner policy and no SQL.
 
 from __future__ import annotations
 
+from collections import ChainMap
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -395,6 +396,34 @@ class RuntimeComposition:
         return ready, checks
 
 
+class _LiveCapabilities(Mapping):
+    """Composition facts, with the few that outlive composition read again.
+
+    Nearly every capability is settled when the app is built and never moves.
+    Generation is the exception: an Agent App connects over MCP and becomes a
+    name an author may send work to, then disconnects and stops being one. A
+    dict captured at build time would advertise a client that has gone and hide
+    one that has arrived, so those entries are computed on read instead.
+    """
+
+    def __init__(
+        self,
+        static: Mapping[str, Any],
+        live: Mapping[str, Callable[[], Any]],
+    ) -> None:
+        self._static, self._live = static, live
+
+    def __getitem__(self, key: str) -> Any:
+        recompute = self._live.get(key)
+        return self._static[key] if recompute is None else recompute()
+
+    def __iter__(self):
+        return iter(self._static)
+
+    def __len__(self) -> int:
+        return len(self._static)
+
+
 def create_app(
     db_path: Path | str,
     *,
@@ -418,6 +447,7 @@ def create_app(
     agent_capabilities: Sequence[str] | None = None,
     workflow_generator: Callable[[str], str] | None = None,
     workflow_generators: Mapping[str, Callable[[str], str]] | None = None,
+    authoring_broker: Any = None,
     single_goal_mode: bool = True,
     workflow_db_path: Path | str | None = None,
 ) -> Starlette:
@@ -434,8 +464,12 @@ def create_app(
     # up visible in the catalog and uncallable from a workflow.
     agent_catalog: Sequence[Mapping[str, Any]] = ()
     # Named generators an author may choose between. Discovery fills this
-    # below; an explicit mapping (tests, embedders) wins outright.
-    generation_agents: dict[str, Any] = dict(workflow_generators or {})
+    # below; an explicit mapping (tests, embedders) wins outright. Held rather
+    # than copied, so an embedder may supply a mapping that changes — which is
+    # what a set of connected Agent Apps is.
+    generation_agents: Mapping[str, Any] = (
+        {} if workflow_generators is None else workflow_generators
+    )
     registrations = list(handlers)
     planner_service = None
     if discover_agents:
@@ -491,6 +525,32 @@ def create_app(
                     invokable_agents[0].name, next(iter(generation_agents.values()))
                 )
 
+        # An author may also route generation to an MCP client that is already
+        # connected — an Agent App operating this Runtime rather than a fresh
+        # CLI it forks. These names are layered *under* the discovered CLIs so
+        # a client can never shadow one, and so none of them becomes the
+        # default by accident: a forked CLI runs, while a parked prompt only
+        # waits, and nobody may ever come for it. An explicitly injected
+        # mapping is left exactly as the embedder wrote it.
+        if not workflow_generators:
+            from ..workflow.authoring import ExternalAuthoringBroker
+
+            if authoring_broker is None:
+                authoring_broker = ExternalAuthoringBroker()
+            # A ChainMap rather than a merged dict: which Apps are connected
+            # changes while the Runtime runs, so the set of names an author may
+            # pick from has to be read, not remembered.
+            generation_agents = ChainMap(
+                generation_agents, authoring_broker.generators()
+            )
+            if workflow_generator is None:
+                # No CLI to fall back on, and no App has connected yet — but
+                # one may, so authoring is wired rather than declared
+                # unavailable for the life of the process. The broker itself is
+                # the unnamed fallback; the names in the menu are the ones Apps
+                # report for themselves.
+                workflow_generator = authoring_broker
+
     composition = RuntimeComposition(
         db_path,
         handlers=registrations,
@@ -532,8 +592,9 @@ def create_app(
             status_code=200 if ready else 503,
         )
 
-    from .api_v1 import build_api_v1
-    from .mcp import build_mcp
+    from ..workflow.application.authoring_job_service import AuthoringJobService
+    from .api_v1 import authoring_timeout_seconds, build_api_v1
+    from .mcp import build_mcp_dispatcher, mcp_routes
 
     # Composition facts for /api/v1/capabilities: what this deployment can do,
     # with a reason when it cannot. The UI renders "service not provided" from
@@ -547,13 +608,22 @@ def create_app(
     # Which name in the list the Runtime actually falls back to. The list is
     # sorted for display, so the default is not simply its first entry; it is
     # settled above and identified here by identity, whichever path set it.
-    default_generation_agent = next(
-        (
-            name for name, generator in generation_agents.items()
-            if generator is workflow_generator
-        ),
-        None,
-    )
+    def default_generation_agent() -> str | None:
+        return next(
+            (
+                name for name, generator in generation_agents.items()
+                if generator is workflow_generator
+            ),
+            None,
+        )
+
+    def generation_facts() -> dict[str, Any]:
+        # Recomputed per request: a connected client is a name an author may
+        # pick, and clients arrive and leave while the Runtime runs.
+        return {
+            "available": True, "agents": sorted(generation_agents),
+            "default_agent": default_generation_agent(),
+        }
 
     capabilities = {
         "static_graph": {"available": True},
@@ -611,10 +681,7 @@ def create_app(
         "workflow_generation": (
             # The names an author may pick from. Empty means this Runtime has
             # exactly one way to write DSL and the choice is not offered.
-            {
-                "available": True, "agents": sorted(generation_agents),
-                "default_agent": default_generation_agent,
-            }
+            generation_facts()
             if workflow_generator is not None
             else {
                 "available": False,
@@ -624,11 +691,15 @@ def create_app(
                 ),
             }
         ),
-        "workflow_editing": {
-            "available": True, "agents": sorted(generation_agents),
-            "default_agent": default_generation_agent,
-        },
+        "workflow_editing": generation_facts(),
     }
+    if workflow_generator is not None:
+        # The two generation entries are the only ones that can change after
+        # startup, so they are the only ones read again per request.
+        capabilities = _LiveCapabilities(capabilities, {
+            "workflow_generation": generation_facts,
+            "workflow_editing": generation_facts,
+        })
 
     # Authoring shares the sealed registry's manifests and the composition's
     # schema catalog, so a generated draft can only reference what a published
@@ -704,6 +775,43 @@ def create_app(
         if getattr(generator, "command", None)
     }
 
+    operational_config = {
+        "worker_count": worker_count,
+        "poll_seconds": poll_seconds,
+    }
+    # One AuthoringJobService for the whole process. It owns in-flight jobs —
+    # their cancel scopes, their deadline timers, and the recovery that
+    # restarts queued work at startup — so a second instance would run every
+    # queued job a second time and cancel what the first had started. A job
+    # dispatched over MCP and one started from the UI are the same job, in the
+    # same list, cancellable from either.
+    authoring_jobs = (
+        AuthoringJobService(
+            composition.db_path, authoring_service, workflow_publisher,
+            workflow_db_path=composition.workflow_db_path,
+            timeout_seconds=authoring_timeout_seconds(operational_config),
+            clock=composition.clock,
+        )
+        if authoring_service is not None and workflow_publisher is not None
+        else None
+    )
+
+    # The MCP surface is a second protocol over the same application services
+    # and the same identity, not a second implementation. Built here rather
+    # than inside the route factory so `orbit mcp` can carry this very
+    # dispatcher over stdio instead of standing up its own services against a
+    # database this process already has open.
+    mcp_dispatch = build_mcp_dispatcher(
+        composition.db_path, composition.service,
+        workflow_db_path=composition.workflow_db_path,
+        authorizer=authorizer,
+        single_goal_mode=single_goal_mode,
+        schema_catalog=composition.schema_catalog,
+        artifact_backend=artifact_backend,
+        authoring_jobs=authoring_jobs,
+        authoring_broker=authoring_broker,
+    )
+
     routes: list[Route | Mount] = [
         Route("/health/live", health_live, methods=["GET"]),
         Route("/health/ready", health_ready, methods=["GET"]),
@@ -723,19 +831,12 @@ def create_app(
             workflow_publisher=workflow_publisher,
             draft_service=draft_service,
             single_goal_mode=single_goal_mode,
-            operational_config={
-                "worker_count": worker_count,
-                "poll_seconds": poll_seconds,
-            },
+            operational_config=operational_config,
+            authoring_jobs=authoring_jobs,
         ),
         # The MCP surface is a second protocol over the same application
         # services and the same identity, not a second implementation.
-        *build_mcp(
-            composition.db_path, composition.service,
-            workflow_db_path=composition.workflow_db_path,
-            authenticator=authenticator, authorizer=authorizer,
-            single_goal_mode=single_goal_mode,
-        ),
+        *mcp_routes(mcp_dispatch, authenticator=authenticator),
     ]
 
     if serve_ui:
@@ -778,4 +879,7 @@ def create_app(
     # None when discovery is off or found nothing; adapters must treat the
     # planner as optional rather than assume it.
     app.state.planner = composition.planner_service
+    # `orbit mcp` reaches the tools through this instead of over its own HTTP
+    # connection: same dispatcher, same services, one transport removed.
+    app.state.mcp_dispatch = mcp_dispatch
     return app

@@ -212,6 +212,34 @@ class WorkflowInventoryCliTests(unittest.TestCase):
             json.dumps(dsl()), source_name="<test>", source_format="json",
             expected_latest_version=0, actor="author",
         )
+        # This is the conventional Agent ingress accepted by the Runtime: the
+        # CLI inventory must resolve its built-in object schema just as the UI
+        # does, rather than reporting a missing goal binding from an empty
+        # schema catalog.
+        with connect_workflow_database(self.db) as connection:
+            row = connection.execute(
+                "SELECT * FROM workflow_versions"
+                " WHERE workflow_id='workflow:research'"
+            ).fetchone()
+            research = json.loads(row["canonical_ir_json"])
+            research["nodes"][0]["handler"]["name"] = "agent.codex"
+            prompt = research["nodes"][0]["inputs"][0]
+            prompt["id"] = "prompt"
+            prompt["schema_id"] = "schema://object/1.0"
+            connection.execute(
+                "INSERT INTO workflow_versions(workflow_id,version,definition_hash,"
+                "dsl_version,ir_version,compiler_version,canonical_ir_json,"
+                "source_format,source_text,catalog_fingerprint,created_at,created_by)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    row["workflow_id"], int(row["version"]) + 1,
+                    row["definition_hash"] + "-goal-binding", row["dsl_version"],
+                    row["ir_version"], row["compiler_version"], json.dumps(research),
+                    row["source_format"], row["source_text"],
+                    row["catalog_fingerprint"], row["created_at"], row["created_by"],
+                ),
+            )
+            connection.commit()
         legacy = dsl()
         legacy["dsl_version"] = "1.2"
         legacy["metadata"] = {"id": "legacy", "name": "Legacy"}
@@ -245,6 +273,10 @@ class WorkflowInventoryCliTests(unittest.TestCase):
         self.assertEqual({"workflow:legacy", "workflow:research"}, set(listed))
         self.assertEqual(
             {key: len(value) for key, value in buckets.items()}, report["counts"],
+        )
+        self.assertEqual(
+            ["workflow:research"],
+            [item["workflow_id"] for item in buckets["ready"]],
         )
 
     def test_a_workflow_that_cannot_start_a_goal_carries_its_reason(self) -> None:

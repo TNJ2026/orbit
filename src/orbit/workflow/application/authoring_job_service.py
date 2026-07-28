@@ -77,7 +77,7 @@ class AuthoringJobService:
                 # store must not change the authoring job it merely observes.
                 pass
 
-        scope = CancelScope(on_output=record)
+        scope = CancelScope(on_output=record, job_id=job_id)
         with self._scope_lock:
             self._scopes[job_id] = scope
         return scope
@@ -260,6 +260,12 @@ class AuthoringJobService:
         prompt = prompt.strip()
         if not prompt:
             raise ValueError("prompt is required")
+        # Refused here rather than in one protocol's route, so a name that no
+        # Agent answers to is a rejected request over every entrance instead of
+        # a job that fails minutes later. It matters more now that a name can
+        # stop being valid: a connected client may have gone since the author
+        # last looked at the menu.
+        agent = self.authoring.ensure_agent(agent)
         job_type = "generate" if workflow_id is None else "modify"
         if job_type == "generate":
             workflow_id = f"workflow:wf_{uuid.uuid4()}"
