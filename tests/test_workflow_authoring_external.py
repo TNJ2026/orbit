@@ -316,5 +316,143 @@ class BrokerTests(unittest.TestCase):
         self.assertEqual([], self.broker.pending())
 
 
+class SubscriptionTests(unittest.TestCase):
+    """Being told there is work, instead of asking on a timer."""
+
+    def setUp(self) -> None:
+        self.broker = ExternalAuthoringBroker()
+        self.seen: dict[str, list] = {}
+
+    def subscribe(self, client: str) -> int:
+        events = self.seen.setdefault(client, [])
+        return self.broker.subscribe(client, events.append)
+
+    def park(self, target: str | None):
+        thread = threading.Thread(
+            target=lambda: (
+                self.broker(" prompt ") if target is None
+                else self.broker.generator_for(target)(" prompt ")
+            ),
+            daemon=True,
+        )
+        thread.start()
+        deadline = time.monotonic() + 10.0
+        while not self.broker.pending() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        return thread
+
+    def drain(self, client: str) -> None:
+        """Answer whatever is parked so no test leaves a thread waiting."""
+
+        request = self.broker.claim(actor="local", client=client)
+        if request is not None:
+            self.broker.respond(request["request_id"], "{}", actor=client)
+
+    def test_a_connection_is_presence_no_timeout_can_be_wrong_about(self) -> None:
+        now = [1000.0]
+        broker = ExternalAuthoringBroker(presence_seconds=60.0, clock=lambda: now[0])
+        token = broker.subscribe("cursor", lambda _event: None)
+        now[0] += 6000.0
+        # It never polled, and it is still here. A poll timeout was only ever
+        # approximating the thing a live connection states outright.
+        self.assertEqual(["cursor"], broker.clients())
+        self.assertEqual(["app:cursor"], sorted(broker.generators()))
+
+        broker.unsubscribe(token)
+        self.assertEqual([], broker.clients())
+
+    def test_a_closed_stream_outranks_a_poll_that_came_before_it(self) -> None:
+        broker = ExternalAuthoringBroker()
+        broker.claim(actor="local", client="cursor")
+        token = broker.subscribe("cursor", lambda _event: None)
+        self.assertEqual(["cursor"], broker.clients())
+
+        # The socket is gone, and that is newer than the poll before it. Left
+        # to the presence timeout, an App that both streams and claims would
+        # linger in the menu for exactly the interval the stream was meant to
+        # make unnecessary.
+        broker.unsubscribe(token)
+        self.assertEqual([], broker.clients())
+        # Going back to polling is not punished: the next poll re-registers.
+        broker.claim(actor="local", client="cursor")
+        self.assertEqual(["cursor"], broker.clients())
+
+    def test_one_of_two_streams_closing_leaves_the_app_connected(self) -> None:
+        broker = ExternalAuthoringBroker()
+        first = broker.subscribe("cursor", lambda _event: None)
+        broker.subscribe("cursor", lambda _event: None)
+        broker.unsubscribe(first)
+        self.assertEqual(["cursor"], broker.clients())
+
+    def test_parking_work_tells_the_app_it_is_addressed_to(self) -> None:
+        self.subscribe("cursor")
+        self.subscribe("zed")
+        thread = self.park("cursor")
+
+        self.assertEqual(1, len(self.seen["cursor"]))
+        event = self.seen["cursor"][0]
+        self.assertEqual("request_parked", event["type"])
+        self.assertEqual("cursor", event["addressed_to"])
+        self.assertEqual(
+            event["request_id"], self.broker.pending()[0]["request_id"],
+        )
+        # An App is woken for work it could take, never for somebody else's.
+        self.assertEqual([], self.seen["zed"])
+
+        self.drain("cursor")
+        thread.join(timeout=10.0)
+
+    def test_unaddressed_work_wakes_everybody_who_could_take_it(self) -> None:
+        self.subscribe("cursor")
+        self.subscribe("zed")
+        thread = self.park(None)
+
+        self.assertEqual(1, len(self.seen["cursor"]))
+        self.assertEqual(1, len(self.seen["zed"]))
+        self.assertIsNone(self.seen["zed"][0]["addressed_to"])
+
+        self.drain("zed")
+        thread.join(timeout=10.0)
+
+    def test_work_back_on_offer_is_announced_like_it_was_the_first_time(self) -> None:
+        now = [1000.0]
+        broker = ExternalAuthoringBroker(lease_seconds=30.0, clock=lambda: now[0])
+        self.broker = broker
+        events: list = []
+        broker.subscribe("cursor", events.append)
+        thread = self.park("cursor")
+        broker.claim(actor="local", client="cursor")
+
+        now[0] += 31.0
+        broker.pending()  # any read sweeps lapsed leases
+        self.assertEqual(
+            ["request_parked", "request_released"],
+            [event["type"] for event in events],
+        )
+        self.assertEqual("cursor", events[1]["unanswered_by"])
+
+        self.drain("cursor")
+        thread.join(timeout=10.0)
+
+    def test_a_sink_that_fails_never_reaches_the_job(self) -> None:
+        def explode(_event):
+            raise RuntimeError("this client's socket is gone")
+
+        self.broker.subscribe("cursor", explode)
+        self.subscribe("zed")
+        # Notification is a shortcut to claiming, so a broken sink costs its
+        # own client promptness and costs the job nothing at all.
+        thread = self.park(None)
+        self.assertEqual(1, len(self.seen["zed"]))
+
+        self.drain("zed")
+        thread.join(timeout=10.0)
+
+    def test_a_nameless_subscriber_is_refused(self) -> None:
+        for name in (None, "", "has space"):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                self.broker.subscribe(name, lambda _event: None)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -187,10 +187,15 @@ class ExternalAuthoringBroker:
         self._lock = threading.Lock()
         self._order: list[str] = []
         self._pending: dict[str, _Pending] = {}
-        # When each client was last heard from. Presence is observed, never
+        # When each client was last polled from. Presence is observed, never
         # declared: a client that stopped polling stopped being somewhere work
         # can be sent, whatever it said when it arrived.
         self._seen: dict[str, float] = {}
+        # Clients holding an open event stream, by subscription token. A live
+        # connection is a better answer to "is this App still there" than any
+        # timeout over a poll: it is the fact the timeout was approximating.
+        self._subscribers: dict[int, tuple[str, Callable[[Mapping[str, Any]], None]]] = {}
+        self._next_token = 1
         self.max_wait_seconds = float(max_wait_seconds)
         self.lease_seconds = float(lease_seconds)
         self.presence_seconds = float(presence_seconds)
@@ -216,13 +221,78 @@ class ExternalAuthoringBroker:
         return generate
 
     def clients(self) -> list[str]:
-        """Clients heard from recently enough to still be worth addressing."""
+        """Clients still worth addressing: connected, or recently polled.
+
+        A client holding an event stream is present for as long as it holds it
+        — no timeout can be wrong about that. Polling remains a second way in,
+        because a client that cannot open a stream is still a client, and it
+        is the only one the presence timeout applies to.
+        """
 
         cutoff = self.clock() - self.presence_seconds
         with self._lock:
-            return sorted(
+            polled = {
                 name for name, seen in self._seen.items() if seen > cutoff
-            )
+            }
+            connected = {name for name, _deliver in self._subscribers.values()}
+        return sorted(polled | connected)
+
+    # -- the event stream ---------------------------------------------------
+
+    def subscribe(
+        self, client: str, deliver: Callable[[Mapping[str, Any]], None],
+    ) -> int:
+        """Register a client's event sink, and report it present until it goes.
+
+        `deliver` is called from whichever thread parked or released the work —
+        a Job's own thread, not an event loop — so an implementation that has
+        to reach one must hand the event over itself.
+        """
+
+        name = normalise_client(client)
+        if name is None:
+            raise ValueError("a client name is required")
+        with self._lock:
+            token = self._next_token
+            self._next_token += 1
+            self._subscribers[token] = (name, deliver)
+        return token
+
+    def unsubscribe(self, token: int) -> None:
+        """Drop a client's event sink, and with it any older claim to presence.
+
+        A socket closing is newer evidence than a poll the same client made
+        before it — "gone" beats "was here a minute ago". Without this, any
+        client that both streams and claims stays in the menu for the whole
+        presence timeout after it disappears, which is the timeout the stream
+        was supposed to make unnecessary. A client that goes back to polling
+        re-registers on its very next poll.
+        """
+
+        with self._lock:
+            gone = self._subscribers.pop(token, None)
+            still_connected = {name for name, _sink in self._subscribers.values()}
+            if gone is not None and gone[0] not in still_connected:
+                self._seen.pop(gone[0], None)
+
+    def _publish(self, event: Mapping[str, Any], *, target: str | None) -> None:
+        """Tell the clients this event concerns, and nobody else.
+
+        A notification is a shortcut to claiming, never a substitute for it:
+        every fact in it can be re-read from `claim`, so a sink that drops or
+        raises costs latency and nothing more.
+        """
+
+        with self._lock:
+            sinks = [
+                deliver for name, deliver in self._subscribers.values()
+                if target is None or name == target
+            ]
+        for deliver in sinks:
+            try:
+                deliver(event)
+            except Exception:  # noqa: BLE001 - observation, never the work
+                pass
 
     # -- the generator side -------------------------------------------------
 
@@ -260,6 +330,13 @@ class ExternalAuthoringBroker:
             f"waiting for {addressed} to claim {entry.request_id}\n"
             f"--- prompt ---\n{prompt}\n--- end of prompt ---\n"
         ))
+        # Told, rather than waited for. Without this a client learns about the
+        # work on its next poll, so the interval it polls at is the latency —
+        # and an idle Runtime pays for that interval all day.
+        self._publish({
+            "type": "request_parked", "request_id": entry.request_id,
+            "job_id": entry.job_id, "addressed_to": target,
+        }, target=target)
         handle = _CancelHandle(entry)
         # Registering before the wait, not after, so a cancellation that
         # arrives during setup is remembered by the scope and applied here.
@@ -326,6 +403,13 @@ class ExternalAuthoringBroker:
                 f"{entry.request_id} was not answered by {previous}; "
                 "it is waiting to be claimed again\n"
             ))
+            # Back on offer, so whoever could take it is told the same way
+            # they were told about it the first time.
+            self._publish({
+                "type": "request_released", "request_id": entry.request_id,
+                "job_id": entry.job_id, "addressed_to": entry.target,
+                "unanswered_by": previous,
+            }, target=entry.target)
 
     # -- the client side ----------------------------------------------------
 

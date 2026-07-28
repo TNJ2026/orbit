@@ -9,6 +9,10 @@ dependencies = [
     "PyYAML>=6.0",
     "starlette>=0.37",
     "uvicorn>=0.29",
+    # uvicorn speaks no WebSocket protocol on its own, and without one the
+    # authoring event socket is a 404 rather than a push. The endpoint's tests
+    # drive ASGI directly and pass without it; a running Runtime does not.
+    "websockets>=12",
 ]
 
 # Test-only. playwright is never imported by the package; the browser suite

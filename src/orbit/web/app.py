@@ -23,7 +23,7 @@ from typing import Any, Callable, Mapping, Sequence
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
-from starlette.routing import Mount, Route
+from starlette.routing import Mount, Route, WebSocketRoute
 
 from ..workflow.application.durable_runtime_service import (
     DurableRuntimeApplicationService,
@@ -812,7 +812,7 @@ def create_app(
         authoring_broker=authoring_broker,
     )
 
-    routes: list[Route | Mount] = [
+    routes: list[Route | Mount | WebSocketRoute] = [
         Route("/health/live", health_live, methods=["GET"]),
         Route("/health/ready", health_ready, methods=["GET"]),
         *build_api_v1(
@@ -838,6 +838,15 @@ def create_app(
         # services and the same identity, not a second implementation.
         *mcp_routes(mcp_dispatch, authenticator=authenticator),
     ]
+
+    if authoring_broker is not None:
+        # The push half of client-written generation. Claiming stays the only
+        # way work changes hands; this only removes the wait for a poll.
+        from .authoring_events import authoring_event_routes
+
+        routes.extend(
+            authoring_event_routes(authoring_broker, authenticator=authenticator)
+        )
 
     if serve_ui:
         # The modular UI is static files only: it holds no server-side session
