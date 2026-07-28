@@ -302,6 +302,29 @@ class DurableRuntimeTests(unittest.TestCase):
         self.assertIs(JobStatus.FAILED, self.service.list_jobs(self.run_id)[0].status)
         self.assertIs(WorkflowRunStatus.FAILED, self.service.get_run(self.run_id).status)
 
+    def test_unattributable_node_timeout_is_observable(self):
+        """Protocol drift is safe and visible, not merely generic obsolete."""
+
+        logged = []
+        self.service.kernel.logger = lambda message, fields: logged.append(
+            (message, fields)
+        )
+        self.service.submit(self.start)
+        claimed = self.service.claim_job("timeout-worker", NOW)
+        self.service.start_job(claimed, NOW)
+        due = NOW + timedelta(seconds=5)
+        self.service.schedule_timer(
+            self.run_id, purpose="node_timeout", dedupe_key="node-timeout-1",
+            target_type="job", target_id=claimed.job_id, payload={},
+            due_at=due, now=NOW,
+        )
+
+        self.assertTrue(TimerDispatcher(self.service, clock=lambda: due).run_once())
+
+        self.assertIs(JobStatus.RUNNING, self.service.list_jobs(self.run_id)[0].status)
+        messages = [message for message, _ in logged]
+        self.assertIn("node_timeout_timer_unattributable", messages)
+
     def node_timeout_timers(self, service=None):
         target = service or self.service
         with target.uow_factory() as uow:

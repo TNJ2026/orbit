@@ -583,13 +583,15 @@ class AuthoringJobService:
         }
 
     def _expire_due(self):
-        if self.timeout_seconds is None:
-            return
+        # Existing rows own their deadline. `timeout_seconds` decides whether
+        # new rows get one; removing that configuration after a restart must
+        # not revoke deadlines already persisted for queued or running Jobs.
         stamp = self._time(self.clock())
         with connect_workflow_database(self.path) as db:
             expired = list(db.execute(
                 "SELECT job_id,actor FROM workflow_authoring_jobs"
-                " WHERE status IN ('queued','running') AND deadline_at<=?",
+                " WHERE status IN ('queued','running')"
+                " AND deadline_at IS NOT NULL AND deadline_at<>'' AND deadline_at<=?",
                 (stamp,),
             ))
             db.execute(
@@ -597,7 +599,7 @@ class AuthoringJobService:
                 " cancel_requested=1,error_code='authoring_timeout',"
                 " error_message='Workflow authoring exceeded its deadline',"
                 " updated_at=? WHERE status IN ('queued','running')"
-                " AND deadline_at<=?",
+                " AND deadline_at IS NOT NULL AND deadline_at<>'' AND deadline_at<=?",
                 (stamp, stamp),
             )
             for row in expired:

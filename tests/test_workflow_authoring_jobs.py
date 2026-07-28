@@ -556,6 +556,28 @@ class UnknownResultTests(AuthoringJobTestCase):
             ).fetchone()
         self.assertEqual(("failed", "authoring_timeout"), tuple(row))
 
+    def test_recovered_deadline_survives_removing_the_timeout_config(self) -> None:
+        """Persisted policy is not revoked by a later process configuration."""
+
+        jobs = self.service()
+        created = jobs.create(actor="author", prompt="Research", idempotency_key="g1")
+        self.settled(jobs, created["job_id"])
+        expired = datetime.now(timezone.utc) - timedelta(seconds=1)
+        with connect_workflow_database(self.path) as connection:
+            connection.execute(
+                "UPDATE workflow_authoring_jobs SET status='running',"
+                " cancel_requested=0,deadline_at=? WHERE job_id=?",
+                (jobs._time(expired), created["job_id"]),
+            )
+            connection.commit()
+
+        self.assertIsNone(jobs.timeout_seconds)
+        jobs._expire_due()
+
+        job = jobs.get(created["job_id"], actor="author")
+        self.assertEqual("failed", job["status"])
+        self.assertEqual("authoring_timeout", job["error"]["code"])
+
     def test_cancelling_a_queued_job_claims_no_unknown_effect(self) -> None:
         release = threading.Event()
 
