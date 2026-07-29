@@ -14,9 +14,15 @@ helpers, `context` owns the services and the cross-cutting request helpers
 
 from __future__ import annotations
 
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Callable, Mapping, Sequence
+
+from starlette.requests import Request
 from starlette.routing import Route
 
 from ...workflow.api.artifact_read_models import PREVIEW_LIMIT_BYTES
+from ...workflow.api.routes import RateLimiter
 
 from . import artifacts, drafts, human, ops, plans, recovery, runs, workflows
 from .common import (
@@ -33,14 +39,64 @@ __all__ = [
 ]
 
 
-def build_api_v1(db_path, durable_service, **kwargs) -> list[Route]:
+def build_api_v1(
+    db_path: Path | str,
+    durable_service,
+    *,
+    workflow_db_path: Path | str | None = None,
+    authenticator: Callable[[Request], str | None] | None = None,
+    authorizer: Authorizer | None = None,
+    rate_limiter: RateLimiter | None = None,
+    unlimited_actors: Sequence[str] = (),
+    token_exempt_actors: Sequence[str] = (),
+    operator_actors: Sequence[str] = (),
+    audit: Callable[[str, str, Mapping[str, Any]], None] | None = None,
+    fault_hook: Callable[[str], None] | None = None,
+    clock: Callable[[], datetime] | None = None,
+    agent_catalog: Sequence[Mapping[str, Any]] = (),
+    capabilities: Mapping[str, Mapping[str, Any]] | None = None,
+    schema_catalog=None,
+    artifact_backend=None,
+    operational_config: Mapping[str, Any] | None = None,
+    authoring_service=None,
+    workflow_publisher=None,
+    draft_service=None,
+    single_goal_mode: bool = True,
+    authoring_jobs=None,
+    shutdown_request: Callable[[], None] | None = None,
+) -> list[Route]:
     """Routes for `/api/v1`, ready to mount on the composition root.
 
-    Keyword arguments are forwarded verbatim to `ApiContext` — see
-    `context.ApiContext.__init__` for the full list.
+    The explicit signature is kept in sync with ``ApiContext`` so callers,
+    documentation generators and static analysis can discover the supported
+    composition options without inspecting the implementation.
     """
 
-    ctx = ApiContext(db_path, durable_service, **kwargs)
+    ctx = ApiContext(
+        db_path,
+        durable_service,
+        workflow_db_path=workflow_db_path,
+        authenticator=authenticator,
+        authorizer=authorizer,
+        rate_limiter=rate_limiter,
+        unlimited_actors=unlimited_actors,
+        token_exempt_actors=token_exempt_actors,
+        operator_actors=operator_actors,
+        audit=audit,
+        fault_hook=fault_hook,
+        clock=clock,
+        agent_catalog=agent_catalog,
+        capabilities=capabilities,
+        schema_catalog=schema_catalog,
+        artifact_backend=artifact_backend,
+        operational_config=operational_config,
+        authoring_service=authoring_service,
+        workflow_publisher=workflow_publisher,
+        draft_service=draft_service,
+        single_goal_mode=single_goal_mode,
+        authoring_jobs=authoring_jobs,
+        shutdown_request=shutdown_request,
+    )
     return [
         *runs.build_routes(ctx),
         *plans.build_routes(ctx),
