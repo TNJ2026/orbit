@@ -135,7 +135,7 @@ class SourceTests(unittest.TestCase):
         literals = set(re.findall(r'request\(\s*"(POST|PUT|PATCH|DELETE)",\s*"([^"]+)"', api_js))
         self.assertEqual(set(), literals)
 
-        app_js = (ASSETS / "app.js").read_text(encoding="utf-8")
+        app_js = "\n".join(path.read_text(encoding="utf-8") for path in source_files())
         self.assertNotIn("/api/v1/human-tasks", app_js)
         self.assertNotIn("/cancel", app_js)
         self.assertIn("allowed.href", api_js)
@@ -199,7 +199,7 @@ class AccessibilityTests(unittest.TestCase):
         self.assertIn("@media (max-width", css)
 
     def test_goal_composer_has_designed_structure_and_shortcut(self) -> None:
-        app_js = (ASSETS / "app.js").read_text(encoding="utf-8")
+        app_js = "\n".join(path.read_text(encoding="utf-8") for path in source_files())
         css = stylesheet_source()
         for marker in (
             "simplified-goal-page", "simplifiedGoalTitle",
@@ -211,7 +211,7 @@ class AccessibilityTests(unittest.TestCase):
         self.assertIn(".simplified-workflow-picker { grid-template-columns: 1fr; }", css)
 
     def test_goal_run_detail_has_timeline_and_responsive_columns(self) -> None:
-        app_js = (ASSETS / "app.js").read_text(encoding="utf-8")
+        app_js = "\n".join(path.read_text(encoding="utf-8") for path in source_files())
         css = stylesheet_source()
         for marker in (
             "simplified-run-page", "simplified-goal-summary",
@@ -233,10 +233,28 @@ class AccessibilityTests(unittest.TestCase):
         self.assertIn("commandButtons(item.allowed_commands || [], reload)", app_js)
 
 class CapacityRenderingTests(unittest.TestCase):
+    def test_active_goal_has_a_distinct_cancel_execution_control(self) -> None:
+        source = (ASSETS / "views" / "index.js").read_text(encoding="utf-8")
+        self.assertIn('class: "button danger goal-cancel-execution"', source)
+        self.assertIn('allowed.command === "run.cancel"', source)
+        self.assertIn('i18n.t("goal.cancelExecution")', source)
+
+    def test_workflow_generation_progress_offers_server_authorized_cancel(self) -> None:
+        generation_js = (
+            ASSETS / "workflow" / "generation-progress.js"
+        ).read_text(encoding="utf-8")
+        self.assertIn('class: "button workflow-generation-cancel"', generation_js)
+        self.assertIn(
+            '(item) => item.command === "workflow.authoring.cancel"', generation_js
+        )
+        self.assertIn(
+            '`workflow.authoring.cancel:${job.job_id}`', generation_js
+        )
+
     def test_the_console_follows_only_while_the_run_is_alive(self) -> None:
         """Polling a finished run's console forever is a busy loop for nothing."""
 
-        app_js = (ASSETS / "app.js").read_text(encoding="utf-8")
+        app_js = "\n".join(path.read_text(encoding="utf-8") for path in source_files())
         self.assertIn('{ live: status === "running" }', app_js)
         self.assertIn("else if (live) timer = setTimeout(poll, 2000);", app_js)
         self.assertIn("activeViewCleanup = () => {", app_js)

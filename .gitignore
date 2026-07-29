@@ -18,6 +18,14 @@ docs/*
 !docs/workflow-runtime-clean-migration-plan.md
 !docs/agentic-workflow-implementation-plan.md
 !docs/agent-cli-execution-reliability-plan.md
+!docs/agent-app-host-integration-plan.md
+!docs/codex-plugin-integration-plan.md
+!agent-app.json
+!.mcp.json
+!.codex-plugin/
+!scripts/start-orbit.sh
+!scripts/start-mcp-proxy.sh
+!skills/
 !docs/migration/
 !docs/adr/
 !docs/ui/

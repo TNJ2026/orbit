@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import signal
 import sqlite3
 import sys
 
@@ -33,7 +34,12 @@ def _workflow_db_path(explicit: str | None) -> str:
     return str(public_workflow_db_path())
 
 
-def _runtime_db_path(explicit: str | None, *, acknowledged: bool = False) -> str:
+def _runtime_db_path(
+    explicit: str | None,
+    *,
+    acknowledged: bool = False,
+    project_root: Path | str | None = None,
+) -> str:
     """Resolve the runtime database, gating on the cutover acknowledgement.
 
     Every command that touches the default database goes through here, so
@@ -50,11 +56,13 @@ def _runtime_db_path(explicit: str | None, *, acknowledged: bool = False) -> str
     if explicit:
         return explicit
     try:
-        ensure_cutover_acknowledged(acknowledged=acknowledged)
+        ensure_cutover_acknowledged(
+            acknowledged=acknowledged, project_dir=project_root,
+        )
     except CutoverRequired as exc:
         print(str(exc), flush=True)
         raise SystemExit(exc.exit_code) from None
-    return str(project_db_path(resolve_project_root()))
+    return str(project_db_path(resolve_project_root(project_root)))
 
 
 def _artifact_root_path(explicit: str | None, db_path: str | Path) -> Path:
@@ -361,15 +369,17 @@ def _serve(args) -> None:
     from .web.schema_guard import MixedSchemaError, assert_runtime_schema
     from .workflow.artifacts import LocalCASBackend
 
-    project_root = resolve_project_root()
+    project_root = resolve_project_root(getattr(args, "project_root", None))
 
     # `serve` is the one command that can *grant* the acknowledgement; the gate
     # itself lives in _runtime_db_path so every other command is covered too.
     db_path = _runtime_db_path(
-        args.db, acknowledged=args.acknowledge_discard_legacy_data
+        args.db,
+        acknowledged=args.acknowledge_discard_legacy_data,
+        project_root=project_root,
     )
     if args.acknowledge_discard_legacy_data:
-        marker = read_marker()
+        marker = read_marker(project_root)
         if marker is not None:
             print(
                 f"cutover acknowledged at {marker.acknowledged_at}; "
@@ -417,6 +427,12 @@ def _serve(args) -> None:
         handlers.extend(dev_handlers)
         print(f"dev tools: {', '.join(tool_names) or 'none granted'}", flush=True)
 
+    def request_shutdown() -> None:
+        # Uvicorn owns graceful shutdown and lifespan cleanup. Raising the same
+        # signal as Ctrl-C keeps its public `run` entrypoint (and embedders that
+        # patch it) intact while still stopping workers through app lifespan.
+        os.kill(os.getpid(), signal.SIGINT)
+
     try:
         app = create_app(
             db_path,
@@ -439,6 +455,7 @@ def _serve(args) -> None:
             token_exempt_actors=(LOCAL_ACTOR,),
             # Recovery takeovers are answered by this person too.
             operator_actors=(LOCAL_ACTOR,),
+            shutdown_request=request_shutdown,
         )
     except MixedSchemaError as exc:
         raise SystemExit(f"error: {exc}") from None
@@ -526,6 +543,32 @@ def _mcp(args) -> None:
             print(f"loops still running at exit: {stragglers}", file=sys.stderr)
 
 
+def _agent_app(args) -> None:
+    """Run the generic local Agent App host without coupling it to Orbit Runtime."""
+
+    from .agent_apps.host import AgentAppHost, AgentAppHostError
+    from .agent_apps.mcp_proxy import serve_proxy
+
+    host = AgentAppHost(state_root=args.state_dir)
+    workspace = args.workspace
+    if args.agent_app_action == "mcp-proxy" and workspace is None:
+        try:
+            workspace = host.active_workspace(args.manifest)
+        except (AgentAppHostError, ValueError) as exc:
+            raise SystemExit(f"orbit agent-app: {exc}") from None
+    try:
+        ensured = host.ensure(args.manifest, workspace=workspace)
+    except (AgentAppHostError, ValueError) as exc:
+        raise SystemExit(f"orbit agent-app: {exc}") from None
+    if args.agent_app_action == "ensure":
+        print(ensured.manifest.ui_url)
+        return
+    try:
+        serve_proxy(ensured.manifest, state_dir=ensured.state_dir)
+    except RuntimeError as exc:
+        raise SystemExit(f"orbit agent-app mcp-proxy: {exc}") from None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="orbit", description="Local multi-agent workflow orchestrator")
     parser.add_argument(
@@ -539,6 +582,10 @@ def main() -> None:
     )
     serve_cmd.add_argument("--host", default="127.0.0.1", help="Bind address (default: 127.0.0.1)")
     serve_cmd.add_argument("--port", type=int, default=8848, help="Port (default: 8848)")
+    serve_cmd.add_argument(
+        "--project-root", default=None,
+        help="Project directory used for Runtime state (default: current directory)",
+    )
     serve_cmd.add_argument(
         "--db",
         default=None,
@@ -604,6 +651,27 @@ def main() -> None:
         "--no-agent-discovery", action="store_true",
         help="Skip probing for installed Agent CLIs at startup",
     )
+
+    agent_app_cmd = sub.add_parser(
+        "agent-app", help="Host a manifest-declared local Agent App",
+    )
+    agent_app_sub = agent_app_cmd.add_subparsers(
+        dest="agent_app_action", required=True,
+    )
+    for action, help_text in (
+        ("ensure", "Start the App if needed and print its UI URL"),
+        ("mcp-proxy", "Carry its HTTP JSON-RPC MCP endpoint over stdio"),
+    ):
+        command = agent_app_sub.add_parser(action, help=help_text)
+        command.add_argument("manifest", help="Path to agent-app.json")
+        command.add_argument(
+            "--workspace", default=None,
+            help="Workspace identity and working directory for workspace-scoped Apps",
+        )
+        command.add_argument(
+            "--state-dir", default=None,
+            help="Host state directory (default: AGENT_APP_STATE_DIR or user state)",
+        )
 
     workflow_cmd = sub.add_parser(
         "workflow",
@@ -687,6 +755,10 @@ def main() -> None:
 
     if args.command == "mcp":
         _mcp(args)
+        return
+
+    if args.command == "agent-app":
+        _agent_app(args)
         return
 
 

@@ -1,0 +1,56 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Resolve and verify release version
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          package_version="$(python -c 'import ast; p=ast.parse(open("src/orbit/__init__.py").read()); print(next(n.value.value for n in p.body if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "__version__" for t in n.targets)))')"
+          test "$package_version" = "$version"
+          echo "ORBIT_RELEASE_VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Install development dependencies
+        run: uv sync --extra dev
+
+      - name: Run tests
+        run: |
+          uv run python -m unittest discover -s tests
+          node --test tests/ui/client_modules.test.mjs
+
+      - name: Build Python packages
+        run: uv build
+
+      - name: Build local Marketplace archive
+        run: |
+          uv run python scripts/build-marketplace-release.py \
+            --version "$ORBIT_RELEASE_VERSION" \
+            --output "dist/orbit-marketplace-$ORBIT_RELEASE_VERSION.zip"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --verify-tag \
+            --generate-notes \
+            --title "Orbit $GITHUB_REF_NAME"

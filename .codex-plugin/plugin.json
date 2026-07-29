@@ -1,0 +1,26 @@
+{
+  "name": "orbit",
+  "version": "0.4.0+codex.20260729101135",
+  "description": "Local durable workflow Runtime with a browser UI and MCP tools.",
+  "author": {
+    "name": "Orbit"
+  },
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Orbit",
+    "shortDescription": "Run and inspect local durable workflows.",
+    "longDescription": "Start one local Orbit Runtime for an explicitly selected workspace, inspect durable workflow runs in the browser UI, and use the same Runtime through MCP.",
+    "developerName": "Orbit",
+    "category": "Productivity",
+    "capabilities": [
+      "Local web service",
+      "Workflow runtime",
+      "MCP tools"
+    ],
+    "defaultPrompt": [
+      "Open Orbit",
+      "List my Orbit runs"
+    ]
+  }
+}

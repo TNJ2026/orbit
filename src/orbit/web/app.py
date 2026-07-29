@@ -450,6 +450,7 @@ def create_app(
     authoring_broker: Any = None,
     single_goal_mode: bool = True,
     workflow_db_path: Path | str | None = None,
+    shutdown_request: Callable[[], None] | None = None,
 ) -> Starlette:
     """Build the Runtime application.
 
@@ -833,11 +834,20 @@ def create_app(
             single_goal_mode=single_goal_mode,
             operational_config=operational_config,
             authoring_jobs=authoring_jobs,
+            shutdown_request=shutdown_request,
         ),
         # The MCP surface is a second protocol over the same application
         # services and the same identity, not a second implementation.
         *mcp_routes(mcp_dispatch, authenticator=authenticator),
     ]
+
+    # Durable notifications for Agent Apps. Frames are hints only: consumers
+    # re-read HTTP/MCP state and execute only server-issued allowed_commands.
+    from .runtime_events import runtime_event_routes
+
+    routes.extend(runtime_event_routes(
+        db_path, authenticator=authenticator, authorizer=authorizer,
+    ))
 
     if authoring_broker is not None:
         # The push half of client-written generation. Claiming stays the only

@@ -183,6 +183,9 @@
   display: flex; align-items: center; justify-content: space-between; gap: 16px;
 }
 .workflow-generation-output-head h3 { margin: 0; font-size: 14px; }
+.workflow-generation-output-actions {
+  display: flex; align-items: center; justify-content: flex-end; gap: 10px;
+}
 .workflow-generation-output-empty { font-size: 12px; }
 .workflow-generation-console {
   width: 100%; max-width: 100%; min-width: 0; box-sizing: border-box;
@@ -510,7 +513,7 @@
 }
 .workflow-detail .graph-zoom-controls, .workflow-edit-page .graph-zoom-controls { padding: 16px 18px 0; }
 .workflow-detail .workflow-graph-scroll, .workflow-edit-page .workflow-graph-scroll {
-  display: flex; align-items: center; justify-content: center; padding: 8px 24px 24px;
+  display: flex; align-items: center; justify-content: flex-start; padding: 8px 24px 24px;
 }
 /* The revision editor band is shared by the dedicated Workflow edit page. */
 .workflow-editor-wrap {
@@ -896,7 +899,7 @@
   max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 /* Prompt reads as a little panel (design/workflow_detail3.html): a captioned
-   bar over a clamped body — five lines, then truncated, full text on hover. */
+   bar over a bounded, independently scrollable body. */
 .defn-prompt {
   flex: 1 1 280px; min-width: 0;
   --defn-prompt-bg: color-mix(in srgb, var(--panel) 62%, var(--bg));
@@ -910,19 +913,12 @@
   font-size: 10px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase;
   color: var(--muted-2);
 }
-/* Five lines, then a fade into the panel floor — a line-clamp-free clip that
-   renders identically everywhere (the webkit box path mis-clips a 6th line in
-   some engines). Full text stays on the title tooltip. */
 .defn-prompt-body {
-  position: relative; box-sizing: content-box;
+  box-sizing: border-box;
   padding: 10px 14px; color: var(--muted);
   font-family: var(--mono); font-size: 13px; line-height: 20px;
-  max-height: 100px; overflow: hidden;
-}
-.defn-prompt-body::after {
-  content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 22px;
-  background: linear-gradient(to bottom, transparent, var(--defn-prompt-bg));
-  pointer-events: none;
+  max-height: 200px; overflow: auto;
+  white-space: pre-wrap; overflow-wrap: anywhere;
 }
 .defn-prompt-key { font-weight: 700; margin-right: 8px; color: var(--row-accent, var(--blue)); }
 .defn-note {
@@ -1088,7 +1084,18 @@
   font-size: 18px; line-height: 1;
 }
 .graph-zoom-level { min-width: 54px; color: var(--muted); text-align: center; font-size: 13px; }
-.workflow-graph { display: block; max-width: none; }
+.workflow-graph {
+  display: block; max-width: none;
+  /* The scroll strip is a flex container. Without an explicit non-shrinking
+     basis, flexbox squeezes every zoom level back to the viewport width while
+     leaving the SVG height enlarged, so zoom appears inert and distorts the
+     graph. The SVG's width/height attributes are the zoom source of truth. */
+  flex: 0 0 auto;
+  /* Auto margins center a graph that fits, but collapse to zero once it
+     overflows. Unlike justify-content:center, this never places its left edge
+     in an unreachable negative scroll area. */
+  margin-inline: auto;
+}
 .graph-box rect {
   fill: var(--panel-2); stroke: var(--line); stroke-width: 1;
 }

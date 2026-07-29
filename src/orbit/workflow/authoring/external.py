@@ -128,14 +128,24 @@ class _Pending:
 class _CancelHandle:
     """What a `CancelScope` cancels when the "child" is a waiting thread."""
 
-    def __init__(self, pending: _Pending) -> None:
+    def __init__(
+        self, pending: _Pending, notify: Callable[[_Pending], None] | None = None,
+    ) -> None:
         self._pending = pending
+        self._notify = notify
+        self._lock = threading.Lock()
+        self._notified = False
 
     def cancel(self, *, grace_seconds: float | None = None) -> None:
         # There is no process to be gentle with: a waiting thread stops now,
         # and `grace_seconds` is accepted only to match the handle contract.
         self._pending.cancelled = True
         self._pending.event.set()
+        with self._lock:
+            notify = None if self._notified else self._notify
+            self._notified = True
+        if notify is not None:
+            notify(self._pending)
 
 
 class _GeneratorView(Mapping):
@@ -337,7 +347,17 @@ class ExternalAuthoringBroker:
             "type": "request_parked", "request_id": entry.request_id,
             "job_id": entry.job_id, "addressed_to": target,
         }, target=target)
-        handle = _CancelHandle(entry)
+        def notify_cancelled(pending: _Pending) -> None:
+            self._publish({
+                "type": "request_cancelled",
+                "request_id": pending.request_id,
+                "job_id": pending.job_id,
+                "addressed_to": pending.target,
+                "claimed_by": pending.claimed_by,
+                "reason": "cancelled_by_operator",
+            }, target=pending.claimed_by or pending.target)
+
+        handle = _CancelHandle(entry, notify_cancelled)
         # Registering before the wait, not after, so a cancellation that
         # arrives during setup is remembered by the scope and applied here.
         if scope is not None:
@@ -453,6 +473,38 @@ class ExternalAuthoringBroker:
             "lease_seconds": self.lease_seconds,
             "prompt": claimed.prompt,
         }
+
+    def wait_claim(
+        self, *, actor: str, client: str, timeout_seconds: float
+    ) -> dict[str, Any] | None:
+        """Stay addressable until this client can claim work or times out."""
+
+        name = normalise_client(client)
+        if name is None:
+            raise ValueError("a client name is required")
+        timeout = float(timeout_seconds)
+        if timeout < 0:
+            raise ValueError("timeout_seconds must not be negative")
+
+        claimed = self.claim(actor=actor, client=name)
+        if claimed is not None or timeout == 0:
+            return claimed
+
+        wake = threading.Event()
+        token = self.subscribe(name, lambda _event: wake.set())
+        deadline = time.monotonic() + timeout
+        try:
+            while True:
+                claimed = self.claim(actor=actor, client=name)
+                if claimed is not None:
+                    return claimed
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                wake.wait(remaining)
+                wake.clear()
+        finally:
+            self.unsubscribe(token)
 
     def pending(self) -> list[dict[str, Any]]:
         self._expire_leases()

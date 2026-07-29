@@ -10,16 +10,16 @@
    canvas while their saturated text stays legible. */
 :root {
   color-scheme: dark;
-  --chrome: #0b0e15;        /* surface-container-lowest — sits below the page */
-  --bg: #10131a;            /* Deep-Space base / surface */
-  --panel: #1d2027;         /* surface-container — cards */
-  --panel-2: #272a31;       /* surface-container-high — inputs, buttons */
-  --panel-3: #32353c;       /* surface-container-highest */
+  --chrome: #212121;        /* ChatGPT app canvas */
+  --bg: #212121;            /* ChatGPT app canvas */
+  --panel: #212121;         /* cards share the ChatGPT app canvas */
+  --panel-2: #212121;       /* inputs and buttons share the canvas */
+  --panel-3: #212121;       /* raised neutral surfaces share the canvas */
   --line: #424754;          /* outline-variant — component boundaries */
   --line-soft: #2a2d35;     /* quieter dividers inside a card */
   /* Hover surface: a clear step above --panel-3 so the lift reads on a dark
      screen. */
-  --hover: #363941;         /* surface-bright */
+  --hover: #212121;         /* hover remains on the shared canvas */
   --text: #e1e2ec;          /* on-surface — primary text */
   --muted: #c2c6d6;         /* on-surface-variant — secondary text */
   --muted-2: #8c909f;       /* outline — tertiary / metadata text */
@@ -65,14 +65,14 @@
    sits below white cards, borders stay 1px, accents drop to AA-safe 600s. */
 html[data-theme="light"] {
   color-scheme: light;
-  --chrome: #eef1f6;
-  --bg: #f6f8fc;
+  --chrome: #ffffff;
+  --bg: #ffffff;
   --panel: #ffffff;
-  --panel-2: #eef1f6;
-  --panel-3: #e2e7f0;
+  --panel-2: #ffffff;
+  --panel-3: #ffffff;
   --line: #cdd4e0;
   --line-soft: #e4e8f0;
-  --hover: #e2e8f2;
+  --hover: #ffffff;
   --text: #171a21;
   --muted: #4a5164;   /* >= 4.5:1 on --panel */
   --muted-2: #5a6274; /* decorative/secondary text */

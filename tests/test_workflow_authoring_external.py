@@ -207,6 +207,36 @@ class BrokerTests(unittest.TestCase):
             ["app:cursor", "app:zed"], sorted(self.broker.generators()),
         )
 
+    def test_waiting_client_is_addressable_and_claims_new_work(self) -> None:
+        result = {}
+
+        def wait() -> None:
+            result["request"] = self.broker.wait_claim(
+                actor="local", client="chatgpt", timeout_seconds=2,
+            )
+
+        waiter = threading.Thread(target=wait, daemon=True)
+        waiter.start()
+        deadline = time.monotonic() + 2
+        while "chatgpt" not in self.broker.clients() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertIn("chatgpt", self.broker.clients())
+        generation, outcome = self.park()
+        waiter.join(timeout=2)
+        self.assertFalse(waiter.is_alive())
+        request = result["request"]
+        self.assertIsNotNone(request)
+        self.assertEqual("write me a workflow", request["prompt"])
+        self.broker.respond(request["request_id"], "{}", actor="chatgpt")
+        generation.join(timeout=2)
+        self.assertEqual("{}", outcome["text"])
+
+    def test_wait_timeout_removes_client_presence(self) -> None:
+        self.assertIsNone(self.broker.wait_claim(
+            actor="local", client="chatgpt", timeout_seconds=0.01,
+        ))
+        self.assertEqual([], self.broker.clients())
+
     def test_an_app_that_stopped_polling_stops_being_offered(self) -> None:
         now = [1000.0]
         broker = ExternalAuthoringBroker(

@@ -117,17 +117,14 @@
    The markup owns that order; this rule keeps the status compact without
    turning it into a viewport-level floating layer. */
 .runtime-card-inline {
-  display: inline-flex; align-items: center; gap: 8px;
-  border: 1px solid var(--line); border-radius: var(--radius);
-  min-height: 36px; padding: 6px 12px; background: var(--panel);
-  font-size: 12px; pointer-events: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 36px; pointer-events: none;
 }
 .live-dot {
   width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto;
   background: var(--green); box-shadow: 0 0 0 4px var(--green-soft);
 }
 .live-dot.degraded { background: var(--red); box-shadow: 0 0 0 4px var(--red-soft); }
-.runtime-card-inline .muted { color: var(--muted-2); }
 
 .content { padding: 20px; display: flex; flex-direction: column; gap: 16px; }
 #liveRegion { margin: 16px 20px 0; }
@@ -147,10 +144,6 @@
   .topbar-controls {
     margin-left: auto; flex-wrap: wrap; row-gap: 8px;
     justify-content: flex-end; min-width: 0; max-width: 100%;
-  }
-  .runtime-card-inline { min-width: 0; }
-  .runtime-card-inline #runtimeDetail {
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 34vw;
   }
   .content { padding: 14px 12px; }
   #liveRegion { margin: 12px 12px 0; }

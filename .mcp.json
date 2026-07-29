@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "orbit": {
+      "command": "bash",
+      "args": ["./scripts/start-mcp-proxy.sh"],
+      "cwd": ".",
+      "env_vars": ["ORBIT_AGENT_APP_WORKSPACE"]
+    }
+  }
+}

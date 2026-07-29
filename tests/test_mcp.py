@@ -76,7 +76,8 @@ class DiscoveryTests(ApiTestCase):
                     "read_artifact", "list_inbox", "request_human_task_token",
                     "submit_human_task", "generate_workflow",
                     "get_authoring_job", "claim_authoring_request",
-                    "submit_authoring_response", "runtime_status",
+                    "wait_authoring_request", "submit_authoring_response",
+                    "runtime_status",
                 },
                 names,
             )
@@ -534,7 +535,7 @@ class StdioTransportTests(ApiTestCase):
 
         self.assertEqual(2, len(responses))
         self.assertEqual("orbit", responses[0]["result"]["serverInfo"]["name"])
-        self.assertEqual(16, len(responses[1]["result"]["tools"]))
+        self.assertEqual(17, len(responses[1]["result"]["tools"]))
 
     def test_a_notification_produces_no_line_at_all(self) -> None:
         """There is no 202 on this transport; silence is the whole answer."""

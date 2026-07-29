@@ -2,246 +2,172 @@
 
 [简体中文](./README.zh-CN.md) | **English**
 
-> A local workflow runtime for agent work. A workflow is a static graph; a run
-> advances by appending events to a log. Action nodes use handlers registered
-> before startup; deterministic controllers handle routing, joins and durable
-> HumanTask waits. Restart it mid-run and it
-> picks up exactly where it was, because the log — not a process — is the state.
+Orbit is a local, durable workflow Runtime for Agent Apps. It combines the
+Runtime, API, Web UI, workers, timers, workflow authoring, and MCP integration
+in one process. Project data is stored under `~/.orbit/projects/`.
 
+## Install in Codex
+
+Download `orbit-marketplace-<version>.zip` from the matching GitHub Release,
+then run:
+
+```bash
+unzip orbit-marketplace-<version>.zip
+codex plugin marketplace add ./orbit-marketplace
+codex plugin add orbit@orbit-local
 ```
-workflow definition ──▶ plan ──▶ jobs ──▶ handlers
-                           └────▶ HumanTask controllers
-                                   │
-        event log (SQLite) ◀───────┘──▶ read models ──▶ /api/v1, /mcp, /ui
-```
 
-- **Durable by construction.** Commands are idempotent, jobs are leased, and a
-  handler that loses its lease mid-call reports an *unknown* result rather than
-  being silently retried into a second side effect.
-- **The server decides what may be done.** Every action a client can take is
-  advertised as an `allowed_commands[]` entry with a target and an expected
-  version. Clients never invent a mutation URL.
-- **Nothing runs that was not registered.** The handler registry is sealed
-  before the first worker starts, and a plan is bound to the exact manifest
-  fingerprint it was compiled against.
-- **One process.** `orbit serve` is the runtime, the API, the UI, the workers
-  and the timer dispatcher. Runs stay in per-project SQLite databases under
-  `~/.orbit/projects/`; published Workflow definitions are shared through
-  `~/.orbit/workflows/library.db`.
+Alternatively, install it from the Codex plugin UI after adding the extracted
+Marketplace directory.
 
-## Scope
+1. Open **Plugins** in the Codex app.
+2. Find **Orbit** under **Orbit Local** and select **Install**.
+3. Start a new Codex task so the installed Skill and MCP tools are loaded.
+4. Open the project that should own the workflow Runtime.
+5. Ask Codex: `Open Orbit`.
 
-orbit runs **static** workflow graphs: a published workflow compiles to a plan
-whose shape does not change while it runs. Static `human` nodes create durable
-approval tasks and resume graph routing after an authorised submission.
-Dynamic planning — foreach groups,
-subflows and agentic regions that rewrite their own graph — is implemented in
-the domain and service layers but is not reachable from a published workflow:
-the Planner dispatcher is supervised by the composition root, but the DSL and
-kernel do not yet create Planner attempts or structural nodes. See
-[docs/migration/unwired-capabilities.md](docs/migration/unwired-capabilities.md).
+Orbit requires an explicit project directory. If the chat has no project
+workspace, startup stops and asks the user to open or select one; it never uses
+an incidental process working directory.
 
-## Table of Contents
+Orbit starts the Runtime for the current project, opens
+`http://127.0.0.1:8848/ui`, and automatically begins listening for workflow
+authoring requests. While the task is active, `app:chatgpt` appears in Orbit's
+Agent selector and is selected by default.
 
-- [Install](#install)
-- [Quick Start](#quick-start)
-- [CLI Reference](#cli-reference)
-- [HTTP API](#http-api)
-- [MCP](#mcp)
-- [Development Tools](#development-tools)
-- [Upgrading from the Pre-Cutover Engine](#upgrading-from-the-pre-cutover-engine)
+The listening presence belongs to the active Codex task. Ending the task
+removes `app:chatgpt`; the Runtime may continue running. Start a new task and
+ask it to open Orbit to reconnect.
 
-## Install
+## Install the CLI
 
-Requires Python ≥ 3.10 and [uv](https://docs.astral.sh/uv/).
+Orbit requires Python 3.10 or newer and
+[uv](https://docs.astral.sh/uv/).
 
 ```bash
 uv tool install git+https://github.com/TNJ2026/orbit.git
-uv tool update-shell            # ensure ~/.local/bin is on PATH (first time only)
+uv tool update-shell
 ```
 
-From a local checkout:
+To work from source:
 
 ```bash
 git clone https://github.com/TNJ2026/orbit.git
-uv tool install --editable ./orbit   # global `orbit` reflecting your edits
-# or run in place:  cd orbit && uv run orbit serve
+cd orbit
+uv sync --extra dev
+uv run orbit serve
 ```
 
-## Quick Start
+The UI is available at `http://127.0.0.1:8848/ui`.
+
+## Use Orbit in Codex
+
+### Open and connect
+
+In a new Codex task, ask:
+
+```text
+Open Orbit
+```
+
+Codex starts or reuses the project Runtime, opens the UI, and calls
+`wait_authoring_request(client="chatgpt")`. The wait is automatically renewed
+while the task remains active.
+
+### Create a workflow
+
+1. Open **Workflows** in Orbit.
+2. Confirm that `app:chatgpt` is selected under **Written by**.
+3. Describe the workflow and select **Generate workflow**.
+4. Codex receives the request, returns Workflow DSL, and handles compiler
+   feedback until the draft succeeds or fails.
+5. Review and publish the generated workflow.
+
+### Run a goal
+
+1. Open **Goal**.
+2. Select a published workflow.
+3. Enter the goal and start it.
+4. Follow step progress in the workspace or inspect completed runs in
+   **History**.
+
+Orbit can also be operated through MCP with `list_runs`, `inspect_run`,
+`start_run`, and `cancel_run`. Clients must follow the Runtime's
+`allowed_commands[]`; do not construct mutation URLs.
+
+### Stop Orbit
+
+Select **Stop Orbit** beside the Refresh button and confirm. This stops the
+Runtime, workers, timers, MCP endpoint, and event connections for the project.
+
+## Connect another Agent App
+
+Any MCP-capable Agent App can connect through Orbit's stdio proxy. Adapt this
+example to the App's MCP configuration format:
+
+```json
+{
+  "mcpServers": {
+    "orbit": {
+      "command": "bash",
+      "args": ["/absolute/path/to/orbit/scripts/start-mcp-proxy.sh"],
+      "env": {
+        "ORBIT_AGENT_APP_WORKSPACE": "/absolute/path/to/project"
+      }
+    }
+  }
+}
+```
+
+To appear in Orbit's Agent selector, the App must keep this call pending:
+
+```text
+wait_authoring_request(client="claude-desktop", timeout_seconds=300)
+```
+
+Orbit then shows `app:claude-desktop`. Connecting MCP alone does not register
+an online authoring App. After receiving a request, the App submits one
+Workflow DSL JSON object with `submit_authoring_response`, checks the result
+with `get_authoring_job`, and repeats when compiler feedback requests another
+attempt.
+
+Runtime events can be consumed with `wait_app_event`, `list_app_events`, and
+`ack_app_event`. Treat events as hints and re-read the referenced Run before
+acting.
+
+## CLI quick reference
 
 ```bash
-cd <your-project>
-orbit workflow publish my-workflow.yaml --catalog catalog.json --expected-version 0
 orbit serve
-```
-
-Open `http://127.0.0.1:8848/ui`. The console shows runs, what each one is
-waiting on, its plan, and an inbox of anything waiting on a person. It is
-bilingual (`zh-CN` / `en-US`) and follows your browser's language.
-
-Or drive it from the terminal:
-
-```bash
-orbit run start my-workflow --input '{"value": 1}'
-orbit run inspect run:abc123          # status, open responsibilities, recent errors
-```
-
-`orbit serve` binds loopback and treats the person at the keyboard as the
-operator. A request that did not arrive over loopback gets no identity at all,
-so exposing the port yields 401s rather than an open runtime.
-
-## CLI Reference
-
-```bash
 orbit --version
-orbit <command> --help
+orbit run start <workflow_id> --goal "..."
+orbit run inspect <run_id> --json
+orbit workflow validate <file> --catalog <catalog.json>
+orbit workflow publish <file> --catalog <catalog.json> --expected-version <n>
+orbit db check
 ```
 
-### `orbit serve`
-
-Start the runtime.
-
-| Flag | Default | Meaning |
-| --- | --- | --- |
-| `--host` | `127.0.0.1` | Bind address. |
-| `--port` | `8848` | Port. |
-| `--db` | per-project | Runtime database path. With the default, definitions use the public `~/.orbit/workflows/library.db`; an explicit path keeps definitions and runs self-contained. |
-| `--artifact-root` | beside database | Local content-addressed Artifact directory; defaults to `artifacts/` beside the selected database. |
-| `--runner-concurrency` | `5` | Jobs the in-process workers run in parallel. |
-| `--no-agent-discovery` | off | Skip probing for installed agent CLIs. |
-| `--dev-tools` | off | Register the trusted git and verify tools (see below). |
-| `--acknowledge-discard-legacy-data` | off | One-time cutover acknowledgement (see below). |
-
-The Artifact store is enabled by default. Its `staging/` and `blobs/`
-directories must be writable and on the same filesystem. Back up the Runtime
-database and this directory together; metadata lives in SQLite while immutable
-content lives under the Artifact root.
-
-### `orbit run`
-
-```bash
-orbit run start <workflow_id> [--input JSON] [--goal TEXT] [--workflow-version N]
-                              [--idempotency-key KEY] [--json]
-orbit run inspect <run_id> [--json]
-```
-
-`run start` writes through the same application service as the HTTP API, so a
-start from the terminal and a start from the UI produce identical events. Pass
-`--idempotency-key` to make re-running the whole command idempotent — without
-it, each invocation is a new run.
-
-### `orbit workflow`
-
-```bash
-orbit workflow validate <file> --catalog <catalog.json> [--json]
-orbit workflow compile  <file> --catalog <catalog.json> [--output PATH]
-orbit workflow publish  <file> --catalog <catalog.json> --expected-version N [--db PATH]
-```
-
-`--expected-version` is a compare-and-set: publishing against a stale version
-fails rather than overwriting someone else's.
-
-### `orbit db check`
-
-Audits event, projection, receipt and snapshot integrity. Read-only unless you
-pass `--drop-invalid-snapshots`, which deletes only corrupt snapshot caches —
-events and projections are never modified. Exits non-zero when the database is
-not sound.
-
-## HTTP API
-
-Everything lives under `/api/v1`. Reads are cursor-paged and carry a schema
-version; writes require an `idempotency-key` header and an `expected_version`
-in the body.
-
-| Route | Purpose |
-| --- | --- |
-| `GET /api/v1/runs` | Runs, newest first. `?active=true` to filter. |
-| `GET /api/v1/runs/{id}` | Summary: status, workflow, budget. |
-| `GET /api/v1/runs/{id}/responsibilities` | What the run is waiting on, plus the commands you may issue. |
-| `GET /api/v1/runs/{id}/timeline` | The event log. |
-| `GET /api/v1/runs/{id}/errors` | Failures, as a projection rather than a filtered timeline. |
-| `GET /api/v1/runs/{id}/data` | Inline values and committed Artifact metadata. |
-| `GET /api/v1/runs/{id}/data/{data_id}/lineage` | Run-scoped Value or Artifact lineage. |
-| `GET /api/v1/runs/{id}/plan` | Plan definition: nodes, handlers, edges. No run state. |
-| `GET /api/v1/runs/{id}/plan/overlay` | Run state per node, stamped with its plan version. |
-| `GET /api/v1/runs/{id}/plan/diff` | What changed between two plan versions. |
-| `GET /api/v1/inbox` | Everything waiting on a person, across all runs. |
-| `GET /api/v1/recovery` | What the runtime believes is stuck. |
-| `GET /api/v1/handler-catalog` | Installed handlers and discovered agent CLIs. |
-| `GET /api/v1/workflows` | Published workflows and authorised `start_run` commands. |
-| `POST /api/v1/runs` | Start a run. |
-| `POST /api/v1/runs/{id}/cancel` | Cancel at a known version. |
-| `POST /api/v1/runs/{id}/budget` | Grant more budget. |
-| `POST /api/v1/human-tasks/{id}/claim` \| `/submit` | Claim or decide a human task. |
-| `POST /api/v1/recovery/apply` | Apply recovery actions. |
-
-Definition and overlay are deliberately separate: a single "node with a status"
-blob makes it impossible to tell a replanned graph from a retried node, and
-invites a client to paint last version's statuses onto this version's plan.
-
-`/health/live` and `/health/ready` sit outside `/api/v1`. Readiness reports the
-database, migrations, the sealed registry, and every background loop by name.
-
-## MCP
-
-`POST /mcp` speaks JSON-RPC 2.0 with tools `list_runs`, `inspect_run`,
-`start_run` and `cancel_run`, behind the same identity and authorisation as the
-HTTP API. Tool discovery is open; every tool call needs a scope.
-
-```toml
-# .codex/config.toml
-[mcp_servers.orbit]
-url = "http://127.0.0.1:8848/mcp"
-```
-
-## Development Tools
-
-`orbit serve --dev-tools` registers four trusted tools — `git.status`,
-`git.diff`, `git.integrate` and `verify` — that run inside a git worktree the
-runtime provisions per workspace ref.
-
-A workflow **selects** a tool by name and passes bounded arguments. It cannot
-supply a program, a flag, a path or a shell string: each adapter owns a frozen
-argv, and verification runs a *named profile* registered by the composition
-root. There is no shell anywhere in that path, and the child's environment is
-built explicitly rather than inherited.
-
-Capability policy is applied before the registry is sealed, so a tool the
-deployment did not grant does not exist rather than being refused later.
-`git.integrate` is the only tool that writes, so it is the only one whose lost
-lease produces an unknown result and an escalation instead of a retry.
-
-## Upgrading from the Pre-Cutover Engine
-
-Earlier versions of orbit were a different system: a task queue with a
-`messages.db`, `orbit start` / `up` / `init` / `config` / `runner`, and an
-unversioned `/api/tasks` surface. All of it is gone.
-
-If a project still holds a pre-migration database, `orbit serve` refuses to
-start and exits with code 3. Its contents — including any runtime data written
-before the cutover — are abandoned, not migrated. orbit will not open, copy or
-delete those files; that is your call. To continue:
-
-```bash
-orbit serve --acknowledge-discard-legacy-data
-```
-
-That writes a `0600` marker recording which paths you acknowledged and when,
-and nothing else. There is deliberately no import path: a half-supported import
-is exactly how two sources of truth come back.
+`orbit serve` binds to `127.0.0.1` by default. Runtime state and Artifacts are
+project-scoped; published workflow definitions are shared through the local
+Orbit workflow library.
 
 ## Development
 
 ```bash
+uv sync --extra dev
 .venv/bin/python -m unittest discover -s tests
-node --test tests/ui/client_modules.test.mjs   # client modules, if node is installed
+node --test tests/ui/client_modules.test.mjs
 ```
 
-The browser suite needs its own extras and skips without them:
+Build the Python package with:
 
 ```bash
-uv pip install -e '.[dev]'
-python -m playwright install chromium
+uv build
+python scripts/build-marketplace-release.py \
+  --version 0.4.0 \
+  --output dist/orbit-marketplace-0.4.0.zip
 ```
+
+Pushing a tag such as `v0.4.0` runs the Release workflow, verifies that the tag
+matches `src/orbit/__init__.py`, runs the tests, and uploads the wheel, source
+distribution, and local Marketplace ZIP to the GitHub Release.

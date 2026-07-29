@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "id": "orbit",
+  "scope": "workspace",
+  "service": {
+    "command": [
+      "uv",
+      "run",
+      "--project",
+      "{manifest_dir}",
+      "orbit",
+      "serve",
+      "--project-root",
+      "{workspace}"
+    ],
+    "cwd": ".",
+    "environment": ["HOME", "PATH"],
+    "ready_url": "http://127.0.0.1:8848/health/ready",
+    "timeout_seconds": 30
+  },
+  "ui": {
+    "url": "http://127.0.0.1:8848/ui/"
+  },
+  "mcp": {
+    "transport": "http-jsonrpc",
+    "url": "http://127.0.0.1:8848/mcp"
+  },
+  "events": {
+    "transport": "websocket",
+    "url": "ws://127.0.0.1:8848/events"
+  }
+}

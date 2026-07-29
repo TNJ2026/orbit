@@ -13,6 +13,7 @@ key is rejected rather than silently retried into a duplicate run.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -369,6 +370,29 @@ def build_mcp_dispatcher(
             },
         },
         {
+            "name": "wait_authoring_request",
+            "description": (
+                "Wait for a workflow generation prompt addressed to this App. "
+                "While waiting, the App is offered in Orbit as app:<client>. "
+                "Use this when a person will click Generate in the Orbit UI."
+            ),
+            "scope": WRITE_SCOPE,
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "client": {
+                        "type": "string",
+                        "description": "Stable App name used as app:<client> in Orbit.",
+                    },
+                    "timeout_seconds": {
+                        "type": "integer", "minimum": 1, "maximum": 300,
+                        "default": 120,
+                    },
+                },
+                "required": ["client"],
+            },
+        },
+        {
             "name": "submit_authoring_response",
             "description": (
                 "Answer a claimed generation request with the DSL document. "
@@ -547,6 +571,19 @@ def build_mcp_dispatcher(
                 # author is being offered alongside its own.
                 "clients": authoring_broker.clients(),
             }
+        if name == "wait_authoring_request":
+            if authoring_broker is None:
+                raise ValueError("client-side workflow generation is not configured")
+            claimed = authoring_broker.wait_claim(
+                actor=actor,
+                client=str(arguments["client"]),
+                timeout_seconds=int(arguments.get("timeout_seconds", 120)),
+            )
+            return {
+                "request": claimed,
+                "waiting": authoring_broker.pending(),
+                "clients": authoring_broker.clients(),
+            }
         if name == "submit_authoring_response":
             if authoring_broker is None:
                 raise ValueError("client-side workflow generation is not configured")
@@ -672,13 +709,14 @@ def mcp_routes(
         if isinstance(message, list):
             responses = [
                 response for item in message
-                if isinstance(item, Mapping) and (response := dispatch(item, actor)) is not None
+                if isinstance(item, Mapping)
+                and (response := await asyncio.to_thread(dispatch, item, actor)) is not None
             ]
             return JSONResponse(responses) if responses else JSONResponse(None, status_code=202)
         if not isinstance(message, Mapping) or message.get("jsonrpc") != "2.0":
             return JSONResponse(_failure(None, INVALID_REQUEST, "expected a JSON-RPC 2.0 message"))
 
-        response = dispatch(message, actor)
+        response = await asyncio.to_thread(dispatch, message, actor)
         if response is None:
             return JSONResponse(None, status_code=202)
         return JSONResponse(response)

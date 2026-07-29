@@ -20,6 +20,7 @@ from orbit.web.authoring_events import (
     CLOSE_BAD_CLIENT_NAME, CLOSE_UNAUTHENTICATED, authoring_event_routes,
 )
 from orbit.workflow.authoring import ExternalAuthoringBroker
+from orbit.workflow.authoring import CancelScope, cancellable
 
 
 LOOPBACK = ("127.0.0.1", 51234)
@@ -126,6 +127,40 @@ class AuthoringEventTests(unittest.TestCase):
 
         self.run_scenario(scenario)
         self.answer()
+        parked[0].join(timeout=10.0)
+
+    def test_a_claimed_app_is_told_when_its_request_is_cancelled(self) -> None:
+        app = self.build()
+        scope = CancelScope(job_id="authoring_job:cancel-me")
+        parked: list = []
+
+        def generate() -> None:
+            try:
+                with cancellable(scope):
+                    self.broker.generator_for("cursor")("write me a workflow")
+            except Exception:
+                # Cancellation is the expected terminal outcome of this thread;
+                # the socket event is the protocol assertion below.
+                pass
+
+        async def scenario() -> None:
+            async with Socket(app) as socket:
+                await socket.next()
+                await socket.frame()
+                thread = threading.Thread(target=generate, daemon=True)
+                parked.append(thread)
+                thread.start()
+                self.assertEqual("request_parked", (await socket.frame())["type"])
+                request = self.broker.claim(actor="local", client="cursor")
+                self.assertIsNotNone(request)
+                scope.cancel()
+                cancelled = await socket.frame()
+                self.assertEqual("request_cancelled", cancelled["type"])
+                self.assertEqual(request["request_id"], cancelled["request_id"])
+                self.assertEqual("cursor", cancelled["claimed_by"])
+                self.assertEqual("cancelled_by_operator", cancelled["reason"])
+
+        self.run_scenario(scenario)
         parked[0].join(timeout=10.0)
 
     def test_work_parked_before_the_socket_existed_is_not_a_blind_spot(self) -> None:
