@@ -1,7 +1,14 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+import sqlite3
+import tempfile
 import unittest
+
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.types import interrupt
 
 from orbit.workflow.catalogs import (
     HandlerManifest,
@@ -9,6 +16,7 @@ from orbit.workflow.catalogs import (
     InMemorySchemaCatalog,
 )
 from orbit.workflow.domain.definitions import (
+    CompiledWorkflow,
     IREdge,
     IRHandlerRef,
     IRNode,
@@ -18,13 +26,21 @@ from orbit.workflow.domain.definitions import (
 )
 from orbit.workflow.domain.durable_execution import ExecutionSafety
 from orbit.workflow.domain.handlers import ResourceProfile
+from orbit.workflow.domain.serialization import definition_hash
 from orbit.workflow.langgraph_runtime import (
     BoundHandler,
     HandlerBindingError,
+    HandlerOutcome,
     LangGraphHandlerRegistry,
+    LangGraphRunConflict,
+    LangGraphWorkflowService,
     compile_generated_workflow,
     compile_workflow,
 )
+from orbit.workflow.persistence.workflow_versions import SQLiteWorkflowVersionStore
+from orbit.web.api_v1 import OPS_WRITE_SCOPE, READ_SCOPE, WRITE_SCOPE, Authorizer
+from orbit.web.app import create_app
+from tests.test_web_composition import AsgiHarness
 
 
 FINGERPRINT = "sha256:" + "a" * 64
@@ -73,6 +89,7 @@ def edge(
     mapping=IDENTITY,
     priority=0,
     back_edge=False,
+    route="success",
 ) -> IREdge:
     return IREdge(
         edge_id,
@@ -80,7 +97,7 @@ def edge(
         source_port,
         target,
         target_port,
-        "success",
+        route,
         condition,
         mapping,
         priority,
@@ -113,6 +130,124 @@ def binding(name, invoke) -> BoundHandler:
 
 
 class LangGraphWorkflowCompilerTests(unittest.TestCase):
+    def test_explicit_error_outcome_selects_error_edge(self) -> None:
+        action = node(
+            "action", inputs=("value",), outputs=("value",), route_mode="exclusive"
+        )
+        succeeded = node(
+            "succeeded", inputs=("value",), kind="terminal", handler=False
+        )
+        failed = node(
+            "failed", inputs=("value",), kind="terminal", handler=False
+        )
+        ir = workflow(
+            (action, succeeded, failed),
+            (
+                edge("ok", "action", "succeeded"),
+                edge("failed", "action", "failed", route="error"),
+            ),
+            entry=("action",),
+            terminals=("succeeded", "failed"),
+            result=("action", "value"),
+        )
+        registry = LangGraphHandlerRegistry([
+            binding("action", lambda values, config, context: HandlerOutcome(
+                {"value": "rejected:" + values["value"]}, route="error"
+            ))
+        ])
+
+        result = compile_workflow(ir, registry).invoke({"value": "x"})
+
+        self.assertEqual("error", result["node_routes"]["action"])
+        self.assertEqual(["action", "failed"], result["execution_order"])
+        self.assertEqual("rejected:x", result["result"])
+
+    def test_checkpointed_interrupt_resumes_with_same_thread(self) -> None:
+        action = node("action", inputs=("value",), outputs=("value",))
+        terminal = node(
+            "terminal", inputs=("value",), kind="terminal", handler=False
+        )
+        ir = workflow(
+            (action, terminal),
+            (edge("done", "action", "terminal"),),
+            entry=("action",),
+            terminals=("terminal",),
+            result=("action", "value"),
+        )
+
+        def wait_for_approval(values, config, context):
+            approved = interrupt({"value": values["value"]})
+            return {"value": values["value"] if approved else "rejected"}
+
+        compiled = compile_workflow(
+            ir,
+            LangGraphHandlerRegistry([binding("action", wait_for_approval)]),
+            checkpointer=InMemorySaver(),
+        )
+        config = {"configurable": {"thread_id": "test-interrupt"}}
+
+        paused = compiled.invoke({"value": "payload"}, config=config)
+        resumed = compiled.resume(True, config=config)
+
+        self.assertIsNone(paused["result"])
+        self.assertEqual("payload", resumed["result"])
+
+    def test_sqlite_checkpoint_resumes_after_runtime_is_rebuilt(self) -> None:
+        action = node("action", inputs=("value",), outputs=("value",))
+        terminal = node(
+            "terminal", inputs=("value",), kind="terminal", handler=False
+        )
+        ir = workflow(
+            (action, terminal),
+            (edge("done", "action", "terminal"),),
+            entry=("action",),
+            terminals=("terminal",),
+            result=("action", "value"),
+        )
+
+        def wait_for_value(values, config, context):
+            suffix = interrupt("suffix")
+            return {"value": values["value"] + suffix}
+
+        registry = LangGraphHandlerRegistry([binding("action", wait_for_value)])
+        config = {"configurable": {"thread_id": "durable-interrupt"}}
+        with tempfile.TemporaryDirectory() as directory:
+            database = str(Path(directory) / "checkpoints.sqlite3")
+            with SqliteSaver.from_conn_string(database) as saver:
+                first = compile_workflow(ir, registry, checkpointer=saver)
+                self.assertIsNone(first.invoke({"value": "saved"}, config=config)["result"])
+            with SqliteSaver.from_conn_string(database) as saver:
+                rebuilt = compile_workflow(ir, registry, checkpointer=saver)
+                result = rebuilt.resume("-resumed", config=config)
+
+        self.assertEqual("saved-resumed", result["result"])
+
+    def test_stream_exposes_native_node_updates(self) -> None:
+        action = node("action", inputs=("value",), outputs=("value",))
+        terminal = node(
+            "terminal", inputs=("value",), kind="terminal", handler=False
+        )
+        ir = workflow(
+            (action, terminal),
+            (edge("done", "action", "terminal"),),
+            entry=("action",),
+            terminals=("terminal",),
+            result=("action", "value"),
+        )
+        compiled = compile_workflow(
+            ir,
+            LangGraphHandlerRegistry([
+                binding("action", lambda values, config, context: {
+                    "value": values["value"] + 1
+                })
+            ]),
+        )
+
+        chunks = list(compiled.stream({"value": 1}))
+
+        self.assertIn("action", chunks[0])
+        self.assertIn("terminal", chunks[-1])
+
     def test_agent_dsl_is_validated_before_langgraph_compilation(self) -> None:
         schema_catalog = InMemorySchemaCatalog(
             {SCHEMA: {"type": "integer"}}
@@ -360,6 +495,291 @@ class LangGraphWorkflowCompilerTests(unittest.TestCase):
             ["count", "count", "count", "terminal"],
             result["execution_order"],
         )
+
+
+class LangGraphWorkflowServiceTests(unittest.TestCase):
+    def test_service_migrates_early_run_metadata_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run_database = Path(directory) / "langgraph-runs.sqlite3"
+            with sqlite3.connect(run_database) as connection:
+                connection.execute(
+                    "CREATE TABLE langgraph_runs("
+                    "run_id TEXT PRIMARY KEY,workflow_id TEXT,workflow_version INTEGER,"
+                    "status TEXT,revision INTEGER,result_json TEXT,error TEXT,"
+                    "created_at TEXT,updated_at TEXT)"
+                )
+            LangGraphWorkflowService(
+                object(),
+                LangGraphHandlerRegistry([]),
+                run_db_path=run_database,
+                checkpoint_db_path=Path(directory) / "checkpoints.sqlite3",
+            )
+            with sqlite3.connect(run_database) as connection:
+                columns = {
+                    row[1] for row in connection.execute(
+                        "PRAGMA table_info(langgraph_runs)"
+                    )
+                }
+
+        self.assertIn("input_json", columns)
+        self.assertIn("interrupts_json", columns)
+
+    def publish(self, directory: str, ir: WorkflowIR) -> SQLiteWorkflowVersionStore:
+        store = SQLiteWorkflowVersionStore(Path(directory) / "workflows.sqlite3")
+        store.publish(
+            CompiledWorkflow(ir, definition_hash(ir), "test", "sha256:" + "c" * 64),
+            expected_latest_version=0,
+            source_format="json",
+            source_text="{}",
+            actor="test:author",
+            dsl_version="1.3",
+        )
+        return store
+
+    def service(self, directory: str, store, registry) -> LangGraphWorkflowService:
+        return LangGraphWorkflowService(
+            store,
+            registry,
+            run_db_path=Path(directory) / "langgraph-runs.sqlite3",
+            checkpoint_db_path=Path(directory) / "langgraph-checkpoints.sqlite3",
+        )
+
+    def test_start_is_durable_and_idempotent(self) -> None:
+        action = node("action", inputs=("value",), outputs=("value",))
+        terminal = node(
+            "terminal", inputs=("value",), kind="terminal", handler=False
+        )
+        ir = workflow(
+            (action, terminal),
+            (edge("done", "action", "terminal"),),
+            entry=("action",), terminals=("terminal",), result=("action", "value"),
+        )
+        registry = LangGraphHandlerRegistry([
+            binding("action", lambda values, config, context: {
+                "value": values["value"] + 1
+            })
+        ])
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.publish(directory, ir)
+            service = self.service(directory, store, registry)
+
+            created = service.start(
+                ir.workflow_id, {"value": 4}, idempotency_key="start-once"
+            )
+            replayed = service.start(
+                ir.workflow_id, {"value": 4}, idempotency_key="start-once"
+            )
+
+            self.assertEqual("completed", created.status)
+            self.assertEqual(5, created.result)
+            self.assertEqual(created.run_id, replayed.run_id)
+            self.assertEqual(created, service.get(created.run_id))
+            with self.assertRaises(LangGraphRunConflict):
+                service.start(
+                    ir.workflow_id, {"value": 9}, idempotency_key="start-once"
+                )
+
+    def test_interrupted_run_resumes_after_service_rebuild(self) -> None:
+        action = node("action", inputs=("value",), outputs=("value",))
+        terminal = node(
+            "terminal", inputs=("value",), kind="terminal", handler=False
+        )
+        ir = workflow(
+            (action, terminal),
+            (edge("done", "action", "terminal"),),
+            entry=("action",), terminals=("terminal",), result=("action", "value"),
+        )
+
+        def approval(values, config, context):
+            accepted = interrupt("approve")
+            return {"value": values["value"] if accepted else -1}
+
+        registry = LangGraphHandlerRegistry([binding("action", approval)])
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.publish(directory, ir)
+            first = self.service(directory, store, registry)
+            paused = first.start(
+                ir.workflow_id, {"value": 7}, idempotency_key="interrupt"
+            )
+            rebuilt = self.service(directory, store, registry)
+            completed = rebuilt.resume(
+                paused.run_id,
+                True,
+                expected_revision=paused.revision,
+                idempotency_key="resume-once",
+            )
+            replayed = rebuilt.resume(
+                paused.run_id,
+                True,
+                expected_revision=paused.revision,
+                idempotency_key="resume-once",
+            )
+
+            self.assertEqual("interrupted", paused.status)
+            self.assertEqual("approve", paused.interrupts[0]["value"])
+            self.assertEqual("completed", completed.status)
+            self.assertEqual(7, completed.result)
+            self.assertEqual(paused.revision + 1, completed.revision)
+            self.assertEqual(completed, replayed)
+            self.assertEqual((completed,), rebuilt.list_runs(status="completed"))
+            self.assertEqual((), rebuilt.recover_running())
+            with self.assertRaises(LangGraphRunConflict):
+                rebuilt.resume(
+                    paused.run_id,
+                    False,
+                    expected_revision=paused.revision,
+                    idempotency_key="resume-once",
+                )
+
+
+class LangGraphHttpApiTests(unittest.TestCase):
+    def publish(self, directory: str, ir: WorkflowIR) -> SQLiteWorkflowVersionStore:
+        store = SQLiteWorkflowVersionStore(Path(directory) / "workflows.sqlite3")
+        store.publish(
+            CompiledWorkflow(ir, definition_hash(ir), "test", "sha256:" + "c" * 64),
+            expected_latest_version=0,
+            source_format="json",
+            source_text="{}",
+            actor="test:author",
+            dsl_version="1.3",
+        )
+        return store
+
+    def service(self, directory: str, store, registry) -> LangGraphWorkflowService:
+        return LangGraphWorkflowService(
+            store,
+            registry,
+            run_db_path=Path(directory) / "langgraph-runs.sqlite3",
+            checkpoint_db_path=Path(directory) / "langgraph-checkpoints.sqlite3",
+        )
+
+    def test_optional_routes_start_list_and_read_a_run(self) -> None:
+        action = node("action", inputs=("value",), outputs=("value",))
+        terminal = node(
+            "terminal", inputs=("value",), kind="terminal", handler=False
+        )
+        ir = workflow(
+            (action, terminal),
+            (edge("done", "action", "terminal"),),
+            entry=("action",), terminals=("terminal",), result=("action", "value"),
+        )
+        registry = LangGraphHandlerRegistry([
+            binding("action", lambda values, config, context: {
+                "value": values["value"] + 1
+            })
+        ])
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.publish(directory, ir)
+            service = self.service(directory, store, registry)
+            app = create_app(
+                Path(directory) / "orbit.sqlite3",
+                workflow_db_path=store.path,
+                langgraph_service=service,
+                authenticator=lambda request: request.headers.get("x-orbit-actor"),
+                authorizer=Authorizer(lambda actor: (
+                    READ_SCOPE, WRITE_SCOPE, OPS_WRITE_SCOPE,
+                )),
+                worker_count=1,
+            )
+            with AsgiHarness(app) as client:
+                started = client.post(
+                    "/api/v1/langgraph-runs",
+                    actor="test:operator",
+                    key="http-start",
+                    body={"workflow_id": ir.workflow_id, "input": {"value": 8}},
+                )
+                self.assertEqual(200, started.status_code, started.text)
+                run = started.json()["data"]["run"]
+                listed = client.get(
+                    "/api/v1/langgraph-runs?status=completed",
+                    actor="test:operator",
+                )
+                detail = client.get(
+                    f"/api/v1/langgraph-runs/{run['run_id']}",
+                    actor="test:operator",
+                )
+
+        self.assertEqual(9, run["result"])
+        self.assertEqual(run["run_id"], listed.json()["data"]["runs"][0]["run_id"])
+        self.assertEqual(run["revision"], detail.json()["projection_version"])
+
+    def test_routes_are_absent_without_explicit_service(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            app = create_app(Path(directory) / "orbit.sqlite3", worker_count=1)
+            with AsgiHarness(app) as client:
+                response = client.get("/api/v1/langgraph-runs")
+        self.assertEqual(404, response.status_code)
+
+    def test_interrupt_resume_is_authorized_versioned_and_idempotent(self) -> None:
+        action = node("action", inputs=("value",), outputs=("value",))
+        terminal = node(
+            "terminal", inputs=("value",), kind="terminal", handler=False
+        )
+        ir = workflow(
+            (action, terminal),
+            (edge("done", "action", "terminal"),),
+            entry=("action",), terminals=("terminal",), result=("action", "value"),
+        )
+
+        def approval(values, config, context):
+            accepted = interrupt({"question": "approve?"})
+            return {"value": values["value"] if accepted else -1}
+
+        registry = LangGraphHandlerRegistry([binding("action", approval)])
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.publish(directory, ir)
+            service = self.service(directory, store, registry)
+            app = create_app(
+                Path(directory) / "orbit.sqlite3",
+                workflow_db_path=store.path,
+                langgraph_service=service,
+                authenticator=lambda request: request.headers.get("x-orbit-actor"),
+                authorizer=Authorizer(lambda actor: (
+                    (READ_SCOPE,) if actor == "test:reader"
+                    else (READ_SCOPE, WRITE_SCOPE, OPS_WRITE_SCOPE)
+                )),
+                worker_count=1,
+            )
+            with AsgiHarness(app) as client:
+                started = client.post(
+                    "/api/v1/langgraph-runs",
+                    actor="test:operator", key="api-interrupt",
+                    body={"workflow_id": ir.workflow_id, "input": {"value": 12}},
+                ).json()["data"]["run"]
+                reader_view = client.get(
+                    f"/api/v1/langgraph-runs/{started['run_id']}",
+                    actor="test:reader",
+                ).json()["data"]
+                forbidden = client.post(
+                    f"/api/v1/langgraph-runs/{started['run_id']}/resume",
+                    actor="test:reader", key="reader-resume",
+                    body={"expected_version": started["revision"], "value": True},
+                )
+                path = f"/api/v1/langgraph-runs/{started['run_id']}/resume"
+                body = {"expected_version": started["revision"], "value": True}
+                completed = client.post(
+                    path, actor="test:operator", key="api-resume", body=body,
+                )
+                replayed = client.post(
+                    path, actor="test:operator", key="api-resume", body=body,
+                )
+                conflict = client.post(
+                    path,
+                    actor="test:operator",
+                    key="api-resume",
+                    body={"expected_version": started["revision"], "value": False},
+                )
+
+        self.assertEqual("interrupted", started["status"])
+        self.assertEqual({"question": "approve?"}, started["interrupts"][0]["value"])
+        self.assertTrue(started["allowed_commands"])
+        self.assertEqual([], reader_view["allowed_commands"])
+        self.assertEqual(403, forbidden.status_code)
+        self.assertEqual(200, completed.status_code)
+        self.assertEqual(completed.json(), replayed.json())
+        self.assertEqual(12, completed.json()["data"]["run"]["result"])
+        self.assertEqual(409, conflict.status_code)
+        self.assertEqual("idempotency_conflict", conflict.json()["error"]["code"])
 
 
 if __name__ == "__main__":

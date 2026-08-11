@@ -44,6 +44,73 @@ parallel fan-out, joins, back-edge loops, input defaults, compiled condition
 ASTs, compiled mapping ASTs, explicit primary results, and any LangGraph
 checkpointer supplied by the application.
 
-Only `success` edges are accepted in this first adapter. Error, timeout, and
-cancel routing require an explicit failure-result contract; they are rejected
-at compile time instead of being silently treated as success paths.
+Handlers return a mapping for the normal success path. For explicit failure
+families they return `HandlerOutcome(output, route="error" | "timeout" |
+"cancel")`; matching edges receive the structured output. Arbitrary Python
+exceptions are not converted into business routes.
+
+With a checkpointer, pass a stable `thread_id`. If a Handler calls LangGraph's
+`interrupt()`, resume with `workflow.resume(value, config=the_same_config)`.
+`workflow.stream(...)` exposes native LangGraph progress chunks.
+
+## Durable application service
+
+`LangGraphWorkflowService` is the isolated application boundary for published
+workflows. It loads immutable versions from `SQLiteWorkflowVersionStore`, uses
+a separate SQLite database for LangGraph checkpoints, and keeps run metadata
+and idempotency receipts outside graph state:
+
+```python
+service = LangGraphWorkflowService(
+    workflow_versions,
+    runtime_handlers,
+    run_db_path=project_dir / "langgraph-runs.sqlite3",
+    checkpoint_db_path=project_dir / "langgraph-checkpoints.sqlite3",
+)
+
+run = service.start(
+    "workflow:review",
+    {"request": request},
+    idempotency_key=request_id,
+)
+if run.status == "interrupted":
+    run = service.resume(
+        run.run_id,
+        True,
+        expected_revision=run.revision,
+        idempotency_key=approval_request_id,
+    )
+```
+
+Run metadata has `running`, `interrupted`, `completed`, and `failed` states.
+Interrupt IDs and JSON payloads are projected on `run.interrupts`, so callers
+do not need to decode checkpoint internals.
+Starting with the same idempotency key and identical request returns the first
+run; reusing the key for different input is rejected. Resume has the same
+idempotent receipt behavior, optimistic revision checks, and a conditional
+claim so two callers cannot resume one interrupt concurrently. Initial input
+is durable as well as checkpoints, so
+`recover()` can restart a process that died before writing its first checkpoint.
+`recover_running()` performs the same recovery over a bounded startup snapshot.
+
+This service deliberately is not mounted on Orbit's existing `/api/v1/runs`.
+ADR 002 keeps LangGraph isolated from the primary event-sourced Runtime; an
+HTTP or MCP surface for this adapter should use distinct routes and capabilities.
+
+## Optional HTTP surface
+
+Passing `langgraph_service=service` to `create_app()` explicitly mounts a
+separate surface. Omitting it leaves every route absent:
+
+| Method | Path | Scope |
+| --- | --- | --- |
+| `GET` | `/api/v1/langgraph-runs` | `runtime.read` |
+| `POST` | `/api/v1/langgraph-runs` | `runtime.write` |
+| `GET` | `/api/v1/langgraph-runs/{run_id}` | `runtime.read` |
+| `POST` | `/api/v1/langgraph-runs/{run_id}/resume` | `runtime.write` |
+| `POST` | `/api/v1/langgraph-runs/{run_id}/recover` | `runtime.ops.write` |
+
+Writes require the normal `idempotency-key` header. Read DTOs advertise a
+resume command only to actors with write scope and only while interrupted;
+clients do not infer commands from status. The existing Orbit `/api/v1/runs`
+and MCP tools remain unchanged.

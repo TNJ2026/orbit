@@ -4,20 +4,30 @@ from .compiler import (
     BoundHandler,
     CompiledLangGraphWorkflow,
     HandlerBindingError,
+    HandlerOutcome,
     LangGraphCompileError,
     LangGraphExecutionContext,
     LangGraphHandlerRegistry,
     compile_generated_workflow,
     compile_workflow,
 )
+from .service import (
+    LangGraphRun,
+    LangGraphRunConflict,
+    LangGraphWorkflowService,
+)
 
 __all__ = [
     "BoundHandler",
     "CompiledLangGraphWorkflow",
     "HandlerBindingError",
+    "HandlerOutcome",
     "LangGraphCompileError",
     "LangGraphExecutionContext",
     "LangGraphHandlerRegistry",
+    "LangGraphRun",
+    "LangGraphRunConflict",
+    "LangGraphWorkflowService",
     "compile_generated_workflow",
     "compile_workflow",
 ]

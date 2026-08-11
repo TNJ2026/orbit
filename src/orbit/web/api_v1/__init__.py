@@ -24,7 +24,10 @@ from starlette.routing import Route
 from ...workflow.api.artifact_read_models import PREVIEW_LIMIT_BYTES
 from ...workflow.api.routes import RateLimiter
 
-from . import artifacts, drafts, human, ops, plans, recovery, runs, workflows
+from . import (
+    artifacts, drafts, human, langgraph_runs, ops, plans, recovery, runs,
+    workflows,
+)
 from .common import (
     OPS_READ_SCOPE, OPS_WRITE_SCOPE, READ_SCOPE, SENSITIVE_SCOPE, WRITE_SCOPE,
     Authorizer, authoring_timeout_seconds, error,
@@ -64,6 +67,7 @@ def build_api_v1(
     single_goal_mode: bool = True,
     authoring_jobs=None,
     shutdown_request: Callable[[], None] | None = None,
+    langgraph_service=None,
 ) -> list[Route]:
     """Routes for `/api/v1`, ready to mount on the composition root.
 
@@ -97,7 +101,7 @@ def build_api_v1(
         authoring_jobs=authoring_jobs,
         shutdown_request=shutdown_request,
     )
-    return [
+    routes = [
         *runs.build_routes(ctx),
         *plans.build_routes(ctx),
         *artifacts.build_routes(ctx),
@@ -107,3 +111,6 @@ def build_api_v1(
         *workflows.build_routes(ctx),
         *drafts.build_routes(ctx),
     ]
+    if langgraph_service is not None:
+        routes.extend(langgraph_runs.build_routes(ctx, langgraph_service))
+    return routes

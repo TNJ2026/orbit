@@ -451,6 +451,7 @@ def create_app(
     single_goal_mode: bool = True,
     workflow_db_path: Path | str | None = None,
     shutdown_request: Callable[[], None] | None = None,
+    langgraph_service: Any = None,
 ) -> Starlette:
     """Build the Runtime application.
 
@@ -835,6 +836,7 @@ def create_app(
             operational_config=operational_config,
             authoring_jobs=authoring_jobs,
             shutdown_request=shutdown_request,
+            langgraph_service=langgraph_service,
         ),
         # The MCP surface is a second protocol over the same application
         # services and the same identity, not a second implementation.

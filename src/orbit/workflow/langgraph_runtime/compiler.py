@@ -9,11 +9,11 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
-from operator import add
 from types import MappingProxyType
 from typing import Annotated, Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command
 
 from ..data.mapping import evaluate_mapping
 from ..domain.definitions import IREdge, IRNode, WorkflowIR
@@ -36,9 +36,23 @@ class LangGraphExecutionContext:
     node_id: str
 
 
+@dataclass(frozen=True)
+class HandlerOutcome:
+    """A trusted Handler's data plus the edge family that should consume it."""
+
+    output: Mapping[str, Any]
+    route: str = "success"
+
+    def __post_init__(self) -> None:
+        if self.route not in {"success", "error", "timeout", "cancel"}:
+            raise ValueError(f"unsupported Handler outcome route: {self.route!r}")
+        if not isinstance(self.output, Mapping):
+            raise TypeError("Handler outcome output must be a mapping")
+
+
 HandlerCallable = Callable[
     [Mapping[str, Any], Mapping[str, Any], LangGraphExecutionContext],
-    Mapping[str, Any],
+    Mapping[str, Any] | HandlerOutcome,
 ]
 
 
@@ -94,10 +108,17 @@ def _merge_dicts(left: Mapping[str, Any], right: Mapping[str, Any]) -> dict[str,
     return merged
 
 
+def _append_order(left: Iterable[str], right: Iterable[str]) -> tuple[str, ...]:
+    """Keep deterministic order across serializers that decode tuples as lists."""
+
+    return (*left, *right)
+
+
 class _GraphState(TypedDict):
     workflow_inputs: Mapping[str, Any]
     node_outputs: Annotated[dict[str, Mapping[str, Any]], _merge_dicts]
-    execution_order: Annotated[tuple[str, ...], add]
+    node_routes: Annotated[dict[str, str], _merge_dicts]
+    execution_order: Annotated[tuple[str, ...], _append_order]
 
 
 def _edge_value(
@@ -135,7 +156,9 @@ def _assemble_inputs(
     )
     for edge in incoming:
         source_output = state["node_outputs"].get(edge.source_node)
-        if source_output is None or edge.route != "success":
+        if source_output is None:
+            continue
+        if state["node_routes"].get(edge.source_node, "success") != edge.route:
             continue
         if not evaluate_condition(
             edge.condition, source_output, workflow_inputs=workflow_inputs
@@ -155,7 +178,7 @@ def _assemble_inputs(
             assembled[port.id] = to_primitive(port.default)
         if port.required and port.id not in assembled:
             raise ValueError(f"missing required input {node.id}.{port.id}")
-    return freeze_json(assembled)
+    return to_primitive(assembled)
 
 
 def _normalize_outputs(node: IRNode, result: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -170,14 +193,14 @@ def _normalize_outputs(node: IRNode, result: Mapping[str, Any]) -> Mapping[str, 
         raise ValueError(
             f"handler for {node.id!r} omitted required outputs: {sorted(missing)}"
         )
-    return freeze_json(dict(result))
+    return to_primitive(dict(result))
 
 
 def _handlerless_outputs(
     node: IRNode, inputs: Mapping[str, Any]
 ) -> Mapping[str, Any]:
     if not node.outputs:
-        return MappingProxyType({})
+        return {}
     copied = {port.id: inputs[port.id] for port in node.outputs if port.id in inputs}
     return _normalize_outputs(node, copied)
 
@@ -191,10 +214,13 @@ class CompiledLangGraphWorkflow:
 
     def invoke(
         self,
-        inputs: Mapping[str, Any],
+        inputs: Mapping[str, Any] | None,
         *,
         config: Mapping[str, Any] | None = None,
     ) -> Mapping[str, Any]:
+        if inputs is None:
+            state = self.graph.invoke(None, config=dict(config or {}))
+            return self._result(state)
         declared = {port.id for port in self.ir.inputs}
         unknown = set(inputs) - declared
         if unknown:
@@ -207,21 +233,69 @@ class CompiledLangGraphWorkflow:
                 raise ValueError(f"missing workflow input {port.id!r}")
         state = self.graph.invoke(
             {
-                "workflow_inputs": freeze_json(normalized),
+                "workflow_inputs": to_primitive(normalized),
                 "node_outputs": {},
+                "node_routes": {},
                 "execution_order": (),
             },
             config=dict(config or {}),
         )
+        return self._result(state)
+
+    def stream(
+        self,
+        inputs: Mapping[str, Any] | None,
+        *,
+        config: Mapping[str, Any] | None = None,
+        stream_mode: str = "updates",
+    ):
+        """Yield LangGraph execution chunks without weakening input validation."""
+
+        if inputs is None:
+            graph_input = None
+        else:
+            declared = {port.id for port in self.ir.inputs}
+            unknown = set(inputs) - declared
+            if unknown:
+                raise ValueError(f"unknown workflow inputs: {sorted(unknown)}")
+            normalized = dict(inputs)
+            for port in self.ir.inputs:
+                if port.id not in normalized and port.has_default:
+                    normalized[port.id] = to_primitive(port.default)
+                if port.required and port.id not in normalized:
+                    raise ValueError(f"missing workflow input {port.id!r}")
+            graph_input = {
+                "workflow_inputs": to_primitive(normalized),
+                "node_outputs": {},
+                "node_routes": {},
+                "execution_order": (),
+            }
+        return self.graph.stream(
+            graph_input, config=dict(config or {}), stream_mode=stream_mode
+        )
+
+    def resume(
+        self,
+        value: Any,
+        *,
+        config: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        """Resume a checkpointed LangGraph interrupt with its external value."""
+
+        state = self.graph.invoke(Command(resume=value), config=dict(config))
+        return self._result(state)
+
+    def _result(self, state: Mapping[str, Any]) -> Mapping[str, Any]:
         result = None
         if self.ir.result is not None:
-            result = state["node_outputs"][self.ir.result.node_id][
-                self.ir.result.output_port_id
-            ]
+            producer = state.get("node_outputs", {}).get(self.ir.result.node_id)
+            if producer is not None:
+                result = producer.get(self.ir.result.output_port_id)
         return {
             "result": to_primitive(result),
-            "node_outputs": to_primitive(state["node_outputs"]),
-            "execution_order": list(state["execution_order"]),
+            "node_outputs": to_primitive(state.get("node_outputs", {})),
+            "node_routes": dict(state.get("node_routes", {})),
+            "execution_order": list(state.get("execution_order", ())),
         }
 
 
@@ -235,12 +309,6 @@ def compile_workflow(
 
     if not isinstance(ir, WorkflowIR):
         raise TypeError("compile_workflow requires WorkflowIR")
-    unsupported = sorted({edge.route for edge in ir.edges if edge.route != "success"})
-    if unsupported:
-        raise LangGraphCompileError(
-            "LangGraph adapter currently supports success edges only; found "
-            + ", ".join(unsupported)
-        )
     bound = {
         node.id: registry.resolve(node)
         for node in ir.nodes
@@ -267,11 +335,14 @@ def compile_workflow(
                     current.config,
                     LangGraphExecutionContext(ir.workflow_id, current.id),
                 )
-                if not isinstance(raw, Mapping):
+                outcome = raw if isinstance(raw, HandlerOutcome) else HandlerOutcome(raw)
+                if not isinstance(outcome.output, Mapping):
                     raise TypeError(f"handler for {current.id!r} must return a mapping")
-                output = _normalize_outputs(current, raw)
+                output = _normalize_outputs(current, outcome.output)
+            route_name = "success" if implementation is None else outcome.route
             return {
                 "node_outputs": {current.id: output},
+                "node_routes": {current.id: route_name},
                 "execution_order": (current.id,),
             }
 
@@ -301,7 +372,8 @@ def compile_workflow(
             selected = [
                 edge.target_node
                 for edge in edges
-                if evaluate_condition(
+                if edge.route == state["node_routes"].get(current.id, "success")
+                and evaluate_condition(
                     edge.condition,
                     source,
                     workflow_inputs=state["workflow_inputs"],
