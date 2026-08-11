@@ -28,7 +28,7 @@ from orbit.workflow.domain.definitions import (
 from orbit.workflow.domain.durable_execution import ExecutionSafety
 from orbit.workflow.domain.data import PortDataPolicy, PortTransport
 from orbit.workflow.domain.handlers import ResourceProfile, UnknownExternalResultError
-from orbit.workflow.domain.serialization import definition_hash
+from orbit.workflow.domain.serialization import definition_hash, to_primitive
 from orbit.workflow.langgraph_runtime import (
     BoundHandler,
     HandlerBindingError,
@@ -185,7 +185,7 @@ class LangGraphWorkflowCompilerValidationTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             ValueError,
-            "workflow input port 'payload' uses 'artifact_ref'",
+            "node 'action' input port 'payload' uses 'artifact_ref'",
         ):
             compile_workflow(
                 ir,
@@ -906,6 +906,48 @@ class LangGraphProductionWiringTests(unittest.TestCase):
             replayed = bound.invoke({"value": 7}, {}, context)
 
         self.assertEqual({"value": 8}, first)
+        self.assertEqual(first, replayed)
+        self.assertEqual(1, len(client.requests))
+
+    def test_agent_artifact_is_committed_and_replayed(self) -> None:
+        class ArtifactClient(FakeAgentClient):
+            def execute(self, request, context):
+                self.requests.append(request)
+                artifact_id = context.artifacts.write(
+                    name="value", content=b"agent document",
+                    content_type="application/octet-stream",
+                )
+                return AgentResponse(
+                    {"value": {"artifact_id": str(artifact_id)}},
+                    None, "provider:artifact", artifact_refs=(artifact_id,),
+                )
+
+        client = ArtifactClient()
+        registration = self.registration(client)
+        output = artifact_port("value")
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "runs.sqlite3"
+            registry = trusted_handlers(
+                [registration], attempt_db_path=database,
+            )
+            bound = registry.resolve(self.bound_node(registration.manifest))
+            context = LangGraphExecutionContext(
+                "workflow:test", "agent", "langgraph_run:test",
+                "langgraph_attempt:test:agent:1", (),
+                (to_primitive(output),),
+            )
+            first = bound.invoke({"value": "prompt"}, {}, context)
+            replayed = bound.invoke({"value": "prompt"}, {}, context)
+            artifact_id = first["value"]["artifact_id"]
+            content = LangGraphArtifactStore(
+                database, Path(directory) / "artifacts",
+            ).access(
+                run_id="langgraph_run:test", node_id="consumer",
+                attempt_id="langgraph_attempt:consumer", output_ports=(),
+                inputs={"value": {"artifact_id": artifact_id}},
+            ).read(artifact_id)
+
+        self.assertEqual(b"agent document", content)
         self.assertEqual(first, replayed)
         self.assertEqual(1, len(client.requests))
 

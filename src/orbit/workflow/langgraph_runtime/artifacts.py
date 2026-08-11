@@ -44,7 +44,8 @@ class LangGraphArtifactStore:
         policies = {
             port.id: port
             for port in output_ports
-            if port.data_policy.transport is PortTransport.ARTIFACT_REF
+            if getattr(port.data_policy.transport, "value", port.data_policy.transport)
+            == PortTransport.ARTIFACT_REF.value
         }
         return _ArtifactAccess(
             self, run_id, node_id, attempt_id, policies, authorized,

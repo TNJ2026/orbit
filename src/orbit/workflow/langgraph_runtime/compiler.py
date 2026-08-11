@@ -41,6 +41,8 @@ class LangGraphExecutionContext:
     node_id: str
     run_id: str = ""
     attempt_id: str = ""
+    input_ports: tuple[Mapping[str, Any], ...] = ()
+    output_ports: tuple[Mapping[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -70,6 +72,7 @@ class BoundHandler:
     manifest_fingerprint: str
     invoke: HandlerCallable
     cancel_run: Callable[[str], bool] | None = None
+    supported_transports: frozenset[str] = frozenset({"inline"})
 
     def __post_init__(self) -> None:
         if not self.name.strip() or not self.version.strip():
@@ -80,6 +83,10 @@ class BoundHandler:
             raise TypeError("handler invoke must be callable")
         if self.cancel_run is not None and not callable(self.cancel_run):
             raise TypeError("handler cancel_run must be callable")
+        if not self.supported_transports or not self.supported_transports <= {
+            "inline", "artifact_ref", "secret_ref",
+        }:
+            raise ValueError("handler supported_transports are invalid")
 
 
 class LangGraphHandlerRegistry:
@@ -328,25 +335,6 @@ def compile_workflow(
 
     if not isinstance(ir, WorkflowIR):
         raise TypeError("compile_workflow requires WorkflowIR")
-    for owner, ports in (
-        ("workflow input", ir.inputs),
-        ("workflow output", ir.outputs),
-        *(
-            (f"node {node.id!r} input", node.inputs)
-            for node in ir.nodes
-        ),
-        *(
-            (f"node {node.id!r} output", node.outputs)
-            for node in ir.nodes
-        ),
-    ):
-        for port in ports:
-            transport = port.data_policy.transport.value
-            if transport != "inline":
-                raise LangGraphCompileError(
-                    f"{owner} port {port.id!r} uses {transport!r}; "
-                    "LangGraph artifact and secret transports are not yet supported"
-                )
     bound = {
         node.id: registry.resolve(node)
         for node in ir.nodes
@@ -357,6 +345,29 @@ def compile_workflow(
             raise HandlerBindingError(
                 f"executable node {node.id!r} has no Handler binding"
             )
+        supported = (
+            bound[node.id].supported_transports
+            if node.id in bound else frozenset({"inline"})
+        )
+        for direction, ports in (("input", node.inputs), ("output", node.outputs)):
+            for port in ports:
+                transport = port.data_policy.transport.value
+                if transport not in supported:
+                    raise LangGraphCompileError(
+                        f"node {node.id!r} {direction} port {port.id!r} uses "
+                        f"{transport!r}, unsupported by its LangGraph Handler"
+                    )
+    graph_transports = frozenset().union(
+        *(handler.supported_transports for handler in bound.values())
+    ) if bound else frozenset({"inline"})
+    for owner, ports in (("workflow input", ir.inputs), ("workflow output", ir.outputs)):
+        for port in ports:
+            transport = port.data_policy.transport.value
+            if transport not in graph_transports:
+                raise LangGraphCompileError(
+                    f"{owner} port {port.id!r} uses {transport!r}, unsupported "
+                    "by the LangGraph Handlers in this workflow"
+                )
 
     builder = StateGraph(_GraphState)
 
@@ -404,6 +415,8 @@ def compile_workflow(
                             + f":{current.id}:"
                             + str(state.get("execution_order", ()).count(current.id) + 1)
                         ),
+                        tuple(to_primitive(port) for port in current.inputs),
+                        tuple(to_primitive(port) for port in current.outputs),
                     ),
                 )
                 outcome = raw if isinstance(raw, HandlerOutcome) else HandlerOutcome(raw)

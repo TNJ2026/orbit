@@ -16,6 +16,7 @@ from ..domain.serialization import canonical_json
 from ..handlers import AgentHandler, TransformHandler
 from ..handlers.agent import AgentRequest
 from ..persistence.workflow_versions import SQLiteWorkflowVersionStore
+from .artifacts import LangGraphArtifactStore
 from .compiler import (
     BoundHandler, LangGraphHandlerRegistry, LangGraphUnknownExternalResult,
 )
@@ -105,7 +106,7 @@ class _AgentAttemptJournal:
             connection.commit()
 
 
-def _agent_adapter(implementation: AgentHandler, manifest, journal):
+def _agent_adapter(implementation: AgentHandler, manifest, journal, artifact_store):
     active: dict[str, set[str]] = {}
     active_lock = Lock()
 
@@ -116,6 +117,23 @@ def _agent_adapter(implementation: AgentHandler, manifest, journal):
         deadline = datetime.now(timezone.utc) + timedelta(
             seconds=manifest.resource_profile.max_duration_seconds
         )
+        artifacts = artifact_store.access(
+            run_id=context.run_id,
+            node_id=context.node_id,
+            attempt_id=context.attempt_id,
+            output_ports=tuple(
+                SimpleNamespace(
+                    id=port["id"], schema_id=port["schema_id"],
+                    data_policy=SimpleNamespace(
+                        transport=SimpleNamespace(value=port["data_policy"]["transport"]),
+                        max_size_bytes=port["data_policy"]["max_size_bytes"],
+                        content_types=tuple(port["data_policy"]["content_types"]),
+                    ),
+                )
+                for port in context.output_ports
+            ),
+            inputs=inputs,
+        )
         request_context = SimpleNamespace(
             request=SimpleNamespace(
                 attempt_id=context.attempt_id,
@@ -123,11 +141,11 @@ def _agent_adapter(implementation: AgentHandler, manifest, journal):
                 process_deadline=deadline,
                 input=inputs,
                 config=config,
-                input_ports=(),
-                output_ports=(),
+                input_ports=context.input_ports,
+                output_ports=context.output_ports,
             ),
             output=_DiscardedOutput(),
-            artifacts=None,
+            artifacts=artifacts,
         )
         try:
             with active_lock:
@@ -146,12 +164,21 @@ def _agent_adapter(implementation: AgentHandler, manifest, journal):
             if not isinstance(response.output, Mapping):
                 raise ValueError("Agent output must be an object")
             output = dict(response.output)
+            referenced = {str(item) for item in response.artifact_refs}
+            produced = set(artifacts.produced_artifact_ids)
+            if referenced != produced:
+                raise ValueError(
+                    "Agent artifact_refs must exactly match produced Artifacts"
+                )
+            artifact_store.commit(artifacts.produced_artifact_ids)
             journal.settle(context.attempt_id, "succeeded", output=output)
             return output
         except UnknownExternalResultError as exc:
+            artifact_store.abandon(artifacts.produced_artifact_ids)
             journal.settle(context.attempt_id, "unknown", error=str(exc))
             raise LangGraphUnknownExternalResult(str(exc)) from None
         except Exception as exc:
+            artifact_store.abandon(artifacts.produced_artifact_ids)
             journal.settle(
                 context.attempt_id, "failed", error=f"{type(exc).__name__}: {exc}"
             )
@@ -168,10 +195,16 @@ def _agent_adapter(implementation: AgentHandler, manifest, journal):
 
 
 def trusted_handlers(
-    registrations: Sequence[Any], *, attempt_db_path: Path | str | None = None
+    registrations: Sequence[Any], *, attempt_db_path: Path | str | None = None,
+    artifact_store: LangGraphArtifactStore | None = None,
 ) -> LangGraphHandlerRegistry:
     """Expose only reviewed adapters, never arbitrary Orbit NodeHandlers."""
 
+    if artifact_store is None and attempt_db_path is not None:
+        attempt_path = Path(attempt_db_path)
+        artifact_store = LangGraphArtifactStore(
+            attempt_path, attempt_path.parent / "artifacts",
+        )
     handlers: list[BoundHandler] = []
     for registration in registrations:
         manifest = registration.manifest
@@ -185,10 +218,11 @@ def trusted_handlers(
         elif (
             isinstance(registration.implementation, AgentHandler)
             and attempt_db_path is not None
+            and artifact_store is not None
         ):
             journal = _AgentAttemptJournal(attempt_db_path)
             invoke, cancel_run = _agent_adapter(
-                registration.implementation, manifest, journal
+                registration.implementation, manifest, journal, artifact_store
             )
             handlers.append(BoundHandler(
                 manifest.name,
@@ -196,6 +230,7 @@ def trusted_handlers(
                 manifest.fingerprint,
                 invoke,
                 cancel_run,
+                frozenset({"inline", "artifact_ref"}),
             ))
     return LangGraphHandlerRegistry(handlers)
 
@@ -209,11 +244,15 @@ def build_service(
     """Build the isolated service and its two adapter-owned databases."""
 
     state = Path(state_directory)
+    artifact_store = LangGraphArtifactStore(
+        state / "langgraph-runs.sqlite3", state / "artifacts",
+    )
     return LangGraphWorkflowService(
         SQLiteWorkflowVersionStore(workflow_db_path),
         trusted_handlers(
             registrations,
             attempt_db_path=state / "langgraph-runs.sqlite3",
+            artifact_store=artifact_store,
         ),
         run_db_path=state / "langgraph-runs.sqlite3",
         checkpoint_db_path=state / "langgraph-checkpoints.sqlite3",
