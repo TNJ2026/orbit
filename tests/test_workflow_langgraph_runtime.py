@@ -168,6 +168,47 @@ def binding(name, invoke) -> BoundHandler:
 
 
 class LangGraphWorkflowCompilerValidationTests(unittest.TestCase):
+    def test_default_completion_policy_is_compatible(self) -> None:
+        action = node("action", inputs=("value",), outputs=("value",))
+        ir = workflow(
+            (action,), (),
+            entry=("action",),
+            terminals=("action",),
+            result=("action", "value"),
+            policies=(IRPolicy("complete", "completion", {}),),
+        )
+
+        result = compile_workflow(
+            ir,
+            LangGraphHandlerRegistry([
+                binding("action", lambda values, config, context: values)
+            ]),
+        ).invoke({"value": 7})
+
+        self.assertEqual(7, result["result"])
+
+    def test_non_default_completion_policy_is_rejected_fail_closed(self) -> None:
+        action = node("action", inputs=("value",), outputs=("value",))
+        ir = workflow(
+            (action,), (),
+            entry=("action",),
+            terminals=("action",),
+            result=("action", "value"),
+            policies=(IRPolicy(
+                "complete", "completion", {"required_terminal_count": 2},
+            ),),
+        )
+
+        with self.assertRaisesRegex(
+            ValueError, "only supports required_terminal_count=1",
+        ):
+            compile_workflow(
+                ir,
+                LangGraphHandlerRegistry([
+                    binding("action", lambda values, config, context: values)
+                ]),
+            )
+
     def test_loop_error_route_exhaustion_is_rejected_fail_closed(self) -> None:
         action = node(
             "action", inputs=("value",), outputs=("value",),

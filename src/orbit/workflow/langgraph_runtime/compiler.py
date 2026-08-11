@@ -408,7 +408,7 @@ def compile_workflow(
             (
                 policy for policy in ir.policies
                 if policy.kind not in {
-                    "route", "retry", "join", "loop", "rework",
+                    "route", "retry", "join", "loop", "rework", "completion",
                 }
                 or (
                     policy.kind == "join"
@@ -477,6 +477,14 @@ def compile_workflow(
         if policy.config.get("exhaustion", "fail") != "fail":
             raise LangGraphCompileError(
                 f"rework policy {policy.id!r} only supports fail exhaustion"
+            )
+    for policy in (item for item in ir.policies if item.kind == "completion"):
+        unknown = set(policy.config) - {"required_terminal_count"}
+        required = policy.config.get("required_terminal_count", 1)
+        if unknown or required != 1 or isinstance(required, bool):
+            raise LangGraphCompileError(
+                f"completion policy {policy.id!r} only supports "
+                "required_terminal_count=1"
             )
     policies_by_id = {policy.id: policy for policy in ir.policies}
     for edge in (item for item in ir.edges if item.back_edge):
