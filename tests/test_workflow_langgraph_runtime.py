@@ -705,10 +705,53 @@ class LangGraphHttpApiTests(unittest.TestCase):
 
     def test_routes_are_absent_without_explicit_service(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            app = create_app(Path(directory) / "orbit.sqlite3", worker_count=1)
+            app = create_app(
+                Path(directory) / "orbit.sqlite3",
+                authenticator=lambda request: request.headers.get("x-orbit-actor"),
+                authorizer=Authorizer(lambda actor: (READ_SCOPE,)),
+                worker_count=1,
+            )
             with AsgiHarness(app) as client:
                 response = client.get("/api/v1/langgraph-runs")
+                capability = client.get(
+                    "/api/v1/capabilities", actor="test:reader"
+                ).json()["data"][
+                    "capabilities"
+                ]["langgraph_workflows"]
         self.assertEqual(404, response.status_code)
+        self.assertEqual(
+            {"available": False, "reason": "service_not_configured"}, capability
+        )
+
+    def test_capability_and_startup_recovery_follow_optional_wiring(self) -> None:
+        class RecoveringService:
+            def __init__(self) -> None:
+                self.recoveries = 0
+
+            def recover_running(self):
+                self.recoveries += 1
+                return ()
+
+        service = RecoveringService()
+        with tempfile.TemporaryDirectory() as directory:
+            app = create_app(
+                Path(directory) / "orbit.sqlite3",
+                langgraph_service=service,
+                authenticator=lambda request: request.headers.get("x-orbit-actor"),
+                authorizer=Authorizer(lambda actor: (READ_SCOPE,)),
+                worker_count=1,
+            )
+            self.assertIs(service, app.state.langgraph_service)
+            with AsgiHarness(app) as client:
+                capability = client.get(
+                    "/api/v1/capabilities", actor="test:reader"
+                ).json()["data"][
+                    "capabilities"
+                ]["langgraph_workflows"]
+        self.assertEqual(
+            {"available": True, "api": "/api/v1/langgraph-runs"}, capability
+        )
+        self.assertEqual(1, service.recoveries)
 
     def test_interrupt_resume_is_authorized_versioned_and_idempotent(self) -> None:
         action = node("action", inputs=("value",), outputs=("value",))

@@ -573,6 +573,11 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: Starlette):
+        if langgraph_service is not None:
+            # A process may stop after LangGraph wrote a checkpoint but before
+            # the adapter settled its run metadata. Recover those bounded,
+            # explicitly opted-in runs before accepting new work.
+            langgraph_service.recover_running()
         composition.start()
         try:
             yield
@@ -680,6 +685,11 @@ def create_app(
         "foreach": {"available": True},
         "subflow": {"available": True},
         "history_overlay": {"available": True},
+        "langgraph_workflows": (
+            {"available": True, "api": "/api/v1/langgraph-runs"}
+            if langgraph_service is not None
+            else {"available": False, "reason": "service_not_configured"}
+        ),
         "workflow_generation": (
             # The names an author may pick from. Empty means this Runtime has
             # exactly one way to write DSL and the choice is not offered.
@@ -903,4 +913,8 @@ def create_app(
     # `orbit mcp` reaches the tools through this instead of over its own HTTP
     # connection: same dispatcher, same services, one transport removed.
     app.state.mcp_dispatch = mcp_dispatch
+    # Kept separate from the Orbit composition by design (ADR 002). Embedders
+    # may operate the optional adapter without implying it is the default
+    # event-sourced Runtime.
+    app.state.langgraph_service = langgraph_service
     return app
