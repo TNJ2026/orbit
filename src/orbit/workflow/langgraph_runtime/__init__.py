@@ -1,5 +1,6 @@
 """Compile trusted Orbit Workflow IR into an executable LangGraph graph."""
 
+from .artifacts import LangGraphArtifactAccessDenied, LangGraphArtifactStore
 from .compiler import (
     BoundHandler,
     CompiledLangGraphWorkflow,
@@ -25,6 +26,8 @@ __all__ = [
     "HandlerBindingError",
     "HandlerOutcome",
     "LangGraphCompileError",
+    "LangGraphArtifactAccessDenied",
+    "LangGraphArtifactStore",
     "LangGraphExecutionContext",
     "LangGraphHandlerRegistry",
     "LangGraphUnknownExternalResult",

@@ -47,6 +47,10 @@ from orbit.web.api_v1 import OPS_WRITE_SCOPE, READ_SCOPE, WRITE_SCOPE, Authorize
 from orbit.web.app import HandlerRegistration, create_app
 from orbit.web.builtin_handlers import BUILTIN_SCHEMAS, builtin_handlers
 from orbit.workflow.langgraph_runtime.wiring import trusted_handlers
+from orbit.workflow.langgraph_runtime.artifacts import (
+    LangGraphArtifactAccessDenied,
+    LangGraphArtifactStore,
+)
 from tests.test_web_composition import AsgiHarness
 
 
@@ -148,7 +152,7 @@ def binding(name, invoke) -> BoundHandler:
     return BoundHandler(name, "1.0.0", FINGERPRINT, invoke)
 
 
-class LangGraphWorkflowCompilerTests(unittest.TestCase):
+class LangGraphWorkflowCompilerValidationTests(unittest.TestCase):
     def test_non_inline_port_transport_is_rejected_fail_closed(self) -> None:
         artifact = artifact_port("payload")
         action = IRNode(
@@ -222,6 +226,78 @@ class LangGraphWorkflowCompilerTests(unittest.TestCase):
         self.assertEqual(["action", "failed"], result["execution_order"])
         self.assertEqual("rejected:x", result["result"])
 
+
+class LangGraphArtifactStoreTests(unittest.TestCase):
+    def test_stage_commit_and_scoped_read(self) -> None:
+        output = artifact_port("document")
+        with tempfile.TemporaryDirectory() as directory:
+            store = LangGraphArtifactStore(
+                Path(directory) / "runs.sqlite3", Path(directory) / "blobs",
+            )
+            producer = store.access(
+                run_id="langgraph_run:one", node_id="produce",
+                attempt_id="langgraph_attempt:one", output_ports=(output,), inputs={},
+            )
+            artifact_id = producer.write(
+                name="document", content=b"hello",
+                content_type="application/octet-stream",
+            )
+            with self.assertRaises(LangGraphArtifactAccessDenied):
+                store.access(
+                    run_id="langgraph_run:one", node_id="consume",
+                    attempt_id="langgraph_attempt:two", output_ports=(),
+                    inputs={"document": {"artifact_id": artifact_id}},
+                ).read(artifact_id)
+
+            store.commit(producer.produced_artifact_ids)
+            content = store.access(
+                run_id="langgraph_run:one", node_id="consume",
+                attempt_id="langgraph_attempt:two", output_ports=(),
+                inputs={"document": {"artifact_id": artifact_id}},
+            ).read(artifact_id)
+
+        self.assertEqual(b"hello", content)
+
+    def test_size_content_type_and_run_scope_are_enforced(self) -> None:
+        output = IRPort(
+            "document", SCHEMA, True, False, None, "",
+            PortDataPolicy(
+                PortTransport.ARTIFACT_REF,
+                max_size_bytes=4,
+                content_types=("text/plain",),
+            ),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            store = LangGraphArtifactStore(
+                Path(directory) / "runs.sqlite3", Path(directory) / "blobs",
+            )
+            access = store.access(
+                run_id="langgraph_run:one", node_id="produce",
+                attempt_id="langgraph_attempt:one", output_ports=(output,), inputs={},
+            )
+            with self.assertRaises(LangGraphArtifactAccessDenied):
+                access.write(
+                    name="document", content=b"ok",
+                    content_type="application/octet-stream",
+                )
+            with self.assertRaisesRegex(ValueError, "size limit"):
+                access.write(
+                    name="document", content=b"large", content_type="text/plain",
+                )
+            artifact_id = access.write(
+                name="document", content=b"okay", content_type="text/plain",
+            )
+            store.commit(access.produced_artifact_ids)
+            foreign = store.access(
+                run_id="langgraph_run:other", node_id="consume",
+                attempt_id="langgraph_attempt:other", output_ports=(),
+                inputs={"document": {"artifact_id": artifact_id}},
+            )
+            with self.assertRaises(LangGraphArtifactAccessDenied):
+                foreign.read(artifact_id)
+
+
+class LangGraphWorkflowCompilerTests(unittest.TestCase):
     def test_checkpointed_interrupt_resumes_with_same_thread(self) -> None:
         action = node("action", inputs=("value",), outputs=("value",))
         terminal = node(
