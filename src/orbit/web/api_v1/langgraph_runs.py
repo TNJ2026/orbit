@@ -213,6 +213,18 @@ def build_routes(ctx, service) -> list[Route]:
             },
         )
 
+    async def artifact_lineage(request: Request) -> JSONResponse:
+        actor = ctx.authenticate(request, READ_SCOPE)
+        if isinstance(actor, JSONResponse):
+            return actor
+        try:
+            graph = service.artifacts.lineage(
+                request.path_params["artifact_id"], actor=actor,
+            )
+        except LookupError as exc:
+            return error("not_found", str(exc), 404)
+        return JSONResponse(envelope(graph))
+
     routes = [
         Route("/api/v1/langgraph-runs", list_runs, methods=["GET"]),
         Route("/api/v1/langgraph-runs", start_run, methods=["POST"]),
@@ -243,6 +255,10 @@ def build_routes(ctx, service) -> list[Route]:
             Route(
                 "/api/v1/langgraph-artifacts/{artifact_id}/content",
                 artifact_content, methods=["GET"],
+            ),
+            Route(
+                "/api/v1/langgraph-artifacts/{artifact_id}/lineage",
+                artifact_lineage, methods=["GET"],
             ),
         ])
     return routes

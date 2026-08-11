@@ -254,13 +254,22 @@ class LangGraphArtifactStoreTests(unittest.TestCase):
                     run_id="langgraph_run:one", node_id="consume",
                     attempt_id="langgraph_attempt:two", output_ports=(),
                     inputs={"document": {"artifact_id": artifact_id}},
+                    input_ports=(output,),
                 ).read(artifact_id)
 
             store.commit(producer.produced_artifact_ids)
+            with self.assertRaises(LangGraphArtifactAccessDenied):
+                store.access(
+                    run_id="langgraph_run:one", node_id="spoofed",
+                    attempt_id="langgraph_attempt:spoofed", output_ports=(),
+                    input_ports=(port("document"),),
+                    inputs={"document": {"artifact_id": artifact_id}},
+                ).read(artifact_id)
             content = store.access(
                 run_id="langgraph_run:one", node_id="consume",
                 attempt_id="langgraph_attempt:two", output_ports=(),
                 inputs={"document": {"artifact_id": artifact_id}},
+                input_ports=(output,),
             ).read(artifact_id)
 
         self.assertEqual(b"hello", content)
@@ -299,9 +308,81 @@ class LangGraphArtifactStoreTests(unittest.TestCase):
                 run_id="langgraph_run:other", node_id="consume",
                 attempt_id="langgraph_attempt:other", output_ports=(),
                 inputs={"document": {"artifact_id": artifact_id}},
+                input_ports=(output,),
             )
             with self.assertRaises(LangGraphArtifactAccessDenied):
                 foreign.read(artifact_id)
+
+    def test_lineage_tracks_authorized_artifact_derivation(self) -> None:
+        output = artifact_port("document")
+        with tempfile.TemporaryDirectory() as directory:
+            store = LangGraphArtifactStore(
+                Path(directory) / "runs.sqlite3", Path(directory) / "blobs",
+            )
+            source = store.access(
+                run_id="langgraph_run:one", node_id="source",
+                attempt_id="langgraph_attempt:source", output_ports=(output,),
+                inputs={}, actor="test:owner",
+            )
+            source_id = source.write(
+                name="document", content=b"source",
+                content_type="application/octet-stream",
+            )
+            source.commit()
+            derived = store.access(
+                run_id="langgraph_run:one", node_id="derived",
+                attempt_id="langgraph_attempt:derived", output_ports=(output,),
+                inputs={"document": {"artifact_id": source_id}},
+                input_ports=(output,),
+                actor="test:owner",
+            )
+            derived.read(source_id)
+            derived_id = derived.write(
+                name="document", content=b"derived",
+                content_type="application/octet-stream",
+            )
+            derived.commit()
+
+            graph = store.lineage(derived_id, actor="test:owner")
+            reverse = store.lineage(source_id, actor="test:owner")
+            with self.assertRaises(LookupError):
+                store.lineage(derived_id, actor="test:other")
+
+        self.assertEqual([source_id], graph["derived_from"])
+        self.assertEqual([derived_id], reverse["derived_artifacts"])
+
+    def test_gc_preserves_deduplicated_blob_still_in_use(self) -> None:
+        output = artifact_port("document")
+        with tempfile.TemporaryDirectory() as directory:
+            store = LangGraphArtifactStore(
+                Path(directory) / "runs.sqlite3", Path(directory) / "blobs",
+            )
+            abandoned = store.access(
+                run_id="langgraph_run:one", node_id="failed",
+                attempt_id="langgraph_attempt:failed", output_ports=(output,),
+                inputs={},
+            )
+            abandoned_id = abandoned.write(
+                name="document", content=b"shared",
+                content_type="application/octet-stream",
+            )
+            retained = store.access(
+                run_id="langgraph_run:one", node_id="success",
+                attempt_id="langgraph_attempt:success", output_ports=(output,),
+                inputs={},
+            )
+            retained_id = retained.write(
+                name="document", content=b"shared",
+                content_type="application/octet-stream",
+            )
+            retained.commit()
+            store.abandon((abandoned_id,))
+
+            collected = store.collect_abandoned()
+            content = store.read(retained_id)
+
+        self.assertEqual((abandoned_id,), collected)
+        self.assertEqual(b"shared", content)
 
 
 class LangGraphWorkflowCompilerTests(unittest.TestCase):
@@ -953,6 +1034,7 @@ class LangGraphProductionWiringTests(unittest.TestCase):
                 run_id="langgraph_run:test", node_id="consumer",
                 attempt_id="langgraph_attempt:consumer", output_ports=(),
                 inputs={"value": {"artifact_id": artifact_id}},
+                input_ports=(output,),
             ).read(artifact_id)
 
         self.assertEqual(b"agent document", content)
@@ -1287,6 +1369,10 @@ class LangGraphHttpApiTests(unittest.TestCase):
                     f"/api/v1/langgraph-artifacts/{artifact_id}/content",
                     actor="test:reader",
                 )
+                lineage = client.get(
+                    f"/api/v1/langgraph-artifacts/{artifact_id}/lineage",
+                    actor="test:reader",
+                )
                 denied = client.get(
                     f"/api/v1/langgraph-artifacts/{artifact_id}",
                     actor="test:other",
@@ -1313,6 +1399,7 @@ class LangGraphHttpApiTests(unittest.TestCase):
         )
         self.assertEqual(artifact_id, detail.json()["data"]["artifact_id"])
         self.assertEqual(b"projected content", content.content)
+        self.assertEqual([], lineage.json()["data"]["derived_from"])
         self.assertEqual(404, denied.status_code)
         self.assertEqual([], hidden.json()["data"]["artifacts"])
         self.assertEqual(

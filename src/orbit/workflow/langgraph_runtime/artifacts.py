@@ -42,6 +42,11 @@ class LangGraphArtifactStore:
                     "ALTER TABLE langgraph_artifacts ADD COLUMN owner_actor"
                     " TEXT NOT NULL DEFAULT 'system:langgraph'"
                 )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS langgraph_artifact_links("
+                "artifact_id TEXT NOT NULL,source_artifact_id TEXT NOT NULL,"
+                "run_id TEXT NOT NULL,PRIMARY KEY(artifact_id,source_artifact_id))"
+            )
 
     def _connect(self):
         connection = sqlite3.connect(self.database)
@@ -50,10 +55,23 @@ class LangGraphArtifactStore:
 
     def access(
         self, *, run_id, node_id, attempt_id, output_ports, inputs,
-        secret_values=(), actor="system:langgraph",
+        input_ports=(), secret_values=(), actor="system:langgraph",
     ):
+        artifact_inputs = set()
+        for port in input_ports:
+            if isinstance(port, Mapping):
+                port_id = port["id"]
+                transport = port.get("data_policy", {}).get("transport")
+            else:
+                port_id = port.id
+                transport = getattr(
+                    port.data_policy.transport, "value", port.data_policy.transport
+                )
+            if transport == PortTransport.ARTIFACT_REF.value:
+                artifact_inputs.add(port_id)
         authorized = set()
-        for value in inputs.values():
+        for port_id in artifact_inputs:
+            value = inputs.get(port_id)
             if isinstance(value, Mapping) and isinstance(value.get("artifact_id"), str):
                 authorized.add(value["artifact_id"])
         policies = {
@@ -125,7 +143,70 @@ class LangGraphArtifactStore:
             row["blob_key"], max_size_bytes=row["size_bytes"]
         )
 
-    def commit(self, artifact_ids) -> None:
+    def lineage(self, artifact_id: str, *, actor: str) -> Mapping[str, Any]:
+        artifact = self.get(artifact_id, actor=actor)
+        with self._connect() as connection:
+            upstream = [
+                row[0] for row in connection.execute(
+                    "SELECT source_artifact_id FROM langgraph_artifact_links"
+                    " WHERE artifact_id=? ORDER BY source_artifact_id",
+                    (artifact_id,),
+                )
+            ]
+            downstream = [
+                row[0] for row in connection.execute(
+                    "SELECT artifact_id FROM langgraph_artifact_links"
+                    " WHERE source_artifact_id=? ORDER BY artifact_id",
+                    (artifact_id,),
+                )
+            ]
+        visible_upstream = [
+            item for item in upstream
+            if self._record(item)["owner_actor"] == actor
+        ]
+        visible_downstream = [
+            item for item in downstream
+            if self._record(item)["owner_actor"] == actor
+        ]
+        return {
+            "artifact": artifact,
+            "derived_from": visible_upstream,
+            "derived_artifacts": visible_downstream,
+        }
+
+    def collect_abandoned(self, *, limit: int = 100) -> tuple[str, ...]:
+        """Remove unreferenced CAS blobs for a bounded abandoned snapshot."""
+
+        if isinstance(limit, bool) or not 1 <= limit <= 500:
+            raise ValueError("limit must be between 1 and 500")
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT artifact_id,blob_key FROM langgraph_artifacts"
+                " WHERE status='abandoned' ORDER BY rowid LIMIT ?", (limit,),
+            ).fetchall()
+            collected = []
+            for row in rows:
+                retained = connection.execute(
+                    "SELECT 1 FROM langgraph_artifacts WHERE blob_key=?"
+                    " AND status IN ('staged','committed') LIMIT 1",
+                    (row["blob_key"],),
+                ).fetchone()
+                if retained is None:
+                    self.backend.delete(row["blob_key"])
+                connection.execute(
+                    "DELETE FROM langgraph_artifact_links"
+                    " WHERE artifact_id=? OR source_artifact_id=?",
+                    (row["artifact_id"], row["artifact_id"]),
+                )
+                connection.execute(
+                    "DELETE FROM langgraph_artifacts WHERE artifact_id=?"
+                    " AND status='abandoned'", (row["artifact_id"],),
+                )
+                collected.append(row["artifact_id"])
+            connection.commit()
+        return tuple(collected)
+
+    def commit(self, artifact_ids, *, source_artifact_ids=()) -> None:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             for artifact_id in artifact_ids:
@@ -138,6 +219,28 @@ class LangGraphArtifactStore:
                     connection.rollback()
                     raise LangGraphArtifactAccessDenied(
                         "Artifact is not staged by this attempt"
+                    )
+                target = connection.execute(
+                    "SELECT run_id,owner_actor FROM langgraph_artifacts"
+                    " WHERE artifact_id=?", (artifact_id,),
+                ).fetchone()
+                for source_id in source_artifact_ids:
+                    source = connection.execute(
+                        "SELECT run_id,owner_actor,status FROM langgraph_artifacts"
+                        " WHERE artifact_id=?", (source_id,),
+                    ).fetchone()
+                    if (
+                        source is None or source["status"] != "committed"
+                        or source["run_id"] != target["run_id"]
+                        or source["owner_actor"] != target["owner_actor"]
+                    ):
+                        connection.rollback()
+                        raise LangGraphArtifactAccessDenied(
+                            "Artifact lineage source is not authorized"
+                        )
+                    connection.execute(
+                        "INSERT OR IGNORE INTO langgraph_artifact_links VALUES (?,?,?)",
+                        (artifact_id, source_id, target["run_id"]),
                     )
             connection.commit()
 
@@ -166,6 +269,12 @@ class _ArtifactAccess:
     @property
     def produced_artifact_ids(self):
         return tuple(self._produced[key] for key in sorted(self._produced))
+
+    def commit(self) -> None:
+        self.store.commit(
+            self.produced_artifact_ids,
+            source_artifact_ids=tuple(sorted(self.authorized)),
+        )
 
     def write(self, *, name, content, content_type, filename=None):
         port = self.policies.get(name)

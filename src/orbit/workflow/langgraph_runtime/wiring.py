@@ -151,6 +151,7 @@ def _agent_adapter(
                 for port in context.output_ports
             ),
             inputs=inputs,
+            input_ports=context.input_ports,
             secret_values=secret_values.values(),
             actor=context.actor,
         )
@@ -195,7 +196,7 @@ def _agent_adapter(
                 raise ValueError(
                     "Agent artifact_refs must exactly match produced Artifacts"
                 )
-            artifact_store.commit(artifacts.produced_artifact_ids)
+            artifacts.commit()
             journal.settle(context.attempt_id, "succeeded", output=output)
             return output
         except UnknownExternalResultError as exc:
