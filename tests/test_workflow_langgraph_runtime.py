@@ -951,6 +951,58 @@ class LangGraphProductionWiringTests(unittest.TestCase):
         self.assertEqual(first, replayed)
         self.assertEqual(1, len(client.requests))
 
+    def test_artifact_flows_between_agent_nodes_in_one_graph(self) -> None:
+        class PipelineClient(FakeAgentClient):
+            def execute(self, request, context):
+                self.requests.append(request)
+                if ":produce:" in request.idempotency_key:
+                    artifact_id = context.artifacts.write(
+                        name="document", content=b"pipeline document",
+                        content_type="application/octet-stream",
+                    )
+                    return AgentResponse(
+                        {"document": {"artifact_id": artifact_id}}, None, None,
+                        artifact_refs=(artifact_id,),
+                    )
+                reference = request.input["document"]["artifact_id"]
+                content = context.artifacts.read(reference)
+                return AgentResponse({"value": content.decode("utf-8")}, None, None)
+
+        client = PipelineClient()
+        registration = self.registration(client)
+        reference = IRHandlerRef(
+            registration.manifest.name, registration.manifest.version,
+            registration.manifest.fingerprint,
+        )
+        document = artifact_port("document")
+        produce = IRNode(
+            "produce", "action", (port("value"),), (document,),
+            reference, {}, (), None,
+        )
+        consume = IRNode(
+            "consume", "action", (document,), (port("value"),),
+            reference, {}, (), None,
+        )
+        ir = WorkflowIR(
+            "1.3", "workflow:artifact-pipeline", "Artifact pipeline", "", {},
+            (port("value"),), (), (produce, consume),
+            (edge(
+                "document", "produce", "consume",
+                source_port="document", target_port="document",
+            ),),
+            ("produce",), ("consume",), (), (), {},
+            IRResult("consume", "value"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            registry = trusted_handlers(
+                [registration],
+                attempt_db_path=Path(directory) / "runs.sqlite3",
+            )
+            result = compile_workflow(ir, registry).invoke({"value": "start"})
+
+        self.assertEqual("pipeline document", result["result"])
+        self.assertEqual(2, len(client.requests))
+
     def test_unknown_agent_attempt_is_never_executed_twice(self) -> None:
         client = FakeAgentClient(
             error=UnknownExternalResultError("connection lost after submission")
@@ -1108,6 +1160,71 @@ class LangGraphHttpApiTests(unittest.TestCase):
             mcp_started["result"]["content"][0]["text"]
         )
         self.assertEqual(21, mcp_payload["result"])
+
+    def test_artifact_http_and_mcp_projections_expose_committed_content(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "langgraph-runs.sqlite3"
+            artifacts = LangGraphArtifactStore(
+                database, Path(directory) / "artifacts",
+            )
+            access = artifacts.access(
+                run_id="langgraph_run:projection", node_id="agent",
+                attempt_id="langgraph_attempt:projection",
+                output_ports=(artifact_port("document"),), inputs={},
+            )
+            artifact_id = access.write(
+                name="document", content=b"projected content",
+                content_type="application/octet-stream",
+            )
+            artifacts.commit(access.produced_artifact_ids)
+            service = LangGraphWorkflowService(
+                object(), LangGraphHandlerRegistry([]),
+                run_db_path=database,
+                checkpoint_db_path=Path(directory) / "checkpoints.sqlite3",
+                artifact_store=artifacts,
+            )
+            app = create_app(
+                Path(directory) / "orbit.sqlite3",
+                langgraph_service=service,
+                authenticator=lambda request: request.headers.get("x-orbit-actor"),
+                authorizer=Authorizer(lambda actor: (READ_SCOPE,)),
+                worker_count=1,
+            )
+            with AsgiHarness(app) as client:
+                listed = client.get(
+                    "/api/v1/langgraph-artifacts?run_id=langgraph_run%3Aprojection",
+                    actor="test:reader",
+                )
+                detail = client.get(
+                    f"/api/v1/langgraph-artifacts/{artifact_id}",
+                    actor="test:reader",
+                )
+                content = client.get(
+                    f"/api/v1/langgraph-artifacts/{artifact_id}/content",
+                    actor="test:reader",
+                )
+                mcp = client.request(
+                    "POST", "/mcp", actor="test:reader",
+                    body={
+                        "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                        "params": {
+                            "name": "read_langgraph_artifact",
+                            "arguments": {"artifact_id": artifact_id},
+                        },
+                    },
+                ).json()
+
+        self.assertEqual(200, listed.status_code, listed.text)
+        self.assertEqual(
+            artifact_id,
+            listed.json()["data"]["artifacts"][0]["artifact_id"],
+        )
+        self.assertEqual(artifact_id, detail.json()["data"]["artifact_id"])
+        self.assertEqual(b"projected content", content.content)
+        self.assertEqual(
+            artifact_id,
+            json.loads(mcp["result"]["content"][0]["text"])["artifact_id"],
+        )
 
     def test_routes_are_absent_without_explicit_service(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

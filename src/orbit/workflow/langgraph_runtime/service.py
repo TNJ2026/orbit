@@ -47,12 +47,14 @@ class LangGraphWorkflowService:
         *,
         run_db_path: Path | str,
         checkpoint_db_path: Path | str,
+        artifact_store=None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.workflow_versions = workflow_versions
         self.handlers = handlers
         self.run_db_path = Path(run_db_path)
         self.checkpoint_db_path = Path(checkpoint_db_path)
+        self.artifacts = artifact_store
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.run_db_path.parent.mkdir(parents=True, exist_ok=True)
         self.checkpoint_db_path.parent.mkdir(parents=True, exist_ok=True)

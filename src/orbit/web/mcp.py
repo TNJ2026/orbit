@@ -509,6 +509,28 @@ def build_mcp_dispatcher(
                     ],
                 },
             },
+            {
+                "name": "list_langgraph_artifacts",
+                "description": "List committed Artifacts produced by LangGraph runs.",
+                "scope": READ_SCOPE,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "run_id": {"type": "string"},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+                    },
+                },
+            },
+            {
+                "name": "read_langgraph_artifact",
+                "description": "Read metadata for one committed LangGraph Artifact.",
+                "scope": READ_SCOPE,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"artifact_id": {"type": "string"}},
+                    "required": ["artifact_id"],
+                },
+            },
         )
     by_name = {tool["name"]: tool for tool in tools}
 
@@ -561,6 +583,19 @@ def build_mcp_dispatcher(
                 expected_revision=int(arguments["expected_version"]),
                 idempotency_key=str(arguments["idempotency_key"]),
             ))
+        if name == "list_langgraph_artifacts":
+            if getattr(langgraph_service, "artifacts", None) is None:
+                raise LookupError("LangGraph Artifact store is unavailable")
+            return {"artifacts": list(langgraph_service.artifacts.list(
+                run_id=arguments.get("run_id") or None,
+                limit=min(200, max(1, int(arguments.get("limit", 20)))),
+            ))}
+        if name == "read_langgraph_artifact":
+            if getattr(langgraph_service, "artifacts", None) is None:
+                raise LookupError("LangGraph Artifact store is unavailable")
+            return langgraph_service.artifacts.get(
+                str(arguments["artifact_id"])
+            )
         if name == "list_runs":
             items, cursor = reads.list_runs(
                 limit=min(200, max(1, int(arguments.get("limit", 20)))),

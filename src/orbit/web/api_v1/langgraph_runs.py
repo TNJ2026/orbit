@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from ...workflow.api.dto import envelope, page_size
@@ -161,7 +161,53 @@ def build_routes(ctx, service) -> list[Route]:
             request, WRITE_SCOPE, "langgraph_run.cancel", command
         )
 
-    return [
+    async def list_artifacts(request: Request) -> JSONResponse:
+        actor = ctx.authenticate(request, READ_SCOPE)
+        if isinstance(actor, JSONResponse):
+            return actor
+        try:
+            unknown = set(request.query_params) - {"limit", "run_id"}
+            if unknown:
+                raise ValueError(f"unknown query parameter: {sorted(unknown)[0]}")
+            items = service.artifacts.list(
+                run_id=request.query_params.get("run_id") or None,
+                limit=page_size(request.query_params.get("limit")),
+            )
+        except ValueError as exc:
+            return error("invalid_request", str(exc))
+        return JSONResponse(envelope({"artifacts": list(items)}))
+
+    async def get_artifact(request: Request) -> JSONResponse:
+        actor = ctx.authenticate(request, READ_SCOPE)
+        if isinstance(actor, JSONResponse):
+            return actor
+        try:
+            item = service.artifacts.get(request.path_params["artifact_id"])
+        except LookupError as exc:
+            return error("not_found", str(exc), 404)
+        return JSONResponse(envelope(item))
+
+    async def artifact_content(request: Request) -> Response:
+        actor = ctx.authenticate(request, READ_SCOPE)
+        if isinstance(actor, JSONResponse):
+            return actor
+        try:
+            item = service.artifacts.get(request.path_params["artifact_id"])
+            content = service.artifacts.read(item["artifact_id"])
+        except LookupError as exc:
+            return error("not_found", str(exc), 404)
+        return Response(
+            content,
+            media_type=item["content_type"],
+            headers={
+                "Content-Length": str(item["size_bytes"]),
+                "X-Content-Type-Options": "nosniff",
+                "Content-Security-Policy": "default-src 'none'; sandbox",
+                "Cache-Control": "no-store",
+            },
+        )
+
+    routes = [
         Route("/api/v1/langgraph-runs", list_runs, methods=["GET"]),
         Route("/api/v1/langgraph-runs", start_run, methods=["POST"]),
         Route("/api/v1/langgraph-runs/{run_id}", get_run, methods=["GET"]),
@@ -181,3 +227,16 @@ def build_routes(ctx, service) -> list[Route]:
             methods=["POST"],
         ),
     ]
+    if getattr(service, "artifacts", None) is not None:
+        routes.extend([
+            Route("/api/v1/langgraph-artifacts", list_artifacts, methods=["GET"]),
+            Route(
+                "/api/v1/langgraph-artifacts/{artifact_id}",
+                get_artifact, methods=["GET"],
+            ),
+            Route(
+                "/api/v1/langgraph-artifacts/{artifact_id}/content",
+                artifact_content, methods=["GET"],
+            ),
+        ])
+    return routes

@@ -256,4 +256,5 @@ def build_service(
         ),
         run_db_path=state / "langgraph-runs.sqlite3",
         checkpoint_db_path=state / "langgraph-checkpoints.sqlite3",
+        artifact_store=artifact_store,
     )
