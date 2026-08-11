@@ -493,6 +493,22 @@ def build_mcp_dispatcher(
                     "required": ["run_id"],
                 },
             },
+            {
+                "name": "cancel_langgraph_run",
+                "description": "Cancel a LangGraph run at its observed revision.",
+                "scope": WRITE_SCOPE,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "run_id": {"type": "string"},
+                        "expected_version": {"type": "integer"},
+                        "idempotency_key": {"type": "string"},
+                    },
+                    "required": [
+                        "run_id", "expected_version", "idempotency_key",
+                    ],
+                },
+            },
         )
     by_name = {tool["name"]: tool for tool in tools}
 
@@ -539,6 +555,12 @@ def build_mcp_dispatcher(
             return langgraph_run_dto(
                 langgraph_service.recover(str(arguments["run_id"]))
             )
+        if name == "cancel_langgraph_run":
+            return langgraph_run_dto(langgraph_service.cancel(
+                str(arguments["run_id"]),
+                expected_revision=int(arguments["expected_version"]),
+                idempotency_key=str(arguments["idempotency_key"]),
+            ))
         if name == "list_runs":
             items, cursor = reads.list_runs(
                 limit=min(200, max(1, int(arguments.get("limit", 20)))),

@@ -69,6 +69,7 @@ class BoundHandler:
     version: str
     manifest_fingerprint: str
     invoke: HandlerCallable
+    cancel_run: Callable[[str], bool] | None = None
 
     def __post_init__(self) -> None:
         if not self.name.strip() or not self.version.strip():
@@ -77,6 +78,8 @@ class BoundHandler:
             raise ValueError("handler fingerprint must be sha256")
         if not callable(self.invoke):
             raise TypeError("handler invoke must be callable")
+        if self.cancel_run is not None and not callable(self.cancel_run):
+            raise TypeError("handler cancel_run must be callable")
 
 
 class LangGraphHandlerRegistry:
@@ -105,6 +108,15 @@ class LangGraphHandlerRegistry:
                 f"handler manifest mismatch: {reference.name}@{reference.version}"
             )
         return handler
+
+    def cancel(self, run_id: str) -> bool:
+        """Best-effort signal to every handler currently executing this run."""
+
+        signalled = False
+        for handler in self._entries.values():
+            if handler.cancel_run is not None:
+                signalled = handler.cancel_run(run_id) or signalled
+        return signalled
 
 
 def _merge_dicts(left: Mapping[str, Any], right: Mapping[str, Any]) -> dict[str, Any]:

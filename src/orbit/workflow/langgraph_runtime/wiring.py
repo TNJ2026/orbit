@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import sqlite3
+from threading import Lock
 from types import SimpleNamespace
 from typing import Any
 
@@ -105,6 +106,9 @@ class _AgentAttemptJournal:
 
 
 def _agent_adapter(implementation: AgentHandler, manifest, journal):
+    active: dict[str, set[str]] = {}
+    active_lock = Lock()
+
     def invoke(inputs, config, context):
         replay = journal.claim(context)
         if replay is not None:
@@ -126,9 +130,19 @@ def _agent_adapter(implementation: AgentHandler, manifest, journal):
             artifacts=None,
         )
         try:
-            response = implementation.client.execute(
-                AgentRequest(inputs, config, context.attempt_id), request_context
-            )
+            with active_lock:
+                active.setdefault(context.run_id, set()).add(context.attempt_id)
+            try:
+                response = implementation.client.execute(
+                    AgentRequest(inputs, config, context.attempt_id), request_context
+                )
+            finally:
+                with active_lock:
+                    attempts = active.get(context.run_id)
+                    if attempts is not None:
+                        attempts.discard(context.attempt_id)
+                        if not attempts:
+                            active.pop(context.run_id, None)
             if not isinstance(response.output, Mapping):
                 raise ValueError("Agent output must be an object")
             output = dict(response.output)
@@ -143,7 +157,14 @@ def _agent_adapter(implementation: AgentHandler, manifest, journal):
             )
             raise
 
-    return invoke
+    def cancel_run(run_id: str) -> bool:
+        with active_lock:
+            attempts = tuple(active.get(run_id, ()))
+        for attempt_id in attempts:
+            implementation.client.cancel(f"agent:{attempt_id}")
+        return bool(attempts)
+
+    return invoke, cancel_run
 
 
 def trusted_handlers(
@@ -166,11 +187,15 @@ def trusted_handlers(
             and attempt_db_path is not None
         ):
             journal = _AgentAttemptJournal(attempt_db_path)
+            invoke, cancel_run = _agent_adapter(
+                registration.implementation, manifest, journal
+            )
             handlers.append(BoundHandler(
                 manifest.name,
                 manifest.version,
                 manifest.fingerprint,
-                _agent_adapter(registration.implementation, manifest, journal),
+                invoke,
+                cancel_run,
             ))
     return LangGraphHandlerRegistry(handlers)
 

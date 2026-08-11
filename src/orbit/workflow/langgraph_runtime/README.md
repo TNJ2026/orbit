@@ -118,6 +118,8 @@ checkpoint write is interrupted. A timeout, cancellation, process loss, or an
 attempt found `started` during recovery parks the run as `unknown`; it is never
 submitted a second time automatically. This preserves Orbit's core
 unknown-external-result rule while Agent execution migrates to LangGraph.
+Cancellation is persisted before live Handler cancellation hooks run. A late
+result therefore cannot overwrite `cancelled`.
 
 Passing `langgraph_service=service` to `create_app()` explicitly mounts a
 separate surface. Omitting it leaves every route absent:
@@ -128,6 +130,7 @@ separate surface. Omitting it leaves every route absent:
 | `POST` | `/api/v1/langgraph-runs` | `runtime.write` |
 | `GET` | `/api/v1/langgraph-runs/{run_id}` | `runtime.read` |
 | `POST` | `/api/v1/langgraph-runs/{run_id}/resume` | `runtime.write` |
+| `POST` | `/api/v1/langgraph-runs/{run_id}/cancel` | `runtime.write` |
 | `POST` | `/api/v1/langgraph-runs/{run_id}/recover` | `runtime.ops.write` |
 
 Writes require the normal `idempotency-key` header. Read DTOs advertise a
@@ -135,9 +138,10 @@ resume command only to actors with write scope and only while interrupted;
 clients do not infer commands from status. The existing Orbit `/api/v1/runs`
 tools remain unchanged.
 
-The same explicit injection advertises five MCP tools to agents:
+The same explicit injection advertises six MCP tools to agents:
 `list_langgraph_runs`, `inspect_langgraph_run`, `start_langgraph_run`,
-`resume_langgraph_run`, and `recover_langgraph_run`. They reuse the same MCP
+`resume_langgraph_run`, `cancel_langgraph_run`, and `recover_langgraph_run`.
+They reuse the same MCP
 identity and scopes as HTTP; recovery requires `runtime.ops.write`. When the
 service is absent, none of these optional tools appears in `tools/list`.
 

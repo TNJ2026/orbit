@@ -253,6 +253,56 @@ class LangGraphWorkflowService:
         inputs = None if has_checkpoint else json.loads(row["input_json"])
         return self._execute(run_id, record.ir, inputs=inputs)
 
+    def cancel(
+        self,
+        run_id: str,
+        *,
+        expected_revision: int,
+        idempotency_key: str,
+    ) -> LangGraphRun:
+        """Persist cancellation before signalling any in-flight Handler."""
+
+        if not idempotency_key.strip():
+            raise ValueError("idempotency_key is required")
+        request_hash = definition_hash({
+            "command": "cancel",
+            "run_id": run_id,
+            "expected_revision": expected_revision,
+        }).value
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            receipt = connection.execute(
+                "SELECT request_hash,run_id FROM langgraph_run_receipts"
+                " WHERE idempotency_key=?", (idempotency_key,),
+            ).fetchone()
+            if receipt is not None:
+                connection.commit()
+                if receipt["request_hash"] != request_hash:
+                    raise LangGraphRunConflict(
+                        "idempotency key was already used for another request"
+                    )
+                return self.get(receipt["run_id"])
+            changed = connection.execute(
+                "UPDATE langgraph_runs SET status='cancelled',revision=revision+1,"
+                "interrupts_json='[]',updated_at=? WHERE run_id=? AND revision=?"
+                " AND status IN ('running','interrupted')",
+                (self._stamp(), run_id, expected_revision),
+            ).rowcount
+            if changed != 1:
+                connection.rollback()
+                actual = self.get(run_id)
+                raise LangGraphRunConflict(
+                    f"cannot cancel run at revision {expected_revision}; "
+                    f"found {actual.status}@{actual.revision}"
+                )
+            connection.execute(
+                "INSERT INTO langgraph_run_receipts VALUES (?,?,?)",
+                (idempotency_key, request_hash, run_id),
+            )
+            connection.commit()
+        self.handlers.cancel(run_id)
+        return self.get(run_id)
+
     def get(self, run_id: str) -> LangGraphRun:
         with self._connect() as connection:
             row = connection.execute(
@@ -269,6 +319,7 @@ class LangGraphWorkflowService:
             raise ValueError("limit must be between 1 and 500")
         if status is not None and status not in {
             "running", "interrupted", "completed", "failed", "unknown",
+            "cancelled",
         }:
             raise ValueError("invalid LangGraph run status")
         where, params = ("", ()) if status is None else (" WHERE status=?", (status,))
@@ -325,7 +376,8 @@ class LangGraphWorkflowService:
             connection.execute("BEGIN IMMEDIATE")
             changed = connection.execute(
                 "UPDATE langgraph_runs SET status=?,revision=revision+1,result_json=?,"
-                " interrupts_json=?,error=?,updated_at=? WHERE run_id=?",
+                " interrupts_json=?,error=?,updated_at=? WHERE run_id=?"
+                " AND status!='cancelled'",
                 (
                     status,
                     None if result is None else canonical_json(result),
@@ -337,6 +389,9 @@ class LangGraphWorkflowService:
             ).rowcount
             if changed != 1:
                 connection.rollback()
+                current = self.get(run_id)
+                if current.status == "cancelled":
+                    return current
                 raise LookupError(f"LangGraph run not found: {run_id}")
             connection.commit()
         return self.get(run_id)

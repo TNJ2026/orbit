@@ -25,6 +25,17 @@ def _dto(run, *, can_write: bool) -> dict[str, Any]:
             "expected_version": run.revision,
             "payload_schema": "langgraph-run-resume/1.0",
         })
+    if can_write and run.status in {"running", "interrupted"}:
+        commands.append({
+            "command": "langgraph_run.cancel",
+            "label": "Cancel LangGraph workflow",
+            "method": "POST",
+            "href": f"/api/v1/langgraph-runs/{run.run_id}/cancel",
+            "target_aggregate_id": run.run_id,
+            "expected_version": run.revision,
+            "payload_schema": "langgraph-run-cancel/1.0",
+            "confirmation": "explicit",
+        })
     return {
         "run_id": run.run_id,
         "workflow_id": run.workflow_id,
@@ -130,6 +141,26 @@ def build_routes(ctx, service) -> list[Route]:
             request, OPS_WRITE_SCOPE, "langgraph_run.recover", command
         )
 
+    async def cancel_run(request: Request) -> JSONResponse:
+        run_id = request.path_params["run_id"]
+
+        def command(body: Mapping[str, Any], actor: str, key: str):
+            if "expected_version" not in body:
+                raise ValueError("expected_version is required")
+            try:
+                run = service.cancel(
+                    run_id,
+                    expected_revision=int(body["expected_version"]),
+                    idempotency_key=key,
+                )
+            except LookupError as exc:
+                raise ValueError(str(exc)) from None
+            return {"run": _dto(run, can_write=True)}
+
+        return await ctx.mutate(
+            request, WRITE_SCOPE, "langgraph_run.cancel", command
+        )
+
     return [
         Route("/api/v1/langgraph-runs", list_runs, methods=["GET"]),
         Route("/api/v1/langgraph-runs", start_run, methods=["POST"]),
@@ -142,6 +173,11 @@ def build_routes(ctx, service) -> list[Route]:
         Route(
             "/api/v1/langgraph-runs/{run_id}/recover",
             recover_run,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/v1/langgraph-runs/{run_id}/cancel",
+            cancel_run,
             methods=["POST"],
         ),
     ]

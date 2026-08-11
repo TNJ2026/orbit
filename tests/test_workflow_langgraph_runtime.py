@@ -668,6 +668,53 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
                     idempotency_key="resume-once",
                 )
 
+    def test_cancel_is_versioned_idempotent_and_wins_over_late_settlement(self):
+        action = node("action", inputs=("value",), outputs=("value",))
+        terminal = node(
+            "terminal", inputs=("value",), kind="terminal", handler=False
+        )
+        ir = workflow(
+            (action, terminal),
+            (edge("done", "action", "terminal"),),
+            entry=("action",), terminals=("terminal",), result=("action", "value"),
+        )
+
+        def approval(values, config, context):
+            interrupt("approve")
+            return {"value": values["value"]}
+
+        cancelled_runs = []
+        registry = LangGraphHandlerRegistry([BoundHandler(
+            "action", "1.0.0", FINGERPRINT, approval,
+            lambda run_id: not cancelled_runs.append(run_id),
+        )])
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.publish(directory, ir)
+            service = self.service(directory, store, registry)
+            paused = service.start(
+                ir.workflow_id, {"value": 7}, idempotency_key="cancel-start"
+            )
+            cancelled = service.cancel(
+                paused.run_id,
+                expected_revision=paused.revision,
+                idempotency_key="cancel-once",
+            )
+            replayed = service.cancel(
+                paused.run_id,
+                expected_revision=paused.revision,
+                idempotency_key="cancel-once",
+            )
+            late = service._settle(
+                paused.run_id, "completed", result={"too": "late"}
+            )
+
+        self.assertEqual("cancelled", cancelled.status)
+        self.assertEqual(paused.revision + 1, cancelled.revision)
+        self.assertEqual(cancelled, replayed)
+        self.assertEqual(cancelled, late)
+        self.assertIsNone(late.result)
+        self.assertEqual([paused.run_id], cancelled_runs)
+
 
 class LangGraphProductionWiringTests(unittest.TestCase):
     def registration(self, client) -> HandlerRegistration:
@@ -861,6 +908,7 @@ class LangGraphHttpApiTests(unittest.TestCase):
         self.assertEqual(run["run_id"], listed.json()["data"]["runs"][0]["run_id"])
         self.assertEqual(run["revision"], detail.json()["projection_version"])
         self.assertIn("start_langgraph_run", {item["name"] for item in tools})
+        self.assertIn("cancel_langgraph_run", {item["name"] for item in tools})
         mcp_payload = json.loads(
             mcp_started["result"]["content"][0]["text"]
         )
@@ -1115,6 +1163,27 @@ class LangGraphHttpApiTests(unittest.TestCase):
                     key="api-resume",
                     body={"expected_version": started["revision"], "value": False},
                 )
+                to_cancel = client.post(
+                    "/api/v1/langgraph-runs",
+                    actor="test:operator", key="api-cancel-start",
+                    body={"workflow_id": ir.workflow_id, "input": {"value": 13}},
+                ).json()["data"]["run"]
+                cancel_path = (
+                    f"/api/v1/langgraph-runs/{to_cancel['run_id']}/cancel"
+                )
+                cancel_body = {"expected_version": to_cancel["revision"]}
+                cancel_forbidden = client.post(
+                    cancel_path, actor="test:reader", key="reader-cancel",
+                    body=cancel_body,
+                )
+                cancelled = client.post(
+                    cancel_path, actor="test:operator", key="api-cancel",
+                    body=cancel_body,
+                )
+                cancel_replayed = client.post(
+                    cancel_path, actor="test:operator", key="api-cancel",
+                    body=cancel_body,
+                )
 
         self.assertEqual("interrupted", started["status"])
         self.assertEqual({"question": "approve?"}, started["interrupts"][0]["value"])
@@ -1126,6 +1195,9 @@ class LangGraphHttpApiTests(unittest.TestCase):
         self.assertEqual(12, completed.json()["data"]["run"]["result"])
         self.assertEqual(409, conflict.status_code)
         self.assertEqual("idempotency_conflict", conflict.json()["error"]["code"])
+        self.assertEqual(403, cancel_forbidden.status_code)
+        self.assertEqual("cancelled", cancelled.json()["data"]["run"]["status"])
+        self.assertEqual(cancelled.json(), cancel_replayed.json())
 
 
 if __name__ == "__main__":
