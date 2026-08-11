@@ -209,7 +209,7 @@ class LangGraphWorkflowCompilerValidationTests(unittest.TestCase):
                 ]),
             )
 
-    def test_loop_error_route_exhaustion_is_rejected_fail_closed(self) -> None:
+    def test_invalid_loop_exhaustion_is_rejected_fail_closed(self) -> None:
         action = node(
             "action", inputs=("value",), outputs=("value",),
             route_mode="exclusive",
@@ -225,11 +225,11 @@ class LangGraphWorkflowCompilerValidationTests(unittest.TestCase):
             result=("action", "value"),
             policies=(IRPolicy(
                 "bounded", "loop",
-                {"max_iterations": 2, "exhaustion": "error_route"},
+                {"max_iterations": 2, "exhaustion": "continue"},
             ),),
         )
 
-        with self.assertRaisesRegex(ValueError, "only supports fail exhaustion"):
+        with self.assertRaisesRegex(ValueError, "invalid exhaustion"):
             compile_workflow(
                 ir,
                 LangGraphHandlerRegistry([
@@ -1000,6 +1000,50 @@ class LangGraphWorkflowCompilerTests(unittest.TestCase):
             compile_workflow(ir, registry).invoke({"value": 0})
 
         self.assertEqual(3, calls)
+
+    def test_loop_exhaustion_selects_error_route(self) -> None:
+        count = node(
+            "count",
+            inputs=("value",),
+            outputs=("value",),
+            route_mode="exclusive",
+        )
+        failed = node(
+            "failed", inputs=("value",), kind="terminal", handler=False,
+        )
+        ir = workflow(
+            (count, failed),
+            (
+                edge(
+                    "again", "count", "count", back_edge=True,
+                    policy_ref="bounded",
+                ),
+                edge(
+                    "exhausted", "count", "failed", route="error",
+                    priority=10,
+                ),
+            ),
+            entry=("count",),
+            terminals=("failed",),
+            result=("count", "value"),
+            policies=(IRPolicy(
+                "bounded", "loop",
+                {"max_iterations": 2, "exhaustion": "error_route"},
+            ),),
+        )
+        registry = LangGraphHandlerRegistry([
+            binding("count", lambda values, config, context: {
+                "value": values["value"] + 1,
+            }),
+        ])
+
+        result = compile_workflow(ir, registry).invoke({"value": 0})
+
+        self.assertEqual(3, result["result"])
+        self.assertEqual(
+            ["count", "count", "count", "failed"],
+            result["execution_order"],
+        )
 
 
 class LangGraphWorkflowServiceTests(unittest.TestCase):

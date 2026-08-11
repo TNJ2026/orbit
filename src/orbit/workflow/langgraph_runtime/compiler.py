@@ -464,9 +464,9 @@ def compile_workflow(
             raise LangGraphCompileError(
                 f"loop policy {policy.id!r} requires positive max_iterations"
             )
-        if policy.config.get("exhaustion", "fail") != "fail":
+        if policy.config.get("exhaustion", "fail") not in {"fail", "error_route"}:
             raise LangGraphCompileError(
-                f"loop policy {policy.id!r} only supports fail exhaustion"
+                f"loop policy {policy.id!r} has invalid exhaustion"
             )
     for policy in (item for item in ir.policies if item.kind == "rework"):
         maximum = policy.config.get("max_generations")
@@ -474,9 +474,9 @@ def compile_workflow(
             raise LangGraphCompileError(
                 f"rework policy {policy.id!r} requires positive max_generations"
             )
-        if policy.config.get("exhaustion", "fail") != "fail":
+        if policy.config.get("exhaustion", "fail") not in {"fail", "error_route"}:
             raise LangGraphCompileError(
-                f"rework policy {policy.id!r} only supports fail exhaustion"
+                f"rework policy {policy.id!r} has invalid exhaustion"
             )
     for policy in (item for item in ir.policies if item.kind == "completion"):
         unknown = set(policy.config) - {"required_terminal_count"}
@@ -618,6 +618,55 @@ def compile_workflow(
                     raise TypeError(f"handler for {current.id!r} must return a mapping")
                 output = _normalize_outputs(current, outcome.output)
             route_name = "success" if implementation is None else outcome.route
+            if route_name == "success":
+                outgoing = tuple(sorted(
+                    (edge for edge in ir.edges if edge.source_node == current.id),
+                    key=lambda edge: (
+                        (current.route_mode or "exclusive") == "exclusive"
+                        and edge.condition == {"op": "literal", "value": True},
+                        edge.priority,
+                        edge.id,
+                    ),
+                ))
+                selected = [
+                    edge for edge in outgoing
+                    if edge.route == route_name and evaluate_condition(
+                        edge.condition,
+                        output,
+                        workflow_inputs=state["workflow_inputs"],
+                    )
+                ]
+                if (current.route_mode or "exclusive") != "parallel":
+                    selected = selected[:1]
+                exhausted = next((
+                    policies_by_id[edge.policy_ref]
+                    for edge in selected if edge.back_edge
+                    and policies_by_id[edge.policy_ref].config.get(
+                        "exhaustion", "fail",
+                    ) == "error_route"
+                    and state.get("execution_order", ()).count(current.id) >= int(
+                        policies_by_id[edge.policy_ref].config[
+                            "max_iterations"
+                            if policies_by_id[edge.policy_ref].kind == "loop"
+                            else "max_generations"
+                        ]
+                    )
+                ), None)
+                if exhausted is not None:
+                    error_edges = [
+                        edge for edge in outgoing
+                        if edge.route == "error" and evaluate_condition(
+                            edge.condition,
+                            output,
+                            workflow_inputs=state["workflow_inputs"],
+                        )
+                    ]
+                    if not error_edges:
+                        raise ValueError(
+                            f"{exhausted.kind} policy {exhausted.id!r} exhausted "
+                            "without a selected error route"
+                        )
+                    route_name = "error"
             return {
                 "node_outputs": {current.id: output},
                 "node_routes": {current.id: route_name},
