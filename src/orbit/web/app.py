@@ -822,6 +822,7 @@ def create_app(
         artifact_backend=artifact_backend,
         authoring_jobs=authoring_jobs,
         authoring_broker=authoring_broker,
+        langgraph_service=langgraph_service,
     )
 
     routes: list[Route | Mount | WebSocketRoute] = [

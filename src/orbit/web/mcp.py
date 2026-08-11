@@ -35,7 +35,7 @@ from ..workflow.catalogs import InMemorySchemaCatalog
 from ..workflow.domain.ids import EntityId
 from ..workflow.persistence.database import connect_workflow_database
 from .api_v1 import (
-    OPS_READ_SCOPE, PREVIEW_LIMIT_BYTES, READ_SCOPE, SENSITIVE_SCOPE,
+    OPS_READ_SCOPE, OPS_WRITE_SCOPE, PREVIEW_LIMIT_BYTES, READ_SCOPE, SENSITIVE_SCOPE,
     WRITE_SCOPE, Authorizer,
 )
 
@@ -82,6 +82,7 @@ def build_mcp_dispatcher(
     workflow_publisher=None,
     authoring_jobs=None,
     authoring_broker=None,
+    langgraph_service=None,
 ) -> Callable[[Mapping[str, Any], str | None], dict[str, Any] | None]:
     """One JSON-RPC message in, at most one response out.
 
@@ -426,9 +427,118 @@ def build_mcp_dispatcher(
             "inputSchema": {"type": "object", "properties": {}},
         },
     )
+    if langgraph_service is not None:
+        tools += (
+            {
+                "name": "list_langgraph_runs",
+                "description": "List runs executed by the optional LangGraph adapter.",
+                "scope": READ_SCOPE,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "status": {"type": "string"},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+                    },
+                },
+            },
+            {
+                "name": "inspect_langgraph_run",
+                "description": "Inspect one optional LangGraph run and its interrupts.",
+                "scope": READ_SCOPE,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"run_id": {"type": "string"}},
+                    "required": ["run_id"],
+                },
+            },
+            {
+                "name": "start_langgraph_run",
+                "description": "Start a published workflow using the optional LangGraph adapter.",
+                "scope": WRITE_SCOPE,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "workflow_id": {"type": "string"},
+                        "workflow_version": {"type": "integer"},
+                        "input": {"type": "object"},
+                        "idempotency_key": {"type": "string"},
+                    },
+                    "required": ["workflow_id", "idempotency_key"],
+                },
+            },
+            {
+                "name": "resume_langgraph_run",
+                "description": "Resume an interrupted LangGraph run at its observed revision.",
+                "scope": WRITE_SCOPE,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "run_id": {"type": "string"},
+                        "value": {},
+                        "expected_version": {"type": "integer"},
+                        "idempotency_key": {"type": "string"},
+                    },
+                    "required": [
+                        "run_id", "expected_version", "idempotency_key",
+                    ],
+                },
+            },
+            {
+                "name": "recover_langgraph_run",
+                "description": "Recover a LangGraph run left running after process loss.",
+                "scope": OPS_WRITE_SCOPE,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"run_id": {"type": "string"}},
+                    "required": ["run_id"],
+                },
+            },
+        )
     by_name = {tool["name"]: tool for tool in tools}
 
+    def langgraph_run_dto(run) -> dict[str, Any]:
+        return {
+            "run_id": run.run_id,
+            "workflow_id": run.workflow_id,
+            "workflow_version": run.workflow_version,
+            "status": run.status,
+            "revision": run.revision,
+            "result": run.result,
+            "interrupts": list(run.interrupts),
+            "error": run.error,
+            "created_at": run.created_at,
+            "updated_at": run.updated_at,
+        }
+
     def call(name: str, arguments: Mapping[str, Any], actor: str) -> Any:
+        if name == "list_langgraph_runs":
+            return {"runs": [
+                langgraph_run_dto(run)
+                for run in langgraph_service.list_runs(
+                    status=arguments.get("status") or None,
+                    limit=min(200, max(1, int(arguments.get("limit", 20)))),
+                )
+            ]}
+        if name == "inspect_langgraph_run":
+            return langgraph_run_dto(
+                langgraph_service.get(str(arguments["run_id"]))
+            )
+        if name == "start_langgraph_run":
+            return langgraph_run_dto(langgraph_service.start(
+                str(arguments["workflow_id"]), arguments.get("input") or {},
+                workflow_version=arguments.get("workflow_version"),
+                idempotency_key=str(arguments["idempotency_key"]),
+            ))
+        if name == "resume_langgraph_run":
+            return langgraph_run_dto(langgraph_service.resume(
+                str(arguments["run_id"]), arguments.get("value"),
+                expected_revision=int(arguments["expected_version"]),
+                idempotency_key=str(arguments["idempotency_key"]),
+            ))
+        if name == "recover_langgraph_run":
+            return langgraph_run_dto(
+                langgraph_service.recover(str(arguments["run_id"]))
+            )
         if name == "list_runs":
             items, cursor = reads.list_runs(
                 limit=min(200, max(1, int(arguments.get("limit", 20)))),

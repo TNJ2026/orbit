@@ -698,10 +698,33 @@ class LangGraphHttpApiTests(unittest.TestCase):
                     f"/api/v1/langgraph-runs/{run['run_id']}",
                     actor="test:operator",
                 )
+                tools = client.request(
+                    "POST", "/mcp", actor="test:operator",
+                    body={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+                ).json()["result"]["tools"]
+                mcp_started = client.request(
+                    "POST", "/mcp", actor="test:operator",
+                    body={
+                        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                        "params": {
+                            "name": "start_langgraph_run",
+                            "arguments": {
+                                "workflow_id": ir.workflow_id,
+                                "input": {"value": 20},
+                                "idempotency_key": "mcp-start",
+                            },
+                        },
+                    },
+                ).json()
 
         self.assertEqual(9, run["result"])
         self.assertEqual(run["run_id"], listed.json()["data"]["runs"][0]["run_id"])
         self.assertEqual(run["revision"], detail.json()["projection_version"])
+        self.assertIn("start_langgraph_run", {item["name"] for item in tools})
+        mcp_payload = json.loads(
+            mcp_started["result"]["content"][0]["text"]
+        )
+        self.assertEqual(21, mcp_payload["result"])
 
     def test_routes_are_absent_without_explicit_service(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -713,12 +736,19 @@ class LangGraphHttpApiTests(unittest.TestCase):
             )
             with AsgiHarness(app) as client:
                 response = client.get("/api/v1/langgraph-runs")
+                tools = client.request(
+                    "POST", "/mcp", actor="test:reader",
+                    body={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+                ).json()["result"]["tools"]
                 capability = client.get(
                     "/api/v1/capabilities", actor="test:reader"
                 ).json()["data"][
                     "capabilities"
                 ]["langgraph_workflows"]
         self.assertEqual(404, response.status_code)
+        self.assertNotIn(
+            "start_langgraph_run", {item["name"] for item in tools}
+        )
         self.assertEqual(
             {"available": False, "reason": "service_not_configured"}, capability
         )

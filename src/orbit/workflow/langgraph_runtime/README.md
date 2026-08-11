@@ -113,4 +113,10 @@ separate surface. Omitting it leaves every route absent:
 Writes require the normal `idempotency-key` header. Read DTOs advertise a
 resume command only to actors with write scope and only while interrupted;
 clients do not infer commands from status. The existing Orbit `/api/v1/runs`
-and MCP tools remain unchanged.
+tools remain unchanged.
+
+The same explicit injection advertises five MCP tools to agents:
+`list_langgraph_runs`, `inspect_langgraph_run`, `start_langgraph_run`,
+`resume_langgraph_run`, and `recover_langgraph_run`. They reuse the same MCP
+identity and scopes as HTTP; recovery requires `runtime.ops.write`. When the
+service is absent, none of these optional tools appears in `tools/list`.
