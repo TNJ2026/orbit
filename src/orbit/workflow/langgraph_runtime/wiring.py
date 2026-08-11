@@ -70,7 +70,9 @@ class _HandlerAttemptJournal:
     def _now() -> str:
         return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
-    def claim(self, context) -> Mapping[str, Any] | None:
+    def claim(
+        self, context, *, retry_failed: bool = False,
+    ) -> Mapping[str, Any] | None:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
@@ -78,6 +80,14 @@ class _HandlerAttemptJournal:
                 " WHERE attempt_id=?", (context.attempt_id,),
             ).fetchone()
             if row is not None:
+                if row["status"] == "failed" and retry_failed:
+                    connection.execute(
+                        "UPDATE langgraph_handler_attempts SET status='started',"
+                        "error=NULL,updated_at=? WHERE attempt_id=? AND status='failed'",
+                        (self._now(), context.attempt_id),
+                    )
+                    connection.commit()
+                    return None
                 connection.commit()
                 if row["status"] == "succeeded":
                     return json.loads(row["output_json"])
@@ -237,7 +247,12 @@ def _tool_adapter(
         if not validation.valid:
             issue = validation.issues[0]
             raise ValueError(f"Tool Handler validation {issue.path}: {issue.message}")
-        replay = journal.claim(context)
+        replay = journal.claim(
+            context,
+            retry_failed=(
+                manifest.execution_safety is ExecutionSafety.REPLAY_SAFE
+            ),
+        )
         if replay is not None:
             return replay
         deadline = datetime.now(timezone.utc) + timedelta(
@@ -322,6 +337,7 @@ def trusted_handlers(
                 manifest.version,
                 manifest.fingerprint,
                 _transform,
+                retry_safe=True,
             ))
         elif (
             isinstance(registration.implementation, AgentHandler)
@@ -356,6 +372,9 @@ def trusted_handlers(
                 invoke,
                 cancel_run,
                 frozenset({"inline", "secret_ref"}),
+                retry_safe=(
+                    manifest.execution_safety is ExecutionSafety.REPLAY_SAFE
+                ),
             ))
     return LangGraphHandlerRegistry(handlers)
 

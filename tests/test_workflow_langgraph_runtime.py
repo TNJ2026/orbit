@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -37,6 +38,7 @@ from orbit.workflow.langgraph_runtime import (
     LangGraphHandlerRegistry,
     LangGraphExecutionContext,
     LangGraphRunConflict,
+    LangGraphRetryableError,
     LangGraphWorkflowService,
     build_service,
     compile_generated_workflow,
@@ -164,8 +166,13 @@ def binding(name, invoke) -> BoundHandler:
 
 
 class LangGraphWorkflowCompilerValidationTests(unittest.TestCase):
-    def test_retry_policy_is_rejected_instead_of_silently_ignored(self) -> None:
+    def test_retry_policy_requires_retry_safe_handler(self) -> None:
         action = node("action", inputs=("value",), outputs=("value",))
+        action = IRNode(
+            action.id, action.kind, action.inputs, action.outputs, action.handler,
+            action.config, ("retry_network",), action.extension,
+            action.route_mode,
+        )
         base = workflow(
             (action,), (), entry=("action",), terminals=("action",),
             result=("action", "value"),
@@ -179,7 +186,7 @@ class LangGraphWorkflowCompilerValidationTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(
-            ValueError, "retry_network:retry",
+            ValueError, "retry-safe Handler",
         ):
             compile_workflow(
                 ir,
@@ -750,6 +757,60 @@ class LangGraphWorkflowCompilerTests(unittest.TestCase):
 
 
 class LangGraphWorkflowServiceTests(unittest.TestCase):
+    def test_retry_timer_is_durable_and_does_not_fire_early(self) -> None:
+        retry = IRPolicy(
+            "retry_network", "retry",
+            {"max_attempts": 2, "backoff_seconds": [10]},
+        )
+        action = IRNode(
+            "action", "action", (port("value"),), (port("value"),),
+            IRHandlerRef("action", "1.0.0", FINGERPRINT), {},
+            (retry.id,), None,
+        )
+        ir = WorkflowIR(
+            "1.3", "workflow:retry", "Retry workflow", "", {},
+            (port("value"),), (), (action,), (), ("action",), ("action",),
+            (retry,), (), {}, IRResult("action", "value"),
+        )
+        calls = []
+
+        def flaky(values, config, context):
+            calls.append(context.attempt_id)
+            if len(calls) == 1:
+                raise LangGraphRetryableError("temporary")
+            return {"value": values["value"] + 1}
+
+        registry = LangGraphHandlerRegistry([BoundHandler(
+            "action", "1.0.0", FINGERPRINT, flaky, retry_safe=True,
+        )])
+        now = [datetime(2026, 1, 1, tzinfo=timezone.utc)]
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.publish(directory, ir)
+            service = LangGraphWorkflowService(
+                store, registry,
+                run_db_path=Path(directory) / "runs.sqlite3",
+                checkpoint_db_path=Path(directory) / "checkpoints.sqlite3",
+                clock=lambda: now[0],
+            )
+            waiting = service.start(
+                ir.workflow_id, {"value": 4}, idempotency_key="retry-start",
+            )
+            early = service.recover(waiting.run_id)
+            now[0] += timedelta(seconds=10)
+            rebuilt = LangGraphWorkflowService(
+                store, registry,
+                run_db_path=Path(directory) / "runs.sqlite3",
+                checkpoint_db_path=Path(directory) / "checkpoints.sqlite3",
+                clock=lambda: now[0],
+            )
+            completed = rebuilt.recover(waiting.run_id)
+
+        self.assertEqual("waiting", waiting.status)
+        self.assertEqual(waiting, early)
+        self.assertEqual("completed", completed.status)
+        self.assertEqual(5, completed.result)
+        self.assertEqual(2, len(calls))
+
     def test_service_migrates_early_run_metadata_schema(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             run_database = Path(directory) / "langgraph-runs.sqlite3"

@@ -35,6 +35,17 @@ class LangGraphUnknownExternalResult(RuntimeError):
     """An external Handler may have acted and must not be executed again."""
 
 
+class LangGraphRetryableError(RuntimeError):
+    """A Handler explicitly classified a failure as safe to retry."""
+
+
+class LangGraphRetryRequested(RuntimeError):
+    def __init__(self, node_id, attempt_id, policy, cause):
+        self.node_id, self.attempt_id = node_id, attempt_id
+        self.policy, self.cause = policy, cause
+        super().__init__(str(cause))
+
+
 @dataclass(frozen=True)
 class LangGraphExecutionContext:
     workflow_id: str
@@ -74,6 +85,7 @@ class BoundHandler:
     invoke: HandlerCallable
     cancel_run: Callable[[str], bool] | None = None
     supported_transports: frozenset[str] = frozenset({"inline"})
+    retry_safe: bool = False
 
     def __post_init__(self) -> None:
         if not self.name.strip() or not self.version.strip():
@@ -88,6 +100,8 @@ class BoundHandler:
             "inline", "artifact_ref", "secret_ref",
         }:
             raise ValueError("handler supported_transports are invalid")
+        if not isinstance(self.retry_safe, bool):
+            raise TypeError("handler retry_safe must be boolean")
 
 
 class LangGraphHandlerRegistry:
@@ -338,7 +352,7 @@ def compile_workflow(
         raise TypeError("compile_workflow requires WorkflowIR")
     unsupported_policies = tuple(
         sorted(
-            (policy for policy in ir.policies if policy.kind != "route"),
+            (policy for policy in ir.policies if policy.kind not in {"route", "retry"}),
             key=lambda policy: policy.id,
         )
     )
@@ -349,6 +363,21 @@ def compile_workflow(
         raise LangGraphCompileError(
             "LangGraph policy semantics are not yet supported: " + summary
         )
+    for policy in (item for item in ir.policies if item.kind == "retry"):
+        maximum = policy.config.get("max_attempts")
+        backoff = policy.config.get("backoff_seconds", ())
+        if (
+            isinstance(maximum, bool) or not isinstance(maximum, int)
+            or maximum < 1 or not isinstance(backoff, (list, tuple))
+            or len(backoff) > maximum - 1
+            or any(
+                isinstance(delay, bool) or not isinstance(delay, int) or delay < 0
+                for delay in backoff
+            )
+        ):
+            raise LangGraphCompileError(
+                f"retry policy {policy.id!r} has invalid attempts or backoff"
+            )
     bound = {
         node.id: registry.resolve(node)
         for node in ir.nodes
@@ -363,6 +392,20 @@ def compile_workflow(
             bound[node.id].supported_transports
             if node.id in bound else frozenset({"inline"})
         )
+        retry_policies = tuple(
+            policy for policy in ir.policies
+            if policy.id in node.policies and policy.kind == "retry"
+        )
+        if len(retry_policies) > 1:
+            raise LangGraphCompileError(
+                f"node {node.id!r} declares multiple retry policies"
+            )
+        if retry_policies and (
+            node.id not in bound or not bound[node.id].retry_safe
+        ):
+            raise LangGraphCompileError(
+                f"node {node.id!r} retry policy requires a retry-safe Handler"
+            )
         for direction, ports in (("input", node.inputs), ("output", node.outputs)):
             for port in ports:
                 transport = port.data_policy.transport.value
@@ -396,6 +439,10 @@ def compile_workflow(
             implementation=handler,
         ):
             inputs = _assemble_inputs(ir, current, state)
+            retry_policy = next((
+                policy for policy in ir.policies
+                if policy.id in current.policies and policy.kind == "retry"
+            ), None)
             if implementation is None:
                 if current.kind == "human":
                     resumed = interrupt({
@@ -416,10 +463,7 @@ def compile_workflow(
                 else:
                     output = _handlerless_outputs(current, inputs)
             else:
-                raw = implementation.invoke(
-                    inputs,
-                    current.config,
-                    LangGraphExecutionContext(
+                execution_context = LangGraphExecutionContext(
                         ir.workflow_id,
                         current.id,
                         str(config.get("configurable", {}).get("thread_id", "")),
@@ -434,8 +478,18 @@ def compile_workflow(
                         str(config.get("configurable", {}).get(
                             "actor", "system:langgraph"
                         )),
-                    ),
-                )
+                    )
+                try:
+                    raw = implementation.invoke(
+                        inputs, current.config, execution_context,
+                    )
+                except LangGraphRetryableError as exc:
+                    if retry_policy is None:
+                        raise
+                    raise LangGraphRetryRequested(
+                        current.id, execution_context.attempt_id,
+                        to_primitive(retry_policy.config), exc,
+                    ) from exc
                 outcome = raw if isinstance(raw, HandlerOutcome) else HandlerOutcome(raw)
                 if not isinstance(outcome.output, Mapping):
                     raise TypeError(f"handler for {current.id!r} must return a mapping")

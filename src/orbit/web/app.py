@@ -154,6 +154,7 @@ class RuntimeComposition:
         revision_agent_commands: Mapping[str, str] | None = None,
         revision_model_id: str | None = None,
         workflow_db_path: Path | str | None = None,
+        langgraph_service: Any = None,
     ) -> None:
         self.db_path = Path(db_path)
         self.workflow_db_path = Path(workflow_db_path or db_path)
@@ -166,6 +167,7 @@ class RuntimeComposition:
         self.revision_agent_command = revision_agent_command
         self.revision_agent_commands = dict(revision_agent_commands or {})
         self.revision_model_id = revision_model_id
+        self.langgraph_service = langgraph_service
         if human_delivery is None:
             from ..workflow.application.human_delivery import (
                 InMemoryHumanTaskDelivery,
@@ -251,6 +253,12 @@ class RuntimeComposition:
 
         timer = TimerDispatcher(self.service, worker_id="timer-1", clock=self.clock)
         loops.append(BackgroundLoop("timer-1", timer.run_once, self.poll_seconds))
+        if callable(getattr(self.langgraph_service, "recover_due", None)):
+            loops.append(BackgroundLoop(
+                "langgraph-timer", lambda: bool(
+                    self.langgraph_service.recover_due(limit=100)
+                ), self.poll_seconds,
+            ))
 
         loops.append(
             BackgroundLoop("recovery", self._recovery_pass, max(self.poll_seconds, 5.0))
@@ -580,6 +588,7 @@ def create_app(
         planner_service=planner_service,
         human_delivery=human_delivery,
         workflow_db_path=workflow_db_path,
+        langgraph_service=langgraph_service,
     )
     if composition.workflow_db_path != composition.db_path:
         from ..workflow.persistence.workflow_versions import merge_workflow_library

@@ -25,7 +25,7 @@ def _dto(run, *, can_write: bool) -> dict[str, Any]:
             "expected_version": run.revision,
             "payload_schema": "langgraph-run-resume/1.0",
         })
-    if can_write and run.status in {"running", "interrupted"}:
+    if can_write and run.status in {"running", "waiting", "interrupted"}:
         commands.append({
             "command": "langgraph_run.cancel",
             "label": "Cancel LangGraph workflow",

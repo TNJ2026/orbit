@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import sqlite3
@@ -15,7 +15,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from ..domain.serialization import canonical_json, definition_hash, to_primitive
 from .compiler import (
     LangGraphCompileError, LangGraphHandlerRegistry,
-    LangGraphUnknownExternalResult, compile_workflow,
+    LangGraphRetryRequested, LangGraphUnknownExternalResult, compile_workflow,
 )
 
 
@@ -79,6 +79,11 @@ class LangGraphWorkflowService:
                     idempotency_key TEXT PRIMARY KEY,
                     request_hash TEXT NOT NULL,
                     run_id TEXT NOT NULL REFERENCES langgraph_runs(run_id)
+                );
+                CREATE TABLE IF NOT EXISTS langgraph_timers (
+                    timer_id TEXT PRIMARY KEY,run_id TEXT NOT NULL,node_id TEXT NOT NULL,
+                    attempt_number INTEGER NOT NULL,due_at TEXT NOT NULL,
+                    status TEXT NOT NULL,UNIQUE(run_id,node_id,attempt_number)
                 );
                 """
             )
@@ -252,6 +257,30 @@ class LangGraphWorkflowService:
         """Continue a run whose process ended after a durable checkpoint."""
 
         current = self.get(run_id)
+        if current.status == "waiting":
+            with self._connect() as connection:
+                timer = connection.execute(
+                    "SELECT * FROM langgraph_timers WHERE run_id=?"
+                    " AND status='scheduled' ORDER BY attempt_number LIMIT 1",
+                    (run_id,),
+                ).fetchone()
+                if timer is None or timer["due_at"] > self._stamp():
+                    return current
+                connection.execute("BEGIN IMMEDIATE")
+                changed = connection.execute(
+                    "UPDATE langgraph_timers SET status='fired' WHERE timer_id=?"
+                    " AND status='scheduled'", (timer["timer_id"],),
+                ).rowcount
+                if changed != 1:
+                    connection.rollback()
+                    return self.get(run_id)
+                connection.execute(
+                    "UPDATE langgraph_runs SET status='running',revision=revision+1,"
+                    "interrupts_json='[]',updated_at=? WHERE run_id=? AND status='waiting'",
+                    (self._stamp(), run_id),
+                )
+                connection.commit()
+            current = self.get(run_id)
         if current.status != "running":
             return current
         record = self._workflow(current.workflow_id, current.workflow_version)
@@ -297,7 +326,7 @@ class LangGraphWorkflowService:
             changed = connection.execute(
                 "UPDATE langgraph_runs SET status='cancelled',revision=revision+1,"
                 "interrupts_json='[]',updated_at=? WHERE run_id=? AND revision=?"
-                " AND status IN ('running','interrupted')",
+                " AND status IN ('running','waiting','interrupted')",
                 (self._stamp(), run_id, expected_revision),
             ).rowcount
             if changed != 1:
@@ -307,6 +336,10 @@ class LangGraphWorkflowService:
                     f"cannot cancel run at revision {expected_revision}; "
                     f"found {actual.status}@{actual.revision}"
                 )
+            connection.execute(
+                "UPDATE langgraph_timers SET status='cancelled'"
+                " WHERE run_id=? AND status='scheduled'", (run_id,),
+            )
             connection.execute(
                 "INSERT INTO langgraph_run_receipts VALUES (?,?,?)",
                 (idempotency_key, request_hash, run_id),
@@ -330,7 +363,7 @@ class LangGraphWorkflowService:
         if isinstance(limit, bool) or not 1 <= limit <= 500:
             raise ValueError("limit must be between 1 and 500")
         if status is not None and status not in {
-            "running", "interrupted", "completed", "failed", "unknown",
+            "running", "waiting", "interrupted", "completed", "failed", "unknown",
             "cancelled",
         }:
             raise ValueError("invalid LangGraph run status")
@@ -346,9 +379,20 @@ class LangGraphWorkflowService:
     def recover_running(self, *, limit: int = 100) -> tuple[LangGraphRun, ...]:
         """Recover a bounded snapshot of runs left running by process loss."""
 
-        return tuple(self.recover(item.run_id) for item in self.list_runs(
+        recovered = [self.recover(item.run_id) for item in self.list_runs(
             status="running", limit=limit,
-        ))
+        )]
+        recovered.extend(self.recover_due(limit=max(1, limit - len(recovered))))
+        return tuple(recovered)
+
+    def recover_due(self, *, limit: int = 100) -> tuple[LangGraphRun, ...]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT run_id FROM langgraph_timers"
+                " WHERE status='scheduled' AND due_at<=? ORDER BY due_at LIMIT ?",
+                (self._stamp(), limit),
+            ).fetchall()
+        return tuple(self.recover(row["run_id"]) for row in rows)
 
     def _execute(self, run_id: str, ir, *, inputs=..., resume=...) -> LangGraphRun:
         with self._connect() as connection:
@@ -384,9 +428,43 @@ class LangGraphWorkflowService:
             return self._settle(
                 run_id, "unknown", error=f"{type(exc).__name__}: {exc}"
             )
+        except LangGraphRetryRequested as exc:
+            return self._schedule_retry(run_id, exc)
         except Exception as exc:
             self._settle(run_id, "failed", error=f"{type(exc).__name__}: {exc}")
             raise
+
+    def _schedule_retry(self, run_id: str, request) -> LangGraphRun:
+        maximum = int(request.policy.get("max_attempts", 1))
+        backoff = tuple(request.policy.get("backoff_seconds") or ())
+        with self._connect() as connection:
+            attempt_number = int(connection.execute(
+                "SELECT COUNT(*) FROM langgraph_timers WHERE run_id=? AND node_id=?",
+                (run_id, request.node_id),
+            ).fetchone()[0]) + 1
+            if attempt_number >= maximum:
+                self._settle(
+                    run_id, "failed",
+                    error=f"{type(request.cause).__name__}: {request.cause}",
+                )
+                raise request.cause
+            delay = int(backoff[attempt_number - 1]) if attempt_number <= len(backoff) else 0
+            due = self.clock().astimezone(timezone.utc) + timedelta(seconds=delay)
+            due_at = due.isoformat(timespec="microseconds").replace("+00:00", "Z")
+            timer_id = f"langgraph_timer:{run_id}:{request.node_id}:{attempt_number}"
+            connection.execute(
+                "INSERT OR IGNORE INTO langgraph_timers VALUES (?,?,?,?,?,'scheduled')",
+                (timer_id, run_id, request.node_id, attempt_number, due_at),
+            )
+            connection.commit()
+        return self._settle(
+            run_id, "waiting",
+            interrupts=({
+                "type": "retry_timer", "timer_id": timer_id,
+                "node_id": request.node_id, "due_at": due_at,
+                "attempt_number": attempt_number,
+            },),
+        )
 
     def _settle(
         self, run_id: str, status: str, *, result: Any = None,
