@@ -242,6 +242,14 @@ class AgentAppHost:
             stderr.close()
 
     @staticmethod
+    def _workspace_identity(workspace: Path | str | None) -> str | None:
+        """Canonical identity persisted across callers and process restarts."""
+
+        if workspace is None:
+            return None
+        return str(Path(workspace).expanduser().resolve())
+
+    @staticmethod
     def _record_process(
         state_dir: Path,
         manifest: AgentAppManifest,
@@ -253,7 +261,7 @@ class AgentAppHost:
             "pid": process.pid,
             "app_id": manifest.app_id,
             "ready_url": manifest.service.ready_url,
-            "workspace": None if workspace is None else str(workspace),
+            "workspace": AgentAppHost._workspace_identity(workspace),
         }, sort_keys=True), encoding="utf-8")
 
     def _owns_ready_endpoint(
@@ -269,11 +277,15 @@ class AgentAppHost:
             pid = int(payload["pid"])
         except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
             return False
+        try:
+            recorded_workspace = self._workspace_identity(payload.get("workspace"))
+            requested_workspace = self._workspace_identity(workspace)
+        except (OSError, TypeError, ValueError):
+            return False
         return (
             payload.get("app_id") == manifest.app_id
             and payload.get("ready_url") == manifest.service.ready_url
-            and payload.get("workspace")
-            == (None if workspace is None else str(workspace))
+            and recorded_workspace == requested_workspace
             and self.process_exists(pid)
         )
 

@@ -20,7 +20,7 @@ from orbit.workflow.authoring import (
 )
 from orbit.workflow.application.authoring_job_service import AuthoringJobService
 
-from test_workflow_authoring_jobs import AuthoringJobTestCase, dsl
+from tests.test_workflow_authoring_jobs import AuthoringJobTestCase, dsl
 
 
 class BrokerJobTests(AuthoringJobTestCase):

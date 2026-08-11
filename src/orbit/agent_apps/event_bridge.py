@@ -18,6 +18,7 @@ class EventInbox:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._condition = threading.Condition()
+        self._revision = 0
         with closing(self._connect()) as connection:
             connection.executescript(
                 """
@@ -90,6 +91,7 @@ class EventInbox:
                 raise
         if inserted:
             with self._condition:
+                self._revision += 1
                 self._condition.notify_all()
         return inserted
 
@@ -117,6 +119,8 @@ class EventInbox:
         if timeout_seconds < 0 or timeout_seconds > 300:
             raise ValueError("timeout_seconds must be between 0 and 300")
         deadline = time.monotonic() + timeout_seconds
+        with self._condition:
+            observed_revision = self._revision
         while True:
             events = self.pending(limit=1, event_types=event_types)
             if events:
@@ -125,7 +129,14 @@ class EventInbox:
             if remaining <= 0:
                 return None
             with self._condition:
+                # An accept between pending() and acquiring this lock already
+                # changed the revision. Re-query instead of missing its notify
+                # and sleeping until the caller's full timeout.
+                if self._revision != observed_revision:
+                    observed_revision = self._revision
+                    continue
                 self._condition.wait(timeout=remaining)
+                observed_revision = self._revision
 
     def acknowledge(self, event_id: str) -> bool:
         with closing(self._connect()) as connection:

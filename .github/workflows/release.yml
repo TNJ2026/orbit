@@ -34,7 +34,7 @@ jobs:
 
       - name: Run tests
         run: |
-          uv run python -m unittest discover -s tests
+          uv run python scripts/run-release-tests.py
           node --test tests/ui/client_modules.test.mjs
 
       - name: Build Python packages

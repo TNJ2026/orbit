@@ -68,6 +68,11 @@ def _error(request_id: Any, message: str, code: int = INTERNAL_ERROR) -> dict[st
 def forward_http(url: str, message: Any, *, timeout: float = 330) -> Any:
     """Forward exactly one JSON-RPC payload without interpreting business data."""
 
+    # Intentionally longer than the authoring wait maximum (300s): one local
+    # loopback MCP request may be a long poll. The proxy is single-session and
+    # synchronous by design, so this bounds a wedged upstream without cutting
+    # off a legitimate wait_authoring_request call.
+
     body = json.dumps(message, ensure_ascii=False).encode("utf-8")
     request = Request(url, data=body, method="POST", headers={"content-type": "application/json"})
     try:

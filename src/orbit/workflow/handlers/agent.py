@@ -43,7 +43,7 @@ Work within the available time and stop starting new operations when time is sho
 Prefer tests targeted at the changes; do not run the full test suite by default.
 When asked to wrap up, a test fails, or progress is blocked, return immediately with the current result.
 Always report completed changes, tests run, errors, and remaining work, even when the task is only partially complete.
-After the complete final response, print ORBIT_RESULT_COMPLETE on a line by itself and do not print anything after it."""
+After the complete final response, print ORBIT_RESULT_COMPLETE on a line by itself. Orbit treats that line as completion; do not print anything after it."""
 
 
 @dataclass(frozen=True)
@@ -368,16 +368,20 @@ class TrustedPromptCliAgentClient(TrustedCliAgentClient):
 
 
 def _has_terminal_marker(stdout: str, marker: str) -> bool:
-    """True only when the last non-empty line is the exact protocol marker."""
+    """True once any complete output line is the exact protocol marker."""
 
-    lines = stdout.rstrip().splitlines()
-    return bool(lines and lines[-1].strip() == marker)
+    return any(line.strip() == marker for line in stdout.splitlines())
 
 
 def _strip_terminal_marker(stdout: str, marker: str) -> str:
     lines = stdout.rstrip().splitlines()
-    if lines and lines[-1].strip() == marker:
-        lines.pop()
+    for index, line in enumerate(lines):
+        if line.strip() == marker:
+            # The marker commits everything before it as the result. Output
+            # racing in after that point belongs to a process Orbit is already
+            # stopping and must not leak into the committed response.
+            lines = lines[:index]
+            break
     return "\n".join(lines)
 
 

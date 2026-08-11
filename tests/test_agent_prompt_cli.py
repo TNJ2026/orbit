@@ -118,6 +118,14 @@ class PromptTransportTests(unittest.TestCase):
         self.assertEqual("answer", self.call(client))
         self.assertLess(time.monotonic() - started, 3)
 
+    def test_a_standalone_marker_completes_even_when_output_follows_it(self) -> None:
+        client = self.client(
+            "print('answer\\nORBIT_RESULT_COMPLETE\\nlate output')",
+            prompt_flag="-p",
+        )
+
+        self.assertEqual("answer", self.call(client))
+
     def test_a_complete_untruncated_marker_is_not_invalidated_by_drain_health(
         self,
     ) -> None:

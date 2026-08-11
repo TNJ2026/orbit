@@ -120,6 +120,28 @@ class HostTests(unittest.TestCase):
         self.assertFalse(ensured.started)
         self.assertEqual([], launched)
 
+    def test_ready_owner_compares_canonical_workspace_paths(self) -> None:
+        health = iter((False, False, True))
+        first = AgentAppHost(
+            state_root=self.root / "state",
+            health_check=lambda _url: next(health),
+            launcher=lambda *_args: _Process(),
+            sleep=lambda _seconds: None,
+        )
+        ensured = first.ensure(self.manifest_path, workspace=self.workspace)
+        pid_path = ensured.state_dir / "pid.json"
+        payload = json.loads(pid_path.read_text(encoding="utf-8"))
+        payload["workspace"] = str(self.workspace / ".." / "workspace")
+        pid_path.write_text(json.dumps(payload), encoding="utf-8")
+
+        second = AgentAppHost(
+            state_root=self.root / "state", health_check=lambda _url: True,
+            process_exists=lambda _pid: True,
+        )
+        self.assertFalse(
+            second.ensure(self.manifest_path, workspace=self.workspace).started
+        )
+
     def test_ready_endpoint_owned_by_another_workspace_is_rejected(self) -> None:
         health = iter((False, False, True))
         first = AgentAppHost(
@@ -329,6 +351,25 @@ class EventBridgeTests(unittest.TestCase):
         self.assertEqual([frame], reopened.pending())
         self.assertTrue(reopened.acknowledge("event:e1"))
         self.assertEqual([], reopened.pending())
+
+    def test_wait_does_not_miss_an_event_inserted_before_condition_wait(self) -> None:
+        frame = {
+            "type": "runtime_event", "event_id": "event:race",
+            "event_type": "run_started", "cursor": "cursor-race",
+        }
+        original_pending = self.inbox.pending
+        first = True
+
+        def racing_pending(*args, **kwargs):
+            nonlocal first
+            if first:
+                first = False
+                self.inbox.accept(frame)
+                return []
+            return original_pending(*args, **kwargs)
+
+        self.inbox.pending = racing_pending
+        self.assertEqual(frame, self.inbox.wait(timeout_seconds=0.1))
 
     def test_bridge_resumes_from_persisted_cursor(self) -> None:
         self.inbox.accept({"type": "ready", "cursor": "resume-me"})

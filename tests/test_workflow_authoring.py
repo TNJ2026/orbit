@@ -162,6 +162,9 @@ class AuthoringServiceTests(unittest.TestCase):
         self.assertIn("must never form a cycle", prompt)
         self.assertIn("content_types:['text/markdown']", prompt)
         self.assertIn("Never return such a deliverable only as inline JSON", prompt)
+        self.assertIn("long-form or otherwise substantial text", prompt)
+        self.assertIn("Reserve inline transport for short structured values", prompt)
+        self.assertIn("uses Artifact transport for long text", prompt)
         self.assertIn("full test suites", prompt)
         self.assertIn("prefer targeted tests", prompt)
         self.assertIn("useful partial result", prompt)
@@ -654,6 +657,7 @@ class CliGeneratorTests(unittest.TestCase):
             language="zh-CN",
         )
         self.assertIn('"display_language":"zh-CN"', model.prompts[0])
+        self.assertIn("long-form or otherwise substantial text", model.prompts[0])
 
     def test_a_cli_that_never_ran_is_unavailability(self) -> None:
         """Nothing started, so nothing was asked of a model and nothing spent."""

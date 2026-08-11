@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import re
 import stat
@@ -29,6 +30,22 @@ SEMVER = re.compile(
     r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
     r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
 )
+
+
+def package_version() -> str:
+    tree = ast.parse((ROOT / "src/orbit/__init__.py").read_text(encoding="utf-8"))
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if any(isinstance(target, ast.Name) and target.id == "__version__" for target in node.targets):
+            value = ast.literal_eval(node.value)
+            if isinstance(value, str):
+                return value
+    raise SystemExit("src/orbit/__init__.py does not define __version__")
+
+
+def base_version(value: str) -> str:
+    return value.split("+", 1)[0]
 
 
 def marketplace_document() -> dict[str, object]:
@@ -76,9 +93,21 @@ def zip_info(name: str, mode: int = 0o644) -> zipfile.ZipInfo:
 def build(output: Path, version: str | None) -> None:
     manifest_path = ROOT / ".codex-plugin" / "plugin.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    release_version = version or str(manifest["version"])
+    source_version = package_version()
+    manifest_version = str(manifest["version"])
+    if base_version(manifest_version) != base_version(source_version):
+        raise SystemExit(
+            "plugin and package base versions differ: "
+            f"{manifest_version!r} != {source_version!r}"
+        )
+    release_version = version or source_version
     if not SEMVER.fullmatch(release_version):
         raise SystemExit(f"release version is not valid semver: {release_version!r}")
+    if version is not None and release_version != source_version:
+        raise SystemExit(
+            f"requested release version {release_version!r} differs from package "
+            f"version {source_version!r}"
+        )
     manifest["version"] = release_version
 
     output.parent.mkdir(parents=True, exist_ok=True)
