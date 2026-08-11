@@ -8,6 +8,7 @@ import sqlite3
 from typing import Any, Mapping
 
 from ..artifacts.local_cas import LocalCASBackend
+from ..data.secrets import assert_no_secret_values
 from ..domain.data import PortTransport
 
 
@@ -36,7 +37,10 @@ class LangGraphArtifactStore:
         connection.row_factory = sqlite3.Row
         return connection
 
-    def access(self, *, run_id, node_id, attempt_id, output_ports, inputs):
+    def access(
+        self, *, run_id, node_id, attempt_id, output_ports, inputs,
+        secret_values=(),
+    ):
         authorized = set()
         for value in inputs.values():
             if isinstance(value, Mapping) and isinstance(value.get("artifact_id"), str):
@@ -49,6 +53,7 @@ class LangGraphArtifactStore:
         }
         return _ArtifactAccess(
             self, run_id, node_id, attempt_id, policies, authorized,
+            tuple(secret_values),
         )
 
     def _record(self, artifact_id: str):
@@ -124,10 +129,14 @@ class LangGraphArtifactStore:
 
 
 class _ArtifactAccess:
-    def __init__(self, store, run_id, node_id, attempt_id, policies, authorized):
+    def __init__(
+        self, store, run_id, node_id, attempt_id, policies, authorized,
+        secret_values,
+    ):
         self.store = store
         self.run_id, self.node_id, self.attempt_id = run_id, node_id, attempt_id
         self.policies, self.authorized = policies, authorized
+        self.secret_values = secret_values
         self._produced: dict[str, str] = {}
 
     @property
@@ -145,6 +154,7 @@ class _ArtifactAccess:
         artifact_id = "langgraph_artifact:" + hashlib.sha256(
             f"{self.attempt_id}|{name}".encode("utf-8")
         ).hexdigest()
+        assert_no_secret_values(content, self.secret_values)
         receipt = self.store.backend.write(
             content, max_size_bytes=policy.max_size_bytes
         )

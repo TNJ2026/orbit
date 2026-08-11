@@ -565,6 +565,7 @@ def create_app(
             workflow_db_path or db_path,
             registrations,
             state_directory=langgraph_state_directory,
+            secret_values=secret_values,
         )
 
     composition = RuntimeComposition(

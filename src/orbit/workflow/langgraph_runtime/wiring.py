@@ -13,8 +13,10 @@ from typing import Any
 
 from ..domain.handlers import UnknownExternalResultError
 from ..domain.serialization import canonical_json
+from ..data.secrets import assert_no_secret_values
 from ..handlers import AgentHandler, TransformHandler
 from ..handlers.agent import AgentRequest
+from ..handlers.context import ScopedSecretResolver
 from ..persistence.workflow_versions import SQLiteWorkflowVersionStore
 from .artifacts import LangGraphArtifactStore
 from .compiler import (
@@ -106,11 +108,27 @@ class _AgentAttemptJournal:
             connection.commit()
 
 
-def _agent_adapter(implementation: AgentHandler, manifest, journal, artifact_store):
+def _agent_adapter(
+    implementation: AgentHandler, manifest, journal, artifact_store, secret_values,
+):
     active: dict[str, set[str]] = {}
     active_lock = Lock()
 
     def invoke(inputs, config, context):
+        for port in context.input_ports:
+            if port.get("data_policy", {}).get("transport") != "secret_ref":
+                continue
+            reference = inputs.get(port["id"])
+            if not isinstance(reference, Mapping):
+                raise ValueError(f"secret_ref input {port['id']!r} must be an object")
+            unknown = set(reference) - {"logical_name", "version", "provider_hint"}
+            logical_name = reference.get("logical_name")
+            if unknown or not isinstance(logical_name, str) or not logical_name:
+                raise ValueError(f"secret_ref input {port['id']!r} is invalid")
+            if logical_name not in manifest.required_secrets:
+                raise ValueError(
+                    f"secret_ref input {port['id']!r} was not declared by Handler Manifest"
+                )
         replay = journal.claim(context)
         if replay is not None:
             return replay
@@ -133,6 +151,10 @@ def _agent_adapter(implementation: AgentHandler, manifest, journal, artifact_sto
                 for port in context.output_ports
             ),
             inputs=inputs,
+            secret_values=secret_values.values(),
+        )
+        secrets = ScopedSecretResolver(
+            tuple(manifest.required_secrets), secret_values,
         )
         request_context = SimpleNamespace(
             request=SimpleNamespace(
@@ -146,6 +168,7 @@ def _agent_adapter(implementation: AgentHandler, manifest, journal, artifact_sto
             ),
             output=_DiscardedOutput(),
             artifacts=artifacts,
+            secrets=secrets,
         )
         try:
             with active_lock:
@@ -164,6 +187,7 @@ def _agent_adapter(implementation: AgentHandler, manifest, journal, artifact_sto
             if not isinstance(response.output, Mapping):
                 raise ValueError("Agent output must be an object")
             output = dict(response.output)
+            assert_no_secret_values(output, secret_values.values())
             referenced = {str(item) for item in response.artifact_refs}
             produced = set(artifacts.produced_artifact_ids)
             if referenced != produced:
@@ -197,6 +221,7 @@ def _agent_adapter(implementation: AgentHandler, manifest, journal, artifact_sto
 def trusted_handlers(
     registrations: Sequence[Any], *, attempt_db_path: Path | str | None = None,
     artifact_store: LangGraphArtifactStore | None = None,
+    secret_values: Mapping[str, str] | None = None,
 ) -> LangGraphHandlerRegistry:
     """Expose only reviewed adapters, never arbitrary Orbit NodeHandlers."""
 
@@ -206,6 +231,7 @@ def trusted_handlers(
             attempt_path, attempt_path.parent / "artifacts",
         )
     handlers: list[BoundHandler] = []
+    secret_values = dict(secret_values or {})
     for registration in registrations:
         manifest = registration.manifest
         if isinstance(registration.implementation, TransformHandler):
@@ -222,7 +248,8 @@ def trusted_handlers(
         ):
             journal = _AgentAttemptJournal(attempt_db_path)
             invoke, cancel_run = _agent_adapter(
-                registration.implementation, manifest, journal, artifact_store
+                registration.implementation, manifest, journal, artifact_store,
+                secret_values,
             )
             handlers.append(BoundHandler(
                 manifest.name,
@@ -230,7 +257,7 @@ def trusted_handlers(
                 manifest.fingerprint,
                 invoke,
                 cancel_run,
-                frozenset({"inline", "artifact_ref"}),
+                frozenset({"inline", "artifact_ref", "secret_ref"}),
             ))
     return LangGraphHandlerRegistry(handlers)
 
@@ -240,6 +267,7 @@ def build_service(
     registrations: Sequence[Any],
     *,
     state_directory: Path | str,
+    secret_values: Mapping[str, str] | None = None,
 ) -> LangGraphWorkflowService:
     """Build the isolated service and its two adapter-owned databases."""
 
@@ -253,6 +281,7 @@ def build_service(
             registrations,
             attempt_db_path=state / "langgraph-runs.sqlite3",
             artifact_store=artifact_store,
+            secret_values=secret_values,
         ),
         run_db_path=state / "langgraph-runs.sqlite3",
         checkpoint_db_path=state / "langgraph-checkpoints.sqlite3",

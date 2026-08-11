@@ -76,6 +76,13 @@ def artifact_port(name: str) -> IRPort:
     )
 
 
+def secret_port(name: str) -> IRPort:
+    return IRPort(
+        name, SCHEMA, True, False, None, "",
+        PortDataPolicy(PortTransport.SECRET_REF),
+    )
+
+
 def node(
     node_id: str,
     *,
@@ -870,13 +877,14 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
 
 
 class LangGraphProductionWiringTests(unittest.TestCase):
-    def registration(self, client) -> HandlerRegistration:
+    def registration(self, client, *, required_secrets=()) -> HandlerRegistration:
         manifest = HandlerManifest(
             "trusted_agent", "1.0.0", ("action",),
             {"value": SCHEMA}, {"value": SCHEMA},
             {"type": "object"}, ExecutionSafety.UNKNOWN_ON_LEASE_LOSS,
             ResourceProfile(1000, 1000, 0, 30, 0, "agent"),
-            "schema://object/1.0", ("agent.invoke",), (), True, True,
+            "schema://object/1.0", ("agent.invoke",),
+            tuple(required_secrets), True, True,
         )
         return HandlerRegistration(
             manifest, AgentHandler(client), "trusted-agent@test"
@@ -1002,6 +1010,81 @@ class LangGraphProductionWiringTests(unittest.TestCase):
 
         self.assertEqual("pipeline document", result["result"])
         self.assertEqual(2, len(client.requests))
+
+    def test_agent_secret_ref_is_scoped_and_never_enters_graph_result(self) -> None:
+        class SecretClient(FakeAgentClient):
+            def execute(self, request, context):
+                self.requests.append(request)
+                revealed = context.secrets.resolve("api_key").reveal()
+                return AgentResponse(
+                    {"value": "authorized" if revealed == "top-secret" else "bad"},
+                    None, None,
+                )
+
+        client = SecretClient()
+        registration = self.registration(client, required_secrets=("api_key",))
+        credential = secret_port("credential")
+        action = IRNode(
+            "agent", "action", (credential,), (port("value"),),
+            IRHandlerRef(
+                registration.manifest.name, registration.manifest.version,
+                registration.manifest.fingerprint,
+            ),
+            {}, (), None,
+        )
+        ir = WorkflowIR(
+            "1.3", "workflow:secret", "Secret workflow", "", {},
+            (credential,), (), (action,), (), ("agent",), ("agent",), (), (), {},
+            IRResult("agent", "value"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            registry = trusted_handlers(
+                [registration],
+                attempt_db_path=Path(directory) / "runs.sqlite3",
+                secret_values={"api_key": "top-secret"},
+            )
+            result = compile_workflow(ir, registry).invoke({
+                "credential": {"logical_name": "api_key"},
+            })
+
+        self.assertEqual("authorized", result["result"])
+        self.assertNotIn("top-secret", json.dumps(result))
+
+    def test_agent_secret_value_cannot_enter_result_or_artifact(self) -> None:
+        class LeakingClient(FakeAgentClient):
+            def execute(self, request, context):
+                secret = context.secrets.resolve("api_key").reveal()
+                if request.config.get("artifact"):
+                    context.artifacts.write(
+                        name="value", content=secret.encode(),
+                        content_type="application/octet-stream",
+                    )
+                return AgentResponse({"value": secret}, None, None)
+
+        client = LeakingClient()
+        registration = self.registration(client, required_secrets=("api_key",))
+        with tempfile.TemporaryDirectory() as directory:
+            registry = trusted_handlers(
+                [registration],
+                attempt_db_path=Path(directory) / "runs.sqlite3",
+                secret_values={"api_key": "top-secret"},
+            )
+            bound = registry.resolve(self.bound_node(registration.manifest))
+            context = LangGraphExecutionContext(
+                "workflow:test", "agent", "langgraph_run:secret",
+                "langgraph_attempt:secret:result",
+            )
+            with self.assertRaisesRegex(ValueError, "resolved Secret value"):
+                bound.invoke({"value": "prompt"}, {}, context)
+            artifact_context = LangGraphExecutionContext(
+                "workflow:test", "agent", "langgraph_run:secret",
+                "langgraph_attempt:secret:artifact", (),
+                (to_primitive(artifact_port("value")),),
+            )
+            with self.assertRaisesRegex(ValueError, "resolved Secret value"):
+                bound.invoke(
+                    {"value": "prompt"}, {"artifact": True}, artifact_context,
+                )
 
     def test_unknown_agent_attempt_is_never_executed_twice(self) -> None:
         client = FakeAgentClient(
