@@ -428,18 +428,13 @@ def _serve(args) -> None:
         print(f"dev tools: {', '.join(tool_names) or 'none granted'}", flush=True)
 
     workflow_db_path = db_path if args.db else public_workflow_db_path()
-    langgraph_service = None
-    if args.enable_langgraph:
-        from .workflow.langgraph_runtime import build_service
-
-        langgraph_service = build_service(
-            workflow_db_path,
-            handlers,
-            state_directory=(
-                Path(args.langgraph_state_dir).expanduser().absolute()
-                if args.langgraph_state_dir else Path(db_path).parent
-            ),
+    langgraph_state_directory = (
+        (
+            Path(args.langgraph_state_dir).expanduser().absolute()
+            if args.langgraph_state_dir else Path(db_path).parent
         )
+        if args.enable_langgraph else None
+    )
 
     def request_shutdown() -> None:
         # Uvicorn owns graceful shutdown and lifespan cleanup. Raising the same
@@ -470,7 +465,7 @@ def _serve(args) -> None:
             # Recovery takeovers are answered by this person too.
             operator_actors=(LOCAL_ACTOR,),
             shutdown_request=request_shutdown,
-            langgraph_service=langgraph_service,
+            langgraph_state_directory=langgraph_state_directory,
         )
     except MixedSchemaError as exc:
         raise SystemExit(f"error: {exc}") from None

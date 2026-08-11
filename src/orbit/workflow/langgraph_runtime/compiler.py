@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Annotated, Any, TypedDict
 
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
@@ -30,10 +31,16 @@ class HandlerBindingError(LangGraphCompileError):
     """A node does not resolve to the exact trusted Handler build in its IR."""
 
 
+class LangGraphUnknownExternalResult(RuntimeError):
+    """An external Handler may have acted and must not be executed again."""
+
+
 @dataclass(frozen=True)
 class LangGraphExecutionContext:
     workflow_id: str
     node_id: str
+    run_id: str = ""
+    attempt_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -325,7 +332,13 @@ def compile_workflow(
     for node in ir.nodes:
         handler = bound.get(node.id)
 
-        def execute(state: _GraphState, *, current=node, implementation=handler):
+        def execute(
+            state: _GraphState,
+            config: RunnableConfig,
+            *,
+            current=node,
+            implementation=handler,
+        ):
             inputs = _assemble_inputs(ir, current, state)
             if implementation is None:
                 if current.kind == "human":
@@ -350,7 +363,17 @@ def compile_workflow(
                 raw = implementation.invoke(
                     inputs,
                     current.config,
-                    LangGraphExecutionContext(ir.workflow_id, current.id),
+                    LangGraphExecutionContext(
+                        ir.workflow_id,
+                        current.id,
+                        str(config.get("configurable", {}).get("thread_id", "")),
+                        (
+                            "langgraph_attempt:"
+                            + str(config.get("configurable", {}).get("thread_id", ""))
+                            + f":{current.id}:"
+                            + str(state.get("execution_order", ()).count(current.id) + 1)
+                        ),
+                    ),
                 )
                 outcome = raw if isinstance(raw, HandlerOutcome) else HandlerOutcome(raw)
                 if not isinstance(outcome.output, Mapping):

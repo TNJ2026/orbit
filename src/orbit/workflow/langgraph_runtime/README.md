@@ -108,10 +108,16 @@ orbit serve --enable-langgraph
 This creates `langgraph-runs.sqlite3` and
 `langgraph-checkpoints.sqlite3` beside the Runtime database. Use
 `--langgraph-state-dir PATH` to place both elsewhere. Production wiring exposes
-only reviewed adapters; currently that is the deterministic built-in
-`transform` Handler. Orbit Agent and development-tool Handlers remain on the
-event-sourced Runtime because moving them would bypass attempt leases, budgets,
-and unknown-result recovery.
+only reviewed adapters: the deterministic built-in `transform` Handler and
+Agent Handlers produced by the trusted discovery allowlist. Development-tool
+Handlers remain on the event-sourced Runtime.
+
+Agent nodes receive a stable run/attempt identity and write an attempt journal
+before submitting to the CLI. A completed response is replayable if the graph
+checkpoint write is interrupted. A timeout, cancellation, process loss, or an
+attempt found `started` during recovery parks the run as `unknown`; it is never
+submitted a second time automatically. This preserves Orbit's core
+unknown-external-result rule while Agent execution migrates to LangGraph.
 
 Passing `langgraph_service=service` to `create_app()` explicitly mounts a
 separate surface. Omitting it leaves every route absent:

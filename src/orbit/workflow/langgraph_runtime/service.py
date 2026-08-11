@@ -14,7 +14,8 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 
 from ..domain.serialization import canonical_json, definition_hash, to_primitive
 from .compiler import (
-    LangGraphCompileError, LangGraphHandlerRegistry, compile_workflow,
+    LangGraphCompileError, LangGraphHandlerRegistry,
+    LangGraphUnknownExternalResult, compile_workflow,
 )
 
 
@@ -267,7 +268,7 @@ class LangGraphWorkflowService:
         if isinstance(limit, bool) or not 1 <= limit <= 500:
             raise ValueError("limit must be between 1 and 500")
         if status is not None and status not in {
-            "running", "interrupted", "completed", "failed",
+            "running", "interrupted", "completed", "failed", "unknown",
         }:
             raise ValueError("invalid LangGraph run status")
         where, params = ("", ()) if status is None else (" WHERE status=?", (status,))
@@ -307,6 +308,10 @@ class LangGraphWorkflowService:
             )
             return self._settle(
                 run_id, status, result=result["result"], interrupts=interrupts,
+            )
+        except LangGraphUnknownExternalResult as exc:
+            return self._settle(
+                run_id, "unknown", error=f"{type(exc).__name__}: {exc}"
             )
         except Exception as exc:
             self._settle(run_id, "failed", error=f"{type(exc).__name__}: {exc}")

@@ -26,23 +26,26 @@ from orbit.workflow.domain.definitions import (
     WorkflowIR,
 )
 from orbit.workflow.domain.durable_execution import ExecutionSafety
-from orbit.workflow.domain.handlers import ResourceProfile
+from orbit.workflow.domain.handlers import ResourceProfile, UnknownExternalResultError
 from orbit.workflow.domain.serialization import definition_hash
 from orbit.workflow.langgraph_runtime import (
     BoundHandler,
     HandlerBindingError,
     HandlerOutcome,
     LangGraphHandlerRegistry,
+    LangGraphExecutionContext,
     LangGraphRunConflict,
     LangGraphWorkflowService,
     build_service,
     compile_generated_workflow,
     compile_workflow,
 )
+from orbit.workflow.handlers.agent import AgentHandler, AgentResponse, FakeAgentClient
 from orbit.workflow.persistence.workflow_versions import SQLiteWorkflowVersionStore
 from orbit.web.api_v1 import OPS_WRITE_SCOPE, READ_SCOPE, WRITE_SCOPE, Authorizer
-from orbit.web.app import create_app
+from orbit.web.app import HandlerRegistration, create_app
 from orbit.web.builtin_handlers import BUILTIN_SCHEMAS, builtin_handlers
+from orbit.workflow.langgraph_runtime.wiring import trusted_handlers
 from tests.test_web_composition import AsgiHarness
 
 
@@ -664,6 +667,109 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
                     expected_revision=paused.revision,
                     idempotency_key="resume-once",
                 )
+
+
+class LangGraphProductionWiringTests(unittest.TestCase):
+    def registration(self, client) -> HandlerRegistration:
+        manifest = HandlerManifest(
+            "trusted_agent", "1.0.0", ("action",),
+            {"value": SCHEMA}, {"value": SCHEMA},
+            {"type": "object"}, ExecutionSafety.UNKNOWN_ON_LEASE_LOSS,
+            ResourceProfile(1000, 1000, 0, 30, 0, "agent"),
+            "schema://object/1.0", ("agent.invoke",), (), True, True,
+        )
+        return HandlerRegistration(
+            manifest, AgentHandler(client), "trusted-agent@test"
+        )
+
+    def bound_node(self, manifest) -> IRNode:
+        return IRNode(
+            "agent", "action", (port("value"),), (port("value"),),
+            IRHandlerRef(manifest.name, manifest.version, manifest.fingerprint),
+            {}, (), None, None,
+        )
+
+    def test_successful_agent_attempt_is_replayed_from_journal(self) -> None:
+        client = FakeAgentClient(AgentResponse({"value": 8}, None, "provider:1"))
+        registration = self.registration(client)
+        with tempfile.TemporaryDirectory() as directory:
+            registry = trusted_handlers(
+                [registration],
+                attempt_db_path=Path(directory) / "runs.sqlite3",
+            )
+            bound = registry.resolve(self.bound_node(registration.manifest))
+            context = LangGraphExecutionContext(
+                "workflow:test", "agent", "langgraph_run:test",
+                "langgraph_attempt:test:agent:1",
+            )
+            first = bound.invoke({"value": 7}, {}, context)
+            replayed = bound.invoke({"value": 7}, {}, context)
+
+        self.assertEqual({"value": 8}, first)
+        self.assertEqual(first, replayed)
+        self.assertEqual(1, len(client.requests))
+
+    def test_unknown_agent_attempt_is_never_executed_twice(self) -> None:
+        client = FakeAgentClient(
+            error=UnknownExternalResultError("connection lost after submission")
+        )
+        registration = self.registration(client)
+        with tempfile.TemporaryDirectory() as directory:
+            registry = trusted_handlers(
+                [registration],
+                attempt_db_path=Path(directory) / "runs.sqlite3",
+            )
+            bound = registry.resolve(self.bound_node(registration.manifest))
+            context = LangGraphExecutionContext(
+                "workflow:test", "agent", "langgraph_run:test",
+                "langgraph_attempt:test:agent:1",
+            )
+            with self.assertRaisesRegex(RuntimeError, "connection lost"):
+                bound.invoke({"value": 7}, {}, context)
+            with self.assertRaisesRegex(RuntimeError, "unknown outcome"):
+                bound.invoke({"value": 7}, {}, context)
+
+        self.assertEqual(1, len(client.requests))
+
+    def test_unknown_agent_result_parks_the_run_without_reexecution(self) -> None:
+        client = FakeAgentClient(
+            error=UnknownExternalResultError("connection lost after submission")
+        )
+        registration = self.registration(client)
+        action = self.bound_node(registration.manifest)
+        terminal = node(
+            "terminal", inputs=("value",), kind="terminal", handler=False
+        )
+        ir = workflow(
+            (action, terminal),
+            (edge("done", "agent", "terminal"),),
+            entry=("agent",), terminals=("terminal",), result=("agent", "value"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = SQLiteWorkflowVersionStore(root / "workflows.sqlite3")
+            store.publish(
+                CompiledWorkflow(
+                    ir, definition_hash(ir), "test", "sha256:" + "c" * 64
+                ),
+                expected_latest_version=0,
+                source_format="json",
+                source_text="{}",
+                actor="test:author",
+                dsl_version="1.3",
+            )
+            service = build_service(
+                store.path, [registration], state_directory=root,
+            )
+            parked = service.start(
+                ir.workflow_id, {"value": 7}, idempotency_key="unknown-agent"
+            )
+            recovered = service.recover(parked.run_id)
+
+        self.assertEqual("unknown", parked.status)
+        self.assertIn("connection lost", parked.error)
+        self.assertEqual(parked, recovered)
+        self.assertEqual(1, len(client.requests))
 
 
 class LangGraphHttpApiTests(unittest.TestCase):

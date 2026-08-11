@@ -142,13 +142,8 @@ class WorkflowCliTests(unittest.TestCase):
         self.assertEqual(self.db.parent / "artifacts", backend.root)
 
     def test_serve_enables_the_isolated_langgraph_service_explicitly(self) -> None:
-        sentinel = object()
         with (
             patch("orbit.web.app.create_app") as create_app,
-            patch(
-                "orbit.workflow.langgraph_runtime.build_service",
-                return_value=sentinel,
-            ) as build_service,
             patch("orbit.__main__.upsert_project"),
             patch("orbit.__main__.uvicorn.run"),
         ):
@@ -157,10 +152,10 @@ class WorkflowCliTests(unittest.TestCase):
                 "--enable-langgraph",
             )
 
-        build_service.assert_called_once()
-        self.assertEqual(self.db, Path(build_service.call_args.args[0]))
-        self.assertEqual(self.db.parent, build_service.call_args.kwargs["state_directory"])
-        self.assertIs(sentinel, create_app.call_args.kwargs["langgraph_service"])
+        self.assertEqual(
+            self.db.parent,
+            create_app.call_args.kwargs["langgraph_state_directory"],
+        )
 
     def test_serve_keeps_langgraph_disabled_by_default(self) -> None:
         with (
@@ -172,7 +167,9 @@ class WorkflowCliTests(unittest.TestCase):
                 "serve", "--db", str(self.db), "--no-agent-discovery",
             )
 
-        self.assertIsNone(create_app.call_args.kwargs["langgraph_service"])
+        self.assertIsNone(
+            create_app.call_args.kwargs["langgraph_state_directory"]
+        )
 
     def test_serve_reports_an_unusable_artifact_root_without_a_traceback(self) -> None:
         invalid_root = Path(self.temp_dir.name) / "not-a-directory"

@@ -452,6 +452,7 @@ def create_app(
     workflow_db_path: Path | str | None = None,
     shutdown_request: Callable[[], None] | None = None,
     langgraph_service: Any = None,
+    langgraph_state_directory: Path | str | None = None,
 ) -> Starlette:
     """Build the Runtime application.
 
@@ -552,6 +553,19 @@ def create_app(
                 # the unnamed fallback; the names in the menu are the ones Apps
                 # report for themselves.
                 workflow_generator = authoring_broker
+
+    if langgraph_state_directory is not None:
+        if langgraph_service is not None:
+            raise ValueError(
+                "provide langgraph_service or langgraph_state_directory, not both"
+            )
+        from ..workflow.langgraph_runtime import build_service
+
+        langgraph_service = build_service(
+            workflow_db_path or db_path,
+            registrations,
+            state_directory=langgraph_state_directory,
+        )
 
     composition = RuntimeComposition(
         db_path,

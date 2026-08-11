@@ -8,6 +8,7 @@ from .compiler import (
     LangGraphCompileError,
     LangGraphExecutionContext,
     LangGraphHandlerRegistry,
+    LangGraphUnknownExternalResult,
     compile_generated_workflow,
     compile_workflow,
 )
@@ -26,6 +27,7 @@ __all__ = [
     "LangGraphCompileError",
     "LangGraphExecutionContext",
     "LangGraphHandlerRegistry",
+    "LangGraphUnknownExternalResult",
     "LangGraphRun",
     "LangGraphRunConflict",
     "LangGraphWorkflowService",
