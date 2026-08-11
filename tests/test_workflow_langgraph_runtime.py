@@ -26,6 +26,7 @@ from orbit.workflow.domain.definitions import (
     WorkflowIR,
 )
 from orbit.workflow.domain.durable_execution import ExecutionSafety
+from orbit.workflow.domain.data import PortDataPolicy, PortTransport
 from orbit.workflow.domain.handlers import ResourceProfile, UnknownExternalResultError
 from orbit.workflow.domain.serialization import definition_hash
 from orbit.workflow.langgraph_runtime import (
@@ -57,6 +58,18 @@ IDENTITY = {"op": "identity"}
 
 def port(name: str) -> IRPort:
     return IRPort(name, SCHEMA, True, False, None, "")
+
+
+def artifact_port(name: str) -> IRPort:
+    return IRPort(
+        name,
+        SCHEMA,
+        True,
+        False,
+        None,
+        "",
+        PortDataPolicy(PortTransport.ARTIFACT_REF),
+    )
 
 
 def node(
@@ -136,6 +149,47 @@ def binding(name, invoke) -> BoundHandler:
 
 
 class LangGraphWorkflowCompilerTests(unittest.TestCase):
+    def test_non_inline_port_transport_is_rejected_fail_closed(self) -> None:
+        artifact = artifact_port("payload")
+        action = IRNode(
+            "action",
+            "action",
+            (artifact,),
+            (port("value"),),
+            IRHandlerRef("action", "1.0.0", FINGERPRINT),
+            {},
+            (),
+            None,
+        )
+        ir = WorkflowIR(
+            "1.3",
+            "workflow:artifact",
+            "Artifact workflow",
+            "",
+            {},
+            (artifact,),
+            (),
+            (action,),
+            (),
+            ("action",),
+            ("action",),
+            (),
+            (),
+            {},
+            IRResult("action", "value"),
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "workflow input port 'payload' uses 'artifact_ref'",
+        ):
+            compile_workflow(
+                ir,
+                LangGraphHandlerRegistry([
+                    binding("action", lambda values, config, context: values)
+                ]),
+            )
+
     def test_explicit_error_outcome_selects_error_edge(self) -> None:
         action = node(
             "action", inputs=("value",), outputs=("value",), route_mode="exclusive"
@@ -615,6 +669,29 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
             {"compatible": True, "workflow_version": 1, "engine": "langgraph"},
             supported,
         )
+
+    def test_compatibility_rejects_artifact_transport_before_start(self) -> None:
+        artifact = artifact_port("payload")
+        action = IRNode(
+            "action", "action", (artifact,), (port("value"),),
+            IRHandlerRef("action", "1.0.0", FINGERPRINT), {}, (), None,
+        )
+        ir = WorkflowIR(
+            "1.3", "workflow:artifact", "Artifact workflow", "", {},
+            (artifact,), (), (action,), (), ("action",), ("action",), (), (), {},
+            IRResult("action", "value"),
+        )
+        registry = LangGraphHandlerRegistry([
+            binding("action", lambda values, config, context: values)
+        ])
+        with tempfile.TemporaryDirectory() as directory:
+            result = self.service(
+                directory, self.publish(directory, ir), registry
+            ).compatibility(ir.workflow_id)
+
+        self.assertFalse(result["compatible"])
+        self.assertEqual("unsupported_workflow", result["reason"])
+        self.assertIn("artifact_ref", result["detail"])
 
     def test_interrupted_run_resumes_after_service_rebuild(self) -> None:
         action = node("action", inputs=("value",), outputs=("value",))

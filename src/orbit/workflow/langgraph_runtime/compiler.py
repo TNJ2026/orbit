@@ -328,6 +328,25 @@ def compile_workflow(
 
     if not isinstance(ir, WorkflowIR):
         raise TypeError("compile_workflow requires WorkflowIR")
+    for owner, ports in (
+        ("workflow input", ir.inputs),
+        ("workflow output", ir.outputs),
+        *(
+            (f"node {node.id!r} input", node.inputs)
+            for node in ir.nodes
+        ),
+        *(
+            (f"node {node.id!r} output", node.outputs)
+            for node in ir.nodes
+        ),
+    ):
+        for port in ports:
+            transport = port.data_policy.transport.value
+            if transport != "inline":
+                raise LangGraphCompileError(
+                    f"{owner} port {port.id!r} uses {transport!r}; "
+                    "LangGraph artifact and secret transports are not yet supported"
+                )
     bound = {
         node.id: registry.resolve(node)
         for node in ir.nodes
