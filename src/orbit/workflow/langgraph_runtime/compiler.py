@@ -228,10 +228,20 @@ def _assemble_inputs(
         merge_mode = JoinMergeMode(
             policy.config.get("merge_mode", "array_by_edge")
         )
+        mode = policy.config.get("mode")
         by_port: dict[str, list[tuple[Any, Any]]] = {}
         for edge, value in selected_values:
             by_port.setdefault(edge.target_port, []).append((edge, value))
         for port_id, values in by_port.items():
+            if mode == "any":
+                values = values[:1]
+            elif mode == "n_of_m":
+                threshold = int(policy.config["threshold"])
+                if len(values) < threshold:
+                    raise ValueError(
+                        f"join {node.id!r} cannot satisfy threshold {threshold}"
+                    )
+                values = values[:threshold]
             ordered = tuple(edge.id for edge, _ in values)
             assembled[port_id] = to_primitive(assemble_join_inputs(
                 merge_mode, {edge.id: value for edge, value in values}, ordered,
@@ -381,7 +391,9 @@ def compile_workflow(
                 if policy.kind not in {"route", "retry", "join"}
                 or (
                     policy.kind == "join"
-                    and policy.config.get("mode") != "all"
+                    and policy.config.get("mode") not in {
+                        "all", "all_successful", "any", "n_of_m",
+                    }
                 )
             ),
             key=lambda policy: policy.id,
@@ -416,6 +428,15 @@ def compile_workflow(
             raise LangGraphCompileError(
                 f"join policy {policy.id!r} has invalid merge_mode"
             ) from None
+        mode = policy.config.get("mode")
+        threshold = policy.config.get("threshold")
+        if mode == "n_of_m" and (
+            isinstance(threshold, bool) or not isinstance(threshold, int)
+            or threshold < 1
+        ):
+            raise LangGraphCompileError(
+                f"join policy {policy.id!r} requires a positive threshold"
+            )
     bound = {
         node.id: registry.resolve(node)
         for node in ir.nodes

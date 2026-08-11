@@ -469,6 +469,57 @@ class LangGraphWorkflowCompilerTests(unittest.TestCase):
             "left_join": "x-left", "right_join": "x-right",
         }, result["result"])
 
+    def test_join_winner_modes_follow_priority_order(self) -> None:
+        fan = node(
+            "fan", inputs=("value",), outputs=("value",), route_mode="parallel",
+        )
+        left = node("left", inputs=("value",), outputs=("value",))
+        right = node("right", inputs=("value",), outputs=("value",))
+        registry = LangGraphHandlerRegistry([
+            binding("fan", lambda values, config, context: values),
+            binding("left", lambda values, config, context: {"value": "left"}),
+            binding("right", lambda values, config, context: {"value": "right"}),
+        ])
+        for mode, extra, expected in (
+            ("any", {}, {"left_join": "left"}),
+            ("n_of_m", {"threshold": 1}, {"left_join": "left"}),
+            (
+                "all_successful", {},
+                {"left_join": "left", "right_join": "right"},
+            ),
+        ):
+            with self.subTest(mode=mode):
+                policy = IRPolicy(
+                    "join_policy", "join",
+                    {"mode": mode, "merge_mode": "object_by_edge", **extra},
+                )
+                join = IRNode(
+                    "join", "join", (port("items"),), (port("merged"),),
+                    None, {}, (policy.id,), None,
+                )
+                ir = WorkflowIR(
+                    "1.3", f"workflow:join-{mode}", "Join", "", {},
+                    (port("value"),), (), (fan, left, right, join),
+                    (
+                        edge("to_left", "fan", "left"),
+                        edge("to_right", "fan", "right"),
+                        edge(
+                            "left_join", "left", "join",
+                            target_port="items", priority=1,
+                        ),
+                        edge(
+                            "right_join", "right", "join",
+                            target_port="items", priority=2,
+                        ),
+                    ),
+                    ("fan",), ("join",), (policy,), (), {},
+                    IRResult("join", "merged"),
+                )
+
+                result = compile_workflow(ir, registry).invoke({"value": "x"})
+
+                self.assertEqual(expected, result["result"])
+
     def test_checkpointed_interrupt_resumes_with_same_thread(self) -> None:
         action = node("action", inputs=("value",), outputs=("value",))
         terminal = node(
