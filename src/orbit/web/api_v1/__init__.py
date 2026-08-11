@@ -100,6 +100,7 @@ def build_api_v1(
         single_goal_mode=single_goal_mode,
         authoring_jobs=authoring_jobs,
         shutdown_request=shutdown_request,
+        langgraph_service=langgraph_service,
     )
     routes = [
         *runs.build_routes(ctx),

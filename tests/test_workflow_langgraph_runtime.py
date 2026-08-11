@@ -582,6 +582,37 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
                     ir.workflow_id, {"value": 9}, idempotency_key="start-once"
                 )
 
+    def test_compatibility_explains_missing_handler_before_start(self) -> None:
+        action = node("action", inputs=("value",), outputs=("value",))
+        terminal = node(
+            "terminal", inputs=("value",), kind="terminal", handler=False
+        )
+        ir = workflow(
+            (action, terminal),
+            (edge("done", "action", "terminal"),),
+            entry=("action",), terminals=("terminal",), result=("action", "value"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.publish(directory, ir)
+            unsupported = self.service(
+                directory, store, LangGraphHandlerRegistry([])
+            ).compatibility(ir.workflow_id)
+            supported = self.service(
+                directory,
+                store,
+                LangGraphHandlerRegistry([
+                    binding("action", lambda values, config, context: values)
+                ]),
+            ).compatibility(ir.workflow_id)
+
+        self.assertFalse(unsupported["compatible"])
+        self.assertEqual("unsupported_workflow", unsupported["reason"])
+        self.assertIn("handler not registered", unsupported["detail"])
+        self.assertEqual(
+            {"compatible": True, "workflow_version": 1, "engine": "langgraph"},
+            supported,
+        )
+
     def test_interrupted_run_resumes_after_service_rebuild(self) -> None:
         action = node("action", inputs=("value",), outputs=("value",))
         terminal = node(
@@ -888,6 +919,20 @@ class LangGraphHttpApiTests(unittest.TestCase):
                         break
                     time.sleep(0.01)
                 self.assertEqual("done", authored["status"], authored)
+                catalog = client.get(
+                    "/api/v1/workflows", actor="test:agent"
+                ).json()["data"]["workflows"]
+                generated = next(
+                    item for item in catalog
+                    if item["workflow_id"] == authored["result"]["workflow_id"]
+                )
+                self.assertTrue(
+                    generated["langgraph_compatibility"]["compatible"]
+                )
+                self.assertIn(
+                    "langgraph_run.start",
+                    {command["command"] for command in generated["allowed_commands"]},
+                )
                 interrupted = mcp(client, "start_langgraph_run", {
                     "workflow_id": authored["result"]["workflow_id"],
                     "input": {"value": 42},

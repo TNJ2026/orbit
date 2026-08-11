@@ -13,7 +13,9 @@ import uuid
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 from ..domain.serialization import canonical_json, definition_hash, to_primitive
-from .compiler import LangGraphHandlerRegistry, compile_workflow
+from .compiler import (
+    LangGraphCompileError, LangGraphHandlerRegistry, compile_workflow,
+)
 
 
 class LangGraphRunConflict(ValueError):
@@ -159,6 +161,28 @@ class LangGraphWorkflowService:
             )
             connection.commit()
         return self._execute(run_id, record.ir, inputs=inputs)
+
+    def compatibility(
+        self, workflow_id: str, workflow_version: int | None = None
+    ) -> Mapping[str, Any]:
+        """Explain whether an immutable workflow version can use this engine."""
+
+        try:
+            record = self._workflow(workflow_id, workflow_version)
+            compile_workflow(record.ir, self.handlers)
+        except LookupError as exc:
+            return {"compatible": False, "reason": "workflow_not_found", "detail": str(exc)}
+        except (LangGraphCompileError, ValueError, TypeError) as exc:
+            return {
+                "compatible": False,
+                "reason": "unsupported_workflow",
+                "detail": str(exc),
+            }
+        return {
+            "compatible": True,
+            "workflow_version": record.version.value,
+            "engine": "langgraph",
+        }
 
     def resume(
         self,

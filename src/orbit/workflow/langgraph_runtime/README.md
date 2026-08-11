@@ -139,3 +139,13 @@ Handlerless `human` nodes compile to native LangGraph interrupts. Their
 checkpoint payload includes the workflow, node, declared input, and config;
 resume with an object keyed by the human node's declared output ports (or a
 scalar when it declares exactly one output).
+
+## Gradual engine migration
+
+When the adapter is enabled, workflow catalog and detail projections include
+`langgraph_compatibility`. The service compiles the immutable published version
+against the reviewed registry before reporting it compatible. A writer receives
+the server-issued `langgraph_run.start` command only for a compatible version;
+unsupported workflows carry a stable reason and detail instead of failing after
+the caller has selected an engine. The existing `run.start` command remains
+available during migration, so switching is explicit and reversible per run.

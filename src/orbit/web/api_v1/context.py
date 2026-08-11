@@ -93,12 +93,14 @@ class ApiContext:
         single_goal_mode: bool = True,
         authoring_jobs=None,
         shutdown_request: Callable[[], None] | None = None,
+        langgraph_service=None,
     ) -> None:
         path = Path(db_path)
         workflow_path = Path(workflow_db_path or db_path)
         self.path = path
         self.workflow_path = workflow_path
         self.durable_service = durable_service
+        self.langgraph_service = langgraph_service
         self.artifact_backend = artifact_backend or getattr(
             durable_service, "artifact_backend", None
         )
