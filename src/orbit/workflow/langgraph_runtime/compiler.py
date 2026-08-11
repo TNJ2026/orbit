@@ -21,6 +21,8 @@ from ..domain.definitions import IREdge, IRNode, WorkflowIR
 from ..domain.serialization import freeze_json, to_primitive
 from ..dsl.compiler import compile_source
 from ..graph.conditions import evaluate_condition
+from ..graph.input_assembly import assemble_join_inputs
+from ..domain.graph import JoinMergeMode
 
 
 class LangGraphCompileError(ValueError):
@@ -195,6 +197,7 @@ def _assemble_inputs(
         (edge for edge in ir.edges if edge.target_node == node.id),
         key=lambda edge: (edge.priority, edge.id),
     )
+    selected_values: list[tuple[Any, Any]] = []
     for edge in incoming:
         source_output = state["node_outputs"].get(edge.source_node)
         if source_output is None:
@@ -206,6 +209,9 @@ def _assemble_inputs(
         ):
             continue
         value = _edge_value(edge, source_output, workflow_inputs)
+        if node.kind == "join":
+            selected_values.append((edge, value))
+            continue
         if edge.target_port in assembled and assembled[edge.target_port] != value:
             # Once a loop has produced a value, its declared back edge is the
             # next generation's input and supersedes the original ingress.
@@ -214,6 +220,22 @@ def _assemble_inputs(
                     f"multiple selected edges write input {node.id}.{edge.target_port}"
                 )
         assembled[edge.target_port] = value
+    if node.kind == "join" and selected_values:
+        policy = next(
+            item for item in ir.policies
+            if item.id in node.policies and item.kind == "join"
+        )
+        merge_mode = JoinMergeMode(
+            policy.config.get("merge_mode", "array_by_edge")
+        )
+        by_port: dict[str, list[tuple[Any, Any]]] = {}
+        for edge, value in selected_values:
+            by_port.setdefault(edge.target_port, []).append((edge, value))
+        for port_id, values in by_port.items():
+            ordered = tuple(edge.id for edge, _ in values)
+            assembled[port_id] = to_primitive(assemble_join_inputs(
+                merge_mode, {edge.id: value for edge, value in values}, ordered,
+            ))
     for port in node.inputs:
         if port.id not in assembled and port.has_default:
             assembled[port.id] = to_primitive(port.default)
@@ -243,6 +265,8 @@ def _handlerless_outputs(
     if not node.outputs:
         return {}
     copied = {port.id: inputs[port.id] for port in node.outputs if port.id in inputs}
+    if node.kind == "join" and not copied and len(node.inputs) == len(node.outputs) == 1:
+        copied[node.outputs[0].id] = inputs[node.inputs[0].id]
     return _normalize_outputs(node, copied)
 
 
@@ -352,7 +376,14 @@ def compile_workflow(
         raise TypeError("compile_workflow requires WorkflowIR")
     unsupported_policies = tuple(
         sorted(
-            (policy for policy in ir.policies if policy.kind not in {"route", "retry"}),
+            (
+                policy for policy in ir.policies
+                if policy.kind not in {"route", "retry", "join"}
+                or (
+                    policy.kind == "join"
+                    and policy.config.get("mode") != "all"
+                )
+            ),
             key=lambda policy: policy.id,
         )
     )
@@ -378,6 +409,13 @@ def compile_workflow(
             raise LangGraphCompileError(
                 f"retry policy {policy.id!r} has invalid attempts or backoff"
             )
+    for policy in (item for item in ir.policies if item.kind == "join"):
+        try:
+            JoinMergeMode(policy.config.get("merge_mode", "array_by_edge"))
+        except ValueError:
+            raise LangGraphCompileError(
+                f"join policy {policy.id!r} has invalid merge_mode"
+            ) from None
     bound = {
         node.id: registry.resolve(node)
         for node in ir.nodes
@@ -405,6 +443,14 @@ def compile_workflow(
         ):
             raise LangGraphCompileError(
                 f"node {node.id!r} retry policy requires a retry-safe Handler"
+            )
+        join_policies = tuple(
+            policy for policy in ir.policies
+            if policy.id in node.policies and policy.kind == "join"
+        )
+        if node.kind == "join" and len(join_policies) != 1:
+            raise LangGraphCompileError(
+                f"join node {node.id!r} requires exactly one join policy"
             )
         for direction, ports in (("input", node.inputs), ("output", node.outputs)):
             for port in ports:

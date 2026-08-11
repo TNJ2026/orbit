@@ -421,6 +421,54 @@ class LangGraphArtifactStoreTests(unittest.TestCase):
 
 
 class LangGraphWorkflowCompilerTests(unittest.TestCase):
+    def test_join_all_uses_legacy_deterministic_merge_modes(self) -> None:
+        fan = node(
+            "fan", inputs=("value",), outputs=("value",), route_mode="parallel",
+        )
+        left = node("left", inputs=("value",), outputs=("value",))
+        right = node("right", inputs=("value",), outputs=("value",))
+        join_policy = IRPolicy(
+            "join_all", "join",
+            {"mode": "all", "merge_mode": "object_by_edge"},
+        )
+        join = IRNode(
+            "join", "join", (port("items"),), (port("merged"),), None,
+            {}, (join_policy.id,), None,
+        )
+        ir = WorkflowIR(
+            "1.3", "workflow:join", "Join workflow", "", {},
+            (port("value"),), (), (fan, left, right, join),
+            (
+                edge("to_left", "fan", "left"),
+                edge("to_right", "fan", "right"),
+                edge(
+                    "left_join", "left", "join",
+                    target_port="items", priority=1,
+                ),
+                edge(
+                    "right_join", "right", "join",
+                    target_port="items", priority=2,
+                ),
+            ),
+            ("fan",), ("join",), (join_policy,), (), {},
+            IRResult("join", "merged"),
+        )
+        registry = LangGraphHandlerRegistry([
+            binding("fan", lambda values, config, context: values),
+            binding("left", lambda values, config, context: {
+                "value": values["value"] + "-left"
+            }),
+            binding("right", lambda values, config, context: {
+                "value": values["value"] + "-right"
+            }),
+        ])
+
+        result = compile_workflow(ir, registry).invoke({"value": "x"})
+
+        self.assertEqual({
+            "left_join": "x-left", "right_join": "x-right",
+        }, result["result"])
+
     def test_checkpointed_interrupt_resumes_with_same_thread(self) -> None:
         action = node("action", inputs=("value",), outputs=("value",))
         terminal = node(
