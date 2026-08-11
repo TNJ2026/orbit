@@ -289,15 +289,20 @@ class CompiledLangGraphWorkflow:
 
     def _config(self, config: Mapping[str, Any] | None) -> dict[str, Any]:
         value = dict(config or {})
-        loop_limit = max(
+        back_edge_limit = max(
             (
-                int(policy.config["max_iterations"])
-                for policy in self.ir.policies if policy.kind == "loop"
+                int(policy.config[
+                    "max_iterations" if policy.kind == "loop"
+                    else "max_generations"
+                ])
+                for policy in self.ir.policies
+                if policy.kind in {"loop", "rework"}
             ),
             default=0,
         )
         value.setdefault(
-            "recursion_limit", max(25, loop_limit * max(1, len(self.ir.nodes)) + 10),
+            "recursion_limit",
+            max(25, back_edge_limit * max(1, len(self.ir.nodes)) + 10),
         )
         return value
 
@@ -402,7 +407,9 @@ def compile_workflow(
         sorted(
             (
                 policy for policy in ir.policies
-                if policy.kind not in {"route", "retry", "join", "loop"}
+                if policy.kind not in {
+                    "route", "retry", "join", "loop", "rework",
+                }
                 or (
                     policy.kind == "join"
                     and policy.config.get("mode") not in {
@@ -461,12 +468,22 @@ def compile_workflow(
             raise LangGraphCompileError(
                 f"loop policy {policy.id!r} only supports fail exhaustion"
             )
+    for policy in (item for item in ir.policies if item.kind == "rework"):
+        maximum = policy.config.get("max_generations")
+        if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum < 1:
+            raise LangGraphCompileError(
+                f"rework policy {policy.id!r} requires positive max_generations"
+            )
+        if policy.config.get("exhaustion", "fail") != "fail":
+            raise LangGraphCompileError(
+                f"rework policy {policy.id!r} only supports fail exhaustion"
+            )
     policies_by_id = {policy.id: policy for policy in ir.policies}
     for edge in (item for item in ir.edges if item.back_edge):
         policy = policies_by_id.get(edge.policy_ref or "")
-        if policy is None or policy.kind != "loop":
+        if policy is None or policy.kind not in {"loop", "rework"}:
             raise LangGraphCompileError(
-                f"back edge {edge.id!r} requires a loop policy"
+                f"back edge {edge.id!r} requires a loop or rework policy"
             )
     bound = {
         node.id: registry.resolve(node)
@@ -644,11 +661,15 @@ def compile_workflow(
                     raise LangGraphCompileError(
                         f"back edge {edge.id!r} requires a loop policy"
                     )
+                limit_field = (
+                    "max_iterations" if policy.kind == "loop"
+                    else "max_generations"
+                )
                 if state.get("execution_order", ()).count(current.id) > int(
-                    policy.config["max_iterations"]
+                    policy.config[limit_field]
                 ):
                     raise ValueError(
-                        f"loop policy {policy.id!r} exceeded max_iterations"
+                        f"{policy.kind} policy {policy.id!r} exceeded {limit_field}"
                     )
             return [edge.target_node for edge in selected_edges]
 

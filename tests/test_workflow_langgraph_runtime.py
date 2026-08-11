@@ -923,6 +923,43 @@ class LangGraphWorkflowCompilerTests(unittest.TestCase):
 
         self.assertEqual(3, calls)
 
+    def test_back_edge_rework_fails_after_max_generations(self) -> None:
+        revise = node(
+            "revise",
+            inputs=("value",),
+            outputs=("value",),
+            route_mode="exclusive",
+        )
+        ir = workflow(
+            (revise,),
+            (edge(
+                "revise_again",
+                "revise",
+                "revise",
+                back_edge=True,
+                policy_ref="bounded_rework",
+            ),),
+            entry=("revise",),
+            terminals=(),
+            result=("revise", "value"),
+            policies=(IRPolicy(
+                "bounded_rework", "rework", {"max_generations": 2},
+            ),),
+        )
+        calls = 0
+
+        def increment(values, config, context):
+            nonlocal calls
+            calls += 1
+            return {"value": values["value"] + 1}
+
+        registry = LangGraphHandlerRegistry([binding("revise", increment)])
+
+        with self.assertRaisesRegex(ValueError, "exceeded max_generations"):
+            compile_workflow(ir, registry).invoke({"value": 0})
+
+        self.assertEqual(3, calls)
+
 
 class LangGraphWorkflowServiceTests(unittest.TestCase):
     def test_retry_timer_is_durable_and_does_not_fire_early(self) -> None:
