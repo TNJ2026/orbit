@@ -152,6 +152,7 @@ def _agent_adapter(
             ),
             inputs=inputs,
             secret_values=secret_values.values(),
+            actor=context.actor,
         )
         secrets = ScopedSecretResolver(
             tuple(manifest.required_secrets), secret_values,

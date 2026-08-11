@@ -43,6 +43,7 @@ class LangGraphExecutionContext:
     attempt_id: str = ""
     input_ports: tuple[Mapping[str, Any], ...] = ()
     output_ports: tuple[Mapping[str, Any], ...] = ()
+    actor: str = "system:langgraph"
 
 
 @dataclass(frozen=True)
@@ -417,6 +418,9 @@ def compile_workflow(
                         ),
                         tuple(to_primitive(port) for port in current.inputs),
                         tuple(to_primitive(port) for port in current.outputs),
+                        str(config.get("configurable", {}).get(
+                            "actor", "system:langgraph"
+                        )),
                     ),
                 )
                 outcome = raw if isinstance(raw, HandlerOutcome) else HandlerOutcome(raw)

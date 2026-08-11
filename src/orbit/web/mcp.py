@@ -566,6 +566,7 @@ def build_mcp_dispatcher(
                 str(arguments["workflow_id"]), arguments.get("input") or {},
                 workflow_version=arguments.get("workflow_version"),
                 idempotency_key=str(arguments["idempotency_key"]),
+                actor=actor,
             ))
         if name == "resume_langgraph_run":
             return langgraph_run_dto(langgraph_service.resume(
@@ -589,12 +590,13 @@ def build_mcp_dispatcher(
             return {"artifacts": list(langgraph_service.artifacts.list(
                 run_id=arguments.get("run_id") or None,
                 limit=min(200, max(1, int(arguments.get("limit", 20)))),
+                actor=actor,
             ))}
         if name == "read_langgraph_artifact":
             if getattr(langgraph_service, "artifacts", None) is None:
                 raise LookupError("LangGraph Artifact store is unavailable")
             return langgraph_service.artifacts.get(
-                str(arguments["artifact_id"])
+                str(arguments["artifact_id"]), actor=actor,
             )
         if name == "list_runs":
             items, cursor = reads.list_runs(

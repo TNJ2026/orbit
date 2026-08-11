@@ -29,8 +29,19 @@ class LangGraphArtifactStore:
                 "artifact_id TEXT PRIMARY KEY,run_id TEXT NOT NULL,"
                 "attempt_id TEXT NOT NULL,node_id TEXT NOT NULL,port_id TEXT NOT NULL,"
                 "schema_id TEXT NOT NULL,content_type TEXT NOT NULL,size_bytes INTEGER NOT NULL,"
-                "blob_key TEXT NOT NULL,status TEXT NOT NULL,filename TEXT)"
+                "blob_key TEXT NOT NULL,status TEXT NOT NULL,filename TEXT,"
+                "owner_actor TEXT NOT NULL DEFAULT 'system:langgraph')"
             )
+            columns = {
+                row["name"] for row in connection.execute(
+                    "PRAGMA table_info(langgraph_artifacts)"
+                )
+            }
+            if "owner_actor" not in columns:
+                connection.execute(
+                    "ALTER TABLE langgraph_artifacts ADD COLUMN owner_actor"
+                    " TEXT NOT NULL DEFAULT 'system:langgraph'"
+                )
 
     def _connect(self):
         connection = sqlite3.connect(self.database)
@@ -39,7 +50,7 @@ class LangGraphArtifactStore:
 
     def access(
         self, *, run_id, node_id, attempt_id, output_ports, inputs,
-        secret_values=(),
+        secret_values=(), actor="system:langgraph",
     ):
         authorized = set()
         for value in inputs.values():
@@ -54,6 +65,7 @@ class LangGraphArtifactStore:
         return _ArtifactAccess(
             self, run_id, node_id, attempt_id, policies, authorized,
             tuple(secret_values),
+            actor,
         )
 
     def _record(self, artifact_id: str):
@@ -73,30 +85,41 @@ class LangGraphArtifactStore:
             )
         }
 
-    def list(self, *, run_id: str | None = None, limit: int = 100):
+    def list(
+        self, *, run_id: str | None = None, limit: int = 100,
+        actor: str | None = None,
+    ):
         if isinstance(limit, bool) or not 1 <= limit <= 500:
             raise ValueError("limit must be between 1 and 500")
-        where, parameters = (
-            ("status='committed'", ())
-            if run_id is None
-            else ("status='committed' AND run_id=?", (run_id,))
-        )
+        clauses, parameters = ["status='committed'"], []
+        if run_id is not None:
+            clauses.append("run_id=?"); parameters.append(run_id)
+        if actor is not None:
+            clauses.append("owner_actor=?"); parameters.append(actor)
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM langgraph_artifacts WHERE " + where
+                "SELECT * FROM langgraph_artifacts WHERE " + " AND ".join(clauses)
                 + " ORDER BY rowid DESC LIMIT ?", (*parameters, limit),
             ).fetchall()
         return tuple(self._dto(row) for row in rows)
 
-    def get(self, artifact_id: str) -> Mapping[str, Any]:
+    def get(
+        self, artifact_id: str, *, actor: str | None = None,
+    ) -> Mapping[str, Any]:
         row = self._record(artifact_id)
-        if row is None or row["status"] != "committed":
+        if (
+            row is None or row["status"] != "committed"
+            or (actor is not None and row["owner_actor"] != actor)
+        ):
             raise LookupError(f"LangGraph Artifact not found: {artifact_id}")
         return self._dto(row)
 
-    def read(self, artifact_id: str) -> bytes:
+    def read(self, artifact_id: str, *, actor: str | None = None) -> bytes:
         row = self._record(artifact_id)
-        if row is None or row["status"] != "committed":
+        if (
+            row is None or row["status"] != "committed"
+            or (actor is not None and row["owner_actor"] != actor)
+        ):
             raise LookupError(f"LangGraph Artifact not found: {artifact_id}")
         return self.backend.read(
             row["blob_key"], max_size_bytes=row["size_bytes"]
@@ -131,12 +154,13 @@ class LangGraphArtifactStore:
 class _ArtifactAccess:
     def __init__(
         self, store, run_id, node_id, attempt_id, policies, authorized,
-        secret_values,
+        secret_values, actor,
     ):
         self.store = store
         self.run_id, self.node_id, self.attempt_id = run_id, node_id, attempt_id
         self.policies, self.authorized = policies, authorized
         self.secret_values = secret_values
+        self.actor = actor
         self._produced: dict[str, str] = {}
 
     @property
@@ -166,11 +190,11 @@ class _ArtifactAccess:
             if prior is None:
                 connection.execute(
                     "INSERT INTO langgraph_artifacts VALUES (?,?,?,?,?,?,?,?,?,"
-                    "'staged',?)",
+                    "'staged',?,?)",
                     (
                         artifact_id, self.run_id, self.attempt_id, self.node_id,
                         name, port.schema_id, normalized, receipt.size_bytes,
-                        receipt.blob_key, filename,
+                        receipt.blob_key, filename, self.actor,
                     ),
                 )
                 connection.commit()

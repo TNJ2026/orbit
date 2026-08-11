@@ -1254,6 +1254,7 @@ class LangGraphHttpApiTests(unittest.TestCase):
                 run_id="langgraph_run:projection", node_id="agent",
                 attempt_id="langgraph_attempt:projection",
                 output_ports=(artifact_port("document"),), inputs={},
+                actor="test:reader",
             )
             artifact_id = access.write(
                 name="document", content=b"projected content",
@@ -1286,6 +1287,14 @@ class LangGraphHttpApiTests(unittest.TestCase):
                     f"/api/v1/langgraph-artifacts/{artifact_id}/content",
                     actor="test:reader",
                 )
+                denied = client.get(
+                    f"/api/v1/langgraph-artifacts/{artifact_id}",
+                    actor="test:other",
+                )
+                hidden = client.get(
+                    "/api/v1/langgraph-artifacts",
+                    actor="test:other",
+                )
                 mcp = client.request(
                     "POST", "/mcp", actor="test:reader",
                     body={
@@ -1304,6 +1313,8 @@ class LangGraphHttpApiTests(unittest.TestCase):
         )
         self.assertEqual(artifact_id, detail.json()["data"]["artifact_id"])
         self.assertEqual(b"projected content", content.content)
+        self.assertEqual(404, denied.status_code)
+        self.assertEqual([], hidden.json()["data"]["artifacts"])
         self.assertEqual(
             artifact_id,
             json.loads(mcp["result"]["content"][0]["text"])["artifact_id"],

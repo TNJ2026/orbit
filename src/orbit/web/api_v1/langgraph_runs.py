@@ -97,6 +97,7 @@ def build_routes(ctx, service) -> list[Route]:
                     body.get("input") or {},
                     workflow_version=None if version is None else int(version),
                     idempotency_key=key,
+                    actor=actor,
                 )
             except LookupError as exc:
                 raise ValueError(str(exc)) from None
@@ -172,6 +173,7 @@ def build_routes(ctx, service) -> list[Route]:
             items = service.artifacts.list(
                 run_id=request.query_params.get("run_id") or None,
                 limit=page_size(request.query_params.get("limit")),
+                actor=actor,
             )
         except ValueError as exc:
             return error("invalid_request", str(exc))
@@ -182,7 +184,9 @@ def build_routes(ctx, service) -> list[Route]:
         if isinstance(actor, JSONResponse):
             return actor
         try:
-            item = service.artifacts.get(request.path_params["artifact_id"])
+            item = service.artifacts.get(
+                request.path_params["artifact_id"], actor=actor,
+            )
         except LookupError as exc:
             return error("not_found", str(exc), 404)
         return JSONResponse(envelope(item))
@@ -192,8 +196,10 @@ def build_routes(ctx, service) -> list[Route]:
         if isinstance(actor, JSONResponse):
             return actor
         try:
-            item = service.artifacts.get(request.path_params["artifact_id"])
-            content = service.artifacts.read(item["artifact_id"])
+            item = service.artifacts.get(
+                request.path_params["artifact_id"], actor=actor,
+            )
+            content = service.artifacts.read(item["artifact_id"], actor=actor)
         except LookupError as exc:
             return error("not_found", str(exc), 404)
         return Response(

@@ -35,6 +35,7 @@ class LangGraphRun:
     error: str | None
     created_at: str
     updated_at: str
+    owner_actor: str
 
 
 class LangGraphWorkflowService:
@@ -95,6 +96,11 @@ class LangGraphWorkflowService:
                     "ALTER TABLE langgraph_runs ADD COLUMN interrupts_json"
                     " TEXT NOT NULL DEFAULT '[]'"
                 )
+            if "owner_actor" not in columns:
+                connection.execute(
+                    "ALTER TABLE langgraph_runs ADD COLUMN owner_actor"
+                    " TEXT NOT NULL DEFAULT 'system:langgraph'"
+                )
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.run_db_path)
@@ -123,14 +129,18 @@ class LangGraphWorkflowService:
         *,
         idempotency_key: str,
         workflow_version: int | None = None,
+        actor: str = "system:langgraph",
     ) -> LangGraphRun:
         if not idempotency_key.strip():
             raise ValueError("idempotency_key is required")
+        if not actor.strip():
+            raise ValueError("actor is required")
         record = self._workflow(workflow_id, workflow_version)
         request_hash = definition_hash({
             "workflow_id": workflow_id,
             "workflow_version": record.version.value,
             "inputs": inputs,
+            "actor": actor,
         }).value
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -151,11 +161,11 @@ class LangGraphWorkflowService:
             connection.execute(
                 "INSERT INTO langgraph_runs("
                 "run_id,workflow_id,workflow_version,status,revision,input_json,"
-                "result_json,error,created_at,updated_at)"
-                " VALUES (?,?,?,'running',0,?,NULL,NULL,?,?)",
+                "result_json,error,created_at,updated_at,owner_actor)"
+                " VALUES (?,?,?,'running',0,?,NULL,NULL,?,?,?)",
                 (
                     run_id, workflow_id, record.version.value,
-                    canonical_json(inputs), now, now,
+                    canonical_json(inputs), now, now, actor,
                 ),
             )
             connection.execute(
@@ -341,7 +351,15 @@ class LangGraphWorkflowService:
         ))
 
     def _execute(self, run_id: str, ir, *, inputs=..., resume=...) -> LangGraphRun:
-        config = {"configurable": {"thread_id": run_id}}
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT owner_actor FROM langgraph_runs WHERE run_id=?", (run_id,)
+            ).fetchone()
+        if row is None:
+            raise LookupError(f"LangGraph run not found: {run_id}")
+        config = {"configurable": {
+            "thread_id": run_id, "actor": row["owner_actor"],
+        }}
         try:
             with SqliteSaver.from_conn_string(str(self.checkpoint_db_path)) as saver:
                 workflow = compile_workflow(ir, self.handlers, checkpointer=saver)
@@ -411,4 +429,5 @@ class LangGraphWorkflowService:
             row["error"],
             row["created_at"],
             row["updated_at"],
+            row["owner_actor"],
         )
