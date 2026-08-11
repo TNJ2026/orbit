@@ -287,6 +287,20 @@ class CompiledLangGraphWorkflow:
     ir: WorkflowIR
     graph: Any
 
+    def _config(self, config: Mapping[str, Any] | None) -> dict[str, Any]:
+        value = dict(config or {})
+        loop_limit = max(
+            (
+                int(policy.config["max_iterations"])
+                for policy in self.ir.policies if policy.kind == "loop"
+            ),
+            default=0,
+        )
+        value.setdefault(
+            "recursion_limit", max(25, loop_limit * max(1, len(self.ir.nodes)) + 10),
+        )
+        return value
+
     def invoke(
         self,
         inputs: Mapping[str, Any] | None,
@@ -294,7 +308,7 @@ class CompiledLangGraphWorkflow:
         config: Mapping[str, Any] | None = None,
     ) -> Mapping[str, Any]:
         if inputs is None:
-            state = self.graph.invoke(None, config=dict(config or {}))
+            state = self.graph.invoke(None, config=self._config(config))
             return self._result(state)
         declared = {port.id for port in self.ir.inputs}
         unknown = set(inputs) - declared
@@ -313,7 +327,7 @@ class CompiledLangGraphWorkflow:
                 "node_routes": {},
                 "execution_order": (),
             },
-            config=dict(config or {}),
+            config=self._config(config),
         )
         return self._result(state)
 
@@ -346,7 +360,7 @@ class CompiledLangGraphWorkflow:
                 "execution_order": (),
             }
         return self.graph.stream(
-            graph_input, config=dict(config or {}), stream_mode=stream_mode
+            graph_input, config=self._config(config), stream_mode=stream_mode
         )
 
     def resume(
@@ -357,7 +371,7 @@ class CompiledLangGraphWorkflow:
     ) -> Mapping[str, Any]:
         """Resume a checkpointed LangGraph interrupt with its external value."""
 
-        state = self.graph.invoke(Command(resume=value), config=dict(config))
+        state = self.graph.invoke(Command(resume=value), config=self._config(config))
         return self._result(state)
 
     def _result(self, state: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -388,7 +402,7 @@ def compile_workflow(
         sorted(
             (
                 policy for policy in ir.policies
-                if policy.kind not in {"route", "retry", "join"}
+                if policy.kind not in {"route", "retry", "join", "loop"}
                 or (
                     policy.kind == "join"
                     and policy.config.get("mode") not in {
@@ -436,6 +450,23 @@ def compile_workflow(
         ):
             raise LangGraphCompileError(
                 f"join policy {policy.id!r} requires a positive threshold"
+            )
+    for policy in (item for item in ir.policies if item.kind == "loop"):
+        maximum = policy.config.get("max_iterations")
+        if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum < 1:
+            raise LangGraphCompileError(
+                f"loop policy {policy.id!r} requires positive max_iterations"
+            )
+        if policy.config.get("exhaustion", "fail") != "fail":
+            raise LangGraphCompileError(
+                f"loop policy {policy.id!r} only supports fail exhaustion"
+            )
+    policies_by_id = {policy.id: policy for policy in ir.policies}
+    for edge in (item for item in ir.edges if item.back_edge):
+        policy = policies_by_id.get(edge.policy_ref or "")
+        if policy is None or policy.kind != "loop":
+            raise LangGraphCompileError(
+                f"back edge {edge.id!r} requires a loop policy"
             )
     bound = {
         node.id: registry.resolve(node)
@@ -591,8 +622,8 @@ def compile_workflow(
 
         def route(state: _GraphState, *, current=node, edges=outgoing):
             source = state["node_outputs"][current.id]
-            selected = [
-                edge.target_node
+            selected_edges = [
+                edge
                 for edge in edges
                 if edge.route == state["node_routes"].get(current.id, "success")
                 and evaluate_condition(
@@ -602,7 +633,24 @@ def compile_workflow(
                 )
             ]
             mode = current.route_mode or "exclusive"
-            return selected if mode == "parallel" else selected[:1]
+            selected_edges = (
+                selected_edges if mode == "parallel" else selected_edges[:1]
+            )
+            for edge in selected_edges:
+                if not edge.back_edge:
+                    continue
+                policy = policies_by_id.get(edge.policy_ref or "")
+                if policy is None:
+                    raise LangGraphCompileError(
+                        f"back edge {edge.id!r} requires a loop policy"
+                    )
+                if state.get("execution_order", ()).count(current.id) > int(
+                    policy.config["max_iterations"]
+                ):
+                    raise ValueError(
+                        f"loop policy {policy.id!r} exceeded max_iterations"
+                    )
+            return [edge.target_node for edge in selected_edges]
 
         builder.add_conditional_edges(
             node.id, route, sorted({edge.target_node for edge in outgoing})

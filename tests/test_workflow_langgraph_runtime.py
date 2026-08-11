@@ -125,6 +125,7 @@ def edge(
     mapping=IDENTITY,
     priority=0,
     back_edge=False,
+    policy_ref=None,
     route="success",
 ) -> IREdge:
     return IREdge(
@@ -138,10 +139,11 @@ def edge(
         mapping,
         priority,
         back_edge,
+        policy_ref,
     )
 
 
-def workflow(nodes, edges, *, entry, terminals, result) -> WorkflowIR:
+def workflow(nodes, edges, *, entry, terminals, result, policies=()) -> WorkflowIR:
     return WorkflowIR(
         "1.3",
         "workflow:generated",
@@ -154,7 +156,7 @@ def workflow(nodes, edges, *, entry, terminals, result) -> WorkflowIR:
         tuple(edges),
         tuple(entry),
         tuple(terminals),
-        (),
+        tuple(policies),
         (),
         {},
         IRResult(*result),
@@ -166,6 +168,34 @@ def binding(name, invoke) -> BoundHandler:
 
 
 class LangGraphWorkflowCompilerValidationTests(unittest.TestCase):
+    def test_loop_error_route_exhaustion_is_rejected_fail_closed(self) -> None:
+        action = node(
+            "action", inputs=("value",), outputs=("value",),
+            route_mode="exclusive",
+        )
+        ir = workflow(
+            (action,),
+            (edge(
+                "again", "action", "action", back_edge=True,
+                policy_ref="bounded",
+            ),),
+            entry=("action",),
+            terminals=(),
+            result=("action", "value"),
+            policies=(IRPolicy(
+                "bounded", "loop",
+                {"max_iterations": 2, "exhaustion": "error_route"},
+            ),),
+        )
+
+        with self.assertRaisesRegex(ValueError, "only supports fail exhaustion"):
+            compile_workflow(
+                ir,
+                LangGraphHandlerRegistry([
+                    binding("action", lambda values, config, context: values)
+                ]),
+            )
+
     def test_retry_policy_requires_retry_safe_handler(self) -> None:
         action = node("action", inputs=("value",), outputs=("value",))
         action = IRNode(
@@ -833,12 +863,14 @@ class LangGraphWorkflowCompilerTests(unittest.TestCase):
                     "count",
                     condition=less_than_three,
                     back_edge=True,
+                    policy_ref="bounded",
                 ),
                 edge("done", "count", "terminal", priority=10),
             ),
             entry=("count",),
             terminals=("terminal",),
             result=("count", "value"),
+            policies=(IRPolicy("bounded", "loop", {"max_iterations": 2}),),
         )
         registry = LangGraphHandlerRegistry(
             [binding("count", lambda values, config, context: {
@@ -853,6 +885,43 @@ class LangGraphWorkflowCompilerTests(unittest.TestCase):
             ["count", "count", "count", "terminal"],
             result["execution_order"],
         )
+
+    def test_back_edge_loop_fails_after_max_iterations(self) -> None:
+        count = node(
+            "count",
+            inputs=("value",),
+            outputs=("value",),
+            route_mode="exclusive",
+        )
+        ir = workflow(
+            (count,),
+            (
+                edge(
+                    "again",
+                    "count",
+                    "count",
+                    back_edge=True,
+                    policy_ref="bounded",
+                ),
+            ),
+            entry=("count",),
+            terminals=(),
+            result=("count", "value"),
+            policies=(IRPolicy("bounded", "loop", {"max_iterations": 2}),),
+        )
+        calls = 0
+
+        def increment(values, config, context):
+            nonlocal calls
+            calls += 1
+            return {"value": values["value"] + 1}
+
+        registry = LangGraphHandlerRegistry([binding("count", increment)])
+
+        with self.assertRaisesRegex(ValueError, "exceeded max_iterations"):
+            compile_workflow(ir, registry).invoke({"value": 0})
+
+        self.assertEqual(3, calls)
 
 
 class LangGraphWorkflowServiceTests(unittest.TestCase):
