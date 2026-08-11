@@ -21,6 +21,7 @@ from orbit.workflow.domain.definitions import (
     IREdge,
     IRHandlerRef,
     IRNode,
+    IRPolicy,
     IRPort,
     IRResult,
     WorkflowIR,
@@ -163,6 +164,30 @@ def binding(name, invoke) -> BoundHandler:
 
 
 class LangGraphWorkflowCompilerValidationTests(unittest.TestCase):
+    def test_retry_policy_is_rejected_instead_of_silently_ignored(self) -> None:
+        action = node("action", inputs=("value",), outputs=("value",))
+        base = workflow(
+            (action,), (), entry=("action",), terminals=("action",),
+            result=("action", "value"),
+        )
+        ir = WorkflowIR(
+            base.ir_version, base.workflow_id, base.name, base.description,
+            base.labels, base.inputs, base.outputs, base.nodes, base.edges,
+            base.entry, base.terminals,
+            (IRPolicy("retry_network", "retry", {"max_attempts": 3}),),
+            base.extensions, base.indexes, base.result,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError, "retry_network:retry",
+        ):
+            compile_workflow(
+                ir,
+                LangGraphHandlerRegistry([
+                    binding("action", lambda values, config, context: values)
+                ]),
+            )
+
     def test_non_inline_port_transport_is_rejected_fail_closed(self) -> None:
         artifact = artifact_port("payload")
         action = IRNode(

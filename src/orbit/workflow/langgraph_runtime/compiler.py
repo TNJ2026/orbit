@@ -336,6 +336,19 @@ def compile_workflow(
 
     if not isinstance(ir, WorkflowIR):
         raise TypeError("compile_workflow requires WorkflowIR")
+    unsupported_policies = tuple(
+        sorted(
+            (policy for policy in ir.policies if policy.kind != "route"),
+            key=lambda policy: policy.id,
+        )
+    )
+    if unsupported_policies:
+        summary = ", ".join(
+            f"{policy.id}:{policy.kind}" for policy in unsupported_policies
+        )
+        raise LangGraphCompileError(
+            "LangGraph policy semantics are not yet supported: " + summary
+        )
     bound = {
         node.id: registry.resolve(node)
         for node in ir.nodes
