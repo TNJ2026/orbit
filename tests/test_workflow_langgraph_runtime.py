@@ -1111,6 +1111,18 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
                     "status TEXT,revision INTEGER,result_json TEXT,error TEXT,"
                     "created_at TEXT,updated_at TEXT)"
                 )
+                connection.execute(
+                    "CREATE TABLE langgraph_timers("
+                    "timer_id TEXT PRIMARY KEY,run_id TEXT NOT NULL,"
+                    "node_id TEXT NOT NULL,attempt_number INTEGER NOT NULL,"
+                    "due_at TEXT NOT NULL,status TEXT NOT NULL,"
+                    "UNIQUE(run_id,node_id,attempt_number))"
+                )
+                connection.execute(
+                    "INSERT INTO langgraph_timers VALUES "
+                    "('timer:1','run:1','action',1,'2026-01-01T00:00:00Z',"
+                    "'scheduled')"
+                )
             LangGraphWorkflowService(
                 object(),
                 LangGraphHandlerRegistry([]),
@@ -1123,9 +1135,20 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
                         "PRAGMA table_info(langgraph_runs)"
                     )
                 }
+                timer_columns = {
+                    row[1] for row in connection.execute(
+                        "PRAGMA table_info(langgraph_timers)"
+                    )
+                }
+                timer = connection.execute(
+                    "SELECT purpose,target_id FROM langgraph_timers"
+                    " WHERE timer_id='timer:1'"
+                ).fetchone()
 
         self.assertIn("input_json", columns)
         self.assertIn("interrupts_json", columns)
+        self.assertTrue({"purpose", "target_id"}.issubset(timer_columns))
+        self.assertEqual(("retry", "action"), timer)
 
     def publish(self, directory: str, ir: WorkflowIR) -> SQLiteWorkflowVersionStore:
         store = SQLiteWorkflowVersionStore(Path(directory) / "workflows.sqlite3")

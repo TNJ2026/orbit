@@ -83,7 +83,9 @@ class LangGraphWorkflowService:
                 CREATE TABLE IF NOT EXISTS langgraph_timers (
                     timer_id TEXT PRIMARY KEY,run_id TEXT NOT NULL,node_id TEXT NOT NULL,
                     attempt_number INTEGER NOT NULL,due_at TEXT NOT NULL,
-                    status TEXT NOT NULL,UNIQUE(run_id,node_id,attempt_number)
+                    status TEXT NOT NULL,purpose TEXT NOT NULL DEFAULT 'retry',
+                    target_id TEXT NOT NULL DEFAULT '',
+                    UNIQUE(run_id,purpose,target_id,attempt_number)
                 );
                 """
             )
@@ -106,6 +108,24 @@ class LangGraphWorkflowService:
                     "ALTER TABLE langgraph_runs ADD COLUMN owner_actor"
                     " TEXT NOT NULL DEFAULT 'system:langgraph'"
                 )
+            timer_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(langgraph_timers)")
+            }
+            if "purpose" not in timer_columns:
+                connection.execute(
+                    "ALTER TABLE langgraph_timers ADD COLUMN purpose"
+                    " TEXT NOT NULL DEFAULT 'retry'"
+                )
+            if "target_id" not in timer_columns:
+                connection.execute(
+                    "ALTER TABLE langgraph_timers ADD COLUMN target_id"
+                    " TEXT NOT NULL DEFAULT ''"
+                )
+            connection.execute(
+                "UPDATE langgraph_timers SET target_id=node_id"
+                " WHERE purpose='retry' AND target_id=''"
+            )
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.run_db_path)
@@ -439,7 +459,8 @@ class LangGraphWorkflowService:
         backoff = tuple(request.policy.get("backoff_seconds") or ())
         with self._connect() as connection:
             attempt_number = int(connection.execute(
-                "SELECT COUNT(*) FROM langgraph_timers WHERE run_id=? AND node_id=?",
+                "SELECT COUNT(*) FROM langgraph_timers"
+                " WHERE run_id=? AND purpose='retry' AND target_id=?",
                 (run_id, request.node_id),
             ).fetchone()[0]) + 1
             if attempt_number >= maximum:
@@ -453,8 +474,13 @@ class LangGraphWorkflowService:
             due_at = due.isoformat(timespec="microseconds").replace("+00:00", "Z")
             timer_id = f"langgraph_timer:{run_id}:{request.node_id}:{attempt_number}"
             connection.execute(
-                "INSERT OR IGNORE INTO langgraph_timers VALUES (?,?,?,?,?,'scheduled')",
-                (timer_id, run_id, request.node_id, attempt_number, due_at),
+                "INSERT OR IGNORE INTO langgraph_timers("
+                "timer_id,run_id,node_id,attempt_number,due_at,status,purpose,target_id)"
+                " VALUES (?,?,?,?,?,'scheduled','retry',?)",
+                (
+                    timer_id, run_id, request.node_id, attempt_number, due_at,
+                    request.node_id,
+                ),
             )
             connection.commit()
         return self._settle(
