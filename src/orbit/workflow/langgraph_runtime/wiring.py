@@ -12,9 +12,10 @@ from types import SimpleNamespace
 from typing import Any
 
 from ..domain.handlers import UnknownExternalResultError
+from ..domain.durable_execution import ExecutionSafety
 from ..domain.serialization import canonical_json
 from ..data.secrets import assert_no_secret_values
-from ..handlers import AgentHandler, TransformHandler
+from ..handlers import AgentHandler, ToolHandler, TransformHandler
 from ..handlers.agent import AgentRequest
 from ..handlers.context import ScopedSecretResolver
 from ..persistence.workflow_versions import SQLiteWorkflowVersionStore
@@ -47,8 +48,8 @@ class _DiscardedOutput:
         return None
 
 
-class _AgentAttemptJournal:
-    """Prevent an Agent side effect from being replayed after process loss."""
+class _HandlerAttemptJournal:
+    """Prevent an external Handler effect from replaying after process loss."""
 
     def __init__(self, path: Path | str) -> None:
         self.path = Path(path)
@@ -81,7 +82,7 @@ class _AgentAttemptJournal:
                 if row["status"] == "succeeded":
                     return json.loads(row["output_json"])
                 raise LangGraphUnknownExternalResult(
-                    f"Agent attempt {context.attempt_id} has {row['status']} outcome"
+                    f"Handler attempt {context.attempt_id} has {row['status']} outcome"
                 )
             connection.execute(
                 "INSERT INTO langgraph_handler_attempts VALUES (?,?,?,'started',NULL,NULL,?)",
@@ -108,6 +109,23 @@ class _AgentAttemptJournal:
             connection.commit()
 
 
+def _validate_secret_refs(inputs, context, manifest) -> None:
+    for port in context.input_ports:
+        if port.get("data_policy", {}).get("transport") != "secret_ref":
+            continue
+        reference = inputs.get(port["id"])
+        if not isinstance(reference, Mapping):
+            raise ValueError(f"secret_ref input {port['id']!r} must be an object")
+        unknown = set(reference) - {"logical_name", "version", "provider_hint"}
+        logical_name = reference.get("logical_name")
+        if unknown or not isinstance(logical_name, str) or not logical_name:
+            raise ValueError(f"secret_ref input {port['id']!r} is invalid")
+        if logical_name not in manifest.required_secrets:
+            raise ValueError(
+                f"secret_ref input {port['id']!r} was not declared by Handler Manifest"
+            )
+
+
 def _agent_adapter(
     implementation: AgentHandler, manifest, journal, artifact_store, secret_values,
 ):
@@ -115,20 +133,7 @@ def _agent_adapter(
     active_lock = Lock()
 
     def invoke(inputs, config, context):
-        for port in context.input_ports:
-            if port.get("data_policy", {}).get("transport") != "secret_ref":
-                continue
-            reference = inputs.get(port["id"])
-            if not isinstance(reference, Mapping):
-                raise ValueError(f"secret_ref input {port['id']!r} must be an object")
-            unknown = set(reference) - {"logical_name", "version", "provider_hint"}
-            logical_name = reference.get("logical_name")
-            if unknown or not isinstance(logical_name, str) or not logical_name:
-                raise ValueError(f"secret_ref input {port['id']!r} is invalid")
-            if logical_name not in manifest.required_secrets:
-                raise ValueError(
-                    f"secret_ref input {port['id']!r} was not declared by Handler Manifest"
-                )
+        _validate_secret_refs(inputs, context, manifest)
         replay = journal.claim(context)
         if replay is not None:
             return replay
@@ -220,6 +225,81 @@ def _agent_adapter(
     return invoke, cancel_run
 
 
+def _tool_adapter(
+    implementation: ToolHandler, manifest, journal, secret_values,
+):
+    active: dict[str, dict[str, Any]] = {}
+    active_lock = Lock()
+
+    def invoke(inputs, config, context):
+        _validate_secret_refs(inputs, context, manifest)
+        validation = implementation.validate(manifest, config)
+        if not validation.valid:
+            issue = validation.issues[0]
+            raise ValueError(f"Tool Handler validation {issue.path}: {issue.message}")
+        replay = journal.claim(context)
+        if replay is not None:
+            return replay
+        deadline = datetime.now(timezone.utc) + timedelta(
+            seconds=manifest.resource_profile.max_duration_seconds
+        )
+        request = SimpleNamespace(
+            attempt_id=context.attempt_id, input=inputs, config=config,
+            idempotency_key=context.attempt_id, deadline=deadline,
+            process_deadline=deadline,
+        )
+        handler_context = SimpleNamespace(
+            request=request,
+            secrets=ScopedSecretResolver(
+                tuple(manifest.required_secrets), secret_values,
+            ),
+            artifacts=None,
+            output=_DiscardedOutput(),
+            clock=lambda: datetime.now(timezone.utc),
+        )
+        try:
+            prepared = implementation.prepare(
+                request, SimpleNamespace(request=request)
+            )
+            with active_lock:
+                active[context.attempt_id] = {
+                    "execution_ref": prepared.execution_ref,
+                    "context": handler_context,
+                    "run_id": context.run_id,
+                }
+            try:
+                raw = implementation.execute(prepared, handler_context)
+                result = implementation.normalize_result(raw, handler_context)
+            finally:
+                with active_lock:
+                    active.pop(context.attempt_id, None)
+            if not isinstance(result.output, Mapping):
+                raise ValueError("Tool output must be an object")
+            output = dict(result.output)
+            assert_no_secret_values(output, secret_values.values())
+            journal.settle(context.attempt_id, "succeeded", output=output)
+            return output
+        except Exception as exc:
+            if manifest.execution_safety is ExecutionSafety.UNKNOWN_ON_LEASE_LOSS:
+                journal.settle(context.attempt_id, "unknown", error=type(exc).__name__)
+                raise LangGraphUnknownExternalResult(
+                    f"Tool attempt {context.attempt_id} outcome is unknown"
+                ) from None
+            journal.settle(context.attempt_id, "failed", error=type(exc).__name__)
+            raise
+
+    def cancel_run(run_id: str) -> bool:
+        with active_lock:
+            entries = tuple(
+                item for item in active.values() if item["run_id"] == run_id
+            )
+        for item in entries:
+            implementation.cancel(item["execution_ref"], item["context"])
+        return bool(entries)
+
+    return invoke, cancel_run
+
+
 def trusted_handlers(
     registrations: Sequence[Any], *, attempt_db_path: Path | str | None = None,
     artifact_store: LangGraphArtifactStore | None = None,
@@ -248,7 +328,7 @@ def trusted_handlers(
             and attempt_db_path is not None
             and artifact_store is not None
         ):
-            journal = _AgentAttemptJournal(attempt_db_path)
+            journal = _HandlerAttemptJournal(attempt_db_path)
             invoke, cancel_run = _agent_adapter(
                 registration.implementation, manifest, journal, artifact_store,
                 secret_values,
@@ -260,6 +340,22 @@ def trusted_handlers(
                 invoke,
                 cancel_run,
                 frozenset({"inline", "artifact_ref", "secret_ref"}),
+            ))
+        elif (
+            isinstance(registration.implementation, ToolHandler)
+            and attempt_db_path is not None
+        ):
+            journal = _HandlerAttemptJournal(attempt_db_path)
+            invoke, cancel_run = _tool_adapter(
+                registration.implementation, manifest, journal, secret_values,
+            )
+            handlers.append(BoundHandler(
+                manifest.name,
+                manifest.version,
+                manifest.fingerprint,
+                invoke,
+                cancel_run,
+                frozenset({"inline", "secret_ref"}),
             ))
     return LangGraphHandlerRegistry(handlers)
 

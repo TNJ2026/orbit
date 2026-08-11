@@ -42,6 +42,9 @@ from orbit.workflow.langgraph_runtime import (
     compile_workflow,
 )
 from orbit.workflow.handlers.agent import AgentHandler, AgentResponse, FakeAgentClient
+from orbit.workflow.handlers.tools import (
+    ToolHandler, ToolManifest, ToolRegistry, ToolResult,
+)
 from orbit.workflow.persistence.workflow_versions import SQLiteWorkflowVersionStore
 from orbit.web.api_v1 import OPS_WRITE_SCOPE, READ_SCOPE, WRITE_SCOPE, Authorizer
 from orbit.web.app import HandlerRegistration, create_app
@@ -1167,6 +1170,100 @@ class LangGraphProductionWiringTests(unittest.TestCase):
                 bound.invoke(
                     {"value": "prompt"}, {"artifact": True}, artifact_context,
                 )
+
+    def tool_registration(self, adapter, *, safety=ExecutionSafety.REPLAY_SAFE):
+        tools = ToolRegistry()
+        tools.register(ToolManifest(
+            "example.read", "1.0.0", safety, {"value": SCHEMA},
+            "schema://object/1.0", 30, True, True, True,
+            ("workspace.read",), (),
+        ), adapter)
+        tools.seal()
+        manifest = HandlerManifest(
+            "tool", "1.0.0", ("action",), {"value": SCHEMA},
+            {"value": SCHEMA}, {"type": "object"}, safety,
+            ResourceProfile(0, 0, 0, 30, 0, "tool"),
+            "schema://object/1.0", ("workspace.read",), (), True, True,
+        )
+        return HandlerRegistration(manifest, ToolHandler(tools), "tool@test")
+
+    def test_tool_handler_is_validated_and_replayed_from_journal(self) -> None:
+        class Adapter:
+            def __init__(self): self.calls = 0
+            def execute(self, request, context):
+                self.calls += 1
+                return ToolResult({"value": request.input["value"] + 1})
+            def cancel(self, execution_ref, context): return None
+            def recover(self, recovery_ref, context): return None
+
+        adapter = Adapter()
+        registration = self.tool_registration(adapter)
+        with tempfile.TemporaryDirectory() as directory:
+            registry = trusted_handlers(
+                [registration],
+                attempt_db_path=Path(directory) / "runs.sqlite3",
+            )
+            bound = registry.resolve(IRNode(
+                "tool", "action", (port("value"),), (port("value"),),
+                IRHandlerRef(
+                    registration.manifest.name, registration.manifest.version,
+                    registration.manifest.fingerprint,
+                ),
+                {
+                    "tool_name": "example.read",
+                    "tool_version": "1.0.0",
+                }, (), None,
+            ))
+            context = LangGraphExecutionContext(
+                "workflow:test", "tool", "langgraph_run:tool",
+                "langgraph_attempt:tool:1",
+            )
+            config = {"tool_name": "example.read", "tool_version": "1.0.0"}
+            first = bound.invoke({"value": 4}, config, context)
+            replayed = bound.invoke({"value": 4}, config, context)
+
+        self.assertEqual({"value": 5}, first)
+        self.assertEqual(first, replayed)
+        self.assertEqual(1, adapter.calls)
+
+    def test_unknown_safety_tool_failure_is_not_reexecuted(self) -> None:
+        class Adapter:
+            def __init__(self): self.calls = 0
+            def execute(self, request, context):
+                self.calls += 1
+                raise RuntimeError("lost after write")
+            def cancel(self, execution_ref, context): return None
+            def recover(self, recovery_ref, context): return None
+
+        adapter = Adapter()
+        registration = self.tool_registration(
+            adapter, safety=ExecutionSafety.UNKNOWN_ON_LEASE_LOSS,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            registry = trusted_handlers(
+                [registration],
+                attempt_db_path=Path(directory) / "runs.sqlite3",
+            )
+            node = IRNode(
+                "tool", "action", (port("value"),), (port("value"),),
+                IRHandlerRef(
+                    registration.manifest.name, registration.manifest.version,
+                    registration.manifest.fingerprint,
+                ),
+                {}, (), None,
+            )
+            bound = registry.resolve(node)
+            context = LangGraphExecutionContext(
+                "workflow:test", "tool", "langgraph_run:tool",
+                "langgraph_attempt:tool:unknown",
+            )
+            config = {"tool_name": "example.read", "tool_version": "1.0.0"}
+            with self.assertRaisesRegex(RuntimeError, "outcome is unknown"):
+                bound.invoke({"value": 4}, config, context)
+            with self.assertRaisesRegex(RuntimeError, "unknown outcome"):
+                bound.invoke({"value": 4}, config, context)
+
+        self.assertEqual(1, adapter.calls)
 
     def test_unknown_agent_attempt_is_never_executed_twice(self) -> None:
         client = FakeAgentClient(
