@@ -16,6 +16,7 @@ from .service import (
     LangGraphRunConflict,
     LangGraphWorkflowService,
 )
+from .wiring import build_service, trusted_handlers
 
 __all__ = [
     "BoundHandler",
@@ -28,6 +29,8 @@ __all__ = [
     "LangGraphRun",
     "LangGraphRunConflict",
     "LangGraphWorkflowService",
+    "build_service",
     "compile_generated_workflow",
     "compile_workflow",
+    "trusted_handlers",
 ]

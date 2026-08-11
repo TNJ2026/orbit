@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import sqlite3
 import tempfile
+import time
 import unittest
 
 from langgraph.checkpoint.memory import InMemorySaver
@@ -34,12 +35,14 @@ from orbit.workflow.langgraph_runtime import (
     LangGraphHandlerRegistry,
     LangGraphRunConflict,
     LangGraphWorkflowService,
+    build_service,
     compile_generated_workflow,
     compile_workflow,
 )
 from orbit.workflow.persistence.workflow_versions import SQLiteWorkflowVersionStore
 from orbit.web.api_v1 import OPS_WRITE_SCOPE, READ_SCOPE, WRITE_SCOPE, Authorizer
 from orbit.web.app import create_app
+from orbit.web.builtin_handlers import BUILTIN_SCHEMAS, builtin_handlers
 from tests.test_web_composition import AsgiHarness
 
 
@@ -782,6 +785,125 @@ class LangGraphHttpApiTests(unittest.TestCase):
             {"available": True, "api": "/api/v1/langgraph-runs"}, capability
         )
         self.assertEqual(1, service.recoveries)
+
+    def test_agent_generation_publishes_and_runs_through_langgraph_mcp(self) -> None:
+        document = {
+            "dsl_version": "1.3",
+            "metadata": {"id": "generated", "name": "Agent generated"},
+            "inputs": [{
+                "id": "value", "schema_id": "example://integer/1.0",
+            }],
+            "nodes": [
+                {
+                    "id": "transform", "kind": "action", "label": "Transform",
+                    "inputs": [{
+                        "id": "value", "schema_id": "example://integer/1.0",
+                    }],
+                    "outputs": [{
+                        "id": "value", "schema_id": "example://integer/1.0",
+                    }],
+                    "handler": {"name": "transform", "version": "1.0.0"},
+                },
+                {
+                    "id": "done", "kind": "terminal",
+                    "inputs": [{
+                        "id": "result", "schema_id": "schema://object/1.0",
+                    }],
+                },
+                {
+                    "id": "approve", "kind": "human", "label": "Approve",
+                    "inputs": [{
+                        "id": "value", "schema_id": "example://integer/1.0",
+                    }],
+                    "outputs": [{
+                        "id": "result", "schema_id": "schema://object/1.0",
+                    }],
+                    "config": {
+                        "task_kind": "approval", "participants": ["local"],
+                        "quorum": "any",
+                    },
+                },
+            ],
+            "edges": [
+                {
+                    "id": "review",
+                    "from": {"node": "transform", "port": "value"},
+                    "to": {"node": "approve", "port": "value"},
+                },
+                {
+                    "id": "finish",
+                    "from": {"node": "approve", "port": "result"},
+                    "to": {"node": "done", "port": "result"},
+                },
+            ],
+            "entry": ["transform"],
+            "terminals": ["done"],
+            "result": {"node": "approve", "port": "result"},
+        }
+
+        def mcp(client, name, arguments, request_id):
+            response = client.request(
+                "POST", "/mcp", actor="test:agent",
+                body={
+                    "jsonrpc": "2.0", "id": request_id,
+                    "method": "tools/call",
+                    "params": {"name": name, "arguments": arguments},
+                },
+            ).json()
+            self.assertFalse(response["result"]["isError"], response)
+            return json.loads(response["result"]["content"][0]["text"])
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workflow_path = root / "workflows.sqlite3"
+            registrations = list(builtin_handlers())
+            service = build_service(
+                workflow_path, registrations, state_directory=root,
+            )
+            app = create_app(
+                root / "orbit.sqlite3",
+                workflow_db_path=workflow_path,
+                handlers=registrations,
+                schemas=BUILTIN_SCHEMAS,
+                workflow_generator=lambda _prompt: json.dumps(document),
+                langgraph_service=service,
+                authenticator=lambda request: request.headers.get("x-orbit-actor"),
+                authorizer=Authorizer(lambda _actor: (
+                    READ_SCOPE, WRITE_SCOPE, OPS_WRITE_SCOPE,
+                )),
+                worker_count=1,
+                poll_seconds=0.01,
+            )
+            with AsgiHarness(app) as client:
+                job = mcp(client, "generate_workflow", {
+                    "prompt": "Build an identity workflow",
+                    "idempotency_key": "generate-langgraph",
+                }, 1)
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    authored = mcp(
+                        client, "get_authoring_job", {"job_id": job["job_id"]}, 2,
+                    )
+                    if authored["status"] not in {"queued", "running"}:
+                        break
+                    time.sleep(0.01)
+                self.assertEqual("done", authored["status"], authored)
+                interrupted = mcp(client, "start_langgraph_run", {
+                    "workflow_id": authored["result"]["workflow_id"],
+                    "input": {"value": 42},
+                    "idempotency_key": "run-generated-langgraph",
+                }, 3)
+                self.assertEqual("interrupted", interrupted["status"])
+                self.assertEqual("approve", interrupted["interrupts"][0]["value"]["node_id"])
+                run = mcp(client, "resume_langgraph_run", {
+                    "run_id": interrupted["run_id"],
+                    "value": {"result": {"decision": "approve", "value": 43}},
+                    "expected_version": interrupted["revision"],
+                    "idempotency_key": "resume-generated-langgraph",
+                }, 4)
+
+        self.assertEqual("completed", run["status"])
+        self.assertEqual({"decision": "approve", "value": 43}, run["result"])
 
     def test_interrupt_resume_is_authorized_versioned_and_idempotent(self) -> None:
         action = node("action", inputs=("value",), outputs=("value",))

@@ -99,6 +99,20 @@ HTTP or MCP surface for this adapter should use distinct routes and capabilities
 
 ## Optional HTTP surface
 
+For the local Runtime, enable the adapter explicitly:
+
+```console
+orbit serve --enable-langgraph
+```
+
+This creates `langgraph-runs.sqlite3` and
+`langgraph-checkpoints.sqlite3` beside the Runtime database. Use
+`--langgraph-state-dir PATH` to place both elsewhere. Production wiring exposes
+only reviewed adapters; currently that is the deterministic built-in
+`transform` Handler. Orbit Agent and development-tool Handlers remain on the
+event-sourced Runtime because moving them would bypass attempt leases, budgets,
+and unknown-result recovery.
+
 Passing `langgraph_service=service` to `create_app()` explicitly mounts a
 separate surface. Omitting it leaves every route absent:
 
@@ -120,3 +134,8 @@ The same explicit injection advertises five MCP tools to agents:
 `resume_langgraph_run`, and `recover_langgraph_run`. They reuse the same MCP
 identity and scopes as HTTP; recovery requires `runtime.ops.write`. When the
 service is absent, none of these optional tools appears in `tools/list`.
+
+Handlerless `human` nodes compile to native LangGraph interrupts. Their
+checkpoint payload includes the workflow, node, declared input, and config;
+resume with an object keyed by the human node's declared output ports (or a
+scalar when it declares exactly one output).

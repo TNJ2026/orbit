@@ -13,7 +13,7 @@ from types import MappingProxyType
 from typing import Annotated, Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
-from langgraph.types import Command
+from langgraph.types import Command, interrupt
 
 from ..data.mapping import evaluate_mapping
 from ..domain.definitions import IREdge, IRNode, WorkflowIR
@@ -315,7 +315,7 @@ def compile_workflow(
         if node.handler is not None
     }
     for node in ir.nodes:
-        if node.handler is None and node.kind not in {"terminal", "join"}:
+        if node.handler is None and node.kind not in {"terminal", "join", "human"}:
             raise HandlerBindingError(
                 f"executable node {node.id!r} has no Handler binding"
             )
@@ -328,7 +328,24 @@ def compile_workflow(
         def execute(state: _GraphState, *, current=node, implementation=handler):
             inputs = _assemble_inputs(ir, current, state)
             if implementation is None:
-                output = _handlerless_outputs(current, inputs)
+                if current.kind == "human":
+                    resumed = interrupt({
+                        "workflow_id": ir.workflow_id,
+                        "node_id": current.id,
+                        "input": to_primitive(inputs),
+                        "config": to_primitive(current.config),
+                    })
+                    if isinstance(resumed, Mapping):
+                        human_output = resumed
+                    elif len(current.outputs) == 1:
+                        human_output = {current.outputs[0].id: resumed}
+                    else:
+                        raise ValueError(
+                            f"human node {current.id!r} requires an object response"
+                        )
+                    output = _normalize_outputs(current, human_output)
+                else:
+                    output = _handlerless_outputs(current, inputs)
             else:
                 raw = implementation.invoke(
                     inputs,

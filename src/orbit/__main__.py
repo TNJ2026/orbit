@@ -427,6 +427,20 @@ def _serve(args) -> None:
         handlers.extend(dev_handlers)
         print(f"dev tools: {', '.join(tool_names) or 'none granted'}", flush=True)
 
+    workflow_db_path = db_path if args.db else public_workflow_db_path()
+    langgraph_service = None
+    if args.enable_langgraph:
+        from .workflow.langgraph_runtime import build_service
+
+        langgraph_service = build_service(
+            workflow_db_path,
+            handlers,
+            state_directory=(
+                Path(args.langgraph_state_dir).expanduser().absolute()
+                if args.langgraph_state_dir else Path(db_path).parent
+            ),
+        )
+
     def request_shutdown() -> None:
         # Uvicorn owns graceful shutdown and lifespan cleanup. Raising the same
         # signal as Ctrl-C keeps its public `run` entrypoint (and embedders that
@@ -436,7 +450,7 @@ def _serve(args) -> None:
     try:
         app = create_app(
             db_path,
-            workflow_db_path=(db_path if args.db else public_workflow_db_path()),
+            workflow_db_path=workflow_db_path,
             handlers=handlers,
             schemas=BUILTIN_SCHEMAS,
             artifact_backend=artifact_backend,
@@ -456,6 +470,7 @@ def _serve(args) -> None:
             # Recovery takeovers are answered by this person too.
             operator_actors=(LOCAL_ACTOR,),
             shutdown_request=request_shutdown,
+            langgraph_service=langgraph_service,
         )
     except MixedSchemaError as exc:
         raise SystemExit(f"error: {exc}") from None
@@ -617,6 +632,22 @@ def main() -> None:
             "Register the trusted git and verify tools. Workflows may then run "
             "reviewed commands inside a git worktree; they still cannot supply "
             "a command of their own."
+        ),
+    )
+    serve_cmd.add_argument(
+        "--enable-langgraph",
+        action="store_true",
+        help=(
+            "Enable the isolated LangGraph execution adapter and its HTTP/MCP "
+            "surface. Only reviewed LangGraph Handler adapters are used."
+        ),
+    )
+    serve_cmd.add_argument(
+        "--langgraph-state-dir",
+        default=None,
+        help=(
+            "Directory for LangGraph run and checkpoint databases "
+            "(default: beside the Runtime database)."
         ),
     )
     serve_cmd.add_argument(
