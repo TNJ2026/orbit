@@ -330,6 +330,20 @@ class LangGraphWorkflowService:
         """Continue a run whose process ended after a durable checkpoint."""
 
         current = self.get(run_id)
+        if current.status == "running":
+            with self._connect() as connection:
+                firing = connection.execute(
+                    "SELECT * FROM langgraph_timers WHERE run_id=?"
+                    " AND status='firing' AND purpose='join_deadline'"
+                    " ORDER BY due_at,timer_id LIMIT 1", (run_id,),
+                ).fetchone()
+            if firing is not None:
+                record = self._workflow(
+                    current.workflow_id, current.workflow_version,
+                )
+                return self._fire_join_deadline(
+                    run_id, record.ir, firing["target_id"],
+                )
         if current.status in {"waiting", "interrupted"}:
             with self._connect() as connection:
                 timer = connection.execute(
@@ -349,8 +363,13 @@ class LangGraphWorkflowService:
                     (self._stamp(), run_id, current.revision),
                 ).rowcount
                 changed_timer = connection.execute(
-                    "UPDATE langgraph_timers SET status='fired' WHERE timer_id=?"
-                    " AND status='scheduled'", (timer["timer_id"],),
+                    "UPDATE langgraph_timers SET status=? WHERE timer_id=?"
+                    " AND status='scheduled'",
+                    (
+                        "firing" if timer["purpose"] == "join_deadline"
+                        else "fired",
+                        timer["timer_id"],
+                    ),
                 ).rowcount
                 if claimed_run != 1 or changed_timer != 1:
                     connection.rollback()
@@ -432,11 +451,13 @@ class LangGraphWorkflowService:
                 {"id": item.id, "value": to_primitive(item.value)}
                 for task in after.tasks for item in task.interrupts
             )
+            self._finish_timer(run_id, "join_deadline", node_id)
             return self._settle(
                 run_id, "interrupted" if interrupts else "completed",
                 result=result["result"], interrupts=interrupts,
             )
         except LangGraphJoinDeadlineExceeded as exc:
+            self._finish_timer(run_id, "join_deadline", node_id)
             return self._settle(
                 run_id, "failed", error=f"{type(exc).__name__}: {exc}",
             )
@@ -485,7 +506,7 @@ class LangGraphWorkflowService:
                 )
             connection.execute(
                 "UPDATE langgraph_timers SET status='cancelled'"
-                " WHERE run_id=? AND status='scheduled'", (run_id,),
+                " WHERE run_id=? AND status IN ('scheduled','firing')", (run_id,),
             )
             connection.execute(
                 "INSERT INTO langgraph_run_receipts VALUES (?,?,?)",
@@ -536,10 +557,20 @@ class LangGraphWorkflowService:
         with self._connect() as connection:
             rows = connection.execute(
                 "SELECT DISTINCT run_id FROM langgraph_timers"
-                " WHERE status='scheduled' AND due_at<=? ORDER BY due_at LIMIT ?",
+                " WHERE status IN ('scheduled','firing') AND due_at<=?"
+                " ORDER BY due_at LIMIT ?",
                 (self._stamp(), limit),
             ).fetchall()
         return tuple(self.recover(row["run_id"]) for row in rows)
+
+    def _finish_timer(self, run_id: str, purpose: str, target_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE langgraph_timers SET status='fired'"
+                " WHERE run_id=? AND purpose=? AND target_id=?"
+                " AND status='firing'", (run_id, purpose, target_id),
+            )
+            connection.commit()
 
     def _execute(self, run_id: str, ir, *, inputs=..., resume=...) -> LangGraphRun:
         with self._connect() as connection:
@@ -647,7 +678,8 @@ class LangGraphWorkflowService:
             if status in {"completed", "failed", "unknown", "cancelled"}:
                 connection.execute(
                     "UPDATE langgraph_timers SET status='cancelled'"
-                    " WHERE run_id=? AND status='scheduled'", (run_id,),
+                    " WHERE run_id=? AND status IN ('scheduled','firing')",
+                    (run_id,),
                 )
             if changed != 1:
                 connection.rollback()

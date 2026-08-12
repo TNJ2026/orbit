@@ -407,6 +407,11 @@ class CompiledLangGraphWorkflow:
             raise ValueError(f"join {node_id!r} has no deadline policy")
         snapshot = self.graph.get_state(self._config(config))
         values = dict(snapshot.values)
+        if (
+            node_id in values.get("execution_order", ())
+            and values.get("join_deadlines", {}).get(node_id)
+        ):
+            return self._result(values)
         outputs = values.get("node_outputs", {})
         incoming = tuple(
             edge for edge in self.ir.edges if edge.target_node == node_id
