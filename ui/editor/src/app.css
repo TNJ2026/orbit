@@ -70,7 +70,12 @@ body {
 .notice.info { color: var(--muted); }
 
 .workspace { flex: 1; min-height: 0; display: flex; }
-.canvas { flex: 1; min-width: 0; }
+.canvas { flex: 1; min-width: 0; position: relative; }
+
+/* The inspector is a column beside the canvas rather than over it, so the
+   minimap and the controls stay where React Flow put them and nothing is
+   drawn underneath a panel. */
+.inspector { max-height: 100%; }
 
 .inspector {
   width: 320px;

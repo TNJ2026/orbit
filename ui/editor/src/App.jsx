@@ -16,6 +16,7 @@ import WorkflowPanel from "./WorkflowPanel.jsx";
 import WorkflowNode from "./WorkflowNode.jsx";
 
 const nodeTypes = { workflow: WorkflowNode };
+const FIT_VIEW = { padding: 0.2, maxZoom: 1 };
 
 export default function App() {
   const [contract, setContract] = useState(null);
@@ -29,6 +30,10 @@ export default function App() {
   const [notice, setNotice] = useState(null);
   const [diagnostics, setDiagnostics] = useState([]);
   const [selection, setSelection] = useState(null);
+  // React Flow's own handle, kept so a graph can be re-fitted after it is
+  // loaded. `fitView` alone fits once, on mount — when there is no workflow
+  // open, no inspector beside the canvas, and so a different width.
+  const [flow, setFlow] = useState(null);
   const [busy, setBusy] = useState(false);
   // This tab's expected_version is behind the store: somebody else published
   // while it was open, so every publish from here would be refused.
@@ -87,6 +92,16 @@ export default function App() {
       setNotice({ level: "error", text: error.message });
     }
   }, []);
+
+  // Fitted once a workflow has been drawn, not when the canvas mounted: at
+  // mount there is nothing open, so no inspector beside the canvas and a
+  // different width to fit into. Keyed on the workflow rather than on the
+  // nodes, so editing one does not keep yanking the view back.
+  useEffect(() => {
+    if (!flow || !workflowId || !nodes.length) return undefined;
+    const frame = requestAnimationFrame(() => flow.fitView(FIT_VIEW));
+    return () => cancelAnimationFrame(frame);
+  }, [flow, workflowId]);
 
   const onNodesChange = useCallback(
     (changes) => setNodes((current) => applyNodeChanges(changes, current)),
@@ -432,11 +447,23 @@ export default function App() {
           isValidConnection={isValidConnection}
           onNodeClick={(_event, node) => setSelection({ kind: "node", item: node })}
           onEdgeClick={(_event, edge) => setSelection({ kind: "edge", item: edge })}
+          onInit={setFlow}
           onPaneClick={() => setSelection(null)}
+          // React Flow themes its own chrome — the minimap, the controls, the
+          // background and the edge strokes — from this. Left unset it stays
+          // light, which is how a white minimap ended up sitting on a dark
+          // canvas: the defaults were being used, just not the one that makes
+          // them follow the viewer.
+          colorMode="system"
           // Both keys, not React Flow's Backspace alone: Delete is what a
           // Windows or Linux keyboard offers for this, and a key that does
           // nothing reads as a canvas that will not let go of anything.
           deleteKeyCode={["Backspace", "Delete"]}
+          // `maxZoom: 1` because fitting must never magnify. It is also what
+          // React Flow does when it fits before the nodes have been measured:
+          // zero-sized bounds send it to the 2x default, which is how a
+          // two-node graph ended up rendered twice its size and clipped.
+          fitViewOptions={FIT_VIEW}
           fitView
         >
           <Background />
