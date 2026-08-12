@@ -51,6 +51,15 @@ export const authoringSchema = () => request("/api/v1/workflows/authoring-schema
 
 export const listWorkflows = () => request("/api/v1/workflows");
 
+/** The handlers this Runtime has registered, with the ports each declares.
+ *
+ * The catalog reports a manifest fingerprint; the editor reads the name, the
+ * version and the ports and never stores the fingerprint. Which build a node
+ * binds to is resolved by `analyze_dsl` against the sealed registry, and a
+ * document that named its own would be choosing for it.
+ */
+export const handlerCatalog = () => request("/api/v1/handler-catalog");
+
 export const readWorkflow = (workflowId) =>
   request(`/api/v1/workflows/${encodeURIComponent(workflowId)}`);
 

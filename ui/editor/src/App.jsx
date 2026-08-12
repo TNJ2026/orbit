@@ -9,7 +9,7 @@ import * as api from "./api.mjs";
 import {
   NODE_KINDS, connectionProblem, freshId, toDocument, toGraph,
 } from "./dsl-graph.mjs";
-import { removePort } from "./document.mjs";
+import { handlersForKind, removePort } from "./document.mjs";
 import Inspector from "./Inspector.jsx";
 import WorkflowPanel from "./WorkflowPanel.jsx";
 import WorkflowNode from "./WorkflowNode.jsx";
@@ -19,6 +19,7 @@ const nodeTypes = { workflow: WorkflowNode };
 export default function App() {
   const [contract, setContract] = useState(null);
   const [catalog, setCatalog] = useState([]);
+  const [handlers, setHandlers] = useState([]);
   const [workflowId, setWorkflowId] = useState("");
   const [base, setBase] = useState(null);
   const [version, setVersion] = useState(0);
@@ -33,10 +34,11 @@ export default function App() {
   const [stale, setStale] = useState(false);
 
   useEffect(() => {
-    Promise.all([api.authoringSchema(), api.listWorkflows()])
-      .then(([schema, list]) => {
+    Promise.all([api.authoringSchema(), api.listWorkflows(), api.handlerCatalog()])
+      .then(([schema, list, registry]) => {
         setContract(schema);
         setCatalog(list.workflows ?? []);
+        setHandlers(registry.handlers ?? []);
       })
       .catch((error) => setNotice({ level: "error", text: error.message }));
   }, []);
@@ -141,7 +143,11 @@ export default function App() {
         if (value === undefined) delete dsl[key];
         else dsl[key] = value;
       }
-      return { ...item, data: { ...item.data, dsl } };
+      // The card draws from `data.handler`, so a binding change has to reach
+      // it as well as the stored document it is rebuilt from.
+      const data = { ...item.data, dsl };
+      if ("handler" in patch) data.handler = patch.handler ?? null;
+      return { ...item, data };
     };
     const apply = (current) =>
       current.map((item) => (item.id === selection.item.id ? merge(item) : item));
@@ -181,6 +187,28 @@ export default function App() {
         : null,
     );
   }, [selection, nodes, edges]);
+
+  /** Change a node's kind, dropping a handler the new kind cannot use.
+   *
+   * A manifest declares which kinds it serves, so a binding that survived the
+   * switch would be one the compiler refuses — and the author would have to
+   * read a diagnostic to learn what the switch did.
+   */
+  const setKind = useCallback((kind) => {
+    if (selection?.kind !== "node") return;
+    setNodes((current) =>
+      current.map((node) => {
+        if (node.id !== selection.item.id) return node;
+        const dsl = { ...(node.data.dsl ?? {}), kind };
+        const bound = dsl.handler
+          && handlersForKind(handlers, kind).some(
+            (item) => item.name === dsl.handler.name && item.version === dsl.handler.version,
+          );
+        if (!bound) delete dsl.handler;
+        return { ...node, data: { ...node.data, kind, handler: dsl.handler ?? null, dsl } };
+      }),
+    );
+  }, [selection, handlers]);
 
   const addNode = useCallback(
     (kind) => {
@@ -312,6 +340,16 @@ export default function App() {
             + {kind}
           </button>
         ))}
+        <button
+          onClick={() => setSelection(null)}
+          disabled={!base}
+          // Clicking empty canvas also gets here, but "deselect to reach the
+          // workflow's own settings" is not a thing to have to discover —
+          // and `result` lives there and is required to publish at all.
+          className={base && !selection ? "active" : ""}
+        >
+          Workflow
+        </button>
         {base ? <span className="version">v{version}</span> : null}
         <button onClick={check} disabled={!document || busy}>
           Validate
@@ -356,8 +394,11 @@ export default function App() {
             selection={live}
             document={document}
             onChange={patchSelected}
+            kinds={kinds}
+            handlers={handlers}
             onPorts={setPorts}
             onRemovePort={dropPort}
+            onKind={setKind}
           />
         ) : null}
         {base && !live ? (

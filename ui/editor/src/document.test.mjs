@@ -4,7 +4,8 @@ import { test } from "node:test";
 import {
   POLICY_KINDS, POLICY_TEMPLATES, addPolicy, addPort, freshPolicyId,
   policyReferences, removePolicy, removePort, resultOptions, setInputs,
-  setMetadata, setResult, toggleMembership, updatePolicy,
+  setMetadata, setResult, toggleMembership, updatePolicy, handlersForKind,
+  portsFromManifest, handlerRef,
 } from "./document.mjs";
 
 const DOC = {
@@ -187,4 +188,64 @@ test("removing a port leaves other nodes untouched", () => {
   };
   const result = removePort(graph, "a", "outputs", "v");
   assert.deepEqual(result.nodes[1].data.outputs, [{ id: "v", schema_id: "s" }]);
+});
+
+test("only handlers that serve this node kind are offered", () => {
+  const catalog = [
+    { name: "b", version: "1.0.0", node_kinds: ["action"] },
+    { name: "a", version: "1.0.0", node_kinds: ["action", "decision"] },
+    { name: "c", version: "1.0.0", node_kinds: ["decision"] },
+  ];
+  assert.deepEqual(
+    handlersForKind(catalog, "action").map((item) => item.name),
+    ["a", "b"],
+  );
+  assert.deepEqual(
+    handlersForKind(catalog, "decision").map((item) => item.name),
+    ["a", "c"],
+  );
+  assert.deepEqual(handlersForKind(catalog, "terminal"), []);
+  assert.deepEqual(handlersForKind(undefined, "action"), []);
+});
+
+test("two versions of one handler sort by version", () => {
+  const catalog = [
+    { name: "t", version: "2.0.0", node_kinds: ["action"] },
+    { name: "t", version: "1.0.0", node_kinds: ["action"] },
+  ];
+  assert.deepEqual(
+    handlersForKind(catalog, "action").map((item) => item.version),
+    ["1.0.0", "2.0.0"],
+  );
+});
+
+test("a manifest's ports convert to the array form a node declares", () => {
+  assert.deepEqual(
+    portsFromManifest({
+      inputs: { value: "s://i/1.0" },
+      outputs: { result: "s://o/1.0", extra: "s://e/1.0" },
+    }),
+    {
+      inputs: [{ id: "value", schema_id: "s://i/1.0" }],
+      outputs: [
+        { id: "extra", schema_id: "s://e/1.0" },
+        { id: "result", schema_id: "s://o/1.0" },
+      ],
+    },
+  );
+});
+
+test("a manifest with no ports converts to empty arrays", () => {
+  assert.deepEqual(portsFromManifest({}), { inputs: [], outputs: [] });
+  assert.deepEqual(portsFromManifest(undefined), { inputs: [], outputs: [] });
+});
+
+test("a handler reference never carries the fingerprint the catalog reports", () => {
+  // The binding an IR node holds is resolved by analyze_dsl from the registry;
+  // a document naming its own fingerprint would choose what it binds to.
+  assert.deepEqual(
+    handlerRef({ name: "t", version: "1.0.0", manifest_fingerprint: "deadbeef" }),
+    { name: "t", version: "1.0.0" },
+  );
+  assert.equal(handlerRef(null), undefined);
 });

@@ -203,3 +203,5 @@ body {
 }
 .inspector .port-add { display: flex; gap: 4px; }
 .inspector .port-add input { flex: 1; min-width: 0; }
+
+.bar button.active { border-color: var(--accent); color: var(--accent); }

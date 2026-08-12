@@ -187,3 +187,43 @@ export function removePort(graph, nodeId, side, portId) {
     removedEdges: graph.edges.filter(bound).map((edge) => edge.id),
   };
 }
+
+/** The registered handlers a node of this kind may bind to.
+ *
+ * A manifest declares which node kinds it serves, so offering the whole
+ * catalog would invite a binding the compiler refuses. Sorted, because the
+ * order a registry happens to seal in is not an order to read.
+ */
+export function handlersForKind(catalog, kind) {
+  return (catalog ?? [])
+    .filter((handler) => (handler.node_kinds ?? []).includes(kind))
+    .sort((left, right) =>
+      left.name.localeCompare(right.name) || left.version.localeCompare(right.version),
+    );
+}
+
+/** The ports a manifest declares, in the array form a node must write them.
+ *
+ * The manifest states them as id-to-schema maps and a node declares them as
+ * arrays. Asking an author to perform that conversion by hand is asking them
+ * to copy data they were already given, and the compiler then rejects the copy
+ * for the smallest divergence — the same reason the generator does this for a
+ * model rather than describing it in a prompt.
+ */
+export function portsFromManifest(manifest) {
+  const convert = (declared) =>
+    Object.entries(declared ?? {})
+      .map(([id, schema_id]) => ({ id, schema_id }))
+      .sort((left, right) => left.id.localeCompare(right.id));
+  return { inputs: convert(manifest?.inputs), outputs: convert(manifest?.outputs) };
+}
+
+/** The `{name, version}` a node stores for a chosen handler.
+ *
+ * Never the fingerprint, even though the catalog reports one: the binding an
+ * IR node carries is resolved by `analyze_dsl` from the registry. A document
+ * that named its own fingerprint would be choosing what it binds to.
+ */
+export function handlerRef(manifest) {
+  return manifest ? { name: manifest.name, version: manifest.version } : undefined;
+}

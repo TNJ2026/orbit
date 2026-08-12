@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 
-import { addPort } from "./document.mjs";
+import { addPort, handlerRef, handlersForKind, portsFromManifest } from "./document.mjs";
 import {
   availableReferences, conditionText, conditionValue, mappingText,
   mappingValue, objectText, objectValue,
@@ -244,8 +244,13 @@ function PortList({ node, side, onAdd, onRemove }) {
   );
 }
 
-function NodeInspector({ node, policies, onChange, onPorts, onRemovePort }) {
+const handlerKey = (handler) => (handler ? `${handler.name} ${handler.version}` : "");
+
+function NodeInspector({
+  node, policies, kinds, handlers, onChange, onPorts, onRemovePort, onKind,
+}) {
   const dsl = node.data?.dsl ?? {};
+  const available = handlersForKind(handlers, node.data.kind);
   const initial = objectText(dsl.config);
   const [config, changeConfig, problem] = useDraft(
     initial,
@@ -258,7 +263,52 @@ function NodeInspector({ node, policies, onChange, onPorts, onRemovePort }) {
       <h2>
         Node <code>{node.id}</code>
       </h2>
-      <p className="path">{node.data.kind}</p>
+      <label>
+        <span>Kind</span>
+        <select value={node.data.kind} onChange={(event) => onKind(event.target.value)}>
+          {kinds.map((kind) => (
+            <option key={kind} value={kind}>{kind}</option>
+          ))}
+        </select>
+      </label>
+      <label>
+        <span>Handler</span>
+        <select
+          value={handlerKey(dsl.handler)}
+          onChange={(event) => {
+            const chosen = available.find(
+              (item) => handlerKey(item) === event.target.value,
+            );
+            onChange({ handler: handlerRef(chosen) });
+            // The manifest already states the ports; copying them by hand is
+            // copying data the author was given, and the compiler rejects the
+            // copy for the smallest divergence.
+            if (chosen) {
+              const ports = portsFromManifest(chosen);
+              onPorts("inputs", ports.inputs);
+              onPorts("outputs", ports.outputs);
+            }
+          }}
+        >
+          <option value="">none</option>
+          {available.map((handler) => (
+            <option key={handlerKey(handler)} value={handlerKey(handler)}>
+              {handler.name} · {handler.version}
+            </option>
+          ))}
+        </select>
+        {dsl.handler && !available.some((item) => handlerKey(item) === handlerKey(dsl.handler)) ? (
+          // The registry seals at startup, so a binding can name a build that
+          // is no longer installed — upgrading an Agent CLI retires every
+          // binding to the old one. Saying so beats a publish that fails.
+          <em className="problem">
+            {dsl.handler.name} {dsl.handler.version} is not registered here
+          </em>
+        ) : null}
+        {node.data.kind === "action" && !dsl.handler ? (
+          <em className="problem">an action node requires a handler</em>
+        ) : null}
+      </label>
       <label>
         <span>Config</span>
         <textarea
@@ -308,7 +358,7 @@ function NodeInspector({ node, policies, onChange, onPorts, onRemovePort }) {
  * still carried through untouched.
  */
 export default function Inspector({
-  selection, document, onChange, onPorts, onRemovePort,
+  selection, document, kinds, handlers, onChange, onPorts, onRemovePort, onKind,
 }) {
   const policies = document?.policies ?? [];
   if (!selection) {
@@ -332,8 +382,11 @@ export default function Inspector({
           node={selection.item}
           policies={policies}
           onChange={onChange}
+          kinds={kinds}
+          handlers={handlers}
           onPorts={onPorts}
           onRemovePort={onRemovePort}
+          onKind={onKind}
         />
       )}
     </aside>
