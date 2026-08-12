@@ -52,6 +52,10 @@ class LangGraphJoinDeadlineExceeded(RuntimeError):
     """A deadline join fired without enough successful branches."""
 
 
+class LangGraphCompletionUnsatisfied(RuntimeError):
+    """A finished graph did not satisfy its terminal completion policy."""
+
+
 @dataclass(frozen=True)
 class LangGraphExecutionContext:
     workflow_id: str
@@ -451,6 +455,23 @@ class CompiledLangGraphWorkflow:
         return self._result(state)
 
     def _result(self, state: Mapping[str, Any]) -> Mapping[str, Any]:
+        completion = next((
+            policy for policy in self.ir.policies
+            if policy.kind == "completion"
+        ), None)
+        required_terminals = int(
+            completion.config.get("required_terminal_count", 1)
+            if completion is not None else 1
+        )
+        reached_terminals = sum(
+            node_id in self.ir.terminals
+            for node_id in state.get("execution_order", ())
+        )
+        if not state.get("__interrupt__") and reached_terminals < required_terminals:
+            raise LangGraphCompletionUnsatisfied(
+                f"completion requires {required_terminals} successful terminals; "
+                f"reached {reached_terminals}"
+            )
         result = None
         if self.ir.result is not None:
             producer = state.get("node_outputs", {}).get(self.ir.result.node_id)
@@ -560,13 +581,23 @@ def compile_workflow(
             raise LangGraphCompileError(
                 f"rework policy {policy.id!r} has invalid exhaustion"
             )
-    for policy in (item for item in ir.policies if item.kind == "completion"):
+    completion_policies = tuple(
+        item for item in ir.policies if item.kind == "completion"
+    )
+    if len(completion_policies) > 1:
+        raise LangGraphCompileError(
+            "workflow declares multiple completion policies"
+        )
+    for policy in completion_policies:
         unknown = set(policy.config) - {"required_terminal_count"}
         required = policy.config.get("required_terminal_count", 1)
-        if unknown or required != 1 or isinstance(required, bool):
+        if (
+            unknown or isinstance(required, bool)
+            or not isinstance(required, int) or required < 1
+        ):
             raise LangGraphCompileError(
-                f"completion policy {policy.id!r} only supports "
-                "required_terminal_count=1"
+                f"completion policy {policy.id!r} requires positive "
+                "required_terminal_count"
             )
     policies_by_id = {policy.id: policy for policy in ir.policies}
     for edge in (item for item in ir.edges if item.back_edge):

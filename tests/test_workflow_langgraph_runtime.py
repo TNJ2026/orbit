@@ -37,6 +37,7 @@ from orbit.workflow.langgraph_runtime import (
     HandlerOutcome,
     LangGraphHandlerRegistry,
     LangGraphExecutionContext,
+    LangGraphCompletionUnsatisfied,
     LangGraphJoinDeadlineExceeded,
     LangGraphRunConflict,
     LangGraphRetryableError,
@@ -188,7 +189,7 @@ class LangGraphWorkflowCompilerValidationTests(unittest.TestCase):
 
         self.assertEqual(7, result["result"])
 
-    def test_non_default_completion_policy_is_rejected_fail_closed(self) -> None:
+    def test_completion_policy_fails_below_required_terminal_count(self) -> None:
         action = node("action", inputs=("value",), outputs=("value",))
         ir = workflow(
             (action,), (),
@@ -201,14 +202,44 @@ class LangGraphWorkflowCompilerValidationTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(
-            ValueError, "only supports required_terminal_count=1",
+            LangGraphCompletionUnsatisfied, "requires 2.*reached 1",
         ):
             compile_workflow(
                 ir,
                 LangGraphHandlerRegistry([
                     binding("action", lambda values, config, context: values)
                 ]),
-            )
+            ).invoke({"value": 7})
+
+    def test_completion_policy_accepts_multiple_successful_terminals(self) -> None:
+        fan = node(
+            "fan", inputs=("value",), outputs=("value",), route_mode="parallel",
+        )
+        left = node(
+            "left", inputs=("value",), kind="terminal", handler=False,
+        )
+        right = node(
+            "right", inputs=("value",), kind="terminal", handler=False,
+        )
+        ir = workflow(
+            (fan, left, right),
+            (edge("to_left", "fan", "left"), edge("to_right", "fan", "right")),
+            entry=("fan",), terminals=("left", "right"),
+            result=("fan", "value"),
+            policies=(IRPolicy(
+                "complete", "completion", {"required_terminal_count": 2},
+            ),),
+        )
+
+        result = compile_workflow(
+            ir,
+            LangGraphHandlerRegistry([
+                binding("fan", lambda values, config, context: values)
+            ]),
+        ).invoke({"value": 7})
+
+        self.assertEqual(7, result["result"])
+        self.assertEqual({"left", "right"}, set(result["execution_order"][-2:]))
 
     def test_invalid_loop_exhaustion_is_rejected_fail_closed(self) -> None:
         action = node(
