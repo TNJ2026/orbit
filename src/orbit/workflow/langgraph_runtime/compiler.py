@@ -495,6 +495,31 @@ def compile_workflow(
 
     if not isinstance(ir, WorkflowIR):
         raise TypeError("compile_workflow requires WorkflowIR")
+    if ir.extensions:
+        identifiers = ", ".join(
+            sorted(extension.extension_id for extension in ir.extensions)
+        )
+        raise LangGraphCompileError(
+            "LangGraph workflows do not support extensions: " + identifiers
+        )
+    unsupported_nodes = tuple(
+        sorted(
+            (
+                node for node in ir.nodes
+                if node.kind not in {
+                    "action", "human", "decision", "join", "terminal",
+                }
+            ),
+            key=lambda node: node.id,
+        )
+    )
+    if unsupported_nodes:
+        summary = ", ".join(
+            f"{node.id}:{node.kind}" for node in unsupported_nodes
+        )
+        raise LangGraphCompileError(
+            "LangGraph node kinds are not supported: " + summary
+        )
     unsupported_policies = tuple(
         sorted(
             (

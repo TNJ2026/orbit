@@ -20,6 +20,7 @@ from orbit.workflow.catalogs import (
 from orbit.workflow.domain.definitions import (
     CompiledWorkflow,
     IREdge,
+    IRExtension,
     IRHandlerRef,
     IRNode,
     IRPolicy,
@@ -170,6 +171,55 @@ def binding(name, invoke) -> BoundHandler:
 
 
 class LangGraphWorkflowCompilerValidationTests(unittest.TestCase):
+    def test_extensions_are_rejected_before_execution(self) -> None:
+        action = node("action", inputs=("value",), outputs=("value",))
+        base = workflow(
+            (action,), (), entry=("action",), terminals=("action",),
+            result=("action", "value"),
+        )
+        ir = WorkflowIR(
+            base.ir_version, base.workflow_id, base.name, base.description,
+            base.labels, base.inputs, base.outputs, base.nodes, base.edges,
+            base.entry, base.terminals, base.policies,
+            (IRExtension("vendor.example", "1.0.0", {}),),
+            base.indexes, base.result,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError, "do not support extensions: vendor.example",
+        ):
+            compile_workflow(
+                ir,
+                LangGraphHandlerRegistry([
+                    binding("action", lambda values, config, context: values)
+                ]),
+            )
+
+    def test_legacy_controller_node_kinds_are_rejected(self) -> None:
+        for kind in ("agentic", "foreach", "subflow", "extension"):
+            with self.subTest(kind=kind):
+                controller = node(
+                    "controller", inputs=("value",), outputs=("value",),
+                    kind=kind,
+                )
+                ir = workflow(
+                    (controller,), (), entry=("controller",),
+                    terminals=("controller",), result=("controller", "value"),
+                )
+
+                with self.assertRaisesRegex(
+                    ValueError, f"controller:{kind}",
+                ):
+                    compile_workflow(
+                        ir,
+                        LangGraphHandlerRegistry([
+                            binding(
+                                "controller",
+                                lambda values, config, context: values,
+                            )
+                        ]),
+                    )
+
     def test_default_completion_policy_is_compatible(self) -> None:
         action = node("action", inputs=("value",), outputs=("value",))
         ir = workflow(

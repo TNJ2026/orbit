@@ -40,9 +40,30 @@ result = workflow.invoke(
 ```
 
 Supported IR behavior includes fixed and conditional routing, exclusive or
-parallel fan-out, joins, back-edge loops, input defaults, compiled condition
-ASTs, compiled mapping ASTs, explicit primary results, and any LangGraph
-checkpointer supplied by the application.
+parallel fan-out, joins, bounded back-edge loops and rework, input defaults,
+compiled condition and mapping ASTs, explicit primary results, and any
+LangGraph checkpointer supplied by the application.
+
+## Authoring capability matrix
+
+New LangGraph workflows use a deliberately smaller contract than the legacy
+Runtime. The compiler rejects unsupported declarations before a run is created;
+it never silently ignores them.
+
+| Contract area | Supported |
+| --- | --- |
+| Node kinds | `action`, `decision`, `human`, `join`, `terminal` |
+| Handler adapters | reviewed Agent, Tool, Transform, or other exact-version `BoundHandler` adapters |
+| Routing | success/error/timeout/cancel, conditions, exclusive and parallel fan-out |
+| Join policies | `all`, `all_successful`, `any`, `n_of_m`, `deadline` |
+| Repetition | bounded `loop` and `rework`, with `fail` or `error_route` exhaustion |
+| Completion | positive `required_terminal_count` |
+| Durability | SQLite checkpoints, retry timers, join deadlines, recovery, cancellation |
+| Data | inline values plus artifact/secret refs when every bound Handler declares the transport |
+
+Agent authoring must not emit `agentic`, `foreach`, `subflow`, or `extension`
+node kinds, nor top-level IR extensions. These belong to the legacy Runtime
+contract and are intentionally outside the new LangGraph workflow language.
 
 Handlers return a mapping for the normal success path. For explicit failure
 families they return `HandlerOutcome(output, route="error" | "timeout" |
