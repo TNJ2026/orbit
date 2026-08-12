@@ -3396,3 +3396,60 @@ class AuthoringSchemaApiTests(ApiTestCase):
         with AsgiHarness(self.app) as client:
             data = self._schema(client)
         self.assertIn("schema", data)
+
+
+class EditorMountTests(unittest.TestCase):
+    """The graph editor is served beside the UI, and only when it is built."""
+
+    def build(self, **extra):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        return create_app(
+            Path(temp.name) / "runtime.db",
+            handlers=[transform_registration()], schemas=SCHEMAS,
+            worker_count=1, poll_seconds=0.02,
+            authenticator=lambda request: request.headers.get("x-orbit-actor"),
+            authorizer=Authorizer(lambda actor: [READ_SCOPE]),
+            serve_ui=True,
+            **extra,
+        )
+
+    def _mounted(self, **extra):
+        return {
+            route.name
+            for route in self.build(**extra).routes
+            if hasattr(route, "name")
+        }
+
+    @staticmethod
+    def _built() -> bool:
+        from importlib import resources
+
+        return resources.files("orbit").joinpath(
+            "static/workflow-editor/index.html"
+        ).is_file()
+
+    def test_the_editor_is_mounted_when_it_has_been_built(self) -> None:
+        mounted = self._mounted()
+        self.assertEqual(self._built(), "editor" in mounted)
+        self.assertIn("ui", mounted)
+
+    def test_the_editor_is_absent_where_its_api_is(self) -> None:
+        """/api/v1/workflows exists in multi-agent mode alone.
+
+        An editor mounted in single-agent mode would load and then 404 on its
+        first request, which is worse than not being there.
+        """
+
+        self.assertNotIn("editor", self._mounted(workflow_ui_mode="single-agent"))
+        self.assertIn("ui", self._mounted(workflow_ui_mode="single-agent"))
+
+    def test_the_editor_is_static_files_and_needs_no_credentials(self) -> None:
+        """It reaches the Runtime through /api/v1, which does check them."""
+
+        if not self._built():
+            self.skipTest("editor bundle is not built in this checkout")
+        with AsgiHarness(self.build()) as client:
+            response = client.get("/editor/")
+        self.assertEqual(200, response.status_code)
+        self.assertIn("<div id=\"root\">", response.text)

@@ -1002,6 +1002,31 @@ def create_app(
             )
         )
 
+        # The graph editor is a separate surface with a build step of its own,
+        # mounted beside the hand-written UI rather than inside it. Keeping
+        # them apart is what lets the editor use a framework without the rest
+        # of the UI acquiring one.
+        #
+        # Mounted only where the API it lives on is: /api/v1/workflows exists
+        # in multi-agent mode alone, so in single-agent mode the editor would
+        # load and then 404 on its first request. Serving nothing there is the
+        # honest answer. It is also absent from a source checkout that has not
+        # run the build, and a missing directory must not stop the Runtime.
+        editor_root = resources.files("orbit").joinpath("static/workflow-editor")
+        if (
+            workflow_ui_mode == "multi-agent"
+            and editor_root.joinpath("index.html").is_file()
+        ):
+            routes.append(
+                Mount(
+                    "/editor",
+                    app=RevalidatedStaticFiles(
+                        directory=str(editor_root), html=True
+                    ),
+                    name="editor",
+                )
+            )
+
     routes.extend(extra_routes)
     app = Starlette(routes=routes, lifespan=lifespan)
     app.state.runtime = composition

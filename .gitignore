@@ -8,6 +8,10 @@ build/
 *.egg-info/
 .codegraph/
 .DS_Store
+# The editor's dependencies. Its *build output* under
+# src/orbit/static/workflow-editor/ is committed on purpose — a pip install
+# has no node and cannot produce it — but the tree that builds it is not.
+node_modules/
 docs/orbit-与-loop-engineering.md
 .playwright-cli/
 

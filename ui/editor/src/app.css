@@ -1,0 +1,121 @@
+/* Theme-aware to match the Runtime UI it sits beside: the operator's system
+   preference decides, and neither palette is defined only inside a media
+   query, so nothing renders on an unpainted background. */
+:root {
+  color-scheme: light dark;
+  --bg: #f6f7f9;
+  --panel: #ffffff;
+  --ink: #14161a;
+  --muted: #5d6470;
+  --line: #d8dce3;
+  --accent: #2563eb;
+  --ok: #15803d;
+  --bad: #b91c1c;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --ink: #e8eaee;
+    --muted: #9aa2b1;
+    --line: #2a2f39;
+    --accent: #3b82f6;
+    --ok: #4ade80;
+    --bad: #f87171;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+.editor { display: flex; flex-direction: column; height: 100vh; }
+
+.bar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 10px 14px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+
+.bar .spacer { flex: 1; }
+
+.bar button,
+.bar select {
+  font: inherit;
+  color: var(--ink);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 5px 10px;
+  cursor: pointer;
+}
+
+.bar button:disabled { opacity: 0.45; cursor: default; }
+.bar button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+.notice { margin: 0; padding: 8px 14px; border-bottom: 1px solid var(--line); }
+.notice.error { color: var(--bad); }
+.notice.ok { color: var(--ok); }
+.notice.info { color: var(--muted); }
+
+.canvas { flex: 1; min-height: 0; }
+
+.diagnostics {
+  margin: 0;
+  padding: 10px 14px;
+  max-height: 30vh;
+  overflow: auto;
+  list-style: none;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.diagnostics li { padding: 3px 0; }
+.diagnostics code { color: var(--bad); }
+.diagnostics .path { color: var(--muted); }
+
+.node {
+  min-width: 210px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+}
+
+.node.selected { border-color: var(--accent); }
+.node header { display: flex; flex-direction: column; gap: 2px; }
+.node .kind { font-size: 10px; text-transform: uppercase; color: var(--muted); letter-spacing: 0.06em; }
+.node .title { font-weight: 600; }
+.node .handler { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
+.node .handler .version { opacity: 0.7; }
+
+/* Terminal and human nodes read differently at a glance; the kind is also
+   written out, so colour is never the only carrier. */
+.node-terminal { border-left: 3px solid var(--ok); }
+.node-human { border-left: 3px solid var(--accent); }
+.node-decision { border-left: 3px solid #d97706; }
+.node-join { border-left: 3px solid var(--muted); }
+
+.node .ports { display: flex; justify-content: space-between; margin-top: 8px; position: relative; }
+.node .side { list-style: none; margin: 0; padding: 0; }
+.node .side li { position: relative; height: 22px; display: flex; align-items: center; color: var(--muted); }
+.node .side.right li { justify-content: flex-end; }
+
+/* A handle anchors to its own port row, which gets the vertical position
+   right for free; the horizontal offset pulls it back out through the node's
+   padding so it sits on the border where an author expects to grab it. */
+.node .side li .react-flow__handle { left: -11px; right: auto; transform: translateY(-50%); }
+.node .side.right li .react-flow__handle { left: auto; right: -11px; }
+.node .side li .react-flow__handle { width: 9px; height: 9px; background: var(--muted); border: 1px solid var(--panel); }
+.node .side li .react-flow__handle:hover { background: var(--accent); }
