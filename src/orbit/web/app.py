@@ -600,7 +600,7 @@ def create_app(
         langgraph_service=langgraph_service,
         legacy_execution=legacy_execution,
     )
-    if composition.workflow_db_path != composition.db_path:
+    if legacy_execution and composition.workflow_db_path != composition.db_path:
         from ..workflow.persistence.workflow_versions import merge_workflow_library
 
         merge_workflow_library(composition.db_path, composition.workflow_db_path)

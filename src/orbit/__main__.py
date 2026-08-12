@@ -19,6 +19,7 @@ from .platform.cutover import (
 from .platform.projects import (
     project_db_path,
     public_workflow_db_path,
+    workflow_library_path,
     project_state_dir,
     resolve_project_root,
     upsert_project,
@@ -427,7 +428,10 @@ def _serve(args) -> None:
         handlers.extend(dev_handlers)
         print(f"dev tools: {', '.join(tool_names) or 'none granted'}", flush=True)
 
-    workflow_db_path = db_path if args.db else public_workflow_db_path()
+    workflow_db_path = (
+        Path(db_path).with_name(f"workflows-{args.ui_mode}.db")
+        if args.db else workflow_library_path(args.ui_mode)
+    )
     langgraph_state_directory = (
         Path(args.langgraph_state_dir).expanduser().absolute()
         if args.langgraph_state_dir else Path(db_path).parent

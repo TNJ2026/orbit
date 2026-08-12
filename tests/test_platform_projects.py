@@ -86,6 +86,18 @@ class RuntimeDatabasePathTests(unittest.TestCase):
             projects.project_db_path(self.root, base_dir=self.state),
         )
 
+    def test_single_and_multi_agent_workflow_libraries_are_isolated(self) -> None:
+        single = projects.workflow_library_path("single-agent")
+        multi = projects.workflow_library_path("multi-agent")
+
+        self.assertNotEqual(single, multi)
+        self.assertEqual(projects.public_workflow_db_path(), multi)
+        self.assertEqual("single-agent-library.db", single.name)
+
+    def test_unknown_workflow_ui_mode_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "single-agent or multi-agent"):
+            projects.workflow_library_path("unknown")
+
 
 class LegacySentinelTests(unittest.TestCase):
     """The legacy paths exist to warn, never to read."""

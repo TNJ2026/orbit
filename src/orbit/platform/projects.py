@@ -33,12 +33,25 @@ STATE_DIR_NAME = ".orbit"
 DEFAULT_STATE_ROOT = Path.home() / STATE_DIR_NAME / "projects"
 DEFAULT_PROJECT_INDEX_PATH = DEFAULT_STATE_ROOT / "index.json"
 DEFAULT_WORKFLOW_LIBRARY_PATH = Path.home() / STATE_DIR_NAME / "workflows" / "library.db"
+DEFAULT_SINGLE_AGENT_WORKFLOW_LIBRARY_PATH = (
+    Path.home() / STATE_DIR_NAME / "workflows" / "single-agent-library.db"
+)
 
 
 def public_workflow_db_path() -> Path:
     """Host-wide immutable Workflow definitions shared by every project."""
 
     return DEFAULT_WORKFLOW_LIBRARY_PATH
+
+
+def workflow_library_path(ui_mode: str) -> Path:
+    """An isolated published Workflow library for one authoring product."""
+
+    if ui_mode == "single-agent":
+        return DEFAULT_SINGLE_AGENT_WORKFLOW_LIBRARY_PATH
+    if ui_mode == "multi-agent":
+        return DEFAULT_WORKFLOW_LIBRARY_PATH
+    raise ValueError("ui_mode must be single-agent or multi-agent")
 
 PROJECT_MARKERS = (".git", "pyproject.toml")
 

@@ -42,10 +42,27 @@ def build_routes(ctx) -> list[Route]:
             return prompt
         if profile != "single_agent":
             raise ValueError("authoring_profile must be single_agent or multi_agent")
-        executor = str(body.get("execution_agent", "")).strip()
-        if not executor:
-            raise ValueError("single_agent authoring requires an execution_agent")
-        handler = executor if executor.startswith("agent.") else f"agent.{executor}"
+        writer = str(body.get("agent", "")).strip()
+        if not writer.startswith("app:"):
+            raise ValueError(
+                "single_agent authoring requires a currently connected MCP Agent"
+            )
+        client = writer.removeprefix("app:")
+        registry = getattr(ctx.durable_service, "execution_registry", None)
+        handlers = sorted(
+            entry.manifest.name for entry in registry.entries()
+            if "agent.invoke" in entry.manifest.capabilities
+        ) if registry is not None and registry.sealed else []
+        aliases = {"chatgpt": "codex", "claude-desktop": "claude"}
+        preferred = f"agent.{aliases.get(client, client)}"
+        if preferred in handlers:
+            handler = preferred
+        elif len(handlers) == 1:
+            handler = handlers[0]
+        else:
+            raise ValueError(
+                "the connected MCP Agent has no unambiguous executable Handler"
+            )
         return (
             f"[ORBIT_SINGLE_AGENT handler={handler}]\n"
             "Build the smallest single-Agent workflow with exactly one action "

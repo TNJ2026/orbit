@@ -1317,22 +1317,20 @@ export function createViews(context) {
       let writerAgent = defaultGenerationAgent();
       const authoringProfile = shellFacts?.product_mode?.workflow_ui_mode === "single-agent"
         ? "single_agent" : "multi_agent";
-      const executionAgents = shellFacts?.capabilities?.agent_handlers?.agents || [];
-      let executionAgent = executionAgents.includes(writerAgent)
-        ? writerAgent : executionAgents[0] || "";
-      const executionAgentSelect = el("select", {
-        id: "workflowExecutionAgent",
-        onchange: (event) => { executionAgent = event.target.value; },
-      }, executionAgents.map((name) => el("option", {
-        value: name, text: name, selected: name === executionAgent ? "selected" : null,
-      })));
-      const executionAgentField = el("div", {
-        class: "field simplified-workflow-execution-agent",
+      const connectedMcpAgents = (
+        shellFacts?.capabilities?.workflow_generation?.agents || []
+      ).filter((name) => name.startsWith("app:"));
+      if (authoringProfile === "single_agent") {
+        writerAgent = connectedMcpAgents[0] || "";
+      }
+      const connectedAgent = el("div", {
+        class: "field simplified-workflow-connected-agent",
       }, [
-        el("label", {
-          for: "workflowExecutionAgent", text: i18n.t("generate.executionAgent"),
+        el("span", { class: "field-label", text: i18n.t("generate.connectedAgent") }),
+        el("div", {
+          class: "agent-choice-static mono",
+          text: writerAgent || i18n.t("generate.connectedAgent.none"),
         }),
-        executionAgentSelect,
       ]);
       const instruction = el("textarea", {
         id: "generateInstruction", required: "required", maxlength: "4000",
@@ -1345,7 +1343,8 @@ export function createViews(context) {
       });
       const submit = el("button", {
         class: "button primary", type: "submit", id: "generateWorkflow",
-        disabled: !generateCommand || activeGeneration ? "disabled" : null,
+        disabled: !generateCommand || activeGeneration
+          || (authoringProfile === "single_agent" && !writerAgent) ? "disabled" : null,
       }, [
         el("span", { class: "generate-spark", "aria-hidden": "true", text: "✦" }),
         el("span", { text: activeGeneration
@@ -1367,8 +1366,6 @@ export function createViews(context) {
                 prompt: instruction.value.trim(),
                 display_language: i18n.locale,
                 authoring_profile: authoringProfile,
-                ...(authoringProfile === "single_agent" && executionAgent
-                  ? { execution_agent: executionAgent } : {}),
                 ...(writerAgent ? { agent: writerAgent } : {}),
               },
               `workflow.generate:${Date.now()}`,
@@ -1385,13 +1382,14 @@ export function createViews(context) {
           }
         },
       }, [
-        el("div", { class: "simplified-workflow-generator-agent" }, [
-          generationAgentField(
-            "workflowGenerateAgent", writerAgent,
-            (value) => { writerAgent = value; },
-          ),
-        ]),
-        authoringProfile === "single_agent" ? executionAgentField : null,
+        authoringProfile === "single_agent"
+          ? connectedAgent
+          : el("div", { class: "simplified-workflow-generator-agent" }, [
+            generationAgentField(
+              "workflowGenerateAgent", writerAgent,
+              (value) => { writerAgent = value; },
+            ),
+          ]),
         el("div", { class: "field" }, [
           el("label", {
             class: "sr-only", for: "generateInstruction",

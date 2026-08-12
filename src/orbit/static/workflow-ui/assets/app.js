@@ -233,6 +233,13 @@ async function render() {
     // the initial writer without requiring a full browser reload.
     shellFacts = (await api.capabilities()).data;
     mayStartRun = Boolean(shellFacts.permissions && shellFacts.permissions.start_run);
+    const singleAgentUi = shellFacts.product_mode?.workflow_ui_mode === "single-agent";
+    const agentsNav = document.querySelector('[data-view="agents"]');
+    if (agentsNav) agentsNav.hidden = singleAgentUi;
+    if (singleAgentUi && route.view === "agents") {
+      navigate({ view: "home", runId: null });
+      return;
+    }
     views.update({ i18n, shellFacts, mayStartRun });
     const fresh = el("div", { class: "content" });
     if (route.view === "home") await views.renderSimplifiedWorkspace(fresh);
@@ -429,6 +436,10 @@ async function boot() {
   try {
     shellFacts = (await api.capabilities()).data;
     mayStartRun = Boolean(shellFacts.permissions && shellFacts.permissions.start_run);
+    const agentsNav = document.querySelector('[data-view="agents"]');
+    if (agentsNav) {
+      agentsNav.hidden = shellFacts.product_mode?.workflow_ui_mode === "single-agent";
+    }
     views.update({ i18n, shellFacts, mayStartRun });
     const shutdown = runtimeShutdownCommand();
     document.getElementById("shutdownRuntime").hidden = !shutdown;

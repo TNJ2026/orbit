@@ -160,6 +160,10 @@ class WorkflowCliTests(unittest.TestCase):
         self.assertEqual(
             "single-agent", create_app.call_args.kwargs["workflow_ui_mode"]
         )
+        self.assertEqual(
+            self.db.with_name("workflows-single-agent.db"),
+            create_app.call_args.kwargs["workflow_db_path"],
+        )
 
     def test_serve_can_select_the_multi_agent_ui(self) -> None:
         with (
@@ -174,6 +178,10 @@ class WorkflowCliTests(unittest.TestCase):
 
         self.assertEqual(
             "multi-agent", create_app.call_args.kwargs["workflow_ui_mode"]
+        )
+        self.assertEqual(
+            self.db.with_name("workflows-multi-agent.db"),
+            create_app.call_args.kwargs["workflow_db_path"],
         )
 
     def test_serve_reports_an_unusable_artifact_root_without_a_traceback(self) -> None:
