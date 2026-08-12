@@ -2127,6 +2127,14 @@ class WorkflowDraftApiTests(ApiTestCase):
             workflow_generators={"app:codex": lambda _prompt: "{}"}, single_goal_mode=False,
             workflow_ui_mode="single-agent",
         )
+        # Asserted on the mounted routes rather than only on a status: with
+        # the literal segment absent, `/generate` is matched by
+        # `/api/v1/workflows/{workflow_id}` and refused as a method rather than
+        # as a path. The intent is that the endpoint is not there at all.
+        self.assertNotIn(
+            "workflow_generate",
+            {route.name for route in app.routes if getattr(route, "name", None)},
+        )
         with AsgiHarness(app) as client:
             response = client.post(
                 "/api/v1/workflows/generate", actor="writer", key="single-codex",
@@ -2137,7 +2145,7 @@ class WorkflowDraftApiTests(ApiTestCase):
                 },
             )
 
-        self.assertEqual(404, response.status_code)
+        self.assertIn(response.status_code, (404, 405))
 
     def test_multi_agent_generation_prompt_is_unchanged(self) -> None:
         prompts = []
@@ -3434,15 +3442,14 @@ class EditorMountTests(unittest.TestCase):
         self.assertEqual(self._built(), "editor" in mounted)
         self.assertIn("ui", mounted)
 
-    def test_the_editor_is_absent_where_its_api_is(self) -> None:
-        """/api/v1/workflows exists in multi-agent mode alone.
+    def test_the_editor_is_served_in_both_authoring_modes(self) -> None:
+        """The catalog it reads is in both, so the editor is too."""
 
-        An editor mounted in single-agent mode would load and then 404 on its
-        first request, which is worse than not being there.
-        """
-
-        self.assertNotIn("editor", self._mounted(workflow_ui_mode="single-agent"))
-        self.assertIn("ui", self._mounted(workflow_ui_mode="single-agent"))
+        for mode in ("single-agent", "multi-agent"):
+            with self.subTest(mode=mode):
+                mounted = self._mounted(workflow_ui_mode=mode)
+                self.assertEqual(self._built(), "editor" in mounted)
+                self.assertIn("ui", mounted)
 
     def test_the_editor_is_static_files_and_needs_no_credentials(self) -> None:
         """It reaches the Runtime through /api/v1, which does check them."""
@@ -3453,3 +3460,71 @@ class EditorMountTests(unittest.TestCase):
             response = client.get("/editor/")
         self.assertEqual(200, response.status_code)
         self.assertIn("<div id=\"root\">", response.text)
+
+
+class WorkflowCatalogModeTests(ApiTestCase):
+    """The catalog is not a property of which authoring UI was chosen."""
+
+    def build(self, mode: str):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        return create_app(
+            Path(temp.name) / "runtime.db",
+            handlers=[transform_registration()], schemas=SCHEMAS,
+            worker_count=1, poll_seconds=0.02,
+            authenticator=lambda request: request.headers.get("x-orbit-actor"),
+            authorizer=Authorizer(lambda actor: self.scopes.get(actor, [])),
+            workflow_ui_mode=mode,
+        )
+
+    def test_the_catalog_is_readable_in_single_agent_mode(self) -> None:
+        with AsgiHarness(self.build("single-agent")) as client:
+            response = client.get("/api/v1/workflows", actor="reader")
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertIn("workflows", response.json()["data"])
+
+    def test_the_authoring_contract_is_served_in_single_agent_mode(self) -> None:
+        """The editor fetches this before it draws anything."""
+
+        with AsgiHarness(self.build("single-agent")) as client:
+            response = client.get(
+                "/api/v1/workflows/authoring-schema", actor="reader"
+            )
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertEqual("1.3", response.json()["data"]["dsl_version"])
+
+    def test_drafts_stay_with_the_ui_that_drives_them(self) -> None:
+        """Only the multi-agent UI runs the persistent-draft flow."""
+
+        # There is no draft to read; what is being asked is whether the route
+        # is mounted at all, which a 404 from Starlette answers either way. So
+        # compare the mounted names instead.
+        single = {
+            route.name for route in self.build("single-agent").routes
+            if getattr(route, "name", None)
+        }
+        multi = {
+            route.name for route in self.build("multi-agent").routes
+            if getattr(route, "name", None)
+        }
+        # Single-agent mode gets the catalog the editor reads and nothing that
+        # writes a definition from a prompt: generation, the jobs that track
+        # it, natural-language revision, handler rebinding and drafts.
+        self.assertEqual(
+            {
+                "authoring_job_cancel", "authoring_job_list",
+                "authoring_job_output", "authoring_job_read",
+                "workflow_action_update", "workflow_delete",
+                "workflow_draft_create", "workflow_draft_read",
+                "workflow_generate", "workflow_modify", "workflow_rebind",
+            },
+            multi - single,
+        )
+        # And what it does get is exactly what the editor needs.
+        self.assertLessEqual(
+            {
+                "workflow_catalog", "workflow_detail", "workflow_validate",
+                "workflow_publish", "workflow_authoring_schema",
+            },
+            single,
+        )

@@ -30,7 +30,16 @@ from .common import (
 )
 
 
-def build_routes(ctx) -> list[Route]:
+def build_routes(ctx, *, authoring: bool = True) -> list[Route]:
+    """Catalog routes, and the prompt-driven authoring ones when asked.
+
+    `authoring=False` returns only what reading, compiling and publishing a
+    definition needs — what the graph editor uses. Single-agent mode composes
+    it that way: a goal there is written by the connected Agent through a
+    template, so `/generate` and the jobs that track it would be a second
+    authoring path that product was built without.
+    """
+
     def _generation_prompt(body: Mapping[str, Any]) -> str:
         prompt = str(body.get("prompt", body.get("instruction", ""))).strip()
         profile = str(body.get("authoring_profile", "multi_agent"))
@@ -770,16 +779,37 @@ def build_routes(ctx) -> list[Route]:
 
         return await ctx.mutate(request, WRITE_SCOPE, "workflow.rebind", command)
 
-    return [
+    # Reading a definition, compiling it and publishing a version. The graph
+    # editor needs exactly these, and they say nothing about which authoring UI
+    # is on, so both modes get them.
+    catalog = [
         Route("/api/v1/workflows", workflow_catalog, methods=["GET"]),
         Route("/api/v1/workflows/validate", workflow_validate, methods=["POST"]),
-        # /generate before /{workflow_id}: Starlette matches in order, and the
-        # literal segment must not be captured as a workflow id.
-        Route("/api/v1/workflows/generate", workflow_generate, methods=["POST"]),
         Route(
             "/api/v1/workflows/authoring-schema",
             workflow_authoring_schema, methods=["GET"],
         ),
+        Route(
+            "/api/v1/workflows/{workflow_id}", workflow_detail, methods=["GET"]
+        ),
+        Route(
+            "/api/v1/workflows/{workflow_id}/versions", workflow_publish,
+            methods=["POST"],
+        ),
+    ]
+    if not authoring:
+        return catalog
+
+    # Prompt-driven authoring, which single-agent mode deliberately does not
+    # have: there, a goal is written by the connected Agent through a template,
+    # not by asking this endpoint for DSL. Mounting it would give that product
+    # a second authoring path it was built without.
+    return [
+        *catalog[:2],
+        # /generate before /{workflow_id}: Starlette matches in order, and the
+        # literal segment must not be captured as a workflow id.
+        Route("/api/v1/workflows/generate", workflow_generate, methods=["POST"]),
+        *catalog[2:3],
         Route(
             "/api/v1/workflow-authoring-jobs", authoring_job_list, methods=["GET"],
         ),
@@ -795,9 +825,7 @@ def build_routes(ctx) -> list[Route]:
             "/api/v1/workflow-authoring-jobs/{job_id}/cancel",
             authoring_job_cancel, methods=["POST"],
         ),
-        Route(
-            "/api/v1/workflows/{workflow_id}", workflow_detail, methods=["GET"]
-        ),
+        *catalog[3:4],
         Route(
             "/api/v1/workflows/{workflow_id}", workflow_delete, methods=["DELETE"]
         ),
@@ -809,10 +837,7 @@ def build_routes(ctx) -> list[Route]:
             "/api/v1/workflows/{workflow_id}/actions/{node_id}",
             workflow_action_update, methods=["POST"],
         ),
-        Route(
-            "/api/v1/workflows/{workflow_id}/versions", workflow_publish,
-            methods=["POST"],
-        ),
+        *catalog[4:],
         Route(
             "/api/v1/workflows/{workflow_id}/rebind", workflow_rebind,
             methods=["POST"],
