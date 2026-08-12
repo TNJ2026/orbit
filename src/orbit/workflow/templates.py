@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 from typing import Any, Callable, Mapping, Sequence
+import uuid
 
 from .application.workflows import WorkflowDefinitionService
+from .api.workflow_catalog import WorkflowCatalogReadModelService
 from .catalogs import HandlerManifest
+from .domain.definitions import IRHandlerRef
 
 
 @dataclass(frozen=True)
@@ -76,10 +79,27 @@ class SingleAgentTemplateService:
 
     def list(self) -> Mapping[str, Any]:
         binding = self._binding()
+        published = []
+        if self.definitions.store is not None:
+            catalog = WorkflowCatalogReadModelService(
+                self.definitions.store.path, self.definitions.catalogs.schemas,
+                usage_path=self.definitions.store.path,
+            )
+            for item in catalog.list():
+                if item["labels"].get("orbit.mode") != "single-agent-template":
+                    continue
+                detail = catalog.detail(item["workflow_id"])
+                published.append({
+                    "workflow_id": item["workflow_id"], "name": item["name"],
+                    "description": item["description"],
+                    "template_id": item["labels"].get("orbit.template"),
+                    "graph": detail["graph"],
+                })
         return {
             "connected_agent": None if binding is None else binding[0],
             "ready": binding is not None,
             "templates": [self._public(item) for item in TEMPLATES],
+            "published": published,
         }
 
     @staticmethod
@@ -102,29 +122,92 @@ class SingleAgentTemplateService:
         }
 
     def start(
-        self, template_id: str, goal: str, *, actor: str, idempotency_key: str,
+        self, template_id: str | None, goal: str, *, actor: str,
+        idempotency_key: str, workflow_id: str | None = None,
     ):
         goal = goal.strip()
         if not goal:
             raise ValueError("goal is required")
+        binding = self._binding()
+        if binding is None:
+            raise ValueError("no unambiguous connected MCP Agent Handler")
+        _agent_name, manifest = binding
+        if workflow_id:
+            version = self.definitions.store.latest_version(workflow_id)
+            record = self.definitions.get_workflow_version(workflow_id, version)
+            if record is None or record.ir.labels.get("orbit.mode") != "single-agent-template":
+                raise ValueError(f"published template workflow not found: {workflow_id!r}")
+            ir = self._bind_current_agent(record.ir, manifest)
+            template_id = record.ir.labels.get("orbit.template") or "published"
+            run_workflow_id = workflow_id
+        else:
+            template = self._template(template_id)
+            compiled = self.definitions.validate_workflow(
+                json.dumps(self._document(template, manifest), ensure_ascii=False),
+                source_name=f"<template:{template_id}>", source_format="json",
+            )
+            ir = compiled.ir
+            run_workflow_id = f"template:{template_id}"
+        return self.langgraph.start_snapshot(
+            run_workflow_id, ir, {"prompt": {"goal": goal}},
+            template_id=template_id, idempotency_key=idempotency_key, actor=actor,
+        )
+
+    def publish(self, template_id: str, name: str, *, actor: str):
+        name = name.strip()
+        if not name:
+            raise ValueError("workflow name is required")
+        if len(name) > 80:
+            raise ValueError("workflow name must be at most 80 characters")
+        binding = self._binding()
+        if binding is None:
+            raise ValueError("no unambiguous connected MCP Agent Handler")
+        template = self._template(template_id)
+        workflow_id = "single-" + uuid.uuid4().hex
+        document = self._document(template, binding[1])
+        document["metadata"].update({
+            "id": workflow_id, "name": name,
+            "labels": {
+                "orbit.mode": "single-agent-template",
+                "orbit.template": template_id,
+                "orbit.agent_binding": "current",
+            },
+        })
+        return self.definitions.publish_workflow(
+            json.dumps(document, ensure_ascii=False),
+            source_name=f"<template:{template_id}>", source_format="json",
+            expected_latest_version=0, actor=actor,
+        )
+
+    @staticmethod
+    def _template(template_id: str | None) -> WorkflowTemplate:
         template = next(
             (item for item in TEMPLATES if item.template_id == template_id), None
         )
         if template is None:
             raise ValueError(f"unknown workflow template: {template_id!r}")
-        binding = self._binding()
-        if binding is None:
-            raise ValueError("no unambiguous connected MCP Agent Handler")
-        _agent_name, manifest = binding
-        document = self._document(template, manifest)
-        compiled = self.definitions.validate_workflow(
-            json.dumps(document, ensure_ascii=False),
-            source_name=f"<template:{template_id}>", source_format="json",
+        return template
+
+    @staticmethod
+    def _bind_current_agent(ir, manifest: HandlerManifest):
+        agent_nodes = tuple(
+            node for node in ir.nodes
+            if node.handler is not None and node.handler.name.startswith("agent.")
         )
-        return self.langgraph.start_snapshot(
-            f"template:{template_id}", compiled.ir, {"prompt": {"goal": goal}},
-            template_id=template_id, idempotency_key=idempotency_key, actor=actor,
-        )
+        if not agent_nodes:
+            raise ValueError("published single-Agent workflow has no Agent node")
+        expected_inputs = tuple(manifest.inputs.items())
+        expected_outputs = tuple(manifest.outputs.items())
+        for node in agent_nodes:
+            if tuple((port.id, port.schema_id) for port in node.inputs) != expected_inputs:
+                raise ValueError("current Agent input ports do not match the published graph")
+            if tuple((port.id, port.schema_id) for port in node.outputs) != expected_outputs:
+                raise ValueError("current Agent output ports do not match the published graph")
+        reference = IRHandlerRef(manifest.name, manifest.version, manifest.fingerprint)
+        return replace(ir, nodes=tuple(
+            replace(node, handler=reference) if node in agent_nodes else node
+            for node in ir.nodes
+        ))
 
     @staticmethod
     def _document(template: WorkflowTemplate, manifest: HandlerManifest) -> dict[str, Any]:

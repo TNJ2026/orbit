@@ -64,16 +64,40 @@ def build_routes(ctx, service, template_service=None) -> list[Route]:
         data["templates"] = [
             {
                 **item,
+                "allowed_commands": ([
+                    {
+                        "command": "workflow_template.start",
+                        "label": "Start template",
+                        "method": "POST",
+                        "href": "/api/v1/workflow-template-runs",
+                        "target_aggregate_id": f"template:{item['template_id']}",
+                        "payload_schema": "workflow-template-run/1.0",
+                    },
+                    {
+                        "command": "workflow_template.publish",
+                        "label": "Publish workflow",
+                        "method": "POST",
+                        "href": "/api/v1/workflow-template-publish",
+                        "target_aggregate_id": f"template:{item['template_id']}",
+                        "payload_schema": "workflow-template-publish/1.0",
+                    },
+                ] if can_start else []),
+            }
+            for item in data["templates"]
+        ]
+        data["published"] = [
+            {
+                **item,
                 "allowed_commands": ([{
                     "command": "workflow_template.start",
-                    "label": "Start template",
+                    "label": "Start workflow",
                     "method": "POST",
                     "href": "/api/v1/workflow-template-runs",
-                    "target_aggregate_id": f"template:{item['template_id']}",
+                    "target_aggregate_id": item["workflow_id"],
                     "payload_schema": "workflow-template-run/1.0",
                 }] if can_start else []),
             }
-            for item in data["templates"]
+            for item in data["published"]
         ]
         return JSONResponse(envelope(data))
 
@@ -83,14 +107,36 @@ def build_routes(ctx, service, template_service=None) -> list[Route]:
 
         def command(body: Mapping[str, Any], actor: str, key: str):
             run = template_service.start(
-                str(body.get("template_id") or ""),
+                str(body.get("template_id") or "") or None,
                 str(body.get("goal") or ""),
                 actor=actor, idempotency_key=key,
+                workflow_id=str(body.get("workflow_id") or "") or None,
             )
             return {"run": _dto(run, can_write=True)}
 
         return await ctx.mutate(
             request, WRITE_SCOPE, "workflow_template.start", command
+        )
+
+    async def publish_template(request: Request) -> JSONResponse:
+        if template_service is None:
+            return error("not_found", "single-Agent templates are not enabled", 404)
+
+        def command(body: Mapping[str, Any], actor: str, _key: str):
+            record = template_service.publish(
+                str(body.get("template_id") or ""),
+                str(body.get("name") or ""), actor=actor,
+            )
+            return {
+                "workflow": {
+                    "workflow_id": record.workflow_id,
+                    "name": record.ir.name,
+                    "template_id": record.ir.labels.get("orbit.template"),
+                }
+            }
+
+        return await ctx.mutate(
+            request, WRITE_SCOPE, "workflow_template.publish", command
         )
 
     async def list_runs(request: Request) -> JSONResponse:
@@ -291,6 +337,7 @@ def build_routes(ctx, service, template_service=None) -> list[Route]:
         routes[:0] = [
             Route("/api/v1/workflow-templates", list_templates, methods=["GET"]),
             Route("/api/v1/workflow-template-runs", start_template, methods=["POST"]),
+            Route("/api/v1/workflow-template-publish", publish_template, methods=["POST"]),
         ]
     if getattr(service, "artifacts", None) is not None:
         routes.extend([

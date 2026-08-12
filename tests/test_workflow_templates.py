@@ -12,6 +12,7 @@ from orbit.workflow.domain.handlers import ResourceProfile
 from orbit.workflow.templates import SingleAgentTemplateService, TEMPLATES
 from orbit.workflow.authoring import ExternalAuthoringBroker
 from orbit.workflow.handlers.agent import AgentHandler, AgentResponse, FakeAgentClient
+from orbit.workflow.persistence.workflow_versions import SQLiteWorkflowVersionStore
 from orbit.web.api_v1 import READ_SCOPE, WRITE_SCOPE, Authorizer
 from orbit.web.app import HandlerRegistration, create_app
 from tests.test_web_composition import AsgiHarness
@@ -19,6 +20,13 @@ from tests.test_web_composition import AsgiHarness
 
 AGENT = HandlerManifest(
     "agent.codex", "1.0.0", ("action",),
+    {"prompt": "schema://object/1.0"}, {"result": "schema://object/1.0"},
+    {"type": "object"}, ExecutionSafety.UNKNOWN_ON_LEASE_LOSS,
+    ResourceProfile(100_000, 100_000, 0, 300, 0, "agent"),
+    "schema://object/1.0", ("agent.invoke",), (), True, True,
+)
+CLAUDE = HandlerManifest(
+    "agent.claude", "2.0.0", ("action",),
     {"prompt": "schema://object/1.0"}, {"result": "schema://object/1.0"},
     {"type": "object"}, ExecutionSafety.UNKNOWN_ON_LEASE_LOSS,
     ResourceProfile(100_000, 100_000, 0, 300, 0, "agent"),
@@ -82,7 +90,39 @@ class SingleAgentTemplateTests(unittest.TestCase):
                 "direct", "ship it", actor="local", idempotency_key="start:none",
             )
 
-    def test_single_agent_http_starts_a_template_without_publishing(self) -> None:
+    def test_published_graph_rebinds_to_the_current_agent_for_each_run(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            catalogs = WorkflowCatalogs(
+                InMemoryHandlerCatalog([AGENT, CLAUDE]),
+                InMemorySchemaCatalog({"schema://object/1.0": {"type": "object"}}),
+                InMemoryExtensionRegistry(),
+            )
+            definitions = WorkflowDefinitionService(
+                catalogs, SQLiteWorkflowVersionStore(Path(directory) / "workflows.db"),
+            )
+            langgraph = FakeLangGraph()
+            publisher = SingleAgentTemplateService(
+                definitions, [AGENT, CLAUDE], langgraph, lambda: ["chatgpt"],
+            )
+            published = publisher.publish("plan-execute", "Reusable", actor="local")
+            runner = SingleAgentTemplateService(
+                definitions, [AGENT, CLAUDE], langgraph,
+                lambda: ["claude-desktop"],
+            )
+            runner.start(
+                None, "ship it", workflow_id=published.workflow_id,
+                actor="local", idempotency_key="start:rebound",
+            )
+
+        ir = langgraph.calls[-1][1]
+        self.assertEqual({"agent.claude"}, {
+            node.handler.name for node in ir.nodes if node.handler is not None
+        })
+        self.assertEqual({"2.0.0"}, {
+            node.handler.version for node in ir.nodes if node.handler is not None
+        })
+
+    def test_single_agent_http_starts_and_publishes_templates(self) -> None:
         broker = ExternalAuthoringBroker()
         broker.claim(actor="test:agent", client="chatgpt")
         client = FakeAgentClient(AgentResponse({"result": {"ok": True}}, None, None))
@@ -109,10 +149,36 @@ class SingleAgentTemplateTests(unittest.TestCase):
                 self.assertEqual(200, listed.status_code, listed.text)
                 data = listed.json()["data"]
                 self.assertEqual("app:chatgpt", data["connected_agent"])
-                command = data["templates"][0]["allowed_commands"][0]
+                commands = data["templates"][0]["allowed_commands"]
+                command = next(
+                    item for item in commands
+                    if item["command"] == "workflow_template.start"
+                )
                 started = http.post(
                     command["href"], actor="test:operator", key="template-http",
                     body={"template_id": "direct", "goal": "ship it"},
+                )
+                publish = next(
+                    item for item in commands
+                    if item["command"] == "workflow_template.publish"
+                )
+                published = http.post(
+                    publish["href"], actor="test:operator", key="publish-http",
+                    body={"template_id": "direct", "name": "Reusable task"},
+                )
+                self.assertEqual(200, published.status_code, published.text)
+                workflow_id = published.json()["data"]["workflow"]["workflow_id"]
+                refreshed = http.get(
+                    "/api/v1/workflow-templates", actor="test:operator",
+                ).json()["data"]
+                reusable = refreshed["published"][0]
+                self.assertEqual(workflow_id, reusable["workflow_id"])
+                self.assertEqual("Reusable task", reusable["name"])
+                self.assertEqual(2, len(reusable["graph"]["nodes"]))
+                published_run = http.post(
+                    reusable["allowed_commands"][0]["href"],
+                    actor="test:operator", key="published-run-http",
+                    body={"workflow_id": workflow_id, "goal": "run it again"},
                 )
 
             self.assertEqual(200, started.status_code, started.text)
@@ -120,6 +186,10 @@ class SingleAgentTemplateTests(unittest.TestCase):
             self.assertEqual("direct", run["template_id"])
             self.assertEqual(0, run["workflow_version"])
             self.assertEqual("completed", run["status"])
+            self.assertEqual(200, published_run.status_code, published_run.text)
+            reused = published_run.json()["data"]["run"]
+            self.assertEqual(workflow_id, reused["workflow_id"])
+            self.assertEqual(0, reused["workflow_version"])
 
 
 if __name__ == "__main__":

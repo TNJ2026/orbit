@@ -85,13 +85,17 @@ while the task remains active.
 
 1. On the Orbit home page, confirm that **Connected Agent** shows `app:chatgpt`.
 2. Choose **Direct execution**, **Plan then execute**, or **Execute then review**.
-3. Review the read-only graph, enter the goal, and select **Start goal**.
-4. Orbit binds the template to the one Agent Handler, stores the graph snapshot
-   on the Run, and executes it directly with LangGraph.
+3. Review the read-only graph, enter the goal, and select **Start goal**; or
+   provide a name and select **Publish workflow** to save a reusable flow.
+4. Published workflows appear at the top of the selector with their full graph.
+5. Before every run, Orbit binds all Agent nodes to the currently connected
+   Agent Handler, stores the resolved graph snapshot, and executes it with LangGraph.
 
-Single-Agent mode creates no DSL, draft, published Workflow, or Workflow
-version. A template affects only new Runs; an existing Run always recovers from
-its own graph snapshot. The multi-Agent UI retains full Workflow authoring.
+Single-Agent mode exposes no DSL, draft, or version number. Publishing reuses
+the existing Workflow version store internally for durable storage and graph
+projection, while the UI shows only the current definition. Changes affect only
+new Runs; an existing Run always recovers from its own graph snapshot. The
+multi-Agent UI retains full Workflow authoring.
 
 ### Run a goal
 

@@ -279,12 +279,19 @@ export function createViews(context) {
 
   function renderTemplateComposer(root, data, summary) {
     const templates = data.templates || [];
-    if (!templates.some((item) => item.template_id === simplifiedComposerState.templateId)) {
-      simplifiedComposerState.templateId = templates[0]?.template_id || "";
+    const published = (data.published || []).map((item) => ({
+      ...item, selection_id: `workflow:${item.workflow_id}`, published: true,
+    }));
+    const choices = [
+      ...published,
+      ...templates.map((item) => ({ ...item, selection_id: `template:${item.template_id}` })),
+    ];
+    if (!choices.some((item) => item.selection_id === simplifiedComposerState.templateId)) {
+      simplifiedComposerState.templateId = choices[0]?.selection_id || "";
     }
     const locked = Boolean(summary);
-    const selected = () => templates.find(
-      (item) => item.template_id === simplifiedComposerState.templateId,
+    const selected = () => choices.find(
+      (item) => item.selection_id === simplifiedComposerState.templateId,
     );
     const templateSelect = el("select", {
       id: "simplifiedTemplate", disabled: locked ? "disabled" : null,
@@ -292,9 +299,10 @@ export function createViews(context) {
         simplifiedComposerState.templateId = event.target.value;
         render();
       },
-    }, templates.map((item) => el("option", {
-      value: item.template_id, text: item.name,
-      selected: item.template_id === simplifiedComposerState.templateId ? "selected" : null,
+    }, choices.map((item) => el("option", {
+      value: item.selection_id,
+      text: `${item.published ? i18n.t("template.publishedPrefix") : i18n.t("template.builtinPrefix")} · ${item.name}`,
+      selected: item.selection_id === simplifiedComposerState.templateId ? "selected" : null,
     })));
     const chosen = selected();
     const goal = el("textarea", {
@@ -307,6 +315,9 @@ export function createViews(context) {
     const command = chosen?.allowed_commands?.find(
       (item) => item.command === "workflow_template.start",
     );
+    const publishCommand = chosen?.allowed_commands?.find(
+      (item) => item.command === "workflow_template.publish",
+    );
     const start = el("button", {
       class: "button primary", type: "submit", id: "newGoalStart",
       disabled: locked || !command ? "disabled" : null,
@@ -315,7 +326,10 @@ export function createViews(context) {
     const graph = chosen ? el("div", { class: "template-graph", role: "img" }, [
       ...chosen.graph.nodes.flatMap((node, index) => [
         index ? el("span", { class: "template-edge", text: "→" }) : null,
-        el("span", { class: `template-node template-node-${node.type}`, text: node.label }),
+        el("span", {
+          class: `template-node template-node-${node.type || node.kind}`,
+          text: node.label || node.node_id,
+        }),
       ]),
     ]) : null;
     const form = el("form", {
@@ -327,7 +341,10 @@ export function createViews(context) {
         problem.hidden = true;
         try {
           const response = await api.execute(command, {
-            template_id: chosen.template_id, goal: goal.value.trim(),
+            ...(chosen.published
+              ? { workflow_id: chosen.workflow_id }
+              : { template_id: chosen.template_id }),
+            goal: goal.value.trim(),
           }, `template.start:${crypto.randomUUID ? crypto.randomUUID() : Date.now()}`);
           const run = response.data.run;
           simplifiedComposerState.runId = run.run_id;
@@ -355,7 +372,23 @@ export function createViews(context) {
       el("div", { class: "field simplified-goal-field" }, [
         el("label", { for: "simplifiedGoal", text: i18n.t("newRun.goal") }), goal,
       ]),
-      el("div", { class: "actions simplified-composer-actions" }, [start]),
+      el("div", { class: "actions simplified-composer-actions" }, [
+        start,
+        publishCommand ? el("button", {
+          class: "button", type: "button", text: i18n.t("template.publish"),
+          onclick: async () => {
+            const name = window.prompt(i18n.t("template.publishName"), chosen.name);
+            if (!name?.trim()) return;
+            try {
+              await api.execute(publishCommand, {
+                template_id: chosen.template_id, name: name.trim(),
+              }, `template.publish:${crypto.randomUUID ? crypto.randomUUID() : Date.now()}`);
+              announce(i18n.t("template.published"), "success");
+              await render();
+            } catch (error) { reportError(error); }
+          },
+        }) : null,
+      ]),
       !data.ready ? el("div", { class: "banner warn", text: i18n.t("template.agentRequired") }) : null,
       problem,
     ]);
