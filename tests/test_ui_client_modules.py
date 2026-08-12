@@ -20,7 +20,10 @@ SUITE = ROOT / "tests" / "ui" / "client_modules.test.mjs"
 # The editor's canvas-to-DSL mapping. It has no dependencies of its own — that
 # is why it is a plain module rather than part of the React app — so it runs
 # under node with nothing installed, unlike the rest of the editor.
-EDITOR_SUITE = ROOT / "ui" / "editor" / "src" / "dsl-graph.test.mjs"
+EDITOR_SUITES = (
+    ROOT / "ui" / "editor" / "src" / "dsl-graph.test.mjs",
+    ROOT / "ui" / "editor" / "src" / "api.test.mjs",
+)
 NODE = shutil.which("node")
 
 
@@ -45,10 +48,12 @@ class ClientModuleTests(unittest.TestCase):
     def test_the_javascript_client_modules_pass(self) -> None:
         self._run(SUITE)
 
-    def test_the_editor_graph_mapping_passes(self) -> None:
-        if not EDITOR_SUITE.is_file():
-            self.skipTest("editor sources are not present in this checkout")
-        self._run(EDITOR_SUITE)
+    def test_the_editor_modules_pass(self) -> None:
+        for suite in EDITOR_SUITES:
+            if not suite.is_file():
+                self.skipTest("editor sources are not present in this checkout")
+            with self.subTest(suite=suite.name):
+                self._run(suite)
 
 
 if __name__ == "__main__":

@@ -17,7 +17,17 @@ export default function WorkflowNode({ id, data, selected }) {
     <div className={`node node-${data.kind}${selected ? " selected" : ""}`}>
       <header>
         <span className="kind">{data.kind}</span>
-        <span className="title">{data.label || id}</span>
+        {/* The label is the one part of a node this canvas can already change,
+            so it is edited in place rather than behind a panel. `nodrag` stops
+            xyflow from treating a click in the field as the start of a drag,
+            which would otherwise make the text impossible to select. */}
+        <input
+          className="title nodrag"
+          value={data.label ?? ""}
+          placeholder={id}
+          aria-label={`Label for ${id}`}
+          onChange={(event) => data.onLabelChange?.(id, event.target.value)}
+        />
       </header>
       {data.handler ? (
         <p className="handler">

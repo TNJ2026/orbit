@@ -48,6 +48,7 @@ body {
 }
 
 .bar .spacer { flex: 1; }
+.bar .version { color: var(--muted); font-variant-numeric: tabular-nums; }
 
 .bar button,
 .bar select {
@@ -96,7 +97,19 @@ body {
 .node.selected { border-color: var(--accent); }
 .node header { display: flex; flex-direction: column; gap: 2px; }
 .node .kind { font-size: 10px; text-transform: uppercase; color: var(--muted); letter-spacing: 0.06em; }
-.node .title { font-weight: 600; }
+.node .title {
+  font: inherit;
+  font-weight: 600;
+  color: var(--ink);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 1px 3px;
+  margin: -1px -3px;
+  width: 100%;
+}
+.node .title:hover { border-color: var(--line); }
+.node .title:focus { border-color: var(--accent); outline: none; background: var(--bg); }
 .node .handler { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
 .node .handler .version { opacity: 0.7; }
 

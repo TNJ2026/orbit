@@ -73,4 +73,67 @@ export const validate = (document, expectedVersion) =>
     },
   });
 
+/** A 32-bit FNV-1a of the source, as hex.
+ *
+ * Only a discriminator for the idempotency key, never an integrity claim —
+ * `definition_hash` is the server's business and is a real digest. This one
+ * has to be synchronous, which SubtleCrypto is not.
+ */
+export function sourceDiscriminator(text) {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, "0");
+}
+
+/** The idempotency key for one publish attempt.
+ *
+ * Stable across a retry of the same attempt, so a request that was sent and
+ * lost replays its receipt rather than colliding with itself. It changes when
+ * the content does, because the author fixing a rejected document and
+ * publishing again is a *different* attempt — reusing the key there would
+ * answer them with `idempotency_conflict` instead of publishing their fix.
+ */
+export const publishKey = (workflowId, expectedVersion, source) =>
+  `publish:${workflowId}:${expectedVersion}:${sourceDiscriminator(source)}`;
+
+/** Publish the document as the next version of this workflow.
+ *
+ * The server compiles it again — publishing is never a promise the editor can
+ * make on the compiler's behalf — and refuses if `expected_version` is no
+ * longer the latest, which is what stops a stale tab from overwriting
+ * somebody else's revision.
+ */
+export function publish(workflowId, document, expectedVersion) {
+  const source = JSON.stringify(document);
+  return request(
+    `/api/v1/workflows/${encodeURIComponent(workflowId)}/versions`,
+    {
+      method: "POST",
+      body: { source, expected_version: expectedVersion },
+      key: publishKey(workflowId, expectedVersion, source),
+    },
+  );
+}
+
+/** The compiler's findings inside a rejection, or none if it was not that.
+ *
+ * A publish is refused for two quite different reasons and both arrive as one
+ * status: the document did not compile, or somebody else published first. The
+ * author can act on the first and only on the second by reloading, so the
+ * editor has to tell them apart rather than say "rejected".
+ */
+export function diagnosticsOf(error) {
+  try {
+    return JSON.parse(error.message)?.diagnostics ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export const isConflict = (error) =>
+  typeof error?.message === "string" && error.message.includes("publish conflict");
+
 export { ApiError };

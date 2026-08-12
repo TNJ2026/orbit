@@ -23,6 +23,10 @@ export default function App() {
   const [edges, setEdges] = useState([]);
   const [notice, setNotice] = useState(null);
   const [diagnostics, setDiagnostics] = useState([]);
+  const [busy, setBusy] = useState(false);
+  // This tab's expected_version is behind the store: somebody else published
+  // while it was open, so every publish from here would be refused.
+  const [stale, setStale] = useState(false);
 
   useEffect(() => {
     Promise.all([api.authoringSchema(), api.listWorkflows()])
@@ -67,6 +71,7 @@ export default function App() {
       setWorkflowId(id);
       setNodes(graph.nodes);
       setEdges(graph.edges);
+      setStale(false);
     } catch (error) {
       setNotice({ level: "error", text: error.message });
     }
@@ -110,6 +115,14 @@ export default function App() {
     [nodes],
   );
 
+  const renameNode = useCallback((id, label) => {
+    setNodes((current) =>
+      current.map((node) =>
+        node.id === id ? { ...node, data: { ...node.data, label } } : node,
+      ),
+    );
+  }, []);
+
   const addNode = useCallback(
     (kind) => {
       setNodes((current) => {
@@ -128,38 +141,86 @@ export default function App() {
     [],
   );
 
+  // xyflow hands a custom node only its `data`, so the rename callback rides
+  // there. Attached at render rather than stored on the node, which keeps it
+  // out of what `toDocument` rebuilds from.
+  const drawn = useMemo(
+    () => nodes.map((node) => ({
+      ...node, data: { ...node.data, onLabelChange: renameNode },
+    })),
+    [nodes, renameNode],
+  );
+
   const document = useMemo(
     () => (base ? toDocument(base, { nodes, edges }) : null),
     [base, nodes, edges],
   );
 
+  // The compiler answers with diagnostics; showing them is the entire value of
+  // asking it, so they are rendered rather than collapsed into "invalid".
+  const reportFailure = useCallback((error) => {
+    const findings = api.diagnosticsOf(error);
+    setDiagnostics(findings ?? []);
+    if (api.isConflict(error)) {
+      // Nothing the author can fix by editing: someone else published while
+      // this tab was open. Saying so, and offering the reload, is the only
+      // useful answer — retrying would refuse again forever.
+      setStale(true);
+      setNotice({ level: "error", text: `${error.message} — reopen to continue` });
+      return;
+    }
+    setNotice({
+      level: "error",
+      text: findings?.length ? `${findings.length} problem(s)` : error.message,
+    });
+  }, []);
+
   const check = useCallback(async () => {
     if (!document) return;
+    setBusy(true);
     setNotice({ level: "info", text: "validating…" });
     try {
       const result = await api.validate(document, version);
       setDiagnostics([]);
       setNotice({
         level: "ok",
-        text: `compiles · ${result.node_count} nodes · ${result.definition_hash.slice(0, 12)}`,
+        text: `compiles · ${result.node_count} nodes · ${result.definition_hash.slice(0, 19)}`,
       });
     } catch (error) {
-      // The compiler answers with diagnostics; showing them is the entire
-      // value of asking it, so they are rendered rather than collapsed into
-      // "invalid".
-      let findings = [];
-      try {
-        findings = JSON.parse(error.message)?.diagnostics ?? [];
-      } catch {
-        findings = [];
-      }
-      setDiagnostics(findings);
-      setNotice({
-        level: "error",
-        text: findings.length ? `${findings.length} problem(s)` : error.message,
-      });
+      reportFailure(error);
+    } finally {
+      setBusy(false);
     }
-  }, [document, version]);
+  }, [document, version, reportFailure]);
+
+  const publish = useCallback(async () => {
+    if (!document) return;
+    setBusy(true);
+    setNotice({ level: "info", text: "publishing…" });
+    try {
+      const result = await api.publish(workflowId, document, version);
+      setDiagnostics([]);
+      // The published document is the new baseline. Without this the next
+      // edit would be rebuilt onto the previous one, and the next publish
+      // would carry a version that is no longer the latest.
+      setBase(document);
+      setVersion(result.version);
+      setStale(false);
+      setNotice({
+        level: "ok",
+        text: result.version === version
+          ? `unchanged · already published as v${result.version}`
+          : `published v${result.version} · ${result.definition_hash.slice(0, 19)}`,
+      });
+      api.listWorkflows()
+        .then((list) => setCatalog(list.workflows ?? []))
+        .catch(() => {});
+    } catch (error) {
+      reportFailure(error);
+    } finally {
+      setBusy(false);
+    }
+  }, [document, workflowId, version, reportFailure]);
 
   return (
     <div className="editor">
@@ -179,12 +240,24 @@ export default function App() {
         </select>
         <span className="spacer" />
         {kinds.map((kind) => (
-          <button key={kind} onClick={() => addNode(kind)} disabled={!base}>
+          <button key={kind} onClick={() => addNode(kind)} disabled={!base || busy}>
             + {kind}
           </button>
         ))}
-        <button className="primary" onClick={check} disabled={!document}>
+        {base ? <span className="version">v{version}</span> : null}
+        <button onClick={check} disabled={!document || busy}>
           Validate
+        </button>
+        <button
+          className="primary"
+          onClick={publish}
+          // Refused while stale: this tab's expected_version is behind, so
+          // every publish from here would be rejected. Reopening is the fix,
+          // and leaving the button live would only invite the same refusal.
+          disabled={!document || busy || stale}
+          title={stale ? "reopen the workflow to publish" : "Publish a new version"}
+        >
+          Publish
         </button>
       </header>
 
@@ -192,7 +265,7 @@ export default function App() {
 
       <div className="canvas">
         <ReactFlow
-          nodes={nodes}
+          nodes={drawn}
           edges={edges}
           nodeTypes={nodeTypes}
           onNodesChange={onNodesChange}
