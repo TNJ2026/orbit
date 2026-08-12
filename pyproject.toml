@@ -8,6 +8,11 @@ dependencies = [
     "jsonschema>=4.23",
     "langgraph>=1.0,<2",
     "langgraph-checkpoint-sqlite>=3.0,<4",
+    # Declared rather than borrowed. langgraph already requires pydantic, so
+    # this adds nothing to an install; but `workflow.dsl.models` imports it
+    # directly, and a direct import resting on somebody else's dependency is
+    # how a transitive bump becomes an unexplained ImportError.
+    "pydantic>=2.7,<3",
     "PyYAML>=6.0",
     "starlette>=0.37",
     "uvicorn>=0.29",
