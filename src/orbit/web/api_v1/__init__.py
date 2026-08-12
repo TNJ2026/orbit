@@ -68,6 +68,7 @@ def build_api_v1(
     authoring_jobs=None,
     shutdown_request: Callable[[], None] | None = None,
     langgraph_service=None,
+    legacy_execution: bool = True,
 ) -> list[Route]:
     """Routes for `/api/v1`, ready to mount on the composition root.
 
@@ -101,17 +102,21 @@ def build_api_v1(
         authoring_jobs=authoring_jobs,
         shutdown_request=shutdown_request,
         langgraph_service=langgraph_service,
+        legacy_execution=legacy_execution,
     )
     routes = [
-        *runs.build_routes(ctx),
-        *plans.build_routes(ctx),
-        *artifacts.build_routes(ctx),
-        *human.build_routes(ctx),
-        *recovery.build_routes(ctx),
         *ops.build_routes(ctx),
         *workflows.build_routes(ctx),
         *drafts.build_routes(ctx),
     ]
+    if legacy_execution:
+        routes[:0] = [
+            *runs.build_routes(ctx),
+            *plans.build_routes(ctx),
+            *artifacts.build_routes(ctx),
+            *human.build_routes(ctx),
+            *recovery.build_routes(ctx),
+        ]
     if langgraph_service is not None:
         routes.extend(langgraph_runs.build_routes(ctx, langgraph_service))
     return routes

@@ -124,18 +124,18 @@ before the LangGraph checkpoint advances, the next process sees `firing` and
 idempotently finishes it. Run `recover_running()` during startup and
 `recover_due()` from the timer loop; neither requires manual database edits.
 
-This service deliberately is not mounted on Orbit's existing `/api/v1/runs`.
-It uses distinct HTTP and MCP surfaces. Compatible workflows advertise
-`langgraph_run.start` as their sole default start command; workflows outside
-the LangGraph contract may advertise legacy `run.start`. Clients execute the
-server's `allowed_commands[]` and never infer an engine.
+This service is Orbit's only workflow execution engine. It uses the
+`/api/v1/langgraph-runs` HTTP surface and LangGraph MCP tools. Compatible
+workflows advertise `langgraph_run.start`; incompatible definitions are not
+runnable and never fall back to another engine. Clients execute the server's
+`allowed_commands[]` and never infer an engine.
 
-## Optional HTTP surface
+## HTTP surface
 
-For the local Runtime, enable the adapter explicitly:
+Start the local Runtime normally:
 
 ```console
-orbit serve --enable-langgraph
+orbit serve
 ```
 
 This creates `langgraph-runs.sqlite3` and
@@ -143,7 +143,7 @@ This creates `langgraph-runs.sqlite3` and
 `--langgraph-state-dir PATH` to place both elsewhere. Production wiring exposes
 only reviewed adapters: the deterministic built-in `transform` Handler and
 Agent Handlers produced by the trusted discovery allowlist. Development-tool
-Handlers remain on the event-sourced Runtime.
+Handlers must have a reviewed LangGraph binding before their workflows can run.
 
 Agent nodes receive a stable run/attempt identity and write an attempt journal
 before submitting to the CLI. A completed response is replayable if the graph

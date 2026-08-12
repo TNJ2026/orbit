@@ -204,7 +204,9 @@ def _assemble_inputs(
     )
     incoming = sorted(
         (edge for edge in ir.edges if edge.target_node == node.id),
-        key=lambda edge: (edge.priority, edge.id),
+        # Back edges carry the next generation's value and must supersede the
+        # original ingress regardless of how their ids sort against it.
+        key=lambda edge: (edge.back_edge, edge.priority, edge.id),
     )
     selected_values: list[tuple[Any, Any]] = []
     for edge in incoming:

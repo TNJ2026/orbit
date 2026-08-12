@@ -141,7 +141,7 @@ class WorkflowCliTests(unittest.TestCase):
         backend = create_app.call_args.kwargs["artifact_backend"]
         self.assertEqual(self.db.parent / "artifacts", backend.root)
 
-    def test_serve_enables_the_isolated_langgraph_service_explicitly(self) -> None:
+    def test_serve_enables_langgraph_by_default(self) -> None:
         with (
             patch("orbit.web.app.create_app") as create_app,
             patch("orbit.__main__.upsert_project"),
@@ -149,7 +149,6 @@ class WorkflowCliTests(unittest.TestCase):
         ):
             self.run_cli(
                 "serve", "--db", str(self.db), "--no-agent-discovery",
-                "--enable-langgraph",
             )
 
         self.assertEqual(
@@ -157,19 +156,7 @@ class WorkflowCliTests(unittest.TestCase):
             create_app.call_args.kwargs["langgraph_state_directory"],
         )
 
-    def test_serve_keeps_langgraph_disabled_by_default(self) -> None:
-        with (
-            patch("orbit.web.app.create_app") as create_app,
-            patch("orbit.__main__.upsert_project"),
-            patch("orbit.__main__.uvicorn.run"),
-        ):
-            self.run_cli(
-                "serve", "--db", str(self.db), "--no-agent-discovery",
-            )
-
-        self.assertIsNone(
-            create_app.call_args.kwargs["langgraph_state_directory"]
-        )
+        self.assertFalse(create_app.call_args.kwargs["legacy_execution"])
 
     def test_serve_reports_an_unusable_artifact_root_without_a_traceback(self) -> None:
         invalid_root = Path(self.temp_dir.name) / "not-a-directory"

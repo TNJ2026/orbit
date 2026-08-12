@@ -2,8 +2,8 @@
 
 **简体中文** | [English](./README.md)
 
-Orbit 是面向 Agent App 的本地持久化工作流 Runtime。Runtime、API、Web UI、
-Worker、定时器、工作流编写和 MCP 接入都运行在同一个进程中。项目数据保存在
+Orbit 是面向 Agent App 的本地持久化 LangGraph 工作流 Runtime。Runtime、API、Web UI、
+持久化定时器、工作流编写和 MCP 接入都运行在同一个进程中。项目数据保存在
 `~/.orbit/projects/`。
 
 ## 在 Codex 中安装

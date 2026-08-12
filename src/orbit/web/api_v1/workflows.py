@@ -86,7 +86,8 @@ def build_routes(ctx) -> list[Route]:
                     "target_aggregate_id": item["workflow_id"],
                     "expected_version": 0,
                     "payload_schema": "run-start/1.0",
-                }] if may_start and item["goal_readiness"] == "ready" else [])
+                }] if may_start and ctx.legacy_execution
+                and item["goal_readiness"] == "ready" else [])
             if may_start and ctx.workflow_publisher is not None:
                 item["allowed_commands"].append({
                     "command": "workflow.delete",
@@ -526,7 +527,7 @@ def build_routes(ctx) -> list[Route]:
             "target_aggregate_id": item["workflow_id"],
             "expected_version": 0,
             "payload_schema": "run-start/1.0",
-        }] if ctx.guard.allows(actor, WRITE_SCOPE)
+        }] if ctx.guard.allows(actor, WRITE_SCOPE) and ctx.legacy_execution
         and item["goal_readiness"] == "ready" else [])
         if ctx.guard.allows(actor, WRITE_SCOPE) and ctx.workflow_publisher is not None:
             item["allowed_commands"].append({

@@ -1,4 +1,4 @@
-"""Safe production wiring for the opt-in LangGraph adapter."""
+"""Safe production wiring for Orbit's LangGraph execution runtime."""
 
 from __future__ import annotations
 

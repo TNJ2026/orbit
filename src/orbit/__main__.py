@@ -429,11 +429,8 @@ def _serve(args) -> None:
 
     workflow_db_path = db_path if args.db else public_workflow_db_path()
     langgraph_state_directory = (
-        (
-            Path(args.langgraph_state_dir).expanduser().absolute()
-            if args.langgraph_state_dir else Path(db_path).parent
-        )
-        if args.enable_langgraph else None
+        Path(args.langgraph_state_dir).expanduser().absolute()
+        if args.langgraph_state_dir else Path(db_path).parent
     )
 
     def request_shutdown() -> None:
@@ -449,7 +446,7 @@ def _serve(args) -> None:
             handlers=handlers,
             schemas=BUILTIN_SCHEMAS,
             artifact_backend=artifact_backend,
-            worker_count=args.runner_concurrency,
+            worker_count=1,
             discover_agents=not args.no_agent_discovery,
             serve_ui=True,
             authenticator=loopback_authenticator,
@@ -466,6 +463,7 @@ def _serve(args) -> None:
             operator_actors=(LOCAL_ACTOR,),
             shutdown_request=request_shutdown,
             langgraph_state_directory=langgraph_state_directory,
+            legacy_execution=False,
         )
     except MixedSchemaError as exc:
         raise SystemExit(f"error: {exc}") from None
@@ -476,7 +474,7 @@ def _serve(args) -> None:
     )
     print(
         f"orbit Runtime listening on http://{args.host}:{args.port}/ui/ "
-        f"(health: /health/ready, workers: {args.runner_concurrency}) "
+        f"(health: /health/ready, engine: langgraph) "
         f"(db: {db_path}, artifacts: {artifact_backend.root})",
         flush=True,
     )
@@ -525,7 +523,7 @@ def _mcp(args) -> None:
         handlers=list(builtin_handlers()),
         schemas=BUILTIN_SCHEMAS,
         artifact_backend=artifact_backend,
-        worker_count=args.runner_concurrency,
+        worker_count=1,
         discover_agents=not args.no_agent_discovery,
         serve_ui=False,
         # There is no connection to authenticate. The person who started this
@@ -535,12 +533,14 @@ def _mcp(args) -> None:
         unlimited_actors=(LOCAL_ACTOR,),
         token_exempt_actors=(LOCAL_ACTOR,),
         operator_actors=(LOCAL_ACTOR,),
+        langgraph_state_directory=Path(db_path).parent,
+        legacy_execution=False,
     )
     composition = app.state.runtime
     # Started by hand because no ASGI server will run the lifespan here.
     composition.start()
     print(
-        f"orbit MCP on stdio (db: {db_path}, workers: {args.runner_concurrency})",
+        f"orbit MCP on stdio (db: {db_path}, engine: langgraph)",
         file=sys.stderr, flush=True,
     )
     try:
@@ -610,12 +610,6 @@ def main() -> None:
         ),
     )
     serve_cmd.add_argument(
-        "--runner-concurrency",
-        type=int,
-        default=5,
-        help="How many jobs the in-process worker runs in parallel (default: 5).",
-    )
-    serve_cmd.add_argument(
         "--no-agent-discovery",
         action="store_true",
         help="Skip probing for installed Agent CLIs at startup",
@@ -627,14 +621,6 @@ def main() -> None:
             "Register the trusted git and verify tools. Workflows may then run "
             "reviewed commands inside a git worktree; they still cannot supply "
             "a command of their own."
-        ),
-    )
-    serve_cmd.add_argument(
-        "--enable-langgraph",
-        action="store_true",
-        help=(
-            "Enable the isolated LangGraph execution adapter and its HTTP/MCP "
-            "surface. Only reviewed LangGraph Handler adapters are used."
         ),
     )
     serve_cmd.add_argument(
@@ -668,10 +654,6 @@ def main() -> None:
             "Local content-addressed Artifact directory "
             "(default: artifacts/ beside the Runtime database)"
         ),
-    )
-    mcp_cmd.add_argument(
-        "--runner-concurrency", type=int, default=5,
-        help="How many jobs the in-process worker runs in parallel (default: 5).",
     )
     mcp_cmd.add_argument(
         "--no-agent-discovery", action="store_true",

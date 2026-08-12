@@ -37,12 +37,14 @@ export function createViews(context) {
   function workflowStartCommand(entry) {
     const commands = entry?.allowed_commands || [];
     return commands.find((item) => item.command === "langgraph_run.start")
-      || commands.find((item) => item.command === "run.start");
+      || (!shellFacts?.capabilities?.langgraph_workflows?.available
+        ? commands.find((item) => item.command === "run.start") : null);
   }
 
   function workflowRunnable(entry) {
-    return entry?.goal_readiness === "ready"
-      || entry?.langgraph_compatibility?.compatible === true;
+    return entry?.langgraph_compatibility?.compatible === true
+      || (!shellFacts?.capabilities?.langgraph_workflows?.available
+        && entry?.goal_readiness === "ready");
   }
 
   function prepareSimplifiedComposer(summary, entries) {
@@ -160,12 +162,8 @@ export function createViews(context) {
           }, `run.start:${crypto.randomUUID ? crypto.randomUUID() : Date.now()}`);
           const startedRun = started.data.run || started.data;
           simplifiedComposerState.runId = startedRun.run_id;
-          if (command.command === "langgraph_run.start") {
-            announce(command.label, "success");
-            navigate({ view: "workflows", runId: null });
-          } else {
-            navigate({ view: "run", runId: startedRun.run_id });
-          }
+          announce(command.label, "success");
+          navigate({ view: "run", runId: startedRun.run_id });
         } catch (error) {
           if (error instanceof ApiError && error.code === "active_goal_exists") {
             const active = error.details.active_goal;
@@ -241,17 +239,78 @@ export function createViews(context) {
   }
 
   async function renderSimplifiedWorkspace(root, selectedRunId = null) {
-    const [dashboardResponse, catalogResponse] = await Promise.all([
-      api.dashboard(), api.workflowCatalog(),
+    if (!shellFacts?.capabilities?.langgraph_workflows?.available) {
+      const [dashboardResponse, catalogResponse] = await Promise.all([
+        api.dashboard(), api.workflowCatalog(),
+      ]);
+      const runId = selectedRunId || dashboardResponse.data.active_goal?.run_id || null;
+      const entries = catalogResponse.data.workflows;
+      const summary = runId ? (await api.runSummary(runId)).data : null;
+      const historicalDetail = Boolean(
+        selectedRunId && summary && TERMINAL_RUN_STATUSES.has(summary.status),
+      );
+      if (!historicalDetail) renderSimplifiedComposer(root, entries, summary);
+      if (runId && summary) await renderSimplifiedRun(root, runId, summary);
+      return;
+    }
+    const [runsResponse, catalogResponse] = await Promise.all([
+      api.langGraphRuns({ limit: 25 }), api.workflowCatalog(),
     ]);
-    const runId = selectedRunId || dashboardResponse.data.active_goal?.run_id || null;
+    const runs = runsResponse.data.runs || [];
+    const active = runs.find((item) => ["running", "waiting", "interrupted"].includes(item.status));
+    const runId = selectedRunId || active?.run_id || null;
     const entries = catalogResponse.data.workflows;
-    const summary = runId ? (await api.runSummary(runId)).data : null;
+    const summary = runId ? (await api.langGraphRun(runId)).data : null;
     const historicalDetail = Boolean(
       selectedRunId && summary && TERMINAL_RUN_STATUSES.has(summary.status),
     );
     if (!historicalDetail) renderSimplifiedComposer(root, entries, summary);
-    if (runId && summary) await renderSimplifiedRun(root, runId, summary);
+    if (runId && summary) renderLangGraphRun(root, summary);
+  }
+
+  function renderLangGraphRun(root, run) {
+    const commands = run.allowed_commands || [];
+    const resume = commands.find((item) => item.command === "langgraph_run.resume");
+    const cancel = commands.find((item) => item.command === "langgraph_run.cancel");
+    const actions = [];
+    if (resume) actions.push(el("button", {
+      class: "button primary", text: resume.label,
+      onclick: async () => {
+        const raw = window.prompt("Resume value (JSON)", "{}");
+        if (raw === null) return;
+        try {
+          await api.execute(resume, { value: JSON.parse(raw) }, `resume:${run.run_id}`);
+          await render();
+        } catch (error) { reportError(error); }
+      },
+    }));
+    if (cancel) actions.push(el("button", {
+      class: "button danger", text: cancel.label,
+      onclick: async () => {
+        if (!window.confirm(cancel.confirmation || cancel.label)) return;
+        try {
+          await api.execute(cancel, {}, `cancel:${run.run_id}`);
+          await render();
+        } catch (error) { reportError(error); }
+      },
+    }));
+    root.append(el("section", { class: "panel simplified-run-hero" }, [
+      el("div", { class: "split" }, [
+        el("div", {}, [
+          el("h2", { text: run.workflow_id }),
+          el("p", { class: "mono muted", text: run.run_id }),
+        ]),
+        pill(run.status),
+      ]),
+      run.interrupts?.length ? el("pre", {
+        class: "code-block", text: JSON.stringify(run.interrupts, null, 2),
+      }) : null,
+      run.result !== null && run.result !== undefined ? el("pre", {
+        class: "code-block", text: JSON.stringify(run.result, null, 2),
+      }) : null,
+      run.error ? el("div", { class: "banner error", text: run.error }) : null,
+      actions.length ? el("div", { class: "actions" }, actions) : null,
+    ]));
   }
 
   function historyDayKey(value) {
@@ -390,10 +449,15 @@ export function createViews(context) {
         render();
       },
     }))));
+    const langGraphOnly = shellFacts?.capabilities?.langgraph_workflows?.available;
+    const requestedStatus = langGraphOnly && goalFilters.status === "succeeded"
+      ? "completed" : goalFilters.status;
     const [response, catalogResponse] = await Promise.all([
-      api.listRuns({
-        limit: 25, q: goalFilters.q, status: goalFilters.status, terminalOnly: true,
-      }),
+      langGraphOnly
+        ? api.langGraphRuns({ limit: 25, status: requestedStatus })
+        : api.listRuns({
+          limit: 25, q: goalFilters.q, status: requestedStatus, terminalOnly: true,
+        }),
       api.workflowCatalog(),
     ]);
     const workflowNames = new Map(
@@ -428,7 +492,7 @@ export function createViews(context) {
         try {
           const next = await api.listRuns({
             cursor: nextCursor, limit: 25, q: goalFilters.q,
-            status: goalFilters.status, terminalOnly: true,
+            status: requestedStatus, terminalOnly: true,
           });
           appendHistoryRuns(list, next.data.runs, workflowNames);
           loadedCount += next.data.runs.length;
@@ -2502,7 +2566,11 @@ export function createViews(context) {
        pre-flight stays — the composer must know which Workflow is runnable and
        the author must hear "no catalog" before typing a goal nobody can run. */
     try {
-      const active = (await api.dashboard()).data.active_goal;
+      const runSource = shellFacts?.capabilities?.langgraph_workflows?.available
+        ? api.langGraphRuns({ limit: 25 }) : api.listRuns({ limit: 25 });
+      const active = (await runSource).data.runs.find(
+        (item) => ["running", "waiting", "interrupted"].includes(item.status),
+      );
       if (active) {
         announce(i18n.t("newRun.active.exists", { goal: runName(active) }), "info");
         navigate({ view: "run", runId: active.run_id });

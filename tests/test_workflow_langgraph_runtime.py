@@ -1096,6 +1096,67 @@ class LangGraphWorkflowCompilerTests(unittest.TestCase):
             result["execution_order"],
         )
 
+    def test_back_edge_supersedes_ingress_regardless_of_edge_id_order(self) -> None:
+        start = node(
+            "start",
+            inputs=("value",),
+            outputs=("value",),
+        )
+        count = node(
+            "count",
+            inputs=("value",),
+            outputs=("value",),
+            route_mode="exclusive",
+        )
+        terminal = node(
+            "terminal", inputs=("value",), kind="terminal", handler=False
+        )
+        less_than_three = {
+            "op": "lt",
+            "left": {"op": "ref", "path": "source.value"},
+            "right": {"op": "literal", "value": 3},
+        }
+        # The back edge's id sorts before the ingress edge's id. The loop
+        # input must still come from the back edge once a value exists.
+        ir = workflow(
+            (start, count, terminal),
+            (
+                edge(
+                    "zz_start_count",
+                    "start",
+                    "count",
+                    priority=0,
+                ),
+                edge(
+                    "aa_again",
+                    "count",
+                    "count",
+                    condition=less_than_three,
+                    back_edge=True,
+                    policy_ref="bounded",
+                ),
+                edge("done", "count", "terminal", priority=10),
+            ),
+            entry=("start",),
+            terminals=("terminal",),
+            result=("count", "value"),
+            policies=(IRPolicy("bounded", "loop", {"max_iterations": 2}),),
+        )
+        registry = LangGraphHandlerRegistry([
+            binding("start", lambda values, config, context: {"value": values["value"]}),
+            binding("count", lambda values, config, context: {
+                "value": values["value"] + 1
+            }),
+        ])
+
+        result = compile_workflow(ir, registry).invoke({"value": 0})
+
+        self.assertEqual(3, result["result"])
+        self.assertEqual(
+            ["start", "count", "count", "count", "terminal"],
+            result["execution_order"],
+        )
+
     def test_back_edge_loop_fails_after_max_iterations(self) -> None:
         count = node(
             "count",
@@ -2290,6 +2351,40 @@ class LangGraphHttpApiTests(unittest.TestCase):
         self.assertEqual(
             {"available": False, "reason": "service_not_configured"}, capability
         )
+
+    def test_langgraph_only_composition_removes_legacy_execution_surfaces(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            app = create_app(
+                root / "orbit.sqlite3",
+                langgraph_state_directory=root,
+                legacy_execution=False,
+                authenticator=lambda request: request.headers.get("x-orbit-actor"),
+                authorizer=Authorizer(lambda actor: (
+                    READ_SCOPE, WRITE_SCOPE, OPS_WRITE_SCOPE,
+                )),
+                worker_count=1,
+            )
+            with AsgiHarness(app) as client:
+                legacy_runs = client.get("/api/v1/runs", actor="test:reader")
+                legacy_inbox = client.get("/api/v1/inbox", actor="test:reader")
+                langgraph_runs = client.get(
+                    "/api/v1/langgraph-runs", actor="test:reader"
+                )
+                tools = client.request(
+                    "POST", "/mcp", actor="test:reader",
+                    body={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+                ).json()["result"]["tools"]
+                loop_names = {loop.name for loop in app.state.runtime.loops}
+
+        self.assertEqual(404, legacy_runs.status_code)
+        self.assertEqual(404, legacy_inbox.status_code)
+        self.assertEqual(200, langgraph_runs.status_code)
+        tool_names = {item["name"] for item in tools}
+        self.assertIn("start_run", tool_names)
+        self.assertNotIn("start_langgraph_run", tool_names)
+        self.assertNotIn("submit_human_task", tool_names)
+        self.assertEqual({"langgraph-timer"}, loop_names)
 
     def test_capability_and_startup_recovery_follow_optional_wiring(self) -> None:
         class RecoveringService:

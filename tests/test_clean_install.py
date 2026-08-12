@@ -194,7 +194,9 @@ class CleanInstallTests(unittest.TestCase):
             with urllib.request.urlopen(f"{base}/ui/index.html", timeout=5) as response:
                 self.assertEqual(200, response.status)
                 self.assertIn(b"Orbit Runtime", response.read())
-            with urllib.request.urlopen(f"{base}/api/v1/runs", timeout=5) as response:
+            with urllib.request.urlopen(
+                f"{base}/api/v1/langgraph-runs", timeout=5
+            ) as response:
                 self.assertEqual(200, response.status)
         finally:
             server.terminate()

@@ -155,6 +155,7 @@ class RuntimeComposition:
         revision_model_id: str | None = None,
         workflow_db_path: Path | str | None = None,
         langgraph_service: Any = None,
+        legacy_execution: bool = True,
     ) -> None:
         self.db_path = Path(db_path)
         self.workflow_db_path = Path(workflow_db_path or db_path)
@@ -168,6 +169,7 @@ class RuntimeComposition:
         self.revision_agent_commands = dict(revision_agent_commands or {})
         self.revision_model_id = revision_model_id
         self.langgraph_service = langgraph_service
+        self.legacy_execution = bool(legacy_execution)
         if human_delivery is None:
             from ..workflow.application.human_delivery import (
                 InMemoryHumanTaskDelivery,
@@ -232,7 +234,7 @@ class RuntimeComposition:
 
     def _build_loops(self) -> list[BackgroundLoop]:
         loops: list[BackgroundLoop] = []
-        for index in range(self.worker_count):
+        for index in range(self.worker_count if self.legacy_execution else 0):
             # Each worker gets its own runtime object, so an execution_ref and
             # its cancellation token are never shared between concurrent jobs.
             # The HandlerExecutor is passed directly: WorkerRuntime detects an
@@ -251,8 +253,9 @@ class RuntimeComposition:
                 BackgroundLoop(worker.worker_id, worker.run_once, self.poll_seconds)
             )
 
-        timer = TimerDispatcher(self.service, worker_id="timer-1", clock=self.clock)
-        loops.append(BackgroundLoop("timer-1", timer.run_once, self.poll_seconds))
+        if self.legacy_execution:
+            timer = TimerDispatcher(self.service, worker_id="timer-1", clock=self.clock)
+            loops.append(BackgroundLoop("timer-1", timer.run_once, self.poll_seconds))
         if callable(getattr(self.langgraph_service, "recover_due", None)):
             loops.append(BackgroundLoop(
                 "langgraph-timer", lambda: bool(
@@ -260,18 +263,19 @@ class RuntimeComposition:
                 ), self.poll_seconds,
             ))
 
-        loops.append(
-            BackgroundLoop("recovery", self._recovery_pass, max(self.poll_seconds, 5.0))
-        )
-        subflows = SubflowReconciler(self.service, clock=self.clock)
-        loops.append(BackgroundLoop(
-            "subflow-reconciler", subflows.run_once, self.poll_seconds,
-        ))
-        foreach = ForeachReconciler(self.service, clock=self.clock)
-        loops.append(BackgroundLoop(
-            "foreach-reconciler", foreach.run_once, self.poll_seconds,
-        ))
-        if self.planner_service is not None:
+        if self.legacy_execution:
+            loops.append(
+                BackgroundLoop("recovery", self._recovery_pass, max(self.poll_seconds, 5.0))
+            )
+            subflows = SubflowReconciler(self.service, clock=self.clock)
+            loops.append(BackgroundLoop(
+                "subflow-reconciler", subflows.run_once, self.poll_seconds,
+            ))
+            foreach = ForeachReconciler(self.service, clock=self.clock)
+            loops.append(BackgroundLoop(
+                "foreach-reconciler", foreach.run_once, self.poll_seconds,
+            ))
+        if self.legacy_execution and self.planner_service is not None:
             planner = PlannerDispatcher(
                 self.planner_service, worker_id="planner-1", clock=self.clock,
                 budget_service=self.budget_service,
@@ -461,6 +465,7 @@ def create_app(
     shutdown_request: Callable[[], None] | None = None,
     langgraph_service: Any = None,
     langgraph_state_directory: Path | str | None = None,
+    legacy_execution: bool = True,
 ) -> Starlette:
     """Build the Runtime application.
 
@@ -589,6 +594,7 @@ def create_app(
         human_delivery=human_delivery,
         workflow_db_path=workflow_db_path,
         langgraph_service=langgraph_service,
+        legacy_execution=legacy_execution,
     )
     if composition.workflow_db_path != composition.db_path:
         from ..workflow.persistence.workflow_versions import merge_workflow_library
@@ -847,6 +853,7 @@ def create_app(
         authoring_jobs=authoring_jobs,
         authoring_broker=authoring_broker,
         langgraph_service=langgraph_service,
+        legacy_execution=legacy_execution,
     )
 
     routes: list[Route | Mount | WebSocketRoute] = [
@@ -872,6 +879,7 @@ def create_app(
             authoring_jobs=authoring_jobs,
             shutdown_request=shutdown_request,
             langgraph_service=langgraph_service,
+            legacy_execution=legacy_execution,
         ),
         # The MCP surface is a second protocol over the same application
         # services and the same identity, not a second implementation.

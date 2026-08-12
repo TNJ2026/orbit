@@ -83,6 +83,7 @@ def build_mcp_dispatcher(
     authoring_jobs=None,
     authoring_broker=None,
     langgraph_service=None,
+    legacy_execution: bool = True,
 ) -> Callable[[Mapping[str, Any], str | None], dict[str, Any] | None]:
     """One JSON-RPC message in, at most one response out.
 
@@ -431,7 +432,7 @@ def build_mcp_dispatcher(
         tools += (
             {
                 "name": "list_langgraph_runs",
-                "description": "List runs executed by the optional LangGraph adapter.",
+                "description": "List workflow runs executed by LangGraph.",
                 "scope": READ_SCOPE,
                 "inputSchema": {
                     "type": "object",
@@ -443,7 +444,7 @@ def build_mcp_dispatcher(
             },
             {
                 "name": "inspect_langgraph_run",
-                "description": "Inspect one optional LangGraph run and its interrupts.",
+                "description": "Inspect one LangGraph run and its interrupts.",
                 "scope": READ_SCOPE,
                 "inputSchema": {
                     "type": "object",
@@ -453,7 +454,7 @@ def build_mcp_dispatcher(
             },
             {
                 "name": "start_langgraph_run",
-                "description": "Start a published workflow using the optional LangGraph adapter.",
+                "description": "Start a published workflow using LangGraph.",
                 "scope": WRITE_SCOPE,
                 "inputSchema": {
                     "type": "object",
@@ -554,6 +555,39 @@ def build_mcp_dispatcher(
                 },
             },
         )
+    if not legacy_execution:
+        langgraph_tool_names = {
+            "list_langgraph_runs": "list_runs",
+            "inspect_langgraph_run": "inspect_run",
+            "start_langgraph_run": "start_run",
+            "resume_langgraph_run": "resume_run",
+            "recover_langgraph_run": "recover_run",
+            "cancel_langgraph_run": "cancel_run",
+            "list_langgraph_artifacts": "list_artifacts",
+            "read_langgraph_artifact": "read_artifact",
+            "get_langgraph_artifact_lineage": "get_artifact_lineage",
+            "collect_langgraph_artifacts": "collect_artifacts",
+        }
+        tools = tuple(
+            {**tool, "name": langgraph_tool_names.get(tool["name"], tool["name"])}
+            for tool in tools
+            if tool["name"] not in {
+                "list_runs", "inspect_run", "start_run", "cancel_run",
+                "get_run_result", "list_artifacts", "read_artifact",
+                "list_inbox", "request_human_task_token", "submit_human_task",
+                "runtime_status",
+            }
+        )
+        langgraph_only_tools = {
+            "list_workflows",
+            "generate_workflow",
+            "get_authoring_job",
+            "claim_authoring_request",
+            "wait_authoring_request",
+            "submit_authoring_response",
+            *langgraph_tool_names.values(),
+        }
+        tools = tuple(tool for tool in tools if tool["name"] in langgraph_only_tools)
     by_name = {tool["name"]: tool for tool in tools}
 
     def langgraph_run_dto(run) -> dict[str, Any]:
@@ -571,6 +605,19 @@ def build_mcp_dispatcher(
         }
 
     def call(name: str, arguments: Mapping[str, Any], actor: str) -> Any:
+        if not legacy_execution:
+            name = {
+                "list_runs": "list_langgraph_runs",
+                "inspect_run": "inspect_langgraph_run",
+                "start_run": "start_langgraph_run",
+                "resume_run": "resume_langgraph_run",
+                "recover_run": "recover_langgraph_run",
+                "cancel_run": "cancel_langgraph_run",
+                "list_artifacts": "list_langgraph_artifacts",
+                "read_artifact": "read_langgraph_artifact",
+                "get_artifact_lineage": "get_langgraph_artifact_lineage",
+                "collect_artifacts": "collect_langgraph_artifacts",
+            }.get(name, name)
         if name == "list_langgraph_runs":
             return {"runs": [
                 langgraph_run_dto(run)

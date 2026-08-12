@@ -2,8 +2,8 @@
 
 [简体中文](./README.zh-CN.md) | **English**
 
-Orbit is a local, durable workflow Runtime for Agent Apps. It combines the
-Runtime, API, Web UI, workers, timers, workflow authoring, and MCP integration
+Orbit is a local, durable LangGraph workflow Runtime for Agent Apps. It combines
+the Runtime, API, Web UI, durable timers, workflow authoring, and MCP integration
 in one process. Project data is stored under `~/.orbit/projects/`.
 
 ## Install in Codex

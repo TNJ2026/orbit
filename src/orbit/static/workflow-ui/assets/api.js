@@ -130,6 +130,16 @@ export class Api {
     return this.get(`/api/v1/runs/${encodeURIComponent(runId)}`);
   }
 
+  langGraphRuns({ limit = 25, status = "" } = {}) {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (status) params.set("status", status);
+    return this.get(`/api/v1/langgraph-runs?${params}`);
+  }
+
+  langGraphRun(runId) {
+    return this.get(`/api/v1/langgraph-runs/${encodeURIComponent(runId)}`);
+  }
+
   responsibilities(runId) {
     return this.get(`/api/v1/runs/${encodeURIComponent(runId)}/responsibilities`);
   }
