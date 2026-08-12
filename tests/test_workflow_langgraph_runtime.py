@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import sqlite3
@@ -1341,7 +1342,18 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
             )
             self.assertEqual((), service.recover_due())
             now[0] += timedelta(seconds=10)
-            reviewing, = service.recover_due()
+            competing = LangGraphWorkflowService(
+                store, registry,
+                run_db_path=Path(directory) / "runs.sqlite3",
+                checkpoint_db_path=Path(directory) / "checkpoints.sqlite3",
+                clock=lambda: now[0],
+            )
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                recoveries = tuple(pool.map(
+                    lambda candidate: candidate.recover_due(),
+                    (service, competing),
+                ))
+            reviewing = service.get(interrupted.run_id)
             completed = service.resume(
                 reviewing.run_id,
                 "approved",
@@ -1350,6 +1362,10 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
             )
 
         self.assertEqual("interrupted", interrupted.status)
+        observed = [items[0].status for items in recoveries if items]
+        self.assertEqual(2, len(observed))
+        self.assertIn("interrupted", observed)
+        self.assertTrue(set(observed) <= {"running", "interrupted"})
         self.assertEqual("interrupted", reviewing.status)
         self.assertEqual("review", reviewing.interrupts[0]["value"]["node_id"])
         self.assertEqual("completed", completed.status)

@@ -342,18 +342,19 @@ class LangGraphWorkflowService:
                 if timer["purpose"] == "retry" and current.status != "waiting":
                     return current
                 connection.execute("BEGIN IMMEDIATE")
-                changed = connection.execute(
+                claimed_run = connection.execute(
+                    "UPDATE langgraph_runs SET status='running',revision=revision+1,"
+                    "updated_at=? WHERE run_id=? AND revision=?"
+                    " AND status IN ('waiting','interrupted')",
+                    (self._stamp(), run_id, current.revision),
+                ).rowcount
+                changed_timer = connection.execute(
                     "UPDATE langgraph_timers SET status='fired' WHERE timer_id=?"
                     " AND status='scheduled'", (timer["timer_id"],),
                 ).rowcount
-                if changed != 1:
+                if claimed_run != 1 or changed_timer != 1:
                     connection.rollback()
                     return self.get(run_id)
-                connection.execute(
-                    "UPDATE langgraph_runs SET status='running',revision=revision+1,"
-                    "updated_at=? WHERE run_id=? AND status IN ('waiting','interrupted')",
-                    (self._stamp(), run_id),
-                )
                 connection.commit()
             current = self.get(run_id)
             if timer["purpose"] == "join_deadline":
