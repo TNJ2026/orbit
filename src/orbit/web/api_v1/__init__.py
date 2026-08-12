@@ -70,6 +70,7 @@ def build_api_v1(
     langgraph_service=None,
     legacy_execution: bool = True,
     workflow_ui_mode: str = "multi-agent",
+    template_service=None,
 ) -> list[Route]:
     """Routes for `/api/v1`, ready to mount on the composition root.
 
@@ -106,11 +107,12 @@ def build_api_v1(
         legacy_execution=legacy_execution,
         workflow_ui_mode=workflow_ui_mode,
     )
-    routes = [
-        *ops.build_routes(ctx),
-        *workflows.build_routes(ctx),
-        *drafts.build_routes(ctx),
-    ]
+    routes = [*ops.build_routes(ctx)]
+    if workflow_ui_mode == "multi-agent":
+        routes.extend([
+            *workflows.build_routes(ctx),
+            *drafts.build_routes(ctx),
+        ])
     if legacy_execution:
         routes[:0] = [
             *runs.build_routes(ctx),
@@ -120,5 +122,7 @@ def build_api_v1(
             *recovery.build_routes(ctx),
         ]
     if langgraph_service is not None:
-        routes.extend(langgraph_runs.build_routes(ctx, langgraph_service))
+        routes.extend(langgraph_runs.build_routes(
+            ctx, langgraph_service, template_service=template_service,
+        ))
     return routes

@@ -2117,20 +2117,14 @@ class WorkflowDraftApiTests(ApiTestCase):
             self.assertEqual("done", job["status"], job.get("error"))
             self.assertEqual(["codex"], asked)
 
-    def test_single_agent_generation_uses_one_agent_without_a_fixed_shape(self) -> None:
-        prompts = []
-
-        def writer(prompt):
-            prompts.append(prompt)
-            return "{}"
-
+    def test_single_agent_http_does_not_mount_dsl_authoring_routes(self) -> None:
         app = create_app(
             self.db, handlers=[transform_registration(), self._agent_registration()],
             schemas=SCHEMAS,
             worker_count=1, poll_seconds=0.02,
             authenticator=lambda request: request.headers.get("x-orbit-actor"),
             authorizer=Authorizer(lambda actor: self.scopes.get(actor, [])),
-            workflow_generators={"app:codex": writer}, single_goal_mode=False,
+            workflow_generators={"app:codex": lambda _prompt: "{}"}, single_goal_mode=False,
             workflow_ui_mode="single-agent",
         )
         with AsgiHarness(app) as client:
@@ -2142,21 +2136,8 @@ class WorkflowDraftApiTests(ApiTestCase):
                     "authoring_profile": "single_agent",
                 },
             )
-            self.assertEqual(200, response.status_code, response.json())
-            job = response.json()["data"]
-            import time
-            for _ in range(100):
-                job = client.get(job["href"], actor="writer").json()["data"]
-                if job["status"] not in {"queued", "running"}:
-                    break
-                time.sleep(0.01)
 
-        self.assertTrue(prompts)
-        self.assertIn("[ORBIT_SINGLE_AGENT handler=agent.codex]", prompts[0])
-        self.assertIn("as many steps as the task needs", prompts[0])
-        self.assertIn("non-Agent tool actions", prompts[0])
-        self.assertIn("Do not use any other agent.* handler", prompts[0])
-        self.assertIn("Add human approval only when", prompts[0])
+        self.assertEqual(404, response.status_code)
 
     def test_multi_agent_generation_prompt_is_unchanged(self) -> None:
         prompts = []
@@ -2187,28 +2168,6 @@ class WorkflowDraftApiTests(ApiTestCase):
         self.assertTrue(prompts)
         self.assertNotIn("ORBIT_SINGLE_AGENT", prompts[0])
         self.assertIn("use several specialist agents", prompts[0])
-
-    def test_single_agent_generation_requires_a_connected_mcp_agent(self) -> None:
-        app = create_app(
-            self.db, handlers=[transform_registration(), self._agent_registration()],
-            schemas=SCHEMAS,
-            worker_count=1, poll_seconds=0.02,
-            authenticator=lambda request: request.headers.get("x-orbit-actor"),
-            authorizer=Authorizer(lambda actor: self.scopes.get(actor, [])),
-            workflow_generators={"app:codex": lambda _prompt: "{}"},
-            single_goal_mode=False, workflow_ui_mode="single-agent",
-        )
-        with AsgiHarness(app) as client:
-            response = client.post(
-                "/api/v1/workflows/generate", actor="writer", key="single-default",
-                body={
-                    "prompt": "implement it",
-                    "authoring_profile": "single_agent",
-                },
-            )
-
-        self.assertEqual(409, response.status_code)
-        self.assertIn("connected MCP Agent", response.json()["error"]["message"])
 
     def test_generation_rejects_a_profile_from_the_other_ui(self) -> None:
         app = self._app_with_named_agents({"codex": lambda _prompt: "{}"})

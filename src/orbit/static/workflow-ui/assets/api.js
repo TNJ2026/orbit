@@ -225,6 +225,10 @@ export class Api {
     return this.get("/api/v1/workflows");
   }
 
+  workflowTemplates() {
+    return this.get("/api/v1/workflow-templates");
+  }
+
   workflowDraft(draftId) {
     return this.get(`/api/v1/workflow-drafts/${encodeURIComponent(draftId)}`);
   }

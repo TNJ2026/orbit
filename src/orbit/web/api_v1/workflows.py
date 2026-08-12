@@ -32,48 +32,10 @@ from .common import (
 def build_routes(ctx) -> list[Route]:
     def _generation_prompt(body: Mapping[str, Any]) -> str:
         prompt = str(body.get("prompt", body.get("instruction", ""))).strip()
-        expected_profile = ctx.workflow_ui_mode.replace("-", "_")
-        profile = str(body.get("authoring_profile", expected_profile))
-        if profile != expected_profile:
-            raise ValueError(
-                f"this Runtime uses the {expected_profile} authoring profile"
-            )
-        if profile == "multi_agent":
-            return prompt
-        if profile != "single_agent":
-            raise ValueError("authoring_profile must be single_agent or multi_agent")
-        writer = str(body.get("agent", "")).strip()
-        if not writer.startswith("app:"):
-            raise ValueError(
-                "single_agent authoring requires a currently connected MCP Agent"
-            )
-        client = writer.removeprefix("app:")
-        registry = getattr(ctx.durable_service, "execution_registry", None)
-        handlers = sorted(
-            entry.manifest.name for entry in registry.entries()
-            if "agent.invoke" in entry.manifest.capabilities
-        ) if registry is not None and registry.sealed else []
-        aliases = {"chatgpt": "codex", "claude-desktop": "claude"}
-        preferred = f"agent.{aliases.get(client, client)}"
-        if preferred in handlers:
-            handler = preferred
-        elif len(handlers) == 1:
-            handler = handlers[0]
-        else:
-            raise ValueError(
-                "the connected MCP Agent has no unambiguous executable Handler"
-            )
-        return (
-            f"[ORBIT_SINGLE_AGENT handler={handler}]\n"
-            "Build a single-Agent workflow that uses the named handler for every "
-            "Agent reasoning or execution action. The graph may contain as many "
-            "steps as the task needs, including non-Agent tool actions, decisions, "
-            "joins, bounded loops, human tasks, parallel branches, artifacts, and "
-            "terminal nodes. Do not use any other agent.* handler. Keep each action "
-            "bounded and single-purpose, and model repetition as an explicit bounded "
-            "loop. Add human approval only when the user's process requires it.\n\n"
-            "User request:\n" + prompt
-        )
+        profile = str(body.get("authoring_profile", "multi_agent"))
+        if profile != "multi_agent":
+            raise ValueError("this Runtime uses the multi_agent authoring profile")
+        return prompt
 
     async def workflow_catalog(request: Request) -> JSONResponse:
         actor = ctx.authenticate(request, READ_SCOPE)

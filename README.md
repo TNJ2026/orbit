@@ -81,23 +81,22 @@ Codex starts or reuses the project Runtime, opens the UI, and calls
 `wait_authoring_request(client="chatgpt")`. The wait is automatically renewed
 while the task remains active.
 
-### Create a workflow
+### Use a workflow template
 
-1. Open **Workflows** in Orbit.
-2. Confirm that **Connected Agent** shows `app:chatgpt`.
-3. Describe the workflow and select **Generate workflow**.
-4. Codex receives the request, returns Workflow DSL, and handles compiler
-   feedback until the draft succeeds or fails.
-5. Review and publish the generated workflow.
+1. On the Orbit home page, confirm that **Connected Agent** shows `app:chatgpt`.
+2. Choose **Direct execution**, **Plan then execute**, or **Execute then review**.
+3. Review the read-only graph, enter the goal, and select **Start goal**.
+4. Orbit binds the template to the one Agent Handler, stores the graph snapshot
+   on the Run, and executes it directly with LangGraph.
 
-Single-Agent means that the whole graph uses one `agent.*` Handler; it does
-not impose a node count or fixed topology. Tools, decisions, parallel branches,
-bounded loops, human tasks, and multiple terminal paths remain available.
+Single-Agent mode creates no DSL, draft, published Workflow, or Workflow
+version. A template affects only new Runs; an existing Run always recovers from
+its own graph snapshot. The multi-Agent UI retains full Workflow authoring.
 
 ### Run a goal
 
 1. Open **Goal**.
-2. Select a published workflow.
+2. Select a workflow template.
 3. Enter the goal and start it.
 4. Follow step progress in the workspace or inspect completed runs in
    **History**.
@@ -130,17 +129,17 @@ example to the App's MCP configuration format:
 }
 ```
 
-To appear in Orbit's Agent selector, the App must keep this call pending:
+For Orbit to recognize it as the connected Agent, the App must keep this call pending:
 
 ```text
 wait_authoring_request(client="claude-desktop", timeout_seconds=300)
 ```
 
 Orbit then shows `app:claude-desktop`. Connecting MCP alone does not register
-an online authoring App. After receiving a request, the App submits one
-Workflow DSL JSON object with `submit_authoring_response`, checks the result
-with `get_authoring_job`, and repeats when compiler feedback requests another
-attempt.
+an online App. Default single-Agent mode uses the pending call only for presence
+and starts templates directly. Only `--ui-mode multi-agent` asks the App to
+submit Workflow DSL with `submit_authoring_response` and process compiler
+feedback through `get_authoring_job`.
 
 Runtime events can be consumed with `wait_app_event`, `list_app_events`, and
 `ack_app_event`. Treat events as hints and re-read the referenced Run before

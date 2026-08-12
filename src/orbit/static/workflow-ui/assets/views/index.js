@@ -18,7 +18,9 @@ export function createViews(context) {
   let activeViewCleanup = null;
   let activeViewLeaveGuard = null;
   const goalFilters = { q: "", status: "" };
-  const simplifiedComposerState = { runId: null, workflowId: "", goal: "" };
+  const simplifiedComposerState = {
+    runId: null, workflowId: "", templateId: "", goal: "",
+  };
   let focusSimplifiedGoalOnRender = false;
   let simplifiedWorkflowGenerationPending = false;
 
@@ -253,19 +255,117 @@ export function createViews(context) {
       if (runId && summary) await renderSimplifiedRun(root, runId, summary);
       return;
     }
-    const [runsResponse, catalogResponse] = await Promise.all([
-      api.langGraphRuns({ limit: 25 }), api.workflowCatalog(),
+    const singleAgentUi = shellFacts?.product_mode?.workflow_ui_mode === "single-agent";
+    const [runsResponse, sourceResponse] = await Promise.all([
+      api.langGraphRuns({ limit: 25 }),
+      singleAgentUi ? api.workflowTemplates() : api.workflowCatalog(),
     ]);
     const runs = runsResponse.data.runs || [];
     const active = runs.find((item) => ["running", "waiting", "interrupted"].includes(item.status));
     const runId = selectedRunId || active?.run_id || null;
-    const entries = catalogResponse.data.workflows;
     const summary = runId ? (await api.langGraphRun(runId)).data : null;
     const historicalDetail = Boolean(
       selectedRunId && summary && TERMINAL_RUN_STATUSES.has(summary.status),
     );
-    if (!historicalDetail) renderSimplifiedComposer(root, entries, summary);
+    if (!historicalDetail) {
+      if (singleAgentUi) {
+        renderTemplateComposer(root, sourceResponse.data, summary);
+      } else {
+        renderSimplifiedComposer(root, sourceResponse.data.workflows, summary);
+      }
+    }
     if (runId && summary) renderLangGraphRun(root, summary);
+  }
+
+  function renderTemplateComposer(root, data, summary) {
+    const templates = data.templates || [];
+    if (!templates.some((item) => item.template_id === simplifiedComposerState.templateId)) {
+      simplifiedComposerState.templateId = templates[0]?.template_id || "";
+    }
+    const locked = Boolean(summary);
+    const selected = () => templates.find(
+      (item) => item.template_id === simplifiedComposerState.templateId,
+    );
+    const templateSelect = el("select", {
+      id: "simplifiedTemplate", disabled: locked ? "disabled" : null,
+      onchange: (event) => {
+        simplifiedComposerState.templateId = event.target.value;
+        render();
+      },
+    }, templates.map((item) => el("option", {
+      value: item.template_id, text: item.name,
+      selected: item.template_id === simplifiedComposerState.templateId ? "selected" : null,
+    })));
+    const chosen = selected();
+    const goal = el("textarea", {
+      id: "simplifiedGoal", required: "required", disabled: locked ? "disabled" : null,
+      placeholder: i18n.t("simplified.start.placeholder"),
+      text: simplifiedComposerState.goal,
+      oninput: (event) => { simplifiedComposerState.goal = event.target.value; },
+    });
+    const problem = el("div", { class: "banner error", hidden: "hidden" });
+    const command = chosen?.allowed_commands?.find(
+      (item) => item.command === "workflow_template.start",
+    );
+    const start = el("button", {
+      class: "button primary", type: "submit", id: "newGoalStart",
+      disabled: locked || !command ? "disabled" : null,
+      text: locked ? i18n.t("simplified.run.inProgress") : i18n.t("newRun.submit"),
+    });
+    const graph = chosen ? el("div", { class: "template-graph", role: "img" }, [
+      ...chosen.graph.nodes.flatMap((node, index) => [
+        index ? el("span", { class: "template-edge", text: "→" }) : null,
+        el("span", { class: `template-node template-node-${node.type}`, text: node.label }),
+      ]),
+    ]) : null;
+    const form = el("form", {
+      class: "panel simplified-workspace-composer",
+      onsubmit: async (event) => {
+        event.preventDefault();
+        if (!command || !goal.value.trim() || !goal.reportValidity()) return;
+        start.disabled = true;
+        problem.hidden = true;
+        try {
+          const response = await api.execute(command, {
+            template_id: chosen.template_id, goal: goal.value.trim(),
+          }, `template.start:${crypto.randomUUID ? crypto.randomUUID() : Date.now()}`);
+          const run = response.data.run;
+          simplifiedComposerState.runId = run.run_id;
+          navigate({ view: "run", runId: run.run_id });
+        } catch (error) {
+          problem.textContent = error instanceof ApiError ? error.message : i18n.t("error.generic");
+          problem.hidden = false;
+          reportError(error);
+        } finally {
+          if (start.isConnected) start.disabled = !command;
+        }
+      },
+    }, [
+      el("div", { class: "field" }, [
+        el("span", { class: "field-label", text: i18n.t("generate.connectedAgent") }),
+        el("div", { class: "agent-choice-static mono", text: data.connected_agent
+          || i18n.t("generate.connectedAgent.none") }),
+      ]),
+      el("div", { class: "field" }, [
+        el("label", { for: "simplifiedTemplate", text: i18n.t("template.label") }),
+        templateSelect,
+        chosen ? el("p", { class: "muted", text: chosen.description }) : null,
+        graph,
+      ]),
+      el("div", { class: "field simplified-goal-field" }, [
+        el("label", { for: "simplifiedGoal", text: i18n.t("newRun.goal") }), goal,
+      ]),
+      el("div", { class: "actions simplified-composer-actions" }, [start]),
+      !data.ready ? el("div", { class: "banner warn", text: i18n.t("template.agentRequired") }) : null,
+      problem,
+    ]);
+    root.append(el("section", { class: "simplified-goal-page" }, [
+      el("header", { class: "simplified-goal-intro" }, [
+        el("h1", { text: i18n.t("template.title") }),
+        el("p", { class: "muted", text: i18n.t("template.description") }),
+      ]),
+      form,
+    ]));
   }
 
   function renderLangGraphRun(root, run) {

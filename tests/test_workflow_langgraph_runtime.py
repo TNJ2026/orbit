@@ -1627,6 +1627,39 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
                     ir.workflow_id, {"value": 9}, idempotency_key="start-once"
                 )
 
+    def test_template_run_persists_its_graph_without_a_workflow_version(self) -> None:
+        action = node("action", inputs=("value",), outputs=("value",))
+        terminal = node(
+            "terminal", inputs=("value",), kind="terminal", handler=False
+        )
+        ir = workflow(
+            (action, terminal), (edge("done", "action", "terminal"),),
+            entry=("action",), terminals=("terminal",), result=("action", "value"),
+        )
+        registry = LangGraphHandlerRegistry([
+            binding("action", lambda values, config, context: {
+                "value": values["value"] + 1
+            })
+        ])
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteWorkflowVersionStore(Path(directory) / "workflows.sqlite3")
+            service = self.service(directory, store, registry)
+            run = service.start_snapshot(
+                "template:direct", ir, {"value": 4}, template_id="direct",
+                idempotency_key="template-once", actor="test:author",
+            )
+            with sqlite3.connect(service.run_db_path) as connection:
+                row = connection.execute(
+                    "SELECT workflow_version,template_id,graph_snapshot_json"
+                    " FROM langgraph_runs WHERE run_id=?", (run.run_id,),
+                ).fetchone()
+
+        self.assertEqual("completed", run.status)
+        self.assertEqual(5, run.result)
+        self.assertEqual(0, row[0])
+        self.assertEqual("direct", row[1])
+        self.assertEqual(ir.workflow_id, json.loads(row[2])["workflow_id"])
+
     def test_compatibility_explains_missing_handler_before_start(self) -> None:
         action = node("action", inputs=("value",), outputs=("value",))
         terminal = node(
@@ -1732,6 +1765,40 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
                     expected_revision=paused.revision,
                     idempotency_key="resume-once",
                 )
+
+    def test_template_run_resumes_from_its_snapshot_after_service_rebuild(self) -> None:
+        action = node("action", inputs=("value",), outputs=("value",))
+        terminal = node(
+            "terminal", inputs=("value",), kind="terminal", handler=False
+        )
+        ir = workflow(
+            (action, terminal), (edge("done", "action", "terminal"),),
+            entry=("action",), terminals=("terminal",), result=("action", "value"),
+        )
+
+        def approval(values, config, context):
+            accepted = interrupt("approve template")
+            return {"value": values["value"] if accepted else -1}
+
+        registry = LangGraphHandlerRegistry([binding("action", approval)])
+        with tempfile.TemporaryDirectory() as directory:
+            empty_store = SQLiteWorkflowVersionStore(
+                Path(directory) / "empty-workflows.sqlite3"
+            )
+            first = self.service(directory, empty_store, registry)
+            paused = first.start_snapshot(
+                "template:review", ir, {"value": 7}, template_id="review",
+                idempotency_key="template-interrupt", actor="test:author",
+            )
+            rebuilt = self.service(directory, empty_store, registry)
+            completed = rebuilt.resume(
+                paused.run_id, True, expected_revision=paused.revision,
+                idempotency_key="template-resume",
+            )
+
+        self.assertEqual("interrupted", paused.status)
+        self.assertEqual("completed", completed.status)
+        self.assertEqual(7, completed.result)
 
     def test_cancel_is_versioned_idempotent_and_wins_over_late_settlement(self):
         action = node("action", inputs=("value",), outputs=("value",))

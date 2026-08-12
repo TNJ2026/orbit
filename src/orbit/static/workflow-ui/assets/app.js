@@ -236,7 +236,9 @@ async function render() {
     const singleAgentUi = shellFacts.product_mode?.workflow_ui_mode === "single-agent";
     const agentsNav = document.querySelector('[data-view="agents"]');
     if (agentsNav) agentsNav.hidden = singleAgentUi;
-    if (singleAgentUi && route.view === "agents") {
+    const workflowsNav = document.querySelector('[data-view="workflows"]');
+    if (workflowsNav) workflowsNav.hidden = singleAgentUi;
+    if (singleAgentUi && ["agents", "workflows", "workflow"].includes(route.view)) {
       navigate({ view: "home", runId: null });
       return;
     }
@@ -439,6 +441,10 @@ async function boot() {
     const agentsNav = document.querySelector('[data-view="agents"]');
     if (agentsNav) {
       agentsNav.hidden = shellFacts.product_mode?.workflow_ui_mode === "single-agent";
+    }
+    const workflowsNav = document.querySelector('[data-view="workflows"]');
+    if (workflowsNav) {
+      workflowsNav.hidden = shellFacts.product_mode?.workflow_ui_mode === "single-agent";
     }
     views.update({ i18n, shellFacts, mayStartRun });
     const shutdown = runtimeShutdownCommand();

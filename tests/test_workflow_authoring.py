@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
-from types import SimpleNamespace
 import unittest
 
 from orbit.workflow.authoring import (
@@ -588,58 +587,6 @@ class NamedAgentTests(unittest.TestCase):
 
     def test_the_available_names_are_reported_for_the_ui(self) -> None:
         self.assertEqual(("claude", "codex"), self.service.available_agents)
-
-    def test_single_agent_profile_rejects_a_graph_without_its_agent(self) -> None:
-        document = json.dumps(valid_document())
-        model = ScriptedModel([document] * 5)
-        constrained = service(model)
-
-        with self.assertRaises(AuthoringFailedError) as caught:
-            constrained.generate(
-                "[ORBIT_SINGLE_AGENT handler=agent.codex]\nUser request:\nbuild it",
-                agent=None,
-            )
-
-        self.assertIn("requires at least one action using handler 'agent.codex'", str(
-            caught.exception.diagnostics[0]
-        ))
-
-    def test_single_agent_profile_allows_an_arbitrary_graph_shape(self) -> None:
-        nodes = [
-            SimpleNamespace(
-                kind="action", handler=SimpleNamespace(name="agent.codex")
-            ),
-            SimpleNamespace(kind="action", handler=SimpleNamespace(name="transform")),
-            SimpleNamespace(kind="decision", handler=None),
-            SimpleNamespace(kind="join", handler=None),
-            SimpleNamespace(kind="human", handler=None),
-            SimpleNamespace(kind="terminal", handler=None),
-            SimpleNamespace(kind="terminal", handler=None),
-        ]
-        compiled = SimpleNamespace(ir=SimpleNamespace(nodes=nodes))
-
-        self.service._check_single_agent_workflow(
-            compiled,
-            "[ORBIT_SINGLE_AGENT handler=agent.codex]\nUser request:\nbuild it",
-        )
-
-    def test_single_agent_profile_rejects_a_second_agent_handler(self) -> None:
-        nodes = [
-            SimpleNamespace(
-                kind="action", handler=SimpleNamespace(name="agent.codex")
-            ),
-            SimpleNamespace(
-                kind="action", handler=SimpleNamespace(name="agent.claude")
-            ),
-        ]
-        compiled = SimpleNamespace(ir=SimpleNamespace(nodes=nodes))
-
-        with self.assertRaisesRegex(ValueError, "may use only the Agent handler"):
-            self.service._check_single_agent_workflow(
-                compiled,
-                "[ORBIT_SINGLE_AGENT handler=agent.codex]\nUser request:\nbuild it",
-            )
-
 
 class CliGeneratorTests(unittest.TestCase):
     def test_prompt_goes_to_stdin_and_stdout_comes_back(self) -> None:

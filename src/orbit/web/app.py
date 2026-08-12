@@ -767,6 +767,18 @@ def create_app(
     workflow_publisher = WorkflowDefinitionService(
         authoring_catalogs, SQLiteWorkflowVersionStore(composition.workflow_db_path)
     )
+    template_service = None
+    if (
+        workflow_ui_mode == "single-agent"
+        and langgraph_service is not None
+        and authoring_broker is not None
+    ):
+        from ..workflow.templates import SingleAgentTemplateService
+
+        template_service = SingleAgentTemplateService(
+            workflow_publisher, manifests, langgraph_service,
+            authoring_broker.clients,
+        )
     from ..workflow.application.workflow_draft_service import (
         WorkflowDraftApplicationService,
     )
@@ -885,6 +897,7 @@ def create_app(
             langgraph_service=langgraph_service,
             legacy_execution=legacy_execution,
             workflow_ui_mode=workflow_ui_mode,
+            template_service=template_service,
         ),
         # The MCP surface is a second protocol over the same application
         # services and the same identity, not a second implementation.

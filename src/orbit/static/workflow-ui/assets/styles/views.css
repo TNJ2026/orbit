@@ -52,6 +52,31 @@
 }
 .simplified-workflow-picker > select,
 .simplified-workflow-picker > .custom-select { width: 100%; min-width: 0; }
+
+.template-graph {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: .55rem;
+  margin-top: .75rem;
+  padding: .85rem;
+  border: 1px solid var(--line);
+  border-radius: .6rem;
+  background: var(--line-soft);
+}
+
+.template-node {
+  padding: .4rem .65rem;
+  border: 1px solid var(--line);
+  border-radius: .45rem;
+  background: var(--panel);
+  font-size: .85rem;
+  font-weight: 600;
+}
+
+.template-node-human { border-style: dashed; }
+.template-node-terminal { border-radius: 999px; }
+.template-edge { color: var(--muted); }
 .simplified-workflow-picker > select,
 .simplified-workflow-picker > .custom-select,
 .simplified-workflow-picker > .button { min-height: 46px; }

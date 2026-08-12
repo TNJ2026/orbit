@@ -13,6 +13,7 @@ import uuid
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 from ..domain.serialization import canonical_json, definition_hash, to_primitive
+from ..domain.ir_schema import workflow_ir_from_primitive
 from .compiler import (
     LangGraphCompileError, LangGraphHandlerRegistry,
     LangGraphJoinDeadlineExceeded,
@@ -37,6 +38,7 @@ class LangGraphRun:
     created_at: str
     updated_at: str
     owner_actor: str
+    template_id: str | None = None
 
 
 class LangGraphWorkflowService:
@@ -113,6 +115,14 @@ class LangGraphWorkflowService:
                 connection.execute(
                     "ALTER TABLE langgraph_runs ADD COLUMN interrupt_responses_json"
                     " TEXT NOT NULL DEFAULT '{}'"
+                )
+            if "template_id" not in columns:
+                connection.execute(
+                    "ALTER TABLE langgraph_runs ADD COLUMN template_id TEXT"
+                )
+            if "graph_snapshot_json" not in columns:
+                connection.execute(
+                    "ALTER TABLE langgraph_runs ADD COLUMN graph_snapshot_json TEXT"
                 )
             timer_columns = {
                 row["name"]
@@ -205,6 +215,71 @@ class LangGraphWorkflowService:
             )
             connection.commit()
         return self._execute(run_id, record.ir, inputs=inputs)
+
+    def start_snapshot(
+        self,
+        workflow_id: str,
+        ir,
+        inputs: Mapping[str, Any],
+        *,
+        template_id: str,
+        idempotency_key: str,
+        actor: str = "system:langgraph",
+    ) -> LangGraphRun:
+        """Start an immutable per-Run graph without publishing a Workflow version."""
+
+        if not idempotency_key.strip():
+            raise ValueError("idempotency_key is required")
+        if not actor.strip():
+            raise ValueError("actor is required")
+        snapshot = to_primitive(ir)
+        # Fail before recording a Run if the template cannot bind to this Runtime.
+        compile_workflow(ir, self.handlers)
+        request_hash = definition_hash({
+            "template_id": template_id, "graph": snapshot,
+            "inputs": inputs, "actor": actor,
+        }).value
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            receipt = connection.execute(
+                "SELECT request_hash,run_id FROM langgraph_run_receipts"
+                " WHERE idempotency_key=?", (idempotency_key,),
+            ).fetchone()
+            if receipt is not None:
+                connection.commit()
+                if receipt["request_hash"] != request_hash:
+                    raise LangGraphRunConflict(
+                        "idempotency key was already used for another request"
+                    )
+                return self.get(receipt["run_id"])
+            run_id = "langgraph_run:" + uuid.uuid4().hex
+            now = self._stamp()
+            connection.execute(
+                "INSERT INTO langgraph_runs("
+                "run_id,workflow_id,workflow_version,status,revision,input_json,"
+                "result_json,error,created_at,updated_at,owner_actor,template_id,"
+                "graph_snapshot_json) VALUES (?,?,0,'running',0,?,NULL,NULL,?,?,?,?,?)",
+                (
+                    run_id, workflow_id, canonical_json(inputs), now, now, actor,
+                    template_id, canonical_json(snapshot),
+                ),
+            )
+            connection.execute(
+                "INSERT INTO langgraph_run_receipts VALUES (?,?,?)",
+                (idempotency_key, request_hash, run_id),
+            )
+            connection.commit()
+        return self._execute(run_id, ir, inputs=inputs)
+
+    def _run_ir(self, run: LangGraphRun):
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT graph_snapshot_json FROM langgraph_runs WHERE run_id=?",
+                (run.run_id,),
+            ).fetchone()
+        if row is not None and row["graph_snapshot_json"]:
+            return workflow_ir_from_primitive(json.loads(row["graph_snapshot_json"]))
+        return self._workflow(run.workflow_id, run.workflow_version).ir
 
     def compatibility(
         self, workflow_id: str, workflow_version: int | None = None
@@ -321,9 +396,8 @@ class LangGraphWorkflowService:
             connection.commit()
         if not ready:
             return self.get(run_id)
-        record = self._workflow(current.workflow_id, current.workflow_version)
         return self._execute(
-            run_id, record.ir, resume=responses,
+            run_id, self._run_ir(current), resume=responses,
         )
 
     def recover(self, run_id: str) -> LangGraphRun:
@@ -338,11 +412,8 @@ class LangGraphWorkflowService:
                     " ORDER BY due_at,timer_id LIMIT 1", (run_id,),
                 ).fetchone()
             if firing is not None:
-                record = self._workflow(
-                    current.workflow_id, current.workflow_version,
-                )
                 return self._fire_join_deadline(
-                    run_id, record.ir, firing["target_id"],
+                    run_id, self._run_ir(current), firing["target_id"],
                 )
         if current.status in {"waiting", "interrupted"}:
             with self._connect() as connection:
@@ -377,15 +448,11 @@ class LangGraphWorkflowService:
                 connection.commit()
             current = self.get(run_id)
             if timer["purpose"] == "join_deadline":
-                record = self._workflow(
-                    current.workflow_id, current.workflow_version,
-                )
                 return self._fire_join_deadline(
-                    run_id, record.ir, timer["target_id"],
+                    run_id, self._run_ir(current), timer["target_id"],
                 )
         if current.status != "running":
             return current
-        record = self._workflow(current.workflow_id, current.workflow_version)
         config = {"configurable": {"thread_id": run_id}}
         with SqliteSaver.from_conn_string(str(self.checkpoint_db_path)) as saver:
             has_checkpoint = saver.get_tuple(config) is not None
@@ -394,7 +461,7 @@ class LangGraphWorkflowService:
                 "SELECT input_json FROM langgraph_runs WHERE run_id=?", (run_id,)
             ).fetchone()
         inputs = None if has_checkpoint else json.loads(row["input_json"])
-        return self._execute(run_id, record.ir, inputs=inputs)
+        return self._execute(run_id, self._run_ir(current), inputs=inputs)
 
     def _schedule_join_deadlines(
         self, run_id: str, ir, *, available_outputs: Mapping[str, Any]
@@ -704,4 +771,5 @@ class LangGraphWorkflowService:
             row["created_at"],
             row["updated_at"],
             row["owner_actor"],
+            row["template_id"] if "template_id" in row.keys() else None,
         )

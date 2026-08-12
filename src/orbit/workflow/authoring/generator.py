@@ -973,11 +973,8 @@ class WorkflowAuthoringService:
 
         def checks(compiled):
             self._check_goal_binding(compiled)
-            single_agent = instruction.startswith("[ORBIT_SINGLE_AGENT ")
-            if self._wants_markdown_artifact(instruction) and not single_agent:
+            if self._wants_markdown_artifact(instruction):
                 self._check_markdown_artifact(compiled)
-            if single_agent:
-                self._check_single_agent_workflow(compiled, instruction)
 
         return self._run_funnel(
             lambda feedback: self._prompt(
@@ -994,29 +991,6 @@ class WorkflowAuthoringService:
             on_progress=on_progress,
             on_diagnostics=on_diagnostics,
         )
-
-    @staticmethod
-    def _check_single_agent_workflow(compiled, instruction: str) -> None:
-        marker = instruction.splitlines()[0]
-        expected_handler = marker.removeprefix(
-            "[ORBIT_SINGLE_AGENT handler="
-        ).removesuffix("]")
-        agent_handlers = {
-            node.handler.name
-            for node in compiled.ir.nodes
-            if node.kind == "action" and node.handler is not None
-            and node.handler.name.startswith("agent.")
-        }
-        if not agent_handlers:
-            raise ValueError(
-                f"single-Agent workflow requires at least one action using "
-                f"handler {expected_handler!r}"
-            )
-        if agent_handlers != {expected_handler}:
-            raise ValueError(
-                "single-Agent workflow may use only the Agent handler "
-                f"{expected_handler!r}; found {sorted(agent_handlers)!r}"
-            )
 
     def revise(
         self, current_source: str, instruction: str, *, expected_workflow_id: str,
