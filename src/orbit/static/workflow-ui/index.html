@@ -72,6 +72,20 @@
             </svg>
             <span class="nav-label" data-i18n="nav.agents">Agents</span>
           </button>
+          <!-- A link, not a view: the editor is its own page with its own
+               bundle, so this leaves the shell rather than routing inside it.
+               It carries no data-view for that reason, which is also what
+               keeps the router's handlers off it. -->
+          <a class="nav-button" id="editorNav" href="/editor/"
+             data-i18n-label="nav.editor" aria-label="Editor">
+            <svg class="nav-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+              <rect x="1.5" y="2.25" width="5" height="4" rx="1.25"/>
+              <rect x="9.5" y="9.75" width="5" height="4" rx="1.25"/>
+              <path d="M4 6.25v3.25a2 2 0 0 0 2 2h6"/>
+              <path d="M10.25 9.5 12 11.75l1.75-2.25" fill="none"/>
+            </svg>
+            <span class="nav-label" data-i18n="nav.editor">Editor</span>
+          </a>
         </nav>
 
         <div class="topbar-controls">

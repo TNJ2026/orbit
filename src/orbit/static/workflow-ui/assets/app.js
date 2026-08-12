@@ -210,7 +210,7 @@ async function render() {
   root.replaceChildren();
   root.append(dataState(el, i18n, "loading"));
 
-  for (const button of document.querySelectorAll(".nav-button")) {
+  for (const button of document.querySelectorAll(".nav-button[data-view]")) {
     const section = route.view === "run" || route.view === "goal" ? "home"
         : route.view === "workflow" || route.view === "workflowEdit"
           ? "workflows" : route.view;
@@ -449,6 +449,15 @@ async function boot() {
     if (workflowsNav) {
       workflowsNav.hidden = shellFacts.product_mode?.workflow_ui_mode === "single-agent";
     }
+    // Hidden where the Runtime says there is no editor, rather than offered
+    // as a link that 404s: the bundle is a build artifact and a source
+    // checkout may not carry it.
+    const editorNav = document.getElementById("editorNav");
+    if (editorNav) {
+      const editor = shellFacts.capabilities?.workflow_editor;
+      editorNav.hidden = !editor?.available;
+      if (editor?.url) editorNav.href = editor.url;
+    }
     views.update({ i18n, shellFacts, mayStartRun });
     const shutdown = runtimeShutdownCommand();
     document.getElementById("shutdownRuntime").hidden = !shutdown;
@@ -465,7 +474,7 @@ async function boot() {
   document.getElementById("refresh").addEventListener("click", () => render());
   window.addEventListener("orbit:refresh", () => render());
   views.scheduleLivePolling();
-  for (const button of document.querySelectorAll(".nav-button")) {
+  for (const button of document.querySelectorAll(".nav-button[data-view]")) {
     button.addEventListener("click", () => {
       // A message about the page you just left is noise on the next one.
       announce("");

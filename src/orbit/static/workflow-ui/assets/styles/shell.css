@@ -55,6 +55,10 @@
   background: none; border: 0; border-radius: 0;
   cursor: pointer; color: var(--muted); font-size: 13px; font-weight: 500;
   white-space: nowrap;
+  /* One of these is an anchor — the editor leaves the shell rather than
+     routing inside it — so the link defaults are cleared here instead of
+     letting one entry sit underlined beside four buttons. */
+  text-decoration: none; font-family: inherit;
 }
 .nav-button + .nav-button { border-left: 1px solid var(--line); }
 .nav-button:hover { background: var(--hover); color: var(--text); }

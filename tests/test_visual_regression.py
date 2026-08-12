@@ -255,6 +255,22 @@ class VisualCaptureCase(unittest.TestCase):
             color_scheme="dark" if theme == "dark" else "light",
         )
         try:
+            # Nothing off this machine. The shell asks Google for a webfont,
+            # and offline that request fails after a delay nobody controls —
+            # so whether the fallback metrics had settled before the shot was
+            # a coin toss, and the same page differed by a few pixels of
+            # vertical drift between runs. Refused instantly and identically
+            # instead: a suite that freezes everything the page can vary on
+            # cannot leave a third-party fetch in the middle of it.
+            context.route(
+                "**/*",
+                lambda route: (
+                    route.continue_()
+                    if "127.0.0.1" in route.request.url
+                    or route.request.url.startswith("data:")
+                    else route.abort()
+                ),
+            )
             if fail_path:
                 context.route(
                     f"**{fail_path}",
@@ -313,7 +329,10 @@ class VisualCaptureCase(unittest.TestCase):
                         "() => !document.querySelector('#liveRegion').hidden",
                         timeout=15000,
                     )
-            page.wait_for_timeout(100)  # one settle tick after fonts/layout
+            # The fonts the page will actually use, rather than a fixed
+            # guess at how long they take to fail.
+            page.wait_for_function("() => document.fonts.status === 'loaded'")
+            page.wait_for_timeout(100)  # one settle tick after layout
             return page.screenshot(full_page=False)
         finally:
             context.close()

@@ -684,6 +684,12 @@ def create_app(
     from .api_v1 import authoring_timeout_seconds, build_api_v1
     from .mcp import build_mcp_dispatcher, mcp_routes
 
+    from importlib import resources as _resources
+
+    editor_available = _resources.files("orbit").joinpath(
+        "static/workflow-editor/index.html"
+    ).is_file()
+
     # Composition facts for /api/v1/capabilities: what this deployment can do,
     # with a reason when it cannot. The UI renders "service not provided" from
     # these instead of probing endpoints for 404s (delivery plan API-7).
@@ -716,6 +722,15 @@ def create_app(
     capabilities = {
         "static_graph": {"available": True},
         "human_tasks": {"available": True},
+        # The graph editor ships as a build artifact, so a source checkout
+        # that has not run it serves no /editor/. Reported rather than left to
+        # be discovered: a nav link to a 404 is the thing this endpoint exists
+        # to prevent.
+        "workflow_editor": (
+            {"available": True, "url": "/editor/"}
+            if editor_available
+            else {"available": False, "reason": "editor_bundle_not_built"}
+        ),
         "artifacts": (
             {"available": True}
             if artifact_backend is not None

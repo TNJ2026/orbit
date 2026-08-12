@@ -227,6 +227,35 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
         page.wait_for_timeout(6_000)
         self.assertEqual([], errors, f"the refresh chain raised {errors}")
 
+    def test_the_editor_is_reachable_from_the_navigation(self) -> None:
+        """A page nobody can find is not shipped.
+
+        The editor is its own bundle at its own address, so this is a link out
+        of the shell rather than a view inside it — and it is offered only
+        where the Runtime says the bundle is there, because a nav entry that
+        404s is what the capability report exists to prevent.
+        """
+
+        from importlib import resources
+
+        page = self.open("en-US")
+        page.wait_for_selector(".simplified-workspace-composer")
+        link = page.locator("#editorNav")
+        built = resources.files("orbit").joinpath(
+            "static/workflow-editor/index.html"
+        ).is_file()
+        self.assertEqual(built, link.is_visible())
+        if not built:
+            self.skipTest("editor bundle is not built in this checkout")
+
+        self.assertEqual("/editor/", link.get_attribute("href"))
+        link.click()
+        page.wait_for_load_state("networkidle")
+        self.assertTrue(page.url.endswith("/editor/"))
+        self.assertEqual(
+            1, page.locator("select[aria-label='Workflow']").count()
+        )
+
     def test_navigation_and_workflow_catalog_use_the_simplified_product_mode(self) -> None:
         page = self.open("en-US")
         page.wait_for_selector(".simplified-workspace-composer")
