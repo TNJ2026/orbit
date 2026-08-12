@@ -109,6 +109,11 @@ class LangGraphWorkflowService:
                     "ALTER TABLE langgraph_runs ADD COLUMN owner_actor"
                     " TEXT NOT NULL DEFAULT 'system:langgraph'"
                 )
+            if "interrupt_responses_json" not in columns:
+                connection.execute(
+                    "ALTER TABLE langgraph_runs ADD COLUMN interrupt_responses_json"
+                    " TEXT NOT NULL DEFAULT '{}'"
+                )
             timer_columns = {
                 row["name"]
                 for row in connection.execute("PRAGMA table_info(langgraph_timers)")
@@ -230,16 +235,38 @@ class LangGraphWorkflowService:
         *,
         expected_revision: int,
         idempotency_key: str,
+        interrupt_id: str | None = None,
     ) -> LangGraphRun:
         if not idempotency_key.strip():
             raise ValueError("idempotency_key is required")
-        current = self.get(run_id)
         request_hash = definition_hash({
             "command": "resume",
             "run_id": run_id,
             "expected_revision": expected_revision,
             "value": value,
+            "interrupt_id": interrupt_id,
         }).value
+        with self._connect() as connection:
+            receipt = connection.execute(
+                "SELECT request_hash,run_id FROM langgraph_run_receipts"
+                " WHERE idempotency_key=?", (idempotency_key,),
+            ).fetchone()
+        if receipt is not None:
+            if receipt["request_hash"] != request_hash:
+                raise LangGraphRunConflict(
+                    "idempotency key was already used for another request"
+                )
+            return self.get(receipt["run_id"])
+        current = self.get(run_id)
+        available = {item["id"] for item in current.interrupts}
+        if interrupt_id is None:
+            if len(available) != 1:
+                raise ValueError(
+                    "interrupt_id is required when a run has multiple interrupts"
+                )
+            interrupt_id = next(iter(available))
+        elif interrupt_id not in available:
+            raise ValueError(f"interrupt is not pending: {interrupt_id}")
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             receipt = connection.execute(
@@ -254,10 +281,31 @@ class LangGraphWorkflowService:
                         "idempotency key was already used for another request"
                     )
                 return self.get(receipt["run_id"])
-            claimed = connection.execute(
-                "UPDATE langgraph_runs SET status='running',updated_at=?"
+            row = connection.execute(
+                "SELECT interrupt_responses_json FROM langgraph_runs"
                 " WHERE run_id=? AND status='interrupted' AND revision=?",
-                (self._stamp(), run_id, expected_revision),
+                (run_id, expected_revision),
+            ).fetchone()
+            responses = {} if row is None else json.loads(
+                row["interrupt_responses_json"]
+            )
+            responses[interrupt_id] = value
+            ready = available <= set(responses)
+            pending_interrupts = tuple(
+                item for item in current.interrupts
+                if item["id"] not in responses
+            )
+            claimed = connection.execute(
+                "UPDATE langgraph_runs SET status=?,revision=revision+?,"
+                "interrupt_responses_json=?,interrupts_json=?,updated_at=?"
+                " WHERE run_id=? AND status='interrupted' AND revision=?",
+                (
+                    "running" if ready else "interrupted",
+                    0 if ready else 1,
+                    "{}" if ready else canonical_json(responses),
+                    "[]" if ready else canonical_json(pending_interrupts),
+                    self._stamp(), run_id, expected_revision,
+                ),
             ).rowcount
             if claimed != 1:
                 connection.rollback()
@@ -271,12 +319,12 @@ class LangGraphWorkflowService:
                 (idempotency_key, request_hash, run_id),
             )
             connection.commit()
+        if not ready:
+            return self.get(run_id)
         record = self._workflow(current.workflow_id, current.workflow_version)
-        resume_value = (
-            {current.interrupts[0]["id"]: value}
-            if len(current.interrupts) == 1 else value
+        return self._execute(
+            run_id, record.ir, resume=responses,
         )
-        return self._execute(run_id, record.ir, resume=resume_value)
 
     def recover(self, run_id: str) -> LangGraphRun:
         """Continue a run whose process ended after a durable checkpoint."""

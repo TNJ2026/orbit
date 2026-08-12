@@ -475,6 +475,7 @@ def build_mcp_dispatcher(
                     "properties": {
                         "run_id": {"type": "string"},
                         "value": {},
+                        "interrupt_id": {"type": "string"},
                         "expected_version": {"type": "integer"},
                         "idempotency_key": {"type": "string"},
                     },
@@ -594,6 +595,7 @@ def build_mcp_dispatcher(
                 str(arguments["run_id"]), arguments.get("value"),
                 expected_revision=int(arguments["expected_version"]),
                 idempotency_key=str(arguments["idempotency_key"]),
+                interrupt_id=arguments.get("interrupt_id"),
             ))
         if name == "recover_langgraph_run":
             return langgraph_run_dto(

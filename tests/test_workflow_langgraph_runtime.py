@@ -1215,6 +1215,69 @@ class LangGraphWorkflowCompilerTests(unittest.TestCase):
 
 
 class LangGraphWorkflowServiceTests(unittest.TestCase):
+    def test_parallel_interrupts_require_and_accept_explicit_id(self) -> None:
+        fan = node(
+            "fan", inputs=("value",), outputs=("value",), route_mode="parallel",
+        )
+        left = node(
+            "left", inputs=("value",), outputs=("value",),
+            kind="human", handler=False,
+        )
+        right = node(
+            "right", inputs=("value",), outputs=("value",),
+            kind="human", handler=False,
+        )
+        ir = workflow(
+            (fan, left, right),
+            (edge("to_left", "fan", "left"), edge("to_right", "fan", "right")),
+            entry=("fan",), terminals=("left", "right"),
+            result=("left", "value"),
+            policies=(IRPolicy(
+                "complete", "completion", {"required_terminal_count": 2},
+            ),),
+        )
+        registry = LangGraphHandlerRegistry([
+            binding("fan", lambda values, config, context: dict(values)),
+        ])
+        with tempfile.TemporaryDirectory() as directory:
+            service = self.service(
+                directory, self.publish(directory, ir), registry,
+            )
+            started = service.start(
+                ir.workflow_id, {"value": "start"},
+                idempotency_key="parallel-start",
+            )
+            with self.assertRaisesRegex(ValueError, "interrupt_id is required"):
+                service.resume(
+                    started.run_id, "ambiguous",
+                    expected_revision=started.revision,
+                    idempotency_key="parallel-ambiguous",
+                )
+            left_interrupt = next(
+                item for item in started.interrupts
+                if item["value"]["node_id"] == "left"
+            )
+            remaining = service.resume(
+                started.run_id, "left-approved",
+                expected_revision=started.revision,
+                idempotency_key="parallel-left",
+                interrupt_id=left_interrupt["id"],
+            )
+            completed = service.resume(
+                remaining.run_id, "right-approved",
+                expected_revision=remaining.revision,
+                idempotency_key="parallel-right",
+                interrupt_id=remaining.interrupts[0]["id"],
+            )
+
+        self.assertEqual("interrupted", remaining.status)
+        self.assertEqual(
+            ["right"],
+            [item["value"]["node_id"] for item in remaining.interrupts],
+        )
+        self.assertEqual("completed", completed.status)
+        self.assertEqual("left-approved", completed.result)
+
     def test_deadline_join_timer_resumes_partial_checkpoint(self) -> None:
         deadline = IRPolicy(
             "wait_for_enough", "join",
@@ -1392,6 +1455,7 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
 
         self.assertIn("input_json", columns)
         self.assertIn("interrupts_json", columns)
+        self.assertIn("interrupt_responses_json", columns)
         self.assertTrue({"purpose", "target_id"}.issubset(timer_columns))
         self.assertEqual(("retry", "action"), timer)
 

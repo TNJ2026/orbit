@@ -119,6 +119,7 @@ def build_routes(ctx, service) -> list[Route]:
                     body.get("value"),
                     expected_revision=int(body["expected_version"]),
                     idempotency_key=key,
+                    interrupt_id=body.get("interrupt_id"),
                 )
             except LookupError as exc:
                 raise ValueError(str(exc)) from None

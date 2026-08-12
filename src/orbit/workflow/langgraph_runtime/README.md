@@ -105,7 +105,11 @@ if run.status == "interrupted":
 
 Run metadata has `running`, `interrupted`, `completed`, and `failed` states.
 Interrupt IDs and JSON payloads are projected on `run.interrupts`, so callers
-do not need to decode checkpoint internals.
+do not need to decode checkpoint internals. When a parallel superstep exposes
+multiple interrupts, resume each with its explicit `interrupt_id`. The service
+durably accumulates those responses and submits them to LangGraph together once
+the superstep is complete; an omitted ID is accepted only when exactly one
+interrupt remains.
 Starting with the same idempotency key and identical request returns the first
 run; reusing the key for different input is rejected. Resume has the same
 idempotent receipt behavior, optimistic revision checks, and a conditional
