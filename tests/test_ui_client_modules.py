@@ -25,6 +25,7 @@ EDITOR_SUITES = (
     ROOT / "ui" / "editor" / "src" / "api.test.mjs",
     ROOT / "ui" / "editor" / "src" / "expressions.test.mjs",
     ROOT / "ui" / "editor" / "src" / "document.test.mjs",
+    ROOT / "ui" / "editor" / "src" / "layout-store.test.mjs",
 )
 NODE = shutil.which("node")
 

@@ -7,9 +7,10 @@ import "@xyflow/react/dist/style.css";
 
 import * as api from "./api.mjs";
 import {
-  NODE_KINDS, connectionProblem, freshId, toDocument, toGraph,
+  NODE_KINDS, connectionProblem, freshId, toDocument, toGraph, toPositions,
 } from "./dsl-graph.mjs";
 import { handlersForKind, removePort } from "./document.mjs";
+import { clearLayout, readLayout, writeLayout } from "./layout-store.mjs";
 import Inspector from "./Inspector.jsx";
 import WorkflowPanel from "./WorkflowPanel.jsx";
 import WorkflowNode from "./WorkflowNode.jsx";
@@ -71,7 +72,10 @@ export default function App() {
         return;
       }
       const document = JSON.parse(detail.source);
-      const graph = toGraph(document);
+      // The author's own arrangement, where there is one. Nodes without a
+      // stored position fall back to the computed layout, so a workflow that
+      // grew since it was last arranged still draws sensibly.
+      const graph = toGraph(document, readLayout(globalThis.localStorage, id));
       setBase(document);
       setVersion(detail.latest_version ?? detail.version ?? 0);
       setWorkflowId(id);
@@ -210,6 +214,37 @@ export default function App() {
     );
   }, [selection, handlers]);
 
+  /** Remove whatever is selected, edges bound to a node included.
+   *
+   * Backspace and Delete do this too, but a keyboard shortcut is not a thing
+   * to have to know — and on a canvas there is nothing to right-click either.
+   */
+  const removeSelected = useCallback(() => {
+    if (!selection) return;
+    const id = selection.item.id;
+    if (selection.kind === "edge") {
+      setEdges((current) => current.filter((edge) => edge.id !== id));
+    } else {
+      setNodes((current) => current.filter((node) => node.id !== id));
+      setEdges((current) =>
+        current.filter((edge) => edge.source !== id && edge.target !== id),
+      );
+    }
+    setSelection(null);
+  }, [selection]);
+
+  /** Forget this arrangement and go back to the computed one. */
+  const resetLayout = useCallback(() => {
+    if (!base || !workflowId) return;
+    clearLayout(globalThis.localStorage, workflowId);
+    setNodes(toGraph(base, {}).nodes.map((node) => {
+      const current = nodes.find((item) => item.id === node.id);
+      // Keep everything the canvas has edited; only the position goes back.
+      return current ? { ...current, position: node.position } : node;
+    }));
+    setNotice({ level: "info", text: "layout reset" });
+  }, [base, workflowId, nodes]);
+
   const addNode = useCallback(
     (kind) => {
       setNodes((current) => {
@@ -237,6 +272,16 @@ export default function App() {
     })),
     [nodes, renameNode],
   );
+
+  useEffect(() => {
+    if (!workflowId || !nodes.length) return;
+    writeLayout(
+      globalThis.localStorage,
+      workflowId,
+      toPositions(nodes),
+      nodes.map((node) => node.id),
+    );
+  }, [workflowId, nodes]);
 
   const document = useMemo(
     () => (base ? toDocument(base, { nodes, edges }) : null),
@@ -340,6 +385,12 @@ export default function App() {
             + {kind}
           </button>
         ))}
+        <button onClick={removeSelected} disabled={!selection}>
+          Delete
+        </button>
+        <button onClick={resetLayout} disabled={!base} title="Forget the saved arrangement">
+          Reset layout
+        </button>
         <button
           onClick={() => setSelection(null)}
           disabled={!base}

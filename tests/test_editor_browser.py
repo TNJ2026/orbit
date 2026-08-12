@@ -321,6 +321,92 @@ class EditorBrowserTests(unittest.TestCase):
         self.assertFalse(page.locator("button:has-text('Publish')").is_disabled())
         self.assertEqual([], self.errors)
 
+    def drag_node(self, page, node_id: str, dx: int, dy: int) -> None:
+        # By the kind label, not the header: the header is mostly the label
+        # input, which carries `nodrag` so that its text can be selected.
+        box = self.node(page, node_id).locator(".kind").bounding_box()
+        page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        page.mouse.down()
+        page.mouse.move(
+            box["x"] + box["width"] / 2 + dx,
+            box["y"] + box["height"] / 2 + dy,
+            steps=15,
+        )
+        page.mouse.up()
+        page.wait_for_timeout(300)
+
+    def stored_layout(self, page):
+        """The arrangement as persisted, in graph coordinates.
+
+        Not the on-screen box: dragging a node can pan the viewport, so screen
+        positions move for reasons that have nothing to do with the layout.
+        """
+
+        return page.evaluate(
+            "key => JSON.parse(localStorage.getItem(key) || 'null')",
+            f"orbit.editor.layout.{self.workflow_id}",
+        )
+
+    def test_an_arrangement_survives_reopening_without_touching_the_definition(
+        self,
+    ) -> None:
+        """Positions are how a drawing is read, not what it means.
+
+        `definition_hash` is the workflow's version identity, so a coordinate
+        inside it would make nudging a node publish a new version. Moving one
+        has to persist, and the definition has to be untouched by it.
+        """
+
+        page = self.open_editor()
+        computed = self.stored_layout(page)
+        self.drag_node(page, "work", 0, 180)
+        arranged = self.stored_layout(page)
+        # In graph units, which the viewport's zoom scales the drag down into.
+        self.assertGreater(arranged["work"]["y"], computed["work"]["y"] + 30)
+
+        # Reopened from the store, not from a page that still had it in hand.
+        page.reload()
+        page.wait_for_selector("select[aria-label='Workflow']")
+        page.select_option("select[aria-label='Workflow']", self.workflow_id)
+        page.wait_for_selector(".react-flow__node")
+        # Equal, not merely present: an editor that ignored what was stored
+        # would draw the computed layout and persist that instead.
+        self.assertEqual(arranged, self.stored_layout(page))
+
+        # And the definition never learned about any of it.
+        page.click("button:has-text('Publish')")
+        page.wait_for_timeout(2500)
+        self.assertIn("unchanged", page.locator(".notice").inner_text())
+        stored = json.loads(self.get(f"/api/v1/workflows/{self.workflow_id}")["source"])
+        self.assertEqual(self.workflow["nodes"], stored["nodes"])
+        self.assertEqual([], self.errors)
+
+    def test_resetting_the_layout_returns_to_the_computed_one(self) -> None:
+        page = self.open_editor()
+        computed = self.stored_layout(page)
+        self.drag_node(page, "work", 0, 180)
+        self.assertNotEqual(computed, self.stored_layout(page))
+
+        page.click("button:has-text('Reset layout')")
+        page.wait_for_timeout(500)
+        self.assertEqual(computed, self.stored_layout(page))
+        self.assertEqual([], self.errors)
+
+    def test_the_delete_button_removes_a_node_and_the_edges_that_named_it(self) -> None:
+        page = self.open_editor()
+        self.assertEqual(2, page.locator(".react-flow__node").count())
+        self.assertEqual(1, page.locator(".react-flow__edge").count())
+
+        self.node(page, "done").click()
+        page.wait_for_selector(".inspector h2")
+        page.click(".bar button:has-text('Delete')")
+        page.wait_for_timeout(400)
+
+        # The edge goes with it: one naming a node that is gone cannot compile.
+        self.assertEqual(1, page.locator(".react-flow__node").count())
+        self.assertEqual(0, page.locator(".react-flow__edge").count())
+        self.assertEqual([], self.errors)
+
     def test_a_workflow_published_without_a_source_cannot_be_edited(self) -> None:
         from tests.test_web_composition import publish_linear_workflow
 
