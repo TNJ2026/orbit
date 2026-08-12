@@ -2117,7 +2117,7 @@ class WorkflowDraftApiTests(ApiTestCase):
             self.assertEqual("done", job["status"], job.get("error"))
             self.assertEqual(["codex"], asked)
 
-    def test_single_agent_generation_uses_the_selected_agent_and_fixed_shape(self) -> None:
+    def test_single_agent_generation_uses_one_agent_without_a_fixed_shape(self) -> None:
         prompts = []
 
         def writer(prompt):
@@ -2153,9 +2153,10 @@ class WorkflowDraftApiTests(ApiTestCase):
 
         self.assertTrue(prompts)
         self.assertIn("[ORBIT_SINGLE_AGENT handler=agent.codex]", prompts[0])
-        self.assertIn("exactly one action", prompts[0])
-        self.assertIn("one human approval", prompts[0])
-        self.assertIn("maximum 3 iterations", prompts[0])
+        self.assertIn("as many steps as the task needs", prompts[0])
+        self.assertIn("non-Agent tool actions", prompts[0])
+        self.assertIn("Do not use any other agent.* handler", prompts[0])
+        self.assertIn("Add human approval only when", prompts[0])
 
     def test_multi_agent_generation_prompt_is_unchanged(self) -> None:
         prompts = []

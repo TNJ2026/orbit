@@ -65,13 +65,14 @@ def build_routes(ctx) -> list[Route]:
             )
         return (
             f"[ORBIT_SINGLE_AGENT handler={handler}]\n"
-            "Build the smallest single-Agent workflow with exactly one action "
-            "node using that handler, one human approval node, and one terminal "
-            "node. Route approval to the terminal and rejection back to the same "
-            "action with one bounded loop policy (maximum 3 iterations). Do not "
-            "add decision, join, extra action, or automatic review nodes. Keep all "
-            "ports inline. The action must perform the task, self-check, and apply "
-            "human feedback on later iterations.\n\nUser request:\n" + prompt
+            "Build a single-Agent workflow that uses the named handler for every "
+            "Agent reasoning or execution action. The graph may contain as many "
+            "steps as the task needs, including non-Agent tool actions, decisions, "
+            "joins, bounded loops, human tasks, parallel branches, artifacts, and "
+            "terminal nodes. Do not use any other agent.* handler. Keep each action "
+            "bounded and single-purpose, and model repetition as an explicit bounded "
+            "loop. Add human approval only when the user's process requires it.\n\n"
+            "User request:\n" + prompt
         )
 
     async def workflow_catalog(request: Request) -> JSONResponse:

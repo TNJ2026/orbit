@@ -84,11 +84,15 @@ while the task remains active.
 ### Create a workflow
 
 1. Open **Workflows** in Orbit.
-2. Confirm that `app:chatgpt` is selected under **Written by**.
+2. Confirm that **Connected Agent** shows `app:chatgpt`.
 3. Describe the workflow and select **Generate workflow**.
 4. Codex receives the request, returns Workflow DSL, and handles compiler
    feedback until the draft succeeds or fails.
 5. Review and publish the generated workflow.
+
+Single-Agent means that the whole graph uses one `agent.*` Handler; it does
+not impose a node count or fixed topology. Tools, decisions, parallel branches,
+bounded loops, human tasks, and multiple terminal paths remain available.
 
 ### Run a goal
 
