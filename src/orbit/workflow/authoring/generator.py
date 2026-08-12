@@ -973,8 +973,11 @@ class WorkflowAuthoringService:
 
         def checks(compiled):
             self._check_goal_binding(compiled)
-            if self._wants_markdown_artifact(instruction):
+            single_agent = instruction.startswith("[ORBIT_SINGLE_AGENT ")
+            if self._wants_markdown_artifact(instruction) and not single_agent:
                 self._check_markdown_artifact(compiled)
+            if single_agent:
+                self._check_single_agent_workflow(compiled, instruction)
 
         return self._run_funnel(
             lambda feedback: self._prompt(
@@ -991,6 +994,58 @@ class WorkflowAuthoringService:
             on_progress=on_progress,
             on_diagnostics=on_diagnostics,
         )
+
+    @staticmethod
+    def _check_single_agent_workflow(compiled, instruction: str) -> None:
+        marker = instruction.splitlines()[0]
+        expected_handler = marker.removeprefix(
+            "[ORBIT_SINGLE_AGENT handler="
+        ).removesuffix("]")
+        nodes = tuple(compiled.ir.nodes)
+        actions = tuple(node for node in nodes if node.kind == "action")
+        humans = tuple(node for node in nodes if node.kind == "human")
+        terminals = tuple(node for node in nodes if node.kind == "terminal")
+        if len(nodes) != 3 or not (
+            len(actions) == len(humans) == len(terminals) == 1
+        ):
+            raise ValueError(
+                "single-Agent workflow requires exactly one action, one human, "
+                "and one terminal node"
+            )
+        handler = actions[0].handler
+        if handler is None or handler.name != expected_handler:
+            raise ValueError(
+                f"single-Agent action must use handler {expected_handler!r}"
+            )
+        if any(
+            port.data_policy.transport.value != "inline"
+            for node in nodes for port in (*node.inputs, *node.outputs)
+        ):
+            raise ValueError("single-Agent workflow ports must use inline transport")
+        back_edges = tuple(edge for edge in compiled.ir.edges if edge.back_edge)
+        if len(back_edges) != 1 or (
+            back_edges[0].source_node != humans[0].id
+            or back_edges[0].target_node != actions[0].id
+        ):
+            raise ValueError(
+                "single-Agent workflow requires one human rejection back edge"
+            )
+        forward = tuple(edge for edge in compiled.ir.edges if not edge.back_edge)
+        required_hops = {
+            (actions[0].id, humans[0].id),
+            (humans[0].id, terminals[0].id),
+        }
+        if {(edge.source_node, edge.target_node) for edge in forward} != required_hops:
+            raise ValueError(
+                "single-Agent workflow must route action to human approval and "
+                "approval directly to terminal"
+            )
+        policies = {policy.id: policy for policy in compiled.ir.policies}
+        policy = policies.get(back_edges[0].policy_ref or "")
+        if policy is None or policy.kind != "loop" or not (
+            1 <= int(policy.config.get("max_iterations", 0)) <= 3
+        ):
+            raise ValueError("single-Agent rejection loop must be bounded to 3 iterations")
 
     def revise(
         self, current_source: str, instruction: str, *, expected_workflow_id: str,

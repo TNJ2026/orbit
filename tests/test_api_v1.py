@@ -2117,6 +2117,83 @@ class WorkflowDraftApiTests(ApiTestCase):
             self.assertEqual("done", job["status"], job.get("error"))
             self.assertEqual(["codex"], asked)
 
+    def test_single_agent_generation_uses_the_selected_agent_and_fixed_shape(self) -> None:
+        prompts = []
+
+        def writer(prompt):
+            prompts.append(prompt)
+            return "{}"
+
+        app = self._app_with_named_agents({"codex": writer})
+        with AsgiHarness(app) as client:
+            response = client.post(
+                "/api/v1/workflows/generate", actor="writer", key="single-codex",
+                body={
+                    "prompt": "implement the requested change",
+                    "agent": "codex",
+                    "authoring_profile": "single_agent",
+                    "execution_agent": "codex",
+                },
+            )
+            self.assertEqual(200, response.status_code, response.json())
+            job = response.json()["data"]
+            import time
+            for _ in range(100):
+                job = client.get(job["href"], actor="writer").json()["data"]
+                if job["status"] not in {"queued", "running"}:
+                    break
+                time.sleep(0.01)
+
+        self.assertTrue(prompts)
+        self.assertIn("[ORBIT_SINGLE_AGENT handler=agent.codex]", prompts[0])
+        self.assertIn("exactly one action", prompts[0])
+        self.assertIn("one human approval", prompts[0])
+        self.assertIn("maximum 3 iterations", prompts[0])
+
+    def test_multi_agent_generation_prompt_is_unchanged(self) -> None:
+        prompts = []
+
+        def writer(prompt):
+            prompts.append(prompt)
+            return "{}"
+
+        app = self._app_with_named_agents({"codex": writer})
+        with AsgiHarness(app) as client:
+            response = client.post(
+                "/api/v1/workflows/generate", actor="writer", key="multi-codex",
+                body={
+                    "prompt": "use several specialist agents",
+                    "agent": "codex",
+                    "authoring_profile": "multi_agent",
+                },
+            )
+            self.assertEqual(200, response.status_code, response.json())
+            job = response.json()["data"]
+            import time
+            for _ in range(100):
+                job = client.get(job["href"], actor="writer").json()["data"]
+                if job["status"] not in {"queued", "running"}:
+                    break
+                time.sleep(0.01)
+
+        self.assertTrue(prompts)
+        self.assertNotIn("ORBIT_SINGLE_AGENT", prompts[0])
+        self.assertIn("use several specialist agents", prompts[0])
+
+    def test_single_agent_generation_requires_an_execution_agent(self) -> None:
+        app = self._app_with_named_agents({"codex": lambda _prompt: "{}"})
+        with AsgiHarness(app) as client:
+            response = client.post(
+                "/api/v1/workflows/generate", actor="writer", key="single-default",
+                body={
+                    "prompt": "implement it",
+                    "authoring_profile": "single_agent",
+                },
+            )
+
+        self.assertEqual(409, response.status_code)
+        self.assertIn("requires an execution_agent", response.json()["error"]["message"])
+
     def test_authoring_job_keeps_the_agent_cli_console(self) -> None:
         """A job that thinks for a minute must not be a black box.
 

@@ -588,6 +588,21 @@ class NamedAgentTests(unittest.TestCase):
     def test_the_available_names_are_reported_for_the_ui(self) -> None:
         self.assertEqual(("claude", "codex"), self.service.available_agents)
 
+    def test_single_agent_profile_rejects_a_free_form_topology(self) -> None:
+        document = json.dumps(valid_document())
+        model = ScriptedModel([document] * 5)
+        constrained = service(model)
+
+        with self.assertRaises(AuthoringFailedError) as caught:
+            constrained.generate(
+                "[ORBIT_SINGLE_AGENT handler=agent.codex]\nUser request:\nbuild it",
+                agent=None,
+            )
+
+        self.assertIn("single-Agent workflow requires exactly one action", str(
+            caught.exception.diagnostics[0]
+        ))
+
 
 class CliGeneratorTests(unittest.TestCase):
     def test_prompt_goes_to_stdin_and_stdout_comes_back(self) -> None:

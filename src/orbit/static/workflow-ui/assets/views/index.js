@@ -1315,6 +1315,46 @@ export function createViews(context) {
 
     {
       let writerAgent = defaultGenerationAgent();
+      let authoringProfile = "single_agent";
+      const executionAgents = shellFacts?.capabilities?.agent_handlers?.agents || [];
+      let executionAgent = executionAgents.includes(writerAgent)
+        ? writerAgent : executionAgents[0] || "";
+      const executionAgentSelect = el("select", {
+        id: "workflowExecutionAgent",
+        onchange: (event) => { executionAgent = event.target.value; },
+      }, executionAgents.map((name) => el("option", {
+        value: name, text: name, selected: name === executionAgent ? "selected" : null,
+      })));
+      const executionAgentField = el("div", {
+        class: "field simplified-workflow-execution-agent",
+      }, [
+        el("label", {
+          for: "workflowExecutionAgent", text: i18n.t("generate.executionAgent"),
+        }),
+        executionAgentSelect,
+      ]);
+      const profileHint = el("span", {
+        class: "muted", text: i18n.t("generate.profile.singleHint"),
+      });
+      const profile = el("select", {
+        id: "workflowAuthoringProfile",
+        onchange: (event) => {
+          authoringProfile = event.target.value;
+          profileHint.textContent = i18n.t(
+            authoringProfile === "single_agent"
+              ? "generate.profile.singleHint" : "generate.profile.multiHint",
+          );
+          executionAgentField.hidden = authoringProfile !== "single_agent";
+        },
+      }, [
+        el("option", {
+          value: "single_agent", selected: "selected",
+          text: i18n.t("generate.profile.single"),
+        }),
+        el("option", {
+          value: "multi_agent", text: i18n.t("generate.profile.multi"),
+        }),
+      ]);
       const instruction = el("textarea", {
         id: "generateInstruction", required: "required", maxlength: "4000",
         disabled: activeGeneration ? "disabled" : null,
@@ -1347,6 +1387,9 @@ export function createViews(context) {
               {
                 prompt: instruction.value.trim(),
                 display_language: i18n.locale,
+                authoring_profile: authoringProfile,
+                ...(authoringProfile === "single_agent" && executionAgent
+                  ? { execution_agent: executionAgent } : {}),
                 ...(writerAgent ? { agent: writerAgent } : {}),
               },
               `workflow.generate:${Date.now()}`,
@@ -1363,12 +1406,20 @@ export function createViews(context) {
           }
         },
       }, [
+        el("div", { class: "field simplified-workflow-generator-profile" }, [
+          el("label", {
+            for: "workflowAuthoringProfile", text: i18n.t("generate.profile.label"),
+          }),
+          profile,
+          profileHint,
+        ]),
         el("div", { class: "simplified-workflow-generator-agent" }, [
           generationAgentField(
             "workflowGenerateAgent", writerAgent,
             (value) => { writerAgent = value; },
           ),
         ]),
+        executionAgentField,
         el("div", { class: "field" }, [
           el("label", {
             class: "sr-only", for: "generateInstruction",

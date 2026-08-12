@@ -30,6 +30,28 @@ from .common import (
 
 
 def build_routes(ctx) -> list[Route]:
+    def _generation_prompt(body: Mapping[str, Any]) -> str:
+        prompt = str(body.get("prompt", body.get("instruction", ""))).strip()
+        profile = str(body.get("authoring_profile", "multi_agent"))
+        if profile == "multi_agent":
+            return prompt
+        if profile != "single_agent":
+            raise ValueError("authoring_profile must be single_agent or multi_agent")
+        executor = str(body.get("execution_agent", "")).strip()
+        if not executor:
+            raise ValueError("single_agent authoring requires an execution_agent")
+        handler = executor if executor.startswith("agent.") else f"agent.{executor}"
+        return (
+            f"[ORBIT_SINGLE_AGENT handler={handler}]\n"
+            "Build the smallest single-Agent workflow with exactly one action "
+            "node using that handler, one human approval node, and one terminal "
+            "node. Route approval to the terminal and rejection back to the same "
+            "action with one bounded loop policy (maximum 3 iterations). Do not "
+            "add decision, join, extra action, or automatic review nodes. Keep all "
+            "ports inline. The action must perform the task, self-check, and apply "
+            "human feedback on later iterations.\n\nUser request:\n" + prompt
+        )
+
     async def workflow_catalog(request: Request) -> JSONResponse:
         actor = ctx.authenticate(request, READ_SCOPE)
         if isinstance(actor, JSONResponse):
@@ -167,7 +189,7 @@ def build_routes(ctx) -> list[Route]:
             try:
                 return ctx.authoring_jobs.create(
                     actor=actor,
-                    prompt=str(body.get("prompt", body.get("instruction", ""))),
+                    prompt=_generation_prompt(body),
                     idempotency_key=key,
                     display_language=_display_language(body),
                     agent=agent,
