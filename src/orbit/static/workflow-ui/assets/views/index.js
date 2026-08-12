@@ -8,7 +8,7 @@ import { workflowGenerationProgress } from "../workflow/generation-progress.js";
 export function createViews(context) {
   const { api, render, navigate, announce, reportError, commandButtons,
     promptAndExecute, pill, statusDot, defaultGenerationAgent,
-    generationAgentField, workflowViews, runtimeState,
+    generationAgentField, workflowViews, runtimeState, isRendering,
     TERMINAL_RUN_STATUSES, DATA_TEXT_LIMIT } = context;
   let i18n = context.i18n;
   let shellFacts = context.shellFacts;
@@ -1336,22 +1336,29 @@ export function createViews(context) {
       Math.min(300, refreshSeconds() * 2 ** failures);
     const tick = async () => {
       if (runtimeState.stopped) return;
-      if (!document.hidden && !rendering && !document.querySelector("dialog[open]")) {
-        try {
+      try {
+        // Inside the try, and the reschedule inside a finally: this guard once
+        // read an identifier that was never in scope, and because it threw
+        // *before* the chain was extended, one ReferenceError silently stopped
+        // every background refresh in the shell until the page was reloaded.
+        // Nothing evaluated here may be able to end the chain.
+        if (!document.hidden && !isRendering() && !document.querySelector("dialog[open]")) {
           const live = (await api.live(liveCursor)).data;
           liveCursor = live.cursor;
           failures = 0;
           // An Editor owns unsaved local text. Background projection changes
           // must never tear down that view; explicit Draft commands redraw it.
           if (live.changed) await render();
-        } catch (error) {
-          // Programming errors must stay loud; only transport failures back off.
-          if (!(error instanceof ApiError)) throw error;
-          failures += 1;
-          if (failures === 1) reportError(error);
         }
+      } catch (error) {
+        failures += 1;
+        // Programming errors stay loud; only transport failures back off
+        // quietly. Neither is allowed to be the last tick.
+        if (!(error instanceof ApiError)) console.error(error);
+        if (failures === 1 || !(error instanceof ApiError)) reportError(error);
+      } finally {
+        refreshTimer = setTimeout(tick, delaySeconds() * 1000);
       }
-      refreshTimer = setTimeout(tick, delaySeconds() * 1000);
     };
     refreshTimer = setTimeout(tick, delaySeconds() * 1000);
   }

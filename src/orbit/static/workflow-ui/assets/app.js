@@ -395,6 +395,9 @@ async function boot() {
   views = createViews({
     api, i18n, shellFacts, mayStartRun, runtimeState,
     render: (...args) => render(...args), navigate: (...args) => navigate(...args),
+    // A getter, not the flag: `rendering` changes for the life of the shell
+    // and a copy taken here would answer for the moment views were built.
+    isRendering: () => rendering,
     announce, reportError, commandButtons, promptAndExecute, pill, statusDot,
     defaultGenerationAgent, generationAgentField, workflowViews,
     TERMINAL_RUN_STATUSES, DATA_TEXT_LIMIT,

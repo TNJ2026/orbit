@@ -179,6 +179,54 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
             ),
         }
 
+    def test_no_view_raises_an_uncaught_error(self) -> None:
+        """A net for the class of fault that has no visible symptom at first.
+
+        An identifier that was never in scope cost this shell its background
+        refresh for fifty-three commits: the polling chain threw before it
+        rescheduled itself, so nothing updated until a reload, and the only
+        trace was one line in a console nobody was reading. Every other test
+        here drives a feature; none of them was listening for that.
+        """
+
+        run_id = self.start_goal("simplified-clean", "Watch for errors")
+        context = self.browser.new_context(locale="en-US")
+        self.addCleanup(context.close)
+        # The fault this exists for did not happen during a render; it happened
+        # in the polling chain, one interval later. Watching each view for a
+        # moment would have missed it entirely, so the interval is set to its
+        # supported minimum and every view is held past a tick.
+        context.add_init_script(
+            "localStorage.setItem('orbit.refreshSeconds', '5')"
+        )
+        page = context.new_page()
+        errors: list[str] = []
+        page.on("pageerror", lambda exc: errors.append(str(exc)))
+        page.on(
+            "console",
+            lambda message: errors.append(f"console.error: {message.text}")
+            if message.type == "error" else None,
+        )
+
+        views = (
+            ("#/workflows", "#content"),
+            ("#/goals", "#content"),
+            (f"#/runs/{run_id}", ".simplified-run-hero"),
+            ("#/home", ".simplified-workspace-composer"),
+        )
+        for fragment, ready in views:
+            with self.subTest(view=fragment):
+                page.goto(f"{self.base}/ui/{fragment}")
+                page.wait_for_selector(ready)
+                page.wait_for_timeout(300)
+                self.assertEqual([], errors, f"{fragment} raised {errors}")
+
+        # The polling chain belongs to the shell rather than to any one view,
+        # so one hold past a tick covers it — and costs six seconds instead of
+        # six times four.
+        page.wait_for_timeout(6_000)
+        self.assertEqual([], errors, f"the refresh chain raised {errors}")
+
     def test_navigation_and_workflow_catalog_use_the_simplified_product_mode(self) -> None:
         page = self.open("en-US")
         page.wait_for_selector(".simplified-workspace-composer")
