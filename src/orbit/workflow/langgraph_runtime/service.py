@@ -15,6 +15,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from ..domain.serialization import canonical_json, definition_hash, to_primitive
 from .compiler import (
     LangGraphCompileError, LangGraphHandlerRegistry,
+    LangGraphJoinDeadlineExceeded,
     LangGraphRetryRequested, LangGraphUnknownExternalResult, compile_workflow,
 )
 
@@ -277,14 +278,16 @@ class LangGraphWorkflowService:
         """Continue a run whose process ended after a durable checkpoint."""
 
         current = self.get(run_id)
-        if current.status == "waiting":
+        if current.status in {"waiting", "interrupted"}:
             with self._connect() as connection:
                 timer = connection.execute(
                     "SELECT * FROM langgraph_timers WHERE run_id=?"
-                    " AND status='scheduled' ORDER BY attempt_number LIMIT 1",
+                    " AND status='scheduled' ORDER BY due_at,timer_id LIMIT 1",
                     (run_id,),
                 ).fetchone()
                 if timer is None or timer["due_at"] > self._stamp():
+                    return current
+                if timer["purpose"] == "retry" and current.status != "waiting":
                     return current
                 connection.execute("BEGIN IMMEDIATE")
                 changed = connection.execute(
@@ -296,11 +299,18 @@ class LangGraphWorkflowService:
                     return self.get(run_id)
                 connection.execute(
                     "UPDATE langgraph_runs SET status='running',revision=revision+1,"
-                    "interrupts_json='[]',updated_at=? WHERE run_id=? AND status='waiting'",
+                    "updated_at=? WHERE run_id=? AND status IN ('waiting','interrupted')",
                     (self._stamp(), run_id),
                 )
                 connection.commit()
             current = self.get(run_id)
+            if timer["purpose"] == "join_deadline":
+                record = self._workflow(
+                    current.workflow_id, current.workflow_version,
+                )
+                return self._fire_join_deadline(
+                    run_id, record.ir, timer["target_id"],
+                )
         if current.status != "running":
             return current
         record = self._workflow(current.workflow_id, current.workflow_version)
@@ -313,6 +323,62 @@ class LangGraphWorkflowService:
             ).fetchone()
         inputs = None if has_checkpoint else json.loads(row["input_json"])
         return self._execute(run_id, record.ir, inputs=inputs)
+
+    def _schedule_join_deadlines(
+        self, run_id: str, ir, *, available_outputs: Mapping[str, Any]
+    ) -> None:
+        policies = {policy.id: policy for policy in ir.policies}
+        now = self.clock().astimezone(timezone.utc)
+        with self._connect() as connection:
+            for node in ir.nodes:
+                policy = next((
+                    policies[item] for item in node.policies
+                    if item in policies and policies[item].kind == "join"
+                    and policies[item].config.get("mode") == "deadline"
+                ), None)
+                if policy is None:
+                    continue
+                if not any(
+                    edge.target_node == node.id
+                    and edge.source_node in available_outputs
+                    for edge in ir.edges
+                ):
+                    continue
+                due = now + timedelta(
+                    seconds=int(policy.config["deadline_seconds"]),
+                )
+                due_at = due.isoformat(timespec="microseconds").replace(
+                    "+00:00", "Z",
+                )
+                timer_id = f"langgraph_timer:{run_id}:join_deadline:{node.id}"
+                connection.execute(
+                    "INSERT OR IGNORE INTO langgraph_timers("
+                    "timer_id,run_id,node_id,attempt_number,due_at,status,"
+                    "purpose,target_id) VALUES (?,?,?,?,?,'scheduled',?,?)",
+                    (
+                        timer_id, run_id, node.id, 1, due_at,
+                        "join_deadline", node.id,
+                    ),
+                )
+            connection.commit()
+
+    def _fire_join_deadline(self, run_id: str, ir, node_id: str) -> LangGraphRun:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT owner_actor FROM langgraph_runs WHERE run_id=?", (run_id,)
+            ).fetchone()
+        config = {"configurable": {
+            "thread_id": run_id, "actor": row["owner_actor"],
+        }}
+        try:
+            with SqliteSaver.from_conn_string(str(self.checkpoint_db_path)) as saver:
+                workflow = compile_workflow(ir, self.handlers, checkpointer=saver)
+                result = workflow.fire_join_deadline(node_id, config=config)
+            return self._settle(run_id, "completed", result=result["result"])
+        except LangGraphJoinDeadlineExceeded as exc:
+            return self._settle(
+                run_id, "failed", error=f"{type(exc).__name__}: {exc}",
+            )
 
     def cancel(
         self,
@@ -433,6 +499,12 @@ class LangGraphWorkflowService:
                     result = workflow.invoke(None if inputs is None else inputs, config=config)
                 snapshot = workflow.graph.get_state(config)
             status = "interrupted" if snapshot.next else "completed"
+            if snapshot.next:
+                self._schedule_join_deadlines(
+                    run_id,
+                    ir,
+                    available_outputs=snapshot.values.get("node_outputs", {}),
+                )
             interrupts = tuple(
                 {
                     "id": item.id,
@@ -511,6 +583,11 @@ class LangGraphWorkflowService:
                     run_id,
                 ),
             ).rowcount
+            if status in {"completed", "failed", "unknown", "cancelled"}:
+                connection.execute(
+                    "UPDATE langgraph_timers SET status='cancelled'"
+                    " WHERE run_id=? AND status='scheduled'", (run_id,),
+                )
             if changed != 1:
                 connection.rollback()
                 current = self.get(run_id)

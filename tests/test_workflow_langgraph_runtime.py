@@ -37,6 +37,7 @@ from orbit.workflow.langgraph_runtime import (
     HandlerOutcome,
     LangGraphHandlerRegistry,
     LangGraphExecutionContext,
+    LangGraphJoinDeadlineExceeded,
     LangGraphRunConflict,
     LangGraphRetryableError,
     LangGraphWorkflowService,
@@ -492,6 +493,92 @@ class LangGraphArtifactStoreTests(unittest.TestCase):
 
 
 class LangGraphWorkflowCompilerTests(unittest.TestCase):
+    def test_deadline_join_opens_from_partial_checkpoint(self) -> None:
+        deadline = IRPolicy(
+            "wait_for_enough", "join",
+            {
+                "mode": "deadline", "merge_mode": "array_by_edge",
+                "deadline_seconds": 10, "min_successful": 1,
+            },
+        )
+        fan = node(
+            "fan", inputs=("value",), outputs=("value",), route_mode="parallel",
+        )
+        fast = node("fast", inputs=("value",), outputs=("value",))
+        waiting = node(
+            "waiting", inputs=("value",), outputs=("value",),
+            kind="human", handler=False,
+        )
+        join = node(
+            "join", inputs=("value",), outputs=("value",),
+            kind="join", handler=False,
+        )
+        join = IRNode(
+            join.id, join.kind, join.inputs, join.outputs, join.handler,
+            join.config, (deadline.id,), join.extension, join.route_mode,
+        )
+        ir = workflow(
+            (fan, fast, waiting, join),
+            (
+                edge("fan_fast", "fan", "fast"),
+                edge("fan_waiting", "fan", "waiting"),
+                edge("fast_join", "fast", "join"),
+                edge("waiting_join", "waiting", "join"),
+            ),
+            entry=("fan",), terminals=("join",), result=("join", "value"),
+            policies=(deadline,),
+        )
+        registry = LangGraphHandlerRegistry([
+            binding("fan", lambda values, config, context: dict(values)),
+            binding("fast", lambda values, config, context: {"value": "fast"}),
+        ])
+        compiled = compile_workflow(ir, registry, checkpointer=InMemorySaver())
+        config = {"configurable": {"thread_id": "deadline-partial"}}
+
+        interrupted = compiled.invoke({"value": "start"}, config=config)
+        completed = compiled.fire_join_deadline("join", config=config)
+
+        self.assertIsNone(interrupted["result"])
+        self.assertEqual(["fast"], completed["result"])
+        self.assertEqual("join", completed["execution_order"][-1])
+
+    def test_deadline_join_fails_below_minimum(self) -> None:
+        deadline = IRPolicy(
+            "wait_for_two", "join",
+            {
+                "mode": "deadline", "merge_mode": "array_by_edge",
+                "deadline_seconds": 10, "min_successful": 2,
+            },
+        )
+        waiting = node(
+            "waiting", inputs=("value",), outputs=("value",),
+            kind="human", handler=False,
+        )
+        join = node(
+            "join", inputs=("value",), outputs=("value",),
+            kind="join", handler=False,
+        )
+        join = IRNode(
+            join.id, join.kind, join.inputs, join.outputs, join.handler,
+            join.config, (deadline.id,), join.extension, join.route_mode,
+        )
+        ir = workflow(
+            (waiting, join),
+            (edge("waiting_join", "waiting", "join"),),
+            entry=("waiting",), terminals=("join",), result=("join", "value"),
+            policies=(deadline,),
+        )
+        compiled = compile_workflow(
+            ir, LangGraphHandlerRegistry([]), checkpointer=InMemorySaver(),
+        )
+        config = {"configurable": {"thread_id": "deadline-insufficient"}}
+        compiled.invoke({"value": "start"}, config=config)
+
+        with self.assertRaisesRegex(
+            LangGraphJoinDeadlineExceeded, "timed out with 0/2 successes",
+        ):
+            compiled.fire_join_deadline("join", config=config)
+
     def test_join_all_uses_legacy_deterministic_merge_modes(self) -> None:
         fan = node(
             "fan", inputs=("value",), outputs=("value",), route_mode="parallel",
@@ -1047,6 +1134,66 @@ class LangGraphWorkflowCompilerTests(unittest.TestCase):
 
 
 class LangGraphWorkflowServiceTests(unittest.TestCase):
+    def test_deadline_join_timer_resumes_partial_checkpoint(self) -> None:
+        deadline = IRPolicy(
+            "wait_for_enough", "join",
+            {
+                "mode": "deadline", "merge_mode": "array_by_edge",
+                "deadline_seconds": 10, "min_successful": 1,
+            },
+        )
+        fan = node(
+            "fan", inputs=("value",), outputs=("value",), route_mode="parallel",
+        )
+        fast = node("fast", inputs=("value",), outputs=("value",))
+        waiting = node(
+            "waiting", inputs=("value",), outputs=("value",),
+            kind="human", handler=False,
+        )
+        join = node(
+            "join", inputs=("value",), outputs=("value",),
+            kind="join", handler=False,
+        )
+        join = IRNode(
+            join.id, join.kind, join.inputs, join.outputs, join.handler,
+            join.config, (deadline.id,), join.extension, join.route_mode,
+        )
+        ir = workflow(
+            (fan, fast, waiting, join),
+            (
+                edge("fan_fast", "fan", "fast"),
+                edge("fan_waiting", "fan", "waiting"),
+                edge("fast_join", "fast", "join"),
+                edge("waiting_join", "waiting", "join"),
+            ),
+            entry=("fan",), terminals=("join",), result=("join", "value"),
+            policies=(deadline,),
+        )
+        registry = LangGraphHandlerRegistry([
+            binding("fan", lambda values, config, context: dict(values)),
+            binding("fast", lambda values, config, context: {"value": "fast"}),
+        ])
+        now = [datetime(2026, 1, 1, tzinfo=timezone.utc)]
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.publish(directory, ir)
+            service = LangGraphWorkflowService(
+                store, registry,
+                run_db_path=Path(directory) / "runs.sqlite3",
+                checkpoint_db_path=Path(directory) / "checkpoints.sqlite3",
+                clock=lambda: now[0],
+            )
+            interrupted = service.start(
+                ir.workflow_id, {"value": "start"},
+                idempotency_key="deadline-start",
+            )
+            self.assertEqual((), service.recover_due())
+            now[0] += timedelta(seconds=10)
+            completed, = service.recover_due()
+
+        self.assertEqual("interrupted", interrupted.status)
+        self.assertEqual("completed", completed.status)
+        self.assertEqual(["fast"], completed.result)
+
     def test_retry_timer_is_durable_and_does_not_fire_early(self) -> None:
         retry = IRPolicy(
             "retry_network", "retry",

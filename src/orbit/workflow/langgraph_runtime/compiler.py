@@ -14,7 +14,7 @@ from typing import Annotated, Any, TypedDict
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
-from langgraph.types import Command, interrupt
+from langgraph.types import Command, Send, interrupt
 
 from ..data.mapping import evaluate_mapping
 from ..domain.definitions import IREdge, IRNode, WorkflowIR
@@ -46,6 +46,10 @@ class LangGraphRetryRequested(RuntimeError):
         self.node_id, self.attempt_id = node_id, attempt_id
         self.policy, self.cause = policy, cause
         super().__init__(str(cause))
+
+
+class LangGraphJoinDeadlineExceeded(RuntimeError):
+    """A deadline join fired without enough successful branches."""
 
 
 @dataclass(frozen=True)
@@ -162,6 +166,7 @@ class _GraphState(TypedDict):
     node_outputs: Annotated[dict[str, Mapping[str, Any]], _merge_dicts]
     node_routes: Annotated[dict[str, str], _merge_dicts]
     execution_order: Annotated[tuple[str, ...], _append_order]
+    join_deadlines: Annotated[dict[str, bool], _merge_dicts]
 
 
 def _edge_value(
@@ -331,6 +336,7 @@ class CompiledLangGraphWorkflow:
                 "node_outputs": {},
                 "node_routes": {},
                 "execution_order": (),
+                "join_deadlines": {},
             },
             config=self._config(config),
         )
@@ -363,6 +369,7 @@ class CompiledLangGraphWorkflow:
                 "node_outputs": {},
                 "node_routes": {},
                 "execution_order": (),
+                "join_deadlines": {},
             }
         return self.graph.stream(
             graph_input, config=self._config(config), stream_mode=stream_mode
@@ -377,6 +384,52 @@ class CompiledLangGraphWorkflow:
         """Resume a checkpointed LangGraph interrupt with its external value."""
 
         state = self.graph.invoke(Command(resume=value), config=self._config(config))
+        return self._result(state)
+
+    def fire_join_deadline(
+        self, node_id: str, *, config: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        """Wake one deadline join from its durable checkpoint."""
+
+        node = next((item for item in self.ir.nodes if item.id == node_id), None)
+        if node is None or node.kind != "join":
+            raise ValueError(f"deadline target is not a join node: {node_id!r}")
+        policy = next((
+            item for item in self.ir.policies
+            if item.id in node.policies and item.kind == "join"
+            and item.config.get("mode") == "deadline"
+        ), None)
+        if policy is None:
+            raise ValueError(f"join {node_id!r} has no deadline policy")
+        snapshot = self.graph.get_state(self._config(config))
+        values = dict(snapshot.values)
+        outputs = values.get("node_outputs", {})
+        incoming = tuple(
+            edge for edge in self.ir.edges if edge.target_node == node_id
+        )
+        successful = sum(
+            1 for edge in incoming if edge.source_node in outputs
+            and values.get("node_routes", {}).get(edge.source_node, "success")
+            == edge.route
+            and evaluate_condition(
+                edge.condition,
+                outputs[edge.source_node],
+                workflow_inputs=values.get("workflow_inputs", {}),
+            )
+        )
+        minimum = int(policy.config["min_successful"])
+        if successful < minimum:
+            raise LangGraphJoinDeadlineExceeded(
+                f"join {node_id!r} timed out with {successful}/{minimum} successes"
+            )
+        values["join_deadlines"] = {node_id: True}
+        state = self.graph.invoke(
+            Command(
+                update={"join_deadlines": {node_id: True}},
+                goto=Send(node_id, values),
+            ),
+            config=self._config(config),
+        )
         return self._result(state)
 
     def _result(self, state: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -413,7 +466,7 @@ def compile_workflow(
                 or (
                     policy.kind == "join"
                     and policy.config.get("mode") not in {
-                        "all", "all_successful", "any", "n_of_m",
+                        "all", "all_successful", "any", "n_of_m", "deadline",
                     }
                 )
             ),
@@ -458,6 +511,17 @@ def compile_workflow(
             raise LangGraphCompileError(
                 f"join policy {policy.id!r} requires a positive threshold"
             )
+        if mode == "deadline":
+            deadline = policy.config.get("deadline_seconds")
+            minimum = policy.config.get("min_successful")
+            if any(
+                isinstance(value, bool) or not isinstance(value, int) or value < 1
+                for value in (deadline, minimum)
+            ):
+                raise LangGraphCompileError(
+                    f"join policy {policy.id!r} requires positive deadline_seconds"
+                    " and min_successful"
+                )
     for policy in (item for item in ir.policies if item.kind == "loop"):
         maximum = policy.config.get("max_iterations")
         if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum < 1:
@@ -528,6 +592,14 @@ def compile_workflow(
         if node.kind == "join" and len(join_policies) != 1:
             raise LangGraphCompileError(
                 f"join node {node.id!r} requires exactly one join policy"
+            )
+        if (
+            join_policies
+            and join_policies[0].config.get("mode") == "deadline"
+            and any(edge.source_node == node.id for edge in ir.edges)
+        ):
+            raise LangGraphCompileError(
+                f"deadline join {node.id!r} must currently be terminal"
             )
         for direction, ports in (("input", node.inputs), ("output", node.outputs)):
             for port in ports:
