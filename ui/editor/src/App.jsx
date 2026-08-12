@@ -9,6 +9,7 @@ import * as api from "./api.mjs";
 import {
   NODE_KINDS, connectionProblem, freshId, toDocument, toGraph,
 } from "./dsl-graph.mjs";
+import Inspector from "./Inspector.jsx";
 import WorkflowNode from "./WorkflowNode.jsx";
 
 const nodeTypes = { workflow: WorkflowNode };
@@ -23,6 +24,7 @@ export default function App() {
   const [edges, setEdges] = useState([]);
   const [notice, setNotice] = useState(null);
   const [diagnostics, setDiagnostics] = useState([]);
+  const [selection, setSelection] = useState(null);
   const [busy, setBusy] = useState(false);
   // This tab's expected_version is behind the store: somebody else published
   // while it was open, so every publish from here would be refused.
@@ -72,6 +74,7 @@ export default function App() {
       setNodes(graph.nodes);
       setEdges(graph.edges);
       setStale(false);
+      setSelection(null);
     } catch (error) {
       setNotice({ level: "error", text: error.message });
     }
@@ -123,6 +126,27 @@ export default function App() {
     );
   }, []);
 
+  /** Merge a patch into the stored DSL object of whatever is selected.
+   *
+   * `undefined` in the patch deletes the field rather than writing a null,
+   * because the DSL schema rejects a null where it expects an absent one.
+   */
+  const patchSelected = useCallback((patch) => {
+    if (!selection) return;
+    const merge = (item) => {
+      const dsl = { ...(item.data?.dsl ?? {}) };
+      for (const [key, value] of Object.entries(patch)) {
+        if (value === undefined) delete dsl[key];
+        else dsl[key] = value;
+      }
+      return { ...item, data: { ...item.data, dsl } };
+    };
+    const apply = (current) =>
+      current.map((item) => (item.id === selection.item.id ? merge(item) : item));
+    if (selection.kind === "edge") setEdges(apply);
+    else setNodes(apply);
+  }, [selection]);
+
   const addNode = useCallback(
     (kind) => {
       setNodes((current) => {
@@ -155,6 +179,15 @@ export default function App() {
     () => (base ? toDocument(base, { nodes, edges }) : null),
     [base, nodes, edges],
   );
+
+  // Re-read from the live arrays: the item captured when the author clicked is
+  // a snapshot, and the panel has to show what their own edits just produced.
+  const live = useMemo(() => {
+    if (!selection) return null;
+    const source = selection.kind === "edge" ? edges : nodes;
+    const item = source.find((entry) => entry.id === selection.item.id);
+    return item ? { kind: selection.kind, item } : null;
+  }, [selection, nodes, edges]);
 
   // The compiler answers with diagnostics; showing them is the entire value of
   // asking it, so they are rendered rather than collapsed into "invalid".
@@ -263,7 +296,8 @@ export default function App() {
 
       {notice ? <p className={`notice ${notice.level}`}>{notice.text}</p> : null}
 
-      <div className="canvas">
+      <div className="workspace">
+        <div className="canvas">
         <ReactFlow
           nodes={drawn}
           edges={edges}
@@ -272,12 +306,19 @@ export default function App() {
           onEdgesChange={onEdgesChange}
           onConnect={onConnect}
           isValidConnection={isValidConnection}
+          onNodeClick={(_event, node) => setSelection({ kind: "node", item: node })}
+          onEdgeClick={(_event, edge) => setSelection({ kind: "edge", item: edge })}
+          onPaneClick={() => setSelection(null)}
           fitView
         >
           <Background />
           <Controls />
           <MiniMap pannable zoomable />
         </ReactFlow>
+        </div>
+        {base ? (
+          <Inspector selection={live} document={document} onChange={patchSelected} />
+        ) : null}
       </div>
 
       {diagnostics.length ? (

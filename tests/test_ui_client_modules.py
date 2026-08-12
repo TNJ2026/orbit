@@ -23,6 +23,7 @@ SUITE = ROOT / "tests" / "ui" / "client_modules.test.mjs"
 EDITOR_SUITES = (
     ROOT / "ui" / "editor" / "src" / "dsl-graph.test.mjs",
     ROOT / "ui" / "editor" / "src" / "api.test.mjs",
+    ROOT / "ui" / "editor" / "src" / "expressions.test.mjs",
 )
 NODE = shutil.which("node")
 
