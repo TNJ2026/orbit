@@ -20,6 +20,7 @@ from starlette.routing import Route
 from ...workflow.api.dto import envelope, page_size
 from ...workflow.application.authoring_job_service import AuthoringJobConflict
 from ...workflow.domain.ids import EntityId
+from ...workflow.dsl import LANGGRAPH_NODE_KINDS, authoring_json_schema
 from ...workflow.persistence.database import connect_workflow_database
 
 from .common import (
@@ -237,6 +238,26 @@ def build_routes(ctx) -> list[Route]:
             return {"workflow_id": workflow_id, "deleted": True}
 
         return await ctx.mutate(request, WRITE_SCOPE, "workflow.delete", command)
+
+    async def workflow_authoring_schema(request: Request) -> JSONResponse:
+        """The contract an editor must draw within, served by the server.
+
+        A canvas that hard-codes its own copy of the node kinds, the port
+        fields or the edge shape is a second definition of the authoring
+        boundary, and the two drift the first time one moves. Serving it means
+        the editor's palette and the compiler's answer come from one place.
+
+        Read scope: this is the shape of a definition, not any definition.
+        """
+
+        actor = ctx.authenticate(request, READ_SCOPE)
+        if isinstance(actor, JSONResponse):
+            return actor
+        return JSONResponse(envelope({
+            "dsl_version": "1.3",
+            "node_kinds": list(LANGGRAPH_NODE_KINDS),
+            "schema": authoring_json_schema(),
+        }))
 
     async def authoring_job_list(request: Request) -> JSONResponse:
         actor = ctx.authenticate(request, READ_SCOPE)
@@ -755,6 +776,10 @@ def build_routes(ctx) -> list[Route]:
         # /generate before /{workflow_id}: Starlette matches in order, and the
         # literal segment must not be captured as a workflow id.
         Route("/api/v1/workflows/generate", workflow_generate, methods=["POST"]),
+        Route(
+            "/api/v1/workflows/authoring-schema",
+            workflow_authoring_schema, methods=["GET"],
+        ),
         Route(
             "/api/v1/workflow-authoring-jobs", authoring_job_list, methods=["GET"],
         ),

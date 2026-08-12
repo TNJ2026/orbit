@@ -3337,3 +3337,62 @@ class SurfaceTests(ApiTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AuthoringSchemaApiTests(ApiTestCase):
+    """The authoring contract, served rather than re-declared by the editor."""
+
+    def _schema(self, client):
+        response = client.get("/api/v1/workflows/authoring-schema", actor="reader")
+        self.assertEqual(200, response.status_code, response.text)
+        return response.json()["data"]
+
+    def test_the_contract_is_readable_and_names_its_dsl_version(self) -> None:
+        with AsgiHarness(self.app) as client:
+            data = self._schema(client)
+        self.assertEqual("1.3", data["dsl_version"])
+        self.assertEqual(
+            ["action", "decision", "human", "join", "terminal"], data["node_kinds"]
+        )
+
+    def test_the_served_schema_is_the_one_the_compiler_binds_to(self) -> None:
+        from orbit.workflow.dsl import authoring_json_schema
+
+        with AsgiHarness(self.app) as client:
+            data = self._schema(client)
+        self.assertEqual(authoring_json_schema(), data["schema"])
+
+    def test_edge_endpoints_arrive_under_their_dsl_names(self) -> None:
+        """An editor drawing `source`/`target` would emit an invalid document."""
+
+        with AsgiHarness(self.app) as client:
+            edge = self._schema(client)["schema"]["$defs"]["Edge"]["properties"]
+        self.assertIn("from", edge)
+        self.assertIn("to", edge)
+        self.assertNotIn("source", edge)
+
+    def test_the_contract_never_offers_a_handler_fingerprint(self) -> None:
+        """An editor must not be able to choose what a node binds to."""
+
+        with AsgiHarness(self.app) as client:
+            handler = self._schema(client)["schema"]["$defs"]["HandlerRef"]
+        self.assertEqual(["name", "version"], sorted(handler["properties"]))
+
+    def test_reading_the_contract_still_needs_credentials(self) -> None:
+        with AsgiHarness(self.app) as client:
+            self.assertEqual(
+                401, client.get("/api/v1/workflows/authoring-schema").status_code
+            )
+            self.assertEqual(
+                403,
+                client.get(
+                    "/api/v1/workflows/authoring-schema", actor="nobody"
+                ).status_code,
+            )
+
+    def test_the_literal_path_is_not_captured_as_a_workflow_id(self) -> None:
+        """Route order: /authoring-schema must not resolve as /{workflow_id}."""
+
+        with AsgiHarness(self.app) as client:
+            data = self._schema(client)
+        self.assertIn("schema", data)

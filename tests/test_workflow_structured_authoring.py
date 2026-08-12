@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+import tempfile
 import unittest
+from unittest import mock
 
 from pydantic import ValidationError
 
@@ -27,9 +30,11 @@ from orbit.workflow.authoring.structured import (
 from orbit.workflow.catalogs import (
     HandlerManifest, InMemoryHandlerCatalog, InMemorySchemaCatalog,
 )
+from orbit.web.api_v1 import READ_SCOPE, Authorizer
 from orbit.workflow.domain.durable_execution import ExecutionSafety
 from orbit.workflow.domain.handlers import ResourceProfile
 from orbit.workflow.dsl import AuthoredWorkflow
+from tests.test_web_composition import AsgiHarness
 
 
 MANIFEST = HandlerManifest(
@@ -413,3 +418,109 @@ def _funnel_document(workflow_id: str = "generated") -> dict:
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CliArgumentTests(unittest.TestCase):
+    """`--structured-agent NAME=MODEL`, refused at the prompt when malformed."""
+
+    def _parse(self, values):
+        from orbit.__main__ import _structured_agents
+
+        return _structured_agents(values)
+
+    def test_no_flag_means_no_structured_agents(self) -> None:
+        self.assertIsNone(self._parse(None))
+        self.assertIsNone(self._parse([]))
+
+    def test_each_entry_becomes_a_name_and_a_model(self) -> None:
+        self.assertEqual(
+            {"gpt": "openai:gpt-5.2", "claude": "anthropic:claude-opus-5"},
+            self._parse(["gpt=openai:gpt-5.2", " claude = anthropic:claude-opus-5 "]),
+        )
+
+    def test_a_model_containing_equals_keeps_everything_after_the_first(self) -> None:
+        self.assertEqual({"x": "a=b"}, self._parse(["x=a=b"]))
+
+    def test_a_missing_half_is_refused(self) -> None:
+        for entry in ("gpt", "gpt=", "=openai:gpt-5.2", "  =  "):
+            with self.subTest(entry=entry), self.assertRaises(SystemExit):
+                self._parse([entry])
+
+    def test_a_duplicate_name_is_refused(self) -> None:
+        with self.assertRaises(SystemExit):
+            self._parse(["gpt=a", "gpt=b"])
+
+
+class AppWiringTests(unittest.TestCase):
+    """A configured structured agent has to reach the authoring service."""
+
+    def _app(self, **kwargs):
+        """Built with the optional dependency stubbed out at its seam.
+
+        `structured_generators` looks `StructuredDslGenerator` up as a module
+        global, so replacing it here exercises the real wiring in `create_app`
+        without pydantic-ai installed or a network call.
+        """
+
+        from orbit.web.app import create_app
+
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        return create_app(
+            Path(directory.name) / "orbit.sqlite3",
+            authenticator=lambda request: request.headers.get("x-orbit-actor"),
+            authorizer=Authorizer(lambda actor: (READ_SCOPE,)),
+            worker_count=1,
+            **kwargs,
+        )
+
+    def setUp(self) -> None:
+        patcher = mock.patch(
+            "orbit.workflow.authoring.structured.StructuredDslGenerator",
+            lambda model, **kwargs: _generator(_StubAgent(_generated())),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_a_structured_agent_is_offered_as_a_generation_agent(self) -> None:
+        app = self._app(structured_agents={"gpt": "stub:model"}, discover_agents=False)
+        with AsgiHarness(app) as client:
+            capability = client.get(
+                "/api/v1/capabilities", actor="test:reader"
+            ).json()["data"]["capabilities"]["workflow_generation"]
+        self.assertTrue(capability["available"])
+        self.assertIn("gpt", capability["agents"])
+        self.assertEqual("gpt", capability["default_agent"])
+
+    def test_two_structured_agents_both_appear_and_one_is_the_default(self) -> None:
+        app = self._app(
+            structured_agents={"zeta": "stub:z", "alpha": "stub:a"},
+            discover_agents=False,
+        )
+        with AsgiHarness(app) as client:
+            capability = client.get(
+                "/api/v1/capabilities", actor="test:reader"
+            ).json()["data"]["capabilities"]["workflow_generation"]
+        self.assertEqual(["alpha", "zeta"], sorted(capability["agents"]))
+        self.assertEqual("alpha", capability["default_agent"])
+
+    def test_a_name_colliding_with_another_writer_is_refused(self) -> None:
+        """Two writers behind one name means the author cannot be told the truth."""
+
+        with self.assertRaises(ValueError) as caught:
+            self._app(
+                structured_agents={"cli": "stub:model"},
+                workflow_generators={"cli": lambda prompt: "{}"},
+                discover_agents=False,
+            )
+        self.assertIn("collide", str(caught.exception))
+
+    def test_no_structured_agents_leaves_the_wiring_untouched(self) -> None:
+        app = self._app(
+            workflow_generators={"cli": lambda prompt: "{}"}, discover_agents=False
+        )
+        with AsgiHarness(app) as client:
+            capability = client.get(
+                "/api/v1/capabilities", actor="test:reader"
+            ).json()["data"]["capabilities"]["workflow_generation"]
+        self.assertEqual(["cli"], capability["agents"])

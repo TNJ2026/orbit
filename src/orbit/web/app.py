@@ -460,6 +460,7 @@ def create_app(
     agent_capabilities: Sequence[str] | None = None,
     workflow_generator: Callable[[str], str] | None = None,
     workflow_generators: Mapping[str, Callable[[str], str]] | None = None,
+    structured_agents: Mapping[str, Any] | None = None,
     authoring_broker: Any = None,
     single_goal_mode: bool = True,
     workflow_db_path: Path | str | None = None,
@@ -571,6 +572,26 @@ def create_app(
                 # the unnamed fallback; the names in the menu are the ones Apps
                 # report for themselves.
                 workflow_generator = authoring_broker
+
+    if structured_agents:
+        # Operator-configured names, so they sit *over* discovery rather than
+        # under it like a connected App does — an operator who named one meant
+        # it. A collision is refused outright instead: two different writers
+        # answering to one name means an author cannot be told truthfully which
+        # one wrote their workflow, and being told the wrong one is worse than
+        # an error.
+        from ..workflow.authoring.structured import structured_generators
+
+        clash = sorted(set(structured_agents) & set(generation_agents))
+        if clash:
+            raise ValueError(
+                "structured agent names collide with discovered ones: "
+                + ", ".join(clash)
+            )
+        built = structured_generators(tuple(structured_agents.items()))
+        generation_agents = ChainMap(dict(built), generation_agents)
+        if workflow_generator is None:
+            workflow_generator = built[sorted(built)[0]]
 
     if langgraph_state_directory is not None:
         if langgraph_service is not None:

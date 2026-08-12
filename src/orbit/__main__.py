@@ -359,6 +359,29 @@ def _run_command(args) -> None:
         print(f"{state} {started.run_id} ({started.workflow_id}@{started.workflow_version})")
 
 
+def _structured_agents(values) -> dict[str, str] | None:
+    """Parse repeated `--structured-agent NAME=MODEL` into a mapping.
+
+    Both halves are required and neither may be blank: a bare name has no
+    model to call, and a bare model has no name an author could select.
+    """
+
+    if not values:
+        return None
+    agents: dict[str, str] = {}
+    for entry in values:
+        name, separator, model = str(entry).partition("=")
+        name, model = name.strip(), model.strip()
+        if not separator or not name or not model:
+            raise SystemExit(
+                f"error: --structured-agent expects NAME=MODEL, got {entry!r}"
+            )
+        if name in agents:
+            raise SystemExit(f"error: duplicate structured agent name: {name}")
+        agents[name] = model
+    return agents
+
+
 def _serve(args) -> None:
     """Start the new Runtime composition root."""
 
@@ -437,6 +460,8 @@ def _serve(args) -> None:
         if args.langgraph_state_dir else Path(db_path).parent
     )
 
+    structured_agents = _structured_agents(getattr(args, "structured_agent", None))
+
     def request_shutdown() -> None:
         # Uvicorn owns graceful shutdown and lifespan cleanup. Raising the same
         # signal as Ctrl-C keeps its public `run` entrypoint (and embedders that
@@ -469,8 +494,15 @@ def _serve(args) -> None:
             langgraph_state_directory=langgraph_state_directory,
             legacy_execution=False,
             workflow_ui_mode=args.ui_mode,
+            structured_agents=structured_agents,
         )
     except MixedSchemaError as exc:
+        raise SystemExit(f"error: {exc}") from None
+    except (ValueError, ImportError) as exc:
+        # A misspelled --structured-agent, a name that collides with a
+        # discovered CLI, or the optional dependency not installed. All are
+        # things the operator typed, so they get an error at the prompt rather
+        # than a Runtime that starts and refuses the first generation.
         raise SystemExit(f"error: {exc}") from None
 
     upsert_project(
@@ -632,6 +664,19 @@ def main() -> None:
             "Register the trusted git and verify tools. Workflows may then run "
             "reviewed commands inside a git worktree; they still cannot supply "
             "a command of their own."
+        ),
+    )
+    serve_cmd.add_argument(
+        "--structured-agent",
+        action="append",
+        default=None,
+        metavar="NAME=MODEL",
+        help=(
+            "Add a workflow writer that asks a model API for a typed "
+            "definition instead of forking a local Agent CLI, e.g. "
+            "--structured-agent gpt=openai:gpt-5.2. Repeatable. Needs the "
+            "optional 'pydantic-ai-slim' dependency and that provider's "
+            "credentials in the environment."
         ),
     )
     serve_cmd.add_argument(
