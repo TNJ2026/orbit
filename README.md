@@ -60,6 +60,13 @@ uv run orbit serve
 
 The UI is available at `http://127.0.0.1:8848/ui`.
 
+The single-Agent authoring UI is the default. Start the unchanged advanced
+multi-Agent UI explicitly when needed:
+
+```bash
+uv run orbit serve --ui-mode multi-agent
+```
+
 ## Use Orbit in Codex
 
 ### Open and connect

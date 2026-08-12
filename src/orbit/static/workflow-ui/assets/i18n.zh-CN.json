@@ -138,6 +138,8 @@
   "generate.tryAgain": "重新生成",
   "goal.cancelExecution": "取消执行",
   "generate.title": "用描述生成工作流",
+  "generate.single.title": "创建单 Agent 工作流",
+  "generate.single.hint": "选择执行 Agent 并描述任务；系统固定生成人工审核与最多 3 次返工的简化流程。",
   "generate.writtenBy": "由谁编写",
   "goals.filter.status": "按状态筛选目标",
   "goals.search.label": "搜索目标",

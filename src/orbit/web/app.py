@@ -466,6 +466,7 @@ def create_app(
     langgraph_service: Any = None,
     langgraph_state_directory: Path | str | None = None,
     legacy_execution: bool = True,
+    workflow_ui_mode: str = "multi-agent",
 ) -> Starlette:
     """Build the Runtime application.
 
@@ -473,6 +474,9 @@ def create_app(
     in M3): they mount alongside health, and get the composition through
     `app.state.runtime` rather than by importing anything from the old engine.
     """
+
+    if workflow_ui_mode not in {"single-agent", "multi-agent"}:
+        raise ValueError("workflow_ui_mode must be single-agent or multi-agent")
 
     # Discovery runs *before* the composition, because the composition seals
     # the handler registry in its constructor. Registering afterwards is not
@@ -880,6 +884,7 @@ def create_app(
             shutdown_request=shutdown_request,
             langgraph_service=langgraph_service,
             legacy_execution=legacy_execution,
+            workflow_ui_mode=workflow_ui_mode,
         ),
         # The MCP surface is a second protocol over the same application
         # services and the same identity, not a second implementation.

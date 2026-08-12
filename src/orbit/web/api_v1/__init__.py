@@ -69,6 +69,7 @@ def build_api_v1(
     shutdown_request: Callable[[], None] | None = None,
     langgraph_service=None,
     legacy_execution: bool = True,
+    workflow_ui_mode: str = "multi-agent",
 ) -> list[Route]:
     """Routes for `/api/v1`, ready to mount on the composition root.
 
@@ -103,6 +104,7 @@ def build_api_v1(
         shutdown_request=shutdown_request,
         langgraph_service=langgraph_service,
         legacy_execution=legacy_execution,
+        workflow_ui_mode=workflow_ui_mode,
     )
     routes = [
         *ops.build_routes(ctx),

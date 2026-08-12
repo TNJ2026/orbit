@@ -2124,7 +2124,14 @@ class WorkflowDraftApiTests(ApiTestCase):
             prompts.append(prompt)
             return "{}"
 
-        app = self._app_with_named_agents({"codex": writer})
+        app = create_app(
+            self.db, handlers=[transform_registration()], schemas=SCHEMAS,
+            worker_count=1, poll_seconds=0.02,
+            authenticator=lambda request: request.headers.get("x-orbit-actor"),
+            authorizer=Authorizer(lambda actor: self.scopes.get(actor, [])),
+            workflow_generators={"codex": writer}, single_goal_mode=False,
+            workflow_ui_mode="single-agent",
+        )
         with AsgiHarness(app) as client:
             response = client.post(
                 "/api/v1/workflows/generate", actor="writer", key="single-codex",
@@ -2181,7 +2188,14 @@ class WorkflowDraftApiTests(ApiTestCase):
         self.assertIn("use several specialist agents", prompts[0])
 
     def test_single_agent_generation_requires_an_execution_agent(self) -> None:
-        app = self._app_with_named_agents({"codex": lambda _prompt: "{}"})
+        app = create_app(
+            self.db, handlers=[transform_registration()], schemas=SCHEMAS,
+            worker_count=1, poll_seconds=0.02,
+            authenticator=lambda request: request.headers.get("x-orbit-actor"),
+            authorizer=Authorizer(lambda actor: self.scopes.get(actor, [])),
+            workflow_generators={"codex": lambda _prompt: "{}"},
+            single_goal_mode=False, workflow_ui_mode="single-agent",
+        )
         with AsgiHarness(app) as client:
             response = client.post(
                 "/api/v1/workflows/generate", actor="writer", key="single-default",
@@ -2193,6 +2207,21 @@ class WorkflowDraftApiTests(ApiTestCase):
 
         self.assertEqual(409, response.status_code)
         self.assertIn("requires an execution_agent", response.json()["error"]["message"])
+
+    def test_generation_rejects_a_profile_from_the_other_ui(self) -> None:
+        app = self._app_with_named_agents({"codex": lambda _prompt: "{}"})
+        with AsgiHarness(app) as client:
+            response = client.post(
+                "/api/v1/workflows/generate", actor="writer", key="wrong-ui",
+                body={
+                    "prompt": "implement it", "agent": "codex",
+                    "execution_agent": "codex",
+                    "authoring_profile": "single_agent",
+                },
+            )
+
+        self.assertEqual(409, response.status_code)
+        self.assertIn("multi_agent authoring profile", response.json()["error"]["message"])
 
     def test_authoring_job_keeps_the_agent_cli_console(self) -> None:
         """A job that thinks for a minute must not be a black box.
@@ -2667,7 +2696,7 @@ class CapabilityTests(ApiTestCase):
             self.assertFalse(data["permissions"]["ops_read"])
             self.assertFalse(data["permissions"]["ops_write"])
             self.assertEqual(
-                {"single_goal_mode": False},
+                {"single_goal_mode": False, "workflow_ui_mode": "multi-agent"},
                 data["product_mode"],
             )
             caps = data["capabilities"]
@@ -2707,7 +2736,7 @@ class CapabilityTests(ApiTestCase):
                 "/api/v1/capabilities", actor="reader"
             ).json()["data"]
             self.assertEqual(
-                {"single_goal_mode": True},
+                {"single_goal_mode": True, "workflow_ui_mode": "multi-agent"},
                 data["product_mode"],
             )
             catalog = client.get(

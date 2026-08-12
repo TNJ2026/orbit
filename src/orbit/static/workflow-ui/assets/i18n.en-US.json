@@ -138,6 +138,8 @@
   "generate.tryAgain": "Generate again",
   "goal.cancelExecution": "Cancel execution",
   "generate.title": "Generate a workflow from a description",
+  "generate.single.title": "Create a single-Agent workflow",
+  "generate.single.hint": "Choose the executing Agent and describe the task; Orbit adds human approval and up to 3 revisions.",
   "generate.writtenBy": "Written by",
   "goals.filter.status": "Filter goals by status",
   "goals.search.label": "Search goals",

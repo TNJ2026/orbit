@@ -157,6 +157,24 @@ class WorkflowCliTests(unittest.TestCase):
         )
 
         self.assertFalse(create_app.call_args.kwargs["legacy_execution"])
+        self.assertEqual(
+            "single-agent", create_app.call_args.kwargs["workflow_ui_mode"]
+        )
+
+    def test_serve_can_select_the_multi_agent_ui(self) -> None:
+        with (
+            patch("orbit.web.app.create_app") as create_app,
+            patch("orbit.__main__.upsert_project"),
+            patch("orbit.__main__.uvicorn.run"),
+        ):
+            self.run_cli(
+                "serve", "--db", str(self.db), "--no-agent-discovery",
+                "--ui-mode", "multi-agent",
+            )
+
+        self.assertEqual(
+            "multi-agent", create_app.call_args.kwargs["workflow_ui_mode"]
+        )
 
     def test_serve_reports_an_unusable_artifact_root_without_a_traceback(self) -> None:
         invalid_root = Path(self.temp_dir.name) / "not-a-directory"

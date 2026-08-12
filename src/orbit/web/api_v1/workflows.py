@@ -32,7 +32,12 @@ from .common import (
 def build_routes(ctx) -> list[Route]:
     def _generation_prompt(body: Mapping[str, Any]) -> str:
         prompt = str(body.get("prompt", body.get("instruction", ""))).strip()
-        profile = str(body.get("authoring_profile", "multi_agent"))
+        expected_profile = ctx.workflow_ui_mode.replace("-", "_")
+        profile = str(body.get("authoring_profile", expected_profile))
+        if profile != expected_profile:
+            raise ValueError(
+                f"this Runtime uses the {expected_profile} authoring profile"
+            )
         if profile == "multi_agent":
             return prompt
         if profile != "single_agent":

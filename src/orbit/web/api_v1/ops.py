@@ -191,6 +191,7 @@ def build_routes(ctx) -> list[Route]:
             "capabilities": dict(ctx.capabilities or {}),
             "product_mode": {
                 "single_goal_mode": ctx.single_goal_mode,
+                "workflow_ui_mode": ctx.workflow_ui_mode,
             },
             "permissions": {
                 "start_run": ctx.guard.allows(actor, WRITE_SCOPE),

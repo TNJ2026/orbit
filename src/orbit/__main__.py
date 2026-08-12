@@ -464,6 +464,7 @@ def _serve(args) -> None:
             shutdown_request=request_shutdown,
             langgraph_state_directory=langgraph_state_directory,
             legacy_execution=False,
+            workflow_ui_mode=args.ui_mode,
         )
     except MixedSchemaError as exc:
         raise SystemExit(f"error: {exc}") from None
@@ -608,6 +609,12 @@ def main() -> None:
             "Local content-addressed Artifact directory "
             "(default: artifacts/ beside the Runtime database)"
         ),
+    )
+    serve_cmd.add_argument(
+        "--ui-mode",
+        choices=("single-agent", "multi-agent"),
+        default="single-agent",
+        help="Workflow authoring UI to serve (default: single-agent).",
     )
     serve_cmd.add_argument(
         "--no-agent-discovery",

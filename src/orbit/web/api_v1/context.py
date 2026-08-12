@@ -95,6 +95,7 @@ class ApiContext:
         shutdown_request: Callable[[], None] | None = None,
         langgraph_service=None,
         legacy_execution: bool = True,
+        workflow_ui_mode: str = "multi-agent",
     ) -> None:
         path = Path(db_path)
         workflow_path = Path(workflow_db_path or db_path)
@@ -103,6 +104,7 @@ class ApiContext:
         self.durable_service = durable_service
         self.langgraph_service = langgraph_service
         self.legacy_execution = bool(legacy_execution)
+        self.workflow_ui_mode = workflow_ui_mode
         self.artifact_backend = artifact_backend or getattr(
             durable_service, "artifact_backend", None
         )

@@ -54,6 +54,12 @@ uv run orbit serve
 
 UI 地址为 `http://127.0.0.1:8848/ui`。
 
+默认启动单 Agent 编排 UI。如需使用保持原有能力的多 Agent 高级 UI：
+
+```bash
+uv run orbit serve --ui-mode multi-agent
+```
+
 ## 在 Codex 中使用
 
 ### 打开并连接
