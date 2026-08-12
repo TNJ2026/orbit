@@ -815,11 +815,10 @@ def create_app(
         authoring_catalogs, SQLiteWorkflowVersionStore(composition.workflow_db_path)
     )
     template_service = None
-    if (
-        workflow_ui_mode == "single-agent"
-        and langgraph_service is not None
-        and authoring_broker is not None
-    ):
+    # Built wherever its two dependencies are, not only in single-agent mode.
+    # Starting a goal from a template is a feature, and which mode is on says
+    # how many Agents an author picks between, not what the Runtime can do.
+    if langgraph_service is not None and authoring_broker is not None:
         from ..workflow.templates import SingleAgentTemplateService
 
         template_service = SingleAgentTemplateService(

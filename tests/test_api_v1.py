@@ -2117,7 +2117,7 @@ class WorkflowDraftApiTests(ApiTestCase):
             self.assertEqual("done", job["status"], job.get("error"))
             self.assertEqual(["codex"], asked)
 
-    def test_single_agent_http_does_not_mount_dsl_authoring_routes(self) -> None:
+    def test_single_agent_http_mounts_the_same_authoring_routes(self) -> None:
         app = create_app(
             self.db, handlers=[transform_registration(), self._agent_registration()],
             schemas=SCHEMAS,
@@ -2127,11 +2127,11 @@ class WorkflowDraftApiTests(ApiTestCase):
             workflow_generators={"app:codex": lambda _prompt: "{}"}, single_goal_mode=False,
             workflow_ui_mode="single-agent",
         )
-        # Asserted on the mounted routes rather than only on a status: with
-        # the literal segment absent, `/generate` is matched by
-        # `/api/v1/workflows/{workflow_id}` and refused as a method rather than
-        # as a path. The intent is that the endpoint is not there at all.
-        self.assertNotIn(
+        # The mode decides how many Agents an author picks between, not which
+        # endpoints exist. A Runtime that advertised generation in its
+        # capabilities and then had no route for it was reporting a promise it
+        # could not keep.
+        self.assertIn(
             "workflow_generate",
             {route.name for route in app.routes if getattr(route, "name", None)},
         )
@@ -2145,7 +2145,7 @@ class WorkflowDraftApiTests(ApiTestCase):
                 },
             )
 
-        self.assertIn(response.status_code, (404, 405))
+        self.assertEqual(200, response.status_code, response.text)
 
     def test_multi_agent_generation_prompt_is_unchanged(self) -> None:
         prompts = []
@@ -2177,20 +2177,42 @@ class WorkflowDraftApiTests(ApiTestCase):
         self.assertNotIn("ORBIT_SINGLE_AGENT", prompts[0])
         self.assertIn("use several specialist agents", prompts[0])
 
-    def test_generation_rejects_a_profile_from_the_other_ui(self) -> None:
+    def test_generation_accepts_either_authoring_profile(self) -> None:
+        """The profile names how many Agents an author picks between.
+
+        It is not a reason to refuse the request: both UIs generate the same
+        way, and which Agent writes it is settled by the name in `agent`.
+        """
+
+        # A Runtime each: one generation may be in flight at a time, so the
+        # second profile would be refused as a duplicate rather than judged.
+        for profile in ("single_agent", "multi_agent"):
+            with self.subTest(profile=profile):
+                app = self._app_with_named_agents({"codex": lambda _prompt: "{}"})
+                with AsgiHarness(app) as client:
+                    response = client.post(
+                        "/api/v1/workflows/generate", actor="writer",
+                        key=f"profile-{profile}",
+                        body={
+                            "prompt": "implement it", "agent": "codex",
+                            "execution_agent": "codex",
+                            "authoring_profile": profile,
+                        },
+                    )
+                self.assertEqual(200, response.status_code, response.text)
+
+    def test_generation_still_refuses_a_profile_it_does_not_know(self) -> None:
         app = self._app_with_named_agents({"codex": lambda _prompt: "{}"})
         with AsgiHarness(app) as client:
             response = client.post(
-                "/api/v1/workflows/generate", actor="writer", key="wrong-ui",
+                "/api/v1/workflows/generate", actor="writer", key="unknown-profile",
                 body={
                     "prompt": "implement it", "agent": "codex",
-                    "execution_agent": "codex",
-                    "authoring_profile": "single_agent",
+                    "authoring_profile": "invented",
                 },
             )
-
         self.assertEqual(409, response.status_code)
-        self.assertIn("multi_agent authoring profile", response.json()["error"]["message"])
+        self.assertIn("unknown authoring profile", response.json()["error"]["message"])
 
     def test_authoring_job_keeps_the_agent_cli_console(self) -> None:
         """A job that thinks for a minute must not be a black box.
@@ -3493,12 +3515,12 @@ class WorkflowCatalogModeTests(ApiTestCase):
         self.assertEqual(200, response.status_code, response.text)
         self.assertEqual("1.3", response.json()["data"]["dsl_version"])
 
-    def test_drafts_stay_with_the_ui_that_drives_them(self) -> None:
-        """Only the multi-agent UI runs the persistent-draft flow."""
+    def test_both_modes_mount_the_same_routes(self) -> None:
+        """The mode is which UI is served, not what the Runtime can do."""
 
-        # There is no draft to read; what is being asked is whether the route
-        # is mounted at all, which a 404 from Starlette answers either way. So
-        # compare the mounted names instead.
+        # Compared on the mounted route names: what is being asked is which
+        # endpoints exist, and a status code cannot tell "not mounted" from
+        # "mounted and refused".
         single = {
             route.name for route in self.build("single-agent").routes
             if getattr(route, "name", None)
@@ -3507,24 +3529,15 @@ class WorkflowCatalogModeTests(ApiTestCase):
             route.name for route in self.build("multi-agent").routes
             if getattr(route, "name", None)
         }
-        # Single-agent mode gets the catalog the editor reads and nothing that
-        # writes a definition from a prompt: generation, the jobs that track
-        # it, natural-language revision, handler rebinding and drafts.
-        self.assertEqual(
-            {
-                "authoring_job_cancel", "authoring_job_list",
-                "authoring_job_output", "authoring_job_read",
-                "workflow_action_update", "workflow_delete",
-                "workflow_draft_create", "workflow_draft_read",
-                "workflow_generate", "workflow_modify", "workflow_rebind",
-            },
-            multi - single,
-        )
-        # And what it does get is exactly what the editor needs.
+        # Identical in both directions: nothing added by one mode, nothing
+        # withheld by the other.
+        self.assertEqual(set(), multi ^ single)
         self.assertLessEqual(
             {
                 "workflow_catalog", "workflow_detail", "workflow_validate",
                 "workflow_publish", "workflow_authoring_schema",
+                "workflow_generate", "workflow_modify", "workflow_delete",
+                "workflow_draft_create", "authoring_job_list",
             },
             single,
         )

@@ -107,15 +107,15 @@ def build_api_v1(
         legacy_execution=legacy_execution,
         workflow_ui_mode=workflow_ui_mode,
     )
-    # The workflow catalog is served in both modes. Reading, validating and
-    # publishing a definition is not a property of which authoring UI is on:
-    # the single-agent product runs published workflows too, and the graph
-    # editor is served beside it. Drafts stay with the multi-agent UI, which is
-    # the only thing that drives that flow.
-    authoring = workflow_ui_mode == "multi-agent"
-    routes = [*ops.build_routes(ctx), *workflows.build_routes(ctx, authoring=authoring)]
-    if authoring:
-        routes.extend(drafts.build_routes(ctx))
+    # Both modes get the same surface. `workflow_ui_mode` selects how many
+    # Agents an author chooses between, not which features exist: a Runtime
+    # that offered generation in one mode and refused it in the other made the
+    # capability report a promise the routes did not keep.
+    routes = [
+        *ops.build_routes(ctx),
+        *workflows.build_routes(ctx),
+        *drafts.build_routes(ctx),
+    ]
     if legacy_execution:
         routes[:0] = [
             *runs.build_routes(ctx),
