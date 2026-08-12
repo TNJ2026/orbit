@@ -272,7 +272,11 @@ class LangGraphWorkflowService:
             )
             connection.commit()
         record = self._workflow(current.workflow_id, current.workflow_version)
-        return self._execute(run_id, record.ir, resume=value)
+        resume_value = (
+            {current.interrupts[0]["id"]: value}
+            if len(current.interrupts) == 1 else value
+        )
+        return self._execute(run_id, record.ir, resume=resume_value)
 
     def recover(self, run_id: str) -> LangGraphRun:
         """Continue a run whose process ended after a durable checkpoint."""
@@ -374,7 +378,15 @@ class LangGraphWorkflowService:
             with SqliteSaver.from_conn_string(str(self.checkpoint_db_path)) as saver:
                 workflow = compile_workflow(ir, self.handlers, checkpointer=saver)
                 result = workflow.fire_join_deadline(node_id, config=config)
-            return self._settle(run_id, "completed", result=result["result"])
+                after = workflow.graph.get_state(config)
+            interrupts = tuple(
+                {"id": item.id, "value": to_primitive(item.value)}
+                for task in after.tasks for item in task.interrupts
+            )
+            return self._settle(
+                run_id, "interrupted" if interrupts else "completed",
+                result=result["result"], interrupts=interrupts,
+            )
         except LangGraphJoinDeadlineExceeded as exc:
             return self._settle(
                 run_id, "failed", error=f"{type(exc).__name__}: {exc}",

@@ -430,6 +430,24 @@ class CompiledLangGraphWorkflow:
             ),
             config=self._config(config),
         )
+        if any(edge.source_node == node_id for edge in self.ir.edges):
+            self.graph.update_state(
+                self._config(config),
+                {
+                    "node_outputs": {
+                        node_id: state.get("node_outputs", {})[node_id],
+                    },
+                    "node_routes": {
+                        node_id: state.get("node_routes", {}).get(
+                            node_id, "success",
+                        ),
+                    },
+                    "execution_order": (node_id,),
+                    "join_deadlines": {node_id: True},
+                },
+                as_node=node_id,
+            )
+            state = self.graph.invoke(None, config=self._config(config))
         return self._result(state)
 
     def _result(self, state: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -592,14 +610,6 @@ def compile_workflow(
         if node.kind == "join" and len(join_policies) != 1:
             raise LangGraphCompileError(
                 f"join node {node.id!r} requires exactly one join policy"
-            )
-        if (
-            join_policies
-            and join_policies[0].config.get("mode") == "deadline"
-            and any(edge.source_node == node.id for edge in ir.edges)
-        ):
-            raise LangGraphCompileError(
-                f"deadline join {node.id!r} must currently be terminal"
             )
         for direction, ports in (("input", node.inputs), ("output", node.outputs)):
             for port in ports:

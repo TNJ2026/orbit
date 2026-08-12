@@ -1158,15 +1158,24 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
             join.id, join.kind, join.inputs, join.outputs, join.handler,
             join.config, (deadline.id,), join.extension, join.route_mode,
         )
+        review = node(
+            "review", inputs=("value",), outputs=("value",),
+            kind="human", handler=False,
+        )
+        terminal = node(
+            "terminal", inputs=("value",), kind="terminal", handler=False,
+        )
         ir = workflow(
-            (fan, fast, waiting, join),
+            (fan, fast, waiting, join, review, terminal),
             (
                 edge("fan_fast", "fan", "fast"),
                 edge("fan_waiting", "fan", "waiting"),
                 edge("fast_join", "fast", "join"),
                 edge("waiting_join", "waiting", "join"),
+                edge("join_review", "join", "review"),
+                edge("review_terminal", "review", "terminal"),
             ),
-            entry=("fan",), terminals=("join",), result=("join", "value"),
+            entry=("fan",), terminals=("terminal",), result=("review", "value"),
             policies=(deadline,),
         )
         registry = LangGraphHandlerRegistry([
@@ -1188,11 +1197,19 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
             )
             self.assertEqual((), service.recover_due())
             now[0] += timedelta(seconds=10)
-            completed, = service.recover_due()
+            reviewing, = service.recover_due()
+            completed = service.resume(
+                reviewing.run_id,
+                "approved",
+                expected_revision=reviewing.revision,
+                idempotency_key="deadline-review",
+            )
 
         self.assertEqual("interrupted", interrupted.status)
+        self.assertEqual("interrupted", reviewing.status)
+        self.assertEqual("review", reviewing.interrupts[0]["value"]["node_id"])
         self.assertEqual("completed", completed.status)
-        self.assertEqual(["fast"], completed.result)
+        self.assertEqual("approved", completed.result)
 
     def test_retry_timer_is_durable_and_does_not_fire_early(self) -> None:
         retry = IRPolicy(
