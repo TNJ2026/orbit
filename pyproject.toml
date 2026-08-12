@@ -26,6 +26,11 @@ dependencies = [
 # skips when it is absent, so a plain install stays four dependencies deep.
 [project.optional-dependencies]
 dev = ["playwright>=1.45", "Pillow>=10"]
+# Structured workflow authoring against a model API, as an alternative to a
+# locally installed Agent CLI. Optional for the same reason playwright is:
+# `authoring.structured` imports it when a generator is built, never at module
+# import, so a Runtime that only uses discovered CLIs never pulls it in.
+structured-authoring = ["pydantic-ai-slim>=0.4"]
 
 [project.scripts]
 orbit = "orbit.__main__:main"
