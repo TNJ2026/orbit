@@ -611,16 +611,56 @@ class LangGraphWorkflowService:
             ).fetchall()
         return tuple(self._record(row) for row in rows)
 
-    def recover_running(self, *, limit: int = 100) -> tuple[LangGraphRun, ...]:
-        """Recover a bounded snapshot of runs left running by process loss."""
+    def recover_running(
+        self, *, limit: int = 100, on_error: Callable[[str, Exception], None] | None = None
+    ) -> tuple[LangGraphRun, ...]:
+        """Recover a bounded snapshot of runs left running by process loss.
 
-        recovered = [self.recover(item.run_id) for item in self.list_runs(
-            status="running", limit=limit,
-        )]
-        recovered.extend(self.recover_due(limit=max(1, limit - len(recovered))))
+        One unrecoverable run must not strand the rest. `_execute` settles a
+        run it cannot finish as `failed` *before* it re-raises, so that run's
+        terminal state is already durable and skipping it loses nothing;
+        carrying the exception out of the batch, on the other hand, leaves
+        every run behind it `running` forever. At startup it is worse than
+        that — this is called from the ASGI lifespan, so one poisoned run would
+        stop the whole Runtime from accepting a single connection, including
+        the half of it that has nothing to do with LangGraph.
+
+        `on_error` observes what was skipped. A failure to observe is not
+        allowed to undo the isolation this method exists to provide.
+        """
+
+        def attempt(run_id: str) -> LangGraphRun | None:
+            try:
+                return self.recover(run_id)
+            except Exception as exc:  # noqa: BLE001 - isolation is the point
+                if on_error is not None:
+                    try:
+                        on_error(run_id, exc)
+                    except Exception:  # noqa: BLE001 - observation, never the work
+                        pass
+                return None
+
+        recovered = [
+            run for item in self.list_runs(status="running", limit=limit)
+            if (run := attempt(item.run_id)) is not None
+        ]
+        recovered.extend(
+            self.recover_due(
+                limit=max(1, limit - len(recovered)), on_error=on_error
+            )
+        )
         return tuple(recovered)
 
-    def recover_due(self, *, limit: int = 100) -> tuple[LangGraphRun, ...]:
+    def recover_due(
+        self, *, limit: int = 100, on_error: Callable[[str, Exception], None] | None = None
+    ) -> tuple[LangGraphRun, ...]:
+        """Fire every timer that is due, one failure at a time.
+
+        Isolated for the same reason as `recover_running`: this is the timer
+        loop's entry point, and a single run whose deadline cannot be fired
+        would otherwise stop every other run's timer from firing too.
+        """
+
         with self._connect() as connection:
             rows = connection.execute(
                 "SELECT DISTINCT run_id FROM langgraph_timers"
@@ -628,7 +668,17 @@ class LangGraphWorkflowService:
                 " ORDER BY due_at LIMIT ?",
                 (self._stamp(), limit),
             ).fetchall()
-        return tuple(self.recover(row["run_id"]) for row in rows)
+        recovered: list[LangGraphRun] = []
+        for row in rows:
+            try:
+                recovered.append(self.recover(row["run_id"]))
+            except Exception as exc:  # noqa: BLE001 - isolation is the point
+                if on_error is not None:
+                    try:
+                        on_error(row["run_id"], exc)
+                    except Exception:  # noqa: BLE001 - observation, never the work
+                        pass
+        return tuple(recovered)
 
     def _finish_timer(self, run_id: str, purpose: str, target_id: str) -> None:
         with self._connect() as connection:

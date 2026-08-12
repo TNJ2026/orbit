@@ -12,6 +12,7 @@ planner policy and no SQL.
 
 from __future__ import annotations
 
+import asyncio
 from collections import ChainMap
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -611,7 +612,32 @@ def create_app(
             # A process may stop after LangGraph wrote a checkpoint but before
             # the adapter settled its run metadata. Recover those bounded,
             # explicitly opted-in runs before accepting new work.
-            langgraph_service.recover_running()
+            failures: list[dict[str, str]] = []
+
+            def record(run_id: str, exc: Exception) -> None:
+                failures.append(
+                    {"run_id": run_id, "error": f"{type(exc).__name__}: {exc}"}
+                )
+
+            try:
+                # In a worker thread: recovery replays whole workflows
+                # synchronously, so running it here would mean the server
+                # accepts no connection until every left-over run has finished.
+                await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: langgraph_service.recover_running(on_error=record)
+                )
+            except Exception as exc:  # noqa: BLE001 - startup outlives recovery
+                # Per-run failures are already isolated inside recover_running;
+                # reaching here means recovery itself could not run at all. The
+                # Runtime still starts: refusing to serve anything because some
+                # older run cannot be replayed is a worse outage than the one
+                # being reported.
+                record("*", exc)
+            if failures:
+                # Surfaced rather than swallowed, like shutdown_stragglers
+                # below: a run that cannot be recovered is a thing an operator
+                # has to see, not a thing to discover from a silent status.
+                app.state.startup_recovery_failures = failures
         composition.start()
         try:
             yield

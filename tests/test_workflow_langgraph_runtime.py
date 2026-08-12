@@ -1592,6 +1592,95 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
             checkpoint_db_path=Path(directory) / "langgraph-checkpoints.sqlite3",
         )
 
+    def _two_stranded_runs(self, directory: str):
+        """Two runs the database believes are still in flight.
+
+        Returned in the order `recover_running` will visit them, so a test can
+        poison the *first* one. Poisoning the last would pass whether or not
+        the batch is isolated, and prove nothing.
+        """
+
+        action = node("action", inputs=("value",), outputs=("value",))
+        terminal = node(
+            "terminal", inputs=("value",), kind="terminal", handler=False
+        )
+        ir = workflow(
+            (action, terminal), (edge("done", "action", "terminal"),),
+            entry=("action",), terminals=("terminal",), result=("action", "value"),
+        )
+        registry = LangGraphHandlerRegistry(
+            [binding("action", lambda values, config, context: {"value": 1})]
+        )
+        store = SQLiteWorkflowVersionStore(Path(directory) / "workflows.sqlite3")
+        service = self.service(directory, store, registry)
+        runs = [
+            service.start_snapshot(
+                f"template:stranded-{index}", ir, {"value": index},
+                template_id=f"stranded-{index}", idempotency_key=f"key-{index}",
+            )
+            for index in range(2)
+        ]
+        with sqlite3.connect(service.run_db_path) as connection:
+            connection.execute("UPDATE langgraph_runs SET status='running'")
+            connection.commit()
+        visiting = [item.run_id for item in service.list_runs(status="running")]
+        self.assertEqual(
+            sorted(item.run_id for item in runs), sorted(visiting)
+        )
+        return service, visiting
+
+    def test_one_unrecoverable_run_does_not_strand_the_rest_of_the_batch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            service, run_ids = self._two_stranded_runs(directory)
+            poisoned, healthy = run_ids
+            observed: list[tuple[str, str]] = []
+            original = service.recover
+
+            def recover(run_id: str):
+                if run_id == poisoned:
+                    raise RuntimeError("handler build is gone")
+                return original(run_id)
+
+            service.recover = recover
+
+            recovered = service.recover_running(
+                on_error=lambda run_id, exc: observed.append((run_id, str(exc)))
+            )
+
+            self.assertEqual([healthy], [item.run_id for item in recovered])
+            self.assertEqual([(poisoned, "handler build is gone")], observed)
+
+    def test_recovery_without_an_observer_still_isolates_a_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            service, run_ids = self._two_stranded_runs(directory)
+            poisoned, healthy = run_ids
+            original = service.recover
+            service.recover = lambda run_id: (
+                original(run_id) if run_id != poisoned
+                else (_ for _ in ()).throw(RuntimeError("gone"))
+            )
+
+            recovered = service.recover_running()
+
+            self.assertEqual([healthy], [item.run_id for item in recovered])
+
+    def test_an_observer_that_raises_cannot_undo_the_isolation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            service, run_ids = self._two_stranded_runs(directory)
+            poisoned, healthy = run_ids
+            original = service.recover
+            service.recover = lambda run_id: (
+                original(run_id) if run_id != poisoned
+                else (_ for _ in ()).throw(RuntimeError("gone"))
+            )
+
+            def hostile(run_id: str, exc: Exception) -> None:
+                raise ValueError("the observer is broken too")
+
+            recovered = service.recover_running(on_error=hostile)
+
+            self.assertEqual([healthy], [item.run_id for item in recovered])
+
     def test_start_is_durable_and_idempotent(self) -> None:
         action = node("action", inputs=("value",), outputs=("value",))
         terminal = node(
@@ -2458,7 +2547,7 @@ class LangGraphHttpApiTests(unittest.TestCase):
             def __init__(self) -> None:
                 self.recoveries = 0
 
-            def recover_running(self):
+            def recover_running(self, *, on_error=None):
                 self.recoveries += 1
                 return ()
 
@@ -2482,6 +2571,82 @@ class LangGraphHttpApiTests(unittest.TestCase):
             {"available": True, "api": "/api/v1/langgraph-runs"}, capability
         )
         self.assertEqual(1, service.recoveries)
+
+    def test_the_runtime_starts_even_when_startup_recovery_cannot_run(self) -> None:
+        """A left-over run must not be able to stop the whole Runtime.
+
+        `recover_running` isolates per-run failures itself; this covers the
+        outer guard, for when recovery cannot get off the ground at all — a
+        corrupt run database, a missing checkpoint file. Refusing to serve
+        anything, including the half of the Runtime that has no LangGraph in
+        it, is a worse outage than the one being reported.
+        """
+
+        class BrokenService:
+            def recover_running(self, *, on_error=None):
+                raise sqlite3.DatabaseError("run database is malformed")
+
+        with tempfile.TemporaryDirectory() as directory:
+            app = create_app(
+                Path(directory) / "orbit.sqlite3",
+                langgraph_service=BrokenService(),
+                authenticator=lambda request: request.headers.get("x-orbit-actor"),
+                authorizer=Authorizer(lambda actor: (READ_SCOPE,)),
+                worker_count=1,
+            )
+            with AsgiHarness(app) as client:
+                self.assertEqual(
+                    200,
+                    client.get("/health/live", actor="test:reader").status_code,
+                )
+            failures = app.state.startup_recovery_failures
+        self.assertEqual(1, len(failures))
+        self.assertEqual("*", failures[0]["run_id"])
+        self.assertIn("run database is malformed", failures[0]["error"])
+
+    def test_a_clean_startup_records_no_recovery_failures(self) -> None:
+        class RecoveringService:
+            def recover_running(self, *, on_error=None):
+                return ()
+
+        with tempfile.TemporaryDirectory() as directory:
+            app = create_app(
+                Path(directory) / "orbit.sqlite3",
+                langgraph_service=RecoveringService(),
+                authenticator=lambda request: request.headers.get("x-orbit-actor"),
+                authorizer=Authorizer(lambda actor: (READ_SCOPE,)),
+                worker_count=1,
+            )
+            with AsgiHarness(app):
+                pass
+            self.assertFalse(hasattr(app.state, "startup_recovery_failures"))
+
+    def test_a_run_that_cannot_be_recovered_is_reported_not_fatal(self) -> None:
+        """The isolated per-run path, seen from startup."""
+
+        class PartialService:
+            def recover_running(self, *, on_error=None):
+                on_error("run:stuck", RuntimeError("handler build is gone"))
+                return ()
+
+        with tempfile.TemporaryDirectory() as directory:
+            app = create_app(
+                Path(directory) / "orbit.sqlite3",
+                langgraph_service=PartialService(),
+                authenticator=lambda request: request.headers.get("x-orbit-actor"),
+                authorizer=Authorizer(lambda actor: (READ_SCOPE,)),
+                worker_count=1,
+            )
+            with AsgiHarness(app) as client:
+                self.assertEqual(
+                    200,
+                    client.get("/health/live", actor="test:reader").status_code,
+                )
+            failures = app.state.startup_recovery_failures
+        self.assertEqual(
+            [{"run_id": "run:stuck", "error": "RuntimeError: handler build is gone"}],
+            failures,
+        )
 
     def test_agent_generation_publishes_and_runs_through_langgraph_mcp(self) -> None:
         document = {
