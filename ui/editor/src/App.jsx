@@ -9,7 +9,9 @@ import * as api from "./api.mjs";
 import {
   NODE_KINDS, connectionProblem, freshId, toDocument, toGraph,
 } from "./dsl-graph.mjs";
+import { removePort } from "./document.mjs";
 import Inspector from "./Inspector.jsx";
+import WorkflowPanel from "./WorkflowPanel.jsx";
 import WorkflowNode from "./WorkflowNode.jsx";
 
 const nodeTypes = { workflow: WorkflowNode };
@@ -146,6 +148,39 @@ export default function App() {
     if (selection.kind === "edge") setEdges(apply);
     else setNodes(apply);
   }, [selection]);
+
+  /** Replace one side's ports on the selected node. */
+  const setPorts = useCallback((side, ports) => {
+    if (selection?.kind !== "node") return;
+    setNodes((current) =>
+      current.map((node) =>
+        node.id === selection.item.id
+          ? { ...node, data: { ...node.data, [side]: ports } }
+          : node,
+      ),
+    );
+  }, [selection]);
+
+  /** Drop a port, and with it every edge that named it.
+   *
+   * Computed once from the current graph rather than inside the state
+   * updaters: nesting them would run this side effect during a render, and
+   * the edges have to be decided from the same snapshot as the nodes.
+   */
+  const dropPort = useCallback((side, portId) => {
+    if (selection?.kind !== "node") return;
+    const result = removePort({ nodes, edges }, selection.item.id, side, portId);
+    setNodes(result.nodes);
+    setEdges(result.edges);
+    setNotice(
+      result.removedEdges.length
+        ? {
+          level: "info",
+          text: `removed ${result.removedEdges.length} edge(s) bound to ${portId}`,
+        }
+        : null,
+    );
+  }, [selection, nodes, edges]);
 
   const addNode = useCallback(
     (kind) => {
@@ -316,8 +351,19 @@ export default function App() {
           <MiniMap pannable zoomable />
         </ReactFlow>
         </div>
-        {base ? (
-          <Inspector selection={live} document={document} onChange={patchSelected} />
+        {base && live ? (
+          <Inspector
+            selection={live}
+            document={document}
+            onChange={patchSelected}
+            onPorts={setPorts}
+            onRemovePort={dropPort}
+          />
+        ) : null}
+        {base && !live ? (
+          // Nothing selected means the workflow itself: entry, terminals,
+          // result and policies belong to the document, not to any one node.
+          <WorkflowPanel document={document} onChange={setBase} />
         ) : null}
       </div>
 

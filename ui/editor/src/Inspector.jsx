@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 
+import { addPort } from "./document.mjs";
 import {
   availableReferences, conditionText, conditionValue, mappingText,
   mappingValue, objectText, objectValue,
@@ -183,7 +184,67 @@ function EdgeInspector({ edge, document, policies, onChange }) {
   );
 }
 
-function NodeInspector({ node, policies, onChange }) {
+function PortList({ node, side, onAdd, onRemove }) {
+  const [draft, setDraft] = useState({ id: "", schema_id: "" });
+  const [problem, setProblem] = useState(null);
+  const ports = node.data?.[side] ?? [];
+  return (
+    <fieldset>
+      <legend>{side}</legend>
+      <ul className="ports-list">
+        {ports.map((port) => (
+          <li key={port.id}>
+            <code>{port.id}</code>
+            <span className="schema" title={port.schema_id}>{port.schema_id}</span>
+            <button
+              type="button"
+              className="link"
+              // The edges bound to it go too: an edge naming a port that is
+              // gone cannot compile, so leaving them would turn one deletion
+              // into a diagnostic to chase.
+              title="remove, along with any edge bound to it"
+              onClick={() => onRemove(side, port.id)}
+            >
+              remove
+            </button>
+          </li>
+        ))}
+      </ul>
+      <div className="port-add">
+        <input
+          value={draft.id}
+          placeholder="id"
+          spellCheck={false}
+          onChange={(event) => setDraft({ ...draft, id: event.target.value })}
+        />
+        <input
+          value={draft.schema_id}
+          placeholder="schema_id"
+          spellCheck={false}
+          onChange={(event) => setDraft({ ...draft, schema_id: event.target.value })}
+        />
+        <button
+          type="button"
+          onClick={() => {
+            const result = addPort(ports, draft);
+            if (result.problem) {
+              setProblem(result.problem);
+              return;
+            }
+            setProblem(null);
+            setDraft({ id: "", schema_id: "" });
+            onAdd(side, result.value);
+          }}
+        >
+          add
+        </button>
+      </div>
+      {problem ? <em className="problem">{problem}</em> : null}
+    </fieldset>
+  );
+}
+
+function NodeInspector({ node, policies, onChange, onPorts, onRemovePort }) {
   const dsl = node.data?.dsl ?? {};
   const initial = objectText(dsl.config);
   const [config, changeConfig, problem] = useDraft(
@@ -212,6 +273,8 @@ function NodeInspector({ node, policies, onChange }) {
           JSON object. Its shape belongs to the Handler, which is what checks it.
         </em>
       </label>
+      <PortList node={node} side="inputs" onAdd={onPorts} onRemove={onRemovePort} />
+      <PortList node={node} side="outputs" onAdd={onPorts} onRemove={onRemovePort} />
       {policies.length ? (
         <fieldset>
           <legend>Policies</legend>
@@ -244,7 +307,9 @@ function NodeInspector({ node, policies, onChange }) {
  * is what `toDocument` rebuilds from — so a field this panel does not show is
  * still carried through untouched.
  */
-export default function Inspector({ selection, document, onChange }) {
+export default function Inspector({
+  selection, document, onChange, onPorts, onRemovePort,
+}) {
   const policies = document?.policies ?? [];
   if (!selection) {
     return (
@@ -267,6 +332,8 @@ export default function Inspector({ selection, document, onChange }) {
           node={selection.item}
           policies={policies}
           onChange={onChange}
+          onPorts={onPorts}
+          onRemovePort={onRemovePort}
         />
       )}
     </aside>
