@@ -210,3 +210,6 @@ body {
 .inspector .port-add input { flex: 1; min-width: 0; }
 
 .bar button.active { border-color: var(--accent); color: var(--accent); }
+
+.inspector .required { color: var(--bad); }
+.inspector fieldset > label:last-child { margin-bottom: 0; }

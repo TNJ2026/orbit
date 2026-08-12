@@ -33,7 +33,41 @@ from orbit.web.api_v1 import Authorizer
 from orbit.web.local_identity import LOCAL_ACTOR, LOCAL_SCOPES, loopback_authenticator
 from orbit.workflow.artifacts.local_cas import LocalCASBackend
 from orbit.workflow.api.routes import RateLimiter
+from orbit.web.app import HandlerRegistration
+from orbit.workflow.catalogs import HandlerManifest
+from orbit.workflow.domain.durable_execution import ExecutionSafety
+from orbit.workflow.domain.handlers import ResourceProfile
+from orbit.workflow.handlers import TransformHandler
 from tests.test_web_composition import SCHEMAS, transform_registration
+
+
+def schema_bearing_registration() -> HandlerRegistration:
+    """A Handler whose config schema is the shape a discovered Agent carries.
+
+    The real one comes from `agent_discovery`, which needs a CLI installed;
+    this declares the same schema so the form has something to render from.
+    """
+
+    manifest = HandlerManifest(
+        "agent.fake", "1.0.0", ("action",),
+        {"value": "example://integer/1.0"},
+        {"value": "example://integer/1.0"},
+        {
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string"},
+                "timeout_seconds": {
+                    "type": "integer", "minimum": 1, "maximum": 1800,
+                    "description": "How long this step may run.",
+                },
+            },
+            "additionalProperties": False,
+        },
+        ExecutionSafety.REPLAY_SAFE,
+        ResourceProfile(100, 100, 5, 60, 1_000_000, "test"),
+        "schema://object/1.0", (), (), True, True,
+    )
+    return HandlerRegistration(manifest, TransformHandler(), "agent.fake@1.0.0")
 
 
 EDITOR_BUILT = resources.files("orbit").joinpath(
@@ -91,7 +125,8 @@ class EditorBrowserTests(unittest.TestCase):
         cls.db = Path(cls.temp.name) / "runtime.db"
         app = create_app(
             cls.db,
-            handlers=[transform_registration()], schemas=SCHEMAS,
+            handlers=[transform_registration(), schema_bearing_registration()],
+            schemas=SCHEMAS,
             worker_count=1, poll_seconds=0.02,
             authenticator=loopback_authenticator,
             authorizer=Authorizer(
@@ -405,6 +440,65 @@ class EditorBrowserTests(unittest.TestCase):
         # The edge goes with it: one naming a node that is gone cannot compile.
         self.assertEqual(1, page.locator(".react-flow__node").count())
         self.assertEqual(0, page.locator(".react-flow__edge").count())
+        self.assertEqual([], self.errors)
+
+    def test_a_handler_schema_becomes_a_form_that_enforces_its_bounds(self) -> None:
+        """The schema is the Handler's own, and it already says all of this.
+
+        Asking an author to hand-type JSON the Runtime could describe to them
+        is asking them to guess at something they were already told — and the
+        bounds it carries are refused here rather than at publish.
+        """
+
+        agent = json.loads(json.dumps(self.workflow))
+        agent["nodes"][0]["handler"] = {"name": "agent.fake", "version": "1.0.0"}
+        agent["nodes"][0]["config"] = {"prompt": "do it", "timeout_seconds": 600}
+        self.post(
+            f"/api/v1/workflows/{self.workflow_id}/versions",
+            {"source": json.dumps(agent), "expected_version": 1},
+        )
+
+        page = self.open_editor()
+        self.node(page, "work").click()
+        page.wait_for_selector(".inspector fieldset")
+        legends = page.locator(".inspector fieldset legend").all_inner_texts()
+        self.assertIn("Config", legends)
+
+        number = page.locator(".inspector input[type=number]")
+        self.assertEqual("600", number.input_value())
+        self.assertEqual("1", number.get_attribute("min"))
+        self.assertEqual("1800", number.get_attribute("max"))
+
+        number.fill("9999")
+        page.wait_for_timeout(300)
+        self.assertIn("at most 1800", page.locator(".inspector .problem").first.inner_text())
+
+        number.fill("900")
+        page.wait_for_timeout(300)
+        page.click("button:has-text('Publish')")
+        page.wait_for_timeout(2500)
+        self.assertIn("published", page.locator(".notice").inner_text())
+
+        stored = json.loads(self.get(f"/api/v1/workflows/{self.workflow_id}")["source"])
+        # A number, not the text of one, and nothing else disturbed.
+        self.assertEqual(
+            {"prompt": "do it", "timeout_seconds": 900}, stored["nodes"][0]["config"]
+        )
+        self.assertEqual([], self.errors)
+
+    def test_a_handler_without_a_schema_keeps_the_raw_editor(self) -> None:
+        """`transform` takes whatever it likes; a form would say otherwise."""
+
+        page = self.open_editor()
+        self.node(page, "work").click()
+        page.wait_for_selector(".inspector")
+        self.assertNotIn(
+            "Config", page.locator(".inspector fieldset legend").all_inner_texts()
+        )
+        self.assertIn(
+            "declares no config schema",
+            page.locator(".inspector label:has(span:text('Config')) .hint").inner_text(),
+        )
         self.assertEqual([], self.errors)
 
     def test_a_workflow_published_without_a_source_cannot_be_edited(self) -> None:

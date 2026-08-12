@@ -1,5 +1,8 @@
 import { useEffect, useState } from "react";
 
+import {
+  applyField, describeFields, emptied, fieldValue, isClosed, unknownKeys,
+} from "./config-form.mjs";
 import { addPort, handlerRef, handlersForKind, portsFromManifest } from "./document.mjs";
 import {
   availableReferences, conditionText, conditionValue, mappingText,
@@ -184,6 +187,148 @@ function EdgeInspector({ edge, document, policies, onChange }) {
   );
 }
 
+function ConfigField({ field, config, onChange }) {
+  const [problem, setProblem] = useState(null);
+  const value = fieldValue(config, field);
+  const commit = (raw) => {
+    const result = applyField(config, field, raw);
+    setProblem(result.problem ?? null);
+    if (!result.problem) onChange(emptied(result.value));
+  };
+  const help = field.description ? <em className="hint">{field.description}</em> : null;
+
+  if (field.control === "checkbox") {
+    return (
+      <>
+        <label className="inline">
+          <input
+            type="checkbox"
+            checked={Boolean(value)}
+            onChange={(event) => commit(event.target.checked)}
+          />
+          <span>{field.name}</span>
+        </label>
+        {help}
+      </>
+    );
+  }
+  return (
+    <label>
+      <span>
+        {field.name}
+        {field.required ? <b className="required"> *</b> : null}
+      </span>
+      {field.control === "select" ? (
+        <select value={value ?? ""} onChange={(event) => commit(event.target.value)}>
+          <option value="">unset</option>
+          {field.choices.map((choice) => (
+            <option key={choice} value={choice}>{choice}</option>
+          ))}
+        </select>
+      ) : field.control === "number" ? (
+        <input
+          type="number"
+          value={value ?? ""}
+          min={field.minimum ?? undefined}
+          max={field.maximum ?? undefined}
+          step={field.integer ? 1 : "any"}
+          onChange={(event) => commit(event.target.value)}
+        />
+      ) : field.control === "text" ? (
+        <input
+          value={value ?? ""}
+          spellCheck={false}
+          onChange={(event) => commit(event.target.value)}
+        />
+      ) : (
+        <textarea
+          rows={3}
+          value={value ?? ""}
+          spellCheck={false}
+          onChange={(event) => commit(event.target.value)}
+        />
+      )}
+      {problem ? <em className="problem">{problem}</em> : null}
+      {help}
+    </label>
+  );
+}
+
+/** The Handler's own config, as the fields its schema declares.
+ *
+ * Falls back to the raw object when the schema cannot drive a form — a
+ * Handler that takes whatever it likes has nothing to draw — and keeps the
+ * raw editor beside the form when the schema is open, because keys it does
+ * not describe are still the author's and must not become uneditable.
+ */
+function ConfigEditor({ node, schema, onChange }) {
+  const dsl = node.data?.dsl ?? {};
+  const config = dsl.config;
+  const fields = describeFields(schema);
+  const initial = objectText(config);
+  const [text, changeText, rawProblem] = useDraft(
+    initial,
+    (next) => objectValue(next, config),
+    (value) => onChange({ config: value }),
+  );
+
+  if (!fields) {
+    return (
+      <label>
+        <span>Config</span>
+        <textarea
+          rows={5}
+          value={text}
+          placeholder="{}"
+          spellCheck={false}
+          onChange={(event) => changeText(event.target.value)}
+        />
+        {rawProblem ? <em className="problem">{rawProblem}</em> : null}
+        <em className="hint">
+          JSON object. This Handler declares no config schema, so its shape is
+          up to it.
+        </em>
+      </label>
+    );
+  }
+
+  const extra = unknownKeys(config, schema);
+  return (
+    <fieldset>
+      <legend>Config</legend>
+      {fields.map((item) => (
+        <ConfigField
+          key={item.name}
+          field={item}
+          config={config}
+          onChange={(next) => onChange({ config: next })}
+        />
+      ))}
+      {isClosed(schema) ? null : (
+        <em className="hint">
+          This Handler also accepts keys it does not declare
+          {extra.length ? `; this node sets ${extra.join(", ")}` : ""}.
+        </em>
+      )}
+      {extra.length ? (
+        <label>
+          <span>Other keys</span>
+          <textarea
+            rows={3}
+            value={text}
+            spellCheck={false}
+            onChange={(event) => changeText(event.target.value)}
+          />
+          {rawProblem ? <em className="problem">{rawProblem}</em> : null}
+          <em className="hint">
+            Edited as JSON, because the schema does not describe these.
+          </em>
+        </label>
+      ) : null}
+    </fieldset>
+  );
+}
+
 function PortList({ node, side, onAdd, onRemove }) {
   const [draft, setDraft] = useState({ id: "", schema_id: "" });
   const [problem, setProblem] = useState(null);
@@ -251,13 +396,10 @@ function NodeInspector({
 }) {
   const dsl = node.data?.dsl ?? {};
   const available = handlersForKind(handlers, node.data.kind);
-  const initial = objectText(dsl.config);
-  const [config, changeConfig, problem] = useDraft(
-    initial,
-    (next) => objectValue(next, dsl.config),
-    (value) => onChange({ config: value }),
-  );
   const selected = new Set(dsl.policies ?? []);
+  const bound = available.find(
+    (item) => handlerKey(item) === handlerKey(dsl.handler),
+  );
   return (
     <>
       <h2>
@@ -309,20 +451,11 @@ function NodeInspector({
           <em className="problem">an action node requires a handler</em>
         ) : null}
       </label>
-      <label>
-        <span>Config</span>
-        <textarea
-          rows={5}
-          value={config}
-          placeholder="{}"
-          spellCheck={false}
-          onChange={(event) => changeConfig(event.target.value)}
-        />
-        {problem ? <em className="problem">{problem}</em> : null}
-        <em className="hint">
-          JSON object. Its shape belongs to the Handler, which is what checks it.
-        </em>
-      </label>
+      <ConfigEditor
+        node={node}
+        schema={bound?.config_schema}
+        onChange={onChange}
+      />
       <PortList node={node} side="inputs" onAdd={onPorts} onRemove={onRemovePort} />
       <PortList node={node} side="outputs" onAdd={onPorts} onRemove={onRemovePort} />
       {policies.length ? (
