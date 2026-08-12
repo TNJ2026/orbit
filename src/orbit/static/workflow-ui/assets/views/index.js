@@ -35,7 +35,14 @@ export function createViews(context) {
 
 
   function workflowStartCommand(entry) {
-    return (entry?.allowed_commands || []).find((item) => item.command === "run.start");
+    const commands = entry?.allowed_commands || [];
+    return commands.find((item) => item.command === "langgraph_run.start")
+      || commands.find((item) => item.command === "run.start");
+  }
+
+  function workflowRunnable(entry) {
+    return entry?.goal_readiness === "ready"
+      || entry?.langgraph_compatibility?.compatible === true;
   }
 
   function prepareSimplifiedComposer(summary, entries) {
@@ -50,7 +57,7 @@ export function createViews(context) {
     }
     if (!entries.some((item) => item.workflow_id === simplifiedComposerState.workflowId)) {
       const ready = entries.find(
-        (item) => item.goal_readiness === "ready" && workflowStartCommand(item),
+        (item) => workflowRunnable(item) && workflowStartCommand(item),
       );
       simplifiedComposerState.workflowId = ready?.workflow_id || entries[0]?.workflow_id || "";
     }
@@ -108,7 +115,7 @@ export function createViews(context) {
       class: "banner error simplified-composer-problem", hidden: "hidden",
     });
     const chosen = selectedEntry();
-    const allowed = chosen?.goal_readiness === "ready" ? workflowStartCommand(chosen) : null;
+    const allowed = workflowRunnable(chosen) ? workflowStartCommand(chosen) : null;
     const start = el("button", {
       class: "button primary", type: "submit", id: "newGoalStart",
       disabled: locked || !allowed ? "disabled" : null,
@@ -127,7 +134,7 @@ export function createViews(context) {
           const fresh = (await api.workflowCatalog()).data.workflows.find(
             (item) => item.workflow_id === simplifiedComposerState.workflowId,
           );
-          if (!fresh || fresh.goal_readiness !== "ready") {
+          if (!fresh || !workflowRunnable(fresh)) {
             problem.textContent = i18n.t("newRun.workflow.unavailable");
             problem.hidden = false;
             return;
@@ -151,8 +158,14 @@ export function createViews(context) {
             goal: goalText,
             input: bindGoalInput(fresh, goalText, {}),
           }, `run.start:${crypto.randomUUID ? crypto.randomUUID() : Date.now()}`);
-          simplifiedComposerState.runId = started.data.run_id;
-          navigate({ view: "run", runId: started.data.run_id });
+          const startedRun = started.data.run || started.data;
+          simplifiedComposerState.runId = startedRun.run_id;
+          if (command.command === "langgraph_run.start") {
+            announce(command.label, "success");
+            navigate({ view: "workflows", runId: null });
+          } else {
+            navigate({ view: "run", runId: startedRun.run_id });
+          }
         } catch (error) {
           if (error instanceof ApiError && error.code === "active_goal_exists") {
             const active = error.details.active_goal;
@@ -176,7 +189,7 @@ export function createViews(context) {
           if (start.isConnected) {
             const current = selectedEntry();
             start.disabled = locked
-              || current?.goal_readiness !== "ready" || !workflowStartCommand(current);
+              || !workflowRunnable(current) || !workflowStartCommand(current);
           }
         }
       },
@@ -1353,7 +1366,7 @@ export function createViews(context) {
           view: "workflowEdit", workflowId: entry.workflow_id, runId: null,
         }),
       }));
-      if ((entry.allowed_commands || []).some((item) => item.command === "run.start")) {
+      if (workflowStartCommand(entry)) {
         cardActions.push(el("button", {
           class: "button", text: i18n.t("action.newGoal"),
           onclick: () => newRunDialog(entry.workflow_id),

@@ -71,6 +71,14 @@ def build_routes(ctx) -> list[Route]:
                 else ctx.authoring_jobs.active_for_workflow(item["workflow_id"], actor=actor)
             )
             item["allowed_commands"] = ([{
+                    "command": "langgraph_run.start",
+                    "label": "Start run",
+                    "method": "POST",
+                    "href": "/api/v1/langgraph-runs",
+                    "target_aggregate_id": item["workflow_id"],
+                    "expected_version": 0,
+                    "payload_schema": "langgraph-run-start/1.0",
+                }] if may_start and item["langgraph_compatibility"]["compatible"] else [{
                     "command": "run.start",
                     "label": "Start run",
                     "method": "POST",
@@ -79,16 +87,6 @@ def build_routes(ctx) -> list[Route]:
                     "expected_version": 0,
                     "payload_schema": "run-start/1.0",
                 }] if may_start and item["goal_readiness"] == "ready" else [])
-            if may_start and item["langgraph_compatibility"]["compatible"]:
-                item["allowed_commands"].append({
-                    "command": "langgraph_run.start",
-                    "label": "Start with LangGraph",
-                    "method": "POST",
-                    "href": "/api/v1/langgraph-runs",
-                    "target_aggregate_id": item["workflow_id"],
-                    "expected_version": 0,
-                    "payload_schema": "langgraph-run-start/1.0",
-                })
             if may_start and ctx.workflow_publisher is not None:
                 item["allowed_commands"].append({
                     "command": "workflow.delete",
@@ -512,6 +510,15 @@ def build_routes(ctx) -> list[Route]:
             )
         )
         item["allowed_commands"] = ([{
+            "command": "langgraph_run.start",
+            "label": "Start run",
+            "method": "POST",
+            "href": "/api/v1/langgraph-runs",
+            "target_aggregate_id": workflow_id,
+            "expected_version": 0,
+            "payload_schema": "langgraph-run-start/1.0",
+        }] if ctx.guard.allows(actor, WRITE_SCOPE)
+        and item["langgraph_compatibility"]["compatible"] else [{
             "command": "run.start",
             "label": "Start run",
             "method": "POST",
@@ -521,19 +528,6 @@ def build_routes(ctx) -> list[Route]:
             "payload_schema": "run-start/1.0",
         }] if ctx.guard.allows(actor, WRITE_SCOPE)
         and item["goal_readiness"] == "ready" else [])
-        if (
-            ctx.guard.allows(actor, WRITE_SCOPE)
-            and item["langgraph_compatibility"]["compatible"]
-        ):
-            item["allowed_commands"].append({
-                "command": "langgraph_run.start",
-                "label": "Start with LangGraph",
-                "method": "POST",
-                "href": "/api/v1/langgraph-runs",
-                "target_aggregate_id": workflow_id,
-                "expected_version": 0,
-                "payload_schema": "langgraph-run-start/1.0",
-            })
         if ctx.guard.allows(actor, WRITE_SCOPE) and ctx.workflow_publisher is not None:
             item["allowed_commands"].append({
                 "command": "workflow.delete",

@@ -118,9 +118,17 @@ is durable as well as checkpoints, so
 `recover()` can restart a process that died before writing its first checkpoint.
 `recover_running()` performs the same recovery over a bounded startup snapshot.
 
+Durable timers use `scheduled -> firing -> fired`. Claiming a timer and the run
+revision is one SQLite transaction. If a process exits after the claim but
+before the LangGraph checkpoint advances, the next process sees `firing` and
+idempotently finishes it. Run `recover_running()` during startup and
+`recover_due()` from the timer loop; neither requires manual database edits.
+
 This service deliberately is not mounted on Orbit's existing `/api/v1/runs`.
-ADR 002 keeps LangGraph isolated from the primary event-sourced Runtime; an
-HTTP or MCP surface for this adapter should use distinct routes and capabilities.
+It uses distinct HTTP and MCP surfaces. Compatible workflows advertise
+`langgraph_run.start` as their sole default start command; workflows outside
+the LangGraph contract may advertise legacy `run.start`. Clients execute the
+server's `allowed_commands[]` and never infer an engine.
 
 ## Optional HTTP surface
 
@@ -175,12 +183,12 @@ checkpoint payload includes the workflow, node, declared input, and config;
 resume with an object keyed by the human node's declared output ports (or a
 scalar when it declares exactly one output).
 
-## Gradual engine migration
+## Engine selection
 
 When the adapter is enabled, workflow catalog and detail projections include
 `langgraph_compatibility`. The service compiles the immutable published version
 against the reviewed registry before reporting it compatible. A writer receives
-the server-issued `langgraph_run.start` command only for a compatible version;
+the server-issued `langgraph_run.start` command for a compatible version;
 unsupported workflows carry a stable reason and detail instead of failing after
-the caller has selected an engine. The existing `run.start` command remains
-available during migration, so switching is explicit and reversible per run.
+the caller has selected an engine. Agent authoring is constrained to this
+compatibility boundary, so LangGraph is the default engine for new workflows.

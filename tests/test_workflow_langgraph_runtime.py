@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import sqlite3
@@ -1364,12 +1365,47 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
                 expected_revision=reviewing.revision,
                 idempotency_key="deadline-review",
             )
+            raced = service.start(
+                ir.workflow_id, {"value": "race"},
+                idempotency_key="deadline-race-start",
+            )
+            now[0] += timedelta(seconds=10)
+
+            def race(operation):
+                try:
+                    return operation()
+                except (LangGraphRunConflict, ValueError) as exc:
+                    return exc
+
+            waiting_interrupt = next(
+                item for item in raced.interrupts
+                if item["value"]["node_id"] == "waiting"
+            )
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                outcomes = tuple(pool.map(
+                    race,
+                    (
+                        lambda: service.recover(raced.run_id),
+                        lambda: service.resume(
+                            raced.run_id, "late-approval",
+                            expected_revision=raced.revision,
+                            idempotency_key="deadline-race-human",
+                            interrupt_id=waiting_interrupt["id"],
+                        ),
+                    ),
+                ))
+            raced_after = service.get(raced.run_id)
 
         self.assertEqual("interrupted", interrupted.status)
         self.assertEqual("interrupted", reviewing.status)
         self.assertEqual("review", reviewing.interrupts[0]["value"]["node_id"])
         self.assertEqual("completed", completed.status)
         self.assertEqual("approved", completed.result)
+        self.assertTrue(any(
+            isinstance(item, (LangGraphRunConflict, ValueError)) for item in outcomes
+        ))
+        self.assertEqual("interrupted", raced_after.status)
+        self.assertEqual("review", raced_after.interrupts[0]["value"]["node_id"])
 
     def test_retry_timer_is_durable_and_does_not_fire_early(self) -> None:
         retry = IRPolicy(
@@ -2399,6 +2435,10 @@ class LangGraphHttpApiTests(unittest.TestCase):
                 )
                 self.assertIn(
                     "langgraph_run.start",
+                    {command["command"] for command in generated["allowed_commands"]},
+                )
+                self.assertNotIn(
+                    "run.start",
                     {command["command"] for command in generated["allowed_commands"]},
                 )
                 interrupted = mcp(client, "start_langgraph_run", {

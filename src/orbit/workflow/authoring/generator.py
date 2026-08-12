@@ -646,6 +646,7 @@ class WorkflowAuthoringService:
             "In conditions and mappings, a source reference must start with source.<from.port>; for example an edge from port result references source.result.approved, never source.approved.",
             "Every node must be reachable from entry and have a path to a terminal; terminal nodes have no outgoing edges.",
             "Prefer a simple acyclic graph. Edges without back_edge:true must never form a cycle.",
+            "This is a LangGraph workflow: use only action, decision, human, join, and terminal nodes. Never emit agentic, foreach, subflow, or extension nodes, top-level extensions, or a node extension field.",
             f"At most {self.max_nodes} nodes.",
         ]
         shape = [
@@ -705,7 +706,7 @@ class WorkflowAuthoringService:
                 "port": {"id": "port_id", "schema_id": "one schema_ids value"},
                 "node_fields": [
                     "id", "kind", "label", "inputs", "outputs", "handler",
-                    "config", "policies", "extension", "route_mode",
+                        "config", "policies", "route_mode",
                 ],
                 "label": "the step's name as a person reading the flow would say it",
                 "edge_fields": [
@@ -743,7 +744,10 @@ class WorkflowAuthoringService:
                     },
                     "conditional_fields": {
                         "n_of_m": {"threshold": "positive integer"},
-                        "deadline": {"deadline_seconds": "positive integer"},
+                        "deadline": {
+                            "deadline_seconds": "positive integer",
+                            "min_successful": "positive integer",
+                        },
                     },
                 },
                 "bounded_back_edge": {
