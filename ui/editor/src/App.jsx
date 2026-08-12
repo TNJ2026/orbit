@@ -382,6 +382,10 @@ export default function App() {
           onNodeClick={(_event, node) => setSelection({ kind: "node", item: node })}
           onEdgeClick={(_event, edge) => setSelection({ kind: "edge", item: edge })}
           onPaneClick={() => setSelection(null)}
+          // Both keys, not React Flow's Backspace alone: Delete is what a
+          // Windows or Linux keyboard offers for this, and a key that does
+          // nothing reads as a canvas that will not let go of anything.
+          deleteKeyCode={["Backspace", "Delete"]}
           fitView
         >
           <Background />

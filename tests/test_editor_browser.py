@@ -1,0 +1,338 @@
+"""The graph editor, driven by a real browser.
+
+Two things in the editor cannot be reached by testing its modules: an edge
+only exists once somebody has dragged one, and a publish conflict only happens
+when two writers race. Both were verified by hand while the editor was built,
+which is not the same as verified.
+
+playwright is a test-only dependency and the editor bundle is a build artifact,
+so this skips rather than fails when either is absent — a plain checkout still
+runs green.
+"""
+
+from __future__ import annotations
+
+from importlib import resources
+import json
+from pathlib import Path
+import socket
+import tempfile
+import threading
+import time
+import unittest
+import urllib.request
+import uuid
+
+try:
+    from playwright.sync_api import sync_playwright
+except ImportError:  # pragma: no cover - exercised by the skip
+    sync_playwright = None
+
+from orbit.web.app import create_app
+from orbit.web.api_v1 import Authorizer
+from orbit.web.local_identity import LOCAL_ACTOR, LOCAL_SCOPES, loopback_authenticator
+from orbit.workflow.artifacts.local_cas import LocalCASBackend
+from orbit.workflow.api.routes import RateLimiter
+from tests.test_web_composition import SCHEMAS, transform_registration
+
+
+EDITOR_BUILT = resources.files("orbit").joinpath(
+    "static/workflow-editor/index.html"
+).is_file()
+
+WORKFLOW_ID = "workflow:editable"
+
+SOURCE = {
+    "dsl_version": "1.3",
+    "metadata": {"id": "editable", "name": "Editable"},
+    "nodes": [
+        {
+            "id": "work", "kind": "action", "label": "Transform",
+            "inputs": [{"id": "value", "schema_id": "example://integer/1.0"}],
+            "outputs": [{"id": "value", "schema_id": "example://integer/1.0"}],
+            "handler": {"name": "transform", "version": "1.0.0"},
+        },
+        {
+            "id": "done", "kind": "terminal", "label": "Finished",
+            "inputs": [{"id": "value", "schema_id": "example://integer/1.0"}],
+        },
+    ],
+    "edges": [{
+        "id": "flow",
+        "from": {"node": "work", "port": "value"},
+        "to": {"node": "done", "port": "value"},
+    }],
+    "entry": ["work"],
+    "terminals": ["done"],
+    "result": {"node": "work", "port": "value"},
+    "policies": [{
+        "id": "complete", "kind": "completion",
+        "config": {"required_terminal_count": 1},
+    }],
+}
+
+
+def free_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+@unittest.skipUnless(sync_playwright, "playwright is not installed")
+@unittest.skipUnless(EDITOR_BUILT, "editor bundle is not built in this checkout")
+class EditorBrowserTests(unittest.TestCase):
+    """One server and one browser for the class; a page per test."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        import uvicorn
+
+        cls.temp = tempfile.TemporaryDirectory()
+        cls.db = Path(cls.temp.name) / "runtime.db"
+        app = create_app(
+            cls.db,
+            handlers=[transform_registration()], schemas=SCHEMAS,
+            worker_count=1, poll_seconds=0.02,
+            authenticator=loopback_authenticator,
+            authorizer=Authorizer(
+                lambda actor: tuple(LOCAL_SCOPES) if actor == LOCAL_ACTOR else ()
+            ),
+            artifact_backend=LocalCASBackend(Path(cls.temp.name) / "artifacts"),
+            rate_limiter=RateLimiter(requests=10_000),
+            serve_ui=True,
+            # The editor and the workflows API it lives on are both here only.
+            workflow_ui_mode="multi-agent",
+        )
+        port = free_port()
+        cls.base = f"http://127.0.0.1:{port}"
+        cls.server = uvicorn.Server(
+            uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error")
+        )
+        cls.thread = threading.Thread(target=cls.server.run, daemon=True)
+        cls.thread.start()
+
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            try:
+                with urllib.request.urlopen(f"{cls.base}/health/ready", timeout=1) as r:
+                    if r.status == 200:
+                        break
+            except Exception:
+                time.sleep(0.05)
+        else:
+            raise AssertionError("server never became ready")
+
+        cls.playwright = sync_playwright().start()
+        cls.browser = cls.playwright.chromium.launch()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.browser.close()
+        cls.playwright.stop()
+        cls.server.should_exit = True
+        cls.thread.join(timeout=30)
+        cls.temp.cleanup()
+
+    # -- server-side helpers ----------------------------------------------
+
+    def post(self, path: str, body: dict) -> dict:
+        request = urllib.request.Request(
+            f"{self.base}{path}", data=json.dumps(body).encode(),
+            headers={
+                "content-type": "application/json",
+                "idempotency-key": str(uuid.uuid4()),
+            },
+        )
+        with urllib.request.urlopen(request) as response:
+            return json.load(response)["data"]
+
+    def get(self, path: str) -> dict:
+        with urllib.request.urlopen(f"{self.base}{path}") as response:
+            return json.load(response)["data"]
+
+    def latest(self) -> int:
+        return next(
+            item["latest_version"] for item in self.get("/api/v1/workflows")["workflows"]
+            if item["workflow_id"] == WORKFLOW_ID
+        )
+
+    def publish(self, source: dict, expected: int) -> dict:
+        return self.post(
+            f"/api/v1/workflows/{WORKFLOW_ID}/versions",
+            {"source": json.dumps(source), "expected_version": expected},
+        )
+
+    def setUp(self) -> None:
+        # Each test starts from a workflow of its own, so a publish in one
+        # cannot decide what another sees.
+        self.workflow = json.loads(json.dumps(SOURCE))
+        self.workflow["metadata"]["id"] = f"editable_{uuid.uuid4().hex[:8]}"
+        self.workflow_id = f"workflow:{self.workflow['metadata']['id']}"
+        self.post(
+            f"/api/v1/workflows/{self.workflow_id}/versions",
+            {"source": json.dumps(self.workflow), "expected_version": 0},
+        )
+
+    def open_editor(self):
+        context = self.browser.new_context()
+        page = context.new_page()
+        self.addCleanup(context.close)
+        self.errors: list[str] = []
+        page.on("pageerror", lambda exc: self.errors.append(str(exc)))
+        page.goto(f"{self.base}/editor/")
+        page.wait_for_selector("select[aria-label='Workflow']")
+        page.select_option("select[aria-label='Workflow']", self.workflow_id)
+        page.wait_for_selector(".react-flow__node")
+        return page
+
+    @staticmethod
+    def node(page, node_id: str):
+        """Locate by node id, not by label.
+
+        A node's label lives in an input, so its text is not in the DOM's text
+        content and nothing that reads text can find it.
+        """
+
+        return page.locator(f'.react-flow__node:has([data-node-id="{node_id}"])')
+
+    def connect(self, page, source_id: str, target_id: str) -> None:
+        """Drag from one node's output handle to another's input handle.
+
+        React Flow starts a connection on `pointerdown` over a handle and
+        finishes it on `pointerup` over another, so this has to be a real
+        pointer path rather than a click on each end. The intermediate move is
+        what makes the library treat it as a drag at all.
+        """
+
+        start = self.node(page, source_id).locator(
+            ".react-flow__handle-right"
+        ).bounding_box()
+        end = self.node(page, target_id).locator(
+            ".react-flow__handle-left"
+        ).bounding_box()
+        page.mouse.move(start["x"] + start["width"] / 2, start["y"] + start["height"] / 2)
+        page.mouse.down()
+        page.mouse.move(
+            end["x"] + end["width"] / 2, end["y"] + end["height"] / 2, steps=20,
+        )
+        page.mouse.up()
+        page.wait_for_timeout(300)
+
+    # -- tests -------------------------------------------------------------
+
+    def test_an_edge_can_be_deleted_and_drawn_again(self) -> None:
+        """The drag is what has no substitute in a module test.
+
+        Removing the only edge and drawing it back is the sharpest form: the
+        document is valid at both ends, and what the drag produced has to be
+        the same connection that was there — the same two ports, in the same
+        direction — for it to publish at all.
+        """
+
+        page = self.open_editor()
+        self.assertEqual(1, page.locator(".react-flow__edge").count())
+
+        page.locator(".react-flow__edge").click()
+        page.keyboard.press("Delete")
+        page.wait_for_timeout(300)
+        self.assertEqual(0, page.locator(".react-flow__edge").count())
+
+        self.connect(page, "work", "done")
+        self.assertEqual(1, page.locator(".react-flow__edge").count())
+
+        page.click("button:has-text('Publish')")
+        page.wait_for_timeout(2500)
+        self.assertIn("published v2", page.locator(".notice").inner_text())
+
+        stored = json.loads(self.get(f"/api/v1/workflows/{self.workflow_id}")["source"])
+        self.assertEqual(1, len(stored["edges"]))
+        drawn = stored["edges"][0]
+        self.assertEqual({"node": "work", "port": "value"}, drawn["from"])
+        self.assertEqual({"node": "done", "port": "value"}, drawn["to"])
+        self.assertEqual([], self.errors)
+
+    def test_a_connection_between_mismatched_schemas_cannot_be_dropped(self) -> None:
+        page = self.open_editor()
+        page.locator(".react-flow__edge").click()
+        page.keyboard.press("Delete")
+        page.wait_for_timeout(300)
+
+        # Give the terminal a second input whose schema does not match.
+        self.node(page, "done").click()
+        page.wait_for_selector(".inspector .port-add")
+        inputs = page.locator(".inspector fieldset:has(.port-add)").nth(0)
+        inputs.locator("input").nth(0).fill("other")
+        inputs.locator("input").nth(1).fill("example://other/1.0")
+        inputs.locator("button:has-text('add')").click()
+        page.wait_for_timeout(400)
+
+        start = self.node(page, "work").locator(
+            ".react-flow__handle-right"
+        ).bounding_box()
+        end = self.node(page, "done").locator(
+            ".react-flow__handle-left"
+        ).last.bounding_box()
+        page.mouse.move(start["x"] + start["width"] / 2, start["y"] + start["height"] / 2)
+        page.mouse.down()
+        page.mouse.move(end["x"] + end["width"] / 2, end["y"] + end["height"] / 2, steps=20)
+        page.mouse.up()
+        page.wait_for_timeout(400)
+
+        # Refused while dragging, so it cannot be dropped there at all — the
+        # author is stopped before there is anything to undo.
+        self.assertEqual(0, page.locator(".react-flow__edge").count())
+        self.assertEqual([], self.errors)
+
+    def test_a_stale_tab_is_refused_and_recovers_by_reopening(self) -> None:
+        page = self.open_editor()
+        self.assertEqual("v1", page.locator(".bar .version").inner_text())
+
+        # Somebody else publishes while this tab is open.
+        elsewhere = json.loads(json.dumps(self.workflow))
+        elsewhere["nodes"][1]["label"] = "Finished elsewhere"
+        self.post(
+            f"/api/v1/workflows/{self.workflow_id}/versions",
+            {"source": json.dumps(elsewhere), "expected_version": 1},
+        )
+        latest = next(
+            item["latest_version"] for item in self.get("/api/v1/workflows")["workflows"]
+            if item["workflow_id"] == self.workflow_id
+        )
+        self.assertEqual(2, latest)
+
+        page.locator("input[aria-label='Label for work']").fill("Renamed while stale")
+        page.wait_for_timeout(200)
+        page.click("button:has-text('Publish')")
+        page.wait_for_timeout(2500)
+
+        notice = page.locator(".notice").inner_text()
+        self.assertIn("publish conflict: expected 1, actual 2", notice)
+        self.assertIn("reopen", notice)
+        # Refused, not applied: the store still holds what the other writer put
+        # there, and Publish stops inviting a refusal it will get again.
+        self.assertTrue(page.locator("button:has-text('Publish')").is_disabled())
+        stored = json.loads(self.get(f"/api/v1/workflows/{self.workflow_id}")["source"])
+        self.assertEqual("Finished elsewhere", stored["nodes"][1]["label"])
+        self.assertEqual("Transform", stored["nodes"][0]["label"])
+
+        page.select_option("select[aria-label='Workflow']", self.workflow_id)
+        page.wait_for_timeout(1200)
+        self.assertEqual("v2", page.locator(".bar .version").inner_text())
+        self.assertFalse(page.locator("button:has-text('Publish')").is_disabled())
+        self.assertEqual([], self.errors)
+
+    def test_a_workflow_published_without_a_source_cannot_be_edited(self) -> None:
+        from tests.test_web_composition import publish_linear_workflow
+
+        publish_linear_workflow(self.db)
+        page = self.open_editor()
+        page.select_option("select[aria-label='Workflow']", "workflow:linear")
+        page.wait_for_timeout(800)
+        self.assertIn(
+            "without an authored source", page.locator(".notice").inner_text()
+        )
+        self.assertEqual([], self.errors)
+
+
+if __name__ == "__main__":
+    unittest.main()

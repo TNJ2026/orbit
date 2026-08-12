@@ -14,7 +14,10 @@ export default function WorkflowNode({ id, data, selected }) {
   const outputs = data.outputs ?? [];
   const rows = Math.max(inputs.length, outputs.length, 1);
   return (
-    <div className={`node node-${data.kind}${selected ? " selected" : ""}`}>
+    <div
+      className={`node node-${data.kind}${selected ? " selected" : ""}`}
+      data-node-id={id}
+    >
       <header>
         <span className="kind">{data.kind}</span>
         {/* The label is the one part of a node this canvas can already change,
