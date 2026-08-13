@@ -26,13 +26,44 @@ from .platform.projects import (
 )
 
 
-def _workflow_db_path(explicit: str | None) -> str:
-    """Shared definitions by default; an explicit database remains self-contained."""
+def _workflow_db_path(explicit: str | None, ui_mode: str = "single-agent") -> str:
+    """Which library holds published definitions, for every command alike.
+
+    Two rules, and both have to be the same everywhere or the catalog splits:
+    an explicit database is self-contained, and the default is the host-wide
+    library for the authoring product named by `ui_mode`.
+
+    They were not the same everywhere. `orbit serve` defaults to
+    `--ui-mode single-agent` and so read `single-agent-library.db`, while
+    `orbit mcp`, `orbit workflow inventory|publish` and `orbit run start` all
+    resolved the multi-agent `library.db` — so on a default install, a
+    Workflow published from the command line was never visible in the UI, and
+    one published in the UI could not be started from the command line. Both
+    surfaces were right about their own file and wrong about each other.
+    """
 
     if explicit:
         return explicit
     _runtime_db_path(None)  # Preserve the existing cutover acknowledgement gate.
-    return str(public_workflow_db_path())
+    return str(workflow_library_path(ui_mode))
+
+
+def _add_ui_mode_argument(command) -> None:
+    """Which product's library this command addresses.
+
+    Every command that resolves the default library needs it, or it addresses
+    a different one than the UI does. The default matches `orbit serve`.
+    """
+
+    command.add_argument(
+        "--ui-mode",
+        choices=("single-agent", "multi-agent"),
+        default="single-agent",
+        help=(
+            "Which authoring product's published Workflow library to use "
+            "(default: single-agent). Ignored when --db is given."
+        ),
+    )
 
 
 def _runtime_db_path(
@@ -205,7 +236,7 @@ def _workflow_inventory(args, machine_output: bool) -> None:
     safe to run against a live database.
     """
 
-    path = Path(_workflow_db_path(args.db))
+    path = Path(_workflow_db_path(args.db, args.ui_mode))
     if not path.exists():
         raise SystemExit(
             f"no runtime database at {path}; run `orbit serve` once, or pass --db"
@@ -251,7 +282,9 @@ def _workflow_command(args) -> None:
         source_format = "json" if source_path.suffix.lower() == ".json" else "yaml"
         store = None
         if args.workflow_action == "publish":
-            store = SQLiteWorkflowVersionStore(_workflow_db_path(args.db))
+            store = SQLiteWorkflowVersionStore(
+                _workflow_db_path(args.db, args.ui_mode)
+            )
         service = WorkflowDefinitionService(catalogs, store)
         if args.workflow_action == "validate":
             compiled = service.validate_workflow(
@@ -323,7 +356,7 @@ def _run_command(args) -> None:
     )
 
     db_path = _runtime_db_path(args.db)
-    workflow_db_path = _workflow_db_path(args.db)
+    workflow_db_path = _workflow_db_path(args.db, args.ui_mode)
     service = RunApplicationService(
         db_path, DurableRuntimeApplicationService(
             db_path, workflow_db_path=workflow_db_path,
@@ -451,10 +484,13 @@ def _serve(args) -> None:
         handlers.extend(dev_handlers)
         print(f"dev tools: {', '.join(tool_names) or 'none granted'}", flush=True)
 
-    workflow_db_path = (
-        Path(db_path).with_name(f"workflows-{args.ui_mode}.db")
-        if args.db else workflow_library_path(args.ui_mode)
-    )
+    workflow_db_path = Path(_workflow_db_path(args.db, args.ui_mode))
+    # What this mode's library is seeded from the first time it is created.
+    # Before per-mode libraries existed every `orbit serve` published here, so
+    # an operator upgrading into `--ui-mode single-agent` would otherwise open
+    # the UI onto an empty catalog. Read-only: the shared library is never
+    # written to or removed.
+    seed_libraries = (public_workflow_db_path(),)
     langgraph_state_directory = (
         Path(args.langgraph_state_dir).expanduser().absolute()
         if args.langgraph_state_dir else Path(db_path).parent
@@ -495,6 +531,7 @@ def _serve(args) -> None:
             legacy_execution=False,
             workflow_ui_mode=args.ui_mode,
             structured_agents=structured_agents,
+            workflow_seed_libraries=seed_libraries,
         )
     except MixedSchemaError as exc:
         raise SystemExit(f"error: {exc}") from None
@@ -515,7 +552,7 @@ def _serve(args) -> None:
         f"(db: {db_path}, artifacts: {artifact_backend.root})",
         flush=True,
     )
-    _report_goal_readiness(db_path if args.db else public_workflow_db_path())
+    _report_goal_readiness(workflow_db_path)
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 
 
@@ -556,7 +593,7 @@ def _mcp(args) -> None:
 
     app = create_app(
         db_path,
-        workflow_db_path=(db_path if args.db else public_workflow_db_path()),
+        workflow_db_path=_workflow_db_path(args.db, args.ui_mode),
         handlers=list(builtin_handlers()),
         schemas=BUILTIN_SCHEMAS,
         artifact_backend=artifact_backend,
@@ -616,7 +653,13 @@ def _agent_app(args) -> None:
         raise SystemExit(f"orbit agent-app mcp-proxy: {exc}") from None
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
+    """The whole command line, as a value.
+
+    Separate from `main` so that what a command resolves — which database,
+    which library — can be asserted without running it.
+    """
+
     parser = argparse.ArgumentParser(prog="orbit", description="Local multi-agent workflow orchestrator")
     parser.add_argument(
         "--version", action="version", version=f"orbit {__version__}",
@@ -646,12 +689,7 @@ def main() -> None:
             "(default: artifacts/ beside the Runtime database)"
         ),
     )
-    serve_cmd.add_argument(
-        "--ui-mode",
-        choices=("single-agent", "multi-agent"),
-        default="single-agent",
-        help="Workflow authoring UI to serve (default: single-agent).",
-    )
+    _add_ui_mode_argument(serve_cmd)
     serve_cmd.add_argument(
         "--no-agent-discovery",
         action="store_true",
@@ -715,6 +753,7 @@ def main() -> None:
         "--no-agent-discovery", action="store_true",
         help="Skip probing for installed Agent CLIs at startup",
     )
+    _add_ui_mode_argument(mcp_cmd)
 
     agent_app_cmd = sub.add_parser(
         "agent-app", help="Host a manifest-declared local Agent App",
@@ -756,6 +795,7 @@ def main() -> None:
     inventory.add_argument(
         "--json", action="store_true", help="Emit stable machine-readable JSON"
     )
+    _add_ui_mode_argument(inventory)
     for action in ("validate", "compile", "publish"):
         command = workflow_sub.add_parser(action)
         command.add_argument("file", help="Workflow DSL .yaml, .yml, or .json file")
@@ -770,6 +810,7 @@ def main() -> None:
             command.add_argument("--output", default="-", help="Canonical IR output path (default: stdout)")
         if action == "publish":
             command.add_argument("--db", default=None, help="SQLite database path")
+            _add_ui_mode_argument(command)
             command.add_argument("--expected-version", type=int, required=True)
             command.add_argument("--actor", default="local-cli")
     run_cmd = sub.add_parser("run", help="Start and inspect workflow runs")
@@ -789,6 +830,7 @@ def main() -> None:
     run_inspect.add_argument("run_id")
     for command in (run_start, run_inspect):
         command.add_argument("--db", default=None, help="SQLite database path")
+        _add_ui_mode_argument(command)
         command.add_argument("--json", action="store_true", help="Emit stable machine-readable JSON")
 
     db_cmd = sub.add_parser("db", help="Inspect the project runtime database")
@@ -799,7 +841,11 @@ def main() -> None:
     )
     _add_db_check_arguments(db_check)
 
-    args = parser.parse_args()
+    return parser
+
+
+def main() -> None:
+    args = build_parser().parse_args()
 
     if args.command == "workflow":
         _workflow_command(args)

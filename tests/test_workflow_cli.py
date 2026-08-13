@@ -160,9 +160,12 @@ class WorkflowCliTests(unittest.TestCase):
         self.assertEqual(
             "single-agent", create_app.call_args.kwargs["workflow_ui_mode"]
         )
+        # An explicit --db is self-contained, in every command alike. A
+        # sibling file only this command knew about is what made a Workflow
+        # published with `orbit workflow publish --db X` invisible in the UI
+        # served from the same X.
         self.assertEqual(
-            self.db.with_name("workflows-single-agent.db"),
-            create_app.call_args.kwargs["workflow_db_path"],
+            self.db, create_app.call_args.kwargs["workflow_db_path"],
         )
 
     def test_serve_can_select_the_multi_agent_ui(self) -> None:
@@ -180,8 +183,7 @@ class WorkflowCliTests(unittest.TestCase):
             "multi-agent", create_app.call_args.kwargs["workflow_ui_mode"]
         )
         self.assertEqual(
-            self.db.with_name("workflows-multi-agent.db"),
-            create_app.call_args.kwargs["workflow_db_path"],
+            self.db, create_app.call_args.kwargs["workflow_db_path"],
         )
 
     def test_serve_reports_an_unusable_artifact_root_without_a_traceback(self) -> None:
@@ -398,9 +400,19 @@ class WorkflowInventoryCliTests(unittest.TestCase):
         self.assertTrue(run.called)
 
     def test_the_report_reads_and_never_writes(self) -> None:
-        before = self.db.read_bytes()
+        # Content, not bytes. The database is in WAL mode, so the bytes of the
+        # main file depend on when a checkpoint happened to run — which made
+        # this assertion pass or fail according to what else the process had
+        # done first, rather than according to whether the report wrote.
+        before = self._contents()
         self.run_cli("workflow", "inventory", "--db", str(self.db))
-        self.assertEqual(before, self.db.read_bytes())
+        self.assertEqual(before, self._contents())
+
+    def _contents(self) -> list[str]:
+        """Every row and every schema object, as text."""
+
+        with sqlite3.connect(self.db) as connection:
+            return list(connection.iterdump())
 
     def test_the_human_report_names_each_bucket_and_every_workflow(self) -> None:
         printed = self.run_cli("workflow", "inventory", "--db", str(self.db))
@@ -420,3 +432,69 @@ class WorkflowInventoryCliTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WorkflowLibraryResolutionTests(unittest.TestCase):
+    """One rule for which library a command addresses, for every command.
+
+    Each surface used to resolve it for itself. `orbit serve` defaults to
+    `--ui-mode single-agent` and so read `single-agent-library.db`, while
+    `orbit mcp`, `orbit workflow inventory|publish` and `orbit run start`
+    resolved `library.db` — a default install where a Workflow published from
+    the command line never appeared in the UI, and one authored in the UI
+    could not be started from the command line. Nothing failed; the two
+    catalogs simply had nothing to do with each other.
+    """
+
+    def parse(self, *arguments: str):
+        from orbit.__main__ import build_parser
+
+        return build_parser().parse_args(list(arguments))
+
+    def resolved(self, *arguments: str) -> str:
+        from orbit.__main__ import _workflow_db_path
+
+        args = self.parse(*arguments)
+        return _workflow_db_path(args.db, args.ui_mode)
+
+    def test_every_default_surface_resolves_the_same_library_for_a_mode(self) -> None:
+        from orbit.platform.projects import workflow_library_path
+
+        commands = (
+            ("serve",),
+            ("mcp",),
+            ("workflow", "inventory"),
+            ("run", "inspect", "run:1"),
+        )
+        for mode in ("single-agent", "multi-agent"):
+            expected = str(workflow_library_path(mode))
+            for command in commands:
+                with self.subTest(command=command, mode=mode):
+                    self.assertEqual(
+                        expected, self.resolved(*command, "--ui-mode", mode)
+                    )
+
+    def test_the_default_mode_is_the_same_everywhere(self) -> None:
+        """Agreeing only when the operator names the mode is not agreeing."""
+
+        defaults = {
+            self.parse(*command).ui_mode
+            for command in (
+                ("serve",), ("mcp",), ("workflow", "inventory"),
+                ("run", "inspect", "run:1"),
+            )
+        }
+        self.assertEqual({"single-agent"}, defaults)
+
+    def test_an_explicit_database_is_self_contained_in_every_command(self) -> None:
+        """No sibling file that only one command knows the name of."""
+
+        for command in (("serve",), ("mcp",), ("workflow", "inventory")):
+            for mode in ("single-agent", "multi-agent"):
+                with self.subTest(command=command, mode=mode):
+                    self.assertEqual(
+                        "/tmp/named.db",
+                        self.resolved(
+                            *command, "--db", "/tmp/named.db", "--ui-mode", mode
+                        ),
+                    )
