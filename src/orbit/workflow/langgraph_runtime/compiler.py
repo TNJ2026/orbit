@@ -574,6 +574,102 @@ class CompiledLangGraphWorkflow:
         }
 
 
+def _edge_is_selected(
+    edge: IREdge, state: Mapping[str, Any],
+) -> bool | None:
+    """Whether this edge fired, or `None` while its source has not run.
+
+    Three answers, not two. An edge whose source has produced nothing is
+    undecided; one whose source ran and routed elsewhere is decided *against*
+    and will never fire. A join that cannot tell those apart either waits for
+    a branch that is never coming or merges before one that is.
+    """
+
+    outputs = state.get("node_outputs") or {}
+    if edge.source_node not in outputs:
+        return None
+    if edge.route != (state.get("node_routes") or {}).get(
+        edge.source_node, "success"
+    ):
+        return False
+    return bool(evaluate_condition(
+        edge.condition,
+        outputs[edge.source_node],
+        workflow_inputs=state.get("workflow_inputs", {}),
+    ))
+
+
+def _still_possible(
+    ir: WorkflowIR, state: Mapping[str, Any], frontier: Sequence[str],
+) -> set[str]:
+    """Nodes that may still execute, given what has run and what is scheduled.
+
+    Reached from `frontier` — the nodes about to be scheduled — over every
+    edge that has not already been decided against. A node not in this set can
+    never produce anything, which is what lets a join stop waiting for it.
+    """
+
+    dead = {
+        edge.id for edge in ir.edges if _edge_is_selected(edge, state) is False
+    }
+    live: set[str] = set(frontier)
+    queue = list(live)
+    while queue:
+        current = queue.pop()
+        for edge in ir.edges:
+            if edge.source_node != current or edge.id in dead:
+                continue
+            if edge.target_node not in live:
+                live.add(edge.target_node)
+                queue.append(edge.target_node)
+    return live
+
+
+def _join_is_ready(
+    ir: WorkflowIR, join: IRNode, state: Mapping[str, Any],
+    frontier: Sequence[str], policies: Mapping[str, IRPolicy],
+) -> bool:
+    """Whether this join may run now, or must wait for a branch still coming.
+
+    A join used to be an ordinary node: whoever reached it scheduled it, and
+    it merged whatever had arrived. Branches that finished in different
+    supersteps therefore ran it once each — merging partial data the first
+    time, and re-running everything downstream the second. A workflow whose
+    merge step was an Agent action performed that merge twice.
+
+    `all` waits for every branch that can still arrive. `any` and `n_of_m`
+    need their count and no more, so they run as soon as it is met. A
+    `deadline` join is the one that may legitimately never be satisfied, and
+    its timer — not this — decides when waiting ends.
+    """
+
+    incoming = [edge for edge in ir.edges if edge.target_node == join.id]
+    if not incoming:
+        return True
+    policy = next(
+        (
+            policies[item] for item in join.policies
+            if item in policies and policies[item].kind == "join"
+        ),
+        None,
+    )
+    mode = "all" if policy is None else policy.config.get("mode", "all")
+    arrived = sum(1 for edge in incoming if _edge_is_selected(edge, state) is True)
+    if mode == "any":
+        return arrived >= 1
+    if mode == "n_of_m":
+        return arrived >= int(policy.config["threshold"])
+    if mode == "deadline":
+        return arrived >= int(policy.config["min_successful"])
+    # `all` and `all_successful`: nothing that could still arrive may be
+    # outstanding. A source that can no longer run is not worth waiting for.
+    possible = _still_possible(ir, state, frontier)
+    return not any(
+        _edge_is_selected(edge, state) is None and edge.source_node in possible
+        for edge in incoming
+    )
+
+
 def compile_workflow(
     ir: WorkflowIR,
     registry: LangGraphHandlerRegistry,
@@ -911,6 +1007,8 @@ def compile_workflow(
 
         builder.add_node(node.id, execute)
 
+    nodes_by_id = {node.id: node for node in ir.nodes}
+
     for entry in ir.entry:
         builder.add_edge(START, entry)
 
@@ -964,10 +1062,47 @@ def compile_workflow(
                     raise ValueError(
                         f"{policy.kind} policy {policy.id!r} exceeded {limit_field}"
                     )
-            return [edge.target_node for edge in selected_edges]
+            targets = [edge.target_node for edge in selected_edges]
+            executed = state.get("node_outputs") or {}
 
+            def ready(node_id: str, frontier: Sequence[str]) -> bool:
+                target = nodes_by_id.get(node_id)
+                if target is None or target.kind != "join":
+                    return True
+                return _join_is_ready(ir, target, state, frontier, policies_by_id)
+
+            # A join this node reaches but that is still waiting is left for
+            # whichever branch completes last. Dropping it is only half the
+            # rule: if that last branch routes elsewhere, nobody would ever
+            # schedule the join, so a join that has *become* ready is added
+            # even when this node does not point at it.
+            held = [node_id for node_id in targets if not ready(node_id, targets)]
+            scheduled = [node_id for node_id in targets if node_id not in held]
+            for candidate in ir.nodes:
+                if candidate.kind != "join" or candidate.id in scheduled:
+                    continue
+                if candidate.id in executed or candidate.id in held:
+                    continue
+                if not any(
+                    edge.target_node == candidate.id
+                    and _edge_is_selected(edge, state) is True
+                    for edge in ir.edges
+                ):
+                    continue
+                if ready(candidate.id, scheduled):
+                    scheduled.append(candidate.id)
+            return scheduled
+
+        # Every join is a possible target, not only the ones this node points
+        # at: a router schedules a join that has become ready so that a branch
+        # routing elsewhere cannot strand it.
         builder.add_conditional_edges(
-            node.id, route, sorted({edge.target_node for edge in outgoing})
+            node.id,
+            route,
+            sorted(
+                {edge.target_node for edge in outgoing}
+                | {item.id for item in ir.nodes if item.kind == "join"}
+            ),
         )
 
     return CompiledLangGraphWorkflow(

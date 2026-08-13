@@ -848,6 +848,215 @@ class LangGraphWorkflowCompilerTests(unittest.TestCase):
                 {"other": 1}, config={"configurable": {"thread_id": "declared"}},
             )
 
+    def test_a_join_waits_for_a_branch_that_is_still_coming(self) -> None:
+        """A join was an ordinary node: whoever reached it scheduled it.
+
+        Branches that finish in different supersteps therefore ran it once
+        each — merging partial data the first time and re-running everything
+        downstream the second. Observed against real Agents: a workflow whose
+        merge step was an Agent action performed that merge twice.
+        """
+
+        calls = []
+
+        def counted(name):
+            def handler(values, config, context):
+                calls.append(name)
+                return {"value": name}
+            return handler
+
+        # `left` reaches the join *and* the node that also feeds it, so the
+        # two arrivals land one superstep apart.
+        fan = node(
+            "fan", inputs=("value",), outputs=("value",), route_mode="parallel",
+        )
+        left = node(
+            "left", inputs=("value",), outputs=("value",), route_mode="parallel",
+        )
+        right = node("right", inputs=("value",), outputs=("value",))
+        policy = IRPolicy(
+            "all", "join", {"mode": "all", "merge_mode": "object_by_edge"},
+        )
+        gather = node(
+            "gather", inputs=("value",), outputs=("value",),
+            kind="join", handler=False,
+        )
+        gather = IRNode(
+            gather.id, gather.kind, gather.inputs, gather.outputs,
+            gather.handler, gather.config, (policy.id,), gather.extension,
+            gather.route_mode,
+        )
+        after = node("after", inputs=("value",), outputs=("value",))
+        done = node("done", inputs=("value",), kind="terminal", handler=False)
+        ir = workflow(
+            (fan, left, right, gather, after, done),
+            (
+                edge("f_l", "fan", "left"),
+                edge("l_r", "left", "right"),
+                edge("l_j", "left", "gather"),
+                edge("r_j", "right", "gather"),
+                edge("j_a", "gather", "after"),
+                edge("a_d", "after", "done"),
+            ),
+            entry=("fan",), terminals=("done",), result=("after", "value"),
+            policies=(policy,),
+        )
+        compiled = compile_workflow(
+            ir,
+            LangGraphHandlerRegistry([
+                binding("fan", lambda values, config, context: dict(values)),
+                binding("left", counted("left")),
+                binding("right", counted("right")),
+                binding("after", counted("after")),
+            ]),
+            checkpointer=InMemorySaver(),
+        )
+
+        completed = compiled.invoke(
+            {"value": "in"}, config={"configurable": {"thread_id": "waiting-join"}},
+        )
+
+        self.assertEqual(["left", "right", "after"], calls)
+        self.assertEqual(
+            ["fan", "left", "right", "gather", "after", "done"],
+            list(completed["execution_order"]),
+        )
+
+    def test_a_join_is_not_stranded_by_the_branch_that_ruled_it_out(self) -> None:
+        """Deferring a join is only half a rule.
+
+        The branch that completes last decides whether the join may run — and
+        that branch may route somewhere else entirely, in which case it never
+        points at the join and would never schedule it. The join then holds an
+        arrival nobody will act on and the run simply stops. So a router also
+        schedules a join that has *become* ready, whether or not it has an
+        edge to it.
+        """
+
+        first = node(
+            "first", inputs=("value",), outputs=("value",), route_mode="parallel",
+        )
+        second = node("second", inputs=("value",), outputs=("value",))
+        elsewhere = node("elsewhere", inputs=("value",), outputs=("value",))
+        policy = IRPolicy(
+            "all", "join", {"mode": "all", "merge_mode": "object_by_edge"},
+        )
+        gate = node(
+            "gate", inputs=("value",), outputs=("value",),
+            kind="join", handler=False,
+        )
+        gate = IRNode(
+            gate.id, gate.kind, gate.inputs, gate.outputs, gate.handler,
+            gate.config, (policy.id,), gate.extension, gate.route_mode,
+        )
+        done = node("done", inputs=("value",), kind="terminal", handler=False)
+        ir = workflow(
+            (first, second, elsewhere, gate, done),
+            (
+                edge("f_s", "first", "second"),
+                edge("f_g", "first", "gate"),
+                # `second` rules the join out and goes elsewhere, so it is the
+                # last word on the join and points away from it.
+                edge(
+                    "s_g", "second", "gate",
+                    condition={"op": "literal", "value": False},
+                ),
+                edge("s_e", "second", "elsewhere", priority=100),
+                edge("g_d", "gate", "done"),
+            ),
+            entry=("first",), terminals=("done",), result=("gate", "value"),
+            policies=(policy,),
+        )
+        compiled = compile_workflow(
+            ir,
+            LangGraphHandlerRegistry([
+                binding("first", lambda values, config, context: {"value": "a"}),
+                binding("second", lambda values, config, context: {"value": "b"}),
+                binding("elsewhere", lambda values, config, context: {"value": "c"}),
+            ]),
+            checkpointer=InMemorySaver(),
+        )
+
+        completed = compiled.invoke(
+            {"value": "in"}, config={"configurable": {"thread_id": "stranded-join"}},
+        )
+
+        order = list(completed["execution_order"])
+        self.assertIn("gate", order)
+        self.assertIn("done", order)
+
+    def test_a_join_stops_waiting_for_a_branch_that_cannot_arrive(self) -> None:
+        """Waiting for every branch is only right while one may still come.
+
+        A join fed by an automatic path and a human path — the shape an Agent
+        writes for "merge, or ask somebody" — has two feeders of which exactly
+        one can ever run. Waiting for both would hang the run forever, which
+        is why the rule is what may still arrive rather than what exists.
+        """
+
+        check = node("check", inputs=("value",), outputs=("value",))
+        decide = node(
+            "decide", inputs=("value",), outputs=("value",),
+            kind="decision", handler=False,
+        )
+        auto = node("auto", inputs=("value",), outputs=("value",))
+        manual = node("manual", inputs=("value",), outputs=("value",))
+        policy = IRPolicy(
+            "gate", "join", {"mode": "all", "merge_mode": "object_by_edge"},
+        )
+        gate = node(
+            "gate", inputs=("value",), outputs=("value",),
+            kind="join", handler=False,
+        )
+        gate = IRNode(
+            gate.id, gate.kind, gate.inputs, gate.outputs, gate.handler,
+            gate.config, (policy.id,), gate.extension, gate.route_mode,
+        )
+        merge = node("merge", inputs=("value",), outputs=("value",))
+        done = node("done", inputs=("value",), kind="terminal", handler=False)
+        ir = workflow(
+            (check, decide, auto, manual, gate, merge, done),
+            (
+                edge("c_d", "check", "decide"),
+                edge(
+                    "d_auto", "decide", "auto",
+                    condition={
+                        "op": "eq",
+                        "left": {"op": "ref", "path": "source.value"},
+                        "right": {"op": "literal", "value": "clean"},
+                    },
+                ),
+                edge("d_manual", "decide", "manual", priority=100),
+                edge("auto_g", "auto", "gate"),
+                edge("manual_g", "manual", "gate"),
+                edge("g_m", "gate", "merge"),
+                edge("m_d", "merge", "done"),
+            ),
+            entry=("check",), terminals=("done",), result=("merge", "value"),
+            policies=(policy,),
+        )
+        compiled = compile_workflow(
+            ir,
+            LangGraphHandlerRegistry([
+                binding("check", lambda values, config, context: {"value": "clean"}),
+                binding("auto", lambda values, config, context: {"value": "auto"}),
+                binding("manual", lambda values, config, context: {"value": "manual"}),
+                binding("merge", lambda values, config, context: {"value": "merged"}),
+            ]),
+            checkpointer=InMemorySaver(),
+        )
+
+        completed = compiled.invoke(
+            {"value": "in"}, config={"configurable": {"thread_id": "exclusive-join"}},
+        )
+
+        order = list(completed["execution_order"])
+        self.assertNotIn("manual", order)
+        self.assertEqual(
+            ["check", "decide", "auto", "gate", "merge", "done"], order,
+        )
+        self.assertEqual("merged", completed["result"])
+
     def test_a_decision_routes_without_a_handler(self) -> None:
         """The DSL refuses a handler on a decision; this engine required one.
 
