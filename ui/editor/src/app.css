@@ -213,3 +213,33 @@ body {
 
 .inspector .required { color: var(--bad); }
 .inspector fieldset > label:last-child { margin-bottom: 0; }
+
+/* Above the edges, below the nodes. Pointer events stay off so the label
+   never steals a click meant for the edge underneath it. */
+.edge-label {
+  position: absolute;
+  pointer-events: none;
+  display: flex;
+  gap: 5px;
+  align-items: center;
+  max-width: 260px;
+  padding: 2px 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+.edge-label.selected { border-color: var(--accent); }
+.edge-label code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--ink);
+}
+.edge-label .route { font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; font-size: 10px; }
+.edge-label .route-error { color: var(--bad); }
+.edge-label .route-timeout { color: #d97706; }
+.edge-label .route-cancel { color: var(--muted); }
+.edge-label .mapped { color: var(--muted); }

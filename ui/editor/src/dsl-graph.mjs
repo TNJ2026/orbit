@@ -80,6 +80,7 @@ export function toGraph(document, positions = {}) {
   }));
   const edges = (document.edges ?? []).map((edge) => ({
     id: edge.id,
+    type: "workflow",
     source: edge.from?.node,
     target: edge.to?.node,
     sourceHandle: edge.from?.port,
@@ -88,8 +89,6 @@ export function toGraph(document, positions = {}) {
     data: {
       route: edge.route ?? "success",
       backEdge: Boolean(edge.back_edge),
-      hasCondition: edge.condition !== undefined && edge.condition !== null,
-      hasMapping: Boolean(edge.mapping && Object.keys(edge.mapping).length),
       dsl: edge,
     },
   }));
@@ -191,4 +190,34 @@ export function freshId(prefix, taken) {
     const candidate = `${prefix}_${index}`;
     if (!used.has(candidate)) return candidate;
   }
+}
+
+/** The most a label may say before it stops being readable on a line. */
+const LABEL_LIMIT = 44;
+
+/**
+ * What an edge is worth saying on the canvas, or nothing.
+ *
+ * A route and a condition are the two things that decide where a run goes,
+ * and until now neither was visible: a conditional edge and an unconditional
+ * one were the same grey curve, so reading a graph meant clicking every edge
+ * in it. `success` is the default and stays unwritten — labelling every edge
+ * with it would bury the ones that are not.
+ */
+export function edgeLabel(edge, conditionText) {
+  if (!edge) return null;
+  const route = edge.route && edge.route !== "success" ? edge.route : null;
+  const rendered = conditionText ? conditionText(edge.condition) : null;
+  // `null` from the renderer means an AST with no text form; it is still worth
+  // saying that a condition is there, just not what it says.
+  const condition = edge.condition === undefined || edge.condition === null
+    ? null
+    : rendered === null
+      ? "…"
+      : rendered.length > LABEL_LIMIT
+        ? `${rendered.slice(0, LABEL_LIMIT - 1)}…`
+        : rendered;
+  const mapped = Boolean(edge.mapping && Object.keys(edge.mapping).length);
+  if (!route && !condition && !mapped) return null;
+  return { route, condition, mapped };
 }

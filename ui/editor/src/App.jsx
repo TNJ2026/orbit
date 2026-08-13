@@ -13,9 +13,11 @@ import { handlersForKind, removePort } from "./document.mjs";
 import { clearLayout, readLayout, writeLayout } from "./layout-store.mjs";
 import Inspector from "./Inspector.jsx";
 import WorkflowPanel from "./WorkflowPanel.jsx";
+import WorkflowEdge from "./WorkflowEdge.jsx";
 import WorkflowNode from "./WorkflowNode.jsx";
 
 const nodeTypes = { workflow: WorkflowNode };
+const edgeTypes = { workflow: WorkflowEdge };
 const FIT_VIEW = { padding: 0.2, maxZoom: 1 };
 
 export default function App() {
@@ -132,6 +134,7 @@ export default function App() {
           {
             ...connection,
             id: freshId("edge", current.map((edge) => edge.id)),
+            type: "workflow",
             data: { route: "success", dsl: {} },
           },
           current,
@@ -441,6 +444,7 @@ export default function App() {
           nodes={drawn}
           edges={edges}
           nodeTypes={nodeTypes}
+          edgeTypes={edgeTypes}
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
           onConnect={onConnect}

@@ -501,6 +501,50 @@ class EditorBrowserTests(unittest.TestCase):
         )
         self.assertEqual([], self.errors)
 
+    def test_what_decides_a_route_is_readable_without_clicking(self) -> None:
+        """A conditional edge and a plain one used to be the same grey curve.
+
+        The route and the condition are what decide where a run goes, so
+        reading a graph meant opening every edge in it to find out.
+        """
+
+        routed = json.loads(json.dumps(self.workflow))
+        routed["nodes"][0]["route_mode"] = "parallel"
+        routed["nodes"].append({
+            "id": "other", "kind": "terminal", "label": "Other",
+            "inputs": [{"id": "value", "schema_id": "example://integer/1.0"}],
+        })
+        routed["terminals"] = ["done", "other"]
+        routed["edges"][0]["condition"] = "source.value > 5"
+        routed["edges"].append({
+            "id": "on_error", "route": "error", "priority": 1,
+            "from": {"node": "work", "port": "value"},
+            "to": {"node": "other", "port": "value"},
+        })
+        self.post(
+            f"/api/v1/workflows/{self.workflow_id}/versions",
+            {"source": json.dumps(routed), "expected_version": 1},
+        )
+
+        page = self.open_editor()
+        page.wait_for_selector(".edge-label")
+        labels = page.locator(".edge-label").all_inner_texts()
+        self.assertEqual(2, len(labels), labels)
+        self.assertTrue(any("source.value > 5" in text for text in labels), labels)
+        self.assertTrue(any("error" in text.lower() for text in labels), labels)
+        self.assertEqual([], self.errors)
+
+    def test_an_ordinary_edge_carries_no_label(self) -> None:
+        """`success` with no condition is the default; saying it everywhere
+        would bury the edges that are not."""
+
+        page = self.open_editor()
+        page.wait_for_selector(".react-flow__edge")
+        page.wait_for_timeout(400)
+        self.assertEqual(1, page.locator(".react-flow__edge").count())
+        self.assertEqual(0, page.locator(".edge-label").count())
+        self.assertEqual([], self.errors)
+
     def test_a_workflow_published_without_a_source_cannot_be_edited(self) -> None:
         from tests.test_web_composition import publish_linear_workflow
 

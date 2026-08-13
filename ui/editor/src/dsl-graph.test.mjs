@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
-  connectionProblem, freshId, layout, toDocument, toGraph, toPositions,
+  connectionProblem, edgeLabel, freshId, layout, toDocument, toGraph, toPositions,
 } from "./dsl-graph.mjs";
+import { conditionText } from "./expressions.mjs";
 
 const DOCUMENT = {
   dsl_version: "1.3",
@@ -232,4 +233,60 @@ test("a connection from an input port is refused", () => {
 test("a fresh id skips the ones already taken", () => {
   assert.equal(freshId("node", ["node_1", "node_2"]), "node_3");
   assert.equal(freshId("node", []), "node_1");
+});
+
+test("an ordinary edge has nothing worth labelling", () => {
+  // `success` with no condition is the default everywhere; writing it on every
+  // edge would bury the ones that are not.
+  assert.equal(edgeLabel({ id: "e", route: "success" }, conditionText), null);
+  assert.equal(edgeLabel({ id: "e" }, conditionText), null);
+  assert.equal(edgeLabel(null, conditionText), null);
+});
+
+test("a non-default route is said", () => {
+  assert.deepEqual(
+    edgeLabel({ route: "error" }, conditionText),
+    { route: "error", condition: null, mapped: false },
+  );
+});
+
+test("a condition is shown as the author wrote it", () => {
+  assert.equal(
+    edgeLabel({ condition: "source.value > 5" }, conditionText).condition,
+    "source.value > 5",
+  );
+  assert.equal(edgeLabel({ condition: true }, conditionText).condition, "True");
+});
+
+test("a compiled condition is rendered back to text for the label", () => {
+  const ast = { op: "gt", left: { op: "ref", path: "source.v" }, right: { op: "literal", value: 5 } };
+  assert.equal(edgeLabel({ condition: ast }, conditionText).condition, "source.v > 5");
+});
+
+test("a condition with no text form still says one is there", () => {
+  // Silence would read as "no condition", which is the opposite of the truth.
+  const ast = { op: "literal", value: -7 };
+  assert.equal(edgeLabel({ condition: ast }, conditionText).condition, "…");
+});
+
+test("a long condition is cut rather than allowed to cover the graph", () => {
+  const long = `source.value == ${"x".repeat(80)}`;
+  const label = edgeLabel({ condition: long }, conditionText);
+  assert.ok(label.condition.length <= 44, label.condition.length);
+  assert.ok(label.condition.endsWith("…"));
+});
+
+test("a mapping is marked without being spelled out", () => {
+  assert.equal(edgeLabel({ mapping: { schema_id: "x", value: {} } }, conditionText).mapped, true);
+  assert.equal(edgeLabel({ mapping: {} }, conditionText), null);
+});
+
+test("route, condition and mapping can all be said at once", () => {
+  assert.deepEqual(
+    edgeLabel(
+      { route: "timeout", condition: "exists(source.v)", mapping: { schema_id: "x", value: 1 } },
+      conditionText,
+    ),
+    { route: "timeout", condition: "exists(source.v)", mapped: true },
+  );
 });
