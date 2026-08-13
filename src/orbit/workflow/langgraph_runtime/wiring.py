@@ -176,6 +176,10 @@ def _agent_adapter(
         request_context = SimpleNamespace(
             request=SimpleNamespace(
                 attempt_id=context.attempt_id,
+                # Carried so a Handler can give this run its own place to
+                # work. Nodes in one run hand files to each other; attempts of
+                # one node must land in the same directory.
+                run_id=context.run_id,
                 deadline=deadline,
                 process_deadline=deadline,
                 input=inputs,

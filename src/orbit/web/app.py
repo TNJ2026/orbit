@@ -469,6 +469,7 @@ def create_app(
     langgraph_state_directory: Path | str | None = None,
     legacy_execution: bool = True,
     workflow_ui_mode: str = "multi-agent",
+    agent_workspace_root: Path | str | None = None,
 ) -> Starlette:
     """Build the Runtime application.
 
@@ -506,8 +507,19 @@ def create_app(
         invokable_agents = tuple(
             agent for agent in discovered if agent.spec.runtime_compatible
         )
+        # Where a run's Agents are put to work. Beside the Runtime database by
+        # default, and never the directory `orbit serve` was started in: an
+        # Agent asked to merge a pull request will merge whatever repository it
+        # wakes up in, and on a developer's machine that is theirs.
+        workspace_root = (
+            Path(agent_workspace_root).expanduser().absolute()
+            if agent_workspace_root is not None
+            else Path(db_path).expanduser().absolute().parent / "agent-workspaces"
+        )
         agent_registrations, _names = agent_handlers(
-            invokable_agents, allowed_capabilities=agent_capabilities
+            invokable_agents,
+            allowed_capabilities=agent_capabilities,
+            workspace_root=workspace_root,
         )
         registrations.extend(agent_registrations)
 
@@ -539,6 +551,7 @@ def create_app(
                         (agent.executable_path, *agent.spec.invocation.args),
                         prompt_flag=agent.spec.invocation.prompt_flag,
                         prompt_positional=agent.spec.invocation.prompt_positional,
+                        workspace=workspace_root / "authoring",
                     )
                     for agent in invokable_agents
                 }

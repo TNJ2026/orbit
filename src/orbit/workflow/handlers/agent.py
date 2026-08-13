@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+from pathlib import Path
 import shutil
 import hashlib
 from threading import Lock
@@ -86,6 +87,16 @@ class FakeAgentClient:
     def recover(self, recovery_ref): return RecoveryResult(RecoveryDisposition.NOT_FOUND)
 
 
+def _safe_name(value: str) -> str:
+    """A run id as one path segment, with nothing that can leave the root."""
+
+    cleaned = "".join(
+        character if character.isalnum() or character in "-_." else "_"
+        for character in value
+    )
+    return cleaned.strip(".") or "shared"
+
+
 class TrustedCliAgentClient:
     """Local first-party CLI adapter; command is constructor-owned, never DSL-owned."""
 
@@ -93,6 +104,7 @@ class TrustedCliAgentClient:
         self, command: tuple[str, ...], *, timeout_seconds=3600,
         kill_grace_seconds=AGENT_KILL_GRACE_SECONDS, max_output_bytes=1_048_576,
         environment: Mapping[str, str] | None = None,
+        workspace_root: Path | str | None = None,
     ) -> None:
         if not command or any(not item for item in command):
             raise ValueError("trusted CLI command is required")
@@ -104,6 +116,21 @@ class TrustedCliAgentClient:
         self.max_output_bytes = max_output_bytes
         self.environment = dict(
             environment if environment is not None else trusted_cli_environment()
+        )
+        # Where a run's Agents are put to work. Without one they inherited the
+        # Runtime's own working directory, which on a developer's machine is
+        # whatever repository they happened to start `orbit serve` in — and an
+        # Agent asked to merge a pull request merged that repository.
+        #
+        # This is isolation, not confinement. Nothing stops a CLI from writing
+        # an absolute path or changing directory; what it stops is the far more
+        # likely accident, an Agent doing exactly what it was asked to do in
+        # whatever directory it woke up in. A real boundary is the operating
+        # system's to draw, and calling this a sandbox would be claiming one
+        # that is not here.
+        self.workspace_root = (
+            None if workspace_root is None
+            else Path(workspace_root).expanduser().absolute()
         )
         # Reader threads this client could not get back. Never reset: it is a
         # cumulative account of leaked capacity, which is what makes the leak
@@ -160,6 +187,7 @@ class TrustedCliAgentClient:
 
         handle = ProcessHandle(
             (*self.command, *extra_args),
+            cwd=self._workspace(context),
             env=self.environment,
             stdin_text=payload.decode("utf-8"),
             max_output_bytes=max_output_bytes or self.max_output_bytes,
@@ -217,6 +245,22 @@ class TrustedCliAgentClient:
         if completed:
             stdout = _strip_terminal_marker(stdout, completion_marker)
         return stdout.encode("utf-8")
+
+    def _workspace(self, context) -> Path | None:
+        """This run's own directory, made on first use.
+
+        Per run rather than per attempt: nodes in one workflow hand work to
+        each other through files, and a fresh directory for every attempt
+        would lose what the step before it wrote. A retry of one node is meant
+        to see what its predecessors left.
+        """
+
+        if self.workspace_root is None:
+            return None
+        run_id = str(getattr(context.request, "run_id", "") or "shared")
+        workspace = self.workspace_root / _safe_name(run_id)
+        workspace.mkdir(parents=True, exist_ok=True)
+        return workspace
 
     def _attempt_timeout(self, context) -> float:
         """How long *this* attempt may run, not how long any attempt may run.

@@ -61,6 +61,7 @@ def agent_handlers(
     *,
     allowed_capabilities: Sequence[str] | None = None,
     timeout_seconds: int = 1800,
+    workspace_root: Any = None,
 ) -> tuple[Sequence[HandlerRegistration], tuple[str, ...]]:
     """Turn discovered agent CLIs into registrations, or nothing.
 
@@ -82,7 +83,10 @@ def agent_handlers(
         registrations.append(
             HandlerRegistration(
                 manifest,
-                AgentHandler(agent_client(agent, timeout_seconds=timeout_seconds)),
+                AgentHandler(agent_client(
+                    agent, timeout_seconds=timeout_seconds,
+                    workspace_root=workspace_root,
+                )),
                 f"{manifest.name}@{manifest.version}",
             )
         )
@@ -90,7 +94,7 @@ def agent_handlers(
     return tuple(registrations), tuple(names)
 
 
-def agent_client(agent: Any, *, timeout_seconds: int = 1800):
+def agent_client(agent: Any, *, timeout_seconds: int = 1800, workspace_root: Any = None):
     """The adapter a discovered CLI is invoked through.
 
     A CLI that speaks Orbit's JSON protocol needs no adapter; none of the ones
@@ -100,7 +104,8 @@ def agent_client(agent: Any, *, timeout_seconds: int = 1800):
     invocation = agent.spec.invocation
     if invocation is None:
         return TrustedCliAgentClient(
-            (agent.executable_path,), timeout_seconds=timeout_seconds
+            (agent.executable_path,), timeout_seconds=timeout_seconds,
+            workspace_root=workspace_root,
         )
     return TrustedPromptCliAgentClient(
         (agent.executable_path, *invocation.args),
@@ -108,6 +113,7 @@ def agent_client(agent: Any, *, timeout_seconds: int = 1800):
         prompt_positional=invocation.prompt_positional,
         process_timeout_flag=invocation.process_timeout_flag,
         timeout_seconds=timeout_seconds,
+        workspace_root=workspace_root,
     )
 
 

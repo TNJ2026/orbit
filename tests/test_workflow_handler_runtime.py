@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from dataclasses import replace
+from pathlib import Path
 import sys
 import tempfile
 import threading
@@ -200,6 +201,77 @@ class HandlerRuntimeContractTests(unittest.TestCase):
         response = client.execute(AgentRequest({"value": 7}, {}, "key"), context)
         self.assertEqual({"value": 7}, response.output)
         self.assertEqual("cli-1", response.provider_request_id)
+
+    def test_an_agent_works_in_its_run_s_own_directory(self):
+        """Not the directory `orbit serve` was started in.
+
+        Without one, an Agent CLI inherited the Runtime's working directory —
+        on a developer's machine, whatever repository they launched it from.
+        Asked to merge a pull request, one did: it committed the working tree,
+        checked out main and fast-forwarded it. The Agent did exactly what it
+        was told; the fault was telling it in somebody's repository.
+        """
+
+        script = (
+            "import json,os,sys; json.load(sys.stdin); "
+            "json.dump({'output': {'cwd': os.getcwd()}}, sys.stdout)"
+        )
+        with tempfile.TemporaryDirectory() as root:
+            client = TrustedCliAgentClient(
+                (sys.executable, "-c", script), timeout_seconds=10,
+                workspace_root=root,
+            )
+            context = SimpleNamespace(request=SimpleNamespace(
+                attempt_id=EntityId("attempt", "test"), run_id="langgraph_run:abc",
+            ))
+            response = client.execute(AgentRequest({}, {}, "key"), context)
+            where = Path(response.output["cwd"]).resolve()
+
+            self.assertEqual(Path(root).resolve() / "langgraph_run_abc", where)
+            self.assertNotEqual(Path.cwd().resolve(), where)
+
+    def test_every_attempt_of_a_run_shares_one_directory(self):
+        """Nodes hand work to each other through files."""
+
+        script = (
+            "import json,os,sys; json.load(sys.stdin); "
+            "json.dump({'output': {'cwd': os.getcwd()}}, sys.stdout)"
+        )
+        with tempfile.TemporaryDirectory() as root:
+            client = TrustedCliAgentClient(
+                (sys.executable, "-c", script), timeout_seconds=10,
+                workspace_root=root,
+            )
+
+            def where(attempt):
+                context = SimpleNamespace(request=SimpleNamespace(
+                    attempt_id=EntityId("attempt", attempt),
+                    run_id="langgraph_run:shared",
+                ))
+                return client.execute(AgentRequest({}, {}, attempt), context).output["cwd"]
+
+            self.assertEqual(where("one"), where("two"))
+
+    def test_a_run_id_cannot_escape_the_workspace_root(self):
+        """The id is a path segment, and it comes from outside."""
+
+        script = (
+            "import json,os,sys; json.load(sys.stdin); "
+            "json.dump({'output': {'cwd': os.getcwd()}}, sys.stdout)"
+        )
+        with tempfile.TemporaryDirectory() as root:
+            client = TrustedCliAgentClient(
+                (sys.executable, "-c", script), timeout_seconds=10,
+                workspace_root=root,
+            )
+            context = SimpleNamespace(request=SimpleNamespace(
+                attempt_id=EntityId("attempt", "test"), run_id="../../escaped",
+            ))
+            where = Path(
+                client.execute(AgentRequest({}, {}, "key"), context).output["cwd"]
+            ).resolve()
+
+        self.assertEqual(Path(root).resolve(), where.parent)
 
     def test_trusted_cli_agent_gets_identity_without_shell_secrets(self):
         script = (

@@ -523,6 +523,7 @@ def _serve(args) -> None:
             langgraph_state_directory=langgraph_state_directory,
             legacy_execution=False,
             workflow_ui_mode=args.ui_mode,
+            agent_workspace_root=args.agent_workspace,
             structured_agents=structured_agents,
         )
     except MixedSchemaError as exc:
@@ -679,6 +680,17 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Local content-addressed Artifact directory "
             "(default: artifacts/ beside the Runtime database)"
+        ),
+    )
+    serve_cmd.add_argument(
+        "--agent-workspace",
+        default=None,
+        metavar="DIR",
+        help=(
+            "Directory a run's Agents work in, one subdirectory per run "
+            "(default: agent-workspaces/ beside the Runtime database). An "
+            "Agent does what it is asked in the directory it is given, so "
+            "point this at a checkout only when that is the intent."
         ),
     )
     _add_ui_mode_argument(serve_cmd)

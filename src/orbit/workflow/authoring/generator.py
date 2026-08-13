@@ -30,6 +30,7 @@ import json
 import re
 import threading
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from ...platform import process as process_port
@@ -490,6 +491,7 @@ class TrustedCliDslGenerator:
         max_response_bytes: int = MAX_RESPONSE_BYTES,
         environment: Mapping[str, str] | None = None,
         runner: Callable[..., Any] = process_port.run,
+        workspace: Path | str | None = None,
     ) -> None:
         if not command or any(not str(part).strip() for part in command):
             raise ValueError("a trusted generator CLI command is required")
@@ -497,6 +499,15 @@ class TrustedCliDslGenerator:
             raise ValueError("generator timeout and output limit must be positive")
         if prompt_flag is not None and prompt_positional:
             raise ValueError("a prompt is passed one way: flag or positional")
+        # Where the writer is put to work. It is asked for a document, not for
+        # an action — but it is the same kind of CLI as the ones that act, and
+        # an Agent that decides to look around should not be looking around
+        # somebody's checkout. Made on first use, and shared: writing a
+        # workflow leaves nothing worth keeping apart.
+        self.workspace = (
+            None if workspace is None
+            else Path(workspace).expanduser().absolute()
+        )
         self.command = tuple(str(part) for part in command)
         self.prompt_flag = prompt_flag
         self.prompt_positional = prompt_positional
@@ -532,8 +543,11 @@ class TrustedCliDslGenerator:
                 argv, stdin_text = [*self.command, "--", prompt], ""
             else:
                 argv, stdin_text = list(self.command), prompt
+            if self.workspace is not None:
+                self.workspace.mkdir(parents=True, exist_ok=True)
             outcome = self.runner(
                 argv,
+                cwd=self.workspace,
                 env=self.environment,
                 stdin_text=stdin_text,
                 timeout=self.timeout_seconds,
