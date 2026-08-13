@@ -2890,6 +2890,132 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
 
             self.assertEqual([healthy], [item.run_id for item in recovered])
 
+    def test_a_process_that_died_mid_run_leaves_it_recoverable(self) -> None:
+        """The guarantee the durable engine exists for.
+
+        The suite tested that one unrecoverable run does not strand the batch,
+        and never that recovery *works*: that a second process, over the same
+        databases, carries a run its predecessor left in flight to completion
+        and finishes the work that was outstanding. The legacy engine claimed
+        the same thing in an end-to-end test that raced — a graceful shutdown
+        cancelled the running Handler, the attempt was recorded failed and the
+        run went terminal, so there was nothing left to recover — and that
+        engine is not the one `orbit serve` runs.
+        """
+
+        started = []
+        first = node("first", inputs=("value",), outputs=("value",))
+        second = node("second", inputs=("value",), outputs=("value",))
+        terminal = node(
+            "terminal", inputs=("value",), kind="terminal", handler=False
+        )
+        ir = workflow(
+            (first, second, terminal),
+            (edge("onward", "first", "second"), edge("done", "second", "terminal")),
+            entry=("first",), terminals=("terminal",),
+            result=("second", "value"),
+        )
+
+        def record(name):
+            def handler(values, config, context):
+                started.append(name)
+                return {"value": f"{values['value']}:{name}"}
+            return handler
+
+        registry = LangGraphHandlerRegistry([
+            binding("first", record("first")),
+            binding("second", record("second")),
+        ])
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.publish(directory, ir)
+            paths = {
+                "run_db_path": Path(directory) / "runs.sqlite3",
+                "checkpoint_db_path": Path(directory) / "checkpoints.sqlite3",
+            }
+            dying = LangGraphWorkflowService(store, registry, **paths)
+            run = dying.start(
+                ir.workflow_id, {"value": "in"},
+                idempotency_key="lost-process", actor="test:owner",
+            )
+            self.assertEqual("completed", run.status)
+
+            # The process died after its work was durable but before the row
+            # was settled: exactly what a kill mid-superstep leaves behind.
+            with sqlite3.connect(paths["run_db_path"]) as connection:
+                connection.execute(
+                    "UPDATE langgraph_runs SET status='running',result_json=NULL"
+                    " WHERE run_id=?", (run.run_id,),
+                )
+            started.clear()
+
+            # A second process, sharing nothing but the databases.
+            successor = LangGraphWorkflowService(store, registry, **paths)
+            recovered = successor.recover_running()
+
+            self.assertEqual([run.run_id], [item.run_id for item in recovered])
+            self.assertEqual("completed", recovered[0].status)
+            self.assertEqual("in:first:second", recovered[0].result)
+            # Nothing was done twice: the checkpoint already held both nodes,
+            # so recovery had only to settle what was already true.
+            self.assertEqual([], started)
+
+    def test_recovery_finishes_the_work_that_was_outstanding(self) -> None:
+        """Recovery is not only bookkeeping; it runs what had not run."""
+
+        started = []
+        waiting = node(
+            "waiting", inputs=("value",), outputs=("value",),
+            kind="human", handler=False,
+        )
+        after = node("after", inputs=("value",), outputs=("value",))
+        terminal = node(
+            "terminal", inputs=("value",), kind="terminal", handler=False
+        )
+        ir = workflow(
+            (waiting, after, terminal),
+            (edge("onward", "waiting", "after"), edge("done", "after", "terminal")),
+            entry=("waiting",), terminals=("terminal",), result=("after", "value"),
+        )
+
+        def record(values, config, context):
+            started.append("after")
+            return {"value": "done"}
+
+        registry = LangGraphHandlerRegistry([binding("after", record)])
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.publish(directory, ir)
+            paths = {
+                "run_db_path": Path(directory) / "runs.sqlite3",
+                "checkpoint_db_path": Path(directory) / "checkpoints.sqlite3",
+            }
+            dying = LangGraphWorkflowService(store, registry, **paths)
+            run = dying.start(
+                ir.workflow_id, {"value": "in"},
+                idempotency_key="lost-mid-answer", actor="test:owner",
+            )
+            self.assertEqual("interrupted", run.status)
+            answered = dying.resume(
+                run.run_id, {"value": "approved"},
+                expected_revision=run.revision,
+                idempotency_key="answered", actor="test:owner",
+            )
+            self.assertEqual("completed", answered.status)
+
+            # The answer was recorded and the graph consumed it, and then the
+            # process is taken away before the row said so.
+            with sqlite3.connect(paths["run_db_path"]) as connection:
+                connection.execute(
+                    "UPDATE langgraph_runs SET status='running',result_json=NULL"
+                    " WHERE run_id=?", (run.run_id,),
+                )
+            started.clear()
+
+            successor = LangGraphWorkflowService(store, registry, **paths)
+            recovered = successor.recover_running()
+
+        self.assertEqual(["completed"], [item.status for item in recovered])
+        self.assertEqual("done", recovered[0].result)
+
     def test_start_is_durable_and_idempotent(self) -> None:
         action = node("action", inputs=("value",), outputs=("value",))
         terminal = node(

@@ -588,23 +588,33 @@ class EndToEndTests(unittest.TestCase):
         finally:
             self.assertEqual([], composition.stop())
 
-    def test_unfinished_run_resumes_after_restart(self) -> None:
+    def test_a_queued_run_is_picked_up_by_the_next_process(self) -> None:
+        """What this engine guarantees across a restart, which is less.
+
+        This asserted that a run left *mid-flight* resumes, and raced about
+        one in fourteen times: `stop()` cancels a Handler that is executing,
+        the attempt is recorded failed, and the run goes terminal — so the
+        second process finds nothing to recover and the assertion loses. That
+        is a real gap in shutdown semantics, in the engine `orbit serve` no
+        longer runs: both entry points pass `legacy_execution=False`, so its
+        workers never start.
+
+        The claim itself still matters and is now asserted where the product
+        keeps it, against the durable engine, in
+        `test_a_process_that_died_mid_run_leaves_it_recoverable`. What is left
+        here is the part this engine does hold without racing: work submitted
+        and not yet begun survives the process that accepted it.
+        """
+
         _, digest = publish_linear_workflow(self.db)
         run_id = EntityId("run", "m2-restart")
 
-        # First process: start the run, then shut everything down immediately so
-        # the workflow is left mid-flight.
+        # Submitted but never started: no Handler is running, so nothing can
+        # be cancelled and the outcome does not depend on timing.
         first = self._compose()
         first.service.submit(start_run_command(run_id, digest))
-        first.start()
-        time.sleep(0.05)
-        self.assertEqual([], first.stop())
+        self.assertIsNotNone(first.service.get_run(run_id))
 
-        interrupted = first.service.get_run(run_id)
-        self.assertIsNotNone(interrupted)
-
-        # Second process over the same database: the surviving job/lease/timer
-        # state must be enough to carry the run to completion.
         second = self._compose()
         second.start()
         try:
