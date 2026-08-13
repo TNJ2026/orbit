@@ -853,6 +853,14 @@ class SimplifiedRegenerateTests(BrowserE2ETestCase):
         # graph; this fixture registers no Agent handlers, so there is none.
         self.assertEqual(0, canvas.locator(".node-editable").count())
 
+    def test_the_embedded_canvas_carries_no_react_flow_badge(self) -> None:
+        """The frame fills a modal, where a third-party mark reads as ours."""
+
+        page = self.open_dialog()
+        canvas = page.frame_locator(".workflow-graph-frame")
+        canvas.locator(".node").first.wait_for(timeout=15_000)
+        self.assertEqual(0, canvas.locator(".react-flow__attribution").count())
+
     def test_a_terminal_is_still_told_apart_from_an_action(self) -> None:
         """Kind was carried by shape and colour; it still has to be carried."""
 

@@ -255,6 +255,20 @@ class EditorBrowserTests(unittest.TestCase):
 
     # -- tests -------------------------------------------------------------
 
+    def test_the_canvas_carries_no_react_flow_badge(self) -> None:
+        """Removed deliberately, so it has to stay removed.
+
+        React Flow renders its own mark into the bottom-right of every canvas
+        unless asked not to. Removing it is permitted by the library's MIT
+        licence — the subscription it asks for is not a condition of the
+        licence — and this Runtime credits xyflow in its dependency manifest.
+        A library upgrade that resets the default would put somebody else's
+        badge back into this product silently.
+        """
+
+        page = self.open_editor()
+        self.assertEqual(0, page.locator(".react-flow__attribution").count())
+
     def test_an_edge_can_be_deleted_and_drawn_again(self) -> None:
         """The drag is what has no substitute in a module test.
 

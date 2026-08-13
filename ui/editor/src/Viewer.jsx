@@ -65,6 +65,15 @@ export default function Viewer() {
         edgesFocusable={false}
         nodesFocusable={false}
         deleteKeyCode={null}
+          // The React Flow badge. Removing it is permitted by its MIT
+          // licence; the library asks for a subscription in exchange rather
+          // than requiring the mark, and this Runtime credits xyflow in its
+          // dependency manifest instead.
+          proOptions={{ hideAttribution: true }}
+          // The React Flow badge. Removing it is permitted by its MIT
+          // licence; the library asks for a subscription in exchange rather
+          // than requiring the mark, and this Runtime credits xyflow in its
+          // dependency manifest instead.
         // Reported, never acted on. Which nodes have an editor behind them and
         // what opening one means belong to the page that embedded this.
         onNodeClick={(_event, node) => {

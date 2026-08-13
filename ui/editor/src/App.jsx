@@ -530,6 +530,15 @@ export default function App() {
           onNodeClick={(_event, node) => setSelection({ kind: "node", item: node })}
           onEdgeClick={(_event, edge) => setSelection({ kind: "edge", item: edge })}
           onInit={setFlow}
+          // The React Flow badge. Removing it is permitted by its MIT
+          // licence; the library asks for a subscription in exchange rather
+          // than requiring the mark, and this Runtime credits xyflow in its
+          // dependency manifest instead.
+          proOptions={{ hideAttribution: true }}
+          // The React Flow badge. Removing it is permitted by its MIT
+          // licence; the library asks for a subscription in exchange rather
+          // than requiring the mark, and this Runtime credits xyflow in its
+          // dependency manifest instead.
           onPaneClick={() => setSelection(null)}
           // React Flow themes its own chrome — the minimap, the controls, the
           // background and the edge strokes — from this. Left unset it stays
