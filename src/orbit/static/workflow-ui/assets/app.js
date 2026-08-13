@@ -108,7 +108,15 @@ function reportError(error) {
 }
 
 function workflowViews() {
-  return createWorkflowDefinitionViews({ api, i18n, reportError });
+  return createWorkflowDefinitionViews({
+    api, i18n, reportError,
+    // The canvas that draws a workflow, where this Runtime says it has one.
+    // Absent in a checkout that never built the editor bundle, and the
+    // definition list stands alone there.
+    editorUrl: () => shellFacts?.capabilities?.workflow_editor?.available
+      ? (shellFacts.capabilities.workflow_editor.url || "/editor/")
+      : null,
+  });
 }
 
 /* ---------------------------------------------------------------- commands */

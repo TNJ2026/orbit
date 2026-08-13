@@ -754,7 +754,13 @@ class SimplifiedUpgradeTests(BrowserE2ETestCase):
             "() => document.querySelector('.workflow-editing-version')"
             "?.textContent.includes('v2')"
         )
-        self.assertIn("Fact Check", page.locator(".workflow-graph").text_content())
+        # Drawn by the editor's canvas in a frame now, so the assertion has to
+        # cross into it rather than read this document.
+        self.assertIn(
+            "Fact Check",
+            page.frame_locator(".workflow-graph-frame")
+                .locator(".react-flow").inner_text(),
+        )
 
 class SimplifiedRegenerateTests(BrowserE2ETestCase):
 
@@ -815,33 +821,46 @@ class SimplifiedRegenerateTests(BrowserE2ETestCase):
         page.goto(f"{self.base}/ui/#/workflows/workflow:research")
         page.wait_for_selector(".workflow-detail")
         self.assertEqual(0, page.locator(".workflow-editor").count())
-        self.assertEqual(0, page.locator(".graph-box.editable").count())
+        page.wait_for_selector(".workflow-graph-frame")
+        self.assertEqual(
+            0,
+            page.frame_locator(".workflow-graph-frame")
+                .locator(".node-editable").count(),
+        )
         self.assertEqual(0, page.locator("#editWorkflow").count())
 
-    def test_workflow_graph_zoom_is_bounded_between_50_and_150_percent(self) -> None:
+    def test_the_graph_is_drawn_by_the_editor_canvas(self) -> None:
+        """One renderer, embedded, rather than a second one written here.
+
+        The page used to lay out its own SVG and carry its own zoom buttons,
+        drawing the same definitions the editor draws with xyflow. The two
+        disagreed about what a node looks like, and a fix to either was a fix
+        to one of them.
+        """
+
         page = self.open_dialog()
-        graph = page.locator(".workflow-graph")
-        terminal = graph.locator(".graph-box.kind-terminal")
-        terminal_shape = terminal.locator(":scope > rect")
-        self.assertEqual("168", terminal_shape.get_attribute("width"))
-        self.assertEqual("60", terminal_shape.get_attribute("height"))
-        self.assertEqual("30", terminal_shape.get_attribute("rx"))
-        self.assertEqual("Done", terminal.locator(".graph-terminal-label").text_content())
-        original_width = int(graph.get_attribute("data-canvas-width"))
-        zoom_in = page.get_by_role("button", name="Zoom in workflow graph")
-        zoom_out = page.get_by_role("button", name="Zoom out workflow graph")
+        canvas = page.frame_locator(".workflow-graph-frame")
+        canvas.locator(".react-flow__node").first.wait_for(timeout=15_000)
 
-        for _ in range(5):
-            zoom_in.click()
-        self.assertEqual(round(original_width * 1.5), int(graph.get_attribute("width")))
-        self.assertTrue(zoom_in.is_disabled())
-        self.assertEqual("150%", page.locator(".graph-zoom-level").inner_text())
+        nodes = canvas.locator(".react-flow__node")
+        self.assertTrue(nodes.count() > 1)
+        self.assertTrue(canvas.locator(".react-flow__edge").count() > 0)
+        # xyflow's own zoom controls, in place of the two buttons this page
+        # used to own.
+        self.assertTrue(canvas.locator(".react-flow__controls").is_visible())
+        # Nothing on this canvas edits the definition. Whether a node has an
+        # editor behind it is the embedding page's answer, sent in with the
+        # graph; this fixture registers no Agent handlers, so there is none.
+        self.assertEqual(0, canvas.locator(".node-editable").count())
 
-        for _ in range(10):
-            zoom_out.click()
-        self.assertEqual(round(original_width * 0.5), int(graph.get_attribute("width")))
-        self.assertTrue(zoom_out.is_disabled())
-        self.assertEqual("50%", page.locator(".graph-zoom-level").inner_text())
+    def test_a_terminal_is_still_told_apart_from_an_action(self) -> None:
+        """Kind was carried by shape and colour; it still has to be carried."""
+
+        page = self.open_dialog()
+        canvas = page.frame_locator(".workflow-graph-frame")
+        canvas.locator(".node").first.wait_for(timeout=15_000)
+        self.assertEqual(1, canvas.locator(".node-terminal").count())
+        self.assertTrue(canvas.locator(".node-action").count() > 0)
 
     def test_regenerate_is_offered_only_after_a_modification_fails(self) -> None:
         page = self.open_dialog()

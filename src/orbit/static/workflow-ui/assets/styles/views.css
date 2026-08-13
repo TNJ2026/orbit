@@ -531,14 +531,7 @@
 /* The definition list reads as prose inside the frame; the graph is full-bleed. */
 .workflow-detail .workflow-tab-content > .definition-list, .workflow-edit-page .workflow-tab-content > .definition-list { padding: 18px 20px; }
 .workflow-detail .workflow-graph-pane, .workflow-edit-page .workflow-graph-pane {
-  flex: 1; grid-template-rows: auto 1fr; gap: 0;
-  background-image: radial-gradient(
-    color-mix(in srgb, var(--muted-2) 26%, transparent) 1px, transparent 1px);
-  background-size: 24px 24px;
-}
-.workflow-detail .graph-zoom-controls, .workflow-edit-page .graph-zoom-controls { padding: 16px 18px 0; }
-.workflow-detail .workflow-graph-scroll, .workflow-edit-page .workflow-graph-scroll {
-  display: flex; align-items: center; justify-content: flex-start; padding: 8px 24px 24px;
+  flex: 1; min-height: 0;
 }
 /* The revision editor band is shared by the dedicated Workflow edit page. */
 .workflow-editor-wrap {
@@ -1095,52 +1088,16 @@
    the page a horizontal scrollbar. */
 .workflow-tabs { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 .workflow-tab-content { min-height: 0; }
-/* min-width:0 or the flex parent sizes to the drawing and the whole page
-   scrolls sideways on a phone instead of just this strip. */
-.workflow-graph-scroll {
-  overflow-x: auto; padding-bottom: 4px; max-width: 100%; min-width: 0;
+/* The graph is drawn by the editor's canvas in a frame, which brings its own
+   panning, zooming and background. Nothing here styles the drawing — the
+   inside of the frame is the editor's stylesheet, and a second opinion about
+   what a decision node looks like is the thing this replaced. */
+.workflow-graph-pane { display: grid; min-width: 0; min-height: 420px; }
+.workflow-graph-frame {
+  width: 100%; height: 100%; min-height: 420px; border: 0; display: block;
+  background: var(--panel);
 }
-.workflow-graph-pane { display: grid; gap: 8px; min-width: 0; }
-.graph-zoom-controls {
-  display: flex; align-items: center; justify-content: flex-end; gap: 6px;
-}
-.graph-zoom-button {
-  width: 30px; height: 30px; padding: 0; display: grid; place-items: center;
-  font-size: 18px; line-height: 1;
-}
-.graph-zoom-level { min-width: 54px; color: var(--muted); text-align: center; font-size: 13px; }
-.workflow-graph {
-  display: block; max-width: none;
-  /* The scroll strip is a flex container. Without an explicit non-shrinking
-     basis, flexbox squeezes every zoom level back to the viewport width while
-     leaving the SVG height enlarged, so zoom appears inert and distorts the
-     graph. The SVG's width/height attributes are the zoom source of truth. */
-  flex: 0 0 auto;
-  /* Auto margins center a graph that fits, but collapse to zero once it
-     overflows. Unlike justify-content:center, this never places its left edge
-     in an unreachable negative scroll area. */
-  margin-inline: auto;
-}
-.graph-box rect {
-  fill: var(--panel-2); stroke: var(--line); stroke-width: 1;
-}
-.graph-box.editable { cursor: pointer; }
-.graph-box.editable:hover rect,
-.graph-box.editable:focus rect { stroke-width: 2; }
-.graph-box.editable:focus { outline: none; }
 .action-editor-dialog textarea { min-height: 150px; resize: vertical; }
-.graph-box.kind-terminal rect { fill: var(--green-soft); stroke: var(--green); }
-.graph-terminal-label { fill: var(--green); font-size: 12px; font-weight: 700; }
-.graph-box.kind-human rect { fill: var(--amber-soft); stroke: var(--amber); }
-.graph-box.kind-decision rect { fill: var(--blue-soft); stroke: var(--blue); }
-.graph-box-id {
-  fill: var(--text); font-family: var(--mono); font-size: 13px; font-weight: 600;
-}
-.graph-box-meta { fill: var(--muted); font-family: var(--mono); font-size: 12px; }
-.graph-edge { fill: none; stroke: var(--muted-2); stroke-width: 1.5; }
-.graph-edge.back { stroke-dasharray: 4 3; }
-.graph-edge.route-failure { stroke: var(--red); }
-#graphArrow path { fill: var(--muted-2); }
 
 /* Registered Agent handlers: identity tiles from design/agents.html. Sharp
    4px corners on purpose — the Agent grid is the one view the design specs

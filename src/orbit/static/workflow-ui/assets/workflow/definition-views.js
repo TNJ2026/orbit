@@ -1,164 +1,26 @@
 import { el, svgEl } from "../components/dom.js";
 
-const GRAPH_BOX = {
-  width: 168, height: 60, gapX: 64, gapY: 40, pad: 16, minHeight: 260,
+/** What the embedded viewer and this page say to each other.
+ *
+ * Duplicated from `ui/editor/src/catalog-graph.mjs` rather than imported: that
+ * module is bundled, this one is served as source, and there is no build step
+ * between them. `test_ui_assets` holds the two copies to the same strings.
+ */
+const VIEWER = {
+  ready: "orbit-viewer-ready",
+  graph: "orbit-viewer-graph",
+  nodeClick: "orbit-viewer-node-click",
 };
 
-export function createWorkflowDefinitionViews({ api, i18n, reportError }) {
+export function createWorkflowDefinitionViews({
+  api, i18n, reportError, editorUrl = () => null,
+}) {
   function readableNodeName(node) {
     const label = node?.label;
     if (typeof label === "string" && label.trim()) return label.trim();
     return i18n.t("simplified.workflow.step");
   }
 
-  function workflowGraphView(graph, actionEditors = {}, onEditAction = null) {
-    const { width, height, gapX, gapY, pad, minHeight } = GRAPH_BOX;
-    const at = new Map();
-    for (const position of graph.layout.positions) {
-      at.set(position.node_id, {
-        x: pad + position.depth * (width + gapX),
-        y: pad + position.lane * (height + gapY),
-      });
-    }
-    const geometry = new Map(graph.nodes.map((node) => {
-      const spot = at.get(node.node_id);
-      if (!spot) return [node.node_id, null];
-      const nodeWidth = width;
-      const nodeHeight = height;
-      return [node.node_id, {
-        x: spot.x + (width - nodeWidth) / 2,
-        y: spot.y + (height - nodeHeight) / 2,
-        width: nodeWidth,
-        height: nodeHeight,
-      }];
-    }));
-    const columns = Math.max(...graph.layout.positions.map((p) => p.depth), 0) + 1;
-    const lanes = Math.max(...graph.layout.positions.map((p) => p.lane), 0) + 1;
-    const hasSelfLoop = graph.edges.some((edge) => edge.back_edge && edge.from === edge.to);
-    // A self-loop returns through the right side of its card and needs half a
-    // column gap beyond the normal graph bounds when it sits in the last column.
-    const canvasWidth = pad * 2 + columns * width + (columns - 1) * gapX
-      + (hasSelfLoop ? gapX / 2 : 0);
-    const drawnHeight = pad * 2 + lanes * height + (lanes - 1) * gapY;
-    const canvasHeight = Math.max(drawnHeight, minHeight);
-    // Centre a short graph in the taller canvas instead of pinning it to the top.
-    const offsetY = Math.round((canvasHeight - drawnHeight) / 2);
-
-    const edges = graph.edges.map((edge) => {
-      const from = geometry.get(edge.from);
-      const to = geometry.get(edge.to);
-      if (!from || !to) return null;
-      const start = { x: from.x + from.width, y: from.y + from.height / 2 };
-      const end = { x: to.x, y: to.y + to.height / 2 };
-      // A back edge points at an earlier column, so route it under the row it
-      // came from instead of drawing a line straight through the boxes.
-      const selfLoop = edge.back_edge && edge.from === edge.to;
-      const path = selfLoop
-        ? `M${from.x + from.width / 2} ${from.y + from.height}`
-          + ` V${from.y + from.height + gapY / 2}`
-          + ` H${from.x + from.width + gapX / 2}`
-          + ` V${from.y + from.height / 2} H${from.x + from.width}`
-        : edge.back_edge
-          ? `M${start.x - from.width / 2} ${from.y + from.height}`
-            + ` V${from.y + from.height + gapY / 2}`
-            + ` H${end.x + to.width / 2} V${to.y + to.height}`
-        : `M${start.x} ${start.y} H${start.x + gapX / 2} V${end.y} H${end.x}`;
-      return svgEl("path", {
-        class: `graph-edge${edge.back_edge ? " back" : ""} route-${edge.route}`,
-        d: path, "marker-end": "url(#graphArrow)",
-      });
-    });
-
-    const boxes = graph.nodes.map((node, index) => {
-      const spot = geometry.get(node.node_id);
-      if (!spot) return null;
-      // Node kinds are DSL vocabulary, shown verbatim here as they are in the
-      // definition list below the picture. A handler gets one short line: the
-      // registry calls it `agent.claude@1.0.0`, the reader recognises `claude`.
-      // The exact name and version stay one hover (and one tab) away.
-      const label = node.handler_name
-        ? node.handler_name.replace(/^agent\./, "")
-        : node.kind;
-      // SVG text does not wrap or ellipsize, so a long id would spill past the
-      // box. Clip each line to the box interior and keep the full value in a
-      // <title> for hover — the drawing stays tidy, nothing is lost.
-      const clipId = `graph-clip-${index}`;
-      const editable = node.kind === "action" && Boolean(actionEditors[node.node_id]);
-      const edit = () => {
-        if (editable && onEditAction) onEditAction(node.node_id);
-      };
-      return svgEl("g", {
-        class: `graph-box kind-${node.kind}${editable ? " editable" : ""}`,
-        transform: `translate(${spot.x} ${spot.y})`,
-        role: editable ? "button" : null,
-        tabindex: editable ? "0" : null,
-        "aria-label": editable ? i18n.t("workflows.editActionNamed", {
-          name: readableNodeName(node),
-        }) : null,
-        onclick: edit,
-        onkeydown: (event) => {
-          if (editable && (event.key === "Enter" || event.key === " ")) {
-            event.preventDefault();
-            edit();
-          }
-        },
-      }, [
-        svgEl("title", {
-          text: node.handler_name
-            ? `${node.node_id} · ${node.handler_name}@${node.handler_version}`
-            : node.node_id,
-        }),
-        svgEl("clipPath", { id: clipId }, [
-          svgEl("rect", { x: 8, y: 0, width: spot.width - 16, height: spot.height }),
-        ]),
-        svgEl("rect", {
-          width: spot.width, height: spot.height,
-          rx: node.kind === "terminal" ? spot.height / 2 : 10,
-        }),
-        node.kind === "terminal"
-          ? svgEl("text", {
-              class: "graph-terminal-label", x: spot.width / 2, y: spot.height / 2 + 4,
-              "text-anchor": "middle", "clip-path": `url(#${clipId})`,
-              text: i18n.t("workflows.completed"),
-            })
-          : svgEl("text", {
-              class: "graph-box-id", x: 12, y: 21, "clip-path": `url(#${clipId})`,
-              text: readableNodeName(node),
-            }),
-        node.kind === "terminal" ? null : svgEl("text", {
-          class: "graph-box-meta", x: 12, y: 38, "clip-path": `url(#${clipId})`,
-          text: label,
-        }),
-      ]);
-    });
-
-    const arrow = svgEl("marker", {
-      id: "graphArrow", viewBox: "0 0 8 8", refX: 7, refY: 4,
-      markerWidth: 6, markerHeight: 6, orient: "auto-start-reverse",
-    }, [svgEl("path", { d: "M0 0 L8 4 L0 8 z" })]);
-
-    return svgEl("svg", {
-      class: "workflow-graph", role: "img",
-      viewBox: `0 0 ${canvasWidth} ${canvasHeight}`,
-      width: canvasWidth, height: canvasHeight,
-      "data-canvas-width": canvasWidth, "data-canvas-height": canvasHeight,
-      "aria-label": i18n.t("workflows.graphAria", {
-        nodes: i18n.number(graph.nodes.length), edges: i18n.number(graph.edges.length),
-      }),
-    }, [
-      svgEl("defs", {}, [arrow]),
-      svgEl("g", { transform: `translate(0 ${offsetY})` }, [...edges, ...boxes]),
-    ]);
-  }
-
-  /* Each node kind owns an accent; the glyph tile and prompt key pick it up via
-   * --row-accent. Terminal reads as neutral slate, matching the design list. */
-  const KIND_COLOR = {
-    action: "blue", human: "amber", decision: "purple", terminal: "muted",
-  };
-
-  /* Inline glyphs (no icon-font dependency): one per kind, plus the row tools.
-   * Anything we have no shape for falls back to the action brackets. */
   function kindGlyph(kind) {
     const paths = {
       action: ["M9 8l-4 4 4 4", "M15 8l4 4-4 4"],
@@ -422,55 +284,15 @@ export function createWorkflowDefinitionViews({ api, i18n, reportError }) {
     graph, definition, definitionKey = "workflows.definition",
     actionEditors = {}, onEditAction = null,
   ) {
-    if (!graph) return definitionList(
-      definition, null, actionEditors, onEditAction,
+    // No drawing without a graph, and none without the canvas that draws it.
+    // The editor bundle is a build artifact and a source checkout may not
+    // carry it; the list says everything the picture does, so that is the
+    // whole degradation.
+    if (!graph || !editorUrl()) return definitionList(
+      definition, graph, actionEditors, onEditAction,
     );
-    let graphZoom = 1;
-    const graphPane = () => {
-      const drawing = workflowGraphView(graph, actionEditors, onEditAction);
-      const level = el("output", {
-        class: "graph-zoom-level mono", "aria-live": "polite",
-      });
-      const zoomOut = el("button", {
-        type: "button", class: "button graph-zoom-button",
-        "aria-label": i18n.t("workflows.zoomOut"),
-        title: i18n.t("workflows.zoomOut"), text: "−",
-      });
-      const zoomIn = el("button", {
-        type: "button", class: "button graph-zoom-button",
-        "aria-label": i18n.t("workflows.zoomIn"),
-        title: i18n.t("workflows.zoomIn"), text: "+",
-      });
-      const applyZoom = () => {
-        const width = Number(drawing.dataset.canvasWidth);
-        const height = Number(drawing.dataset.canvasHeight);
-        drawing.setAttribute("width", String(Math.round(width * graphZoom)));
-        drawing.setAttribute("height", String(Math.round(height * graphZoom)));
-        level.textContent = i18n.t("workflows.zoomLevel", {
-          percent: i18n.number(Math.round(graphZoom * 100)),
-        });
-        zoomOut.disabled = graphZoom <= 0.5;
-        zoomIn.disabled = graphZoom >= 1.5;
-      };
-      zoomOut.addEventListener("click", () => {
-        graphZoom = Math.max(0.5, Number((graphZoom - 0.1).toFixed(1)));
-        applyZoom();
-      });
-      zoomIn.addEventListener("click", () => {
-        graphZoom = Math.min(1.5, Number((graphZoom + 0.1).toFixed(1)));
-        applyZoom();
-      });
-      applyZoom();
-      return el("div", { class: "workflow-graph-pane" }, [
-        el("div", {
-          class: "graph-zoom-controls",
-          "aria-label": i18n.t("workflows.zoomControls"),
-        }, [zoomOut, level, zoomIn]),
-        el("div", { class: "workflow-graph-scroll" }, [drawing]),
-      ]);
-    };
     const panes = {
-      graph: graphPane,
+      graph: () => embeddedGraph(graph, actionEditors, onEditAction),
       definition: () => definitionList(
         definition, graph, actionEditors, onEditAction,
       ),
@@ -501,8 +323,53 @@ export function createWorkflowDefinitionViews({ api, i18n, reportError }) {
   }
 
 
+  /** The workflow graph, drawn by the editor's canvas in a frame.
+   *
+   * There used to be a second renderer here — five hundred lines of hand-laid
+   * SVG — drawing the same definitions the editor draws with xyflow. Two
+   * pictures of one thing drift: they disagreed about what a decision node
+   * looks like and where a back edge goes, and a fix to one was a fix to one.
+   *
+   * The graph is posted in rather than fetched by the frame: it is already
+   * here, an unpublished draft has no id to fetch by, and one request means
+   * one answer that both surfaces are describing.
+   */
+  function embeddedGraph(graph, actionEditors = {}, onEditAction = null) {
+    const editable = Object.keys(actionEditors || {});
+    const frame = el("iframe", {
+      class: "workflow-graph-frame",
+      src: `${editorUrl()}?readonly=1`,
+      title: i18n.t("workflows.graph"),
+      loading: "lazy",
+    });
+    const send = () => frame.contentWindow?.postMessage(
+      { type: VIEWER.graph, graph, editable },
+      window.location.origin,
+    );
+    const onMessage = (event) => {
+      if (event.origin !== window.location.origin) return;
+      if (event.source !== frame.contentWindow) return;
+      if (event.data?.type === VIEWER.ready) send();
+      if (event.data?.type === VIEWER.nodeClick && onEditAction) {
+        onEditAction(event.data.nodeId);
+      }
+    };
+    window.addEventListener("message", onMessage);
+    // The pane is replaced whenever the tab changes or the workflow is
+    // redrawn, and a listener per drawing that outlived its frame would
+    // answer for a window that is gone.
+    const stop = new MutationObserver(() => {
+      if (!frame.isConnected) {
+        window.removeEventListener("message", onMessage);
+        stop.disconnect();
+      }
+    });
+    stop.observe(document.body, { childList: true, subtree: true });
+    return el("div", { class: "workflow-graph-pane" }, [frame]);
+  }
+
   return {
-    readableNodeName, workflowGraphView, definitionList,
+    readableNodeName, definitionList,
     openActionEditorDialog, openWorkflowDeleteDialog, stepPrompt,
     workflowDefinitionTabs, deleteGlyph,
   };

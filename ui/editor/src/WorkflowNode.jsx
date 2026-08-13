@@ -15,7 +15,8 @@ export default function WorkflowNode({ id, data, selected }) {
   const rows = Math.max(inputs.length, outputs.length, 1);
   return (
     <div
-      className={`node node-${data.kind}${selected ? " selected" : ""}`}
+      className={`node node-${data.kind}${selected ? " selected" : ""}${
+        data.editable ? " node-editable" : ""}`}
       data-node-id={id}
     >
       <header>
@@ -23,20 +24,40 @@ export default function WorkflowNode({ id, data, selected }) {
         {/* The label is the one part of a node this canvas can already change,
             so it is edited in place rather than behind a panel. `nodrag` stops
             xyflow from treating a click in the field as the start of a drag,
-            which would otherwise make the text impossible to select. */}
-        <input
-          className="title nodrag"
-          value={data.label ?? ""}
-          placeholder={id}
-          aria-label={`Label for ${id}`}
-          onChange={(event) => data.onLabelChange?.(id, event.target.value)}
-        />
+            which would otherwise make the text impossible to select.
+
+            A viewer shows the same node as text: a disabled field still reads
+            as somewhere an author could type, and there is nothing here to
+            type into. */}
+        {data.readOnly ? (
+          <span className="title">{data.label ?? id}</span>
+        ) : (
+          <input
+            className="title nodrag"
+            value={data.label ?? ""}
+            placeholder={id}
+            aria-label={`Label for ${id}`}
+            onChange={(event) => data.onLabelChange?.(id, event.target.value)}
+          />
+        )}
       </header>
       {data.handler ? (
         <p className="handler">
           {data.handler.name}
           <span className="version"> {data.handler.version}</span>
         </p>
+      ) : null}
+      {/* A drawing needs somewhere for an edge to land. The compiled
+          projection the viewer reads carries no ports, so there are no
+          per-port handles to attach to and an edge would have nothing to
+          anchor against — xyflow drops it, and the graph draws as loose
+          boxes. One handle a side, not interactive, and hidden: it is an
+          anchor, not an offer to connect. */}
+      {data.readOnly ? (
+        <>
+          <Handle type="target" position={Position.Left} isConnectable={false} />
+          <Handle type="source" position={Position.Right} isConnectable={false} />
+        </>
       ) : null}
       <div className="ports" style={{ minHeight: `${rows * 22}px` }}>
         <ul className="side">

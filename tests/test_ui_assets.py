@@ -28,6 +28,9 @@ def source_files() -> list[Path]:
     return [UI_ROOT / "index.html", *sorted(ASSETS.rglob("*.js"))]
 
 
+EDITOR_SOURCE = Path(__file__).resolve().parents[1] / "ui" / "editor" / "src"
+
+
 def stylesheet_source() -> str:
     return "\n".join(
         path.read_text(encoding="utf-8") for path in sorted(ASSETS.rglob("*.css"))
@@ -71,7 +74,6 @@ class CatalogTests(unittest.TestCase):
             "run.data.kind.artifact",
             "shell.breadcrumb.root",
             "wait.none",
-            "workflows.zoomLevel",
         }
         self.assertEqual(
             set(), shared - intentional,
@@ -262,3 +264,42 @@ class CapacityRenderingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(
+    EDITOR_SOURCE.is_dir(), "editor sources are not in this checkout"
+)
+class ViewerProtocolTests(unittest.TestCase):
+    """The two halves of the embedded graph viewer, held to one vocabulary.
+
+    The Runtime's pages draw a workflow by embedding the editor's canvas and
+    posting the graph into it. Both ends name the messages, and they cannot
+    share a module: the editor's is bundled by vite, this one is served as
+    source with no build step between them. So the strings are duplicated, and
+    a duplicate that nothing checks is a rename away from a frame that draws
+    nothing and says nothing about why.
+    """
+
+    def messages(self, text: str) -> set[str]:
+        return set(re.findall(r'"(orbit-viewer-[a-z-]+)"', text))
+
+    def test_both_ends_name_the_same_messages(self) -> None:
+        page = (ASSETS / "workflow" / "definition-views.js").read_text(
+            encoding="utf-8"
+        )
+        canvas = (EDITOR_SOURCE / "catalog-graph.mjs").read_text(encoding="utf-8")
+        self.assertEqual(
+            {"orbit-viewer-ready", "orbit-viewer-graph", "orbit-viewer-node-click"},
+            self.messages(page),
+        )
+        self.assertEqual(self.messages(page), self.messages(canvas))
+
+    def test_the_page_asks_for_the_flag_the_canvas_reads(self) -> None:
+        """A frame opened without it would be the editor, inside a modal."""
+
+        page = (ASSETS / "workflow" / "definition-views.js").read_text(
+            encoding="utf-8"
+        )
+        canvas = (EDITOR_SOURCE / "catalog-graph.mjs").read_text(encoding="utf-8")
+        self.assertIn("?readonly=1", page)
+        self.assertIn('params.get("readonly") === "1"', canvas)

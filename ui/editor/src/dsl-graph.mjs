@@ -17,8 +17,11 @@
  * the fallback for a canvas that has not fetched the contract yet. */
 export const NODE_KINDS = ["action", "decision", "human", "join", "terminal"];
 
-const LANE_HEIGHT = 140;
-const DEPTH_WIDTH = 320;
+/** Exported so the read-only viewer places a node the same distance apart.
+ * It is fed the server's depth and lane rather than computing its own, and a
+ * different spacing there would make the same workflow read as two shapes. */
+export const LANE_HEIGHT = 140;
+export const DEPTH_WIDTH = 320;
 
 /** Longest-path depth per node, and a lane within each depth.
  *

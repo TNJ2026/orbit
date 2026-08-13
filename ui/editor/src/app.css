@@ -163,6 +163,10 @@ body {
 }
 .node .title:hover { border-color: var(--line); }
 .node .title:focus { border-color: var(--accent); outline: none; background: var(--bg); }
+/* The viewer's label is a span, so it must not offer the field's affordances:
+   a box that lights up under the pointer says it can be typed in. */
+span.title { display: block; }
+span.title:hover { border-color: transparent; }
 .node .handler { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
 .node .handler .version { opacity: 0.7; }
 
@@ -243,3 +247,28 @@ body {
 .edge-label .route-timeout { color: #d97706; }
 .edge-label .route-cancel { color: var(--muted); }
 .edge-label .mapped { color: var(--muted); }
+
+/* The read-only viewer the Runtime's pages embed. It fills whatever frame it
+   is given rather than assuming a page: the same drawing appears in a modal,
+   in the editing page and in a draft preview, and each is a different size. */
+.viewer { width: 100%; height: 100vh; }
+
+/* A node the embedding page can open. The cursor is the whole affordance —
+   the viewer does not know what opening it does. */
+.node-editable { cursor: pointer; }
+/* The viewer's anchors. Present so an edge has an end; invisible because
+   there is nothing to connect them to. */
+.node .react-flow__handle { opacity: 0; }
+.node .side .react-flow__handle { opacity: 1; }
+.node-editable:hover { border-color: var(--accent); }
+
+.viewer-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  margin: 0;
+  color: var(--muted);
+}
+
+.viewer-state.error { color: var(--bad); }
