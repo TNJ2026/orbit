@@ -1758,6 +1758,77 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
             checkpoint_db_path=Path(directory) / "langgraph-checkpoints.sqlite3",
         )
 
+    def test_a_run_belongs_to_the_actor_that_started_it(self) -> None:
+        """`owner_actor` was recorded, threaded into the graph config, and
+        enforced on every Artifact read — and on no run read at all. A run's
+        `interrupts` carry the node inputs a human is being asked about, and
+        `result` is the workflow's output; both were readable by any actor
+        holding a read scope, and any write scope could cancel or resume.
+        """
+
+        waiting = node(
+            "waiting", inputs=("value",), outputs=("value",),
+            kind="human", handler=False,
+        )
+        terminal = node(
+            "terminal", inputs=("value",), kind="terminal", handler=False
+        )
+        ir = workflow(
+            (waiting, terminal), (edge("done", "waiting", "terminal"),),
+            entry=("waiting",), terminals=("terminal",),
+            result=("waiting", "value"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.publish(directory, ir)
+            service = self.service(directory, store, LangGraphHandlerRegistry([]))
+            mine = service.start(
+                ir.workflow_id, {"value": 1},
+                idempotency_key="owner-mine", actor="test:owner",
+            )
+            theirs = service.start(
+                ir.workflow_id, {"value": 2},
+                idempotency_key="owner-theirs", actor="test:other",
+            )
+
+            with self.subTest("get"):
+                self.assertEqual(
+                    mine.run_id, service.get(mine.run_id, actor="test:owner").run_id,
+                )
+                with self.assertRaisesRegex(LookupError, "not found"):
+                    service.get(theirs.run_id, actor="test:owner")
+
+            with self.subTest("list"):
+                self.assertEqual(
+                    [mine.run_id],
+                    [run.run_id for run in service.list_runs(actor="test:owner")],
+                )
+
+            with self.subTest("resume"):
+                with self.assertRaisesRegex(LookupError, "not found"):
+                    service.resume(
+                        theirs.run_id, True,
+                        expected_revision=theirs.revision,
+                        idempotency_key="owner-resume", actor="test:owner",
+                    )
+
+            with self.subTest("cancel"):
+                with self.assertRaisesRegex(LookupError, "not found"):
+                    service.cancel(
+                        theirs.run_id, expected_revision=theirs.revision,
+                        idempotency_key="owner-cancel", actor="test:owner",
+                    )
+                self.assertEqual(
+                    "interrupted", service.get(theirs.run_id).status,
+                )
+
+            with self.subTest("recovery still sees every run"):
+                # Nothing inside the service passes an actor: recovery, timers
+                # and settlement exist to act on runs nobody is asking about.
+                self.assertEqual(
+                    {mine.run_id, theirs.run_id},
+                    {run.run_id for run in service.list_runs()},
+                )
+
     def _two_stranded_runs(self, directory: str):
         """Two runs the database believes are still in flight.
 
@@ -2987,10 +3058,23 @@ class LangGraphHttpApiTests(unittest.TestCase):
                     actor="test:operator", key="api-interrupt",
                     body={"workflow_id": ir.workflow_id, "input": {"value": 12}},
                 ).json()["data"]["run"]
-                reader_view = client.get(
+                # Owned by the reader, so it can see it — and holding only
+                # READ_SCOPE, so it is offered nothing to do with it.
+                own = service.start(
+                    ir.workflow_id, {"value": 7},
+                    idempotency_key="reader-own", actor="test:reader",
+                )
+                own_view = client.get(
+                    f"/api/v1/langgraph-runs/{own.run_id}", actor="test:reader",
+                ).json()["data"]
+                # Somebody else's run, whose interrupts carry its node inputs.
+                foreign_view = client.get(
                     f"/api/v1/langgraph-runs/{started['run_id']}",
                     actor="test:reader",
-                ).json()["data"]
+                )
+                foreign_list = client.get(
+                    "/api/v1/langgraph-runs", actor="test:reader",
+                ).json()["data"]["runs"]
                 forbidden = client.post(
                     f"/api/v1/langgraph-runs/{started['run_id']}/resume",
                     actor="test:reader", key="reader-resume",
@@ -3035,7 +3119,11 @@ class LangGraphHttpApiTests(unittest.TestCase):
         self.assertEqual("interrupted", started["status"])
         self.assertEqual({"question": "approve?"}, started["interrupts"][0]["value"])
         self.assertTrue(started["allowed_commands"])
-        self.assertEqual([], reader_view["allowed_commands"])
+        self.assertEqual([], own_view["allowed_commands"])
+        self.assertEqual(404, foreign_view.status_code)
+        self.assertEqual(
+            [own.run_id], [item["run_id"] for item in foreign_list],
+        )
         self.assertEqual(403, forbidden.status_code)
         self.assertEqual(200, completed.status_code)
         self.assertEqual(completed.json(), replayed.json())

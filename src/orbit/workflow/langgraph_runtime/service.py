@@ -311,9 +311,13 @@ class LangGraphWorkflowService:
         expected_revision: int,
         idempotency_key: str,
         interrupt_id: str | None = None,
+        actor: str | None = None,
     ) -> LangGraphRun:
         if not idempotency_key.strip():
             raise ValueError("idempotency_key is required")
+        # Before the receipt is consulted, so that replaying somebody else's
+        # idempotency key cannot answer with their run either.
+        self.get(run_id, actor=actor)
         request_hash = definition_hash({
             "command": "resume",
             "run_id": run_id,
@@ -556,11 +560,13 @@ class LangGraphWorkflowService:
         *,
         expected_revision: int,
         idempotency_key: str,
+        actor: str | None = None,
     ) -> LangGraphRun:
         """Persist cancellation before signalling any in-flight Handler."""
 
         if not idempotency_key.strip():
             raise ValueError("idempotency_key is required")
+        self.get(run_id, actor=actor)
         request_hash = definition_hash({
             "command": "cancel",
             "run_id": run_id,
@@ -604,17 +610,27 @@ class LangGraphWorkflowService:
         self.handlers.cancel(run_id)
         return self.get(run_id)
 
-    def get(self, run_id: str) -> LangGraphRun:
+    def get(self, run_id: str, *, actor: str | None = None) -> LangGraphRun:
+        """One run, optionally only if `actor` owns it.
+
+        Scoped exactly as the Artifact store already scopes its reads: a run
+        belonging to somebody else is not found, rather than forbidden, so the
+        answer does not disclose that the id exists. Callers inside the
+        service — recovery, timers, settlement — pass no actor and see every
+        run, which is what they are for.
+        """
+
         with self._connect() as connection:
             row = connection.execute(
                 "SELECT * FROM langgraph_runs WHERE run_id=?", (run_id,)
             ).fetchone()
-        if row is None:
+        if row is None or (actor is not None and row["owner_actor"] != actor):
             raise LookupError(f"LangGraph run not found: {run_id}")
         return self._record(row)
 
     def list_runs(
-        self, *, status: str | None = None, limit: int = 100
+        self, *, status: str | None = None, limit: int = 100,
+        actor: str | None = None,
     ) -> tuple[LangGraphRun, ...]:
         if isinstance(limit, bool) or not 1 <= limit <= 500:
             raise ValueError("limit must be between 1 and 500")
@@ -623,7 +639,12 @@ class LangGraphWorkflowService:
             "cancelled",
         }:
             raise ValueError("invalid LangGraph run status")
-        where, params = ("", ()) if status is None else (" WHERE status=?", (status,))
+        clauses, params = [], []
+        if status is not None:
+            clauses.append("status=?"); params.append(status)
+        if actor is not None:
+            clauses.append("owner_actor=?"); params.append(actor)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         with self._connect() as connection:
             rows = connection.execute(
                 "SELECT * FROM langgraph_runs" + where

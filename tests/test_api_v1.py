@@ -215,7 +215,12 @@ class ApiTestCase(unittest.TestCase):
     """Boots the real composition root with a scriptable authenticator."""
 
     def setUp(self) -> None:
-        self.temp = tempfile.TemporaryDirectory()
+        # A SQLite connection opened during the test may still be waiting to be
+        # collected when the directory goes, and closing it writes `-wal` back
+        # into a directory `rmtree` has already walked. That made roughly one
+        # run in ten fail in `tearDown`, in whichever test happened to be last —
+        # never in the assertion, and never the same test twice.
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.db = Path(self.temp.name) / "runtime.db"
         self.artifact_backend = LocalCASBackend(Path(self.temp.name) / "artifacts")
         self.scopes = {

@@ -624,11 +624,12 @@ def build_mcp_dispatcher(
                 for run in langgraph_service.list_runs(
                     status=arguments.get("status") or None,
                     limit=min(200, max(1, int(arguments.get("limit", 20)))),
+                    actor=actor,
                 )
             ]}
         if name == "inspect_langgraph_run":
             return langgraph_run_dto(
-                langgraph_service.get(str(arguments["run_id"]))
+                langgraph_service.get(str(arguments["run_id"]), actor=actor)
             )
         if name == "start_langgraph_run":
             return langgraph_run_dto(langgraph_service.start(
@@ -643,6 +644,7 @@ def build_mcp_dispatcher(
                 expected_revision=int(arguments["expected_version"]),
                 idempotency_key=str(arguments["idempotency_key"]),
                 interrupt_id=arguments.get("interrupt_id"),
+                actor=actor,
             ))
         if name == "recover_langgraph_run":
             return langgraph_run_dto(
@@ -653,6 +655,7 @@ def build_mcp_dispatcher(
                 str(arguments["run_id"]),
                 expected_revision=int(arguments["expected_version"]),
                 idempotency_key=str(arguments["idempotency_key"]),
+                actor=actor,
             ))
         if name == "list_langgraph_artifacts":
             if getattr(langgraph_service, "artifacts", None) is None:

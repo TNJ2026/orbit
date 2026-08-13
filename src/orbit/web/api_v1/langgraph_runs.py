@@ -151,6 +151,7 @@ def build_routes(ctx, service, template_service=None) -> list[Route]:
             runs = service.list_runs(
                 status=request.query_params.get("status") or None,
                 limit=limit,
+                actor=actor,
             )
         except ValueError as exc:
             return error("invalid_request", str(exc))
@@ -164,7 +165,10 @@ def build_routes(ctx, service, template_service=None) -> list[Route]:
         if isinstance(actor, JSONResponse):
             return actor
         try:
-            run = service.get(request.path_params["run_id"])
+            # A run belonging to somebody else is not found — the same rule
+            # the Artifact endpoints below already apply, and the reason it
+            # matters here is that `interrupts` carry node input data.
+            run = service.get(request.path_params["run_id"], actor=actor)
         except LookupError as exc:
             return error("not_found", str(exc), 404)
         return JSONResponse(envelope(
@@ -207,6 +211,7 @@ def build_routes(ctx, service, template_service=None) -> list[Route]:
                     expected_revision=int(body["expected_version"]),
                     idempotency_key=key,
                     interrupt_id=body.get("interrupt_id"),
+                    actor=actor,
                 )
             except LookupError as exc:
                 raise ValueError(str(exc)) from None
@@ -241,6 +246,7 @@ def build_routes(ctx, service, template_service=None) -> list[Route]:
                     run_id,
                     expected_revision=int(body["expected_version"]),
                     idempotency_key=key,
+                    actor=actor,
                 )
             except LookupError as exc:
                 raise ValueError(str(exc)) from None
