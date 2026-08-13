@@ -9,7 +9,8 @@ export function createViews(context) {
   const { api, render, navigate, announce, reportError, commandButtons,
     promptAndExecute, pill, statusDot, defaultGenerationAgent,
     generationAgentField, workflowViews, runtimeState, isRendering,
-    TERMINAL_RUN_STATUSES, DATA_TEXT_LIMIT } = context;
+    TERMINAL_RUN_STATUSES, TERMINAL_LANGGRAPH_STATUSES,
+    DATA_TEXT_LIMIT } = context;
   let i18n = context.i18n;
   let shellFacts = context.shellFacts;
   let mayStartRun = context.mayStartRun;
@@ -266,8 +267,12 @@ export function createViews(context) {
     const active = runs.find((item) => ["running", "waiting", "interrupted"].includes(item.status));
     const runId = selectedRunId || active?.run_id || null;
     const summary = runId ? (await api.langGraphRun(runId)).data : null;
+    // A LangGraph run, so a LangGraph status. The composer is withheld once
+    // the selected run is over — it would otherwise render locked, because a
+    // summary is present, and read as a run still in flight.
     const historicalDetail = Boolean(
-      selectedRunId && summary && TERMINAL_RUN_STATUSES.has(summary.status),
+      selectedRunId && summary
+      && TERMINAL_LANGGRAPH_STATUSES.has(summary.status),
     );
     if (!historicalDetail) {
       renderSimplifiedComposer(root, catalogResponse.data.workflows, summary);

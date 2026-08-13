@@ -419,6 +419,10 @@ class AuthoringJobService:
                     outcome = self.authoring.revise(
                         current["source_text"], instruction,
                         expected_workflow_id=row["workflow_id"],
+                        # The version this source actually is. Read in the same
+                        # query, so a patch cannot be held to a number taken at
+                        # a different moment than the document it describes.
+                        base_version=int(current["version"]),
                         language=row["display_language"],
                         agent=row["requested_agent"],
                         on_progress=lambda stage, attempt, maximum: self._record_progress(

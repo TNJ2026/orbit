@@ -602,7 +602,10 @@ class WorkflowAuthoringService:
             )
         return self.generators[agent]
 
-    def _revision_writer(self, agent: str | None, base: Mapping[str, Any]):
+    def _revision_writer(
+        self, agent: str | None, base: Mapping[str, Any],
+        base_version: int | None = None,
+    ):
         """The writer for a revision, asked for a patch where it can give one.
 
         A generator that offers `revise` describes the change as operations
@@ -610,13 +613,18 @@ class WorkflowAuthoringService:
         part it cannot alter. One that does not — every discovered Agent CLI —
         is asked for a whole document exactly as before, and the funnel cannot
         tell the difference: both hand back the document to compile.
+
+        `base_version` travels with the base so the applier can hold the patch
+        to the version it claims. The model is told the same number in the
+        prompt; without both halves the claim is unanswerable and the field is
+        decoration.
         """
 
         writer = self._writer(agent)
         revise = getattr(writer, "revise", None)
         if revise is None:
             return writer
-        return lambda prompt: revise(prompt, base)
+        return lambda prompt: revise(prompt, base, base_version)
 
     # -- prompt ------------------------------------------------------------
 
@@ -705,6 +713,7 @@ class WorkflowAuthoringService:
         current_source: Mapping[str, Any] | None = None,
         language: str | None = None,
         assigned_workflow_id: str | None = None,
+        base_version: int | None = None,
     ) -> str:
         facts = {
             "dsl_version": "1.3",
@@ -717,6 +726,11 @@ class WorkflowAuthoringService:
             "preferred_handler": preferred_handler,
             "assigned_workflow_id": assigned_workflow_id,
             "current_source": current_source,
+            # Which version `current_source` is. A generator that answers with
+            # a patch states the version it worked against, and the applier
+            # refuses a mismatch — so the number has to be knowable here, or
+            # the model is being asked to assert something nobody told it.
+            "base_version": base_version,
             "schema_ids": list(self.schemas.ids()),
             "shape_contract": {
                 "port": {"id": "port_id", "schema_id": "one schema_ids value"},
@@ -1011,7 +1025,7 @@ class WorkflowAuthoringService:
     def revise(
         self, current_source: str, instruction: str, *, expected_workflow_id: str,
         agent: str | None = None, language: str | None = None, on_progress=None,
-        on_diagnostics=None,
+        on_diagnostics=None, base_version: int | None = None,
     ) -> GenerationOutcome:
         """Apply a natural-language change to an existing workflow's source.
 
@@ -1047,9 +1061,10 @@ class WorkflowAuthoringService:
         return self._run_funnel(
             lambda feedback: self._prompt(
                 instruction, feedback, None, base, language=language,
+                base_version=base_version,
             ),
             source_name="<revised>", failure="revision", extra_check=guard,
-            write=self._revision_writer(agent, base),
+            write=self._revision_writer(agent, base, base_version),
             on_progress=on_progress,
             on_diagnostics=on_diagnostics,
         )

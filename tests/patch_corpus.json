@@ -581,5 +581,37 @@
       ],
       "index": 0
     }
+  ],
+  "base_versions": [
+    {
+      "name": "a matching claim applies",
+      "declared": 3,
+      "actual": 3,
+      "refused": false
+    },
+    {
+      "name": "a stale claim is refused",
+      "declared": 3,
+      "actual": 5,
+      "refused": true
+    },
+    {
+      "name": "a claim ahead of the document is refused",
+      "declared": 5,
+      "actual": 3,
+      "refused": true
+    },
+    {
+      "name": "a first version matches zero",
+      "declared": 0,
+      "actual": 0,
+      "refused": false
+    },
+    {
+      "name": "an unknown version checks nothing",
+      "declared": 3,
+      "actual": null,
+      "refused": false
+    }
   ]
 }

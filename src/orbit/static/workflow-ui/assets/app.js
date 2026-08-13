@@ -31,7 +31,18 @@ let mayStartRun = false;
 let shellFacts = null;
 let rendering = false;
 let renderQueued = false;
+// Two engines, two vocabularies, and they are not interchangeable. The legacy
+// Runtime finishes a run as `succeeded`; LangGraph finishes one as `completed`
+// and has `unknown` besides, for an external effect it could not resolve.
+// One set was serving both, so a finished LangGraph run was never terminal:
+// the goal composer stayed rendered and disabled, saying the run was still in
+// progress, for as long as the run stayed selected.
 const TERMINAL_RUN_STATUSES = new Set(["succeeded", "failed", "cancelled"]);
+// The same set `LangGraphWorkflowService._settle` uses to decide a run is
+// over and its timers can be cancelled.
+const TERMINAL_LANGGRAPH_STATUSES = new Set([
+  "completed", "failed", "unknown", "cancelled",
+]);
 // How much of one recorded value is rendered. Inline values are capped at
 // 256 KB server-side; a page that pastes all of that stops responding.
 const DATA_TEXT_LIMIT = 20_000;
@@ -410,7 +421,7 @@ async function boot() {
     isRendering: () => rendering,
     announce, reportError, commandButtons, promptAndExecute, pill, statusDot,
     defaultGenerationAgent, generationAgentField, workflowViews,
-    TERMINAL_RUN_STATUSES, DATA_TEXT_LIMIT,
+    TERMINAL_RUN_STATUSES, TERMINAL_LANGGRAPH_STATUSES, DATA_TEXT_LIMIT,
   });
   router = new Router((next) => {
     route = next;

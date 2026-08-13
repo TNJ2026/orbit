@@ -376,17 +376,48 @@ def _assign(target: dict[str, Any], key: str, value: Any) -> None:
         target[key] = value
 
 
-def apply_patch(document: Mapping[str, Any], patch: GraphPatch) -> dict[str, Any]:
+class PatchBaseMismatch(ValueError):
+    """The patch was computed against a different version than it was given.
+
+    Separate from `PatchError` because it is not about an operation. Every
+    operation may be individually applicable and the result still be wrong:
+    that is precisely the mistake `base_version` exists to catch, and the one
+    that cannot be seen by looking at what came out.
+    """
+
+    def __init__(self, declared: int, actual: int) -> None:
+        super().__init__(
+            f"patch was written against v{declared}, but the document is v{actual}"
+        )
+        self.declared = declared
+        self.actual = actual
+
+
+def apply_patch(
+    document: Mapping[str, Any],
+    patch: GraphPatch,
+    *,
+    base_version: int | None = None,
+) -> dict[str, Any]:
     """The document these operations describe, applied in order.
 
     The argument is never mutated: a caller keeps the document it had, which is
     what lets it show the change before accepting it.
+
+    `base_version` is the version `document` actually is. Given one, the
+    patch's own claim must match it — that claim was decoration until a caller
+    passed this, which is what a field documented as "not decoration" must not
+    be allowed to become. A caller that does not know the version passes none
+    and gets the old behaviour, because a check against a number nobody has is
+    not a check.
 
     The result is not validated here. A sequence passes through states that are
     not yet whole, and it is `AuthoredWorkflow` — and then `compile_source` —
     that says whether what came out is a workflow.
     """
 
+    if base_version is not None and patch.base_version != base_version:
+        raise PatchBaseMismatch(patch.base_version, base_version)
     result = copy.deepcopy(dict(document))
     for index, operation in enumerate(patch.operations):
         _apply(result, operation, index)

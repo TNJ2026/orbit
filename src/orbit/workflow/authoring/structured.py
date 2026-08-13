@@ -37,7 +37,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from ..dsl.models import AuthoredWorkflow
 from ..dsl.patch import (
     AddNode, GraphPatch, PatchError, RemoveNode, SetNodeConfig, SetNodeLabel,
-    SetNodePolicies, SetNodePorts, apply_patch,
+    PatchBaseMismatch, SetNodePolicies, SetNodePorts, apply_patch,
 )
 from .generator import (
     MAX_CHANGE_ENTRIES, MAX_CHANGE_TEXT, AuthoringFailedError,
@@ -160,7 +160,10 @@ class StructuredDslGenerator:
         self._instructions = instructions
         self._reviser: Any = None
 
-    def revise(self, prompt: str, base: Mapping[str, Any]) -> str:
+    def revise(
+        self, prompt: str, base: Mapping[str, Any],
+        base_version: int | None = None,
+    ) -> str:
         """A revision of `base`, described by the model as operations.
 
         Returns the resulting document, because that is what the funnel
@@ -178,10 +181,16 @@ class StructuredDslGenerator:
                 f"structured revision returned {type(revision).__name__}, not a patch"
             )
         try:
-            document = apply_patch(base, revision.patch)
+            document = apply_patch(base, revision.patch, base_version=base_version)
         except PatchError as exc:
             # A refusal the model can act on: it names the operation, so the
             # funnel's next attempt can fix that one rather than start again.
+            raise AuthoringFailedError(str(exc)) from None
+        except PatchBaseMismatch as exc:
+            # The model was told which version it was given and answered about
+            # a different one. Fed back rather than accepted: every operation
+            # may still apply cleanly, and the result would be a workflow
+            # nobody asked for with nothing about it to notice.
             raise AuthoringFailedError(str(exc)) from None
         summary = _summarise(revision.patch, base)
         return json.dumps(

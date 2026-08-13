@@ -554,11 +554,11 @@ class RevisionByPatchTests(unittest.TestCase):
         "result": {"node": "work", "port": "value"},
     }
 
-    def reviser(self, operations, error=None):
+    def reviser(self, operations, error=None, declared_base=1):
         from orbit.workflow.authoring.structured import WorkflowRevision
 
         revision = None if error else WorkflowRevision.model_validate(
-            {"patch": {"base_version": 1, "operations": operations}}
+            {"patch": {"base_version": declared_base, "operations": operations}}
         )
         agent = _StubAgent(revision, error)
         self.agent = agent
@@ -571,6 +571,44 @@ class RevisionByPatchTests(unittest.TestCase):
     def revise(self, operations):
         generator = self.reviser(operations)
         return json.loads(generator.revise("change it", self.BASE))
+
+    def test_a_patch_written_against_another_version_is_refused(self) -> None:
+        """`base_version` was carried and never checked.
+
+        The model is told which version it was handed and states the one it
+        worked against. When those differ it was reasoning about a document
+        other than the one it was given, and every operation may still apply:
+        the result would be a workflow nobody asked for, with nothing about it
+        to notice. Refused, and refused as feedback the funnel can retry with.
+        """
+
+        from orbit.workflow.authoring.generator import AuthoringFailedError
+
+        generator = self.reviser(
+            [{"op": "set_node_label", "node_id": "work", "label": "x"}],
+            declared_base=3,
+        )
+        with self.assertRaisesRegex(AuthoringFailedError, "written against v3"):
+            generator.revise("change it", self.BASE, 5)
+
+    def test_a_patch_against_the_version_it_was_given_applies(self) -> None:
+        generator = self.reviser(
+            [{"op": "set_node_label", "node_id": "work", "label": "x"}],
+            declared_base=5,
+        )
+        payload = json.loads(generator.revise("change it", self.BASE, 5))
+        document = payload["workflow"]
+        self.assertEqual("x", document["nodes"][0]["label"])
+
+    def test_a_caller_that_does_not_know_the_version_checks_nothing(self) -> None:
+        """A check against a number nobody has is not a check."""
+
+        generator = self.reviser(
+            [{"op": "set_node_label", "node_id": "work", "label": "x"}],
+            declared_base=3,
+        )
+        payload = json.loads(generator.revise("change it", self.BASE))
+        self.assertEqual("x", payload["workflow"]["nodes"][0]["label"])
 
     def test_only_what_the_operations_named_is_different(self) -> None:
         payload = self.revise([
@@ -687,8 +725,9 @@ class RevisionSeamTests(unittest.TestCase):
             def __call__(self, prompt):  # pragma: no cover - must not be used
                 raise AssertionError("revision must not take the generation path")
 
-            def revise(self, prompt, base):
+            def revise(self, prompt, base, base_version=None):
                 seen["base"] = base
+                seen["base_version"] = base_version
                 document = json.loads(json.dumps(base))
                 document["nodes"][0]["label"] = "Renamed by patch"
                 return json.dumps(document)
@@ -699,7 +738,10 @@ class RevisionSeamTests(unittest.TestCase):
         )
         outcome = authoring.revise(
             json.dumps(_funnel_document()), "rename it",
-            expected_workflow_id="workflow:generated",
+            expected_workflow_id="workflow:generated", base_version=7,
         )
         self.assertEqual("generated", seen["base"]["metadata"]["id"])
+        # The version travels with the base, so the applier can hold the patch
+        # to the version it claims rather than to whatever it says.
+        self.assertEqual(7, seen["base_version"])
         self.assertIn("Renamed by patch", outcome.source)

@@ -21,7 +21,9 @@ import shutil
 import subprocess
 import unittest
 
-from orbit.workflow.dsl.patch import GraphPatch, PatchError, apply_patch
+from orbit.workflow.dsl.patch import (
+    GraphPatch, PatchBaseMismatch, PatchError, apply_patch,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -41,7 +43,8 @@ class PatchParityTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.corpus = _corpus()
         script = (
-            f"import {{ applyPatch, PatchError }} from {json.dumps(str(APPLIER))};\n"
+            "import { applyPatch, PatchBaseMismatch, PatchError } from "
+            f"{json.dumps(str(APPLIER))};\n"
             "const corpus = JSON.parse(process.argv[1]);\n"
             "const out = { applied: [], failed: [] };\n"
             "for (const item of corpus.cases) {\n"
@@ -56,6 +59,23 @@ class PatchParityTests(unittest.TestCase):
             "      raised: error instanceof PatchError,\n"
             "      index: error.index,\n"
             "      reason: error.reason,\n"
+            "    });\n"
+            "  }\n"
+            "}\n"
+            "out.bases = [];\n"
+            "for (const item of corpus.base_versions) {\n"
+            "  const patch = {\n"
+            "    base_version: item.declared,\n"
+            "    operations: [{op: 'set_node_label', node_id: 'work', label: 'x'}],\n"
+            "  };\n"
+            "  try {\n"
+            "    applyPatch(corpus.document, patch, item.actual);\n"
+            "    out.bases.push({refused: false});\n"
+            "  } catch (error) {\n"
+            "    out.bases.push({\n"
+            "      refused: error instanceof PatchBaseMismatch,\n"
+            "      declared: error.declared,\n"
+            "      actual: error.actual,\n"
             "    });\n"
             "  }\n"
             "}\n"
@@ -94,6 +114,43 @@ class PatchParityTests(unittest.TestCase):
                 # the same one whichever side refused.
                 self.assertEqual(case["index"], caught.exception.index)
                 self.assertEqual(case["index"], from_browser["index"])
+
+    def test_a_stale_base_version_is_refused_on_both_sides(self) -> None:
+        """`base_version` was carried by both and checked by neither.
+
+        Every operation in such a patch can be individually applicable and the
+        result still be a workflow nobody asked for — which is the mistake the
+        field's own docstring says it exists to catch, and the one that cannot
+        be seen by looking at what came out.
+        """
+
+        document = self.corpus["document"]
+        self.assertEqual(
+            len(self.corpus["base_versions"]), len(self.browser["bases"])
+        )
+        for case, from_browser in zip(
+            self.corpus["base_versions"], self.browser["bases"]
+        ):
+            with self.subTest(case=case["name"]):
+                patch = GraphPatch.model_validate({
+                    "base_version": case["declared"],
+                    "operations": [
+                        {"op": "set_node_label", "node_id": "work", "label": "x"}
+                    ],
+                })
+                if not case["refused"]:
+                    apply_patch(document, patch, base_version=case["actual"])
+                    self.assertFalse(from_browser["refused"], "the editor refused it")
+                    continue
+                with self.assertRaises(PatchBaseMismatch) as caught:
+                    apply_patch(document, patch, base_version=case["actual"])
+                self.assertTrue(from_browser["refused"], "the editor accepted it")
+                # Both sides say which two versions disagreed, so a model or an
+                # author is told the same thing whichever refused.
+                self.assertEqual(case["declared"], caught.exception.declared)
+                self.assertEqual(case["actual"], caught.exception.actual)
+                self.assertEqual(case["declared"], from_browser["declared"])
+                self.assertEqual(case["actual"], from_browser["actual"])
 
     def test_neither_applier_mutates_the_document_it_was_given(self) -> None:
         untouched = _corpus()["document"]

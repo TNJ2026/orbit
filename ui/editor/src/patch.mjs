@@ -17,6 +17,21 @@
  * definition can reach them.
  */
 
+/** The patch was computed against a different version than it was given.
+ *
+ * Not a `PatchError`, because it is not about an operation. Every operation
+ * may be individually applicable and the result still be wrong: that is
+ * exactly the mistake `base_version` exists to catch, and the one that cannot
+ * be seen by looking at what came out.
+ */
+class PatchBaseMismatch extends Error {
+  constructor(declared, actual) {
+    super(`patch was written against v${declared}, but the document is v${actual}`);
+    this.declared = declared;
+    this.actual = actual;
+  }
+}
+
 class PatchError extends Error {
   constructor(index, reason) {
     super(`operation ${index}: ${reason}`);
@@ -202,12 +217,22 @@ function membership(document, key, named, index) {
  *
  * The argument is never mutated, which is what lets a caller hold what it had
  * and show the change before accepting it.
+ *
+ * `baseVersion` is the version `document` actually is. Given one, the patch's
+ * own claim must match it. A caller that does not know the version passes
+ * none: a check against a number nobody has is not a check.
  */
-export function applyPatch(document, operations) {
+export function applyPatch(document, operations, baseVersion = null) {
+  const declared = Array.isArray(operations) ? null : operations?.base_version;
+  if (baseVersion !== null && declared !== undefined && declared !== baseVersion) {
+    throw new PatchBaseMismatch(declared, baseVersion);
+  }
   const result = clone(document);
   result.nodes = result.nodes ?? [];
   result.edges = result.edges ?? [];
-  (operations ?? []).forEach((op, index) => {
+  const list = Array.isArray(operations)
+    ? operations : (operations?.operations ?? []);
+  list.forEach((op, index) => {
     const handler = HANDLERS[op?.op];
     if (!handler) throw new PatchError(index, `unsupported operation '${op?.op}'`);
     handler(result, op, index);
@@ -215,4 +240,4 @@ export function applyPatch(document, operations) {
   return result;
 }
 
-export { PatchError };
+export { PatchBaseMismatch, PatchError };

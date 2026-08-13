@@ -1055,6 +1055,115 @@ class SingleAgentHomeTests(BrowserE2ETestCase):
         )
         self.assertNotIn(generated_id, before)
 
+    @staticmethod
+    def runnable(*, human: bool):
+        """A 1.3 document this Runtime can actually start.
+
+        The suite's older fixtures declare no workflow-level `inputs`, so
+        LangGraph refuses every input as unknown — they were published to be
+        listed, not run.
+        """
+
+        from tests.test_workflow_authoring_jobs import dsl
+
+        port = {"id": "value", "schema_id": "example://integer/1.0"}
+        document = dsl(name="Runnable")
+        document["inputs"] = [dict(port)]
+        if human:
+            document["metadata"]["id"] = "pausing"
+            result = {"id": "result", "schema_id": "schema://object/1.0"}
+            document["nodes"].insert(1, {
+                "id": "approve", "kind": "human",
+                "inputs": [dict(port)], "outputs": [dict(result)],
+                # A static human node is an approval, its participants must be
+                # unique, and its output has to accept the submission result
+                # `{decision, value}` — the compiler refuses all three.
+                "config": {
+                    "task_kind": "approval", "participants": ["local"],
+                    "quorum": "any",
+                },
+            })
+            document["nodes"][-1]["inputs"] = [dict(result)]
+            document["edges"] = [
+                {"id": "to_approve",
+                 "from": {"node": "collect", "port": "value"},
+                 "to": {"node": "approve", "port": "value"}},
+                {"id": "finish",
+                 "from": {"node": "approve", "port": "result"},
+                 "to": {"node": "done", "port": "result"}},
+            ]
+            document["result"] = {"node": "approve", "port": "result"}
+        else:
+            document["metadata"]["id"] = "runnable"
+        return document
+
+    def publish(self, page, document) -> str:
+        workflow_id = f"workflow:{document['metadata']['id']}"
+        response = page.evaluate(
+            """([id, source]) => fetch(
+                 `/api/v1/workflows/${encodeURIComponent(id)}/versions`,
+                 {
+                   method: "POST",
+                   headers: {
+                     "content-type": "application/json",
+                     "idempotency-key": "publish-" + id,
+                   },
+                   body: JSON.stringify({source, expected_version: 0}),
+                 },
+               ).then((r) => r.json())""",
+            [workflow_id, json.dumps(document)],
+        )
+        self.assertIn("data", response, response)
+        return workflow_id
+
+    def start(self, page, workflow_id: str) -> dict:
+        return page.evaluate(
+            """(id) => fetch("/api/v1/langgraph-runs", {
+                 method: "POST",
+                 headers: {
+                   "content-type": "application/json",
+                   "idempotency-key": "start-" + id,
+                 },
+                 body: JSON.stringify({workflow_id: id, input: {value: 1}}),
+               }).then((r) => r.json()).then((b) => b.data.run)""",
+            workflow_id,
+        )
+
+    def test_a_finished_run_hands_the_composer_back(self) -> None:
+        """The two engines do not share a word for "over".
+
+        The legacy Runtime finishes a run as `succeeded`; LangGraph finishes
+        one as `completed`. One set of terminal statuses served both, so a
+        finished LangGraph run was never terminal here: the composer stayed
+        rendered, and rendered *disabled* — a summary is present, so every
+        control locks and the button reads "in progress" — for a run that had
+        been over for as long as it stayed selected.
+        """
+
+        page = self.open("en-US")
+        page.wait_for_selector(".simplified-workspace-composer")
+        workflow_id = self.publish(page, self.runnable(human=False))
+        run = self.start(page, workflow_id)
+        self.assertEqual("completed", run["status"])
+
+        page.goto(f"{self.base}/ui/#/runs/{quote(run['run_id'], safe='')}")
+        page.wait_for_selector("#content .panel")
+
+        self.assertEqual(0, page.locator(".simplified-workspace-composer").count())
+
+    def test_a_run_still_in_flight_keeps_the_composer_locked(self) -> None:
+        """The other half: `interrupted` is not over, and must still lock."""
+
+        page = self.open("en-US")
+        page.wait_for_selector(".simplified-workspace-composer")
+        workflow_id = self.publish(page, self.runnable(human=True))
+        run = self.start(page, workflow_id)
+        self.assertEqual("interrupted", run["status"])
+
+        page.goto(f"{self.base}/ui/#/runs/{quote(run['run_id'], safe='')}")
+        page.wait_for_selector(".simplified-workspace-composer")
+        self.assertTrue(page.locator("#newGoalStart").is_disabled())
+
     def test_one_agent_is_still_the_difference(self) -> None:
         """What single-agent mode does withhold, it still withholds."""
 
