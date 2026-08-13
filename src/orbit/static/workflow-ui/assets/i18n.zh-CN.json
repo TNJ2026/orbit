@@ -123,7 +123,7 @@
   "generate.instructionPh": "例如：先转换输入，再交运维审批，通过后结束",
   "generate.executionAgent": "运行任务的 Agent",
   "generate.connectedAgent": "当前连接的 Agent",
-  "generate.connectedAgent.none": "暂无 MCP Agent 连接",
+  "generate.connectedAgent.none": "没有可用的 Agent",
   "generate.outputUnavailable": "当前账号无法查看 Agent 输出。",
   "generate.outputWaiting": "正在等待 Agent 输出…",
   "generate.profile.label": "工作流模式",

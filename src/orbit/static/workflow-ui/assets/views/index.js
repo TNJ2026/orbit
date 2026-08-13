@@ -1347,15 +1347,17 @@ export function createViews(context) {
     }
 
     {
+      // Single-agent mode writes with *the* Agent rather than offering a
+      // choice — which is not the same as writing with nothing.
+      // `defaultGenerationAgent` already ranks them the way this product
+      // wants: a connected Agent App first, because it is already running in
+      // the author's session, and a discovered CLI otherwise. Taking only
+      // `app:` names left an install with three working CLIs advertising
+      // them, reporting "No MCP Agent connected", and refusing to generate at
+      // all.
       let writerAgent = defaultGenerationAgent();
       const authoringProfile = shellFacts?.product_mode?.workflow_ui_mode === "single-agent"
         ? "single_agent" : "multi_agent";
-      const connectedMcpAgents = (
-        shellFacts?.capabilities?.workflow_generation?.agents || []
-      ).filter((name) => name.startsWith("app:"));
-      if (authoringProfile === "single_agent") {
-        writerAgent = connectedMcpAgents[0] || "";
-      }
       const connectedAgent = el("div", {
         class: "field simplified-workflow-connected-agent",
       }, [

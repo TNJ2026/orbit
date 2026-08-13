@@ -123,7 +123,7 @@
   "generate.instructionPh": "e.g. Transform the input, then require an approval from ops before finishing",
   "generate.executionAgent": "Agent that runs the task",
   "generate.connectedAgent": "Connected Agent",
-  "generate.connectedAgent.none": "No MCP Agent connected",
+  "generate.connectedAgent.none": "No Agent available",
   "generate.outputUnavailable": "Agent output is unavailable for this account.",
   "generate.outputWaiting": "Waiting for Agent output…",
   "generate.profile.label": "Workflow mode",
