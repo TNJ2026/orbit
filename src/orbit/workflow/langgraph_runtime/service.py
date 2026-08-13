@@ -377,7 +377,15 @@ class LangGraphWorkflowService:
                 (
                     "running" if ready else "interrupted",
                     0 if ready else 1,
-                    "{}" if ready else canonical_json(responses),
+                    # Kept, not cleared. This commits and *then* hands the
+                    # responses to the graph; a process that stops in between
+                    # used to leave `running` with nothing recorded, so
+                    # recovery re-entered with `invoke(None)`, the graph
+                    # interrupted at the same nodes, and every human answer
+                    # collected across the earlier partial resumes was gone
+                    # with no trace. They are cleared in `_settle`, once the
+                    # graph has actually consumed them.
+                    canonical_json(responses),
                     "[]" if ready else canonical_json(pending_interrupts),
                     self._stamp(), run_id, expected_revision,
                 ),
@@ -453,6 +461,19 @@ class LangGraphWorkflowService:
                 )
         if current.status != "running":
             return current
+        # Answers collected before the process stopped. Re-entering with
+        # `invoke(None)` would interrupt at the same nodes and lose them, so
+        # they are handed back to the graph exactly as `resume` would have.
+        with self._connect() as connection:
+            pending = connection.execute(
+                "SELECT interrupt_responses_json FROM langgraph_runs WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+        responses = json.loads(pending["interrupt_responses_json"] or "{}")
+        if responses:
+            return self._execute(
+                run_id, self._run_ir(current), resume=responses,
+            )
         config = {"configurable": {"thread_id": run_id}}
         with SqliteSaver.from_conn_string(str(self.checkpoint_db_path)) as saver:
             has_checkpoint = saver.get_tuple(config) is not None
@@ -780,9 +801,11 @@ class LangGraphWorkflowService:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             changed = connection.execute(
+                # Reaching here means the execute finished, however it
+                # finished, so whatever it was resumed with has been consumed.
                 "UPDATE langgraph_runs SET status=?,revision=revision+1,result_json=?,"
-                " interrupts_json=?,error=?,updated_at=? WHERE run_id=?"
-                " AND status!='cancelled'",
+                " interrupts_json=?,error=?,interrupt_responses_json='{}',"
+                " updated_at=? WHERE run_id=? AND status!='cancelled'",
                 (
                     status,
                     None if result is None else canonical_json(result),

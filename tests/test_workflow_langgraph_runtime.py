@@ -1340,6 +1340,78 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
         self.assertEqual("completed", completed.status)
         self.assertEqual("left-approved", completed.result)
 
+    def test_answers_survive_a_process_that_stops_mid_resume(self) -> None:
+        """The window between committing the last answer and using it.
+
+        `resume` records the answer, marks the run running, commits, and only
+        then hands the collected answers to the graph. A process that stopped
+        in that window used to leave `running` with nothing recorded, so
+        recovery re-entered with `invoke(None)`, the graph interrupted at the
+        same nodes, and every answer gathered across the earlier partial
+        resumes was gone — with no trace that anyone had ever answered.
+        """
+
+        fan = node(
+            "fan", inputs=("value",), outputs=("value",), route_mode="parallel",
+        )
+        left = node(
+            "left", inputs=("value",), outputs=("value",),
+            kind="human", handler=False,
+        )
+        right = node(
+            "right", inputs=("value",), outputs=("value",),
+            kind="human", handler=False,
+        )
+        ir = workflow(
+            (fan, left, right),
+            (edge("to_left", "fan", "left"), edge("to_right", "fan", "right")),
+            entry=("fan",), terminals=("left", "right"),
+            result=("left", "value"),
+            policies=(IRPolicy(
+                "complete", "completion", {"required_terminal_count": 2},
+            ),),
+        )
+        registry = LangGraphHandlerRegistry([
+            binding("fan", lambda values, config, context: dict(values)),
+        ])
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.publish(directory, ir)
+            service = self.service(directory, store, registry)
+            started = service.start(
+                ir.workflow_id, {"value": "start"}, idempotency_key="crash-start",
+            )
+            first = next(item for item in started.interrupts)
+            partial = service.resume(
+                started.run_id, "first-answer",
+                expected_revision=started.revision,
+                idempotency_key="crash-first", interrupt_id=first["id"],
+            )
+            self.assertEqual("interrupted", partial.status)
+
+            # The last answer, but the process stops before the graph is
+            # given them: the row is committed and `_execute` never runs.
+            crashed = self.service(directory, store, registry)
+            original = crashed._execute
+
+            def stop_after_commit(*args, **kwargs):
+                raise KeyboardInterrupt("process lost")
+
+            crashed._execute = stop_after_commit
+            with self.assertRaises(KeyboardInterrupt):
+                crashed.resume(
+                    partial.run_id, "second-answer",
+                    expected_revision=partial.revision,
+                    idempotency_key="crash-second",
+                    interrupt_id=partial.interrupts[0]["id"],
+                )
+
+            # A new process picks it up. Both answers have to still be there.
+            rebuilt = self.service(directory, store, registry)
+            recovered = rebuilt.recover(partial.run_id)
+
+        self.assertEqual("completed", recovered.status, recovered.error)
+        self.assertEqual("first-answer", recovered.result)
+
     def test_deadline_join_timer_resumes_partial_checkpoint(self) -> None:
         deadline = IRPolicy(
             "wait_for_enough", "join",
