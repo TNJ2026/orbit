@@ -18,7 +18,6 @@ from .platform.cutover import (
 )
 from .platform.projects import (
     project_db_path,
-    public_workflow_db_path,
     workflow_library_path,
     project_state_dir,
     resolve_project_root,
@@ -485,12 +484,6 @@ def _serve(args) -> None:
         print(f"dev tools: {', '.join(tool_names) or 'none granted'}", flush=True)
 
     workflow_db_path = Path(_workflow_db_path(args.db, args.ui_mode))
-    # What this mode's library is seeded from the first time it is created.
-    # Before per-mode libraries existed every `orbit serve` published here, so
-    # an operator upgrading into `--ui-mode single-agent` would otherwise open
-    # the UI onto an empty catalog. Read-only: the shared library is never
-    # written to or removed.
-    seed_libraries = (public_workflow_db_path(),)
     langgraph_state_directory = (
         Path(args.langgraph_state_dir).expanduser().absolute()
         if args.langgraph_state_dir else Path(db_path).parent
@@ -531,7 +524,6 @@ def _serve(args) -> None:
             legacy_execution=False,
             workflow_ui_mode=args.ui_mode,
             structured_agents=structured_agents,
-            workflow_seed_libraries=seed_libraries,
         )
     except MixedSchemaError as exc:
         raise SystemExit(f"error: {exc}") from None

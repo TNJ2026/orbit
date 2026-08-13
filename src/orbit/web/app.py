@@ -469,7 +469,6 @@ def create_app(
     langgraph_state_directory: Path | str | None = None,
     legacy_execution: bool = True,
     workflow_ui_mode: str = "multi-agent",
-    workflow_seed_libraries: Sequence[Path | str] = (),
 ) -> Starlette:
     """Build the Runtime application.
 
@@ -480,13 +479,6 @@ def create_app(
 
     if workflow_ui_mode not in {"single-agent", "multi-agent"}:
         raise ValueError("workflow_ui_mode must be single-agent or multi-agent")
-
-    # Asked here and nowhere later: by the time the composition exists it has
-    # already created this file, so anything that checked afterwards would
-    # conclude the library had always been there and skip the seeding below.
-    library_is_new = workflow_db_path is not None and not Path(
-        workflow_db_path
-    ).is_file()
 
     # Discovery runs *before* the composition, because the composition seals
     # the handler registry in its constructor. Registering afterwards is not
@@ -640,17 +632,11 @@ def create_app(
         carried = merge_workflow_library(
             composition.db_path, composition.workflow_db_path
         )
-        # A library that does not exist yet has nothing to be isolated from,
-        # so this is the one moment its seeds can be taken: the definitions
-        # the operator already had, carried in before it starts diverging.
-        # Doing it on every boot instead would copy the other product's
-        # catalog back in forever, which is not isolation with a grace
-        # period — it is no isolation at all.
-        for seed in (workflow_seed_libraries if library_is_new else ()):
-            # Never created here: an absent seed is an operator who had no
-            # such library, not one to be conjured empty.
-            if Path(seed).is_file():
-                carried += merge_workflow_library(seed, composition.workflow_db_path)
+        # Only from the project database, and never from the other product's
+        # library. The two authoring products keep separate catalogs, and a
+        # seeding step that copied one into the other at any moment — even
+        # once, at creation — would make a single-agent library open with
+        # somebody's multi-agent workflows in it and need archiving by hand.
         if carried:
             print(
                 f"workflow library: carried {carried} definition version(s) "

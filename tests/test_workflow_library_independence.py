@@ -1,16 +1,19 @@
-"""What a per-mode Workflow library starts life holding.
+"""What a per-mode Workflow library holds, and what it must never hold.
 
-Per-mode libraries were introduced so the two authoring products would not
-show each other's catalogs. Nothing carried the operator's existing
-definitions into the new file, and the only back-fill in the code was gated on
-`legacy_execution`, which `orbit serve` hard-codes to False — so upgrading and
-opening the UI showed an empty catalog, with every Workflow still sitting in a
-library nothing read any more.
+The two authoring products keep separate catalogs, and separate means
+separate: a single-agent library must not acquire multi-agent workflows, at
+creation or ever. An earlier attempt seeded a new library from the shared one
+so that upgrading did not open onto an empty catalog; the cost was a
+single-agent product whose first view was somebody else's twelve multi-agent
+workflows, each needing archiving by hand. The old library stays reachable
+with `--ui-mode multi-agent`, which is the answer to "where did they go"
+without being an answer that mixes them in.
 
-Seeding fixes that without giving the isolation away: a library that does not
-exist yet has nothing to be isolated from, so it takes its seeds once. Doing it
-on every boot would copy the other product's catalog back in forever, which is
-not isolation with a grace period — it is no isolation at all.
+What does still carry forward is the project database: definitions published
+into the Runtime's own database belong in the library that Runtime reads.
+That back-fill was gated on `legacy_execution`, which `orbit serve` hard-codes
+to False, so it had never run at all and a Workflow published by an earlier
+build simply stopped being visible.
 """
 
 from __future__ import annotations
@@ -66,65 +69,60 @@ def _workflow_ids(path: Path) -> set[str]:
         }
 
 
-class WorkflowLibrarySeedingTests(unittest.TestCase):
+class WorkflowLibraryIndependenceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
         self.root = Path(self.temp_dir.name)
         self.runtime = self.root / "runtime.db"
-        self.seed = self.root / "library.db"
+        self.shared = self.root / "library.db"
         self.library = self.root / "single-agent-library.db"
 
     def boot(self) -> None:
         create_app(
             str(self.runtime),
             workflow_db_path=self.library,
-            workflow_seed_libraries=(self.seed,),
             worker_count=0,
-            # What `orbit serve` passes. The back-fill used to be gated on
-            # this being true, so testing with the default would have watched
-            # the merge succeed on a path no product takes.
+            # What `orbit serve` passes. The back-fill below used to be gated
+            # on this being true, so testing with the default would have
+            # watched the merge succeed on a path no product takes.
             legacy_execution=False,
         )
 
-    def test_a_new_library_takes_what_the_operator_already_had(self) -> None:
-        carried = _publish(self.seed, "existing", 0)
-        self.boot()
-        self.assertIn(carried, _workflow_ids(self.library))
+    def test_a_new_library_takes_nothing_from_the_other_product(self) -> None:
+        """Independent from the first boot, not independent after a grace period."""
 
-    def test_the_seed_library_is_left_exactly_as_it_was(self) -> None:
-        carried = _publish(self.seed, "existing", 0)
+        other = _publish(self.shared, "authored-in-multi-agent", 0)
+        self.boot()
+        self.assertEqual(set(), _workflow_ids(self.library))
+        self.assertEqual({other}, _workflow_ids(self.shared))
+
+    def test_the_other_library_is_never_written_to(self) -> None:
+        existing = _publish(self.shared, "authored-in-multi-agent", 0)
         self.boot()
         _publish(self.library, "authored-here", 0)
-        self.assertEqual({carried}, _workflow_ids(self.seed))
-
-    def test_seeding_happens_once_and_not_on_every_boot(self) -> None:
-        """Otherwise the other product's catalog reappears forever."""
-
-        _publish(self.seed, "existing", 0)
         self.boot()
-        later = _publish(self.seed, "published-elsewhere-later", 0)
-        self.boot()
-        self.assertNotIn(later, _workflow_ids(self.library))
-
-    def test_an_absent_seed_library_is_not_conjured_into_existence(self) -> None:
-        """An operator with no such library had no Workflows to carry."""
-
-        self.boot()
-        self.assertFalse(self.seed.exists())
+        self.assertEqual({existing}, _workflow_ids(self.shared))
 
     def test_the_project_database_is_always_carried_forward(self) -> None:
         """Definitions published into the runtime database itself.
 
-        This is the back-fill that `legacy_execution` gated out of existence:
-        it has to run on every boot, because a project database keeps
-        receiving publishes after the library exists.
+        This is the back-fill `legacy_execution` gated out of existence. It
+        has to run on every boot, because a project database keeps receiving
+        publishes after the library exists.
         """
 
         self.boot()
         published = _publish(self.runtime, "published-into-the-project", 0)
         self.boot()
         self.assertIn(published, _workflow_ids(self.library))
+
+    def test_an_explicit_database_is_its_own_library_and_merges_nothing(self) -> None:
+        """`--db X` is self-contained, so there are not two paths to reconcile."""
+
+        create_app(str(self.runtime), workflow_db_path=self.runtime, worker_count=0)
+        published = _publish(self.runtime, "self-contained", 0)
+        self.assertEqual({published}, _workflow_ids(self.runtime))
 
 
 if __name__ == "__main__":
