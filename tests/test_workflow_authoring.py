@@ -462,6 +462,46 @@ class AuthoringServiceTests(unittest.TestCase):
         self.assertEqual([], model.prompts)
 
 
+class PatchPromptTests(unittest.TestCase):
+    """The operations prompt must not also ask for a document.
+
+    The `[HARD]` tier outranks everything else, and on a revision it said
+    "return the COMPLETE modified document" and "wrap your answer as
+    {workflow, change_summary}" — in the same prompt that asked for
+    operations. Measured against the real CLIs: opencode returned a document
+    on every first attempt and complied only after the parse failure was fed
+    back; codex did it on half. With the contradiction gone, all three
+    answered with operations first time, on all eight kinds of change.
+    """
+
+    def prompts_for(self, shape):
+        current = json.dumps(valid_document())
+        model = ScriptedModel([current] * 4)
+        service(model).revise(
+            current, "rename it", expected_workflow_id="workflow:generated",
+        )
+        # The operations pass runs first, the document pass after it.
+        return (model.prompts[0] if shape == "patch"
+                else model.prompts[AuthoringReviseTests.PATCH_BUDGET])
+
+    def test_the_operations_prompt_never_asks_for_a_document(self) -> None:
+        prompt = self.prompts_for("patch")
+        self.assertIn("Answer with the operations that change it", prompt)
+        self.assertIn('"patch_contract"', prompt)
+        for contradiction in (
+            "return the COMPLETE modified document",
+            'Wrap your answer as {"workflow"',
+        ):
+            self.assertNotIn(contradiction, prompt)
+
+    def test_the_document_prompt_still_asks_for_one(self) -> None:
+        """The fallback is unchanged; only the pass before it was wrong."""
+
+        prompt = self.prompts_for("document")
+        self.assertIn("return the COMPLETE modified document", prompt)
+        self.assertNotIn("Answer with the operations that change it", prompt)
+
+
 class ExpressionVocabularyTests(unittest.TestCase):
     """What a condition may be, told rather than guessed.
 

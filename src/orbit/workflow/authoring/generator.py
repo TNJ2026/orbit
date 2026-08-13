@@ -719,7 +719,9 @@ class WorkflowAuthoringService:
             rendered.append({**fact, "ports": ports} if ports else dict(fact))
         return rendered
 
-    def _rules(self, current_source: Mapping[str, Any] | None) -> dict[str, list[str]]:
+    def _rules(
+        self, current_source: Mapping[str, Any] | None, shape: str = "document",
+    ) -> dict[str, list[str]]:
         """The rules, grouped by what breaking one costs.
 
         A flat list of two dozen peers gives a reader no way to tell a rule
@@ -741,7 +743,7 @@ class WorkflowAuthoringService:
             "This is a LangGraph workflow: use only action, decision, human, join, and terminal nodes. Never emit agentic, foreach, subflow, or extension nodes, top-level extensions, or a node extension field.",
             f"At most {self.max_nodes} nodes.",
         ]
-        shape = [
+        shape_rules = [
             "Keep every action bounded and single-purpose. A coding action may include targeted tests for its own change, but requirements analysis, cross-module implementation, a full test suite, and final reporting must not be combined in one action.",
             "Put full test suites, long builds, and end-to-end tests in a separate validation action. Agent actions should prefer targeted tests and must be able to return a useful partial result when time is short, a test fails, or progress is blocked.",
             "Never instruct an Agent to keep fixing until every test passes. Repetition requires an explicit back_edge and a bounded loop or rework policy.",
@@ -766,14 +768,28 @@ class WorkflowAuthoringService:
             hard.append(
                 "The generated workflow must be directly runnable from a Run Goal: declare exactly one entry node; it must be an action using an agent.* handler with exactly one inline object input named prompt. Route that entry's output to any downstream parallel branches instead of declaring those branches as additional entries."
             )
-        if current_source is not None:
+        if current_source is not None and shape == "patch":
+            # The rules that ask for a whole document are not merely unhelpful
+            # here, they are the opposite instruction — and they sit in the
+            # tier that outranks everything else. Left in place, a model was
+            # being told to answer with operations and to return the complete
+            # document, in the same prompt: opencode returned a document on
+            # every first attempt and complied only once the parse failure was
+            # fed back, and codex did it on half of them.
+            hard[:0] = [
+                "You are MODIFYING an existing workflow given as current_source. Answer with the operations that change it and nothing else; never return a document.",
+                "Every operation names what it changes. A part of the workflow no operation names must be left exactly as it is — that is why operations are asked for.",
+                "Answer as {\"base_version\": <the base_version fact>, \"summary\": <one sentence>, \"operations\": [...]} following patch_contract.",
+                "Use the fewest operations that express the instruction. Do not restate parts of the workflow that are not changing.",
+            ]
+        elif current_source is not None:
             hard[:0] = [
                 "You are MODIFYING an existing workflow given as current_source. Start from it, apply only the change the instruction asks for, and return the COMPLETE modified document.",
                 "Keep metadata.id exactly as it is in current_source; the workflow identity must not change.",
                 "Wrap your answer as {\"workflow\": <the complete DSL document>, \"change_summary\": [...]} following change_summary_contract.",
                 "List one change_summary entry per node you added, removed or changed; node_id must match a node id in your document (or in current_source for a removal). Do not describe changes you did not make.",
             ]
-        return {"HARD": hard, "SHAPE": shape, "STYLE": style}
+        return {"HARD": hard, "SHAPE": shape_rules, "STYLE": style}
 
     def _prompt(
         self, instruction: str, feedback: str | None,
@@ -892,7 +908,7 @@ class WorkflowAuthoringService:
                 "note": "label and detail are read by the person who asked for the change; write them in their language.",
             },
         }
-        tiers = self._rules(current_source)
+        tiers = self._rules(current_source, shape)
         if assigned_workflow_id is not None and current_source is None:
             tiers["HARD"].insert(1,
                 "Copy assigned_workflow_id without the workflow: prefix into metadata.id. "
