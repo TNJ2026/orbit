@@ -42,9 +42,14 @@ class LangGraphRetryableError(RuntimeError):
 
 
 class LangGraphRetryRequested(RuntimeError):
-    def __init__(self, node_id, attempt_id, policy, cause):
+    def __init__(self, node_id, attempt_id, policy, cause, generation=1):
         self.node_id, self.attempt_id = node_id, attempt_id
         self.policy, self.cause = policy, cause
+        # Which visit to this node failed. A node inside a bounded loop is
+        # executed once per generation, and each generation gets the retry
+        # budget the policy grants — counting them together spends one
+        # generation's allowance on the failures of the ones before it.
+        self.generation = generation
         super().__init__(str(cause))
 
 
@@ -811,6 +816,7 @@ def compile_workflow(
                     raise LangGraphRetryRequested(
                         current.id, execution_context.attempt_id,
                         to_primitive(retry_policy.config), exc,
+                        state.get("execution_order", ()).count(current.id) + 1,
                     ) from exc
                 outcome = raw if isinstance(raw, HandlerOutcome) else HandlerOutcome(raw)
                 if not isinstance(outcome.output, Mapping):

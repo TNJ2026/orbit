@@ -1232,6 +1232,32 @@ class SingleAgentHomeTests(BrowserE2ETestCase):
 
         self.assertFalse(page.locator("#newGoalStart").is_disabled())
 
+    def test_a_card_offers_new_goal_only_where_a_goal_can_start_it(self) -> None:
+        """The card and the composer must agree, or the dialog contradicts it.
+
+        The button rendered on the start command alone, so a workflow that
+        compiles but has nowhere to put a goal advertised "New goal" — and
+        `newRunDialog` then declined to preselect it, because it checks
+        readiness. The person clicked a named workflow and got an empty
+        picker, with nothing saying why.
+        """
+
+        page = self.open("en-US")
+        page.locator('[data-view="workflows"]').click()
+        page.wait_for_selector(".workflow-card")
+
+        # Nothing in this catalog is goal-ready, and all of it compiles.
+        self.assertTrue(page.locator(".workflow-card").count() > 0)
+        # `exact`, because the default is a case-insensitive substring and the
+        # card body itself says "…before starting a new goal".
+        self.assertEqual(
+            0,
+            page.get_by_role("button", name="New goal", exact=True).count(),
+        )
+        # The affordance a non-ready workflow does get, so the assertion above
+        # is not passing because the cards rendered no buttons at all.
+        self.assertTrue(page.locator(".upgrade-workflow, .edit-workflow").count() > 0)
+
     def test_one_agent_is_still_the_difference(self) -> None:
         """What single-agent mode does withhold, it still withholds."""
 

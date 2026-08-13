@@ -1490,7 +1490,12 @@ export function createViews(context) {
           view: "workflowEdit", workflowId: entry.workflow_id, runId: null,
         }),
       }));
-      if (workflowStartCommand(entry)) {
+      // The same predicate the composer uses. Offering the button on the
+      // command alone meant a workflow that compiles but has nowhere to put
+      // a goal advertised "New goal", and the dialog it opened then declined
+      // to preselect it — the person clicked a named workflow and got an
+      // empty picker, with nothing saying why.
+      if (workflowRunnable(entry) && workflowStartCommand(entry)) {
         cardActions.push(el("button", {
           class: "button", text: i18n.t("action.newGoal"),
           onclick: () => newRunDialog(entry.workflow_id),

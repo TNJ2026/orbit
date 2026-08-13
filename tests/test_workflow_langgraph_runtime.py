@@ -1815,6 +1815,128 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
             checkpoint_db_path=Path(directory) / "langgraph-checkpoints.sqlite3",
         )
 
+    def test_each_loop_generation_gets_its_own_retry_budget(self) -> None:
+        """`max_attempts` is what one attempt at a node may spend, per visit.
+
+        The count ran over the whole run, so a retry-safe node inside a
+        bounded loop that failed once per generation exhausted the budget
+        after N generations and failed the run — each generation having had
+        exactly one attempt.
+        """
+
+        from orbit.workflow.langgraph_runtime.compiler import (
+            LangGraphRetryRequested,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteWorkflowVersionStore(Path(directory) / "workflows.sqlite3")
+            service = self.service(directory, store, LangGraphHandlerRegistry([]))
+            run_id = "langgraph_run:" + uuid.uuid4().hex
+            with sqlite3.connect(service.run_db_path) as connection:
+                connection.execute(
+                    "INSERT INTO langgraph_runs(run_id,workflow_id,workflow_version,"
+                    "status,revision,input_json,interrupts_json,"
+                    "interrupt_responses_json,result_json,error,created_at,"
+                    "updated_at,owner_actor) VALUES"
+                    " (?,'workflow:looping',1,'running',1,'{}','[]','{}',"
+                    "NULL,NULL,?,?,'test:owner')",
+                    (
+                        run_id, "2026-01-01T00:00:00.000000Z",
+                        "2026-01-01T00:00:00.000000Z",
+                    ),
+                )
+
+            def failed(generation: int):
+                return LangGraphRetryRequested(
+                    "work", f"langgraph_attempt:{run_id}:work:{generation}",
+                    {"max_attempts": 2, "backoff_seconds": [0]},
+                    RuntimeError("transient"), generation,
+                )
+
+            # One failure in each of three generations. With one shared budget
+            # the second would already be the last.
+            for generation in (1, 2, 3):
+                settled = service._schedule_retry(run_id, failed(generation))
+                self.assertEqual("waiting", settled.status)
+
+            with sqlite3.connect(service.run_db_path) as connection:
+                targets = sorted(
+                    row[0] for row in connection.execute(
+                        "SELECT target_id FROM langgraph_timers"
+                        " WHERE run_id=? AND purpose='retry'", (run_id,),
+                    )
+                )
+                attempts = [
+                    row[0] for row in connection.execute(
+                        "SELECT attempt_number FROM langgraph_timers"
+                        " WHERE run_id=? AND purpose='retry'", (run_id,),
+                    )
+                ]
+
+        self.assertEqual(["work#1", "work#2", "work#3"], targets)
+        # Each generation's first attempt, not the run's first, second, third.
+        self.assertEqual([1, 1, 1], attempts)
+
+    def test_a_deadline_join_visited_twice_is_bounded_twice(self) -> None:
+        """`_finish_timer` marks a timer fired rather than deleting it.
+
+        The id and `attempt_number` were fixed for the whole run, so
+        `INSERT OR IGNORE` discarded every later generation's timer: a
+        deadline join inside a loop was bounded on its first visit and
+        unbounded on every one after.
+        """
+
+        deadline = IRPolicy(
+            "wait", "join",
+            {
+                "mode": "deadline", "merge_mode": "array_by_edge",
+                "deadline_seconds": 60, "min_successful": 1,
+            },
+        )
+        left = node(
+            "left", inputs=("value",), outputs=("value",),
+            kind="human", handler=False,
+        )
+        join = node(
+            "join", inputs=("value",), outputs=("value",),
+            kind="join", handler=False,
+        )
+        join = IRNode(
+            join.id, join.kind, join.inputs, join.outputs, join.handler,
+            join.config, (deadline.id,), join.extension, join.route_mode,
+        )
+        ir = workflow(
+            (left, join), (edge("left_join", "left", "join"),),
+            entry=("left",), terminals=("join",), result=("join", "value"),
+            policies=(deadline,),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.publish(directory, ir)
+            service = self.service(directory, store, LangGraphHandlerRegistry([]))
+            run = service.start(
+                ir.workflow_id, {"value": "in"},
+                idempotency_key="looping-deadline", actor="test:owner",
+            )
+            # The join is reached a second time, as a loop upstream would.
+            service._schedule_join_deadlines(
+                run.run_id, ir,
+                available_outputs={},
+                pending_nodes=frozenset({"left"}),
+                execution_order=("left", "join"),
+            )
+            with sqlite3.connect(service.run_db_path) as connection:
+                timers = sorted(
+                    row[0] for row in connection.execute(
+                        "SELECT attempt_number FROM langgraph_timers"
+                        " WHERE run_id=? AND purpose='join_deadline'",
+                        (run.run_id,),
+                    )
+                )
+
+        self.assertEqual("interrupted", run.status)
+        # One for the first visit, one for the second.
+        self.assertEqual([1, 2], timers)
+
     def test_a_join_fed_only_by_human_branches_still_gets_its_deadline(self) -> None:
         """The one wait the deadline could not bound was the one it was for.
 

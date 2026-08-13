@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 import sqlite3
 import threading
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 import uuid
 
 from langgraph.checkpoint.sqlite import SqliteSaver
@@ -548,6 +548,7 @@ class LangGraphWorkflowService:
         self, run_id: str, ir, *,
         available_outputs: Mapping[str, Any],
         pending_nodes: frozenset[str] = frozenset(),
+        execution_order: Sequence[str] = (),
     ) -> None:
         """Arm the deadline of every join this run is now waiting at.
 
@@ -587,13 +588,23 @@ class LangGraphWorkflowService:
                 due_at = due.isoformat(timespec="microseconds").replace(
                     "+00:00", "Z",
                 )
-                timer_id = f"langgraph_timer:{run_id}:join_deadline:{node.id}"
+                # One deadline per visit. The id and `attempt_number` were
+                # fixed for the whole run, and `_finish_timer` marks a fired
+                # timer rather than deleting it, so `INSERT OR IGNORE` threw
+                # away every later generation's timer: a deadline join inside
+                # a loop was bounded on its first visit and unbounded on
+                # every one after.
+                generation = list(execution_order).count(node.id) + 1
+                timer_id = (
+                    f"langgraph_timer:{run_id}:join_deadline:{node.id}"
+                    f":{generation}"
+                )
                 connection.execute(
                     "INSERT OR IGNORE INTO langgraph_timers("
                     "timer_id,run_id,node_id,attempt_number,due_at,status,"
                     "purpose,target_id) VALUES (?,?,?,?,?,'scheduled',?,?)",
                     (
-                        timer_id, run_id, node.id, 1, due_at,
+                        timer_id, run_id, node.id, generation, due_at,
                         "join_deadline", node.id,
                     ),
                 )
@@ -926,6 +937,7 @@ class LangGraphWorkflowService:
                     pending_nodes=frozenset(
                         task.name for task in snapshot.tasks
                     ),
+                    execution_order=snapshot.values.get("execution_order", ()),
                 )
             interrupts = tuple(
                 {
@@ -952,10 +964,19 @@ class LangGraphWorkflowService:
         maximum = int(request.policy.get("max_attempts", 1))
         backoff = tuple(request.policy.get("backoff_seconds") or ())
         with self._connect() as connection:
+            # Scoped to the generation that failed. The count used to run
+            # over the whole run, so a retry-safe node inside a bounded loop
+            # that failed once per generation exhausted `max_attempts` after
+            # N generations and failed the run — each generation having had
+            # exactly one attempt. The generation rides in `target_id`
+            # because `recover` reads that column as a node id only for a
+            # join deadline, and because the thing being retried in a loop is
+            # a generation's execution rather than the node in the abstract.
+            target = f"{request.node_id}#{request.generation}"
             attempt_number = int(connection.execute(
                 "SELECT COUNT(*) FROM langgraph_timers"
                 " WHERE run_id=? AND purpose='retry' AND target_id=?",
-                (run_id, request.node_id),
+                (run_id, target),
             ).fetchone()[0]) + 1
             if attempt_number >= maximum:
                 self._settle(
@@ -966,14 +987,17 @@ class LangGraphWorkflowService:
             delay = int(backoff[attempt_number - 1]) if attempt_number <= len(backoff) else 0
             due = self.clock().astimezone(timezone.utc) + timedelta(seconds=delay)
             due_at = due.isoformat(timespec="microseconds").replace("+00:00", "Z")
-            timer_id = f"langgraph_timer:{run_id}:{request.node_id}:{attempt_number}"
+            timer_id = (
+                f"langgraph_timer:{run_id}:{request.node_id}"
+                f":{request.generation}:{attempt_number}"
+            )
             connection.execute(
                 "INSERT OR IGNORE INTO langgraph_timers("
                 "timer_id,run_id,node_id,attempt_number,due_at,status,purpose,target_id)"
                 " VALUES (?,?,?,?,?,'scheduled','retry',?)",
                 (
                     timer_id, run_id, request.node_id, attempt_number, due_at,
-                    request.node_id,
+                    target,
                 ),
             )
             connection.commit()
