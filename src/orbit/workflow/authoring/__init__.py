@@ -1,7 +1,6 @@
 """Prompt-driven workflow authoring (docs/workflow-prompt-authoring-design.md)."""
 
 from .external import (
-    CLIENT_AGENT_PREFIX,
     ExternalAuthoringBroker,
     UnknownAuthoringRequestError,
     client_agent_name,
@@ -20,7 +19,7 @@ from .generator import (
 )
 
 __all__ = [
-    "CLIENT_AGENT_PREFIX", "AuthoringFailedError",
+    "AuthoringFailedError",
     "AuthoringUnavailableError", "AuthoringUnknownResultError", "CancelScope",
     "ExternalAuthoringBroker", "GenerationOutcome", "TrustedCliDslGenerator",
     "UnknownAuthoringRequestError", "UnknownGenerationAgentError",

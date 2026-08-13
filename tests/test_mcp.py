@@ -287,7 +287,7 @@ class AuthoringToolTests(ApiTestCase):
 class ClientWrittenWorkflowTests(unittest.TestCase):
     """Generation answered by the connected client instead of a forked CLI.
 
-    An `app:<client>` agent parks its prompt and waits; these two tools are
+    A connected App parks its prompt and waits; these two tools are
     the whole exchange, so what matters here is that a client can claim a
     prompt and that the document it writes settles the job it belongs to.
     """
@@ -352,7 +352,7 @@ class ClientWrittenWorkflowTests(unittest.TestCase):
                 client, "generate_workflow",
                 {
                     "prompt": "double a number", "idempotency_key": "g1",
-                    "agent": "app:cursor",
+                    "agent": "cursor",
                 },
                 actor="writer",
             ))
@@ -437,7 +437,7 @@ class ClientWrittenWorkflowTests(unittest.TestCase):
             self.assertEqual(["cursor"], payload["clients"])
             # The capability list is read again per request, so an App that
             # just connected is immediately somewhere work can be sent.
-            self.assertEqual(["app:cursor"], offered())
+            self.assertEqual(["cursor"], offered())
 
     def test_an_unaddressable_app_is_refused_when_the_job_is_created(self) -> None:
         app, _broker, _time = self.build()
@@ -446,7 +446,7 @@ class ClientWrittenWorkflowTests(unittest.TestCase):
                 client, "generate_workflow",
                 {
                     "prompt": "anything", "idempotency_key": "g9",
-                    "agent": "app:not-here",
+                    "agent": "not-here",
                 },
                 actor="writer",
             )

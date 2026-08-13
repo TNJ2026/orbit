@@ -558,7 +558,13 @@ def create_app(
             from ..workflow.authoring import ExternalAuthoringBroker
 
             if authoring_broker is None:
-                authoring_broker = ExternalAuthoringBroker()
+                # Read at registration, not captured: `generation_agents` is
+                # rebound below when operator-configured writers are added,
+                # and a late-connecting App must be refused a name that took
+                # in the meantime.
+                authoring_broker = ExternalAuthoringBroker(
+                    reserved_names=lambda: set(generation_agents),
+                )
             # A ChainMap rather than a merged dict: which Apps are connected
             # changes while the Runtime runs, so the set of names an author may
             # pick from has to be read, not remembered.

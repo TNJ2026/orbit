@@ -340,7 +340,7 @@ def build_mcp_dispatcher(
                 "required": ["job_id"],
             },
         },
-        # A job whose chosen agent is `app:<client>` writes no DSL of its own:
+        # A job whose chosen agent is a connected App writes no DSL of its own:
         # it parks the prompt here and waits for that App to answer. These two
         # tools are that exchange, and a job needs one round-trip per compile
         # attempt.
@@ -351,7 +351,7 @@ def build_mcp_dispatcher(
                 "or nothing when none is waiting. Write the DSL the prompt "
                 "asks for and return it with submit_authoring_response. Pass "
                 "the same `client` name every time: it is how an author "
-                "addresses this App as `app:<client>`, and polling is what "
+                "addresses this App by the name it registered, and polling is what "
                 "keeps the App listed as connected. A claim is a lease — "
                 "answer within lease_seconds or the request is offered to "
                 "somebody else. Also lists every request still waiting, "
@@ -375,7 +375,7 @@ def build_mcp_dispatcher(
             "name": "wait_authoring_request",
             "description": (
                 "Wait for a workflow generation prompt addressed to this App. "
-                "While waiting, the App is offered in Orbit as app:<client>. "
+                "While waiting, the App is offered in Orbit under this name. "
                 "Use this when a person will click Generate in the Orbit UI."
             ),
             "scope": WRITE_SCOPE,
@@ -384,7 +384,11 @@ def build_mcp_dispatcher(
                 "properties": {
                     "client": {
                         "type": "string",
-                        "description": "Stable App name used as app:<client> in Orbit.",
+                        "description": (
+                            "The name this App is offered under in Orbit. Choose a "
+                            "stable, readable one; a name another Agent already "
+                            "answers to is refused rather than renamed."
+                        ),
                     },
                     "timeout_seconds": {
                         "type": "integer", "minimum": 1, "maximum": 300,

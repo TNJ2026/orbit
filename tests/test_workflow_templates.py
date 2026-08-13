@@ -60,7 +60,7 @@ class SingleAgentTemplateTests(unittest.TestCase):
     def test_lists_static_templates_and_current_mcp_agent(self) -> None:
         result = self.service.list()
         self.assertTrue(result["ready"])
-        self.assertEqual("app:chatgpt", result["connected_agent"])
+        self.assertEqual("chatgpt", result["connected_agent"])
         self.assertEqual(
             [item.template_id for item in TEMPLATES],
             [item["template_id"] for item in result["templates"]],
@@ -148,7 +148,7 @@ class SingleAgentTemplateTests(unittest.TestCase):
                 )
                 self.assertEqual(200, listed.status_code, listed.text)
                 data = listed.json()["data"]
-                self.assertEqual("app:chatgpt", data["connected_agent"])
+                self.assertEqual("chatgpt", data["connected_agent"])
                 commands = data["templates"][0]["allowed_commands"]
                 command = next(
                     item for item in commands

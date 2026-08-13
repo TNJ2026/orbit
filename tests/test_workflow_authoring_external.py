@@ -18,9 +18,55 @@ from orbit.workflow.authoring import (
     ExternalAuthoringBroker, UnknownAuthoringRequestError, WorkflowAuthoringService,
     cancellable,
 )
+from orbit.workflow.authoring.external import ReservedClientNameError
 from orbit.workflow.application.authoring_job_service import AuthoringJobService
 
 from tests.test_workflow_authoring_jobs import AuthoringJobTestCase, dsl
+
+
+class ReservedNameTests(unittest.TestCase):
+    """An App registers under the name it chooses, and collisions are refused.
+
+    The name used to be decorated `app:<client>`, which made collision
+    impossible by making the *kind* of Agent part of its address — something
+    an author has no reason to care about, and which every reader of a name
+    had to know. Refusing is the same answer an operator-configured writer
+    already gets: two writers answering to one name means an author cannot be
+    told truthfully which one wrote their workflow.
+    """
+
+    def broker(self, *reserved):
+        return ExternalAuthoringBroker(reserved_names=lambda: set(reserved))
+
+    def test_a_name_another_agent_answers_to_is_refused(self) -> None:
+        broker = self.broker("codex", "claude")
+        with self.assertRaises(ReservedClientNameError) as caught:
+            broker.claim(actor="local", client="codex")
+        self.assertEqual("codex", caught.exception.name)
+        self.assertIn("register under a different one", str(caught.exception))
+        # Refused means not registered: it must not become addressable.
+        self.assertEqual([], broker.clients())
+
+    def test_a_free_name_is_taken_as_given(self) -> None:
+        broker = self.broker("codex")
+        broker.claim(actor="local", client="cursor")
+        self.assertEqual(["cursor"], broker.clients())
+        self.assertEqual(["cursor"], sorted(broker.generators()))
+
+    def test_a_registered_client_keeps_polling_without_re_checking(self) -> None:
+        """The reserved set is read at registration, not on every claim.
+
+        A CLI discovered *after* an App took the name would otherwise start
+        refusing a client mid-session, which is not a thing the App can act
+        on and not a moment to lose its queue.
+        """
+
+        reserved: set[str] = set()
+        broker = ExternalAuthoringBroker(reserved_names=lambda: set(reserved))
+        broker.claim(actor="local", client="cursor")
+        reserved.add("cursor")
+        self.assertIsNone(broker.claim(actor="local", client="cursor"))
+        self.assertEqual(["cursor"], broker.clients())
 
 
 class BrokerJobTests(AuthoringJobTestCase):
@@ -28,7 +74,7 @@ class BrokerJobTests(AuthoringJobTestCase):
         super().setUp()
         self.broker = ExternalAuthoringBroker()
         # Polling is how an App reports itself, and reporting itself is what
-        # makes `app:cursor` a name an author can pick. Nothing is addressable
+        # makes `cursor` a name an author can pick. Nothing is addressable
         # before its App has been heard from.
         self.broker.claim(actor="local", client="cursor")
 
@@ -60,7 +106,7 @@ class BrokerJobTests(AuthoringJobTestCase):
         jobs = self.service()
         created = jobs.create(
             actor="author", prompt="Research", idempotency_key="g1",
-            agent="app:cursor",
+            agent="cursor",
         )
         deadline = time.monotonic() + 10.0
         while not self.broker.pending() and time.monotonic() < deadline:
@@ -81,7 +127,7 @@ class BrokerJobTests(AuthoringJobTestCase):
         with self.assertRaises(Exception) as caught:
             jobs.create(
                 actor="author", prompt="Research", idempotency_key="g1",
-                agent="app:never-here",
+                agent="never-here",
             )
         # Refused at creation rather than minutes later when the job runs.
         self.assertIn("unknown generation agent", str(caught.exception))
@@ -90,7 +136,7 @@ class BrokerJobTests(AuthoringJobTestCase):
         jobs = self.service()
         created = jobs.create(
             actor="author", prompt="Research a topic", idempotency_key="g1",
-            agent="app:cursor",
+            agent="cursor",
         )
         request = self.claimed()
         # The client is handed the same prompt a CLI would have received.
@@ -107,7 +153,7 @@ class BrokerJobTests(AuthoringJobTestCase):
         jobs = self.service()
         created = jobs.create(
             actor="author", prompt="Research a topic", idempotency_key="g1",
-            agent="app:cursor",
+            agent="cursor",
         )
         request = self.claimed()
         self.broker.respond(request["request_id"], dsl(), actor="client")
@@ -130,7 +176,7 @@ class BrokerJobTests(AuthoringJobTestCase):
         jobs = self.service()
         created = jobs.create(
             actor="author", prompt="Research", idempotency_key="g1",
-            agent="app:cursor",
+            agent="cursor",
         )
         first = self.claimed()
         self.broker.respond(first["request_id"], "not a workflow", actor="client")
@@ -149,7 +195,7 @@ class BrokerJobTests(AuthoringJobTestCase):
         jobs = self.service()
         created = jobs.create(
             actor="author", prompt="Research", idempotency_key="g1",
-            agent="app:cursor",
+            agent="cursor",
         )
         deadline = time.monotonic() + 10.0
         while not self.broker.pending() and time.monotonic() < deadline:
@@ -204,7 +250,7 @@ class BrokerTests(unittest.TestCase):
         # The generation agent names follow the clients, so an author is only
         # offered Apps that are actually there.
         self.assertEqual(
-            ["app:cursor", "app:zed"], sorted(self.broker.generators()),
+            ["cursor", "zed"], sorted(self.broker.generators()),
         )
 
     def test_waiting_client_is_addressable_and_claims_new_work(self) -> None:
@@ -386,7 +432,7 @@ class SubscriptionTests(unittest.TestCase):
         # It never polled, and it is still here. A poll timeout was only ever
         # approximating the thing a live connection states outright.
         self.assertEqual(["cursor"], broker.clients())
-        self.assertEqual(["app:cursor"], sorted(broker.generators()))
+        self.assertEqual(["cursor"], sorted(broker.generators()))
 
         broker.unsubscribe(token)
         self.assertEqual([], broker.clients())

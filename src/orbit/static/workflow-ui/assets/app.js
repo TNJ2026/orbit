@@ -62,11 +62,11 @@ function generationAgents() {
  * server would actually use; the server names that one for us. */
 function defaultGenerationAgent() {
   const agents = generationAgents();
-  // A connected Agent App is already running in the user's current session,
-  // so prefer it over spawning the Runtime's fallback CLI. App registrations
-  // are live capabilities and disappear from this list when they disconnect.
-  const connectedApp = agents.find((name) => name.startsWith("app:"));
-  if (connectedApp) return connectedApp;
+  // Whatever the Runtime says it will use when nobody names one. This used to
+  // look for an `app:` prefix and prefer it, which made the *kind* of Agent
+  // part of its name: an author has no reason to care whether a writer is a
+  // connected App or a discovered CLI, and every reader of a name had to know
+  // the convention. An Agent registers under the name it chooses now.
   const preferred = shellFacts?.capabilities?.workflow_generation?.default_agent;
   return agents.includes(preferred) ? preferred : agents[0] || "";
 }

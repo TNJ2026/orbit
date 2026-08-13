@@ -30,17 +30,21 @@ import re
 import threading
 import time
 import uuid
-from typing import Any, Callable, Iterator, Mapping
+from typing import Any, Callable, Collection, Iterator, Mapping
 
 from .generator import (
     MAX_RESPONSE_BYTES, AuthoringUnavailableError, AuthoringUnknownResultError,
     active_scope,
 )
 
-# How a client's own queue is named among the generation agents. `app:cursor`
-# reads as an address, and the prefix keeps a client from taking — or being
-# mistaken for — the name of a discovered CLI.
-CLIENT_AGENT_PREFIX = "app:"
+# An App is offered under the name it registers, with nothing added. The name
+# used to be decorated `app:<client>` so a client could not take, or be
+# mistaken for, the name of a discovered CLI — but that made the *kind* of
+# Agent part of its address, which an author has no reason to care about and
+# which forced every reader to know the convention. A collision is refused at
+# registration instead, the way an operator-configured writer's already is:
+# two writers answering to one name means an author cannot be told truthfully
+# which one wrote their workflow.
 # A prompt nobody ever claims must not hold its job thread for ever. Jobs carry
 # a deadline of their own and normally end this wait long before the cap; the
 # cap exists for a Runtime configured without one.
@@ -64,12 +68,25 @@ _POLL_SECONDS = 0.2
 _CLIENT_NAME = re.compile(r"^[a-zA-Z][a-zA-Z0-9_.-]{0,63}$")
 
 
+class ReservedClientNameError(ValueError):
+    """An App asked for a name that already answers for another writer."""
+
+    def __init__(self, name: str) -> None:
+        super().__init__(
+            f"the name {name!r} is already registered by another Agent; "
+            "register under a different one"
+        )
+        self.name = name
+
+
 class UnknownAuthoringRequestError(LookupError):
     """The named request was never parked, or has already been answered."""
 
 
 def client_agent_name(client: str) -> str:
-    return f"{CLIENT_AGENT_PREFIX}{client}"
+    """The name an App is offered under: the one it registered."""
+
+    return client
 
 
 def normalise_client(client: Any) -> str | None:
@@ -168,7 +185,7 @@ class _GeneratorView(Mapping):
 
     def __getitem__(self, key: str) -> Callable[[str], str]:
         if key in self._names():
-            return self._broker.generator_for(key[len(CLIENT_AGENT_PREFIX):])
+            return self._broker.generator_for(key)
         raise KeyError(key)
 
     def __iter__(self) -> Iterator[str]:
@@ -193,7 +210,12 @@ class ExternalAuthoringBroker:
         lease_seconds: float = DEFAULT_LEASE_SECONDS,
         presence_seconds: float = DEFAULT_PRESENCE_SECONDS,
         clock: Callable[[], float] = time.monotonic,
+        reserved_names: Callable[[], Collection[str]] | None = None,
     ) -> None:
+        # Names an App may not register under, read at registration rather
+        # than captured: an operator's writers are configured at boot and a
+        # caller may hold this broker before that.
+        self._reserved_names = reserved_names or (lambda: ())
         self._lock = threading.Lock()
         self._order: list[str] = []
         self._pending: dict[str, _Pending] = {}
@@ -442,6 +464,16 @@ class ExternalAuthoringBroker:
         """
 
         name = normalise_client(client)
+        if name is not None and name not in self._seen:
+            # Refused rather than decorated. An App used to be offered as
+            # `app:<name>` so it could not collide; it is offered under the
+            # name it chose now, and a name already answered by a discovered
+            # CLI or an operator's writer is refused — two writers answering
+            # to one name means an author cannot be told truthfully which one
+            # wrote their workflow, and being told the wrong one is worse than
+            # an error.
+            if name in {str(item) for item in self._reserved_names()}:
+                raise ReservedClientNameError(name)
         self._expire_leases()
         now = self.clock()
         with self._lock:

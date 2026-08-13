@@ -72,9 +72,9 @@ class SingleAgentTemplateService:
         )
         manifest = self.manifests.get(preferred)
         if manifest is not None and "agent.invoke" in manifest.capabilities:
-            return f"app:{client}", manifest
+            return client, manifest
         if len(agents) == 1:
-            return f"app:{client}", agents[0]
+            return client, agents[0]
         return None
 
     def list(self) -> Mapping[str, Any]:
