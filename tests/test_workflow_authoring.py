@@ -472,8 +472,8 @@ class AuthoringReviseTests(unittest.TestCase):
     "the first revision prompt" still means the first one of this pass.
     """
 
-    # `max_attempts // 2`, which is what `revise` reserves for operations.
-    PATCH_BUDGET = 2
+    # `max_attempts - 2`, which is what `revise` reserves for operations.
+    PATCH_BUDGET = 3
 
     def _revise(self, model, **kwargs):
         base = json.dumps(valid_document())
@@ -573,10 +573,10 @@ class NamedAgentTests(unittest.TestCase):
     """Which Agent writes the DSL is the caller's choice, by name only."""
 
     def setUp(self) -> None:
-        # Three deep, because a revision asks for operations first: the
-        # opening attempts are spent refusing these documents as patches, and
-        # the fallback then succeeds on one of them.
-        script = [json.dumps(valid_document())] * 3
+        # Deep enough for both passes: a revision asks for operations first,
+        # so the opening attempts are spent refusing these documents as
+        # patches and the fallback then succeeds on one of them.
+        script = [json.dumps(valid_document())] * 4
         self.codex = ScriptedModel(list(script))
         self.claude = ScriptedModel(list(script))
         self.default = ScriptedModel(list(script))
@@ -681,7 +681,7 @@ class CliGeneratorTests(unittest.TestCase):
         # Enough for the operations pass to spend its budget on documents and
         # the fallback to succeed; the language fact is in every prompt either
         # way, which is the point.
-        model = ScriptedModel([current] * 3)
+        model = ScriptedModel([current] * 4)
         service(model).revise(
             current, "add a step", expected_workflow_id="workflow:generated",
             language="zh-CN",

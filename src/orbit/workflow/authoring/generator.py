@@ -1160,7 +1160,14 @@ class WorkflowAuthoringService:
         # Split rather than doubled: a fallback that granted a fresh budget
         # would let one revision cost twice the model calls the caller
         # bargained for.
-        patch_budget = max(1, self.max_attempts // 2)
+        #
+        # The larger share goes to operations, because that is the pass whose
+        # success is worth paying for. Measured against the discovered CLIs on
+        # one revision — codex, opencode and claude, six runs — every one
+        # answered with operations, four on the first attempt and two on the
+        # second. An even split would have had no margin left in those two,
+        # and no run ever needed a third attempt at a whole document.
+        patch_budget = max(1, self.max_attempts - 2)
 
         def apply_operations(response: Mapping[str, Any]) -> Mapping[str, Any]:
             return apply_patch(
