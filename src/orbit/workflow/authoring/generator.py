@@ -44,6 +44,38 @@ from ..dsl.patch import (
 from ..dsl.schema import ID_PATTERN
 
 
+def _expression_vocabulary() -> dict[str, object]:
+    """Every node shape `validate_expression_ast` accepts, from its own tables."""
+
+    from ..dsl.expressions import _CALLS, _COMPARE
+
+    comparisons = sorted(set(_COMPARE.values()))
+    return {
+        "literal": {"op": "literal", "value": "a string, number, boolean or null"},
+        "ref": {"op": "ref", "path": "source.<port>.<field> or inputs.<field>"},
+        "comparison": {
+            "ops": comparisons,
+            "shape": {"op": "eq", "left": {"...": "..."}, "right": {"...": "..."}},
+            "example": {
+                "op": "eq",
+                "left": {"op": "ref", "path": "source.result.severity"},
+                "right": {"op": "literal", "value": "high"},
+            },
+        },
+        "and_or": {"op": "and", "args": [{"...": "..."}, {"...": "..."}]},
+        "not": {"op": "not", "arg": {"...": "..."}},
+        "call": {"names": sorted(_CALLS), "shape": {
+            "op": "call", "name": "exists", "args": [{"...": "..."}],
+        }},
+        "list": {"op": "list", "items": [{"...": "..."}]},
+        "note": (
+            "A condition is one of these objects, or the literal true. Every "
+            "operand is itself one of these objects — never a bare string or "
+            "number."
+        ),
+    }
+
+
 def _patch_operations() -> list[dict[str, object]]:
     """Every operation the contract admits, with the fields each carries.
 
@@ -780,6 +812,13 @@ class WorkflowAuthoringService:
                     "id", "from", "to", "condition", "mapping", "route",
                     "priority", "back_edge", "policy",
                 ],
+                # Every shape a condition may take. The prompt used to show
+                # one `ref` and a bare `true`, so a model asked for anything
+                # else — a comparison, a membership test — had to invent the
+                # operator vocabulary, and `DSL_EXPRESSION_INVALID` was what
+                # it got for guessing. Derived from the compiler's own tables,
+                # because a hand-copied list is the one that goes stale.
+                "condition_ast": _expression_vocabulary(),
                 "conditional_edge_example": {
                     "id": "approved", "from": {"node": "review", "port": "result"},
                     "to": {"node": "publish", "port": "result"},

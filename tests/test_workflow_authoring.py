@@ -462,6 +462,54 @@ class AuthoringServiceTests(unittest.TestCase):
         self.assertEqual([], model.prompts)
 
 
+class ExpressionVocabularyTests(unittest.TestCase):
+    """What a condition may be, told rather than guessed.
+
+    The prompt showed one `ref` and a bare `true`. A model asked for anything
+    else — a comparison, a membership test — had to invent the operator
+    vocabulary, and `DSL_EXPRESSION_INVALID: expression AST nodes must be
+    objects` is what it got for guessing. Measured against the real codex CLI
+    on "change the urgent branch to trigger on severity": three runs failed
+    every patch attempt and fell back to a whole document; with the vocabulary
+    in the prompt, three runs answered with `set_edge` on the first or second
+    attempt and left every node untouched.
+    """
+
+    def test_every_operator_the_compiler_accepts_is_offered(self) -> None:
+        from orbit.workflow.authoring.generator import _expression_vocabulary
+        from orbit.workflow.dsl.expressions import _CALLS, _COMPARE
+
+        vocabulary = _expression_vocabulary()
+        self.assertEqual(
+            sorted(set(_COMPARE.values())), vocabulary["comparison"]["ops"]
+        )
+        self.assertEqual(sorted(_CALLS), vocabulary["call"]["names"])
+        self.assertEqual(
+            {"literal", "ref", "comparison", "and_or", "not", "call", "list",
+             "note"},
+            set(vocabulary),
+        )
+
+    def test_the_offered_comparison_example_actually_compiles(self) -> None:
+        """A worked example in a prompt is a promise the compiler must keep."""
+
+        from orbit.workflow.authoring.generator import _expression_vocabulary
+        from orbit.workflow.dsl.expressions import validate_expression_ast
+
+        example = _expression_vocabulary()["comparison"]["example"]
+        self.assertEqual(example, validate_expression_ast(example, "$.condition"))
+
+    def test_a_revision_prompt_carries_the_vocabulary(self) -> None:
+        current = json.dumps(valid_document())
+        model = ScriptedModel([current] * 4)
+        service(model).revise(
+            current, "route on severity",
+            expected_workflow_id="workflow:generated",
+        )
+        self.assertIn('"condition_ast"', model.prompts[0])
+        self.assertIn('"not_in"', model.prompts[0])
+
+
 class AuthoringReviseTests(unittest.TestCase):
     """The document pass — what a CLI that cannot answer with operations gets.
 
