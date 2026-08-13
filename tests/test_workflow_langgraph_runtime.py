@@ -624,6 +624,100 @@ class LangGraphWorkflowCompilerTests(unittest.TestCase):
         self.assertEqual(["fast"], completed["result"])
         self.assertEqual("join", completed["execution_order"][-1])
 
+    def _deadline_race(self, *, second_consumer: bool):
+        """fan → {fast, waiting} → join, with the deadline firing on `fast`.
+
+        `fast` finishes inside the superstep that `waiting` interrupts, so its
+        writes are pending on a checkpoint that was never committed — which is
+        the state the deadline has to fire from.
+        """
+
+        deadline = IRPolicy(
+            "wait_for_enough", "join",
+            {
+                "mode": "deadline", "merge_mode": "array_by_edge",
+                "deadline_seconds": 10, "min_successful": 1,
+            },
+        )
+        fan = node(
+            "fan", inputs=("value",), outputs=("value",), route_mode="parallel",
+        )
+        fast = node("fast", inputs=("value",), outputs=("value",))
+        waiting = node(
+            "waiting", inputs=("value",), outputs=("value",),
+            kind="human", handler=False,
+        )
+        join = node(
+            "join", inputs=("value",), outputs=("value",),
+            kind="join", handler=False,
+        )
+        join = IRNode(
+            join.id, join.kind, join.inputs, join.outputs, join.handler,
+            join.config, (deadline.id,), join.extension, join.route_mode,
+        )
+        after = node(
+            "after",
+            inputs=("value", "direct") if second_consumer else ("value",),
+            outputs=("value",),
+        )
+        edges = [
+            edge("fan_fast", "fan", "fast"),
+            edge("fan_waiting", "fan", "waiting"),
+            edge("fast_join", "fast", "join"),
+            edge("waiting_join", "waiting", "join"),
+            edge("join_after", "join", "after"),
+        ]
+        if second_consumer:
+            edges.append(
+                edge("fast_after", "fast", "after", target_port="direct")
+            )
+        ir = workflow(
+            (fan, fast, waiting, join, after),
+            tuple(edges),
+            entry=("fan",), terminals=("after",), result=("after", "value"),
+            policies=(deadline,),
+        )
+        registry = LangGraphHandlerRegistry([
+            binding("fan", lambda values, config, context: dict(values)),
+            binding("fast", lambda values, config, context: {"value": "fast"}),
+            binding(
+                "after",
+                lambda values, config, context: {
+                    "value": f"after:{values.get('direct', values['value'])}"
+                },
+            ),
+        ])
+        compiled = compile_workflow(ir, registry, checkpointer=InMemorySaver())
+        config = {"configurable": {"thread_id": "deadline-race"}}
+        compiled.invoke({"value": "start"}, config=config)
+        return compiled, config
+
+    def test_a_deadline_keeps_the_branch_that_won_it(self) -> None:
+        """The branch the join consumed has to survive in the run's state.
+
+        Firing re-applies the join as a write onto the *stored* checkpoint,
+        which is the one the interrupted superstep never committed — so `fast`
+        was there to be merged into the join's inputs and gone from the state
+        the run reports, having apparently never executed.
+        """
+
+        compiled, config = self._deadline_race(second_consumer=False)
+        completed = compiled.fire_join_deadline("join", config=config)
+
+        self.assertEqual(["fast"], completed["node_outputs"]["join"]["value"])
+        self.assertIn("fast", completed["node_outputs"])
+        self.assertEqual(
+            ["fan", "fast", "join", "after"], list(completed["execution_order"]),
+        )
+
+    def test_a_second_consumer_of_that_branch_still_gets_its_input(self) -> None:
+        """Not only the report: the next node reads `node_outputs` too."""
+
+        compiled, config = self._deadline_race(second_consumer=True)
+        completed = compiled.fire_join_deadline("join", config=config)
+
+        self.assertEqual("after:fast", completed["result"])
+
     def test_deadline_join_fails_below_minimum(self) -> None:
         deadline = IRPolicy(
             "wait_for_two", "join",

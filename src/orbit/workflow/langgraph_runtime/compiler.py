@@ -441,25 +441,75 @@ class CompiledLangGraphWorkflow:
             ),
             config=self._config(config),
         )
+        # That invoke ran the join in memory and persisted nothing, so the join
+        # is re-applied as a write. `update_state` branches from the *stored*
+        # checkpoint, which is the one the interrupted superstep never
+        # committed: the branches that finished before the deadline are still
+        # only pending writes there. Re-applying just the join would therefore
+        # publish a state in which the branch that won the deadline never ran —
+        # absent from `node_outputs` for anything downstream that also reads
+        # it, and absent from `execution_order`, which is what numbers a
+        # handler's attempts.
+        self.graph.update_state(
+            self._config(config),
+            self._deadline_writes(node_id, values, state, config),
+            as_node=node_id,
+        )
         if any(edge.source_node == node_id for edge in self.ir.edges):
-            self.graph.update_state(
-                self._config(config),
-                {
-                    "node_outputs": {
-                        node_id: state.get("node_outputs", {})[node_id],
-                    },
-                    "node_routes": {
-                        node_id: state.get("node_routes", {}).get(
-                            node_id, "success",
-                        ),
-                    },
-                    "execution_order": (node_id,),
-                    "join_deadlines": {node_id: True},
-                },
-                as_node=node_id,
-            )
             state = self.graph.invoke(None, config=self._config(config))
         return self._result(state)
+
+    def _deadline_writes(
+        self,
+        node_id: str,
+        values: Mapping[str, Any],
+        state: Mapping[str, Any],
+        config: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """The join's own writes, plus the ones the checkpoint is missing.
+
+        `values` is what the graph reports, which includes the writes pending
+        from the interrupted superstep; the checkpoint holds only what was
+        committed before it. The difference is what would be lost, and it is
+        replayed here rather than recomputed — every channel merges, and
+        `execution_order` merges by appending, so this must carry each entry
+        exactly once or a handler's attempt numbering shifts under it.
+        """
+
+        committed = self._committed_values(config)
+        order = tuple(values.get("execution_order") or ())
+        # Appended to and never rewritten, so what is committed is a prefix.
+        missing = order[len(tuple(committed.get("execution_order") or ())):]
+        outputs = values.get("node_outputs") or {}
+        routes = values.get("node_routes") or {}
+        return {
+            "node_outputs": {
+                **{name: outputs[name] for name in missing if name in outputs},
+                node_id: state.get("node_outputs", {})[node_id],
+            },
+            "node_routes": {
+                **{name: routes[name] for name in missing if name in routes},
+                node_id: state.get("node_routes", {}).get(node_id, "success"),
+            },
+            "execution_order": (*missing, node_id),
+            "join_deadlines": {node_id: True},
+        }
+
+    def _committed_values(self, config: Mapping[str, Any]) -> Mapping[str, Any]:
+        """What the checkpoint holds, without the writes still pending on it.
+
+        `get_state` deliberately shows both, which is the right answer for
+        every other caller and the wrong one for deciding what a write has to
+        restore.
+        """
+
+        checkpointer = getattr(self.graph, "checkpointer", None)
+        if checkpointer is None:
+            return {}
+        stored = checkpointer.get_tuple(self._config(config))
+        if stored is None:
+            return {}
+        return stored.checkpoint.get("channel_values") or {}
 
     def _result(self, state: Mapping[str, Any]) -> Mapping[str, Any]:
         completion = next((
