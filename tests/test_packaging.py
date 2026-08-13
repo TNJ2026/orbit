@@ -81,3 +81,33 @@ class LegacyRemovalTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SourceIsReviewableTests(unittest.TestCase):
+    """Text that git cannot diff is text nobody reviews.
+
+    `WorkflowPanel.jsx` carried a NUL byte, so git classified it as binary and
+    showed `Bin 0 -> 6684 bytes` instead of its contents. A function that was
+    never defined shipped inside it, took the React tree down on the first
+    click, and was invisible in every diff along the way.
+    """
+
+    ROOTS = ("src/orbit", "ui/editor/src", "tests")
+    TEXT_SUFFIXES = {
+        ".py", ".js", ".mjs", ".jsx", ".css", ".html", ".json", ".md", ".toml",
+    }
+
+    def test_no_source_file_contains_a_nul_byte(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        offenders = []
+        for folder in self.ROOTS:
+            for path in (root / folder).rglob("*"):
+                if not path.is_file() or path.suffix not in self.TEXT_SUFFIXES:
+                    continue
+                if "node_modules" in path.parts or "__pycache__" in path.parts:
+                    continue
+                data = path.read_bytes()
+                position = data.find(b"\x00")
+                if position >= 0:
+                    offenders.append(f"{path.relative_to(root)} at byte {position}")
+        self.assertEqual([], offenders)

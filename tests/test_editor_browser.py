@@ -545,6 +545,67 @@ class EditorBrowserTests(unittest.TestCase):
         self.assertEqual(0, page.locator(".edge-label").count())
         self.assertEqual([], self.errors)
 
+    def test_every_workflow_panel_control_is_usable(self) -> None:
+        """The panel's controls, clicked.
+
+        Entry and Terminals shipped calling a function that did not exist —
+        a ReferenceError that took the React tree down on the first click.
+        Nothing here touched those checkboxes, and the file carried a NUL byte
+        that made git treat it as binary, so the change was invisible to
+        review as well. Every control gets exercised now.
+        """
+
+        page = self.open_editor()
+        page.click(".bar button:has-text('Workflow')")
+        page.wait_for_selector(".inspector fieldset")
+
+        fieldsets = page.locator(".inspector fieldset")
+        entry = fieldsets.nth(0).locator("input[type=checkbox]")
+        terminals = fieldsets.nth(1).locator("input[type=checkbox]")
+
+        # Entry: off then on again, so both directions are covered.
+        self.assertTrue(entry.first.is_checked())
+        entry.first.uncheck()
+        page.wait_for_timeout(200)
+        self.assertFalse(entry.first.is_checked())
+        entry.first.check()
+        page.wait_for_timeout(200)
+
+        # Toggled off and back on: the round trip is what exercises both
+        # branches without leaving a document the compiler would refuse.
+        terminals.last.uncheck()
+        page.wait_for_timeout(200)
+        self.assertFalse(terminals.last.is_checked())
+        terminals.last.check()
+        page.wait_for_timeout(200)
+
+        page.locator(".inspector input").first.fill("Renamed workflow")
+        page.wait_for_timeout(200)
+        page.locator(".inspector textarea").first.fill("A description")
+        page.wait_for_timeout(200)
+        before = page.locator(".inspector .policy-head code").all_inner_texts()
+        page.click(".inspector .policy-add button:has-text('+ retry')")
+        page.wait_for_timeout(200)
+        self.assertEqual(
+            [*before, "retry"],
+            page.locator(".inspector .policy-head code").all_inner_texts(),
+        )
+        page.locator(".inspector .policies li").last.locator("button.link").click()
+        page.wait_for_timeout(200)
+        self.assertEqual(
+            before, page.locator(".inspector .policy-head code").all_inner_texts()
+        )
+
+        page.click("button:has-text('Publish')")
+        page.wait_for_timeout(2500)
+        self.assertIn("published", page.locator(".notice").inner_text())
+        stored = json.loads(self.get(f"/api/v1/workflows/{self.workflow_id}")["source"])
+        self.assertEqual("Renamed workflow", stored["metadata"]["name"])
+        self.assertEqual("A description", stored["metadata"]["description"])
+        self.assertEqual(["done"], stored["terminals"])
+        self.assertEqual(["work"], stored["entry"])
+        self.assertEqual([], self.errors)
+
     def test_a_workflow_published_without_a_source_cannot_be_edited(self) -> None:
         from tests.test_web_composition import publish_linear_workflow
 
