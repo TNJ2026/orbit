@@ -38,8 +38,39 @@ from ..catalogs.handlers import HandlerCatalog
 from ..catalogs.schemas import InMemorySchemaCatalog
 from ..domain.serialization import canonical_json
 from ..dsl import DiagnosticError, compile_source
+from ..dsl.patch import (
+    GraphPatch, PatchBaseMismatch, PatchError, apply_patch,
+)
 from ..dsl.schema import ID_PATTERN
 
+
+def _patch_operations() -> list[dict[str, object]]:
+    """Every operation the contract admits, with the fields each carries.
+
+    Derived from the models rather than written out: a hand-kept list is a
+    second declaration of the boundary, and the one that drifts is always the
+    prose. A new operation appears in the prompt the moment it exists.
+    """
+
+    from typing import get_args
+
+    from ..dsl.patch import GraphPatch
+
+    inner = get_args(GraphPatch.model_fields["operations"].annotation)[0]
+    described = []
+    for member in get_args(get_args(inner)[0]):
+        fields = getattr(member, "model_fields", {})
+        literal = fields.get("op")
+        if literal is None:
+            continue
+        described.append({
+            "op": get_args(literal.annotation)[0],
+            "fields": [name for name in fields if name != "op"],
+        })
+    return sorted(described, key=lambda item: item["op"])
+
+
+PATCH_OPERATIONS = _patch_operations()
 
 MAX_RESPONSE_BYTES = 256 * 1024
 MAX_INSTRUCTION_CHARS = 4000
@@ -324,6 +355,11 @@ class GenerationOutcome:
     # Agent offered nothing usable; the caller then describes the change from
     # the structural diff instead of inventing prose here.
     change_summary: tuple[Mapping[str, Any], ...] = field(default_factory=tuple)
+    # How a revision arrived: as operations against the base, or as a whole
+    # replacement document. Worth recording rather than inferring, because the
+    # two carry different guarantees — operations cannot touch what they do
+    # not name, and a replacement can change anything at all.
+    revision_mode: str = "document"
 
 
 CHANGE_KINDS = ("added", "removed", "changed")
@@ -714,6 +750,7 @@ class WorkflowAuthoringService:
         language: str | None = None,
         assigned_workflow_id: str | None = None,
         base_version: int | None = None,
+        shape: str = "document",
     ) -> str:
         facts = {
             "dsl_version": "1.3",
@@ -786,6 +823,23 @@ class WorkflowAuthoringService:
                     "rework_config": {"max_generations": "positive integer"},
                 },
             },
+            # What an answer must look like when operations are being asked
+            # for. Named by id and never by position, because a JSON-Patch
+            # style pointer asks a model to count array elements and any
+            # insertion above shifts every path below it.
+            "patch_contract": None if shape != "patch" else {
+                "shape": {
+                    "base_version": "the base_version fact, copied",
+                    "summary": "one sentence, in display_language",
+                    "operations": [{"op": "one of the operations below"}],
+                },
+                "operations": PATCH_OPERATIONS,
+                "note": (
+                    "Answer with operations only. A part of the workflow no "
+                    "operation names is a part that cannot change, which is "
+                    "why this is asked for instead of a whole document."
+                ),
+            },
             "change_summary_contract": None if current_source is None else {
                 "shape": {
                     "workflow": "the complete modified DSL document",
@@ -815,6 +869,9 @@ class WorkflowAuthoringService:
                 f"{index}. {rule}" for index, rule in enumerate(rules, start=1)
             )
         parts = [
+            "You describe a change to an existing Orbit workflow as a list of "
+            "operations against it."
+            if shape == "patch" else
             "You translate a natural-language description into an Orbit workflow DSL document.",
             # Rules read as text, numbered and tiered. Serialized into the facts
             # blob they were one more JSON array among many, with no way to see
@@ -827,6 +884,12 @@ class WorkflowAuthoringService:
             "structure, never the placeholder names:\n"
             + canonical_json(EXAMPLE_DOCUMENT),
         ]
+        if shape == "patch":
+            parts[-1] = (
+                "SHAPE-EXAMPLE — the document shape an operation's payload "
+                "must follow, for reference. Do not answer with a document:\n"
+                + canonical_json(EXAMPLE_DOCUMENT)
+            )
         if feedback:
             parts.append(
                 "Your previous answer failed validation. Use the included previous answer, fix EVERY finding listed — not only the first — and return the full corrected JSON document. Each finding names the rule it comes from. Do not return a repair summary or explanation.\nRETRY-CONTEXT: "
@@ -1034,6 +1097,21 @@ class WorkflowAuthoringService:
         result must keep the original workflow id. Changing metadata.id would
         publish the edit onto a different aggregate, so a divergent id is a
         validation failure that is fed back for retry, not a silent accept.
+
+        Operations are asked for first, and a whole document only if that
+        fails. What an operation cannot do is the reason: it names what it
+        changes and is structurally incapable of touching anything else, so a
+        part of the workflow the model did not mention is a part it could not
+        have quietly rewritten. A whole document carries no such promise, and
+        the only defence there is noticing afterwards.
+
+        That guarantee comes from applying operations, not from any particular
+        writer. A generator with its own `revise` has the shape enforced by
+        the library that calls the model; a CLI is held to it here, by
+        refusing anything that is not a patch and feeding the refusal back.
+        Which of the two produced the answer is recorded on the outcome rather
+        than inferred, because they are not equally trustworthy and the
+        difference should not be invisible.
         """
         instruction = instruction.strip()
         if not instruction:
@@ -1058,20 +1136,62 @@ class WorkflowAuthoringService:
             if self._wants_markdown_artifact(instruction):
                 self._check_markdown_artifact(compiled)
 
-        return self._run_funnel(
-            lambda feedback: self._prompt(
-                instruction, feedback, None, base, language=language,
+        def document_pass(budget: int) -> GenerationOutcome:
+            return self._run_funnel(
+                lambda feedback: self._prompt(
+                    instruction, feedback, None, base, language=language,
+                    base_version=base_version,
+                ),
+                source_name="<revised>", failure="revision", extra_check=guard,
+                write=self._revision_writer(agent, base, base_version),
+                on_progress=on_progress,
+                on_diagnostics=on_diagnostics,
+                max_attempts=budget,
+                revision_mode="document",
+            )
+
+        writer = self._writer(agent)
+        if getattr(writer, "revise", None) is not None:
+            # The writer emits operations itself and hands back the applied
+            # document; asking it for a patch here would parse its answer a
+            # second time.
+            return document_pass(self.max_attempts)
+
+        # Split rather than doubled: a fallback that granted a fresh budget
+        # would let one revision cost twice the model calls the caller
+        # bargained for.
+        patch_budget = max(1, self.max_attempts // 2)
+
+        def apply_operations(response: Mapping[str, Any]) -> Mapping[str, Any]:
+            return apply_patch(
+                base, GraphPatch.model_validate(response),
                 base_version=base_version,
-            ),
-            source_name="<revised>", failure="revision", extra_check=guard,
-            write=self._revision_writer(agent, base, base_version),
-            on_progress=on_progress,
-            on_diagnostics=on_diagnostics,
-        )
+            )
+
+        try:
+            return self._run_funnel(
+                lambda feedback: self._prompt(
+                    instruction, feedback, None, base, language=language,
+                    base_version=base_version, shape="patch",
+                ),
+                source_name="<revised>", failure="revision", extra_check=guard,
+                write=writer,
+                document_transform=apply_operations,
+                on_progress=on_progress,
+                on_diagnostics=on_diagnostics,
+                max_attempts=patch_budget,
+                revision_mode="patch",
+            )
+        except AuthoringFailedError:
+            # The model could not describe the change as operations. Asking
+            # for the whole document still gets the person their edit; the
+            # outcome says which way it arrived, so nobody has to assume.
+            return document_pass(self.max_attempts - patch_budget)
 
     def _run_funnel(
         self, build_prompt, *, source_name: str, failure: str, extra_check=None,
         write=None, document_transform=None, on_progress=None, on_diagnostics=None,
+        max_attempts: int | None = None, revision_mode: str = "document",
     ) -> GenerationOutcome:
         def progress(stage: str, attempt: int) -> None:
             if on_progress is not None:
@@ -1087,10 +1207,11 @@ class WorkflowAuthoringService:
                 except Exception:
                     pass
 
+        budget = self.max_attempts if max_attempts is None else max_attempts
         feedback: str | None = None
         raw = ""
         last_diagnostics: tuple[Mapping[str, Any], ...] = ()
-        for attempt in range(1, self.max_attempts + 1):
+        for attempt in range(1, budget + 1):
             progress("generating", attempt)
             raw = (write or self.generate_text)(build_prompt(feedback))
             progress("validating", attempt)
@@ -1110,6 +1231,22 @@ class WorkflowAuthoringService:
                 )
                 if extra_check is not None:
                     extra_check(compiled)
+            except (PatchError, PatchBaseMismatch) as exc:
+                # A patch that would not apply. Reported in the shape the
+                # funnel already feeds back, because the fix is the same kind
+                # of fix: the model named an operation that does not fit the
+                # document it was given, and can be told which one.
+                last_diagnostics = ({
+                    "code": "PATCH_NOT_APPLICABLE",
+                    "severity": "error",
+                    "message": str(exc),
+                    "path": "$.operations",
+                },)
+                report_diagnostics(attempt, last_diagnostics)
+                feedback = canonical_json({
+                    "findings": _with_rules(last_diagnostics),
+                })
+                continue
             except DiagnosticError as exc:
                 last_diagnostics = tuple(item.to_dict() for item in exc.diagnostics)
                 report_diagnostics(attempt, last_diagnostics)
@@ -1138,10 +1275,11 @@ class WorkflowAuthoringService:
                 change_summary=_clean_change_summary(
                     raw_summary, frozenset(node.id for node in compiled.ir.nodes)
                 ),
+                revision_mode=revision_mode,
             )
         raise AuthoringFailedError(
-            f"{failure} failed validation after {self.max_attempts} attempts",
+            f"{failure} failed validation after {budget} attempts",
             diagnostics=last_diagnostics,
             raw_output=raw[-4000:],
-            attempts=self.max_attempts,
+            attempts=budget,
         )

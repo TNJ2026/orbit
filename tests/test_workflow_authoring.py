@@ -463,19 +463,41 @@ class AuthoringServiceTests(unittest.TestCase):
 
 
 class AuthoringReviseTests(unittest.TestCase):
+    """The document pass — what a CLI that cannot answer with operations gets.
+
+    A revision asks for operations first. These are about what happens after
+    that, so each script begins with answers that are documents rather than
+    patches: the patch pass spends its budget refusing them, and the fallback
+    begins. `document_prompts` skips past that opening, so an assertion about
+    "the first revision prompt" still means the first one of this pass.
+    """
+
+    # `max_attempts // 2`, which is what `revise` reserves for operations.
+    PATCH_BUDGET = 2
+
     def _revise(self, model, **kwargs):
         base = json.dumps(valid_document())
         return service(model).revise(
             base, "rename it", expected_workflow_id="workflow:generated", **kwargs,
         )
 
+    def _script(self, *responses):
+        """`responses` for the document pass, behind a spent patch budget."""
+
+        documents = [json.dumps(valid_document())] * self.PATCH_BUDGET
+        return ScriptedModel([*documents, *responses])
+
+    def document_prompts(self, model):
+        return model.prompts[self.PATCH_BUDGET:]
+
     def test_revise_carries_current_source_and_the_keep_id_rule(self) -> None:
         renamed = valid_document()
         renamed["metadata"]["name"] = "Renamed"
-        model = ScriptedModel([json.dumps(renamed)])
+        model = self._script(json.dumps(renamed))
         outcome = self._revise(model)
         self.assertEqual("workflow:generated", outcome.workflow_id)
-        prompt = model.prompts[0]
+        self.assertEqual("document", outcome.revision_mode)
+        prompt = self.document_prompts(model)[0]
         self.assertIn("current_source", prompt)
         self.assertIn("MODIFYING an existing workflow", prompt)
         self.assertIn("metadata.id exactly as it is", prompt)
@@ -483,10 +505,10 @@ class AuthoringReviseTests(unittest.TestCase):
 
     def test_a_changed_workflow_id_is_rejected_and_retried(self) -> None:
         drifted = valid_document(workflow_id="hijacked")
-        model = ScriptedModel([json.dumps(drifted), json.dumps(valid_document())])
+        model = self._script(json.dumps(drifted), json.dumps(valid_document()))
         outcome = self._revise(model)
         self.assertEqual(2, outcome.attempts)
-        self.assertIn("must not change", model.prompts[1])
+        self.assertIn("must not change", self.document_prompts(model)[1])
 
     def test_persistent_id_drift_exhausts_and_fails(self) -> None:
         drifted = json.dumps(valid_document(workflow_id="hijacked"))
@@ -551,9 +573,13 @@ class NamedAgentTests(unittest.TestCase):
     """Which Agent writes the DSL is the caller's choice, by name only."""
 
     def setUp(self) -> None:
-        self.codex = ScriptedModel([json.dumps(valid_document())])
-        self.claude = ScriptedModel([json.dumps(valid_document())])
-        self.default = ScriptedModel([json.dumps(valid_document())])
+        # Three deep, because a revision asks for operations first: the
+        # opening attempts are spent refusing these documents as patches, and
+        # the fallback then succeeds on one of them.
+        script = [json.dumps(valid_document())] * 3
+        self.codex = ScriptedModel(list(script))
+        self.claude = ScriptedModel(list(script))
+        self.default = ScriptedModel(list(script))
         self.service = service(
             self.default, generators={"codex": self.codex, "claude": self.claude},
         )
@@ -574,7 +600,9 @@ class NamedAgentTests(unittest.TestCase):
             json.dumps(valid_document()), "rename it",
             expected_workflow_id="workflow:generated", agent="claude",
         )
-        self.assertEqual(1, len(self.claude.prompts))
+        # Every attempt of both passes went to the chosen Agent, and none of
+        # them to the default: a fallback must not change who is writing.
+        self.assertTrue(len(self.claude.prompts) > 1)
         self.assertEqual([], self.default.prompts)
 
     def test_an_unknown_agent_is_refused_rather_than_silently_swapped(self) -> None:
@@ -650,7 +678,10 @@ class CliGeneratorTests(unittest.TestCase):
 
     def test_a_revision_prompt_also_carries_the_reader_s_language(self) -> None:
         current = json.dumps(valid_document())
-        model = ScriptedModel([current])
+        # Enough for the operations pass to spend its budget on documents and
+        # the fallback to succeed; the language fact is in every prompt either
+        # way, which is the point.
+        model = ScriptedModel([current] * 3)
         service(model).revise(
             current, "add a step", expected_workflow_id="workflow:generated",
             language="zh-CN",

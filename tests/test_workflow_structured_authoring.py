@@ -698,8 +698,13 @@ class RevisionByPatchTests(unittest.TestCase):
 class RevisionSeamTests(unittest.TestCase):
     """The service asks for a patch where the writer offers one."""
 
-    def test_a_writer_without_revise_is_still_asked_for_a_document(self) -> None:
-        """Every discovered Agent CLI is one of these; nothing changes for it."""
+    def test_a_writer_without_revise_falls_back_to_a_document(self) -> None:
+        """Every discovered Agent CLI is one of these.
+
+        It is asked for operations first and gets the same guarantee when it
+        can answer with them; when it cannot, the person still gets their
+        edit rather than a refusal.
+        """
 
         asked = []
 
@@ -715,8 +720,85 @@ class RevisionSeamTests(unittest.TestCase):
             json.dumps(_funnel_document()), "change it",
             expected_workflow_id="workflow:generated",
         )
+        # Asked for operations first — that is where the guarantee is — and
+        # only then for a document, which is what this writer can give. The
+        # outcome says which arrived, because the two are not equally
+        # trustworthy and the difference must not be invisible.
+        self.assertEqual("document", outcome.revision_mode)
+        self.assertIn("operations", asked[0])
+        self.assertNotIn("operations", asked[-1])
+        self.assertTrue(len(asked) > 1)
+
+    def test_a_cli_that_answers_with_operations_gets_the_guarantee(self) -> None:
+        """The point of asking a CLI for operations at all.
+
+        The guarantee is a property of applying operations to a base, not of
+        the library that called the model: a part of the workflow no operation
+        names is a part that could not have changed. A CLI is held to it here
+        by refusing anything that is not a patch, which is why it earns the
+        same promise a structured writer does.
+        """
+
+        base = _funnel_document()
+        asked = []
+
+        def cli(prompt):
+            asked.append(prompt)
+            return json.dumps({
+                "base_version": 3,
+                "summary": "rename the step",
+                "operations": [
+                    {"op": "set_node_label", "node_id": "work", "label": "Renamed"},
+                ],
+            })
+
+        authoring = WorkflowAuthoringService(
+            InMemoryHandlerCatalog([MANIFEST]), SCHEMAS, cli,
+            handler_facts=[{"name": "transform", "version": "1.0.0"}],
+        )
+        outcome = authoring.revise(
+            json.dumps(base), "rename the step",
+            expected_workflow_id="workflow:generated", base_version=3,
+        )
+        revised = json.loads(outcome.source)
+
+        self.assertEqual("patch", outcome.revision_mode)
         self.assertEqual(1, outcome.attempts)
-        self.assertEqual(1, len(asked))
+        self.assertEqual(1, len(asked), "the fallback should not have run")
+        self.assertIn("operations", asked[0])
+        self.assertEqual("Renamed", revised["nodes"][0]["label"])
+        # Everything the operations did not name is byte-identical.
+        self.assertEqual(base["edges"], revised["edges"])
+        self.assertEqual(base["metadata"], revised["metadata"])
+
+    def test_a_patch_against_the_wrong_version_is_fed_back(self) -> None:
+        """A refusal the model can act on, not one the operator has to read."""
+
+        attempts = []
+
+        def cli(prompt):
+            attempts.append(prompt)
+            return json.dumps({
+                "base_version": 99,
+                "operations": [
+                    {"op": "set_node_label", "node_id": "work", "label": "x"},
+                ],
+            })
+
+        authoring = WorkflowAuthoringService(
+            InMemoryHandlerCatalog([MANIFEST]), SCHEMAS, cli,
+            handler_facts=[{"name": "transform", "version": "1.0.0"}],
+        )
+        with self.assertRaises(AuthoringFailedError):
+            authoring.revise(
+                json.dumps(_funnel_document()), "rename it",
+                expected_workflow_id="workflow:generated", base_version=3,
+                # No fallback budget, so the failure is the patch pass's own.
+                # (`max_attempts` is halved for operations.)
+            )
+        # The second attempt carries the first one's refusal.
+        self.assertIn("written against v99", attempts[1])
+        self.assertIn("PATCH_NOT_APPLICABLE", attempts[1])
 
     def test_a_writer_with_revise_is_given_the_base_to_patch(self) -> None:
         seen = {}

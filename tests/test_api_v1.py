@@ -2332,7 +2332,10 @@ class WorkflowDraftApiTests(ApiTestCase):
                     break
                 time.sleep(0.02)
                 job = client.get(job["href"], actor="writer").json()["data"]
-            self.assertEqual(["codex"], asked)
+            # Every attempt of both revision passes — operations first, a
+            # whole document if that fails — went to the Agent that was asked
+            # for. The count is not the subject; who was called is.
+            self.assertEqual({"codex"}, set(asked))
 
     def test_quick_modify_rejects_an_unknown_agent_before_queueing(self) -> None:
         app = self._app_with_named_agents({"codex": lambda _prompt: "{}"})
