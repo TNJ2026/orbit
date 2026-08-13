@@ -6,8 +6,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import sqlite3
 import tempfile
+import threading
 import time
 import unittest
+import uuid
 
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.sqlite import SqliteSaver
@@ -33,6 +35,9 @@ from orbit.workflow.domain.durable_execution import ExecutionSafety
 from orbit.workflow.domain.data import PortDataPolicy, PortTransport
 from orbit.workflow.domain.handlers import ResourceProfile, UnknownExternalResultError
 from orbit.workflow.domain.serialization import definition_hash, to_primitive
+from unittest.mock import patch
+
+from orbit.workflow.langgraph_runtime import service as langgraph_service_module
 from orbit.workflow.langgraph_runtime import (
     BoundHandler,
     HandlerBindingError,
@@ -717,6 +722,58 @@ class LangGraphWorkflowCompilerTests(unittest.TestCase):
         completed = compiled.fire_join_deadline("join", config=config)
 
         self.assertEqual("after:fast", completed["result"])
+
+    def test_completion_counts_distinct_terminals_not_arrivals(self) -> None:
+        """One terminal reached twice is one terminal.
+
+        `required_terminal_count` asks how many of a workflow's terminals were
+        reached. Summing membership over `execution_order` counted arrivals
+        instead, so a workflow that demanded both of its outcomes could be
+        signed off having produced one of them twice — which a rework or a
+        loop back edge upstream is what makes reachable.
+
+        The rule is exercised directly on the state such a loop leaves behind,
+        rather than through a graph built to produce it: the arithmetic is the
+        subject, and a contrived loop would only be a slower way to write the
+        same `execution_order` down.
+        """
+
+        completion = IRPolicy(
+            "both", "completion", {"required_terminal_count": 2},
+        )
+        work = node("work", inputs=("value",), outputs=("value",))
+        first = node("first", inputs=("value",), kind="terminal", handler=False)
+        second = node("second", inputs=("value",), kind="terminal", handler=False)
+        ir = workflow(
+            (work, first, second),
+            (
+                edge("to_first", "work", "first"),
+                edge("to_second", "work", "second", priority=1),
+            ),
+            entry=("work",), terminals=("first", "second"),
+            result=("work", "value"), policies=(completion,),
+        )
+        compiled = compile_workflow(
+            ir, LangGraphHandlerRegistry([
+                binding("work", lambda values, config, context: dict(values)),
+            ]),
+            checkpointer=InMemorySaver(),
+        )
+        reached_once = {
+            "execution_order": ("work", "first", "work", "first"),
+            "node_outputs": {"work": {"value": 1}},
+            "node_routes": {},
+        }
+        reached_both = {
+            **reached_once,
+            "execution_order": ("work", "first", "second"),
+        }
+
+        with self.assertRaisesRegex(
+            LangGraphCompletionUnsatisfied, "requires 2 .*reached 1",
+        ):
+            compiled._result(reached_once)
+        self.assertEqual(1, compiled._result(reached_both)["result"])
 
     def test_deadline_join_fails_below_minimum(self) -> None:
         deadline = IRPolicy(
@@ -1757,6 +1814,250 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
             run_db_path=Path(directory) / "langgraph-runs.sqlite3",
             checkpoint_db_path=Path(directory) / "langgraph-checkpoints.sqlite3",
         )
+
+    def test_a_deadline_fire_that_raises_settles_instead_of_re_firing(self) -> None:
+        """Only the deadline's own exception used to be caught.
+
+        Anything else the fire raised on the way through — a Handler that
+        failed, an output the compiler refused — escaped with the run still
+        `running` and the timer still `firing`. `recover_due` selects exactly
+        that pair and routes it back into the fire, and the timer loop
+        isolates the exception, so the run never reached a terminal status and
+        every poll tried again. Verified as a loop: four ticks, four times
+        stuck.
+        """
+
+        deadline = IRPolicy(
+            "wait", "join",
+            {
+                "mode": "deadline", "merge_mode": "array_by_edge",
+                "deadline_seconds": 1, "min_successful": 1,
+            },
+        )
+        fan = node(
+            "fan", inputs=("value",), outputs=("value",), route_mode="parallel",
+        )
+        fast = node("fast", inputs=("value",), outputs=("value",))
+        waiting = node(
+            "waiting", inputs=("value",), outputs=("value",),
+            kind="human", handler=False,
+        )
+        join = node(
+            "join", inputs=("value",), outputs=("value",),
+            kind="join", handler=False,
+        )
+        join = IRNode(
+            join.id, join.kind, join.inputs, join.outputs, join.handler,
+            join.config, (deadline.id,), join.extension, join.route_mode,
+        )
+        after = node("after", inputs=("value",), outputs=("value",))
+        ir = workflow(
+            (fan, fast, waiting, join, after),
+            (
+                edge("fan_fast", "fan", "fast"),
+                edge("fan_waiting", "fan", "waiting"),
+                edge("fast_join", "fast", "join"),
+                edge("waiting_join", "waiting", "join"),
+                edge("join_after", "join", "after"),
+            ),
+            entry=("fan",), terminals=("after",), result=("after", "value"),
+            policies=(deadline,),
+        )
+
+        def explode(values, config, context):
+            raise RuntimeError("handler exploded during the deadline fire")
+
+        registry = LangGraphHandlerRegistry([
+            binding("fan", lambda values, config, context: dict(values)),
+            binding("fast", lambda values, config, context: {"value": "fast"}),
+            binding("after", explode),
+        ])
+        now = [datetime(2026, 1, 1, tzinfo=timezone.utc)]
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.publish(directory, ir)
+            service = LangGraphWorkflowService(
+                store, registry,
+                run_db_path=Path(directory) / "runs.sqlite3",
+                checkpoint_db_path=Path(directory) / "checkpoints.sqlite3",
+                clock=lambda: now[0],
+            )
+            started = service.start(
+                ir.workflow_id, {"value": "in"},
+                idempotency_key="refire", actor="test:owner",
+            )
+            self.assertEqual("interrupted", started.status)
+            now[0] += timedelta(seconds=10)
+
+            observed = []
+            for _ in range(4):
+                service.recover_due(on_error=lambda run_id, exc: None)
+                observed.append(service.get(started.run_id).status)
+            with sqlite3.connect(service.run_db_path) as connection:
+                timers = [
+                    row[0] for row in connection.execute(
+                        "SELECT status FROM langgraph_timers WHERE run_id=?",
+                        (started.run_id,),
+                    )
+                ]
+
+        # Terminal on the first tick, and still terminal after three more.
+        self.assertEqual(["failed"] * 4, observed)
+        self.assertEqual(["fired"], timers)
+
+    def test_recover_does_not_re_enter_a_run_this_process_is_running(self) -> None:
+        """`running` cannot tell a stranded run from one in flight here.
+
+        `start` drives the graph synchronously while the row already reads
+        `running`, so an operator's recover landing in that window compiled
+        and invoked the same thread_id a second time — and the attempt journal,
+        finding the sibling's `started` row, settled a healthy run `unknown`.
+        """
+
+        action = node("action", inputs=("value",), outputs=("value",))
+        terminal = node(
+            "terminal", inputs=("value",), kind="terminal", handler=False
+        )
+        ir = workflow(
+            (action, terminal), (edge("done", "action", "terminal"),),
+            entry=("action",), terminals=("terminal",), result=("action", "value"),
+        )
+        recovered: list[str] = []
+        released = threading.Event()
+
+        def slow(values, config, context):
+            # Inside the handler the run is `running` and this process is
+            # driving it — exactly the window an operator can land in.
+            recovered.append(service.recover(run_id_holder["id"]).status)
+            released.set()
+            return {"value": 7}
+
+        registry = LangGraphHandlerRegistry([binding("action", slow)])
+        run_id_holder = {"id": ""}
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.publish(directory, ir)
+            service = self.service(directory, store, registry)
+            run_id_holder["id"] = "langgraph_run:" + uuid.uuid4().hex
+            with sqlite3.connect(service.run_db_path) as connection:
+                connection.execute(
+                    "INSERT INTO langgraph_runs(run_id,workflow_id,workflow_version,"
+                    "status,revision,input_json,interrupts_json,"
+                    "interrupt_responses_json,result_json,error,created_at,"
+                    "updated_at,owner_actor) VALUES"
+                    " (?,?,?,'running',1,?,'[]','{}',NULL,NULL,?,?,'test:owner')",
+                    (
+                        run_id_holder["id"], ir.workflow_id, 1,
+                        json.dumps({"value": 1}),
+                        "2026-01-01T00:00:00.000000Z",
+                        "2026-01-01T00:00:00.000000Z",
+                    ),
+                )
+            settled = service.recover(run_id_holder["id"])
+
+        self.assertTrue(released.is_set(), "the handler never ran")
+        # The reentrant recover found the run already in flight here and left
+        # it alone, so the real execution finished normally.
+        self.assertEqual(["running"], recovered)
+        self.assertEqual("completed", settled.status)
+        self.assertEqual(7, settled.result)
+
+    def test_compatibility_compiles_a_definition_once(self) -> None:
+        """The catalog asks per workflow per GET, and the UI polls it.
+
+        A full `StateGraph` build per workflow per poll is work whose answer
+        cannot have changed: the definition is content-addressed, the compiler
+        is fixed, and this service's Handler registry is sealed at
+        composition. What must *not* be cached is the resolution of "latest" —
+        answering that from a key taken before a publish would report the
+        previous definition's verdict.
+        """
+
+        action = node("action", inputs=("value",), outputs=("value",))
+        terminal = node(
+            "terminal", inputs=("value",), kind="terminal", handler=False
+        )
+        ir = workflow(
+            (action, terminal), (edge("done", "action", "terminal"),),
+            entry=("action",), terminals=("terminal",), result=("action", "value"),
+        )
+        registry = LangGraphHandlerRegistry([
+            binding("action", lambda values, config, context: dict(values)),
+            binding("extra", lambda values, config, context: dict(values)),
+        ])
+        compiles: list[str] = []
+        real = langgraph_service_module.compile_workflow
+
+        def counted(compiled_ir, handlers, **kwargs):
+            compiles.append(compiled_ir.workflow_id)
+            return real(compiled_ir, handlers, **kwargs)
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.publish(directory, ir)
+            service = self.service(directory, store, registry)
+            with patch.object(langgraph_service_module, "compile_workflow", counted):
+                first = service.compatibility(ir.workflow_id)
+                second = service.compatibility(ir.workflow_id)
+                by_version = service.compatibility(ir.workflow_id, 1)
+                self.assertEqual(1, len(compiles))
+
+                # A second version, and "latest" now means that one.
+                revised = workflow(
+                    (
+                        node("action", inputs=("value",), outputs=("value",)),
+                        node("extra", inputs=("value",), outputs=("value",)),
+                        terminal,
+                    ),
+                    (
+                        edge("onward", "action", "extra"),
+                        edge("done", "extra", "terminal"),
+                    ),
+                    entry=("action",), terminals=("terminal",),
+                    result=("extra", "value"),
+                )
+                store.publish(
+                    CompiledWorkflow(
+                        revised, definition_hash(revised), "test",
+                        "sha256:" + "d" * 64,
+                    ),
+                    expected_latest_version=1, source_format="json",
+                    source_text="{}", actor="test:author", dsl_version="1.3",
+                )
+                latest = service.compatibility(ir.workflow_id)
+
+        self.assertTrue(first["compatible"])
+        self.assertEqual(first, second)
+        self.assertEqual(first, by_version)
+        self.assertEqual(1, first["workflow_version"])
+        # Not the cached answer: a different definition, so a fresh compile.
+        self.assertEqual(2, len(compiles))
+        self.assertEqual(2, latest["workflow_version"])
+
+    def test_an_incompatible_definition_is_not_recompiled_either(self) -> None:
+        """A refusal is as immutable as an acceptance, and costs the same."""
+
+        orphan = node("orphan", inputs=("value",), outputs=("value",))
+        ir = workflow(
+            (orphan,), (), entry=("orphan",), terminals=("orphan",),
+            result=("orphan", "value"),
+        )
+        compiles: list[str] = []
+        real = langgraph_service_module.compile_workflow
+
+        def counted(compiled_ir, handlers, **kwargs):
+            compiles.append(compiled_ir.workflow_id)
+            return real(compiled_ir, handlers, **kwargs)
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.publish(directory, ir)
+            # No Handler registered for `orphan`, so it cannot compile.
+            service = self.service(directory, store, LangGraphHandlerRegistry([]))
+            with patch.object(langgraph_service_module, "compile_workflow", counted):
+                first = service.compatibility(ir.workflow_id)
+                second = service.compatibility(ir.workflow_id)
+
+        self.assertFalse(first["compatible"])
+        self.assertEqual("unsupported_workflow", first["reason"])
+        self.assertEqual(first, second)
+        self.assertEqual(1, len(compiles))
 
     def test_replay_derives_the_run_from_what_was_recorded(self) -> None:
         """Replay has a definition here, and it is not "run it again".

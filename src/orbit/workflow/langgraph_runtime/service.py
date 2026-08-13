@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import sqlite3
+import threading
 from typing import Any, Callable, Mapping
 import uuid
 
@@ -60,6 +62,25 @@ class LangGraphWorkflowService:
         self.checkpoint_db_path = Path(checkpoint_db_path)
         self.artifacts = artifact_store
         self.clock = clock or (lambda: datetime.now(timezone.utc))
+        # Runs this process is executing right now. `running` in the database
+        # means "a process was executing this", and recovery exists because
+        # that process may be gone — but it cannot tell a stranded run from
+        # one in flight here, and re-entering a live thread_id makes the
+        # attempt journal find a sibling's `started` row and settle a healthy
+        # run as `unknown`. This is the part of that question this process can
+        # answer for certain.
+        self._in_flight: set[str] = set()
+        self._in_flight_lock = threading.Lock()
+        # Whether a definition compiles under this engine, by definition hash.
+        # The catalog asks once per workflow per GET and the UI polls it on
+        # every render and every composer submit, so a library of N workflows
+        # meant N full `StateGraph` builds per poll. All three things the
+        # answer depends on are immutable: the definition (content-addressed
+        # by this key), the compiler, and this service's sealed Handler
+        # registry — a registry is fixed at composition, so the instance is
+        # its identity and the cache lives here rather than globally.
+        self._compatibility: dict[str, Mapping[str, Any]] = {}
+        self._compatibility_lock = threading.Lock()
         self.run_db_path.parent.mkdir(parents=True, exist_ok=True)
         self.checkpoint_db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
@@ -287,21 +308,40 @@ class LangGraphWorkflowService:
         """Explain whether an immutable workflow version can use this engine."""
 
         try:
+            # Resolved before the cache is consulted: `workflow_version=None`
+            # means "the latest", and answering that from a key taken before
+            # a publish would report the previous definition's verdict.
             record = self._workflow(workflow_id, workflow_version)
-            compile_workflow(record.ir, self.handlers)
         except LookupError as exc:
             return {"compatible": False, "reason": "workflow_not_found", "detail": str(exc)}
+        key = record.definition_hash.value
+        with self._compatibility_lock:
+            cached = self._compatibility.get(key)
+        if cached is not None:
+            return cached
+        try:
+            compile_workflow(record.ir, self.handlers)
         except (LangGraphCompileError, ValueError, TypeError) as exc:
-            return {
+            answer: Mapping[str, Any] = {
                 "compatible": False,
                 "reason": "unsupported_workflow",
                 "detail": str(exc),
             }
-        return {
-            "compatible": True,
-            "workflow_version": record.version.value,
-            "engine": "langgraph",
-        }
+        else:
+            answer = {
+                "compatible": True,
+                "workflow_version": record.version.value,
+                "engine": "langgraph",
+            }
+        with self._compatibility_lock:
+            # Bounded, because a workflow republished many times leaves an
+            # entry per version. Cleared wholesale rather than evicted one at
+            # a time: every entry is equally cheap to recompute, and a policy
+            # that has to choose is more machinery than the saving is worth.
+            if len(self._compatibility) >= 512:
+                self._compatibility.clear()
+            self._compatibility[key] = answer
+        return answer
 
     def resume(
         self,
@@ -413,8 +453,24 @@ class LangGraphWorkflowService:
         )
 
     def recover(self, run_id: str) -> LangGraphRun:
-        """Continue a run whose process ended after a durable checkpoint."""
+        """Continue a run whose process ended after a durable checkpoint.
 
+        A run this process is executing right now is not that run. `start`
+        drives the graph synchronously inside the request thread while the row
+        already reads `running`, so an operator's `POST .../recover` — or the
+        `recover_langgraph_run` tool — landing in that window used to compile
+        and invoke the same thread_id a second time. The attempt journal then
+        finds the sibling's `started` row and reports the outcome unknown,
+        settling a perfectly healthy run as `unknown`.
+
+        Only this process's own work can be ruled out here. A run left
+        `running` by a *different* process is exactly what recovery is for,
+        and is indistinguishable from one that machine is still driving.
+        """
+
+        with self._in_flight_lock:
+            if run_id in self._in_flight:
+                return self.get(run_id)
         current = self.get(run_id)
         if current.status == "running":
             with self._connect() as connection:
@@ -535,7 +591,9 @@ class LangGraphWorkflowService:
             "thread_id": run_id, "actor": row["owner_actor"],
         }}
         try:
-            with SqliteSaver.from_conn_string(str(self.checkpoint_db_path)) as saver:
+            with self._executing(run_id), SqliteSaver.from_conn_string(
+                str(self.checkpoint_db_path)
+            ) as saver:
                 workflow = compile_workflow(ir, self.handlers, checkpointer=saver)
                 result = workflow.fire_join_deadline(node_id, config=config)
                 after = workflow.graph.get_state(config)
@@ -553,6 +611,26 @@ class LangGraphWorkflowService:
             return self._settle(
                 run_id, "failed", error=f"{type(exc).__name__}: {exc}",
             )
+        except LangGraphUnknownExternalResult as exc:
+            # Same rule as `_execute`: an effect whose outcome nobody knows is
+            # not a failure to retry, and firing this deadline again would ask
+            # the question a second time.
+            self._finish_timer(run_id, "join_deadline", node_id)
+            return self._settle(
+                run_id, "unknown", error=f"{type(exc).__name__}: {exc}",
+            )
+        except Exception as exc:
+            # Anything the fire raised on the way through — a Handler that
+            # failed, an output the compiler refused, a completion policy left
+            # unsatisfied. Only the deadline's own exception used to be
+            # caught, so everything else escaped with the run still `running`
+            # and the timer still `firing`. `recover_due` selects exactly that
+            # pair and routes it straight back here, and the timer loop
+            # isolates the exception — so the run never reached a terminal
+            # status and every poll tried again, forever.
+            self._finish_timer(run_id, "join_deadline", node_id)
+            self._settle(run_id, "failed", error=f"{type(exc).__name__}: {exc}")
+            raise
 
     def cancel(
         self,
@@ -779,6 +857,18 @@ class LangGraphWorkflowService:
                         pass
         return tuple(recovered)
 
+    @contextmanager
+    def _executing(self, run_id: str):
+        """Hold `run_id` for as long as this process is driving its graph."""
+
+        with self._in_flight_lock:
+            self._in_flight.add(run_id)
+        try:
+            yield
+        finally:
+            with self._in_flight_lock:
+                self._in_flight.discard(run_id)
+
     def _finish_timer(self, run_id: str, purpose: str, target_id: str) -> None:
         with self._connect() as connection:
             connection.execute(
@@ -799,7 +889,9 @@ class LangGraphWorkflowService:
             "thread_id": run_id, "actor": row["owner_actor"],
         }}
         try:
-            with SqliteSaver.from_conn_string(str(self.checkpoint_db_path)) as saver:
+            with self._executing(run_id), SqliteSaver.from_conn_string(
+                str(self.checkpoint_db_path)
+            ) as saver:
                 workflow = compile_workflow(ir, self.handlers, checkpointer=saver)
                 if resume is not ...:
                     result = workflow.resume(resume, config=config)

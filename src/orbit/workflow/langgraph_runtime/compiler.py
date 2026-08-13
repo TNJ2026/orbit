@@ -520,10 +520,14 @@ class CompiledLangGraphWorkflow:
             completion.config.get("required_terminal_count", 1)
             if completion is not None else 1
         )
-        reached_terminals = sum(
-            node_id in self.ir.terminals
-            for node_id in state.get("execution_order", ())
-        )
+        # Distinct terminals, not terminal executions. Counting repeats let a
+        # workflow with one terminal satisfy `required_terminal_count: 2` by
+        # reaching that terminal twice — which a rework or a loop back edge
+        # upstream makes reachable — without a second terminal ever existing.
+        reached_terminals = len({
+            node_id for node_id in state.get("execution_order", ())
+            if node_id in self.ir.terminals
+        })
         if not state.get("__interrupt__") and reached_terminals < required_terminals:
             raise LangGraphCompletionUnsatisfied(
                 f"completion requires {required_terminals} successful terminals; "
