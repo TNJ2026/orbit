@@ -176,6 +176,28 @@ def build_routes(ctx, service, template_service=None) -> list[Route]:
             projection_version=run.revision,
         ))
 
+    async def replay_run(request: Request) -> JSONResponse:
+        actor = ctx.authenticate(request, READ_SCOPE)
+        if isinstance(actor, JSONResponse):
+            return actor
+        try:
+            unknown = set(request.query_params) - {"limit"}
+            if unknown:
+                raise ValueError(f"unknown query parameter: {sorted(unknown)[0]}")
+            steps = service.replay(
+                request.path_params["run_id"],
+                actor=actor,
+                limit=page_size(request.query_params.get("limit")),
+            )
+        except LookupError as exc:
+            return error("not_found", str(exc), 404)
+        except ValueError as exc:
+            return error("invalid_request", str(exc))
+        # A read, and only a read: replay derives state from what was recorded
+        # and is forbidden to call a Handler or write anything, so it carries
+        # no commands and is offered on the read scope.
+        return JSONResponse(envelope({"steps": list(steps)}))
+
     async def start_run(request: Request) -> JSONResponse:
         def command(body: Mapping[str, Any], actor: str, key: str):
             workflow_id = str(body.get("workflow_id") or "").strip()
@@ -321,6 +343,12 @@ def build_routes(ctx, service, template_service=None) -> list[Route]:
 
     routes = [
         Route("/api/v1/langgraph-runs", list_runs, methods=["GET"]),
+        Route(
+            "/api/v1/langgraph-runs/{run_id}/replay",
+            replay_run,
+            methods=["GET"],
+            name="langgraph_run_replay",
+        ),
         Route("/api/v1/langgraph-runs", start_run, methods=["POST"]),
         Route("/api/v1/langgraph-runs/{run_id}", get_run, methods=["GET"]),
         Route(

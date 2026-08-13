@@ -453,6 +453,23 @@ def build_mcp_dispatcher(
                 },
             },
             {
+                "name": "replay_langgraph_run",
+                "description": (
+                    "Re-derive a LangGraph run's state from what was recorded, "
+                    "step by step. Reads only the checkpoints: no Handler runs "
+                    "and nothing is written."
+                ),
+                "scope": READ_SCOPE,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "run_id": {"type": "string"},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+                    },
+                    "required": ["run_id"],
+                },
+            },
+            {
                 "name": "start_langgraph_run",
                 "description": "Start a published workflow using LangGraph.",
                 "scope": WRITE_SCOPE,
@@ -646,6 +663,12 @@ def build_mcp_dispatcher(
                 interrupt_id=arguments.get("interrupt_id"),
                 actor=actor,
             ))
+        if name == "replay_langgraph_run":
+            return {"steps": list(langgraph_service.replay(
+                str(arguments["run_id"]),
+                actor=actor,
+                limit=min(200, max(1, int(arguments.get("limit", 50)))),
+            ))}
         if name == "recover_langgraph_run":
             return langgraph_run_dto(
                 langgraph_service.recover(str(arguments["run_id"]))

@@ -1758,6 +1758,145 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
             checkpoint_db_path=Path(directory) / "langgraph-checkpoints.sqlite3",
         )
 
+    def test_replay_derives_the_run_from_what_was_recorded(self) -> None:
+        """Replay has a definition here, and it is not "run it again".
+
+        `workflow/README.md`: a replay may read old state and recorded events
+        and nothing else — no clock, no random, no Planner, Handler, Tool,
+        HTTP or Artifact writer, and no persistent write of any kind. So this
+        asserts what it produces *and* that producing it touched no Handler.
+        """
+
+        calls: list[str] = []
+        first = node("first", inputs=("value",), outputs=("value",))
+        second = node("second", inputs=("value",), outputs=("value",))
+        terminal = node(
+            "terminal", inputs=("value",), kind="terminal", handler=False
+        )
+        ir = workflow(
+            (first, second, terminal),
+            (
+                edge("onward", "first", "second"),
+                edge("done", "second", "terminal"),
+            ),
+            entry=("first",), terminals=("terminal",),
+            result=("second", "value"),
+        )
+
+        def record(name):
+            def handler(values, config, context):
+                calls.append(name)
+                return {"value": f"{name}:{values['value']}"}
+            return handler
+
+        registry = LangGraphHandlerRegistry([
+            binding("first", record("first")), binding("second", record("second")),
+        ])
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.publish(directory, ir)
+            service = self.service(directory, store, registry)
+            run = service.start(
+                ir.workflow_id, {"value": "in"},
+                idempotency_key="replay-once", actor="test:owner",
+            )
+            self.assertEqual("completed", run.status)
+            self.assertEqual(["first", "second"], calls)
+
+            steps = service.replay(run.run_id, actor="test:owner")
+
+            with self.subTest("no handler ran"):
+                self.assertEqual(["first", "second"], calls)
+
+            with self.subTest("forwards, because a derivation runs forwards"):
+                orders = [step["execution_order"] for step in steps]
+                self.assertEqual(sorted(orders, key=len), orders)
+                self.assertEqual(
+                    ["first", "second", "terminal"], orders[-1],
+                )
+
+            with self.subTest("each step carries what was recorded at it"):
+                final = steps[-1]
+                self.assertEqual(
+                    {"first", "second", "terminal"}, set(final["node_outputs"])
+                )
+                self.assertEqual(
+                    "second:first:in", final["node_outputs"]["second"]["value"],
+                )
+                self.assertTrue(all(step["checkpoint_id"] for step in steps))
+
+            with self.subTest("nothing was written"):
+                # The same derivation twice, because a replay that recorded
+                # anything would not produce the same answer the second time.
+                self.assertEqual(steps, service.replay(run.run_id))
+
+            with self.subTest("somebody else's run cannot be replayed"):
+                with self.assertRaisesRegex(LookupError, "not found"):
+                    service.replay(run.run_id, actor="test:other")
+
+            with self.subTest("the limit is bounded"):
+                with self.assertRaisesRegex(ValueError, "between 1 and 500"):
+                    service.replay(run.run_id, limit=0)
+                self.assertEqual(1, len(service.replay(run.run_id, limit=1)))
+
+    def test_replay_shows_the_writes_an_interrupt_left_pending(self) -> None:
+        """The state a resume would continue from, which is not the checkpoint.
+
+        A branch that finished inside an interrupted superstep is a pending
+        write and nothing else. Leaving it out would draw a run as though that
+        branch had never executed — the same omission that made a deadline
+        join lose the branch it had just merged.
+        """
+
+        fan = node(
+            "fan", inputs=("value",), outputs=("value",), route_mode="parallel",
+        )
+        fast = node("fast", inputs=("value",), outputs=("value",))
+        waiting = node(
+            "waiting", inputs=("value",), outputs=("value",),
+            kind="human", handler=False,
+        )
+        join = node(
+            "join", inputs=("value",), outputs=("value",),
+            kind="join", handler=False,
+        )
+        policy = IRPolicy(
+            "wait", "join",
+            {"mode": "all", "merge_mode": "array_by_edge"},
+        )
+        join = IRNode(
+            join.id, join.kind, join.inputs, join.outputs, join.handler,
+            join.config, (policy.id,), join.extension, join.route_mode,
+        )
+        ir = workflow(
+            (fan, fast, waiting, join),
+            (
+                edge("fan_fast", "fan", "fast"),
+                edge("fan_waiting", "fan", "waiting"),
+                edge("fast_join", "fast", "join"),
+                edge("waiting_join", "waiting", "join"),
+            ),
+            entry=("fan",), terminals=("join",), result=("join", "value"),
+            policies=(policy,),
+        )
+        registry = LangGraphHandlerRegistry([
+            binding("fan", lambda values, config, context: dict(values)),
+            binding("fast", lambda values, config, context: {"value": "fast"}),
+        ])
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.publish(directory, ir)
+            service = self.service(directory, store, registry)
+            run = service.start(
+                ir.workflow_id, {"value": "in"},
+                idempotency_key="replay-pending", actor="test:owner",
+            )
+            self.assertEqual("interrupted", run.status)
+
+            latest = service.replay(run.run_id, actor="test:owner")[-1]
+
+        self.assertNotIn("fast", latest["execution_order"])
+        self.assertIn("node_outputs", latest["pending_writes"])
+        self.assertIn("execution_order", latest["pending_writes"])
+
     def test_a_run_belongs_to_the_actor_that_started_it(self) -> None:
         """`owner_actor` was recorded, threaded into the graph config, and
         enforced on every Artifact read — and on no run read at all. A run's
@@ -3021,6 +3160,101 @@ class LangGraphHttpApiTests(unittest.TestCase):
 
         self.assertEqual("completed", run["status"])
         self.assertEqual({"decision": "approve", "value": 43}, run["result"])
+
+    def test_replay_is_a_read_on_both_doors_and_owner_scoped(self) -> None:
+        """Replay reads recorded state, so it is offered on the read scope.
+
+        It is forbidden to call a Handler or write anything — that is what
+        replay means in this codebase — which is why it carries no command and
+        needs no idempotency key. What it does need is the same ownership rule
+        every other run read has: the recorded state is the run's inputs and
+        outputs, node by node.
+        """
+
+        action = node("action", inputs=("value",), outputs=("value",))
+        terminal = node(
+            "terminal", inputs=("value",), kind="terminal", handler=False
+        )
+        ir = workflow(
+            (action, terminal), (edge("done", "action", "terminal"),),
+            entry=("action",), terminals=("terminal",), result=("action", "value"),
+        )
+        registry = LangGraphHandlerRegistry([
+            binding("action", lambda values, config, context: {"value": 21}),
+        ])
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.publish(directory, ir)
+            service = self.service(directory, store, registry)
+            app = create_app(
+                Path(directory) / "orbit.sqlite3",
+                workflow_db_path=store.path,
+                langgraph_service=service,
+                authenticator=lambda request: request.headers.get("x-orbit-actor"),
+                authorizer=Authorizer(lambda actor: (
+                    (READ_SCOPE,) if actor == "test:reader"
+                    else (READ_SCOPE, WRITE_SCOPE, OPS_WRITE_SCOPE)
+                )),
+                worker_count=1,
+            )
+            with AsgiHarness(app) as client:
+                run = client.post(
+                    "/api/v1/langgraph-runs",
+                    actor="test:operator", key="replay-start",
+                    body={"workflow_id": ir.workflow_id, "input": {"value": 8}},
+                ).json()["data"]["run"]
+                replayed = client.get(
+                    f"/api/v1/langgraph-runs/{run['run_id']}/replay",
+                    actor="test:operator",
+                )
+                foreign = client.get(
+                    f"/api/v1/langgraph-runs/{run['run_id']}/replay",
+                    actor="test:reader",
+                )
+                bad_query = client.get(
+                    f"/api/v1/langgraph-runs/{run['run_id']}/replay?depth=2",
+                    actor="test:operator",
+                )
+                over_mcp = client.request(
+                    "POST", "/mcp", actor="test:operator",
+                    body={
+                        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                        "params": {
+                            "name": "replay_langgraph_run",
+                            "arguments": {"run_id": run["run_id"]},
+                        },
+                    },
+                ).json()
+                # A read-only actor: refused for whose run it is, never for
+                # lacking a write scope. That is what puts replay on the read
+                # side — it derives state and writes nothing.
+                by_reader = client.request(
+                    "POST", "/mcp", actor="test:reader",
+                    body={
+                        "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                        "params": {
+                            "name": "replay_langgraph_run",
+                            "arguments": {"run_id": run["run_id"]},
+                        },
+                    },
+                ).json()
+
+        self.assertEqual("completed", run["status"])
+        self.assertEqual(200, replayed.status_code, replayed.text)
+        steps = replayed.json()["data"]["steps"]
+        self.assertTrue(steps)
+        self.assertEqual(
+            ["action", "terminal"], steps[-1]["execution_order"],
+        )
+        self.assertEqual(21, steps[-1]["node_outputs"]["action"]["value"])
+        # Somebody else's run is not found, as it is on every other read.
+        self.assertEqual(404, foreign.status_code)
+        self.assertEqual(400, bad_query.status_code)
+        self.assertEqual(
+            steps,
+            json.loads(over_mcp["result"]["content"][0]["text"])["steps"],
+        )
+        self.assertNotIn("lacks scope", json.dumps(by_reader))
+        self.assertIn("not found", json.dumps(by_reader))
 
     def test_interrupt_resume_is_authorized_versioned_and_idempotent(self) -> None:
         action = node("action", inputs=("value",), outputs=("value",))

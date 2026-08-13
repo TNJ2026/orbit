@@ -628,6 +628,63 @@ class LangGraphWorkflowService:
             raise LookupError(f"LangGraph run not found: {run_id}")
         return self._record(row)
 
+    def replay(
+        self, run_id: str, *, actor: str | None = None, limit: int = 100,
+    ) -> tuple[Mapping[str, Any], ...]:
+        """The run's state re-derived from what was recorded, step by step.
+
+        Replay has a definition in this codebase and it is not "run it again":
+        `workflow/README.md` says a replay may read old state and recorded
+        events and nothing else — no clock, no random, no Planner, Handler,
+        Tool, HTTP or Artifact writer, and no persistent write of any kind.
+
+        So this reads the checkpointer directly and never compiles the graph.
+        Not as an optimisation: with no graph there is no wiring, and with no
+        wiring there is no way for a replay to reach a Handler even by
+        mistake. What it returns is what was durably recorded at each
+        superstep — the same facts a resume would have continued from.
+
+        Ordered oldest first, because a derivation runs forwards. `limit`
+        bounds the newest end, which is where a long run's interesting part
+        is; a run shorter than the limit is returned whole.
+        """
+
+        if isinstance(limit, bool) or not 1 <= limit <= 500:
+            raise ValueError("limit must be between 1 and 500")
+        # Scoped and existence-checked exactly as `get` is, and before any
+        # checkpoint is read: whose run this is decides whether its recorded
+        # state may be looked at.
+        self.get(run_id, actor=actor)
+        config = {"configurable": {"thread_id": run_id}}
+        steps: list[Mapping[str, Any]] = []
+        with SqliteSaver.from_conn_string(str(self.checkpoint_db_path)) as saver:
+            for entry in saver.list(config, limit=limit):
+                values = entry.checkpoint.get("channel_values") or {}
+                metadata = entry.metadata or {}
+                steps.append({
+                    "checkpoint_id": entry.checkpoint.get("id"),
+                    "parent_checkpoint_id": (
+                        (entry.parent_config or {}).get("configurable", {})
+                        .get("checkpoint_id")
+                    ),
+                    "recorded_at": entry.checkpoint.get("ts"),
+                    "step": metadata.get("step"),
+                    "source": metadata.get("source"),
+                    "execution_order": list(values.get("execution_order") or ()),
+                    "node_outputs": to_primitive(values.get("node_outputs") or {}),
+                    "node_routes": dict(values.get("node_routes") or {}),
+                    "join_deadlines": dict(values.get("join_deadlines") or {}),
+                    # Writes the superstep produced but had not committed when
+                    # the checkpoint was taken. A branch that finished inside
+                    # an interrupted superstep lives here and nowhere else,
+                    # which is the state a deadline join fires from.
+                    "pending_writes": sorted({
+                        channel for _task, channel, _value in
+                        (entry.pending_writes or ())
+                    }),
+                })
+        return tuple(reversed(steps))
+
     def list_runs(
         self, *, status: str | None = None, limit: int = 100,
         actor: str | None = None,
