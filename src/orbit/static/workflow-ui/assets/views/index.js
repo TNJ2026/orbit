@@ -44,10 +44,24 @@ export function createViews(context) {
         ? commands.find((item) => item.command === "run.start") : null);
   }
 
+  /** Whether this composer can start `entry` from a goal.
+   *
+   * Two independent questions, and only one of them used to be asked.
+   * `langgraph_compatibility` says the definition compiles under the engine;
+   * `goal_readiness` says a single goal can be bound to its inputs at all,
+   * and is `needs_upgrade`/`needs_migration` for reasons that have nothing to
+   * do with node kinds — no goal binding, a required input with no default,
+   * an ambiguous result.
+   *
+   * A workflow can compile perfectly and have nowhere to put the goal. Start
+   * was enabled for those, `bindGoalInput` returned the input unchanged
+   * because there was no binding to write into, and the run was refused by
+   * the server for an input the person had in fact typed.
+   */
   function workflowRunnable(entry) {
+    if (entry?.goal_readiness !== "ready") return false;
     return entry?.langgraph_compatibility?.compatible === true
-      || (!shellFacts?.capabilities?.langgraph_workflows?.available
-        && entry?.goal_readiness === "ready");
+      || !shellFacts?.capabilities?.langgraph_workflows?.available;
   }
 
   function prepareSimplifiedComposer(summary, entries) {

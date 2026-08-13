@@ -1160,9 +1160,77 @@ class SingleAgentHomeTests(BrowserE2ETestCase):
         run = self.start(page, workflow_id)
         self.assertEqual("interrupted", run["status"])
 
+        # Cancelled when this test is done: the class shares one server, and
+        # a run left in flight locks the composer for every test after it.
+        self.addCleanup(self.cancel, page, run)
+
         page.goto(f"{self.base}/ui/#/runs/{quote(run['run_id'], safe='')}")
         page.wait_for_selector(".simplified-workspace-composer")
         self.assertTrue(page.locator("#newGoalStart").is_disabled())
+
+    def cancel(self, page, run) -> None:
+        page.evaluate(
+            """([id, revision]) => fetch(
+                 `/api/v1/langgraph-runs/${encodeURIComponent(id)}/cancel`,
+                 {
+                   method: "POST",
+                   headers: {
+                     "content-type": "application/json",
+                     "idempotency-key": "cancel-" + id,
+                   },
+                   body: JSON.stringify({expected_version: revision}),
+                 },
+               ).then((r) => r.json())""",
+            [run["run_id"], run["revision"]],
+        )
+
+    def test_start_is_withheld_where_the_goal_has_nowhere_to_go(self) -> None:
+        """Compiling and being startable from a goal are separate questions.
+
+        Only the first used to be asked. `workflow:linear` compiles under
+        LangGraph, so Start was enabled; its `goal_readiness` is not `ready`,
+        so `bindGoalInput` returned the input unchanged — there was no binding
+        to write into — and the server refused the run for an input the person
+        had in fact typed.
+        """
+
+        page = self.open("en-US")
+        page.wait_for_selector(".simplified-workspace-composer")
+        readiness = page.evaluate(
+            """() => fetch("/api/v1/workflows").then((r) => r.json())
+                 .then((b) => Object.fromEntries(b.data.workflows.map((w) => [
+                   w.workflow_id,
+                   [w.goal_readiness, w.langgraph_compatibility.compatible],
+                 ])))"""
+        )
+        # The premise: compilable, and not bindable from a goal.
+        self.assertEqual(["needs_migration", True], readiness["workflow:linear"])
+
+        page.fill("#simplifiedGoal", "do the thing")
+        self.assertTrue(page.locator("#newGoalStart").is_disabled())
+
+        # The same catalog with readiness flipped, and nothing else changed:
+        # what enables Start is the answer to "can a goal be bound", which is
+        # the question that was not being asked.
+        def as_ready(route):
+            response = route.fetch()
+            body = response.json()
+            for item in body["data"]["workflows"]:
+                item["goal_readiness"] = "ready"
+                item["readiness_reason"] = None
+                item["goal_binding"] = {
+                    "source": "run.goal", "node_id": "transform",
+                    "input_id": "prompt", "property": "goal",
+                    "value_shape": "object",
+                }
+            route.fulfill(response=response, json=body)
+
+        page.route("**/api/v1/workflows", as_ready)
+        page.reload()
+        page.wait_for_selector(".simplified-workspace-composer")
+        page.fill("#simplifiedGoal", "do the thing")
+
+        self.assertFalse(page.locator("#newGoalStart").is_disabled())
 
     def test_one_agent_is_still_the_difference(self) -> None:
         """What single-agent mode does withhold, it still withholds."""

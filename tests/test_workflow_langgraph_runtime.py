@@ -1815,6 +1815,75 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
             checkpoint_db_path=Path(directory) / "langgraph-checkpoints.sqlite3",
         )
 
+    def test_a_join_fed_only_by_human_branches_still_gets_its_deadline(self) -> None:
+        """The one wait the deadline could not bound was the one it was for.
+
+        Scheduling required a branch to have produced output. A join fed by
+        human branches has none at the moment it interrupts, and scheduling
+        only runs when an execute ends at an interrupt — which will not happen
+        again without the external input the deadline exists to stop waiting
+        for. So no timer row was ever written, and the run waited forever.
+        """
+
+        deadline = IRPolicy(
+            "wait", "join",
+            {
+                "mode": "deadline", "merge_mode": "array_by_edge",
+                "deadline_seconds": 60, "min_successful": 1,
+            },
+        )
+        fan = node(
+            "fan", inputs=("value",), outputs=("value",), route_mode="parallel",
+        )
+        left = node(
+            "left", inputs=("value",), outputs=("value",),
+            kind="human", handler=False,
+        )
+        right = node(
+            "right", inputs=("value",), outputs=("value",),
+            kind="human", handler=False,
+        )
+        join = node(
+            "join", inputs=("value",), outputs=("value",),
+            kind="join", handler=False,
+        )
+        join = IRNode(
+            join.id, join.kind, join.inputs, join.outputs, join.handler,
+            join.config, (deadline.id,), join.extension, join.route_mode,
+        )
+        ir = workflow(
+            (fan, left, right, join),
+            (
+                edge("fan_left", "fan", "left"),
+                edge("fan_right", "fan", "right"),
+                edge("left_join", "left", "join"),
+                edge("right_join", "right", "join"),
+            ),
+            entry=("fan",), terminals=("join",), result=("join", "value"),
+            policies=(deadline,),
+        )
+        registry = LangGraphHandlerRegistry([
+            binding("fan", lambda values, config, context: dict(values)),
+        ])
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.publish(directory, ir)
+            service = self.service(directory, store, registry)
+            run = service.start(
+                ir.workflow_id, {"value": "in"},
+                idempotency_key="human-deadline", actor="test:owner",
+            )
+            with sqlite3.connect(service.run_db_path) as connection:
+                timers = [
+                    (row[0], row[1]) for row in connection.execute(
+                        "SELECT purpose,target_id FROM langgraph_timers"
+                        " WHERE run_id=?", (run.run_id,),
+                    )
+                ]
+
+        self.assertEqual("interrupted", run.status)
+        self.assertEqual(2, len(run.interrupts))
+        self.assertEqual([("join_deadline", "join")], timers)
+
     def test_a_deadline_fire_that_raises_settles_instead_of_re_firing(self) -> None:
         """Only the deadline's own exception used to be caught.
 

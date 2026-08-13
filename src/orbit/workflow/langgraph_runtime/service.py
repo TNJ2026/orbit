@@ -545,8 +545,22 @@ class LangGraphWorkflowService:
         return self._execute(run_id, self._run_ir(current), inputs=inputs)
 
     def _schedule_join_deadlines(
-        self, run_id: str, ir, *, available_outputs: Mapping[str, Any]
+        self, run_id: str, ir, *,
+        available_outputs: Mapping[str, Any],
+        pending_nodes: frozenset[str] = frozenset(),
     ) -> None:
+        """Arm the deadline of every join this run is now waiting at.
+
+        A branch counts as under way when it has produced output *or* is a
+        task the graph is currently holding. Requiring output alone meant a
+        join fed only by human branches never got a timer at all: at the
+        moment it interrupts, neither branch has produced anything, and
+        scheduling only runs when an execute ends at an interrupt — which will
+        not happen again without the external input the deadline exists to
+        stop waiting for. The wait it was meant to bound was the one wait it
+        could not bound.
+        """
+
         policies = {policy.id: policy for policy in ir.policies}
         now = self.clock().astimezone(timezone.utc)
         with self._connect() as connection:
@@ -560,7 +574,10 @@ class LangGraphWorkflowService:
                     continue
                 if not any(
                     edge.target_node == node.id
-                    and edge.source_node in available_outputs
+                    and (
+                        edge.source_node in available_outputs
+                        or edge.source_node in pending_nodes
+                    )
                     for edge in ir.edges
                 ):
                     continue
@@ -904,6 +921,11 @@ class LangGraphWorkflowService:
                     run_id,
                     ir,
                     available_outputs=snapshot.values.get("node_outputs", {}),
+                    # The nodes the graph is holding right now. A human branch
+                    # sits here and nowhere else until somebody answers it.
+                    pending_nodes=frozenset(
+                        task.name for task in snapshot.tasks
+                    ),
                 )
             interrupts = tuple(
                 {
