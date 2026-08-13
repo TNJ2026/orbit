@@ -30,11 +30,15 @@ emit JSON, not an agent that can read the filesystem.
 from __future__ import annotations
 
 import json
-from typing import Any, Callable, Literal, Sequence
+from typing import Any, Callable, Literal, Mapping, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..dsl.models import AuthoredWorkflow
+from ..dsl.patch import (
+    AddNode, GraphPatch, PatchError, RemoveNode, SetNodeConfig, SetNodeLabel,
+    SetNodePolicies, SetNodePorts, apply_patch,
+)
 from .generator import (
     MAX_CHANGE_ENTRIES, MAX_CHANGE_TEXT, AuthoringFailedError,
     AuthoringUnavailableError, AuthoringUnknownResultError, active_scope,
@@ -45,6 +49,9 @@ from .generator import (
 # after the fact; a summary entry this type admits and that one drops would be
 # silently discarded. The two are pinned together by test.
 ChangeKind = Literal["added", "removed", "changed"]
+
+# Operations that change a node in place, for the derived summary.
+NODE_EDITS = (SetNodeLabel, SetNodeConfig, SetNodePorts, SetNodePolicies)
 
 
 class ChangeEntry(BaseModel):
@@ -88,6 +95,15 @@ class GeneratedWorkflow(BaseModel):
         }
 
 
+def _default_revision_factory(model: Any, instructions: str | None) -> Any:
+    """An Agent bound to `WorkflowRevision`, told to emit only operations."""
+
+    return _build_agent(
+        model, WorkflowRevision,
+        "\n\n".join(filter(None, (instructions, REVISION_INSTRUCTIONS))),
+    )
+
+
 def _default_agent_factory(model: Any, instructions: str | None) -> Any:
     """Build a pydantic-ai Agent bound to `GeneratedWorkflow`.
 
@@ -95,6 +111,10 @@ def _default_agent_factory(model: Any, instructions: str | None) -> Any:
     Runtime that never configures a structured generator must not pay for it.
     """
 
+    return _build_agent(model, GeneratedWorkflow, instructions)
+
+
+def _build_agent(model: Any, output_type: Any, instructions: str | None) -> Any:
     try:
         from pydantic_ai import Agent
     except ImportError as exc:  # pragma: no cover - depends on the install
@@ -102,7 +122,7 @@ def _default_agent_factory(model: Any, instructions: str | None) -> Any:
             "structured generation needs the optional 'pydantic-ai' dependency; "
             "install orbit[structured-authoring] or use a trusted Agent CLI"
         ) from exc
-    return Agent(model, output_type=GeneratedWorkflow, instructions=instructions)
+    return Agent(model, output_type=output_type, instructions=instructions)
 
 
 class StructuredDslGenerator:
@@ -121,6 +141,7 @@ class StructuredDslGenerator:
         instructions: str | None = None,
         agent_factory: Callable[[Any, str | None], Any] = _default_agent_factory,
         model_settings: Any = None,
+        revision_factory: Callable[[Any, str | None], Any] | None = None,
     ) -> None:
         if model is None or (isinstance(model, str) and not model.strip()):
             raise ValueError("a structured generator model is required")
@@ -131,35 +152,68 @@ class StructuredDslGenerator:
         # misspelled model name should be refused when the Runtime is composed,
         # not minutes later when a queued job finally runs.
         self.agent = agent_factory(model, instructions)
+        # Built when a revision is first asked for. Constructing the
+        # generation agent above has already proved the optional dependency is
+        # installed and the model name resolves, so deferring this defers
+        # nothing a caller could have been told earlier.
+        self._revision_factory = revision_factory or _default_revision_factory
+        self._instructions = instructions
+        self._reviser: Any = None
 
-    def __call__(self, prompt: str) -> str:
+    def revise(self, prompt: str, base: Mapping[str, Any]) -> str:
+        """A revision of `base`, described by the model as operations.
+
+        Returns the resulting document, because that is what the funnel
+        compiles and what the retry loop feeds diagnostics back about. What
+        the *model* produced is a patch, and that is where the guarantee is:
+        a part of the workflow it did not name is a part it could not change.
+        """
+
+        if self._reviser is None:
+            self._reviser = self._revision_factory(self.model, self._instructions)
+        result = self._run(self._reviser, prompt)
+        revision = getattr(result, "output", None)
+        if not isinstance(revision, WorkflowRevision):
+            raise AuthoringFailedError(
+                f"structured revision returned {type(revision).__name__}, not a patch"
+            )
+        try:
+            document = apply_patch(base, revision.patch)
+        except PatchError as exc:
+            # A refusal the model can act on: it names the operation, so the
+            # funnel's next attempt can fix that one rather than start again.
+            raise AuthoringFailedError(str(exc)) from None
+        summary = _summarise(revision.patch, base)
+        return json.dumps(
+            {"workflow": document, "change_summary": summary} if summary else document
+        )
+
+    def _run(self, agent: Any, prompt: str) -> Any:
         scope = active_scope()
         if scope is not None and scope.cancelled:
             raise AuthoringUnknownResultError(
                 "structured generation was stopped before it began"
             )
         try:
-            # Passed only when set, so a client that does not take the keyword
-            # is never called twice. Retrying a model call to discover a
-            # signature would charge for the discovery.
             result = (
-                self.agent.run_sync(prompt) if self.model_settings is None
-                else self.agent.run_sync(prompt, model_settings=self.model_settings)
+                agent.run_sync(prompt) if self.model_settings is None
+                else agent.run_sync(prompt, model_settings=self.model_settings)
             )
         except Exception as exc:
             raise self._translate(exc) from None
+        if scope is not None and scope.cancelled:
+            raise AuthoringUnknownResultError(
+                "structured generation was stopped mid-call"
+            )
+        return result
+
+    def __call__(self, prompt: str) -> str:
+        result = self._run(self.agent, prompt)
         output = getattr(result, "output", None)
         if not isinstance(output, GeneratedWorkflow):
             raise AuthoringFailedError(
                 "structured generation returned "
                 f"{type(output).__name__}, not a workflow"
-            )
-        if scope is not None and scope.cancelled:
-            # The answer arrived, but nobody is waiting for it and the request
-            # was already paid for. Unknown, not failed: the same rule the CLI
-            # path applies to a call it could not see the end of.
-            raise AuthoringUnknownResultError(
-                "structured generation was stopped mid-call"
             )
         return json.dumps(output.to_response())
 
@@ -205,3 +259,67 @@ def structured_generators(
             model, instructions=instructions, **kwargs
         )
     return built
+
+
+REVISION_INSTRUCTIONS = (
+    "You are revising an existing workflow. Return the smallest set of "
+    "operations that carries out the instruction, and nothing else: an "
+    "operation you do not emit is a part of the workflow you cannot change. "
+    "Name every node, edge and policy by its id. Do not restate parts of the "
+    "workflow that are already correct."
+)
+
+
+class WorkflowRevision(BaseModel):
+    """The operations a revision is made of.
+
+    A patch rather than a rewritten document, because a model handed the whole
+    definition is free to change parts nobody asked about, and an operation it
+    does not emit is a part it cannot reach.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    patch: GraphPatch
+
+
+def _summarise(patch: GraphPatch, base: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """What the operations did, read off the operations.
+
+    Derived rather than declared. The CLI path asks a model to say what it
+    changed alongside the document it changed, which is a second claim that
+    can disagree with the first; operations are the change, so a summary read
+    from them cannot describe an edit that did not happen.
+
+    Node-scoped only, because that is the shape the reviewer renders.
+    """
+
+    labels = {
+        node.get("id"): node.get("label") or node.get("id")
+        for node in base.get("nodes", []) or []
+        if isinstance(node, Mapping)
+    }
+    entries: list[dict[str, Any]] = []
+    for operation in patch.operations:
+        kind, node_id, label = None, None, None
+        if isinstance(operation, AddNode):
+            kind, node_id = "added", operation.node.id
+            label = operation.node.label or operation.node.id
+        elif isinstance(operation, RemoveNode):
+            kind, node_id = "removed", operation.node_id
+            label = labels.get(operation.node_id, operation.node_id)
+        elif isinstance(operation, NODE_EDITS):
+            kind, node_id = "changed", operation.node_id
+            label = labels.get(operation.node_id, operation.node_id)
+        if kind and node_id and label:
+            entries.append({"kind": kind, "node_id": node_id, "label": label})
+    # One node touched twice is one change to read about.
+    seen: set[tuple[str, str]] = set()
+    unique = []
+    for entry in entries:
+        key = (entry["kind"], entry["node_id"])
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(entry)
+    return unique

@@ -524,3 +524,182 @@ class AppWiringTests(unittest.TestCase):
                 "/api/v1/capabilities", actor="test:reader"
             ).json()["data"]["capabilities"]["workflow_generation"]
         self.assertEqual(["cli"], capability["agents"])
+
+
+class RevisionByPatchTests(unittest.TestCase):
+    """A revision is operations, not a rewritten document."""
+
+    BASE = {
+        "dsl_version": "1.3",
+        "metadata": {"id": "flow", "name": "Flow"},
+        "nodes": [
+            {
+                "id": "work", "kind": "action", "label": "Transform",
+                "inputs": [{"id": "value", "schema_id": "example://integer/1.0"}],
+                "outputs": [{"id": "value", "schema_id": "example://integer/1.0"}],
+                "handler": {"name": "transform", "version": "1.0.0"},
+                "config": {"mode": "fast"},
+            },
+            {
+                "id": "done", "kind": "terminal", "label": "Done",
+                "inputs": [{"id": "value", "schema_id": "example://integer/1.0"}],
+            },
+        ],
+        "edges": [{
+            "id": "flow_edge",
+            "from": {"node": "work", "port": "value"},
+            "to": {"node": "done", "port": "value"},
+        }],
+        "entry": ["work"], "terminals": ["done"],
+        "result": {"node": "work", "port": "value"},
+    }
+
+    def reviser(self, operations, error=None):
+        from orbit.workflow.authoring.structured import WorkflowRevision
+
+        revision = None if error else WorkflowRevision.model_validate(
+            {"patch": {"base_version": 1, "operations": operations}}
+        )
+        agent = _StubAgent(revision, error)
+        self.agent = agent
+        return StructuredDslGenerator(
+            "stub:model",
+            agent_factory=lambda model, i: _StubAgent(_generated()),
+            revision_factory=lambda model, i: agent,
+        )
+
+    def revise(self, operations):
+        generator = self.reviser(operations)
+        return json.loads(generator.revise("change it", self.BASE))
+
+    def test_only_what_the_operations_named_is_different(self) -> None:
+        payload = self.revise([
+            {"op": "set_node_config", "node_id": "work", "config": {"mode": "thorough"}},
+        ])
+        document = payload["workflow"]
+        self.assertEqual({"mode": "thorough"}, document["nodes"][0]["config"])
+        # Everything else is the document that went in.
+        self.assertEqual(self.BASE["nodes"][1], document["nodes"][1])
+        self.assertEqual(self.BASE["edges"], document["edges"])
+        self.assertEqual(self.BASE["result"], document["result"])
+
+    def test_the_base_it_was_given_is_not_mutated(self) -> None:
+        before = json.loads(json.dumps(self.BASE))
+        self.revise([{"op": "remove_node", "node_id": "done"}])
+        self.assertEqual(before, self.BASE)
+
+    def test_the_summary_is_read_off_the_operations(self) -> None:
+        """Derived, not declared: it cannot describe an edit that did not happen."""
+
+        payload = self.revise([
+            {"op": "add_node", "node": {"id": "review", "kind": "human", "label": "Review"}},
+            {"op": "set_node_label", "node_id": "work", "label": "Renamed"},
+        ])
+        self.assertEqual(
+            [
+                {"kind": "added", "node_id": "review", "label": "Review"},
+                {"kind": "changed", "node_id": "work", "label": "Transform"},
+            ],
+            payload["change_summary"],
+        )
+
+    def test_a_node_touched_twice_is_one_change_to_read_about(self) -> None:
+        payload = self.revise([
+            {"op": "set_node_label", "node_id": "work", "label": "A"},
+            {"op": "set_node_config", "node_id": "work", "config": {"mode": "x"}},
+        ])
+        self.assertEqual(1, len(payload["change_summary"]))
+
+    def test_a_change_with_nothing_node_scoped_returns_a_bare_document(self) -> None:
+        # The envelope exists to carry a summary; without one it would only
+        # make a plain revision look different from the CLI path's output.
+        payload = self.revise([{"op": "set_metadata", "name": "Renamed"}])
+        self.assertEqual("1.3", payload["dsl_version"])
+        self.assertNotIn("workflow", payload)
+        self.assertEqual("Renamed", payload["metadata"]["name"])
+
+    def test_an_operation_that_cannot_apply_says_which_one(self) -> None:
+        generator = self.reviser([
+            {"op": "set_node_label", "node_id": "work", "label": "A"},
+            {"op": "set_node_config", "node_id": "ghost", "config": {}},
+        ])
+        with self.assertRaises(AuthoringFailedError) as caught:
+            generator.revise("change it", self.BASE)
+        self.assertIn("operation 1", str(caught.exception))
+        self.assertIn("ghost", str(caught.exception))
+
+    def test_a_reply_that_is_not_a_patch_is_a_plain_failure(self) -> None:
+        generator = StructuredDslGenerator(
+            "stub:model",
+            agent_factory=lambda model, i: _StubAgent(_generated()),
+            revision_factory=lambda model, i: _StubAgent("just a string"),
+        )
+        with self.assertRaises(AuthoringFailedError):
+            generator.revise("change it", self.BASE)
+
+    def test_the_prompt_reaches_the_reviser_and_not_the_generator(self) -> None:
+        generation = _StubAgent(_generated())
+        revision = _StubAgent(None, None)
+        from orbit.workflow.authoring.structured import WorkflowRevision
+
+        revision.output = WorkflowRevision.model_validate(
+            {"patch": {"base_version": 1, "operations": [
+                {"op": "set_metadata", "name": "Renamed"},
+            ]}}
+        )
+        generator = StructuredDslGenerator(
+            "stub:model",
+            agent_factory=lambda model, i: generation,
+            revision_factory=lambda model, i: revision,
+        )
+        generator.revise("rename it", self.BASE)
+        self.assertEqual(["rename it"], revision.prompts)
+        self.assertEqual([], generation.prompts)
+
+
+class RevisionSeamTests(unittest.TestCase):
+    """The service asks for a patch where the writer offers one."""
+
+    def test_a_writer_without_revise_is_still_asked_for_a_document(self) -> None:
+        """Every discovered Agent CLI is one of these; nothing changes for it."""
+
+        asked = []
+
+        def cli(prompt):
+            asked.append(prompt)
+            return json.dumps(_funnel_document())
+
+        authoring = WorkflowAuthoringService(
+            InMemoryHandlerCatalog([MANIFEST]), SCHEMAS, cli,
+            handler_facts=[{"name": "transform", "version": "1.0.0"}],
+        )
+        outcome = authoring.revise(
+            json.dumps(_funnel_document()), "change it",
+            expected_workflow_id="workflow:generated",
+        )
+        self.assertEqual(1, outcome.attempts)
+        self.assertEqual(1, len(asked))
+
+    def test_a_writer_with_revise_is_given_the_base_to_patch(self) -> None:
+        seen = {}
+
+        class PatchWriter:
+            def __call__(self, prompt):  # pragma: no cover - must not be used
+                raise AssertionError("revision must not take the generation path")
+
+            def revise(self, prompt, base):
+                seen["base"] = base
+                document = json.loads(json.dumps(base))
+                document["nodes"][0]["label"] = "Renamed by patch"
+                return json.dumps(document)
+
+        authoring = WorkflowAuthoringService(
+            InMemoryHandlerCatalog([MANIFEST]), SCHEMAS, PatchWriter(),
+            handler_facts=[{"name": "transform", "version": "1.0.0"}],
+        )
+        outcome = authoring.revise(
+            json.dumps(_funnel_document()), "rename it",
+            expected_workflow_id="workflow:generated",
+        )
+        self.assertEqual("generated", seen["base"]["metadata"]["id"])
+        self.assertIn("Renamed by patch", outcome.source)

@@ -602,6 +602,22 @@ class WorkflowAuthoringService:
             )
         return self.generators[agent]
 
+    def _revision_writer(self, agent: str | None, base: Mapping[str, Any]):
+        """The writer for a revision, asked for a patch where it can give one.
+
+        A generator that offers `revise` describes the change as operations
+        against this base, so a part of the workflow it does not name is a
+        part it cannot alter. One that does not — every discovered Agent CLI —
+        is asked for a whole document exactly as before, and the funnel cannot
+        tell the difference: both hand back the document to compile.
+        """
+
+        writer = self._writer(agent)
+        revise = getattr(writer, "revise", None)
+        if revise is None:
+            return writer
+        return lambda prompt: revise(prompt, base)
+
     # -- prompt ------------------------------------------------------------
 
     def _handler_facts_with_ports(self) -> list[Mapping[str, Any]]:
@@ -1033,7 +1049,7 @@ class WorkflowAuthoringService:
                 instruction, feedback, None, base, language=language,
             ),
             source_name="<revised>", failure="revision", extra_check=guard,
-            write=self._writer(agent),
+            write=self._revision_writer(agent, base),
             on_progress=on_progress,
             on_diagnostics=on_diagnostics,
         )
