@@ -331,16 +331,7 @@ class CompiledLangGraphWorkflow:
         if inputs is None:
             state = self.graph.invoke(None, config=self._config(config))
             return self._result(state)
-        declared = {port.id for port in self.ir.inputs}
-        unknown = set(inputs) - declared
-        if unknown:
-            raise ValueError(f"unknown workflow inputs: {sorted(unknown)}")
-        normalized = dict(inputs)
-        for port in self.ir.inputs:
-            if port.id not in normalized and port.has_default:
-                normalized[port.id] = to_primitive(port.default)
-            if port.required and port.id not in normalized:
-                raise ValueError(f"missing workflow input {port.id!r}")
+        normalized = self._accept(inputs)
         state = self.graph.invoke(
             {
                 "workflow_inputs": to_primitive(normalized),
@@ -365,18 +356,8 @@ class CompiledLangGraphWorkflow:
         if inputs is None:
             graph_input = None
         else:
-            declared = {port.id for port in self.ir.inputs}
-            unknown = set(inputs) - declared
-            if unknown:
-                raise ValueError(f"unknown workflow inputs: {sorted(unknown)}")
-            normalized = dict(inputs)
-            for port in self.ir.inputs:
-                if port.id not in normalized and port.has_default:
-                    normalized[port.id] = to_primitive(port.default)
-                if port.required and port.id not in normalized:
-                    raise ValueError(f"missing workflow input {port.id!r}")
             graph_input = {
-                "workflow_inputs": to_primitive(normalized),
+                "workflow_inputs": to_primitive(self._accept(inputs)),
                 "node_outputs": {},
                 "node_routes": {},
                 "execution_order": (),
@@ -385,6 +366,48 @@ class CompiledLangGraphWorkflow:
         return self.graph.stream(
             graph_input, config=self._config(config), stream_mode=stream_mode
         )
+
+    def _accept(self, inputs: Mapping[str, Any]) -> dict[str, Any]:
+        """A run's input, checked against the interface and defaulted.
+
+        One copy. `invoke` and `stream` each carried their own, so fixing the
+        interface in one left the other refusing what the first accepted —
+        and `start` goes through `invoke`.
+        """
+
+        interface = self._interface()
+        unknown = set(inputs) - {port.id for port in interface}
+        if unknown:
+            raise ValueError(f"unknown workflow inputs: {sorted(unknown)}")
+        normalized = dict(inputs)
+        for port in interface:
+            if port.id not in normalized and port.has_default:
+                normalized[port.id] = to_primitive(port.default)
+            if port.required and port.id not in normalized:
+                raise ValueError(f"missing workflow input {port.id!r}")
+        return normalized
+
+    def _interface(self) -> tuple[Any, ...]:
+        """The ports a run's input is accepted under.
+
+        `inputs` when the definition declares them, and otherwise the entry
+        nodes' own ports — which is what everything else already treats as the
+        interface. The kernel delivers one input object to every entry node,
+        the catalog reads those ports to decide a workflow is startable from a
+        Goal, and the goal binding names one of them. Only this validation
+        read `ir.inputs` alone, so a definition without that optional block was
+        advertised as ready and then refused the very input the catalog said
+        to send.
+        """
+
+        if self.ir.inputs:
+            return tuple(self.ir.inputs)
+        by_id = {node.id: node for node in self.ir.nodes}
+        ports: dict[str, Any] = {}
+        for node_id in self.ir.entry:
+            for port in getattr(by_id.get(node_id), "inputs", ()):
+                ports.setdefault(port.id, port)
+        return tuple(ports.values())
 
     def resume(
         self,
@@ -703,7 +726,15 @@ def compile_workflow(
         if node.handler is not None
     }
     for node in ir.nodes:
-        if node.handler is None and node.kind not in {"terminal", "join", "human"}:
+        # A decision belongs here too, and its absence made every workflow
+        # containing one impossible to run: the DSL layer refuses a handler on
+        # a decision node — it routes, it does not execute — while this
+        # required one of every kind not listed. Two rules that cannot both be
+        # satisfied, and no test compiled a decision through this engine, so
+        # nothing said so until an Agent wrote a workflow that branched.
+        if node.handler is None and node.kind not in {
+            "terminal", "join", "human", "decision",
+        }:
             raise HandlerBindingError(
                 f"executable node {node.id!r} has no Handler binding"
             )

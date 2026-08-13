@@ -775,6 +775,138 @@ class LangGraphWorkflowCompilerTests(unittest.TestCase):
             compiled._result(reached_once)
         self.assertEqual(1, compiled._result(reached_both)["result"])
 
+    def test_a_run_input_is_accepted_under_the_entry_ports(self) -> None:
+        """`inputs` is optional; the entry node's ports are the interface.
+
+        The kernel delivers one input object to every entry node, the catalog
+        reads those ports to decide a workflow is startable from a Goal, and
+        the goal binding names one of them. Only this engine's validation read
+        `ir.inputs` alone — so a definition without that optional block was
+        advertised `ready`, and then refused the very input the catalog said
+        to send. Every workflow an Agent wrote was one of those.
+        """
+
+        entry = node("entry", inputs=("prompt",), outputs=("value",))
+        done = node("done", inputs=("value",), kind="terminal", handler=False)
+        ir = workflow(
+            (entry, done), (edge("finish", "entry", "done"),),
+            entry=("entry",), terminals=("done",), result=("entry", "value"),
+        )
+        # An IR with no `inputs` block at all, which is what an Agent writes:
+        # the helper above always declares one, so it must be stripped here.
+        undeclared = WorkflowIR(
+            ir.ir_version, ir.workflow_id, ir.name, ir.description, ir.labels,
+            (), ir.outputs, ir.nodes, ir.edges, ir.entry, ir.terminals,
+            ir.policies, ir.extensions, ir.indexes, ir.result,
+        )
+        self.assertEqual((), tuple(undeclared.inputs))
+        compiled = compile_workflow(
+            undeclared,
+            LangGraphHandlerRegistry([
+                binding("entry", lambda values, config, context: {
+                    "value": values["prompt"]["goal"],
+                }),
+            ]),
+            checkpointer=InMemorySaver(),
+        )
+
+        completed = compiled.invoke(
+            {"prompt": {"goal": "ship it"}},
+            config={"configurable": {"thread_id": "entry-ports"}},
+        )
+        self.assertEqual("ship it", completed["result"])
+
+        with self.assertRaisesRegex(ValueError, r"unknown workflow inputs: \['nope'\]"):
+            compiled.invoke(
+                {"nope": 1}, config={"configurable": {"thread_id": "unknown"}},
+            )
+
+    def test_a_declared_inputs_block_still_wins(self) -> None:
+        """The fallback is for definitions without one, not instead of one."""
+
+        entry = node("entry", inputs=("prompt",), outputs=("value",))
+        done = node("done", inputs=("value",), kind="terminal", handler=False)
+        base = workflow(
+            (entry, done), (edge("finish", "entry", "done"),),
+            entry=("entry",), terminals=("done",), result=("entry", "value"),
+        )
+        declared = WorkflowIR(
+            base.ir_version, base.workflow_id, base.name, base.description,
+            base.labels, (port("prompt"),), base.outputs, base.nodes,
+            base.edges, base.entry, base.terminals, base.policies,
+            base.extensions, base.indexes, base.result,
+        )
+        compiled = compile_workflow(
+            declared,
+            LangGraphHandlerRegistry([
+                binding("entry", lambda values, config, context: {"value": 1}),
+            ]),
+            checkpointer=InMemorySaver(),
+        )
+        with self.assertRaisesRegex(ValueError, "unknown workflow inputs"):
+            compiled.invoke(
+                {"other": 1}, config={"configurable": {"thread_id": "declared"}},
+            )
+
+    def test_a_decision_routes_without_a_handler(self) -> None:
+        """The DSL refuses a handler on a decision; this engine required one.
+
+        Two rules that cannot both be satisfied, so no workflow containing a
+        decision node could run at all — and LangGraph is the only engine. It
+        held because no test compiled a decision through here; it surfaced
+        when an Agent, asked for a real workflow, wrote one that branched.
+        """
+
+        classify = node("classify", inputs=("value",), outputs=("value",))
+        route = node(
+            "route", inputs=("value",), outputs=("value",),
+            kind="decision", handler=False,
+        )
+        urgent = node("urgent", inputs=("value",), outputs=("value",))
+        backlog = node("backlog", inputs=("value",), outputs=("value",))
+        done_urgent = node(
+            "done_urgent", inputs=("value",), kind="terminal", handler=False
+        )
+        done_backlog = node(
+            "done_backlog", inputs=("value",), kind="terminal", handler=False
+        )
+        ir = workflow(
+            (classify, route, urgent, backlog, done_urgent, done_backlog),
+            (
+                edge("classified", "classify", "route"),
+                edge(
+                    "is_urgent", "route", "urgent",
+                    condition={
+                        "op": "eq",
+                        "left": {"op": "ref", "path": "source.value"},
+                        "right": {"op": "literal", "value": "urgent"},
+                    },
+                ),
+                edge("otherwise", "route", "backlog", priority=100),
+                edge("urgent_done", "urgent", "done_urgent"),
+                edge("backlog_done", "backlog", "done_backlog"),
+            ),
+            entry=("classify",), terminals=("done_urgent", "done_backlog"),
+            result=("route", "value"),
+        )
+        registry = LangGraphHandlerRegistry([
+            binding("classify", lambda values, config, context: {"value": "urgent"}),
+            binding("urgent", lambda values, config, context: {"value": "paged"}),
+            binding("backlog", lambda values, config, context: {"value": "queued"}),
+        ])
+
+        compiled = compile_workflow(
+            ir, registry, checkpointer=InMemorySaver(),
+        )
+        completed = compiled.invoke(
+            {"value": "in"}, config={"configurable": {"thread_id": "decision"}},
+        )
+
+        # The decision passed its input through and the edges chose.
+        self.assertIn("urgent", completed["execution_order"])
+        self.assertNotIn("backlog", completed["execution_order"])
+        self.assertEqual("paged", completed["node_outputs"]["urgent"]["value"])
+
     def test_deadline_join_fails_below_minimum(self) -> None:
         deadline = IRPolicy(
             "wait_for_two", "join",
