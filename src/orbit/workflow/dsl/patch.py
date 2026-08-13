@@ -33,7 +33,9 @@ from typing import Annotated, Any, Literal, Mapping, Sequence, Union
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .models import Edge, Endpoint, Node, Policy, Port, _Strict
+from .models import (
+    Edge, Endpoint, HandlerRef, Node, NodeKind, Policy, Port, _Strict,
+)
 
 
 class PatchError(ValueError):
@@ -90,6 +92,24 @@ class SetNodePorts(_Op):
     ports: list[Port]
 
 
+class SetNodeHandler(_Op):
+    """Bind a node to a Handler, or unbind it.
+
+    Named and versioned, never fingerprinted: which build an IR node carries
+    is resolved by `analyze_dsl` against the sealed registry.
+    """
+
+    op: Literal["set_node_handler"]
+    node_id: str
+    handler: HandlerRef | None = None
+
+
+class SetNodeKind(_Op):
+    op: Literal["set_node_kind"]
+    node_id: str
+    kind: NodeKind
+
+
 class SetNodePolicies(_Op):
     op: Literal["set_node_policies"]
     node_id: str
@@ -121,6 +141,12 @@ class SetEdge(_Op):
 class AddPolicy(_Op):
     op: Literal["add_policy"]
     policy: Policy
+
+
+class SetPolicyConfig(_Op):
+    op: Literal["set_policy_config"]
+    policy_id: str
+    config: dict[str, Any]
 
 
 class RemovePolicy(_Op):
@@ -159,8 +185,10 @@ class SetInputs(_Op):
 GraphOperation = Annotated[
     Union[
         AddNode, RemoveNode, SetNodeLabel, SetNodeConfig, SetNodePorts,
-        SetNodePolicies, AddEdge, RemoveEdge, SetEdge, AddPolicy, RemovePolicy,
-        SetResult, SetEntry, SetTerminals, SetMetadata, SetInputs,
+        SetNodePolicies, SetNodeHandler, SetNodeKind, AddEdge, RemoveEdge,
+        SetEdge, AddPolicy, SetPolicyConfig, RemovePolicy, SetResult, SetEntry,
+        SetTerminals,
+        SetMetadata, SetInputs,
     ],
     Field(discriminator="op"),
 ]
@@ -189,7 +217,20 @@ def _index(items: Sequence[Mapping[str, Any]], key: str, value: str) -> int:
 
 
 def _dump(model: BaseModel) -> dict[str, Any]:
-    return model.model_dump(mode="json", by_alias=True, exclude_none=True)
+    """What the operation carried, not what validating it filled in.
+
+    `exclude_unset` is the whole of it: a payload is validated against the
+    authoring contract — that is why it is typed — but the defaults that
+    validation supplies are not part of what the author or the model asked
+    for. Writing them would let one operation inflate a document with fields
+    nobody wrote, and would put this applier out of step with the editor's,
+    which stores what it was given. `tests/test_patch_parity.py` is what
+    noticed.
+    """
+
+    return model.model_dump(
+        mode="json", by_alias=True, exclude_none=True, exclude_unset=True,
+    )
 
 
 def _apply(document: dict[str, Any], op: Any, index: int) -> None:
@@ -219,7 +260,10 @@ def _apply(document: dict[str, Any], op: Any, index: int) -> None:
             document.pop("result", None)
         return
 
-    if isinstance(op, (SetNodeLabel, SetNodeConfig, SetNodePorts, SetNodePolicies)):
+    if isinstance(op, (
+        SetNodeLabel, SetNodeConfig, SetNodePorts, SetNodePolicies,
+        SetNodeHandler, SetNodeKind,
+    )):
         position = _index(nodes, "id", op.node_id)
         if position < 0:
             raise PatchError(index, f"node {op.node_id!r} does not exist")
@@ -230,6 +274,10 @@ def _apply(document: dict[str, Any], op: Any, index: int) -> None:
             _assign(node, "config", op.config or None)
         elif isinstance(op, SetNodePorts):
             _assign(node, op.side, [_dump(port) for port in op.ports] or None)
+        elif isinstance(op, SetNodeHandler):
+            _assign(node, "handler", _dump(op.handler) if op.handler else None)
+        elif isinstance(op, SetNodeKind):
+            node["kind"] = op.kind
         else:
             _assign(node, "policies", sorted(op.policies) or None)
         nodes[position] = node
@@ -260,6 +308,14 @@ def _apply(document: dict[str, Any], op: Any, index: int) -> None:
         if _index(policies, "id", op.policy.id) >= 0:
             raise PatchError(index, f"policy {op.policy.id!r} already exists")
         policies.append(_dump(op.policy))
+        return
+
+    if isinstance(op, SetPolicyConfig):
+        policies = document.get("policies", [])
+        position = _index(policies, "id", op.policy_id)
+        if position < 0:
+            raise PatchError(index, f"policy {op.policy_id!r} does not exist")
+        policies[position] = {**policies[position], "config": op.config}
         return
 
     if isinstance(op, RemovePolicy):

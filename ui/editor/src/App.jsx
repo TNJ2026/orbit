@@ -11,6 +11,7 @@ import {
 } from "./dsl-graph.mjs";
 import { handlersForKind, removePort } from "./document.mjs";
 import { clearLayout, readLayout, writeLayout } from "./layout-store.mjs";
+import { PatchError, applyPatch } from "./patch.mjs";
 import Inspector from "./Inspector.jsx";
 import WorkflowPanel from "./WorkflowPanel.jsx";
 import WorkflowEdge from "./WorkflowEdge.jsx";
@@ -20,15 +21,31 @@ const nodeTypes = { workflow: WorkflowNode };
 const edgeTypes = { workflow: WorkflowEdge };
 const FIT_VIEW = { padding: 0.2, maxZoom: 1 };
 
+/** A panel's patch as an edge body: `undefined` means the field goes. */
+function strip(patch) {
+  const out = {};
+  for (const [key, value] of Object.entries(patch)) {
+    if (value !== undefined) out[key] = value;
+  }
+  return out;
+}
+
 export default function App() {
   const [contract, setContract] = useState(null);
   const [catalog, setCatalog] = useState([]);
   const [handlers, setHandlers] = useState([]);
   const [workflowId, setWorkflowId] = useState("");
   const [base, setBase] = useState(null);
+  // Every change to the definition, in the order it was made. The document is
+  // `base` with these applied — never a thing edited in place — so a change is
+  // a value that can be shown, counted, undone or sent, and so an author's
+  // edit and an Agent's are the same kind of thing.
+  const [operations, setOperations] = useState([]);
   const [version, setVersion] = useState(0);
-  const [nodes, setNodes] = useState([]);
-  const [edges, setEdges] = useState([]);
+  // Where each node is drawn. Not state the definition has any claim on: a
+  // coordinate in `definition_hash` would make nudging a node publish a new
+  // version, so this lives beside the document and never inside it.
+  const [positions, setPositions] = useState({});
   const [notice, setNotice] = useState(null);
   const [diagnostics, setDiagnostics] = useState([]);
   const [selection, setSelection] = useState(null);
@@ -78,16 +95,16 @@ export default function App() {
         });
         return;
       }
-      const document = JSON.parse(detail.source);
+      setBase(JSON.parse(detail.source));
+      // Opening starts a fresh log: what was edited last time was published
+      // or discarded, and either way it is not pending now.
+      setOperations([]);
       // The author's own arrangement, where there is one. Nodes without a
       // stored position fall back to the computed layout, so a workflow that
       // grew since it was last arranged still draws sensibly.
-      const graph = toGraph(document, readLayout(globalThis.localStorage, id));
-      setBase(document);
+      setPositions(readLayout(globalThis.localStorage, id));
       setVersion(detail.latest_version ?? detail.version ?? 0);
       setWorkflowId(id);
-      setNodes(graph.nodes);
-      setEdges(graph.edges);
       setStale(false);
       setSelection(null);
     } catch (error) {
@@ -105,14 +122,106 @@ export default function App() {
     return () => cancelAnimationFrame(frame);
   }, [flow, workflowId]);
 
-  const onNodesChange = useCallback(
-    (changes) => setNodes((current) => applyNodeChanges(changes, current)),
-    [],
+  const document = useMemo(() => {
+    if (!base) return null;
+    try {
+      return applyPatch(base, operations);
+    } catch {
+      // Unreachable through the UI — an operation that could not be applied
+      // was refused before it entered the log — but a document that will not
+      // rebuild must not take the page down with it.
+      return base;
+    }
+  }, [base, operations]);
+
+  const graph = useMemo(
+    () => (document ? toGraph(document, positions) : { nodes: [], edges: [] }),
+    [document, positions],
   );
-  const onEdgesChange = useCallback(
-    (changes) => setEdges((current) => applyEdgeChanges(changes, current)),
-    [],
-  );
+
+  const nodes = useMemo(() => graph.nodes.map((node) => ({
+    ...node,
+    selected: selection?.kind === "node" && selection.item.id === node.id,
+  })), [graph.nodes, selection]);
+
+  const edges = useMemo(() => graph.edges.map((edge) => ({
+    ...edge,
+    selected: selection?.kind === "edge" && selection.item.id === edge.id,
+  })), [graph.edges, selection]);
+
+  // Persisted as the canvas draws them, so an arrangement survives a reload.
+  // Never sent anywhere: a coordinate is how a drawing is read, not what it
+  // means, and one inside `definition_hash` would make nudging a node publish
+  // a new version.
+  useEffect(() => {
+    if (!workflowId || !nodes.length) return;
+    writeLayout(
+      globalThis.localStorage, workflowId, toPositions(nodes),
+      nodes.map((node) => node.id),
+    );
+  }, [workflowId, nodes]);
+
+  // Re-read from the derived arrays: the item captured when the author
+  // clicked is a snapshot, and the panel has to show what their own edits
+  // just produced.
+  const live = useMemo(() => {
+    if (!selection) return null;
+    const source = selection.kind === "edge" ? edges : nodes;
+    const item = source.find((entry) => entry.id === selection.item.id);
+    return item ? { kind: selection.kind, item } : null;
+  }, [selection, nodes, edges]);
+
+  /** Record one or more operations, or say why they could not be applied.
+   *
+   * Applied here rather than only when the document is derived, so an
+   * operation that cannot land is refused at the moment it is made and never
+   * enters the log. That is what keeps the log replayable.
+   */
+  const commit = useCallback((...ops) => {
+    const wanted = ops.filter(Boolean);
+    if (!wanted.length || !base) return false;
+    try {
+      applyPatch(applyPatch(base, operations), wanted);
+    } catch (error) {
+      setNotice({
+        level: "error",
+        text: error instanceof PatchError ? error.reason : String(error),
+      });
+      return false;
+    }
+    setOperations((current) => [...current, ...wanted]);
+    return true;
+  }, [base, operations]);
+
+  // React Flow reports both kinds of change through one channel, and they
+  // belong in different places: a move is layout and a removal is an edit.
+  const onNodesChange = useCallback((changes) => {
+    const removed = changes.filter((change) => change.type === "remove");
+    if (removed.length) {
+      commit(...removed.map((change) => ({ op: "remove_node", node_id: change.id })));
+    }
+    const moved = changes.filter(
+      (change) => change.type === "position" && change.position,
+    );
+    if (moved.length) {
+      setPositions((current) => {
+        const next = { ...current };
+        for (const change of moved) {
+          next[change.id] = {
+            x: Math.round(change.position.x), y: Math.round(change.position.y),
+          };
+        }
+        return next;
+      });
+    }
+  }, [commit]);
+
+  const onEdgesChange = useCallback((changes) => {
+    const removed = changes.filter((change) => change.type === "remove");
+    if (removed.length) {
+      commit(...removed.map((change) => ({ op: "remove_edge", edge_id: change.id })));
+    }
+  }, [commit]);
 
   // Refused while the author is still dragging, so an impossible edge cannot
   // be dropped in the first place. The message on release explains why.
@@ -129,86 +238,85 @@ export default function App() {
         return;
       }
       setNotice(null);
-      setEdges((current) =>
-        addEdge(
-          {
-            ...connection,
-            id: freshId("edge", current.map((edge) => edge.id)),
-            type: "workflow",
-            data: { route: "success", dsl: {} },
-          },
-          current,
-        ),
-      );
+      commit({
+        op: "add_edge",
+        edge: {
+          id: freshId("edge", edges.map((edge) => edge.id)),
+          from: { node: connection.source, port: connection.sourceHandle },
+          to: { node: connection.target, port: connection.targetHandle },
+        },
+      });
     },
-    [nodes],
+    [nodes, edges, commit],
   );
 
-  const renameNode = useCallback((id, label) => {
-    setNodes((current) =>
-      current.map((node) =>
-        node.id === id ? { ...node, data: { ...node.data, label } } : node,
-      ),
-    );
-  }, []);
+  const renameNode = useCallback(
+    (id, label) => commit({ op: "set_node_label", node_id: id, label: label || null }),
+    [commit],
+  );
 
-  /** Merge a patch into the stored DSL object of whatever is selected.
+  /** The operation an inspector field's change means.
    *
-   * `undefined` in the patch deletes the field rather than writing a null,
-   * because the DSL schema rejects a null where it expects an absent one.
+   * The panels speak in DSL fields because that is what they show; this is
+   * the one place that turns a field into the operation for it, so that
+   * everything downstream sees only operations.
    */
   const patchSelected = useCallback((patch) => {
     if (!selection) return;
-    const merge = (item) => {
-      const dsl = { ...(item.data?.dsl ?? {}) };
+    const id = selection.item.id;
+    if (selection.kind === "edge") {
+      const edge = edges.find((item) => item.id === id);
+      const body = { ...(edge?.data?.dsl ?? {}), id, ...strip(patch) };
+      // `undefined` from a panel means the field is gone, and an operation
+      // says that by not carrying it.
       for (const [key, value] of Object.entries(patch)) {
-        if (value === undefined) delete dsl[key];
-        else dsl[key] = value;
+        if (value === undefined) delete body[key];
       }
-      // The card draws from `data.handler`, so a binding change has to reach
-      // it as well as the stored document it is rebuilt from.
-      const data = { ...item.data, dsl };
-      if ("handler" in patch) data.handler = patch.handler ?? null;
-      return { ...item, data };
-    };
-    const apply = (current) =>
-      current.map((item) => (item.id === selection.item.id ? merge(item) : item));
-    if (selection.kind === "edge") setEdges(apply);
-    else setNodes(apply);
-  }, [selection]);
+      commit({ op: "set_edge", edge: body });
+      return;
+    }
+    const ops = [];
+    for (const [key, value] of Object.entries(patch)) {
+      if (key === "label") ops.push({ op: "set_node_label", node_id: id, label: value ?? null });
+      else if (key === "config") ops.push({ op: "set_node_config", node_id: id, config: value ?? {} });
+      else if (key === "handler") ops.push({ op: "set_node_handler", node_id: id, handler: value ?? null });
+      else if (key === "policies") ops.push({ op: "set_node_policies", node_id: id, policies: value ?? [] });
+    }
+    commit(...ops);
+  }, [selection, edges, commit]);
 
   /** Replace one side's ports on the selected node. */
   const setPorts = useCallback((side, ports) => {
     if (selection?.kind !== "node") return;
-    setNodes((current) =>
-      current.map((node) =>
-        node.id === selection.item.id
-          ? { ...node, data: { ...node.data, [side]: ports } }
-          : node,
-      ),
-    );
-  }, [selection]);
+    commit({ op: "set_node_ports", node_id: selection.item.id, side, ports });
+  }, [selection, commit]);
 
   /** Drop a port, and with it every edge that named it.
    *
-   * Computed once from the current graph rather than inside the state
-   * updaters: nesting them would run this side effect during a render, and
-   * the edges have to be decided from the same snapshot as the nodes.
+   * Two operations rather than one: removing a port is not the same act as
+   * removing an edge, and the log should say both happened.
    */
   const dropPort = useCallback((side, portId) => {
     if (selection?.kind !== "node") return;
-    const result = removePort({ nodes, edges }, selection.item.id, side, portId);
-    setNodes(result.nodes);
-    setEdges(result.edges);
-    setNotice(
-      result.removedEdges.length
-        ? {
-          level: "info",
-          text: `removed ${result.removedEdges.length} edge(s) bound to ${portId}`,
-        }
-        : null,
+    const nodeId = selection.item.id;
+    const node = nodes.find((item) => item.id === nodeId);
+    const remaining = (node?.data?.[side] ?? []).filter((port) => port.id !== portId);
+    const bound = edges.filter((edge) => (
+      side === "outputs"
+        ? edge.source === nodeId && edge.sourceHandle === portId
+        : edge.target === nodeId && edge.targetHandle === portId
+    ));
+    const applied = commit(
+      ...bound.map((edge) => ({ op: "remove_edge", edge_id: edge.id })),
+      { op: "set_node_ports", node_id: nodeId, side, ports: remaining },
     );
-  }, [selection, nodes, edges]);
+    if (applied && bound.length) {
+      setNotice({
+        level: "info",
+        text: `removed ${bound.length} edge(s) bound to ${portId}`,
+      });
+    }
+  }, [selection, nodes, edges, commit]);
 
   /** Change a node's kind, dropping a handler the new kind cannot use.
    *
@@ -218,19 +326,18 @@ export default function App() {
    */
   const setKind = useCallback((kind) => {
     if (selection?.kind !== "node") return;
-    setNodes((current) =>
-      current.map((node) => {
-        if (node.id !== selection.item.id) return node;
-        const dsl = { ...(node.data.dsl ?? {}), kind };
-        const bound = dsl.handler
-          && handlersForKind(handlers, kind).some(
-            (item) => item.name === dsl.handler.name && item.version === dsl.handler.version,
-          );
-        if (!bound) delete dsl.handler;
-        return { ...node, data: { ...node.data, kind, handler: dsl.handler ?? null, dsl } };
-      }),
+    const id = selection.item.id;
+    const handler = nodes.find((node) => node.id === id)?.data?.dsl?.handler;
+    const serves = handler && handlersForKind(handlers, kind).some(
+      (item) => item.name === handler.name && item.version === handler.version,
     );
-  }, [selection, handlers]);
+    commit(
+      { op: "set_node_kind", node_id: id, kind },
+      // A binding the new kind cannot serve is one the compiler refuses, and
+      // dropping it silently would leave the author to read a diagnostic.
+      handler && !serves ? { op: "set_node_handler", node_id: id } : null,
+    );
+  }, [selection, nodes, handlers, commit]);
 
   /** Remove whatever is selected, edges bound to a node included.
    *
@@ -240,80 +347,50 @@ export default function App() {
   const removeSelected = useCallback(() => {
     if (!selection) return;
     const id = selection.item.id;
-    if (selection.kind === "edge") {
-      setEdges((current) => current.filter((edge) => edge.id !== id));
-    } else {
-      setNodes((current) => current.filter((node) => node.id !== id));
-      setEdges((current) =>
-        current.filter((edge) => edge.source !== id && edge.target !== id),
-      );
-    }
-    setSelection(null);
-  }, [selection]);
+    const removed = commit(
+      selection.kind === "edge"
+        ? { op: "remove_edge", edge_id: id }
+        // `remove_node` takes the edges that named it, and its place in
+        // entry, terminals and result. One act, one operation.
+        : { op: "remove_node", node_id: id },
+    );
+    if (removed) setSelection(null);
+  }, [selection, commit]);
 
-  /** Forget this arrangement and go back to the computed one. */
+  /** Forget this arrangement and go back to the computed one.
+   *
+   * Only positions are cleared, and the definition is not consulted: the two
+   * have nothing to say to each other, which is the point of keeping them
+   * apart.
+   */
   const resetLayout = useCallback(() => {
     if (!base || !workflowId) return;
     clearLayout(globalThis.localStorage, workflowId);
-    setNodes(toGraph(base, {}).nodes.map((node) => {
-      const current = nodes.find((item) => item.id === node.id);
-      // Keep everything the canvas has edited; only the position goes back.
-      return current ? { ...current, position: node.position } : node;
-    }));
+    setPositions({});
     setNotice({ level: "info", text: "layout reset" });
-  }, [base, workflowId, nodes]);
+  }, [base, workflowId]);
 
-  const addNode = useCallback(
-    (kind) => {
-      setNodes((current) => {
-        const id = freshId(kind, current.map((node) => node.id));
-        return [
-          ...current,
-          {
-            id,
-            type: "workflow",
-            position: { x: 60, y: 60 + current.length * 30 },
-            data: { kind, label: id, inputs: [], outputs: [], dsl: {} },
-          },
-        ];
-      });
-    },
-    [],
-  );
+  const addNode = useCallback((kind) => {
+    const id = freshId(kind, nodes.map((node) => node.id));
+    if (commit({ op: "add_node", node: { id, kind } })) {
+      // Where it is drawn is not part of the definition, so it is placed
+      // rather than recorded.
+      setPositions((current) => ({
+        ...current,
+        [id]: { x: 60, y: 60 + nodes.length * 30 },
+      }));
+    }
+  }, [nodes, commit]);
 
-  // xyflow hands a custom node only its `data`, so the rename callback rides
-  // there. Attached at render rather than stored on the node, which keeps it
-  // out of what `toDocument` rebuilds from.
+  // The canvas is a projection of the document, not a second copy of it:
+  // positions are layered on, selection is our own, and the rename callback
+  // rides in `data` because xyflow hands a custom node only that.
   const drawn = useMemo(
     () => nodes.map((node) => ({
       ...node, data: { ...node.data, onLabelChange: renameNode },
     })),
     [nodes, renameNode],
   );
-
-  useEffect(() => {
-    if (!workflowId || !nodes.length) return;
-    writeLayout(
-      globalThis.localStorage,
-      workflowId,
-      toPositions(nodes),
-      nodes.map((node) => node.id),
-    );
-  }, [workflowId, nodes]);
-
-  const document = useMemo(
-    () => (base ? toDocument(base, { nodes, edges }) : null),
-    [base, nodes, edges],
-  );
-
-  // Re-read from the live arrays: the item captured when the author clicked is
-  // a snapshot, and the panel has to show what their own edits just produced.
-  const live = useMemo(() => {
-    if (!selection) return null;
-    const source = selection.kind === "edge" ? edges : nodes;
-    const item = source.find((entry) => entry.id === selection.item.id);
-    return item ? { kind: selection.kind, item } : null;
-  }, [selection, nodes, edges]);
 
   // The compiler answers with diagnostics; showing them is the entire value of
   // asking it, so they are rendered rather than collapsed into "invalid".
@@ -363,6 +440,7 @@ export default function App() {
       // edit would be rebuilt onto the previous one, and the next publish
       // would carry a version that is no longer the latest.
       setBase(document);
+      setOperations([]);
       setVersion(result.version);
       setStale(false);
       setNotice({
@@ -490,7 +568,7 @@ export default function App() {
         {base && !live ? (
           // Nothing selected means the workflow itself: entry, terminals,
           // result and policies belong to the document, not to any one node.
-          <WorkflowPanel document={document} onChange={setBase} />
+          <WorkflowPanel document={document} onChange={commit} />
         ) : null}
       </div>
 

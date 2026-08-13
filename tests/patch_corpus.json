@@ -1,0 +1,585 @@
+{
+  "document": {
+    "dsl_version": "1.3",
+    "metadata": {
+      "id": "flow",
+      "name": "Flow",
+      "description": "does a thing"
+    },
+    "inputs": [
+      {
+        "id": "value",
+        "schema_id": "example://integer/1.0"
+      }
+    ],
+    "nodes": [
+      {
+        "id": "work",
+        "kind": "action",
+        "label": "Transform",
+        "inputs": [
+          {
+            "id": "value",
+            "schema_id": "example://integer/1.0"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "value",
+            "schema_id": "example://integer/1.0"
+          }
+        ],
+        "handler": {
+          "name": "transform",
+          "version": "1.0.0"
+        },
+        "config": {
+          "mode": "fast"
+        },
+        "policies": [
+          "retry"
+        ]
+      },
+      {
+        "id": "done",
+        "kind": "terminal",
+        "label": "Done",
+        "inputs": [
+          {
+            "id": "value",
+            "schema_id": "example://integer/1.0"
+          }
+        ]
+      }
+    ],
+    "edges": [
+      {
+        "id": "flow_edge",
+        "policy": "retry",
+        "from": {
+          "node": "work",
+          "port": "value"
+        },
+        "to": {
+          "node": "done",
+          "port": "value"
+        }
+      }
+    ],
+    "entry": [
+      "work"
+    ],
+    "terminals": [
+      "done"
+    ],
+    "result": {
+      "node": "work",
+      "port": "value"
+    },
+    "policies": [
+      {
+        "id": "retry",
+        "kind": "retry",
+        "config": {
+          "max_attempts": 2
+        }
+      }
+    ]
+  },
+  "cases": [
+    {
+      "name": "add a node",
+      "operations": [
+        {
+          "op": "add_node",
+          "node": {
+            "id": "review",
+            "kind": "human",
+            "label": "Review"
+          }
+        }
+      ]
+    },
+    {
+      "name": "add a node with ports and no label",
+      "operations": [
+        {
+          "op": "add_node",
+          "node": {
+            "id": "extra",
+            "kind": "action",
+            "inputs": [
+              {
+                "id": "v",
+                "schema_id": "example://integer/1.0"
+              }
+            ],
+            "outputs": [
+              {
+                "id": "v",
+                "schema_id": "example://integer/1.0"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "remove a node takes its edges, entry, terminals and result",
+      "operations": [
+        {
+          "op": "remove_node",
+          "node_id": "work"
+        }
+      ]
+    },
+    {
+      "name": "remove the terminal",
+      "operations": [
+        {
+          "op": "remove_node",
+          "node_id": "done"
+        }
+      ]
+    },
+    {
+      "name": "set a label",
+      "operations": [
+        {
+          "op": "set_node_label",
+          "node_id": "work",
+          "label": "Renamed"
+        }
+      ]
+    },
+    {
+      "name": "clear a label",
+      "operations": [
+        {
+          "op": "set_node_label",
+          "node_id": "work"
+        }
+      ]
+    },
+    {
+      "name": "set a config",
+      "operations": [
+        {
+          "op": "set_node_config",
+          "node_id": "work",
+          "config": {
+            "mode": "thorough",
+            "n": 3
+          }
+        }
+      ]
+    },
+    {
+      "name": "an emptied config removes the key",
+      "operations": [
+        {
+          "op": "set_node_config",
+          "node_id": "work",
+          "config": {}
+        }
+      ]
+    },
+    {
+      "name": "replace ports on one side",
+      "operations": [
+        {
+          "op": "set_node_ports",
+          "node_id": "work",
+          "side": "outputs",
+          "ports": [
+            {
+              "id": "result",
+              "schema_id": "schema://object/1.0"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "an emptied port list removes the key",
+      "operations": [
+        {
+          "op": "set_node_ports",
+          "node_id": "work",
+          "side": "inputs",
+          "ports": []
+        }
+      ]
+    },
+    {
+      "name": "policies are stored sorted",
+      "operations": [
+        {
+          "op": "add_policy",
+          "policy": {
+            "id": "loop",
+            "kind": "loop",
+            "config": {
+              "max_iterations": 3
+            }
+          }
+        },
+        {
+          "op": "set_node_policies",
+          "node_id": "work",
+          "policies": [
+            "retry",
+            "loop"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "an emptied policy list removes the key",
+      "operations": [
+        {
+          "op": "set_node_policies",
+          "node_id": "work",
+          "policies": []
+        }
+      ]
+    },
+    {
+      "name": "bind a handler",
+      "operations": [
+        {
+          "op": "set_node_handler",
+          "node_id": "done",
+          "handler": {
+            "name": "transform",
+            "version": "1.0.0"
+          }
+        }
+      ]
+    },
+    {
+      "name": "unbind a handler",
+      "operations": [
+        {
+          "op": "set_node_handler",
+          "node_id": "work"
+        }
+      ]
+    },
+    {
+      "name": "change a kind",
+      "operations": [
+        {
+          "op": "set_node_kind",
+          "node_id": "done",
+          "kind": "join"
+        }
+      ]
+    },
+    {
+      "name": "add an edge",
+      "operations": [
+        {
+          "op": "add_edge",
+          "edge": {
+            "id": "second",
+            "route": "error",
+            "priority": 1,
+            "from": {
+              "node": "work",
+              "port": "value"
+            },
+            "to": {
+              "node": "done",
+              "port": "value"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "remove an edge",
+      "operations": [
+        {
+          "op": "remove_edge",
+          "edge_id": "flow_edge"
+        }
+      ]
+    },
+    {
+      "name": "replace an edge wholesale",
+      "operations": [
+        {
+          "op": "set_edge",
+          "edge": {
+            "id": "flow_edge",
+            "from": {
+              "node": "work",
+              "port": "value"
+            },
+            "to": {
+              "node": "done",
+              "port": "value"
+            },
+            "condition": "source.value > 5",
+            "priority": 2
+          }
+        }
+      ]
+    },
+    {
+      "name": "removing a policy reaches every reference",
+      "operations": [
+        {
+          "op": "remove_policy",
+          "policy_id": "retry"
+        }
+      ]
+    },
+    {
+      "name": "set the result",
+      "operations": [
+        {
+          "op": "set_result",
+          "result": {
+            "node": "work",
+            "port": "value"
+          }
+        }
+      ]
+    },
+    {
+      "name": "set entry and terminals",
+      "operations": [
+        {
+          "op": "set_entry",
+          "entry": [
+            "work"
+          ]
+        },
+        {
+          "op": "set_terminals",
+          "terminals": [
+            "done",
+            "work"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "set metadata, blanking the description",
+      "operations": [
+        {
+          "op": "set_metadata",
+          "name": "  Renamed  ",
+          "description": "   "
+        }
+      ]
+    },
+    {
+      "name": "metadata name only",
+      "operations": [
+        {
+          "op": "set_metadata",
+          "name": "Only the name"
+        }
+      ]
+    },
+    {
+      "name": "set workflow inputs",
+      "operations": [
+        {
+          "op": "set_inputs",
+          "inputs": [
+            {
+              "id": "topic",
+              "schema_id": "schema://object/1.0"
+            },
+            {
+              "id": "tone",
+              "schema_id": "schema://object/1.0"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "emptied inputs remove the key",
+      "operations": [
+        {
+          "op": "set_inputs",
+          "inputs": []
+        }
+      ]
+    },
+    {
+      "name": "a sequence applies in order",
+      "operations": [
+        {
+          "op": "add_node",
+          "node": {
+            "id": "review",
+            "kind": "human",
+            "label": "Review"
+          }
+        },
+        {
+          "op": "add_edge",
+          "edge": {
+            "id": "to_review",
+            "from": {
+              "node": "work",
+              "port": "value"
+            },
+            "to": {
+              "node": "review",
+              "port": "value"
+            }
+          }
+        },
+        {
+          "op": "set_terminals",
+          "terminals": [
+            "done",
+            "review"
+          ]
+        },
+        {
+          "op": "set_node_label",
+          "node_id": "review",
+          "label": "Human review"
+        }
+      ]
+    },
+    {
+      "name": "replace a policy's config",
+      "operations": [
+        {
+          "op": "set_policy_config",
+          "policy_id": "retry",
+          "config": {
+            "max_attempts": 5
+          }
+        }
+      ]
+    }
+  ],
+  "failures": [
+    {
+      "name": "a duplicate node id",
+      "operations": [
+        {
+          "op": "add_node",
+          "node": {
+            "id": "work",
+            "kind": "action"
+          }
+        }
+      ],
+      "index": 0
+    },
+    {
+      "name": "a node that does not exist",
+      "operations": [
+        {
+          "op": "set_node_label",
+          "node_id": "ghost",
+          "label": "x"
+        }
+      ],
+      "index": 0
+    },
+    {
+      "name": "the failing operation is named by its position",
+      "operations": [
+        {
+          "op": "set_node_label",
+          "node_id": "work",
+          "label": "fine"
+        },
+        {
+          "op": "set_node_config",
+          "node_id": "ghost",
+          "config": {}
+        }
+      ],
+      "index": 1
+    },
+    {
+      "name": "a duplicate edge id",
+      "operations": [
+        {
+          "op": "add_edge",
+          "edge": {
+            "id": "flow_edge",
+            "from": {
+              "node": "work",
+              "port": "value"
+            },
+            "to": {
+              "node": "done",
+              "port": "value"
+            }
+          }
+        }
+      ],
+      "index": 0
+    },
+    {
+      "name": "an edge that does not exist",
+      "operations": [
+        {
+          "op": "remove_edge",
+          "edge_id": "ghost"
+        }
+      ],
+      "index": 0
+    },
+    {
+      "name": "a policy that does not exist",
+      "operations": [
+        {
+          "op": "remove_policy",
+          "policy_id": "ghost"
+        }
+      ],
+      "index": 0
+    },
+    {
+      "name": "entry naming a node that does not exist",
+      "operations": [
+        {
+          "op": "set_entry",
+          "entry": [
+            "ghost"
+          ]
+        }
+      ],
+      "index": 0
+    },
+    {
+      "name": "terminals naming a node that does not exist",
+      "operations": [
+        {
+          "op": "set_terminals",
+          "terminals": [
+            "done",
+            "ghost"
+          ]
+        }
+      ],
+      "index": 0
+    },
+    {
+      "name": "a policy config for a policy that does not exist",
+      "operations": [
+        {
+          "op": "set_policy_config",
+          "policy_id": "ghost",
+          "config": {}
+        }
+      ],
+      "index": 0
+    }
+  ]
+}
