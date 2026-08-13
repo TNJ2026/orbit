@@ -140,12 +140,30 @@ class BrowserE2ETestCase(unittest.TestCase):
             actor="local", idempotency_key=key,
         ).run_id
 
-    def start_goal(self, key: str, goal: str) -> str:
+    def start_goal(
+        self, key: str, goal: str, workflow_id: str = "workflow:linear",
+    ) -> str:
         service = RunApplicationService(self.db, self.app_service())
         return service.start_run(
-            workflow_id="workflow:linear", inputs={"value": 1}, goal=goal,
+            workflow_id=workflow_id, inputs={"value": 1}, goal=goal,
             actor="local", idempotency_key=key,
         ).run_id
+
+    def cancel_goal(self, run_id: str) -> None:
+        """Stop a run this test started, so the next one starts from quiet.
+
+        The class shares one server. A run left in flight is an active goal
+        for every test after it, and the ones that assert an empty workspace
+        then fail for a reason that has nothing to do with them.
+        """
+
+        from orbit.workflow.domain.ids import EntityId
+
+        run = self.app_service().get_run(EntityId.parse(run_id))
+        RunApplicationService(self.db, self.app_service()).cancel_run(
+            run_id, run.aggregate_version.value, actor="local",
+            idempotency_key=f"cleanup-{run_id}",
+        )
 
     def app_service(self):
         from orbit.workflow.application.durable_runtime_service import (
@@ -335,6 +353,17 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
         self.assertIn(generated_id, current_values)
 
     def test_goal_starts_and_stays_in_one_workspace(self) -> None:
+        """The composer keeps what was typed while the run it started is live.
+
+        It is withheld once that run is over — you are looking at a finished
+        run, not composing — so the workflow started here has to be one that
+        waits. With `workflow:linear`, which finishes in milliseconds, this
+        raced: under the load of a full suite the browser rendered slowly
+        enough for the run to reach `succeeded` first, the composer was
+        correctly withheld, and reading the goal back failed. A human step
+        makes "still running" a fact rather than a hope.
+        """
+
         page = self.open("en-US")
         started = {}
 
@@ -360,8 +389,14 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
             if route.request.method != "POST":
                 return route.continue_()
             goal = route.request.post_data_json["goal"]
-            run_id = self.start_goal("simplified-workspace-start", goal)
+            run_id = self.start_goal(
+                "simplified-workspace-start", goal, "workflow:human",
+            )
             started["run_id"] = run_id
+            # A human step waits for ever by design, which is what makes this
+            # test deterministic and what would otherwise leave every test
+            # after it looking at an active goal.
+            self.addCleanup(self.cancel_goal, run_id)
             route.fulfill(
                 status=200, content_type="application/json",
                 body=json.dumps({
