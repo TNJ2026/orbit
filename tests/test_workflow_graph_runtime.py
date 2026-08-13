@@ -165,6 +165,61 @@ class PureGraphDecisionTests(unittest.TestCase):
         self.assertEqual({(("slow-high",), '{"v": 1}')}, results)
 
 
+class ConditionGuardTests(unittest.TestCase):
+    """`exists` is the only guard there is, and it needs short-circuiting.
+
+    An action's result is declared as an open object, so any condition reading
+    into one is a guess about what the Agent will write. `exists` is what the
+    vocabulary offers to make that guess safe, and the only way to use it is
+    `and(exists(x), x == 1)` — which raised on the comparison exactly when the
+    guard had already answered False. Observed twice against real Agents: a
+    run died on `reference member 'issues_found' does not exist`, and again on
+    `'problem'` after the Agent had been told to guard and had done so.
+    """
+
+    GUARD = {
+        "op": "and",
+        "args": [
+            {"op": "call", "name": "exists",
+             "args": [{"op": "ref", "path": "source.problem"}]},
+            {"op": "eq",
+             "left": {"op": "ref", "path": "source.problem"},
+             "right": {"op": "literal", "value": True}},
+        ],
+    }
+
+    def test_a_guard_answers_false_for_a_member_that_is_not_there(self) -> None:
+        self.assertFalse(evaluate_condition(self.GUARD, {}, workflow_inputs={}))
+
+    def test_a_guard_does_not_swallow_the_answer_when_it_is_there(self) -> None:
+        self.assertTrue(
+            evaluate_condition(self.GUARD, {"problem": True}, workflow_inputs={})
+        )
+        self.assertFalse(
+            evaluate_condition(self.GUARD, {"problem": False}, workflow_inputs={})
+        )
+
+    def test_or_stops_at_the_first_true(self) -> None:
+        expression = {
+            "op": "or",
+            "args": [
+                {"op": "literal", "value": True},
+                {"op": "ref", "path": "source.absent"},
+            ],
+        }
+        self.assertTrue(evaluate_condition(expression, {}, workflow_inputs={}))
+
+    def test_an_operand_that_is_evaluated_is_still_type_checked(self) -> None:
+        """Short-circuiting is not a licence for a non-boolean operand."""
+
+        expression = {
+            "op": "and",
+            "args": [{"op": "literal", "value": "yes"}],
+        }
+        with self.assertRaisesRegex(Exception, "operands must be boolean"):
+            evaluate_condition(expression, {}, workflow_inputs={})
+
+
 class GraphRuntimeE2ETests(unittest.TestCase):
     def test_foreach_materializes_bounded_child_runs_and_aggregates(self):
         temp = tempfile.TemporaryDirectory()

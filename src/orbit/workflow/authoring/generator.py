@@ -73,6 +73,19 @@ def _expression_vocabulary() -> dict[str, object]:
             "operand is itself one of these objects — never a bare string or "
             "number."
         ),
+        # An Agent handler declares its output as an open object, so a
+        # condition that reads into it is a guess about what the Agent will
+        # write. Reading a member that is not there is an error at run time,
+        # not a false — silently routing a run on absent data is worse than
+        # refusing — and a workflow whose first decision guessed wrong fails
+        # on its first real execution, after the Agent has already run.
+        "reading_an_agent_result": (
+            "An action's result is an open object: nothing guarantees any "
+            "member of it. A condition that reads inside one must guard the "
+            "read, or the run fails when the member is absent. Write "
+            "{\"op\": \"and\", \"args\": [{\"op\": \"call\", \"name\": "
+            "\"exists\", \"args\": [<the ref>]}, <the comparison>]}."
+        ),
     }
 
 
@@ -748,6 +761,7 @@ class WorkflowAuthoringService:
             "Put full test suites, long builds, and end-to-end tests in a separate validation action. Agent actions should prefer targeted tests and must be able to return a useful partial result when time is short, a test fails, or progress is blocked.",
             "Never instruct an Agent to keep fixing until every test passes. Repetition requires an explicit back_edge and a bounded loop or rework policy.",
             "Each input port on a non-join node may have at most one incoming non-back edge. A back edge may return to an already-bound input when it has a bounded loop or rework policy.",
+            "A condition that reads a member of an action's result must guard it with exists(), and every branch out of a decision must have a default edge whose condition is true. An action's result is an open object: a member you assumed is absent at run time, and the run fails after the Agent has already done its work.",
             "When two or more forward branches converge, target an explicit join node: use join mode any for mutually-exclusive alternatives and all for parallel branches, then use one edge from the join to the downstream node.",
             "Use a join node only for real fan-in: it needs at least two incoming non-back edges and exactly one node policy reference to one top-level join policy.",
             "A join's merge_mode determines its real output type: use object_by_edge when its output schema is an object, and array_by_edge only when its output schema is an array. The downstream port must accept that same type.",

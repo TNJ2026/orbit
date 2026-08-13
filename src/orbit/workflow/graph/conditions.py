@@ -54,10 +54,24 @@ def _evaluate(node, source, workflow_inputs, counter, depth):
     if op == "list":
         return [_evaluate(item, source, workflow_inputs, counter, depth + 1) for item in node.get("items", ())]
     if op in {"and", "or"}:
-        values = [_evaluate(item, source, workflow_inputs, counter, depth + 1) for item in node.get("args", ())]
-        if any(not isinstance(item, bool) for item in values):
-            raise ConditionEvaluationError(f"{op} operands must be boolean")
-        return all(values) if op == "and" else any(values)
+        # Short-circuiting, because `exists` is otherwise useless. It is the
+        # only guard the vocabulary offers against a member that is not there
+        # — an Agent's result is an open object, so any condition reading into
+        # one is a guess — and the only way to use it is
+        # `and(exists(x), x == 1)`. Evaluating every operand first raised on
+        # `x == 1` exactly when `exists(x)` had already answered False, so the
+        # guard could not do the one thing it is for.
+        #
+        # An operand that is never evaluated is never type-checked, which is
+        # the point rather than a gap: demanding it would be evaluating it.
+        stop = op == "or"
+        for item in node.get("args", ()):
+            value = _evaluate(item, source, workflow_inputs, counter, depth + 1)
+            if not isinstance(value, bool):
+                raise ConditionEvaluationError(f"{op} operands must be boolean")
+            if value is stop:
+                return stop
+        return not stop
     if op == "not":
         value = _evaluate(node.get("arg"), source, workflow_inputs, counter, depth + 1)
         if not isinstance(value, bool):

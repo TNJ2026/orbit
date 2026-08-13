@@ -526,9 +526,25 @@ class ExpressionVocabularyTests(unittest.TestCase):
         self.assertEqual(sorted(_CALLS), vocabulary["call"]["names"])
         self.assertEqual(
             {"literal", "ref", "comparison", "and_or", "not", "call", "list",
-             "note"},
+             "note", "reading_an_agent_result"},
             set(vocabulary),
         )
+
+    def test_reading_an_agent_result_is_named_as_a_guess(self) -> None:
+        """`exists` was in the vocabulary and nothing said when to reach for it.
+
+        An action's result is `schema://object/1.0` — an open object — so a
+        condition reading into it is a guess about what the Agent will write,
+        and a wrong guess fails the run *after* the Agent has done its work.
+        Observed: opencode wrote `source.result.review_complete.issues_found`
+        and the run died on `reference member 'issues_found' does not exist`.
+        """
+
+        from orbit.workflow.authoring.generator import _expression_vocabulary
+
+        guidance = _expression_vocabulary()["reading_an_agent_result"]
+        self.assertIn("exists", guidance)
+        self.assertIn("open object", guidance)
 
     def test_the_offered_comparison_example_actually_compiles(self) -> None:
         """A worked example in a prompt is a promise the compiler must keep."""
