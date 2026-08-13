@@ -233,12 +233,14 @@ async function render() {
     // the initial writer without requiring a full browser reload.
     shellFacts = (await api.capabilities()).data;
     mayStartRun = Boolean(shellFacts.permissions && shellFacts.permissions.start_run);
+    // One Agent instead of several is the whole difference between the two
+    // products. The Workflow catalog is not part of it: single-agent mode
+    // authors workflows too, and hiding the page they land in left the one it
+    // had just generated with nowhere to be opened.
     const singleAgentUi = shellFacts.product_mode?.workflow_ui_mode === "single-agent";
     const agentsNav = document.querySelector('[data-view="agents"]');
     if (agentsNav) agentsNav.hidden = singleAgentUi;
-    const workflowsNav = document.querySelector('[data-view="workflows"]');
-    if (workflowsNav) workflowsNav.hidden = singleAgentUi;
-    if (singleAgentUi && ["agents", "workflows", "workflow"].includes(route.view)) {
+    if (singleAgentUi && route.view === "agents") {
       navigate({ view: "home", runId: null });
       return;
     }
@@ -444,10 +446,6 @@ async function boot() {
     const agentsNav = document.querySelector('[data-view="agents"]');
     if (agentsNav) {
       agentsNav.hidden = shellFacts.product_mode?.workflow_ui_mode === "single-agent";
-    }
-    const workflowsNav = document.querySelector('[data-view="workflows"]');
-    if (workflowsNav) {
-      workflowsNav.hidden = shellFacts.product_mode?.workflow_ui_mode === "single-agent";
     }
     // Hidden where the Runtime says there is no editor, rather than offered
     // as a link that 404s: the bundle is a build artifact and a source
