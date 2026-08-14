@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+import sqlite3
 import tempfile
 import time
 import unittest
@@ -25,7 +26,7 @@ from orbit.workflow.persistence.workflow_versions import SQLiteWorkflowVersionSt
 
 import tests.test_workflow_langgraph_runtime as engine_tests
 from tests.test_web_composition import (
-    publish_human_workflow, transform_registration,
+    publish_human_workflow, publish_linear_workflow, transform_registration,
 )
 
 
@@ -667,6 +668,160 @@ class ProgressIsObservableTests(unittest.TestCase):
             partly,
             f"never saw the run partly done; readings were {sorted(set(seen))}",
         )
+
+
+class RetentionTests(unittest.TestCase):
+    """Forgetting a run, and the things that must survive it.
+
+    The three stores grow with every run and nothing ever removed anything.
+    A console is the bulk of it — measured at roughly 316KB a run against
+    37KB of checkpoints for a chatty six-step workflow — so the growth is
+    real, and so is the risk of a policy that takes the wrong thing.
+    """
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(self.temp.cleanup)
+        self.path = Path(self.temp.name) / "runtime.db"
+        publish_linear_workflow(self.path)
+        publish_human_workflow(self.path)
+        self.state = Path(self.temp.name) / "langgraph"
+        self.engine = build_service(
+            self.path, [transform_registration()], state_directory=self.state,
+        )
+
+    def finished(self, key: str):
+        return self.engine.start(
+            "workflow:linear", {"value": 1}, idempotency_key=key, actor="local",
+        )
+
+    def waiting(self, key: str):
+        return self.engine.start(
+            "workflow:human", {"value": 1}, idempotency_key=key, actor="local",
+        )
+
+    def rows(self, table: str) -> int:
+        connection = sqlite3.connect(self.state / "langgraph-runs.sqlite3")
+        try:
+            return int(
+                connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            )
+        finally:
+            connection.close()
+
+    def test_a_finished_run_is_forgotten_whole(self) -> None:
+        """Whole, because half of one lies about itself.
+
+        A run without its console says "nothing printed" about a Handler that
+        printed plenty; one without its checkpoints has a steps panel calling
+        it "not started" beside a hero calling it completed. A run that is
+        gone says neither.
+        """
+
+        run = self.finished("old")
+        self.assertEqual({"runs", "run_ids", "artifacts", "pruned"},
+                         set(self.engine.prune(before="2999-01-01")))
+        self.assertEqual([], list(self.engine.list_runs()))
+        for table in (
+            "langgraph_run_events", "langgraph_handler_attempts",
+            "langgraph_attempt_output", "langgraph_run_receipts",
+        ):
+            with self.subTest(table=table):
+                self.assertEqual(0, self.rows(table))
+        with self.assertRaises(LookupError):
+            self.engine.get(run.run_id)
+
+    def test_the_checkpoints_go_with_it(self) -> None:
+        """They are the heaviest half of a run that no longer exists."""
+
+        run = self.finished("old")
+        self.engine.prune(before="2999-01-01")
+        connection = sqlite3.connect(self.state / "langgraph-checkpoints.sqlite3")
+        try:
+            remaining = connection.execute(
+                "SELECT COUNT(*) FROM checkpoints WHERE thread_id=?",
+                (run.run_id,),
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        self.assertEqual(0, remaining)
+
+    def test_a_run_that_can_still_do_something_is_never_taken(self) -> None:
+        waiting = self.waiting("live")
+        self.finished("old")
+        self.engine.prune(before="2999-01-01")
+        self.assertEqual(
+            [waiting.run_id], [run.run_id for run in self.engine.list_runs()],
+        )
+
+    def test_an_unknown_outcome_is_kept_on_purpose(self) -> None:
+        """Its console is the only account of what happened.
+
+        Nobody can say whether a Handler that ended `unknown` acted, so the
+        run is not resumable and not prunable either — throwing it away
+        destroys the one record of the case most worth reading.
+        """
+
+        run = self.finished("mystery")
+        with self.engine._connect() as connection:
+            connection.execute(
+                "UPDATE langgraph_runs SET status='unknown' WHERE run_id=?",
+                (run.run_id,),
+            )
+            connection.commit()
+        self.engine.prune(before="2999-01-01")
+        self.assertEqual("unknown", self.engine.get(run.run_id).status)
+
+    def test_a_run_that_ended_recently_is_kept(self) -> None:
+        self.finished("recent")
+        self.assertEqual(0, self.engine.prune(before="2000-01-01")["runs"])
+        self.assertEqual(1, len(self.engine.list_runs()))
+
+    def test_a_dry_run_reports_the_same_and_changes_nothing(self) -> None:
+        self.finished("old")
+        preview = self.engine.prune(before="2999-01-01", dry_run=True)
+        self.assertEqual(1, preview["runs"])
+        self.assertFalse(preview["pruned"])
+        self.assertEqual(1, len(self.engine.list_runs()))
+
+    def test_pruning_is_bounded_per_call(self) -> None:
+        """It must not hold the write lock for the length of a year."""
+
+        for index in range(4):
+            self.finished(f"old-{index}")
+        self.assertEqual(2, self.engine.prune(before="2999-01-01", limit=2)["runs"])
+        self.assertEqual(2, len(self.engine.list_runs()))
+        with self.assertRaises(ValueError):
+            self.engine.prune(before="2999-01-01", limit=0)
+
+    def test_a_blob_two_runs_share_outlives_the_first_of_them(self) -> None:
+        """The store is content addressed, so the same bytes serve both."""
+
+        keep = self.waiting("keeper")
+        drop = self.finished("old")
+        store = self.engine.artifacts
+        receipt = store.backend.write(b"the same bytes", max_size_bytes=4096)
+        with store._connect() as connection:
+            for index, run in enumerate((keep, drop)):
+                connection.execute(
+                    "INSERT INTO langgraph_artifacts VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (f"artifact:{index}", run.run_id, "attempt:1", "work",
+                     "value", "schema:text", "text/plain", receipt.size_bytes,
+                     receipt.blob_key, "committed", None, "local"),
+                )
+            connection.commit()
+        self.engine.prune(before="2999-01-01")
+        self.assertEqual(
+            b"the same bytes",
+            store.backend.read(receipt.blob_key, max_size_bytes=4096),
+        )
+
+    def test_the_size_of_what_is_kept_can_be_read(self) -> None:
+        self.finished("one")
+        sizes = self.engine.store_sizes()
+        self.assertGreater(sizes["runs"], 0)
+        self.assertGreater(sizes["checkpoints"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

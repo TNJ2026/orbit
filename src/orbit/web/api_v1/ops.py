@@ -146,6 +146,13 @@ def build_routes(ctx) -> list[Route]:
                 "waiting_runs": runs.get("waiting", 0) + runs.get("interrupted", 0),
             },
             "engine": engine,
+            # What the engine is keeping. It grows with every run and nothing
+            # else would say so, which is how an operator ends up deciding
+            # about retention only once a disk is full.
+            "storage_bytes": (
+                ctx.langgraph_service.store_sizes()
+                if getattr(ctx.langgraph_service, "store_sizes", None) else {}
+            ),
             "server_config": {
                 "poll_seconds": ctx.operational_config.get("poll_seconds"),
                 "artifact_store_configured": ctx.artifact_backend is not None,

@@ -164,6 +164,12 @@ while one is `running`, `waiting` or `interrupted` is refused with
 `active_goal_exists`, and the refusal names the run holding the slot so a
 client can go to it. Cancelling or finishing releases it.
 
+Runs are kept until you say otherwise. `/api/v1/ops/status` reports what the
+engine is holding, and `create_app(run_retention_days=N)` forgets runs that
+ended more than N days ago — whole ones, since a run without its console or
+its checkpoints describes itself wrongly. A run waiting on a person, or one
+whose Handler ended `unknown`, is never forgotten.
+
 What a run's Handlers printed is read from
 `GET /api/v1/langgraph-runs/{run_id}/output?after=<chunk_id>`, which needs the
 sensitive scope. It is a console, not a log: bounded per attempt and per

@@ -150,6 +150,11 @@ run 在启动它的那个请求里执行。`POST /api/v1/langgraph-runs` 带 `"w
 `interrupted` 的 run 时，再启动会以 `active_goal_exists` 拒绝，并在拒绝里带上占用
 该槽位的 run，客户端可以直接跳过去。取消或结束即释放。
 
+run 默认永久保留。`/api/v1/ops/status` 报告引擎占用的容量；
+`create_app(run_retention_days=N)` 会忘掉结束超过 N 天的 run —— 按**整个 run**
+删除，因为缺了控制台或 checkpoint 的 run 会错误地描述自己。等待人工输入的 run、
+以及 Handler 以 `unknown` 结束的 run，永远不会被忘掉。
+
 Handler 进程打印的内容通过
 `GET /api/v1/langgraph-runs/{run_id}/output?after=<chunk_id>` 读取，需要 sensitive
 scope。它是控制台而非日志：按尝试和流分别限量、写在所有事务之外，且永远不参与重放。

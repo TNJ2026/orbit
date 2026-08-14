@@ -16,7 +16,7 @@ import asyncio
 from collections import ChainMap
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import threading
 from typing import Any, Callable, Mapping, Sequence
@@ -144,6 +144,7 @@ class RuntimeComposition:
         revision_model_id: str | None = None,
         workflow_db_path: Path | str | None = None,
         langgraph_service: Any = None,
+        run_retention_days: int | None = None,
     ) -> None:
         self.db_path = Path(db_path)
         self.workflow_db_path = Path(workflow_db_path or db_path)
@@ -156,6 +157,10 @@ class RuntimeComposition:
         self.revision_agent_commands = dict(revision_agent_commands or {})
         self.revision_model_id = revision_model_id
         self.langgraph_service = langgraph_service
+        # Off unless asked for. A run is a goal somebody set, and deleting
+        # their history because a default said so is worse than a database
+        # they can see the size of on the Ops page.
+        self.run_retention_days = run_retention_days
 
         # A file carrying legacy tables is refused before anything is wired:
         # continuing would mean serving a database whose semantics are half
@@ -198,6 +203,12 @@ class RuntimeComposition:
                     self.langgraph_service.recover_due(limit=100)
                 ), self.poll_seconds,
             ))
+        if self.run_retention_days and callable(
+            getattr(self.langgraph_service, "prune", None)
+        ):
+            loops.append(BackgroundLoop(
+                "run-retention", self._prune_once, max(self.poll_seconds, 300.0),
+            ))
         # Agent workflow revisions are durable jobs: the editor enqueues, this
         # loop spends the model call, and a recovery pass fails jobs whose
         # worker died mid-flight.
@@ -219,6 +230,15 @@ class RuntimeComposition:
                 max(self.poll_seconds, 5.0),
             ))
         return loops
+
+    def _prune_once(self) -> bool:
+        """Forget runs that ended longer ago than the operator keeps them."""
+
+        cutoff = self.clock() - timedelta(days=self.run_retention_days)
+        summary = self.langgraph_service.prune(
+            before=cutoff.isoformat().replace("+00:00", "Z"), limit=100,
+        )
+        return bool(summary.get("runs"))
 
     def start(self) -> None:
         if self._started:
@@ -345,6 +365,7 @@ def create_app(
     shutdown_request: Callable[[], None] | None = None,
     langgraph_service: Any = None,
     langgraph_state_directory: Path | str | None = None,
+    run_retention_days: int | None = None,
     workflow_ui_mode: str = "multi-agent",
     agent_workspace_root: Path | str | None = None,
 ) -> Starlette:
@@ -501,6 +522,7 @@ def create_app(
         artifact_backend=artifact_backend,
         workflow_db_path=workflow_db_path,
         langgraph_service=langgraph_service,
+        run_retention_days=run_retention_days,
     )
     if composition.workflow_db_path != composition.db_path:
         from ..workflow.persistence.workflow_versions import merge_workflow_library

@@ -997,6 +997,108 @@ class LangGraphWorkflowService:
             self._background_runs.difference_update(done)
         return tuple(f"background-run-{index}" for index in range(len(not_done)))
 
+    # Runs that cannot do anything else. `unknown` is missing on purpose: it
+    # is not resumable either, but nobody can say whether its Handler acted,
+    # and its console is the only account of what happened — which is exactly
+    # what pruning would throw away.
+    PRUNABLE_STATUSES = ("completed", "failed", "cancelled")
+
+    def store_sizes(self) -> Mapping[str, int]:
+        """What this engine is keeping, in bytes.
+
+        Reported because it grows and nothing else would say so. A console is
+        the bulk of it by a wide margin — a chatty Handler writes far more
+        than the run it describes — and an operator deciding whether to keep a
+        year of history should be able to see the number first.
+        """
+
+        sizes = {}
+        for name, path in (
+            ("runs", self.run_db_path), ("checkpoints", self.checkpoint_db_path),
+        ):
+            total = 0
+            for suffix in ("", "-wal", "-shm"):
+                candidate = Path(str(path) + suffix)
+                if candidate.exists():
+                    total += candidate.stat().st_size
+            sizes[name] = total
+        blobs = getattr(getattr(self.artifacts, "backend", None), "root", None)
+        if blobs is not None and Path(blobs).exists():
+            sizes["artifacts"] = sum(
+                item.stat().st_size
+                for item in Path(blobs).rglob("*") if item.is_file()
+            )
+        return sizes
+
+    def prune(
+        self, *, before: str, limit: int = 100, dry_run: bool = False,
+    ) -> Mapping[str, Any]:
+        """Forget whole runs that ended before `before`.
+
+        Whole ones, and only whole ones. Dropping a run's console but keeping
+        the run leaves a page saying "nothing printed" about a Handler that
+        printed plenty; dropping its checkpoints leaves the steps panel
+        calling a completed run "not started". A run that is gone says none of
+        that — it is simply not in the history any more, which is the one
+        honest thing a retention policy can be.
+
+        Bounded per call so it cannot hold the write lock for the length of a
+        year's history, and `dry_run` reports the same summary having changed
+        nothing.
+        """
+
+        if isinstance(limit, bool) or not 1 <= limit <= 1000:
+            raise ValueError("limit must be between 1 and 1000")
+        placeholders = ",".join("?" for _ in self.PRUNABLE_STATUSES)
+        with self._connect() as connection:
+            doomed = [
+                str(row["run_id"])
+                for row in connection.execute(
+                    "SELECT run_id FROM langgraph_runs"
+                    f" WHERE status IN ({placeholders}) AND updated_at < ?"
+                    " ORDER BY updated_at,run_id LIMIT ?",
+                    (*self.PRUNABLE_STATUSES, before, limit),
+                )
+            ]
+        if not doomed or dry_run:
+            return {"runs": len(doomed), "run_ids": tuple(doomed), "pruned": False}
+
+        artifacts = 0
+        if self._artifacts_are_here():
+            artifacts = self.artifacts.forget_runs(doomed)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            marks = ",".join("?" for _ in doomed)
+            for table in (
+                "langgraph_attempt_output", "langgraph_handler_attempts",
+                "langgraph_run_events", "langgraph_timers",
+                "langgraph_run_receipts", "langgraph_runs",
+            ):
+                connection.execute(
+                    f"DELETE FROM {table} WHERE run_id IN ({marks})", doomed,
+                )
+            connection.commit()
+        # The checkpointer is LangGraph's own store and keyed by thread, which
+        # is the run id. Its tables are read here and nowhere else in the
+        # Runtime; leaving them would keep the heaviest half of a run that no
+        # longer exists.
+        with sqlite3.connect(self.checkpoint_db_path) as connection:
+            marks = ",".join("?" for _ in doomed)
+            for table in ("checkpoints", "writes"):
+                try:
+                    connection.execute(
+                        f"DELETE FROM {table} WHERE thread_id IN ({marks})",
+                        doomed,
+                    )
+                except sqlite3.OperationalError:
+                    # No checkpointer has ever run against this file.
+                    break
+            connection.commit()
+        return {
+            "runs": len(doomed), "run_ids": tuple(doomed),
+            "artifacts": artifacts, "pruned": True,
+        }
+
     def _executed_nodes(self, run_id: str) -> tuple[str, ...]:
         """Every node execution this run has recorded, oldest first.
 

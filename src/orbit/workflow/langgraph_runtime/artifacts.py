@@ -174,6 +174,48 @@ class LangGraphArtifactStore:
             "derived_artifacts": visible_downstream,
         }
 
+    def forget_runs(self, run_ids) -> int:
+        """Drop every Artifact of these runs, and the blobs nothing else holds.
+
+        The store is content addressed, so two Artifacts of two runs can be
+        the same bytes. A blob is removed only once no surviving Artifact
+        names it — the same check `collect_abandoned` makes, for the same
+        reason.
+        """
+
+        doomed = tuple(run_ids)
+        if not doomed:
+            return 0
+        marks = ",".join("?" for _ in doomed)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                f"SELECT artifact_id,blob_key FROM langgraph_artifacts"
+                f" WHERE run_id IN ({marks})", doomed,
+            ).fetchall()
+            connection.execute(
+                f"DELETE FROM langgraph_artifact_links WHERE run_id IN ({marks})",
+                doomed,
+            )
+            connection.execute(
+                f"DELETE FROM langgraph_artifacts WHERE run_id IN ({marks})",
+                doomed,
+            )
+            orphaned = [
+                row["blob_key"] for row in rows
+                if connection.execute(
+                    "SELECT 1 FROM langgraph_artifacts WHERE blob_key=? LIMIT 1",
+                    (row["blob_key"],),
+                ).fetchone() is None
+            ]
+            connection.commit()
+        for blob_key in set(orphaned):
+            try:
+                self.backend.delete(blob_key)
+            except Exception:  # noqa: BLE001 - the row is already gone
+                continue
+        return len(rows)
+
     def collect_abandoned(self, *, limit: int = 100) -> tuple[str, ...]:
         """Remove unreferenced CAS blobs for a bounded abandoned snapshot."""
 
