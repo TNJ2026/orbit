@@ -468,6 +468,29 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
         self.assertIn("Done", text)
         self.assertNotIn("Not started", text)
 
+    def test_the_graph_is_a_second_view_of_the_same_run(self) -> None:
+        """A list says how far along; a graph says which branches there were.
+
+        Neither summarises the other, so the canvas is offered beside the
+        steps rather than instead of them — and closed, because a frame is
+        the heaviest thing on the page and most visits read the list.
+        """
+
+        run_id = self.start_run("canvas-view")
+        page = self.open("en-US", f"/ui/#/runs/{run_id}")
+        page.wait_for_selector(".run-canvas")
+        self.assertEqual(0, page.locator("iframe.workflow-graph-frame").count())
+
+        page.locator(".run-canvas summary").click()
+        page.wait_for_selector("iframe.workflow-graph-frame")
+        frame = page.frame_locator("iframe.workflow-graph-frame")
+        frame.locator(".node").first.wait_for(timeout=15000)
+        # The run is drawn on the definition: every node carries the state it
+        # reached, spelled as well as coloured.
+        classes = frame.locator(".node").first.get_attribute("class")
+        self.assertIn("node-run", classes)
+        self.assertIn("done", frame.locator(".node").first.inner_text().lower())
+
     def test_the_console_is_closed_until_asked_for(self) -> None:
         """The output panel exists on a run and fetches only when opened."""
 

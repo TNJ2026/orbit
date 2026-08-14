@@ -9,6 +9,14 @@ import { Handle, Position } from "@xyflow/react";
  * accept. Naming the handle after the port id is what lets the connection an
  * author draws be rebuilt as `from`/`to` without guessing.
  */
+const RUN_STATUS_TEXT = {
+  succeeded: "done",
+  running: "working",
+  waiting: "waiting",
+  failed: "failed",
+  not_reached: "not started",
+};
+
 export default function WorkflowNode({ id, data, selected }) {
   const inputs = data.inputs ?? [];
   const outputs = data.outputs ?? [];
@@ -16,11 +24,21 @@ export default function WorkflowNode({ id, data, selected }) {
   return (
     <div
       className={`node node-${data.kind}${selected ? " selected" : ""}${
-        data.editable ? " node-editable" : ""}`}
+        data.editable ? " node-editable" : ""}${
+        data.status ? ` node-run node-run-${data.status}` : ""}`}
       data-node-id={id}
     >
       <header>
         <span className="kind">{data.kind}</span>
+        {/* Where a run got to, when one is being drawn. Spelled as well as
+            coloured: a picture whose only difference is a hue is unreadable
+            to anyone who cannot see the hue, and this canvas already refuses
+            to let meaning ride on colour for routes. */}
+        {data.status ? (
+          <span className={`run-status run-status-${data.status}`}>
+            {RUN_STATUS_TEXT[data.status] ?? data.status}
+          </span>
+        ) : null}
         {/* The label is the one part of a node this canvas can already change,
             so it is edited in place rather than behind a panel. `nodrag` stops
             xyflow from treating a click in the field as the start of a drag,

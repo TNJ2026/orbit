@@ -272,3 +272,21 @@ span.title:hover { border-color: transparent; }
 }
 
 .viewer-state.error { color: var(--bad); }
+
+/* A run drawn on the definition. The border says which state at a glance and
+   the chip spells it, so the picture stays readable without colour — the same
+   rule the route labels follow. A node with no status is a definition nobody
+   has run, and is left exactly as it was. */
+.node-run { border-left-width: 3px; border-left-style: solid; }
+.node-run-succeeded { border-left-color: var(--ok); }
+.node-run-failed { border-left-color: var(--bad); }
+.node-run-running { border-left-color: var(--accent); }
+.node-run-waiting { border-left-color: #d97706; }
+.node-run-not_reached { border-left-color: var(--line); opacity: .62; }
+.run-status {
+  font-size: 10px; text-transform: uppercase; letter-spacing: .06em;
+  color: var(--muted); align-self: flex-start;
+}
+.node-run-succeeded .run-status { color: var(--ok); }
+.node-run-failed .run-status { color: var(--bad); }
+.node-run-running .run-status { color: var(--accent); }

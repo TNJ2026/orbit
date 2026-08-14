@@ -12,6 +12,54 @@ const VIEWER = {
   nodeClick: "orbit-viewer-node-click",
 };
 
+/** The published graph, drawn by the editor's canvas in a frame.
+ *
+ * Module level rather than inside the factory because two pages draw it: the
+ * workflow detail, and a run over the top of the same definition. A second
+ * embedding written beside this one would be a second picture of one thing,
+ * which is the drift this frame exists to remove.
+ *
+ * The graph is posted in rather than fetched by the frame: it is already
+ * here, an unpublished draft has no id to fetch by, and one request means
+ * one answer that both surfaces are describing. `statuses` rides along when
+ * the page is drawing a run; without it the frame draws the definition alone.
+ */
+export function embeddedGraph(graph, {
+  editorUrl, i18n, actionEditors = {}, onEditAction = null, statuses = null,
+}) {
+  const editable = Object.keys(actionEditors || {});
+  const frame = el("iframe", {
+    class: "workflow-graph-frame",
+    src: `${editorUrl()}?readonly=1`,
+    title: i18n.t("workflows.graph"),
+    loading: "lazy",
+  });
+  const send = () => frame.contentWindow?.postMessage(
+    { type: VIEWER.graph, graph, editable, statuses },
+    window.location.origin,
+  );
+  const onMessage = (event) => {
+    if (event.origin !== window.location.origin) return;
+    if (event.source !== frame.contentWindow) return;
+    if (event.data?.type === VIEWER.ready) send();
+    if (event.data?.type === VIEWER.nodeClick && onEditAction) {
+      onEditAction(event.data.nodeId);
+    }
+  };
+  window.addEventListener("message", onMessage);
+  // The pane is replaced whenever the tab changes or the workflow is
+  // redrawn, and a listener per drawing that outlived its frame would
+  // answer for a window that is gone.
+  const stop = new MutationObserver(() => {
+    if (!frame.isConnected) {
+      window.removeEventListener("message", onMessage);
+      stop.disconnect();
+    }
+  });
+  stop.observe(document.body, { childList: true, subtree: true });
+  return el("div", { class: "workflow-graph-pane" }, [frame]);
+}
+
 export function createWorkflowDefinitionViews({
   api, i18n, reportError, editorUrl = () => null,
 }) {
@@ -292,7 +340,9 @@ export function createWorkflowDefinitionViews({
       definition, graph, actionEditors, onEditAction,
     );
     const panes = {
-      graph: () => embeddedGraph(graph, actionEditors, onEditAction),
+      graph: () => embeddedGraph(graph, {
+        editorUrl, i18n, actionEditors, onEditAction,
+      }),
       definition: () => definitionList(
         definition, graph, actionEditors, onEditAction,
       ),
@@ -334,40 +384,6 @@ export function createWorkflowDefinitionViews({
    * here, an unpublished draft has no id to fetch by, and one request means
    * one answer that both surfaces are describing.
    */
-  function embeddedGraph(graph, actionEditors = {}, onEditAction = null) {
-    const editable = Object.keys(actionEditors || {});
-    const frame = el("iframe", {
-      class: "workflow-graph-frame",
-      src: `${editorUrl()}?readonly=1`,
-      title: i18n.t("workflows.graph"),
-      loading: "lazy",
-    });
-    const send = () => frame.contentWindow?.postMessage(
-      { type: VIEWER.graph, graph, editable },
-      window.location.origin,
-    );
-    const onMessage = (event) => {
-      if (event.origin !== window.location.origin) return;
-      if (event.source !== frame.contentWindow) return;
-      if (event.data?.type === VIEWER.ready) send();
-      if (event.data?.type === VIEWER.nodeClick && onEditAction) {
-        onEditAction(event.data.nodeId);
-      }
-    };
-    window.addEventListener("message", onMessage);
-    // The pane is replaced whenever the tab changes or the workflow is
-    // redrawn, and a listener per drawing that outlived its frame would
-    // answer for a window that is gone.
-    const stop = new MutationObserver(() => {
-      if (!frame.isConnected) {
-        window.removeEventListener("message", onMessage);
-        stop.disconnect();
-      }
-    });
-    stop.observe(document.body, { childList: true, subtree: true });
-    return el("div", { class: "workflow-graph-pane" }, [frame]);
-  }
-
   return {
     readableNodeName, definitionList,
     openActionEditorDialog, openWorkflowDeleteDialog, stepPrompt,

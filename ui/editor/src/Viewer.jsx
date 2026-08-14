@@ -44,7 +44,9 @@ export default function Viewer() {
 
   if (!drawing?.graph) return <p className="viewer-state">…</p>;
 
-  const { nodes, edges } = viewerGraph(drawing.graph, drawing.editable);
+  const { nodes, edges } = viewerGraph(
+    drawing.graph, drawing.editable, drawing.statuses,
+  );
   return (
     <div className="viewer">
       <ReactFlow

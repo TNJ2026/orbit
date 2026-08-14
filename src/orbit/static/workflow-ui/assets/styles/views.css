@@ -1329,3 +1329,9 @@
    with the steps that have. */
 .step-row.not_reached .step-label,
 .step-row.not_reached .step-detail { color: var(--muted-2); }
+
+/* The graph as a second view of the same run. Closed by default: a frame is
+   the heaviest thing on this page and most visits read the list. */
+.run-canvas { border-top: 1px solid var(--line); padding-top: 8px; margin-top: 4px; }
+.run-canvas > summary { cursor: pointer; font-size: 13px; color: var(--blue); }
+.run-canvas-body:not(:empty) { margin-top: 10px; }

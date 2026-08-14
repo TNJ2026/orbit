@@ -26,8 +26,9 @@ import { DEPTH_WIDTH, LANE_HEIGHT } from "./dsl-graph.mjs";
  * workflow must not be able to produce one that differs from what was
  * published, whatever it is asked to do.
  */
-export function viewerGraph(graph, editable = []) {
+export function viewerGraph(graph, editable = [], statuses = null) {
   const editableIds = new Set(editable ?? []);
+  const at_status = new Map(Object.entries(statuses ?? {}));
   const at = new Map(
     (graph?.layout?.positions ?? []).map((item) => [item.node_id, item]),
   );
@@ -57,6 +58,11 @@ export function viewerGraph(graph, editable = []) {
         // viewer does not decide that and does not open it — it reports the
         // click and the page that knows opens its own dialog.
         editable: editableIds.has(node.node_id),
+        // Where a run got to, when the page is drawing one. Absent for a
+        // definition nobody has run: a picture of a Workflow is not a picture
+        // of a run, and colouring every node "not started" would say the
+        // opposite of nothing.
+        status: at_status.get(node.node_id) ?? null,
       },
     };
   });
@@ -108,5 +114,10 @@ export function readGraphMessage(event, origin) {
   if (!event || event.origin !== origin) return null;
   const data = event.data;
   if (!data || data.type !== VIEWER_GRAPH) return null;
-  return { graph: data.graph ?? null, editable: data.editable ?? [] };
+  return {
+    graph: data.graph ?? null,
+    editable: data.editable ?? [],
+    // `{node_id: status}` when the page is drawing a run, absent otherwise.
+    statuses: data.statuses ?? null,
+  };
 }

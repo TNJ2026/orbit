@@ -136,7 +136,7 @@ test("a graph message from this origin is accepted", () => {
   };
   assert.deepEqual(
     readGraphMessage(message, "http://127.0.0.1:8848"),
-    { graph, editable: ["collect"] },
+    { graph, editable: ["collect"], statuses: null },
   );
 });
 
@@ -159,6 +159,37 @@ test("a graph message may clear the drawing", () => {
   const origin = "http://127.0.0.1:8848";
   assert.deepEqual(
     readGraphMessage({ origin, data: { type: VIEWER_GRAPH } }, origin),
-    { graph: null, editable: [] },
+    { graph: null, editable: [], statuses: null },
+  );
+});
+
+test("a run's statuses ride along with the graph", () => {
+  const origin = "http://127.0.0.1:8848";
+  const message = {
+    origin,
+    data: {
+      type: VIEWER_GRAPH, graph,
+      statuses: { collect: "succeeded", done: "not_reached" },
+    },
+  };
+  assert.deepEqual(
+    readGraphMessage(message, origin).statuses,
+    { collect: "succeeded", done: "not_reached" },
+  );
+});
+
+test("a node carries the status of the run being drawn", () => {
+  const { nodes } = viewerGraph(graph, [], { collect: "running" });
+  const drawn = new Map(nodes.map((node) => [node.id, node.data.status]));
+  assert.equal(drawn.get("collect"), "running");
+  // A node the run has nothing to say about is not given a state.
+  assert.equal(drawn.get("done"), null);
+});
+
+test("a definition nobody has run is drawn without any status", () => {
+  const { nodes } = viewerGraph(graph, []);
+  assert.ok(
+    nodes.every((node) => node.data.status === null),
+    "a picture of a Workflow is not a picture of a run",
   );
 });

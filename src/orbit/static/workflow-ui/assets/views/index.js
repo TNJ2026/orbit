@@ -4,6 +4,7 @@ import { el, svgEl } from "../components/dom.js";
 import { syncCustomSelect } from "../components/custom-select.js";
 import { semanticWorkflowDiff } from "../workflow-diff.js";
 import { workflowGenerationProgress } from "../workflow/generation-progress.js";
+import { embeddedGraph } from "../workflow/definition-views.js";
 
 export function createViews(context) {
   const { api, render, navigate, announce, reportError, commandButtons,
@@ -338,7 +339,7 @@ export function createViews(context) {
         live: !TERMINAL_LANGGRAPH_STATUSES.has(run.status),
       }),
     ]));
-    await renderRunSteps(root, run.run_id);
+    await renderRunSteps(root, run.run_id, run.workflow_id);
     await appendRunArtifacts(root, run.run_id);
   }
 
@@ -356,7 +357,43 @@ export function createViews(context) {
     succeeded: "✓", failed: "✕", running: "●", waiting: "◔", not_reached: "○",
   };
 
-  async function renderRunSteps(root, runId) {
+  /* The same picture as the definition page, with the run drawn on it.
+   *
+   * A second view rather than a replacement: a list says how far along and
+   * how many times, and a graph says which branches there were and which one
+   * was taken. Neither is the other's summary. It is closed by default —
+   * a frame is the heaviest thing on the page and most visits want the list.
+   */
+  function runCanvas(workflowId, statuses) {
+    const url = shellFacts?.capabilities?.workflow_editor?.available
+      ? (shellFacts.capabilities.workflow_editor.url || "/editor/")
+      : null;
+    if (!url) return null;
+    const body = el("div", { class: "run-canvas-body" });
+    const details = el("details", { class: "run-canvas" }, [
+      el("summary", { text: i18n.t("simplified.steps.canvas") }),
+      body,
+    ]);
+    let drawn = false;
+    details.addEventListener("toggle", async () => {
+      if (!details.open || drawn) return;
+      drawn = true;
+      try {
+        const detail = await api.workflowDetail(workflowId);
+        body.append(embeddedGraph(detail.data.graph, {
+          editorUrl: () => url, i18n, statuses,
+        }));
+      } catch (error) {
+        drawn = false;
+        body.append(el("p", { class: "muted", text: error?.messageKey
+          ? i18n.t(error.messageKey, { message: error.message })
+          : i18n.t("simplified.steps.unavailable") }));
+      }
+    });
+    return details;
+  }
+
+  async function renderRunSteps(root, runId, workflowId) {
     const panel = el("section", { class: "panel simplified-steps" }, [
       el("div", { class: "panel-head" }, [
         el("div", { class: "panel-title", text: i18n.t("simplified.steps") }),
@@ -376,6 +413,9 @@ export function createViews(context) {
       panel.append(el("p", { class: "muted", text: i18n.t("simplified.steps.empty") }));
       return;
     }
+    const canvas = runCanvas(workflowId, Object.fromEntries(
+      steps.map((step) => [step.node_id, step.status]),
+    ));
     panel.append(el("ol", { class: "step-list" }, steps.map((step) => el(
       "li", { class: `step-row ${step.status}` }, [
         el("span", { class: "step-mark", "aria-hidden": "true",
@@ -397,6 +437,7 @@ export function createViews(context) {
           text: i18n.t(`simplified.steps.status.${step.status}`) }),
       ],
     ))));
+    if (canvas) panel.append(canvas);
   }
 
   /* The Handler console, followed rather than paged.
