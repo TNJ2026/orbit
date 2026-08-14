@@ -76,17 +76,23 @@ def _frame(event: Mapping[str, Any]) -> dict[str, Any]:
     bridge does, with `INSERT OR IGNORE`) would silently drop the second.
     """
 
-    return {
+    frame = {
         "type": "runtime_event",
         "schema_version": 2,
         "event_id": f"langgraph_event:{event['position']}",
         "event_type": event["event_type"],
         "run_id": event["run_id"],
+        # The run either way: a node event addresses a node *of* a run, and a
+        # consumer re-reads the run to act. `node_id` says which step it was.
         "aggregate_id": event["run_id"],
         "sequence": event["revision"],
         "occurred_at": event["occurred_at"],
         "cursor": _cursor(event["position"]),
     }
+    if event.get("node_id"):
+        frame["node_id"] = event["node_id"]
+        frame["attempt_id"] = event["attempt_id"]
+    return frame
 
 
 def runtime_event_routes(

@@ -23,7 +23,9 @@ from .artifacts import LangGraphArtifactStore
 from .compiler import (
     BoundHandler, LangGraphHandlerRegistry, LangGraphUnknownExternalResult,
 )
-from .service import LangGraphWorkflowService
+from .service import (
+    LangGraphWorkflowService, append_event, ensure_event_log,
+)
 
 
 def _transform(inputs: Mapping[str, Any], config: Mapping[str, Any], _context):
@@ -55,6 +57,7 @@ class _HandlerAttemptJournal:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
+            ensure_event_log(connection)
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS langgraph_handler_attempts("
                 "attempt_id TEXT PRIMARY KEY,run_id TEXT NOT NULL,node_id TEXT NOT NULL,"
@@ -97,6 +100,10 @@ class _HandlerAttemptJournal:
                         "error=NULL,updated_at=? WHERE attempt_id=? AND status='failed'",
                         (self._now(), context.attempt_id),
                     )
+                    self._append(
+                        connection, "started", context.run_id,
+                        context.node_id, context.attempt_id,
+                    )
                     connection.commit()
                     return None
                 connection.commit()
@@ -112,13 +119,36 @@ class _HandlerAttemptJournal:
                 (context.attempt_id, context.run_id, context.node_id, self._now(),
                  handler_name),
             )
+            self._append(
+                connection, "started", context.run_id,
+                context.node_id, context.attempt_id,
+            )
             connection.commit()
         return None
+
+    def _append(
+        self, connection, outcome: str, run_id: str, node_id: str, attempt_id: str,
+    ) -> None:
+        """One node event, in the transaction that recorded the attempt.
+
+        The run log is one stream, so a subscriber sees a node start and a run
+        settle in the order they happened rather than having to reconcile two.
+        """
+
+        append_event(
+            connection, run_id, f"langgraph_node.{outcome}",
+            occurred_at=self._now(), node_id=node_id, attempt_id=attempt_id,
+        )
 
     def settle(
         self, attempt_id: str, status: str, *, output=None, error: str | None = None
     ) -> None:
         with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            attempt = connection.execute(
+                "SELECT run_id,node_id FROM langgraph_handler_attempts"
+                " WHERE attempt_id=?", (attempt_id,),
+            ).fetchone()
             connection.execute(
                 "UPDATE langgraph_handler_attempts SET status=?,output_json=?,error=?,"
                 "updated_at=? WHERE attempt_id=?",
@@ -130,6 +160,11 @@ class _HandlerAttemptJournal:
                     attempt_id,
                 ),
             )
+            if attempt is not None:
+                self._append(
+                    connection, status, attempt["run_id"], attempt["node_id"],
+                    attempt_id,
+                )
             connection.commit()
 
 

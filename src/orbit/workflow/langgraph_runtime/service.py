@@ -43,6 +43,93 @@ class LangGraphRun:
     template_id: str | None = None
 
 
+EVENT_LOG_DDL = """
+    CREATE TABLE IF NOT EXISTS langgraph_run_events (
+        position INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        occurred_at TEXT NOT NULL,
+        node_id TEXT,
+        attempt_id TEXT
+    );
+    CREATE INDEX IF NOT EXISTS langgraph_run_events_by_run
+        ON langgraph_run_events(run_id, position);
+"""
+
+
+def ensure_event_log(connection) -> None:
+    """Create the log if it is not there, and carry an older one forward.
+
+    Both writers call this. The service owns the run tables and the Handler
+    journal owns the attempt table, but the log is one stream that they share,
+    so neither can assume the other built it first.
+    """
+
+    connection.executescript(EVENT_LOG_DDL)
+    columns = {
+        row["name"] for row in connection.execute(
+            "PRAGMA table_info(langgraph_run_events)"
+        )
+    }
+    for column in ("node_id", "attempt_id"):
+        if column not in columns:
+            connection.execute(
+                f"ALTER TABLE langgraph_run_events ADD COLUMN {column} TEXT"
+            )
+
+
+def append_event(
+    connection,
+    run_id: str,
+    event_type: str,
+    *,
+    revision: int | None = None,
+    occurred_at: str | None = None,
+    node_id: str | None = None,
+    attempt_id: str | None = None,
+) -> None:
+    """Append one event to the run log, on a connection already in a write.
+
+    Never on its own connection. An event the stream carries for a change that
+    rolled back would tell a consumer to re-read state that was never written,
+    and a change with no event would strand one waiting for it — so the append
+    belongs to the transaction that made the change, and dies with it.
+
+    `revision` is the run's, including on a node event: it is what a consumer
+    needs to re-read the run and to pass back as `expected_version`. When it is
+    not supplied it is read here, which is one lookup on a primary key inside a
+    transaction that is already open.
+    """
+
+    if revision is None or occurred_at is None:
+        try:
+            row = connection.execute(
+                "SELECT revision,updated_at FROM langgraph_runs WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            # A Handler journal bound to a database with no run store — an
+            # embedder using the adapter's Handler binding on its own. The
+            # attempt still happened, so it is still recorded.
+            row = None
+        if row is None:
+            revision = 0 if revision is None else revision
+            occurred_at = occurred_at or datetime.now(timezone.utc).isoformat(
+            ).replace("+00:00", "Z")
+        else:
+            if revision is None:
+                revision = int(row["revision"])
+            if occurred_at is None:
+                occurred_at = row["updated_at"]
+    connection.execute(
+        "INSERT INTO langgraph_run_events"
+        "(run_id,event_type,revision,occurred_at,node_id,attempt_id)"
+        " VALUES (?,?,?,?,?,?)",
+        (run_id, event_type, int(revision), occurred_at, node_id, attempt_id),
+    )
+
+
 class LangGraphWorkflowService:
     """Load published IR and execute it with durable, idempotent run metadata."""
 
@@ -104,15 +191,6 @@ class LangGraphWorkflowService:
                     request_hash TEXT NOT NULL,
                     run_id TEXT NOT NULL REFERENCES langgraph_runs(run_id)
                 );
-                CREATE TABLE IF NOT EXISTS langgraph_run_events (
-                    position INTEGER PRIMARY KEY AUTOINCREMENT,
-                    run_id TEXT NOT NULL,
-                    event_type TEXT NOT NULL,
-                    revision INTEGER NOT NULL,
-                    occurred_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS langgraph_run_events_by_run
-                    ON langgraph_run_events(run_id, position);
                 CREATE TABLE IF NOT EXISTS langgraph_handler_attempts (
                     attempt_id TEXT PRIMARY KEY,run_id TEXT NOT NULL,
                     node_id TEXT NOT NULL,status TEXT NOT NULL,output_json TEXT,
@@ -128,6 +206,7 @@ class LangGraphWorkflowService:
                 );
                 """
             )
+            ensure_event_log(connection)
             columns = {
                 row["name"]
                 for row in connection.execute("PRAGMA table_info(langgraph_runs)")
@@ -929,11 +1008,6 @@ class LangGraphWorkflowService:
     def _append_event(self, connection, run_id: str) -> None:
         """Record that this run changed, in the transaction that changed it.
 
-        Called after the write and before the commit, never on its own
-        connection: an event the stream carries for a change that rolled back
-        would tell a consumer to re-read state that was never written, and a
-        change with no event would strand one waiting for it.
-
         What it records is read back rather than computed. The callers know
         what they asked for, but only the row knows what was stored — and one
         of them (a resume that completes the last interrupt) advances the
@@ -946,13 +1020,9 @@ class LangGraphWorkflowService:
         ).fetchone()
         if row is None:
             return
-        connection.execute(
-            "INSERT INTO langgraph_run_events(run_id,event_type,revision,occurred_at)"
-            " VALUES (?,?,?,?)",
-            (
-                run_id, f"langgraph_run.{row['status']}",
-                int(row["revision"]), row["updated_at"],
-            ),
+        append_event(
+            connection, run_id, f"langgraph_run.{row['status']}",
+            revision=int(row["revision"]), occurred_at=row["updated_at"],
         )
 
     def events_head(self) -> int:
@@ -977,7 +1047,8 @@ class LangGraphWorkflowService:
             raise ValueError("limit must be between 1 and 500")
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT position,run_id,event_type,revision,occurred_at"
+                "SELECT position,run_id,event_type,revision,occurred_at,"
+                "node_id,attempt_id"
                 " FROM langgraph_run_events WHERE position > ?"
                 " ORDER BY position LIMIT ?",
                 (int(position), limit),

@@ -142,8 +142,11 @@ class GenerationJobTests(AuthoringJobTestCase):
     def test_a_generation_job_publishes_the_workflow_it_produced(self) -> None:
         jobs = self.service()
         created = jobs.create(actor="author", prompt="Research a topic", idempotency_key="g1")
-        # The worker thread may already have claimed it; both are "in flight".
-        self.assertIn(created["status"], {"queued", "running"})
+        # `create` hands back the job rather than the result — which status it
+        # is in by then is the worker's business. It may not have claimed it,
+        # may be running it, or with an in-process generator may already have
+        # finished; asserting one of those is asserting the worker is slow.
+        self.assertIn(created["status"], {"queued", "running", "done"})
         self.assertIsNone(created["deadline_at"])
 
         job = self.settled(jobs, created["job_id"])

@@ -280,6 +280,148 @@ def _position_of(cursor: str) -> int:
     return int(decode_cursor(cursor)["position"])
 
 
+class NodeEventTests(unittest.TestCase):
+    """What a Handler did, in the same stream as what the run did.
+
+    Only adapters with an attempt journal record node events, and that is the
+    line rather than an omission: the journal exists for Handlers whose
+    execution is an effect in the world that must not repeat. A transform is
+    pure, LangGraph may recompute it when a superstep replays, and a stream
+    that announced each recomputation would be reporting arithmetic as news.
+    """
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(self.temp.cleanup)
+        self.db = Path(self.temp.name) / "runs.sqlite3"
+
+    def bind(self, adapter, *, safety=None):
+        from tests.test_workflow_langgraph_runtime import (
+            LangGraphProductionWiringTests, port,
+        )
+        from orbit.workflow.domain.definitions import IRHandlerRef, IRNode
+        from orbit.workflow.langgraph_runtime.wiring import trusted_handlers
+
+        fixture = LangGraphProductionWiringTests("run")
+        registration = (
+            fixture.tool_registration(adapter) if safety is None
+            else fixture.tool_registration(adapter, safety=safety)
+        )
+        registry = trusted_handlers([registration], attempt_db_path=self.db)
+        return registry.resolve(IRNode(
+            "tool", "action", (port("value"),), (port("value"),),
+            IRHandlerRef(
+                registration.manifest.name, registration.manifest.version,
+                registration.manifest.fingerprint,
+            ),
+            {"tool_name": "example.read", "tool_version": "1.0.0"}, (), None,
+        ))
+
+    def context(self, attempt: str = "1"):
+        from orbit.workflow.langgraph_runtime.compiler import (
+            LangGraphExecutionContext,
+        )
+
+        return LangGraphExecutionContext(
+            "workflow:test", "tool", "langgraph_run:tool",
+            f"langgraph_attempt:tool:{attempt}",
+        )
+
+    def events(self) -> list[dict]:
+        import sqlite3
+
+        connection = sqlite3.connect(self.db)
+        connection.row_factory = sqlite3.Row
+        try:
+            return [
+                dict(row) for row in connection.execute(
+                    "SELECT * FROM langgraph_run_events ORDER BY position"
+                )
+            ]
+        finally:
+            connection.close()
+
+    CONFIG = {"tool_name": "example.read", "tool_version": "1.0.0"}
+
+    def test_an_attempt_is_recorded_as_it_starts_and_as_it_settles(self) -> None:
+        from orbit.workflow.handlers.tools import ToolResult
+
+        class Adapter:
+            def execute(self, request, context):
+                return ToolResult({"value": request.input["value"] + 1})
+            def cancel(self, execution_ref, context): return None
+            def recover(self, recovery_ref, context): return None
+
+        self.bind(Adapter()).invoke({"value": 4}, self.CONFIG, self.context())
+        recorded = self.events()
+        self.assertEqual(
+            ["langgraph_node.started", "langgraph_node.succeeded"],
+            [item["event_type"] for item in recorded],
+        )
+        for item in recorded:
+            self.assertEqual("tool", item["node_id"])
+            self.assertEqual("langgraph_attempt:tool:1", item["attempt_id"])
+
+    def test_a_replayed_attempt_announces_nothing(self) -> None:
+        """The stream carries what happened, not what was read back.
+
+        A superstep that replays hands the recorded output straight back
+        without calling the Handler. Announcing it again would have a consumer
+        re-read a node whose outcome it was already told, and count one
+        execution twice.
+        """
+
+        from orbit.workflow.handlers.tools import ToolResult
+
+        class Adapter:
+            def __init__(self): self.calls = 0
+            def execute(self, request, context):
+                self.calls += 1
+                return ToolResult({"value": 1})
+            def cancel(self, execution_ref, context): return None
+            def recover(self, recovery_ref, context): return None
+
+        adapter = Adapter()
+        bound = self.bind(adapter)
+        bound.invoke({"value": 4}, self.CONFIG, self.context())
+        bound.invoke({"value": 4}, self.CONFIG, self.context())
+        self.assertEqual(1, adapter.calls)
+        self.assertEqual(2, len(self.events()))
+
+    def test_a_failure_is_recorded_as_one(self) -> None:
+        class Adapter:
+            def execute(self, request, context):
+                raise RuntimeError("nope")
+            def cancel(self, execution_ref, context): return None
+            def recover(self, recovery_ref, context): return None
+
+        with self.assertRaises(Exception):
+            self.bind(Adapter()).invoke({"value": 4}, self.CONFIG, self.context())
+        self.assertEqual(
+            ["langgraph_node.started", "langgraph_node.failed"],
+            [item["event_type"] for item in self.events()],
+        )
+
+    def test_the_frame_carries_the_node_only_when_there_is_one(self) -> None:
+        run_event = _frame({
+            "position": 1, "run_id": "langgraph_run:r", "revision": 2,
+            "event_type": "langgraph_run.completed",
+            "occurred_at": "2026-01-01T00:00:00Z",
+            "node_id": None, "attempt_id": None,
+        })
+        node_event = _frame({
+            "position": 2, "run_id": "langgraph_run:r", "revision": 2,
+            "event_type": "langgraph_node.started",
+            "occurred_at": "2026-01-01T00:00:00Z",
+            "node_id": "work", "attempt_id": "langgraph_attempt:work:1",
+        })
+        self.assertNotIn("node_id", run_event)
+        self.assertEqual("work", node_event["node_id"])
+        self.assertEqual("langgraph_attempt:work:1", node_event["attempt_id"])
+        # The run either way: a consumer acts by re-reading the run.
+        self.assertEqual("langgraph_run:r", node_event["aggregate_id"])
+
+
 class CompositionTests(unittest.TestCase):
     def test_the_socket_is_mounted_with_the_engine_behind_it(self) -> None:
         from orbit.web.app import create_app

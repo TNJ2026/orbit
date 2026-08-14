@@ -146,9 +146,12 @@ submit Workflow DSL with `submit_authoring_response` and process compiler
 feedback through `get_authoring_job`.
 
 Runtime events can be consumed with `wait_app_event`, `list_app_events`, and
-`ack_app_event`. They are the engine's run-state changes — `event_type` is
-`langgraph_run.<status>` and `run_id` addresses the run. Treat events as hints
-and re-read the referenced Run before acting.
+`ack_app_event`. `event_type` is `langgraph_run.<status>` for a run's state
+changes and `langgraph_node.<outcome>` for one Handler attempt, which also
+carries `node_id` and `attempt_id`. Node events come from Handlers with an
+attempt journal — the ones whose execution is an effect that must not repeat —
+so a replayed superstep announces nothing. Treat events as hints and re-read
+the referenced Run before acting.
 
 ## CLI quick reference
 
