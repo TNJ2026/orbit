@@ -8,6 +8,8 @@ file. Route modules receive the context and stay thin.
 
 from __future__ import annotations
 
+import asyncio
+
 from datetime import datetime, timezone
 import json
 
@@ -205,7 +207,20 @@ class ApiContext:
             return error("invalid_command", "idempotency-key header is required")
         try:
             body = await _bounded_json(request)
-            status, result = self.executor.execute(
+            # Off the event loop. Every command here is synchronous, and one
+            # of them runs a whole workflow: starting a run executed it inline,
+            # so for as long as an Agent was working this process answered
+            # nothing at all — not the UI, not `/health`, not the event socket
+            # the run's own progress travels on. `/mcp` has always dispatched
+            # this way; this is the same move at the other command boundary.
+            #
+            # Runs can now overlap, which they could not before. In the local
+            # product single-goal mode keeps one actor to one run, so what
+            # this buys there is a Runtime that stays answerable while that
+            # one run works. An embedder that turns single-goal off should
+            # set the executor's thread limit deliberately.
+            status, result = await asyncio.to_thread(
+                self.executor.execute,
                 actor=actor, idempotency_key=key, method=request.method,
                 request_path=request.url.path, body=body,
                 handler=lambda payload, who, idem: handler(payload, who, idem),

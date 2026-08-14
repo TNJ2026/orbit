@@ -100,6 +100,24 @@ class AsgiHarness:
         return self.request("POST", path, actor=actor, headers=headers, body=body)
 
     def request(self, method: str, path: str, *, actor=None, headers=None, body=None):
+        return self._loop.run_until_complete(
+            self.arequest(method, path, actor=actor, headers=headers, body=body)
+        )
+
+    def gather(self, *coroutines):
+        """Run coroutines together on this harness's loop.
+
+        The only way to observe whether one request is served while another is
+        in flight: a handler that blocks the loop cannot be caught by asking it
+        two questions in turn.
+        """
+
+        async def both():
+            return await asyncio.gather(*coroutines)
+
+        return self._loop.run_until_complete(both())
+
+    def arequest(self, method: str, path: str, *, actor=None, headers=None, body=None):
         raw = b"" if body is None else json.dumps(body).encode()
         header_map = dict(headers or {})
         if actor is not None:
@@ -158,7 +176,7 @@ class AsgiHarness:
                 json=lambda: json.loads(body.decode()),
             )
 
-        return self._loop.run_until_complete(call())
+        return call()
 
 SCHEMAS = {
     "schema://object/1.0": {"type": "object"},
