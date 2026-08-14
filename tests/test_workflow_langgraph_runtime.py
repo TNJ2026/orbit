@@ -1057,6 +1057,136 @@ class LangGraphWorkflowCompilerTests(unittest.TestCase):
         )
         self.assertEqual("merged", completed["result"])
 
+    def test_an_any_join_does_not_demand_the_branch_that_lost(self) -> None:
+        """The join policy decides how many inputs must be there, not the port.
+
+        `any` is satisfied by one branch and every other port is *meant* to be
+        absent — but the per-port `required` flag was checked anyway, so the
+        shape an Agent writes for "ask a person, or publish straight away"
+        died at the join it was routed through. For `all` the same flag is
+        wrong for a different reason: a branch an upstream decision ruled out
+        can never arrive at any port.
+        """
+
+        check = node("check", inputs=("value",), outputs=("value",))
+        decide = node(
+            "decide", inputs=("value",), outputs=("value",),
+            kind="decision", handler=False,
+        )
+        ask = node("ask", inputs=("value",), outputs=("value",))
+        policy = IRPolicy(
+            "either", "join", {"mode": "any", "merge_mode": "object_by_edge"},
+        )
+        gate = IRNode(
+            "gate", "join",
+            (port("approved"), port("direct")),
+            (port("result"),),
+            None, {}, (policy.id,), None, None,
+        )
+        done = node("done", inputs=("result",), kind="terminal", handler=False)
+        ir = workflow(
+            (check, decide, ask, gate, done),
+            (
+                edge("to_decide", "check", "decide"),
+                edge(
+                    "needs_person", "decide", "ask",
+                    condition={
+                        "op": "eq",
+                        "left": {"op": "ref", "path": "source.value"},
+                        "right": {"op": "literal", "value": "unsure"},
+                    },
+                ),
+                edge("direct", "decide", "gate", target_port="direct", priority=100),
+                edge("approved", "ask", "gate", target_port="approved"),
+                edge(
+                    "finish", "gate", "done",
+                    source_port="result", target_port="result",
+                ),
+            ),
+            entry=("check",), terminals=("done",), result=("gate", "result"),
+            policies=(policy,),
+        )
+        compiled = compile_workflow(
+            ir,
+            LangGraphHandlerRegistry([
+                binding("check", lambda values, config, context: {"value": "clear"}),
+                binding("ask", lambda values, config, context: {"value": "approved"}),
+            ]),
+            checkpointer=InMemorySaver(),
+        )
+
+        completed = compiled.invoke(
+            {"value": "in"}, config={"configurable": {"thread_id": "any-join"}},
+        )
+
+        order = list(completed["execution_order"])
+        self.assertNotIn("ask", order)
+        self.assertIn("gate", order)
+        # Only the branch that ran is in the merge; the other is absent by
+        # design rather than missing.
+        self.assertEqual({"direct"}, set(completed["result"]))
+
+    def test_a_join_with_several_inputs_and_one_output_produces_it(self) -> None:
+        """A join is not required to name its output after an input.
+
+        The merge policy combines the edges feeding each *input port*; nothing
+        said how those ports become the output. A join whose output happened
+        to share a name with an input worked, and one that did not produced
+        nothing and failed as a Handler that had omitted its own declared
+        output — after the branches feeding it had run. Written by an Agent
+        asked to merge two checks into one report.
+        """
+
+        fan = node(
+            "fan", inputs=("value",), outputs=("value",), route_mode="parallel",
+        )
+        facts = node("facts", inputs=("value",), outputs=("value",))
+        tone = node("tone", inputs=("value",), outputs=("value",))
+        policy = IRPolicy(
+            "both", "join", {"mode": "all", "merge_mode": "object_by_edge"},
+        )
+        gather = IRNode(
+            "gather", "join",
+            (port("from_facts"), port("from_tone")),
+            (port("result"),),
+            None, {}, (policy.id,), None, None,
+        )
+        done = node("done", inputs=("result",), kind="terminal", handler=False)
+        ir = workflow(
+            (fan, facts, tone, gather, done),
+            (
+                edge("f_facts", "fan", "facts"),
+                edge("f_tone", "fan", "tone"),
+                edge("facts_in", "facts", "gather", target_port="from_facts"),
+                edge("tone_in", "tone", "gather", target_port="from_tone"),
+                edge(
+                    "finish", "gather", "done",
+                    source_port="result", target_port="result",
+                ),
+            ),
+            entry=("fan",), terminals=("done",), result=("gather", "result"),
+            policies=(policy,),
+        )
+        compiled = compile_workflow(
+            ir,
+            LangGraphHandlerRegistry([
+                binding("fan", lambda values, config, context: dict(values)),
+                binding("facts", lambda values, config, context: {"value": "checked"}),
+                binding("tone", lambda values, config, context: {"value": "polite"}),
+            ]),
+            checkpointer=InMemorySaver(),
+        )
+
+        completed = compiled.invoke(
+            {"value": "in"}, config={"configurable": {"thread_id": "wide-join"}},
+        )
+
+        # Keyed by the input port names the author gave each branch.
+        self.assertEqual(
+            {"from_facts", "from_tone"}, set(completed["result"]),
+        )
+        self.assertIn("done", completed["execution_order"])
+
     def test_a_terminal_may_carry_an_artifact_the_authoring_rules_demand(self) -> None:
         """The two layers were asking for opposite things.
 

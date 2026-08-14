@@ -265,6 +265,14 @@ def _assemble_inputs(
     for port in node.inputs:
         if port.id not in assembled and port.has_default:
             assembled[port.id] = to_primitive(port.default)
+        # A join's policy decides how many of its inputs must be there, and
+        # the per-port flag contradicts it: an `any` join is satisfied by one
+        # branch and every other port is *meant* to be absent, while for `all`
+        # a branch an upstream decision ruled out can never arrive at any
+        # port. The mode is the authority — the threshold it implies is
+        # checked above, and scheduling will not run a join before it holds.
+        if node.kind == "join":
+            continue
         if port.required and port.id not in assembled:
             raise ValueError(f"missing required input {node.id}.{port.id}")
     return to_primitive(assembled)
@@ -291,8 +299,21 @@ def _handlerless_outputs(
     if not node.outputs:
         return {}
     copied = {port.id: inputs[port.id] for port in node.outputs if port.id in inputs}
-    if node.kind == "join" and not copied and len(node.inputs) == len(node.outputs) == 1:
-        copied[node.outputs[0].id] = inputs[node.inputs[0].id]
+    if node.kind == "join" and not copied and len(node.outputs) == 1:
+        if len(node.inputs) == 1:
+            # One in, one out: the join is a rendezvous and the value passes
+            # straight through, unwrapped.
+            copied[node.outputs[0].id] = inputs[node.inputs[0].id]
+        else:
+            # Several branches into one output. The merge policy has already
+            # combined the edges feeding each input port; what was missing was
+            # any rule for putting those ports together, so a join whose
+            # output happened not to share a name with an input produced
+            # nothing at all and failed as a Handler that omitted its own
+            # declared output. Keyed by input port, because that is the name
+            # the author gave each branch and the only one downstream can
+            # refer to.
+            copied[node.outputs[0].id] = dict(inputs)
     return _normalize_outputs(node, copied)
 
 

@@ -135,20 +135,22 @@ def _unsatisfiable_join(join_id: str, edges, node_by_id, node_index):
     """Ports of an `all` join that no single run can fill together.
 
     Reported as (message, hint, path). Empty when the join is satisfiable, and
-    deliberately conservative: it accuses only when two ports are fed *solely*
-    from different branches of one exclusive node, which is a contradiction
-    rather than a smell.
+    deliberately conservative: it accuses only when two ports belong wholly to
+    different branches of one exclusive node, which is a contradiction rather
+    than a smell.
+
+    Branches are followed by *edge*, not by source node. A fan-out that feeds
+    the join directly on one branch is the common shape — "ask a person, or
+    publish straight away" — and it belongs to no branch of itself, so asking
+    which branch its node is in finds nothing.
     """
 
-    feeders: dict[str, set[str]] = {}
-    for edge in edges:
-        if (edge.get("to") or {}).get("node") != join_id or edge.get("back_edge"):
-            continue
-        port = (edge.get("to") or {}).get("port")
-        source = (edge.get("from") or {}).get("node")
-        if port is not None and source is not None:
-            feeders.setdefault(port, set()).add(source)
-    if len(feeders) < 2:
+    incoming = [
+        edge for edge in edges
+        if (edge.get("to") or {}).get("node") == join_id and not edge.get("back_edge")
+    ]
+    ports = {(edge.get("to") or {}).get("port") for edge in incoming}
+    if len(ports - {None}) < 2:
         return []
 
     findings = []
@@ -162,29 +164,39 @@ def _unsatisfiable_join(join_id: str, edges, node_by_id, node_index):
         ]
         if len(outgoing) < 2:
             continue
-        # One branch per outgoing edge: what stays reachable through it alone.
-        branches = {
-            edge["id"]: _reachable_from(
-                (edge.get("to") or {}).get("node", ""), edges,
-            ) | {(edge.get("to") or {}).get("node", "")}
+        reach = {
+            edge["id"]: _reachable_from((edge.get("to") or {}).get("node", ""), edges)
             for edge in outgoing
         }
-        placed: dict[str, str] = {}
-        for port, sources in feeders.items():
+
+        def branch_of(edge):
+            """Which of the fan-out's edges this one can only be reached through."""
+
+            if (edge.get("from") or {}).get("node") == fan_out_id:
+                return edge.get("id")
             owning = {
-                edge_id for edge_id, reach in branches.items()
-                if sources <= reach
+                edge_id for edge_id, nodes in reach.items()
+                if (edge.get("from") or {}).get("node") in nodes
             }
-            if len(owning) == 1:
-                placed[port] = next(iter(owning))
-        by_branch: dict[str, list[str]] = {}
-        for port, edge_id in placed.items():
-            by_branch.setdefault(edge_id, []).append(port)
-        if len(by_branch) > 1:
-            split = ", ".join(sorted(placed))
+            return next(iter(owning)) if len(owning) == 1 else None
+
+        placed: dict[str, set[str | None]] = {}
+        for edge in incoming:
+            port = (edge.get("to") or {}).get("port")
+            if port is not None:
+                placed.setdefault(port, set()).add(branch_of(edge))
+        # A port reachable through more than one branch, or through none of
+        # them, is not evidence: only a port that lives in exactly one.
+        owned = {
+            port: next(iter(branches))
+            for port, branches in placed.items()
+            if len(branches) == 1 and next(iter(branches)) is not None
+        }
+        if len(set(owned.values())) > 1:
             findings.append((
                 f"join {join_id!r} cannot be satisfied: {fan_out_id!r} routes "
-                f"exclusively, so its branches cannot both fill {split}",
+                f"exclusively, so its branches cannot both fill "
+                f"{', '.join(sorted(owned))}",
                 "declare route_mode 'parallel' on the node that fans out, "
                 "or give the join mode 'any'",
                 ("nodes", node_index[fan_out_id], "route_mode"),
