@@ -805,7 +805,6 @@ def create_app(
             authoring_service=authoring_service,
             workflow_publisher=workflow_publisher,
             draft_service=draft_service,
-            single_goal_mode=single_goal_mode,
             operational_config=operational_config,
             authoring_jobs=authoring_jobs,
             shutdown_request=shutdown_request,

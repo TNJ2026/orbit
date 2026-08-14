@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+import inspect
 import tempfile
 import unittest
 
@@ -1901,6 +1902,28 @@ class CapabilityTests(ApiTestCase):
             self.assertTrue(writer["permissions"]["ops_read"])
             self.assertTrue(writer["permissions"]["ops_write"])
 
+    def test_a_runtime_with_no_engine_makes_no_single_goal_promise(self) -> None:
+        """Asked for, and still reported false: nothing would keep it.
+
+        The report used to come from the request that turned it on rather
+        than from anything that acts on it, so a composition with no engine
+        at all still told clients one goal ran at a time.
+        """
+
+        app = create_app(
+            self.db,
+            handlers=[transform_registration()], schemas=SCHEMAS,
+            poll_seconds=0.02,
+            authenticator=lambda request: request.headers.get("x-orbit-actor"),
+            authorizer=Authorizer(lambda actor: self.scopes.get(actor, [])),
+            single_goal_mode=True,
+        )
+        with AsgiHarness(app) as client:
+            data = client.get(
+                "/api/v1/capabilities", actor="reader"
+            ).json()["data"]
+            self.assertFalse(data["product_mode"]["single_goal_mode"])
+
     def test_capabilities_report_single_goal_product_mode(self) -> None:
         app = create_app(
             self.db,
@@ -1910,6 +1933,7 @@ class CapabilityTests(ApiTestCase):
             authorizer=Authorizer(lambda actor: self.scopes.get(actor, [])),
             artifact_backend=self.artifact_backend,
             single_goal_mode=True,
+            langgraph_state_directory=Path(self.temp.name) / "langgraph",
         )
         with AsgiHarness(app) as client:
             data = client.get(
@@ -2116,6 +2140,61 @@ class SingleGoalApiTests(unittest.TestCase):
                 first.json()["data"]["run"]["run_id"], active["run_id"],
             )
             self.assertEqual("Review the draft", active["goal"])
+
+    def test_the_report_cannot_be_told_something_the_engine_does_not_do(self) -> None:
+        """There is one answer, and it comes from whoever keeps the rule.
+
+        The API layer used to carry its own `single_goal_mode`, left over from
+        an engine that enforced there. Anything could be passed into it, and
+        for a long time something was: it said `true` beside an engine that
+        started as many goals as it was asked to.
+        """
+
+        from starlette.applications import Starlette
+
+        from orbit.web.api_v1 import build_api_v1
+        from orbit.workflow.langgraph_runtime import build_service
+
+        self.assertNotIn(
+            "single_goal_mode",
+            inspect.signature(build_api_v1).parameters,
+            "the API layer can be told again",
+        )
+
+        for enforced in (False, True):
+            with self.subTest(single_goal=enforced):
+                root = Path(self.temp.name) / f"derived-{enforced}"
+                root.mkdir()
+                database = root / "runtime.db"
+                publish_human_workflow(database)
+                engine = build_service(
+                    database, [transform_registration()],
+                    state_directory=root / "langgraph", single_goal=enforced,
+                )
+                app = Starlette(routes=build_api_v1(
+                    database, langgraph_service=engine,
+                    authenticator=lambda request: "author",
+                    authorizer=Authorizer(
+                        lambda _actor: [READ_SCOPE, WRITE_SCOPE, OPS_READ_SCOPE]
+                    ),
+                ))
+                with AsgiHarness(app) as client:
+                    reported = client.get(
+                        "/api/v1/capabilities", actor="author",
+                    ).json()["data"]["product_mode"]["single_goal_mode"]
+                    self.assertEqual(enforced, reported)
+                    body = {
+                        "workflow_id": "workflow:human", "input": {"value": 1},
+                    }
+                    client.post(
+                        "/api/v1/langgraph-runs", actor="author", key="a",
+                        body=body,
+                    )
+                    second = client.post(
+                        "/api/v1/langgraph-runs", actor="author", key="b",
+                        body=body,
+                    )
+                self.assertEqual(409 if enforced else 200, second.status_code)
 
     def test_the_slot_is_released_by_cancelling(self) -> None:
         with AsgiHarness(self.app) as client:

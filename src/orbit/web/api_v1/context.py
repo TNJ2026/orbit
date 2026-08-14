@@ -67,7 +67,6 @@ class ApiContext:
         authoring_service=None,
         workflow_publisher=None,
         draft_service=None,
-        single_goal_mode: bool = True,
         authoring_jobs=None,
         shutdown_request: Callable[[], None] | None = None,
         langgraph_service=None,
@@ -132,7 +131,13 @@ class ApiContext:
         self.workflow_publisher = workflow_publisher
         self.authoring_service = authoring_service
         self.shutdown_request = shutdown_request
-        self.single_goal_mode = single_goal_mode
+        # Derived, never passed: one goal at a time is a rule the engine
+        # keeps, so this reads it from there. Given its own parameter it
+        # became a second answer that could differ from the first — which is
+        # how it came to advertise a constraint nothing was enforcing.
+        self.single_goal_mode = bool(
+            getattr(langgraph_service, "single_goal", False)
+        )
 
     def recent_handler_attempts(
         self,
