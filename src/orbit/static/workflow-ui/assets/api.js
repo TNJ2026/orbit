@@ -125,6 +125,12 @@ export class Api {
     return this.get(`/api/v1/langgraph-runs/${encodeURIComponent(runId)}/steps`);
   }
 
+  /** How each branch of a definition has gone across its runs. */
+  workflowBranches(workflowId, limit = 100) {
+    const path = `/api/v1/workflows/${encodeURIComponent(workflowId)}/branches`;
+    return this.get(`${path}?limit=${limit}`);
+  }
+
   /** Which branch this run took at each fork, and which it did not. */
   runEdges(runId) {
     return this.get(`/api/v1/langgraph-runs/${encodeURIComponent(runId)}/edges`);

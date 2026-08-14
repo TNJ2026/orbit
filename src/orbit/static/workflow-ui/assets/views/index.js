@@ -1693,6 +1693,7 @@ export function createViews(context) {
           canvas,
         ].filter(Boolean));
         drawDefinition(value);
+        await renderBranchFindings(page, workflowId);
       } catch (error) {
         page.replaceChildren(dataState(el, i18n, "error", { onRetry: draw }));
         reportError(error);
@@ -1700,6 +1701,48 @@ export function createViews(context) {
     };
 
     await draw();
+  }
+
+  /* Branches the runs have never entered.
+   *
+   * The run page says which way one run went; it cannot call a branch dead,
+   * because on any single run exactly one branch of a fork is taken. Only the
+   * tally can, so the finding belongs to the definition and appears where the
+   * definition is edited.
+   *
+   * Only the finding is drawn — a branch decided and never entered. The rest
+   * of the tally is a fact about normal operation and would bury it.
+   */
+  async function renderBranchFindings(page, workflowId) {
+    let report;
+    try {
+      report = (await api.workflowBranches(workflowId)).data;
+    } catch (error) {
+      return;
+    }
+    const findings = (report.edges || []).filter(
+      (edge) => edge.verdict === "never_taken",
+    );
+    if (!findings.length) return;
+    page.append(el("section", { class: "panel workflow-branch-findings" }, [
+      el("div", { class: "panel-head" }, [
+        el("div", { class: "panel-title",
+          text: i18n.t("workflows.branchFindings") }),
+      ]),
+      el("p", { class: "muted", text: i18n.t("workflows.branchFindings.hint", {
+        runs: i18n.number(report.runs),
+      }) }),
+      el("ul", { class: "workflow-branch-list" }, findings.map((edge) => el(
+        "li", { class: "workflow-branch-finding" }, [
+          el("span", { class: "run-branch-target",
+            text: `${edge.source_node} → ${edge.target_node}` }),
+          el("span", { class: "muted", text: i18n.t(
+            "workflows.branchFindings.count",
+            { decided: i18n.number(edge.decided) },
+          ) }),
+        ],
+      ))),
+    ]));
   }
 
   /* --------------------------------------------------------- workflow editor */

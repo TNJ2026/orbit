@@ -929,6 +929,71 @@ class SimplifiedRegenerateTests(BrowserE2ETestCase):
         page.wait_for_selector(".workflow-editor textarea")
         return page
 
+    def test_a_branch_the_runs_never_entered_is_named_where_it_is_edited(
+        self,
+    ) -> None:
+        """The finding the run page cannot make.
+
+        On any single run one branch of a fork is taken and the rest are not,
+        so only the tally across runs can call one dead — which makes it a
+        fact about the definition, shown where the definition is changed.
+        """
+
+        page = self.open("en-US", "/ui/#/workflows")
+        page.route("**/branches**", lambda route: route.fulfill(
+            status=200, content_type="application/json",
+            body=json.dumps({
+                "schema_version": "1.0", "projection_version": None,
+                "next_cursor": None,
+                "data": {
+                    "workflow_id": "workflow:research", "workflow_version": 1,
+                    "runs": 12,
+                    "edges": [
+                        {"edge_id": "e1", "source_node": "classify",
+                         "target_node": "urgent", "route": "success",
+                         "default": False, "decided": 12, "taken": 0,
+                         "not_taken": 12, "shadowed": 0, "other_route": 0,
+                         "not_reached": 0, "undecidable": 0,
+                         "verdict": "never_taken"},
+                        {"edge_id": "e2", "source_node": "classify",
+                         "target_node": "normal", "route": "success",
+                         "default": True, "decided": 12, "taken": 12,
+                         "not_taken": 0, "shadowed": 0, "other_route": 0,
+                         "not_reached": 0, "undecidable": 0,
+                         "verdict": "taken"},
+                    ],
+                },
+            }),
+        ))
+        page.goto(f"{self.base}/ui/#/workflows/workflow:research/edit")
+        page.wait_for_selector(".workflow-branch-findings")
+
+        # Only the finding. The branch every run took is normal operation and
+        # would bury it.
+        self.assertEqual(1, page.locator(".workflow-branch-finding").count())
+        text = page.inner_text(".workflow-branch-findings")
+        self.assertIn("classify", text)
+        self.assertIn("urgent", text)
+        self.assertNotIn("normal", text)
+        self.assertIn("12", text)
+
+    def test_a_definition_with_nothing_to_report_shows_no_panel(self) -> None:
+        page = self.open("en-US", "/ui/#/workflows")
+        page.route("**/branches**", lambda route: route.fulfill(
+            status=200, content_type="application/json",
+            body=json.dumps({
+                "schema_version": "1.0", "projection_version": None,
+                "next_cursor": None,
+                "data": {
+                    "workflow_id": "workflow:research", "workflow_version": 1,
+                    "runs": 0, "edges": [],
+                },
+            }),
+        ))
+        page.goto(f"{self.base}/ui/#/workflows/workflow:research/edit")
+        page.wait_for_selector(".workflow-editor textarea")
+        self.assertEqual(0, page.locator(".workflow-branch-findings").count())
+
     def test_detail_is_read_only_and_editing_has_its_own_route(self) -> None:
         page = self.open("en-US", "/ui/#/workflows")
         card = page.locator('[data-workflow-id="workflow:research"]')

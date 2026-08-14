@@ -612,6 +612,38 @@ def build_routes(ctx) -> list[Route]:
             })
         return JSONResponse(envelope(item))
 
+    async def workflow_branches(request: Request) -> JSONResponse:
+        """How each branch of this definition has gone across its runs.
+
+        The single-run report cannot call a branch dead — on any one run
+        exactly one branch of a fork is taken and the rest are not. Only the
+        tally can, so it lives on the definition rather than on a run.
+        """
+
+        actor = ctx.authenticate(request, READ_SCOPE)
+        if isinstance(actor, JSONResponse):
+            return actor
+        if ctx.langgraph_service is None:
+            return error("unavailable", "the run engine is not configured", 503)
+        try:
+            workflow_id = str(EntityId.parse(request.path_params["workflow_id"]))
+            if not workflow_id.startswith("workflow:"):
+                raise ValueError("workflow id is required")
+            unknown = set(request.query_params) - {"limit"}
+            if unknown:
+                raise ValueError(f"unknown query parameter: {sorted(unknown)[0]}")
+            limit = int(request.query_params.get("limit", 100))
+            report = ctx.langgraph_service.branch_history(
+                workflow_id, actor=actor, limit=limit,
+            )
+        except LookupError as exc:
+            return error("not_found", str(exc), 404)
+        except ValueError as exc:
+            return error("invalid_request", str(exc))
+        return JSONResponse(envelope({
+            **report, "edges": list(report["edges"]),
+        }))
+
     async def workflow_action_update(request: Request) -> JSONResponse:
         if ctx.workflow_publisher is None:
             return error("publish_unavailable", "workflow publishing is not wired", 503)
@@ -794,6 +826,10 @@ def build_routes(ctx) -> list[Route]:
         Route(
             "/api/v1/workflows/{workflow_id}/modify",
             workflow_modify, methods=["POST"],
+        ),
+        Route(
+            "/api/v1/workflows/{workflow_id}/branches",
+            workflow_branches, methods=["GET"],
         ),
         Route(
             "/api/v1/workflows/{workflow_id}/actions/{node_id}",

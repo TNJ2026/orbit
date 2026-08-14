@@ -22,7 +22,7 @@ from orbit.workflow.domain.serialization import definition_hash
 from orbit.workflow.langgraph_runtime import build_service
 from orbit.workflow.langgraph_runtime.compiler import LangGraphHandlerRegistry
 from orbit.workflow.langgraph_runtime.service import (
-    EDGE_STATUSES, LangGraphWorkflowService,
+    BRANCH_VERDICTS, EDGE_STATUSES, LangGraphWorkflowService,
 )
 from orbit.workflow.persistence.workflow_versions import SQLiteWorkflowVersionStore
 
@@ -1224,6 +1224,212 @@ class EdgeReportTests(unittest.TestCase):
         self.assertEqual("not_taken", report["to_urgent"]["status"])
         self.assertEqual("not_reached", report["onward"]["status"])
         self.assertEqual(0, report["onward"]["visits"])
+
+
+
+class BranchHistoryTests(EdgeReportTests):
+    """The tally across runs — the only place a branch can be called suspect.
+
+    Inherits the fixture rather than the assertions: what is under test here
+    is what many runs of one definition add up to, not what one run did.
+    """
+
+    def repeat(self, outputs, *, edges, starts=None):
+        """Start one run per output, all against the same definition.
+
+        `starts` holds some outputs back for runs the test starts itself.
+        """
+
+        from orbit.workflow.handlers.tools import ToolResult
+        from orbit.workflow.langgraph_runtime.artifacts import LangGraphArtifactStore
+        from orbit.workflow.langgraph_runtime.wiring import trusted_handlers
+
+        pending = list(outputs)
+
+        class Adapter:
+            def execute(self, request, context):
+                return ToolResult({"value": pending.pop(0)})
+
+            def cancel(self, execution_ref, context):
+                return None
+
+            def recover(self, recovery_ref, context):
+                return None
+
+        fixture = engine_tests.LangGraphProductionWiringTests("run")
+        registration = fixture.tool_registration(Adapter())
+        manifest = registration.manifest
+        classify = IRNode(
+            "classify", "action",
+            (engine_tests.port("value"),), (engine_tests.port("value"),),
+            IRHandlerRef(manifest.name, manifest.version, manifest.fingerprint),
+            {"tool_name": "example.read", "tool_version": "1.0.0"},
+            (), None, None,
+        )
+        ir = engine_tests.workflow(
+            (
+                classify,
+                engine_tests.node(
+                    "urgent", inputs=("value",), outputs=("value",),
+                    kind="terminal", handler=False,
+                ),
+                engine_tests.node(
+                    "normal", inputs=("value",), outputs=("value",),
+                    kind="terminal", handler=False,
+                ),
+            ),
+            edges,
+            entry=("classify",), terminals=("urgent", "normal"),
+            result=("classify", "value"),
+        )
+        store = SQLiteWorkflowVersionStore(self.root / "workflows.sqlite3")
+        store.publish(
+            CompiledWorkflow(ir, definition_hash(ir), "test", "sha256:" + "c" * 64),
+            expected_latest_version=0, source_format="json",
+            source_text="{}", actor="test", dsl_version="1.3",
+        )
+        runs = self.root / "runs.sqlite3"
+        service = LangGraphWorkflowService(
+            store, trusted_handlers([registration], attempt_db_path=runs),
+            run_db_path=runs,
+            checkpoint_db_path=self.root / "checkpoints.sqlite3",
+            artifact_store=LangGraphArtifactStore(runs, self.root / "artifacts"),
+        )
+        for index in range(len(outputs) if starts is None else starts):
+            service.start(
+                ir.workflow_id, {"value": {}},
+                idempotency_key=f"run-{index}", actor="local",
+            )
+        return service, ir
+
+    def history(self, service, ir, **kwargs):
+        report = service.branch_history(ir.workflow_id, actor="local", **kwargs)
+        for item in report["edges"]:
+            assert item["verdict"] in BRANCH_VERDICTS, item["verdict"]
+        return report, {item["edge_id"]: item for item in report["edges"]}
+
+    def test_a_branch_no_run_ever_entered_is_the_finding(self) -> None:
+        """Twelve decisions, zero entries — what one run could never say."""
+
+        service, ir = self.repeat([{}] * 12, edges=self.branching())
+        report, edges = self.history(service, ir)
+        self.assertEqual(12, report["runs"])
+        self.assertEqual("never_taken", edges["to_urgent"]["verdict"])
+        self.assertEqual(12, edges["to_urgent"]["decided"])
+        self.assertEqual(0, edges["to_urgent"]["taken"])
+        self.assertEqual("taken", edges["to_normal"]["verdict"])
+
+    def test_one_run_that_entered_it_settles_the_question(self) -> None:
+        """Rare is not dead, and the tally must not confuse them.
+
+        This is the whole reason the verdict is drawn from a count of
+        entries rather than a ratio: a branch taken once in twelve is alive.
+        """
+
+        service, ir = self.repeat(
+            [{}] * 11 + [{"severity": "high"}], edges=self.branching(),
+        )
+        _report, edges = self.history(service, ir)
+        self.assertEqual("taken", edges["to_urgent"]["verdict"])
+        self.assertEqual(1, edges["to_urgent"]["taken"])
+        self.assertEqual(11, edges["to_urgent"]["not_taken"])
+
+    def test_an_error_edge_on_runs_that_never_failed_is_not_a_finding(self) -> None:
+        """Otherwise it would be the loudest one on the page, every time."""
+
+        service, ir = self.repeat([{}] * 5, edges=(
+            engine_tests.edge("to_normal", "classify", "normal"),
+            engine_tests.edge("on_error", "classify", "urgent", route="error"),
+        ))
+        _report, edges = self.history(service, ir)
+        self.assertEqual("no_evidence", edges["on_error"]["verdict"])
+        self.assertEqual(0, edges["on_error"]["decided"])
+        self.assertEqual(5, edges["on_error"]["other_route"])
+
+    def test_pruning_runs_shrinks_the_evidence(self) -> None:
+        """Every number is backed by a run that can still be opened.
+
+        A counter would keep saying twelve after eleven of the runs behind
+        it were deleted, and the one remaining run could not corroborate it.
+        """
+
+        service, ir = self.repeat([{}] * 12, edges=self.branching())
+        self.assertEqual(12, self.history(service, ir)[0]["runs"])
+        service.prune(before="2999-01-01T00:00:00Z")
+        report, edges = self.history(service, ir)
+        self.assertEqual(0, report["runs"])
+        self.assertEqual({}, edges)
+
+    def test_a_limit_bounds_how_far_back_it_looks(self) -> None:
+        service, ir = self.repeat([{}] * 12, edges=self.branching())
+        report, edges = self.history(service, ir, limit=4)
+        self.assertEqual(4, report["runs"])
+        self.assertEqual(4, edges["to_urgent"]["decided"])
+        with self.assertRaises(ValueError):
+            service.branch_history(ir.workflow_id, actor="local", limit=0)
+
+    def test_an_edge_id_is_only_the_same_edge_within_one_version(self) -> None:
+        """Two definitions' tallies must not be added together.
+
+        A published change can reuse an edge id for a different condition,
+        or between different nodes. Counting both under one heading would
+        report an edge as never entered on the strength of runs of a
+        definition where it did not exist.
+        """
+
+        # Seven outputs: four runs of version 1 here, three of version 2 below.
+        service, ir = self.repeat([{"severity": "high"}] * 7, starts=4, edges=(
+            engine_tests.edge(
+                "branch", "classify", "urgent",
+                condition=exists("source.value.severity"),
+            ),
+            engine_tests.edge("fallback", "classify", "normal"),
+        ))
+        first = self.history(service, ir)[1]
+        self.assertEqual("taken", first["branch"]["verdict"])
+
+        # The same id, now guarding a field nothing produces.
+        revised = engine_tests.workflow(
+            tuple(ir.nodes),
+            (
+                engine_tests.edge(
+                    "branch", "classify", "urgent",
+                    condition=exists("source.value.nothing_makes_this"),
+                ),
+                engine_tests.edge("fallback", "classify", "normal"),
+            ),
+            entry=("classify",), terminals=("urgent", "normal"),
+            result=("classify", "value"),
+        )
+        SQLiteWorkflowVersionStore(self.root / "workflows.sqlite3").publish(
+            CompiledWorkflow(
+                revised, definition_hash(revised), "test", "sha256:" + "d" * 64,
+            ),
+            expected_latest_version=1, source_format="json",
+            source_text="{}", actor="test", dsl_version="1.3",
+        )
+        for index in range(3):
+            service.start(
+                revised.workflow_id, {"value": {}},
+                idempotency_key=f"v2-{index}", actor="local",
+            )
+
+        report, edges = self.history(service, ir)
+        self.assertEqual(2, report["workflow_version"])
+        # Three runs of version 2, not seven of both.
+        self.assertEqual(3, report["runs"])
+        self.assertEqual("never_taken", edges["branch"]["verdict"])
+        self.assertEqual(3, edges["branch"]["decided"])
+
+        older, older_edges = self.history(service, ir, workflow_version=1)
+        self.assertEqual(4, older["runs"])
+        self.assertEqual("taken", older_edges["branch"]["verdict"])
+
+    def test_another_actor_sees_none_of_it(self) -> None:
+        service, ir = self.repeat([{}] * 3, edges=self.branching())
+        report = service.branch_history(ir.workflow_id, actor="somebody-else")
+        self.assertEqual(0, report["runs"])
+        self.assertEqual((), report["edges"])
 
 
 

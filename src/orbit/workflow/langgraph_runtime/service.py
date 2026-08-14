@@ -45,6 +45,10 @@ EDGE_STATUSES = (
     "undecidable",
 )
 
+# What `branch_history` concludes from a tally of those. Named for the same
+# reason: a client renders each as a word.
+BRANCH_VERDICTS = ("taken", "never_taken", "no_evidence")
+
 
 # A run that has not finished and could still do something. `unknown` is not
 # here: nobody can tell whether it is still working, and holding the one goal
@@ -1469,6 +1473,88 @@ class LangGraphWorkflowService:
                     }),
                 })
         return tuple(reversed(steps))
+
+    def branch_history(
+        self, workflow_id: str, *, workflow_version: int | None = None,
+        actor: str | None = None, limit: int = 100,
+    ) -> Mapping[str, Any]:
+        """How each branch has actually gone, across this version's runs.
+
+        The single-run report cannot call a branch dead and does not try: on
+        any one run exactly one branch of a fork is taken and the rest are
+        not, which is a fork working. What makes a branch suspect is the
+        tally — decided forty times, taken none — and that only exists here.
+
+        Three verdicts, and the counts they were drawn from are returned
+        alongside so nobody has to take the verdict's word for it:
+
+        `taken`       followed at least once.
+        `never_taken` decided at least once and never followed. A branch the
+                      author believes in and the runs never enter — usually a
+                      condition naming a field the Handler does not produce.
+        `no_evidence` never decided. Its source has not run, or every run so
+                      far left by the other route. Not a finding, and kept
+                      apart from `never_taken` so a fork's error edges do not
+                      read as forty failures on a workflow that never failed.
+
+        Scoped to one definition version, defaulting to the latest, because
+        an edge id is only the same edge within one. And derived from the
+        runs themselves rather than a counter, which costs a checkpoint read
+        per run and buys the property that every number here is backed by a
+        run that can still be opened: pruning runs shrinks the evidence
+        instead of leaving a tally of forty behind five surviving runs.
+        """
+
+        if isinstance(limit, bool) or not 1 <= limit <= 500:
+            raise ValueError("limit must be between 1 and 500")
+        record = self._workflow(workflow_id, workflow_version)
+        version = record.version.value
+        clauses = ["workflow_id=?", "workflow_version=?"]
+        params: list[Any] = [workflow_id, version]
+        if actor is not None:
+            clauses.append("owner_actor=?")
+            params.append(actor)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"SELECT run_id FROM langgraph_runs WHERE {' AND '.join(clauses)}"
+                " ORDER BY created_at DESC, run_id DESC LIMIT ?",
+                (*params, limit),
+            ).fetchall()
+        run_ids = [str(row["run_id"]) for row in rows]
+        tallies: dict[str, dict[str, Any]] = {}
+        for run_id in run_ids:
+            for item in self.edges(run_id, actor=actor):
+                tally = tallies.setdefault(item["edge_id"], {
+                    "edge_id": item["edge_id"],
+                    "source_node": item["source_node"],
+                    "target_node": item["target_node"],
+                    "route": item["route"],
+                    "default": item["default"],
+                    **{status: 0 for status in EDGE_STATUSES},
+                })
+                tally[item["status"]] += 1
+        edges: list[Mapping[str, Any]] = []
+        for tally in tallies.values():
+            # `other_route` is not evidence about this condition and is left
+            # out of the denominator on purpose: an error edge on a workflow
+            # that never fails would otherwise be the loudest finding on the
+            # page, every time.
+            decided = tally["taken"] + tally["not_taken"] + tally["shadowed"]
+            edges.append({
+                **tally,
+                "decided": decided,
+                "verdict": (
+                    "taken" if tally["taken"]
+                    else "never_taken" if decided else "no_evidence"
+                ),
+            })
+        edges.sort(key=lambda item: (item["source_node"], item["edge_id"]))
+        return {
+            "workflow_id": workflow_id,
+            "workflow_version": version,
+            "runs": len(run_ids),
+            "edges": tuple(edges),
+        }
 
     def _artifacts_are_here(self) -> bool:
         database = getattr(self.artifacts, "database", None)

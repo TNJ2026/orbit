@@ -2379,6 +2379,81 @@ class RunStepsApiTests(unittest.TestCase):
             ).status_code)
 
 
+class WorkflowBranchHistoryApiTests(ApiTestCase):
+    """The tally, served on the definition rather than on a run."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        from orbit.web.api_v1 import Authorizer, READ_SCOPE, WRITE_SCOPE
+        from orbit.web.app import create_app
+        from tests.test_web_composition import SCHEMAS, transform_registration
+
+        self.db = Path(self.temp.name) / "runtime.db"
+        self.app = create_app(
+            self.db,
+            handlers=[transform_registration()], schemas=SCHEMAS,
+            poll_seconds=0.02,
+            authenticator=lambda request: request.headers.get("x-orbit-actor"),
+            authorizer=Authorizer(
+                lambda actor: [READ_SCOPE, WRITE_SCOPE]
+                if actor == "author" else [READ_SCOPE]
+            ),
+            single_goal_mode=False,
+            langgraph_state_directory=Path(self.temp.name) / "langgraph",
+        )
+        publish_human_workflow(self.db)
+
+    def test_it_counts_the_runs_behind_every_verdict(self) -> None:
+        with AsgiHarness(self.app) as client:
+            for index in range(3):
+                started = client.post(
+                    "/api/v1/langgraph-runs", actor="author", key=f"b{index}",
+                    body={"workflow_id": "workflow:human", "input": {"value": 1}},
+                )
+                self.assertEqual(200, started.status_code, started.text)
+            response = client.get(
+                "/api/v1/workflows/workflow:human/branches", actor="author",
+            )
+            self.assertEqual(200, response.status_code, response.text)
+            data = response.json()["data"]
+            self.assertEqual(3, data["runs"])
+            self.assertEqual("workflow:human", data["workflow_id"])
+            for edge in data["edges"]:
+                self.assertIn(
+                    edge["verdict"], ("taken", "never_taken", "no_evidence"),
+                )
+                self.assertEqual(
+                    edge["decided"],
+                    edge["taken"] + edge["not_taken"] + edge["shadowed"],
+                )
+
+    def test_another_actor_counts_none_of_them(self) -> None:
+        with AsgiHarness(self.app) as client:
+            client.post(
+                "/api/v1/langgraph-runs", actor="author", key="mine",
+                body={"workflow_id": "workflow:human", "input": {"value": 1}},
+            )
+            data = client.get(
+                "/api/v1/workflows/workflow:human/branches", actor="reader",
+            ).json()["data"]
+            self.assertEqual(0, data["runs"])
+            self.assertEqual([], data["edges"])
+
+    def test_an_unknown_workflow_and_a_bad_limit_are_told_apart(self) -> None:
+        with AsgiHarness(self.app) as client:
+            self.assertEqual(404, client.get(
+                "/api/v1/workflows/workflow:nope/branches", actor="author",
+            ).status_code)
+            self.assertEqual(400, client.get(
+                "/api/v1/workflows/workflow:human/branches?limit=0",
+                actor="author",
+            ).status_code)
+            self.assertEqual(400, client.get(
+                "/api/v1/workflows/workflow:human/branches?since=today",
+                actor="author",
+            ).status_code)
+
+
 class HandlerConsoleApiTests(ApiTestCase):
     """Reading what a run's Handlers printed."""
 

@@ -176,6 +176,14 @@ recorded, and both are the ordinary read scope because they name nodes and
 edges without carrying what flowed along them. `/output` is sensitive
 because a Handler's console is whatever the Handler printed.
 
+Neither can call a branch dead: on any one run exactly one branch of a fork
+is taken and the rest are not. That verdict needs the tally, which
+`GET /api/v1/workflows/{workflow_id}/branches` derives over one definition
+version's runs — an edge id is only the same edge within one — and reports as
+`taken`, `never_taken` or `no_evidence` beside the counts it drew them from.
+It re-reads the runs rather than keeping a counter, so pruning runs shrinks
+the evidence instead of leaving a tally of forty behind five surviving runs.
+
 Writes require the normal `idempotency-key` header. Read DTOs advertise a
 resume command only to actors with write scope and only while interrupted;
 clients do not infer commands from status. The existing Orbit `/api/v1/runs`

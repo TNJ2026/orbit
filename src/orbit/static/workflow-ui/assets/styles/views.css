@@ -1356,3 +1356,12 @@
 .pill.taken { background: var(--green-soft); color: var(--green); }
 .pill.not_taken, .pill.shadowed { background: var(--panel-3); color: var(--muted); }
 .pill.undecidable { background: var(--amber-soft); color: var(--amber); }
+
+/* Branches the runs have never entered. Absent unless there is a finding, so
+   the panel's presence is itself the signal. */
+.workflow-branch-list { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 4px; }
+.workflow-branch-finding {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px;
+  padding: 6px 0; border-top: 1px solid var(--line); font-size: 13px;
+}
+.workflow-branch-finding:first-child { border-top: 0; }
