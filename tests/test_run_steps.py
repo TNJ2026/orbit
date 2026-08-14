@@ -823,5 +823,197 @@ class RetentionTests(unittest.TestCase):
         self.assertGreater(sizes["checkpoints"], 0)
 
 
+
+class RetryOnTheRealHandlerPathTests(unittest.TestCase):
+    """A retry policy on a Handler that actually runs a process.
+
+    The machinery was complete and unreachable. `LangGraphRetryableError` was
+    raised in exactly one place in the codebase — a test double — so a real
+    Tool or Agent with `max_attempts: 3` was called once and the run failed,
+    while the DSL, the validator and the compiler all carried the feature.
+    """
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+
+    def service(self, adapter, *, policy=True, safety=None):
+        from orbit.workflow.langgraph_runtime.artifacts import LangGraphArtifactStore
+        from orbit.workflow.langgraph_runtime.wiring import trusted_handlers
+
+        fixture = engine_tests.LangGraphProductionWiringTests("run")
+        registration = (
+            fixture.tool_registration(adapter) if safety is None
+            else fixture.tool_registration(adapter, safety=safety)
+        )
+        manifest = registration.manifest
+        retry = IRPolicy(
+            "retry_it", "retry", {"max_attempts": 3, "backoff_seconds": [0]},
+        )
+        node = IRNode(
+            "tool", "action",
+            (engine_tests.port("value"),), (engine_tests.port("value"),),
+            IRHandlerRef(manifest.name, manifest.version, manifest.fingerprint),
+            {"tool_name": "example.read", "tool_version": "1.0.0"},
+            (retry.id,) if policy else (), None,
+        )
+        ir = engine_tests.workflow(
+            (node, engine_tests.node(
+                "done", inputs=("value",), kind="terminal", handler=False,
+            )),
+            (engine_tests.edge("t_d", "tool", "done"),),
+            entry=("tool",), terminals=("done",), result=("tool", "value"),
+            policies=(retry,) if policy else (),
+        )
+        store = SQLiteWorkflowVersionStore(self.root / "workflows.sqlite3")
+        store.publish(
+            CompiledWorkflow(ir, definition_hash(ir), "test", "sha256:" + "c" * 64),
+            expected_latest_version=0, source_format="json",
+            source_text="{}", actor="test", dsl_version="1.3",
+        )
+        runs = self.root / "runs.sqlite3"
+        service = LangGraphWorkflowService(
+            store, trusted_handlers([registration], attempt_db_path=runs),
+            run_db_path=runs,
+            checkpoint_db_path=self.root / "checkpoints.sqlite3",
+            artifact_store=LangGraphArtifactStore(runs, self.root / "artifacts"),
+        )
+        return service, ir
+
+    def flaky(self, failures: int):
+        from orbit.workflow.handlers.tools import ToolResult
+
+        calls = {"count": 0}
+
+        class Adapter:
+            def execute(self, request, context):
+                calls["count"] += 1
+                if calls["count"] <= failures:
+                    raise RuntimeError("the network blinked")
+                return ToolResult({"value": calls["count"]})
+
+            def cancel(self, execution_ref, context):
+                return None
+
+            def recover(self, recovery_ref, context):
+                return None
+
+        return Adapter(), calls
+
+    def test_a_failure_that_may_be_repeated_is(self) -> None:
+        adapter, calls = self.flaky(1)
+        service, ir = self.service(adapter)
+        run = service.start(
+            ir.workflow_id, {"value": 1}, idempotency_key="retry", actor="local",
+        )
+        # The run waits on a durable timer rather than looping in place, so a
+        # process that dies between attempts resumes at the next start.
+        self.assertEqual("waiting", run.status)
+        self.assertEqual(1, calls["count"])
+
+        service.recover_due(limit=10)
+        self.assertEqual("completed", service.get(run.run_id).status)
+        self.assertEqual(2, calls["count"])
+        steps = {
+            step["node_id"]: step
+            for step in service.steps(run.run_id, actor="local")
+        }
+        self.assertEqual("succeeded", steps["tool"]["status"])
+
+    def test_the_budget_is_what_stops_it(self) -> None:
+        adapter, calls = self.flaky(99)
+        service, ir = self.service(adapter)
+        run = service.start(
+            ir.workflow_id, {"value": 1}, idempotency_key="doomed", actor="local",
+        )
+        for _ in range(5):
+            if service.get(run.run_id).status in {"failed", "completed"}:
+                break
+            service.recover_due(limit=10)
+        self.assertEqual("failed", service.get(run.run_id).status)
+        # `max_attempts: 3` is three goes, not three retries after the first.
+        self.assertEqual(3, calls["count"])
+
+    def test_without_a_policy_the_original_failure_is_what_surfaces(self) -> None:
+        """Being repeatable is not the same as being repeated.
+
+        The adapter says a failure may be retried; the compiler decides
+        whether this node asked for that. A node that did not gets its own
+        exception back, not the engine's word for one.
+        """
+
+        adapter, calls = self.flaky(99)
+        service, ir = self.service(adapter, policy=False)
+        with self.assertRaises(RuntimeError) as caught:
+            service.start(
+                ir.workflow_id, {"value": 1}, idempotency_key="bare",
+                actor="local",
+            )
+        self.assertIn("the network blinked", str(caught.exception))
+        self.assertEqual(1, calls["count"])
+
+    def test_a_handler_whose_effect_may_have_happened_is_not_repeatable(self) -> None:
+        """Compilation refuses the policy; the adapter refuses the label.
+
+        Two guards for one rule, and the first is the one that stops the
+        repeat: a workflow that attaches a retry policy to an
+        `unknown_on_lease_loss` Handler does not compile, so its Handler is
+        never even reached.
+        """
+
+        from orbit.workflow.domain.durable_execution import ExecutionSafety
+        from orbit.workflow.langgraph_runtime.compiler import LangGraphCompileError
+
+        adapter, calls = self.flaky(99)
+        service, ir = self.service(
+            adapter, safety=ExecutionSafety.UNKNOWN_ON_LEASE_LOSS,
+        )
+        with self.assertRaises(LangGraphCompileError):
+            service.start(
+                ir.workflow_id, {"value": 1}, idempotency_key="unsafe",
+                actor="local",
+            )
+        self.assertEqual(0, calls["count"])
+
+    def test_each_attempt_leaves_its_own_console(self) -> None:
+        """Reading why the first go failed is the point of keeping them."""
+
+        from orbit.workflow.handlers.tools import ToolResult
+        from orbit.workflow.langgraph_runtime.console import AttemptConsole
+
+        calls = {"count": 0}
+
+        class Adapter:
+            def execute(self, request, context):
+                calls["count"] += 1
+                sink = getattr(context, "output", None)
+                if sink:
+                    sink.emit("stderr", f"attempt {calls['count']}\n")
+                if calls["count"] == 1:
+                    raise RuntimeError("the network blinked")
+                return ToolResult({"value": 1})
+
+            def cancel(self, execution_ref, context):
+                return None
+
+            def recover(self, recovery_ref, context):
+                return None
+
+        service, ir = self.service(Adapter())
+        service.console = AttemptConsole(self.root / "runs.sqlite3")
+        run = service.start(
+            ir.workflow_id, {"value": 1}, idempotency_key="console", actor="local",
+        )
+        service.recover_due(limit=10)
+        self.assertEqual("completed", service.get(run.run_id).status)
+        chunks, _after, _more = AttemptConsole(
+            self.root / "runs.sqlite3"
+        ).read(run.run_id)
+        self.assertEqual(
+            ["attempt 1\n", "attempt 2\n"], [item["text"] for item in chunks],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -22,7 +22,8 @@ from ..persistence.workflow_versions import SQLiteWorkflowVersionStore
 from .artifacts import LangGraphArtifactStore
 from .console import AttemptConsole, AttemptConsoleSink
 from .compiler import (
-    BoundHandler, LangGraphHandlerRegistry, LangGraphUnknownExternalResult,
+    BoundHandler, LangGraphHandlerRegistry, LangGraphRetryableError,
+    LangGraphUnknownExternalResult,
 )
 from .service import (
     LangGraphWorkflowService, append_event, ensure_event_log,
@@ -44,6 +45,30 @@ def _transform(inputs: Mapping[str, Any], config: Mapping[str, Any], _context):
             raise ValueError("transform value must be an object")
         return dict(value)
     raise ValueError(f"unsupported transform operation: {operation}")
+
+
+def _retryable(manifest, exc: Exception) -> Exception:
+    """The same failure, said in the one way the engine can act on.
+
+    Nothing raised this before. The DSL took a retry policy, the validator had
+    rules for it, and the compiler carried timers, backoff and a per-generation
+    budget for it — but no adapter ever asked for a retry, so a real Handler
+    with `max_attempts: 3` was called once and the run failed. Every retry
+    policy an author wrote was decoration.
+
+    Whether to honour one is still the compiler's: a node without a policy
+    gets its original failure re-raised. What is kept here is the narrower
+    guarantee that an `unknown_on_lease_loss` Handler's failure is never even
+    *described* as repeatable. Compilation already refuses to attach a retry
+    policy to one, so this is not what stops the repeat — it stops a caller
+    being handed a misleading exception on the way out.
+    """
+
+    if manifest.execution_safety is not ExecutionSafety.REPLAY_SAFE:
+        return exc
+    retryable = LangGraphRetryableError(f"{type(exc).__name__}: {exc}")
+    retryable.__cause__ = exc
+    return retryable
 
 
 def _console_sink(console: AttemptConsole | None, context):
@@ -295,7 +320,7 @@ def _agent_adapter(
             journal.settle(
                 context.attempt_id, "failed", error=f"{type(exc).__name__}: {exc}"
             )
-            raise
+            raise _retryable(manifest, exc)
 
     def cancel_run(run_id: str) -> bool:
         with active_lock:
@@ -375,7 +400,7 @@ def _tool_adapter(
                     f"Tool attempt {context.attempt_id} outcome is unknown"
                 ) from None
             journal.settle(context.attempt_id, "failed", error=type(exc).__name__)
-            raise
+            raise _retryable(manifest, exc)
 
     def cancel_run(run_id: str) -> bool:
         with active_lock:
