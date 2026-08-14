@@ -1057,6 +1057,70 @@ class LangGraphWorkflowCompilerTests(unittest.TestCase):
         )
         self.assertEqual("merged", completed["result"])
 
+    def test_a_terminal_may_carry_an_artifact_the_authoring_rules_demand(self) -> None:
+        """The two layers were asking for opposite things.
+
+        `MARKDOWN_ARTIFACT_REQUIRED` tells an author to declare the Goal
+        result an `artifact_ref` and to carry the same policy to the terminal
+        input. This engine then asked what the terminal's Handler supports —
+        a terminal has none, the default was `inline`, and the workflow was
+        refused for doing what it had been told. A node without a Handler
+        carries its value through; there is nothing to ask.
+        """
+
+        writer = node(
+            "writer", inputs=("prompt",), outputs=("result",),
+        )
+        done = node("done", inputs=("result",), kind="terminal", handler=False)
+        base = workflow(
+            (writer, done), (edge("finish", "writer", "done", source_port="result",
+                                  target_port="result"),),
+            entry=("writer",), terminals=("done",), result=("writer", "result"),
+        )
+        as_artifact = PortDataPolicy(
+            transport=PortTransport.ARTIFACT_REF, max_size_bytes=4096,
+            content_types=("text/markdown",),
+        )
+
+        def carrying(item):
+            ports = tuple(
+                IRPort(
+                    port.id, port.schema_id, port.required, port.has_default,
+                    port.default, port.description, as_artifact,
+                )
+                for port in item.inputs
+            )
+            outputs = tuple(
+                IRPort(
+                    port.id, port.schema_id, port.required, port.has_default,
+                    port.default, port.description, as_artifact,
+                )
+                for port in item.outputs
+            )
+            return IRNode(
+                item.id, item.kind, ports, outputs, item.handler, item.config,
+                item.policies, item.extension, item.route_mode,
+            )
+
+        ir = WorkflowIR(
+            base.ir_version, base.workflow_id, base.name, base.description,
+            base.labels, base.inputs, base.outputs,
+            tuple(carrying(item) for item in base.nodes),
+            base.edges, base.entry, base.terminals, base.policies,
+            base.extensions, base.indexes, base.result,
+        )
+        registry = LangGraphHandlerRegistry([BoundHandler(
+            "writer", "1.0.0", FINGERPRINT,
+            lambda values, config, context: {"result": "artifact:1"},
+            supported_transports=frozenset({"inline", "artifact_ref"}),
+        )])
+
+        compiled = compile_workflow(ir, registry, checkpointer=InMemorySaver())
+
+        self.assertEqual(
+            {"writer", "done"}, {item.id for item in compiled.ir.nodes},
+        )
+
     def test_a_decision_routes_without_a_handler(self) -> None:
         """The DSL refuses a handler on a decision; this engine required one.
 

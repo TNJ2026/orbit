@@ -834,9 +834,15 @@ def compile_workflow(
             raise HandlerBindingError(
                 f"executable node {node.id!r} has no Handler binding"
             )
+        # Only a node that has a Handler is asked what its Handler accepts. A
+        # terminal, join, decision or human node has none — the value is
+        # carried through, not handed to anything — and defaulting them to
+        # `inline` refused the very shape the authoring rules demand:
+        # MARKDOWN_ARTIFACT_REQUIRED tells an author to declare the Goal
+        # result an `artifact_ref` and to "carry the same policy to the
+        # terminal input", and this then refused the terminal for carrying it.
         supported = (
-            bound[node.id].supported_transports
-            if node.id in bound else frozenset({"inline"})
+            bound[node.id].supported_transports if node.id in bound else None
         )
         retry_policies = tuple(
             policy for policy in ir.policies
@@ -860,7 +866,10 @@ def compile_workflow(
             raise LangGraphCompileError(
                 f"join node {node.id!r} requires exactly one join policy"
             )
-        for direction, ports in (("input", node.inputs), ("output", node.outputs)):
+        for direction, ports in (
+            (("input", node.inputs), ("output", node.outputs))
+            if supported is not None else ()
+        ):
             for port in ports:
                 transport = port.data_policy.transport.value
                 if transport not in supported:
