@@ -122,25 +122,6 @@ class WorkflowGraphContractTests(unittest.TestCase):
                 deadline_seconds=10, min_successful=1,
             )
 
-    def test_all_successful_tolerates_failed_participants_but_all_does_not(self):
-        from orbit.workflow.graph.joins import JoinTokenFact, evaluate_join
-        facts = (
-            JoinTokenFact("ok", 0, BranchTokenStatus.COMPLETED, {"value": 1}),
-            JoinTokenFact("bad", 1, BranchTokenStatus.FAILED),
-        )
-        strict, _ = evaluate_join(
-            EntityId("join_group", "strict"),
-            JoinPolicy(JoinMode.ALL, JoinMergeMode.ARRAY_BY_EDGE), facts,
-        )
-        tolerant, merged = evaluate_join(
-            EntityId("join_group", "tolerant"),
-            JoinPolicy(JoinMode.ALL_SUCCESSFUL, JoinMergeMode.ARRAY_BY_EDGE), facts,
-        )
-        self.assertIs(JoinDisposition.FAIL, strict.disposition)
-        self.assertIs(JoinDisposition.OPEN, tolerant.disposition)
-        self.assertEqual(("ok",), tolerant.winner_edge_ids)
-        self.assertEqual(({"value": 1},), merged)
-
     def test_unknown_external_result_cannot_enter_retry_policy(self):
         with self.assertRaisesRegex(ValueError, "cannot be retried"):
             RetryPolicy(2, (0,), (ErrorCategory.UNKNOWN_EXTERNAL_RESULT,))
@@ -185,8 +166,7 @@ class WorkflowGraphContractTests(unittest.TestCase):
 
     def test_stability_and_error_codes_are_registered(self):
         for name in (
-            "execution_plan_v1_2", "static_graph_contract_1_2", "graph_policy",
-            "graph_decision_facts", "graph_runtime_decisions", "graph_persistence_v5",
+            "static_graph_contract_1_2", "graph_policy", "graph_decision_facts",
         ):
             self.assertIs(ContractStability.STABLE, CONTRACT_STABILITY[name])
         self.assertIs(ErrorCategory.PERMANENT_ERROR, ERROR_CODE_REGISTRY["graph_stalled"])

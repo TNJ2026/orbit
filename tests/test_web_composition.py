@@ -23,7 +23,6 @@ import time
 import unittest
 
 from orbit.web.app import RuntimeComposition, HandlerRegistration, create_app
-from orbit.workflow.application.run_service import RunApplicationService
 from orbit.web.schema_guard import (
     LEGACY_TABLES, MixedSchemaError, assert_runtime_schema, table_names,
 )
@@ -370,23 +369,35 @@ class CompositionTests(unittest.TestCase):
             RuntimeComposition(self.db, handlers=[transform_registration()], schemas={})
         self.assertIn("preflight", str(caught.exception))
 
-    def test_each_worker_gets_its_own_runtime_object(self) -> None:
+    def test_only_the_loops_the_runtime_actually_needs_are_started(self) -> None:
+        """A Runtime with nothing to drive in the background starts nothing.
+
+        This used to assert a fixed pool of workers, a timer and three
+        reconcilers — the components of the execution engine that was
+        deleted. What is left is driven by what is wired: a LangGraph service
+        brings its timer loop, a reviser brings the revision loops, and a
+        composition with neither runs no threads at all.
+        """
+
         composition = RuntimeComposition(
             self.db, handlers=[transform_registration()], schemas=SCHEMAS,
-            worker_count=3,
         )
         composition.start()
         try:
-            names = [loop.name for loop in composition.loops]
+            self.assertEqual([], [loop.name for loop in composition.loops])
+        finally:
+            self.assertEqual([], composition.stop())
+
+    def test_a_langgraph_service_brings_its_timer_loop(self) -> None:
+        composition = RuntimeComposition(
+            self.db, handlers=[transform_registration()], schemas=SCHEMAS,
+            langgraph_service=SimpleNamespace(recover_due=lambda limit: ()),
+        )
+        composition.start()
+        try:
             self.assertEqual(
-                [
-                    "worker-1", "worker-2", "worker-3", "timer-1",
-                    "recovery", "subflow-reconciler", "foreach-reconciler",
-                ],
-                names,
+                ["langgraph-timer"], [loop.name for loop in composition.loops]
             )
-            self.assertEqual(3, len(composition._workers))
-            self.assertEqual(3, len({id(w) for w in composition._workers}))
         finally:
             self.assertEqual([], composition.stop())
 
@@ -397,7 +408,8 @@ class HealthEndpointTests(unittest.TestCase):
         self.db = Path(self.temp.name) / "runtime.db"
         self.app = create_app(
             self.db, handlers=[transform_registration()], schemas=SCHEMAS,
-            worker_count=1, poll_seconds=0.05,
+            poll_seconds=0.05,
+            langgraph_state_directory=Path(self.temp.name) / "langgraph",
         )
 
     def tearDown(self) -> None:
@@ -427,295 +439,6 @@ class HealthEndpointTests(unittest.TestCase):
             response = client.get("/health/ready")
             self.assertEqual(503, response.status_code)
             self.assertEqual("not_ready", response.json()["status"])
-
-
-class EndToEndTests(unittest.TestCase):
-    """Gate M2: a static workflow completes through the composed runtime."""
-
-    def setUp(self) -> None:
-        self.temp = tempfile.TemporaryDirectory()
-        self.db = Path(self.temp.name) / "runtime.db"
-
-    def tearDown(self) -> None:
-        self.temp.cleanup()
-
-    def _compose(self) -> RuntimeComposition:
-        composition = RuntimeComposition(
-            self.db, handlers=[transform_registration()], schemas=SCHEMAS,
-            worker_count=2, poll_seconds=0.02, clock=lambda: datetime.now(timezone.utc),
-        )
-        return composition
-
-    def _await_status(self, composition, run_id, statuses, timeout=30.0):
-        deadline = time.monotonic() + timeout
-        last = None
-        while time.monotonic() < deadline:
-            run = composition.service.get_run(run_id)
-            if run is not None:
-                last = run.status
-                if run.status in statuses:
-                    return run
-            time.sleep(0.05)
-        self.fail(f"run did not reach {statuses}; last status was {last}")
-
-    def test_a_handler_can_write_an_artifact_output_through_the_composition(self) -> None:
-        """The Artifact adapter must actually reach a running Handler.
-
-        ScopedArtifactAccess was defined but never wired in, so every artifact
-        write in the running server hit the rejecting default. A blob larger
-        than the 1 MiB inline ceiling proves the write went to CAS, not events.
-        """
-
-        from orbit.workflow.artifacts.local_cas import LocalCASBackend
-        from orbit.workflow.application.run_service import RunApplicationService
-        from orbit.workflow.domain.handlers import (
-            CancelAck, CancelDisposition, HandlerResult, HandlerResultStatus,
-            HandlerValidationResult, PreparedExecution, RawHandlerResult,
-            RecoveryDisposition, RecoveryResult,
-        )
-
-        big = "x" * 2_000_000  # over the 1 MiB inline cap → must go to CAS
-
-        class BigWriter:
-            def validate(self, m, c):
-                return HandlerValidationResult()
-
-            def prepare(self, request, context):
-                return PreparedExecution({"input": request.input}, f"big:{request.attempt_id}")
-
-            def execute(self, prepared, context):
-                artifact_id = context.artifacts.write(
-                    name="result", content=big.encode(), content_type="text/plain",
-                )
-                return RawHandlerResult(
-                    {"result": {"artifact_id": str(artifact_id)}}, None,
-                    artifact_refs=(artifact_id,),
-                )
-
-            def normalize_result(self, raw, context):
-                return HandlerResult(
-                    HandlerResultStatus.SUCCEEDED, raw.output, None, None, True,
-                    raw.external_effect, artifact_refs=raw.artifact_refs,
-                )
-
-            def cancel(self, r, c):
-                return CancelAck(CancelDisposition.CONFIRMED_STOPPED)
-
-            def recover(self, r, c):
-                return RecoveryResult(RecoveryDisposition.NOT_FOUND)
-
-        manifest = HandlerManifest(
-            "bigwriter", "1.0.0", ("action",), {"prompt": "schema://object/1.0"},
-            {"result": "schema://object/1.0"}, {"type": "object"},
-            ExecutionSafety.REPLAY_SAFE,
-            ResourceProfile(1, 1, 1, 60, 10_000_000, "t"), "schema://object/1.0",
-            (), (), True, True,
-        )
-        policy = {
-            "transport": "artifact_ref", "max_size_bytes": 10_000_000,
-            "content_types": ["text/plain"], "visibility": "run",
-        }
-        dsl = {
-            "dsl_version": "1.2", "metadata": {"id": "big", "name": "Big"},
-            "nodes": [
-                {"id": "work", "kind": "action",
-                 "inputs": [{"id": "prompt", "schema_id": "schema://object/1.0"}],
-                 "outputs": [{"id": "result", "schema_id": "schema://object/1.0", **policy}],
-                 "handler": {"name": "bigwriter", "version": "1.0.0"}},
-                {"id": "done", "kind": "terminal",
-                 "inputs": [{"id": "result", "schema_id": "schema://object/1.0", **policy}]},
-            ],
-            "edges": [{"id": "e", "from": {"node": "work", "port": "result"},
-                       "to": {"node": "done", "port": "result"}}],
-            "entry": ["work"], "terminals": ["done"],
-        }
-        compiled = compile_source(
-            json.dumps(dsl), InMemoryHandlerCatalog([manifest]),
-            InMemorySchemaCatalog(SCHEMAS), source_format="json",
-        )
-        SQLiteWorkflowVersionStore(self.db).publish(
-            compiled, expected_latest_version=0, source_format="json",
-            source_text=None, actor="t",
-        )
-        backend = LocalCASBackend(Path(self.temp.name) / "artifacts")
-        composition = RuntimeComposition(
-            self.db, handlers=[HandlerRegistration(manifest, BigWriter(), "bigwriter@1.0.0")],
-            schemas=SCHEMAS, worker_count=2, poll_seconds=0.02,
-            clock=lambda: datetime.now(timezone.utc), artifact_backend=backend,
-        )
-        composition.start()
-        try:
-            RunApplicationService(self.db, composition.service).start_run(
-                workflow_id=compiled.ir.workflow_id, inputs={"prompt": {"goal": "x"}},
-                actor="t", idempotency_key="big",
-            )
-            deadline = time.monotonic() + 20
-            status = None
-            while time.monotonic() < deadline:
-                conn = sqlite3.connect(self.db)
-                try:
-                    row = conn.execute("SELECT status FROM workflow_runs").fetchone()
-                    status = row[0] if row else None
-                finally:
-                    conn.close()
-                if status in {"succeeded", "failed"}:
-                    break
-                time.sleep(0.1)
-            self.assertEqual("succeeded", status)
-            conn = sqlite3.connect(self.db)
-            try:
-                art = conn.execute("SELECT status, size_bytes FROM artifacts").fetchone()
-            finally:
-                conn.close()
-            self.assertEqual(("committed", 2_000_000), (art[0], art[1]))
-        finally:
-            composition.stop()
-
-    def test_static_workflow_runs_to_completion(self) -> None:
-        composition = self._compose()
-        _, digest = publish_linear_workflow(self.db)
-        run_id = EntityId("run", "m2-e2e")
-
-        composition.start()
-        try:
-            result = composition.service.submit(start_run_command(run_id, digest))
-            self.assertEqual("applied", result.disposition.value)
-            run = self._await_status(
-                composition, run_id,
-                {WorkflowRunStatus.SUCCEEDED, WorkflowRunStatus.FAILED},
-            )
-            self.assertIs(WorkflowRunStatus.SUCCEEDED, run.status)
-        finally:
-            self.assertEqual([], composition.stop())
-
-    def test_a_queued_run_is_picked_up_by_the_next_process(self) -> None:
-        """What this engine guarantees across a restart, which is less.
-
-        This asserted that a run left *mid-flight* resumes, and raced about
-        one in fourteen times: `stop()` cancels a Handler that is executing,
-        the attempt is recorded failed, and the run goes terminal — so the
-        second process finds nothing to recover and the assertion loses. That
-        is a real gap in shutdown semantics, in the engine `orbit serve` no
-        longer runs: both entry points pass `legacy_execution=False`, so its
-        workers never start.
-
-        The claim itself still matters and is now asserted where the product
-        keeps it, against the durable engine, in
-        `test_a_process_that_died_mid_run_leaves_it_recoverable`. What is left
-        here is the part this engine does hold without racing: work submitted
-        and not yet begun survives the process that accepted it.
-        """
-
-        _, digest = publish_linear_workflow(self.db)
-        run_id = EntityId("run", "m2-restart")
-
-        # Submitted but never started: no Handler is running, so nothing can
-        # be cancelled and the outcome does not depend on timing.
-        first = self._compose()
-        first.service.submit(start_run_command(run_id, digest))
-        self.assertIsNotNone(first.service.get_run(run_id))
-
-        second = self._compose()
-        second.start()
-        try:
-            run = self._await_status(
-                second, run_id,
-                {WorkflowRunStatus.SUCCEEDED, WorkflowRunStatus.FAILED},
-            )
-            self.assertIs(WorkflowRunStatus.SUCCEEDED, run.status)
-        finally:
-            self.assertEqual([], second.stop())
-
-    def test_shutdown_stops_every_loop(self) -> None:
-        composition = self._compose()
-        composition.start()
-        self.assertTrue(all(loop.alive for loop in composition.loops))
-        self.assertEqual([], composition.stop())
-        self.assertTrue(all(not loop.alive for loop in composition.loops))
-
-    def test_shutdown_cancels_a_running_handler_before_waiting_on_it(self) -> None:
-        """A Handler mid-call cannot notice a stop flag; it must be told.
-
-        Waiting on it first only spends the shutdown budget and then kills the
-        process with the Handler still running — the lease expires unrenewed
-        and the attempt lands as `unknown_external_result` explaining nothing.
-        """
-
-        from orbit.workflow.domain.handlers import (
-            CancelAck, CancelDisposition, HandlerResult, HandlerResultStatus,
-            HandlerValidationResult, PreparedExecution, RawHandlerResult,
-            RecoveryDisposition, RecoveryResult,
-        )
-
-        started = threading.Event()
-        released = threading.Event()
-
-        class _Blocking:
-            """An Agent CLI in miniature: runs until told to stop."""
-
-            def validate(self, manifest, config):
-                return HandlerValidationResult()
-
-            def prepare(self, request, context):
-                return PreparedExecution(
-                    {"input": request.input}, f"blocking:{request.attempt_id}"
-                )
-
-            def execute(self, prepared, context):
-                started.set()
-                for _ in range(600):
-                    if context.cancellation.cancelled:
-                        break
-                    time.sleep(0.02)
-                released.set()
-                return RawHandlerResult({"value": 1}, None)
-
-            def normalize_result(self, raw, context):
-                return HandlerResult(HandlerResultStatus.SUCCEEDED, raw.payload)
-
-            def cancel(self, execution_ref, context):
-                return CancelAck(CancelDisposition.CONFIRMED_STOPPED)
-
-            def recover(self, recovery_ref, context):
-                return RecoveryResult(RecoveryDisposition.NOT_FOUND)
-
-        registration = transform_registration()
-        composition = RuntimeComposition(
-            self.db,
-            handlers=[HandlerRegistration(
-                registration.manifest, _Blocking(), registration.implementation_id,
-            )],
-            schemas=SCHEMAS, worker_count=1, poll_seconds=0.02,
-            clock=lambda: datetime.now(timezone.utc),
-        )
-        publish_linear_workflow(self.db)
-        composition.start()
-        try:
-            RunApplicationService(self.db, composition.service).start_run(
-                workflow_id="workflow:linear", inputs={"value": 1},
-                actor="test", idempotency_key="shutdown-cancel",
-            )
-            self.assertTrue(started.wait(timeout=20), "handler never started")
-            began = time.monotonic()
-            stragglers = composition.stop(timeout=10)
-        finally:
-            composition._started = False
-        elapsed = time.monotonic() - began
-        self.assertTrue(released.is_set(), "the handler was never told to stop")
-        self.assertEqual([], stragglers)
-        # It stopped because it was cancelled, not because the budget ran out.
-        self.assertLess(elapsed, 8)
-
-    def test_lifespan_starts_and_stops_components(self) -> None:
-        app = create_app(
-            self.db, handlers=[transform_registration()], schemas=SCHEMAS,
-            worker_count=1, poll_seconds=0.02,
-        )
-        composition = app.state.runtime
-        with AsgiHarness(app):
-            self.assertTrue(all(loop.alive for loop in composition.loops))
-        self.assertTrue(all(not loop.alive for loop in composition.loops))
-        self.assertFalse(hasattr(app.state, "shutdown_stragglers"))
 
 
 class BackgroundLoopTests(unittest.TestCase):

@@ -9,7 +9,6 @@ file. Route modules receive the context and stay thin.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-import hashlib
 import json
 
 from pathlib import Path
@@ -18,32 +17,14 @@ from typing import Any, Callable, Mapping, Sequence
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from ...workflow.api.dto import CursorError, envelope, page_size
-from ...workflow.api.artifact_read_models import (
-    ArtifactReadModelService, PREVIEW_LIMIT_BYTES,
-)
-from ...workflow.api.plan_read_models import PlanReadModelService
-from ...workflow.api.dynamic_read_models import DynamicReadModelService
-from ...workflow.api.read_models import ReadModelService
+from ...workflow.api.dto import envelope
 from ...workflow.api.workflow_catalog import WorkflowCatalogReadModelService
-from ...workflow.persistence.attempt_output import SQLiteAttemptOutputStore
 from ...workflow.api.routes import (
     ApiCommandExecutor, CommandInProgress, IdempotencyConflict, RateLimiter,
     RequestTooLarge, _bounded_json,
 )
-from ...workflow.application.budget_service import (
-    BudgetService, BudgetVersionConflict,
-)
-from ...workflow.application.foreach_service import ForeachService
-from ...workflow.application.human_service import HumanTaskService
 from ...workflow.application.authoring_job_service import AuthoringJobService
-from ...workflow.application.run_service import (
-    ActiveGoalExistsError,
-    RunApplicationService,
-    RunStartError,
-)
 from ...workflow.catalogs.schemas import InMemorySchemaCatalog
-from ...workflow.domain.ids import EntityId
 from ...workflow.authoring import (
     AuthoringFailedError, AuthoringUnavailableError,
     UnknownGenerationAgentError,
@@ -55,13 +36,8 @@ from ...workflow.application.workflow_draft_service import (
     WorkflowVersionConflictError,
 )
 from ...workflow.persistence.database import connect_workflow_database
-from ...workflow.persistence.control import audit as persist_audit
-from ...workflow.recovery.manager import RecoveryManager
 
-from .common import (
-    OPS_WRITE_SCOPE, READ_SCOPE, WRITE_SCOPE, Authorizer,
-    authoring_timeout_seconds, error,
-)
+from .common import Authorizer, authoring_timeout_seconds, error
 
 
 class ApiContext:
@@ -70,8 +46,8 @@ class ApiContext:
     def __init__(
         self,
         db_path: Path | str,
-        durable_service,
         *,
+        execution_registry=None,
         workflow_db_path: Path | str | None = None,
         authenticator: Callable[[Request], str | None] | None = None,
         authorizer: Authorizer | None = None,
@@ -94,33 +70,23 @@ class ApiContext:
         authoring_jobs=None,
         shutdown_request: Callable[[], None] | None = None,
         langgraph_service=None,
-        legacy_execution: bool = True,
         workflow_ui_mode: str = "multi-agent",
     ) -> None:
         path = Path(db_path)
         workflow_path = Path(workflow_db_path or db_path)
         self.path = path
         self.workflow_path = workflow_path
-        self.durable_service = durable_service
+        # The sealed Handler registry, which is what the catalog and the
+        # authoring surface actually asked the old application service for.
+        self.execution_registry = execution_registry
         self.langgraph_service = langgraph_service
-        self.legacy_execution = bool(legacy_execution)
         self.workflow_ui_mode = workflow_ui_mode
-        self.artifact_backend = artifact_backend or getattr(
-            durable_service, "artifact_backend", None
-        )
-        self.reads = ReadModelService(path)
-        self.artifact_reads = ArtifactReadModelService(
-            path, blob_reader=self.read_preview_blob
-        )
-        self.runs = RunApplicationService(
-            path, durable_service, enforce_single_goal=single_goal_mode,
-            workflow_db_path=workflow_path,
-        )
-        self.plans = PlanReadModelService(path)
-        self.dynamic_reads = DynamicReadModelService(path)
+        self.artifact_backend = artifact_backend
         self.workflow_reads = WorkflowCatalogReadModelService(
             workflow_path, schema_catalog or InMemorySchemaCatalog({}),
-            usage_path=path,
+            # Optional on purpose: an embedder may wire a service that only
+            # runs workflows, and the catalog then simply reports no usage.
+            usage_source=getattr(langgraph_service, "workflow_usage", None),
         )
         # One per process, never one per protocol. Constructing a second
         # against the same database means two recoveries: each restarts every
@@ -140,21 +106,6 @@ class ApiContext:
             )
             if authoring_service is not None and workflow_publisher is not None
             else None
-        )
-        self.humans = HumanTaskService(path)
-        # Handler console output: an observation store, not a projection of
-        # events, so it is read directly rather than through ReadModelService.
-        self.attempt_output = SQLiteAttemptOutputStore(path)
-        self.budgets = BudgetService(path)
-        # Every service a finding can be applied through. Recovery that
-        # detects a problem it cannot act on is worse than not detecting it:
-        # the operator is told the runtime knows, and the fix fails.
-        self.recovery = RecoveryManager(
-            path, durable_service=durable_service, human_service=self.humans,
-            foreach_service=ForeachService(path),
-            # A takeover is answered by a person. The composition root is the
-            # only place that knows who that is here.
-            takeover_participants=tuple(operator_actors),
         )
         self.limiter = rate_limiter or RateLimiter()
         # The limit exists to keep a shared deployment from being drowned by
@@ -182,99 +133,48 @@ class ApiContext:
         self.shutdown_request = shutdown_request
         self.single_goal_mode = single_goal_mode
 
-    def read_preview_blob(self, blob_key: str) -> bytes:
-        if self.artifact_backend is None:
-            raise LookupError("Artifact store is unavailable")
-        return self.artifact_backend.read(
-            blob_key, max_size_bytes=PREVIEW_LIMIT_BYTES
-        )
-
     def recent_handler_attempts(
         self,
     ) -> tuple[dict[str, Mapping[str, Any]], dict[str, int], dict[str, int]]:
-        """Latest durable attempt plus total and failed job counts per handler.
+        """Latest attempt plus total and failed counts per Handler.
 
-        A job is one scheduled execution of a node (retries stay inside it),
-        so the count answers "how many times has this handler run" without
-        ever posing as a heartbeat.
+        Read from the engine that runs them. The counts used to come from the
+        job table of a second engine, and once that engine stopped running
+        they were structurally zero — a Handler page that reported "never
+        used" for a Handler used every day.
+        """
+
+        source = getattr(self.langgraph_service, "handler_attempts", None)
+        if source is None:
+            return {}, {}, {}
+        stats = source()
+        recent = {
+            name: entry["recent"]
+            for name, entry in stats.items() if entry["recent"] is not None
+        }
+        counts = {name: entry["total"] for name, entry in stats.items()}
+        failed = {name: entry["failed"] for name, entry in stats.items()}
+        return recent, counts, failed
+
+    def change_marker(self) -> Mapping[str, Any]:
+        """A value that changes exactly when something a client polls changed.
+
+        Audit position covers authoring and drafts; the engine's own run clock
+        covers execution. It used to read the job and timer tables of the
+        engine that has since been deleted, which froze the marker and made
+        every poll answer "nothing changed".
         """
 
         with connect_workflow_database(self.path) as connection:
-            count_rows = connection.execute(
-                "SELECT job_kind AS handler_name, COUNT(*) AS total,"
-                " SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed"
-                " FROM jobs GROUP BY job_kind"
-            ).fetchall()
-            counts = {
-                str(row["handler_name"]): int(row["total"])
-                for row in count_rows
-            }
-            failed_counts = {
-                str(row["handler_name"]): int(row["failed"])
-                for row in count_rows
-            }
-            rows = connection.execute(
-                """
-                WITH ranked AS (
-                    SELECT j.job_kind AS handler_name, nr.run_id, nr.node_id,
-                           a.attempt_id, a.status, a.updated_at,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY j.job_kind
-                               ORDER BY a.updated_at DESC, a.attempt_id DESC
-                           ) AS rank
-                    FROM node_attempts a
-                    JOIN node_runs nr ON nr.node_run_id = a.node_run_id
-                    JOIN jobs j ON j.current_attempt_id = a.attempt_id
-                )
-                SELECT handler_name, run_id, node_id, attempt_id, status, updated_at
-                FROM ranked WHERE rank = 1
-                """
-            ).fetchall()
-        recent = {
-            str(row["handler_name"]): {
-                "run_id": row["run_id"], "node_id": row["node_id"],
-                "attempt_id": row["attempt_id"], "status": row["status"],
-                "occurred_at": row["updated_at"],
-            }
-            for row in rows
+            audit_position = connection.execute(
+                "SELECT COUNT(*) FROM audit_records"
+            ).fetchone()[0]
+        source = getattr(self.langgraph_service, "last_change", None)
+        engine_updated = "" if source is None else (source() or "")
+        return {
+            "audit_position": int(audit_position),
+            "engine_updated": engine_updated,
         }
-        return recent, counts, failed_counts
-
-    def change_marker(self) -> Mapping[str, Any]:
-        with connect_workflow_database(self.path) as connection:
-            event_position = connection.execute(
-                "SELECT COALESCE(MAX(global_position), 0) FROM run_events"
-            ).fetchone()[0]
-            durable_updated = connection.execute(
-                """
-                SELECT COALESCE(MAX(value), '') FROM (
-                    SELECT MAX(updated_at) AS value FROM jobs
-                    UNION ALL SELECT MAX(updated_at) FROM node_attempts
-                    UNION ALL SELECT MAX(updated_at) FROM durable_timers
-                )
-                """
-            ).fetchone()[0]
-        return {"event_position": int(event_position), "durable_updated": durable_updated}
-
-    def audit_artifact_read(
-        self,
-        actor: str, action: str, artifact_id: str, decision: str,
-        *, run_id: str | None = None, details: Mapping[str, Any] | None = None,
-    ) -> None:
-        # Denied ids are hashed so the audit store cannot become an oracle for
-        # Artifact identities the actor was not allowed to enumerate.
-        target = artifact_id if decision == "allowed" else (
-            "artifact_ref_hash:" + hashlib.sha256(artifact_id.encode()).hexdigest()
-        )
-        with connect_workflow_database(self.path) as connection:
-            persist_audit(
-                connection,
-                run_id=None if run_id is None else EntityId.parse(run_id),
-                actor=actor, action=action, target_id=target,
-                decision=decision, details=dict(details or {}),
-                occurred_at=self.now(),
-            )
-            connection.commit()
 
     def authenticate(self, request: Request, scope: str) -> str | JSONResponse:
         if self.authenticator is None:
@@ -287,51 +187,6 @@ class ApiContext:
         if actor not in self.exempt_from_limit and not self.limiter.allow(actor):
             return error("rate_limited", "request rate limit exceeded", 429)
         return actor
-
-    def read_params(self, request: Request) -> tuple[str | None, int]:
-        return (
-            request.query_params.get("cursor") or None,
-            page_size(request.query_params.get("limit")),
-        )
-
-    def command_factory(self, actor: str):
-        """Commands are authorised before they are advertised (plan B1).
-
-        A reader who cannot execute a mutation must not be shown its button:
-        an inbox full of buttons that 403 teaches people the UI lies. The
-        server still re-checks scope on submission — this only shapes what is
-        offered.
-        """
-        if self.guard.allows(actor, WRITE_SCOPE):
-            return None  # read model default: full command set
-        return lambda record, *, run_id, run_version: ()
-
-    def paged_read(
-        self,
-        loader, scope: str = READ_SCOPE, *, missing_is_not_found=False,
-        pass_actor: bool = False,
-    ):
-        async def handler(request: Request) -> JSONResponse:
-            actor = self.authenticate(request, scope)
-            if isinstance(actor, JSONResponse):
-                return actor
-            try:
-                cursor, limit = self.read_params(request)
-                arguments = {"cursor": cursor, "limit": limit}
-                if pass_actor:
-                    arguments["actor"] = actor
-                items, next_cursor = loader(
-                    EntityId.parse(request.path_params["run_id"]), **arguments
-                )
-            except CursorError as exc:
-                return error("invalid_cursor", str(exc))
-            except ValueError as exc:
-                if missing_is_not_found:
-                    return error("not_found", str(exc), 404)
-                return error("invalid_request", str(exc))
-            return JSONResponse(envelope({"items": items}, next_cursor=next_cursor))
-
-        return handler
 
     async def mutate(
         self, request: Request, scope: str, action: str, handler
@@ -359,8 +214,6 @@ class ApiContext:
             return error("command_in_progress", str(exc), 409)
         except PermissionError as exc:
             return error("forbidden", str(exc), 403)
-        except BudgetVersionConflict as exc:
-            return error("version_conflict", str(exc), 409)
         except AuthoringFailedError as exc:
             # The agent could not produce a compilable revision. Return its
             # findings so the editor can show them, not a bare 500.
@@ -375,11 +228,6 @@ class ApiContext:
             )
         except (AuthoringUnavailableError, RevisionUnavailableError) as exc:
             return error("generation_unavailable", str(exc), 503)
-        except ActiveGoalExistsError as exc:
-            return error(
-                "active_goal_exists", str(exc), 409,
-                active_goal=exc.active_goal,
-            )
         except (DraftNotFoundError, RevisionNotFoundError) as exc:
             return error("workflow_draft_not_found", str(exc), 404)
         except DraftVersionConflictError as exc:
@@ -400,11 +248,11 @@ class ApiContext:
             )
         except SourceUnavailableError as exc:
             return error("source_unavailable", str(exc), 409)
-        except (RunStartError, ValueError) as exc:
-            # A run refused because its plan names a Handler build that is no
-            # longer registered is not "you raced someone" — retrying cannot
-            # help. Give it a code of its own so the client stops telling the
-            # operator to reload and confirm.
+        except ValueError as exc:
+            # A run refused because its definition names a Handler build that
+            # is no longer registered is not "you raced someone" — retrying
+            # cannot help. Give it a code of its own so the client stops
+            # telling the operator to reload and confirm.
             if "HANDLER_UNAVAILABLE" in str(exc):
                 return error("handler_unavailable", str(exc), 409)
             return error("invalid_command", str(exc), 409)

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..handlers.executor import HandlerExecutor
 from ..handlers.registry import ExecutionRegistry
 
 
@@ -29,14 +28,9 @@ class HandlerRegistrySummary:
 
 
 class HandlerRuntimeBuilder:
-    def __init__(
-        self, schema_catalog, *, secret_values=None, output_sink_factory=None,
-    ) -> None:
+    def __init__(self, schema_catalog, *, secret_values=None) -> None:
         self.schemas = schema_catalog
         self.secret_values = dict(secret_values or {})
-        # Optional: where Handler console output is kept for the operator. A
-        # Runtime without one still executes every Handler.
-        self.output_sink_factory = output_sink_factory
         self.registry = ExecutionRegistry()
 
     def register(self, manifest, implementation, *, implementation_id):
@@ -45,13 +39,18 @@ class HandlerRuntimeBuilder:
         )
         return self
 
-    def build(self) -> HandlerExecutor:
+    def seal(self):
+        """Close the registry and check every Handler can actually be bound.
+
+        Sealing before anything runs is what makes "the definition's exact
+        Handler version" a runtime guarantee rather than a convention, and
+        preflight is where a missing secret or an unknown schema id is a
+        startup failure instead of a run that dies halfway.
+        """
+
         self.registry.seal()
         self.preflight()
-        return HandlerExecutor(
-            self.registry, self.schemas, secret_values=self.secret_values,
-            output_sink_factory=self.output_sink_factory,
-        )
+        return self.registry
 
     def preflight(self) -> None:
         missing = []

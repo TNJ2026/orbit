@@ -76,7 +76,7 @@ class CleanInstallTests(unittest.TestCase):
     def test_the_installed_cli_offers_only_the_target_commands(self) -> None:
         result = self.orbit_cli("--help")
         self.assertEqual(0, result.returncode, result.stderr)
-        for command in ("serve", "workflow", "run", "db"):
+        for command in ("serve", "workflow", "mcp", "agent-app"):
             with self.subTest(command=command):
                 self.assertIn(command, result.stdout)
         for retired in ("start", "up", "init", "config", "runner"):
@@ -122,26 +122,6 @@ class CleanInstallTests(unittest.TestCase):
         ):
             with self.subTest(removed=removed):
                 self.assertNotIn(removed, names)
-
-    def test_a_fresh_database_is_created_and_audits_clean(self) -> None:
-        database = self.dir / "fresh.db"
-        python = str(self.venv / "bin" / "python")
-        create = subprocess.run(
-            [
-                python, "-c",
-                "import sys;"
-                "from orbit.workflow.persistence.database import connect_workflow_database;"
-                "from orbit.workflow.persistence.migrations import migrate_workflow_database;"
-                f"c = connect_workflow_database({str(database)!r});"
-                "migrate_workflow_database(c); c.close()",
-            ],
-            capture_output=True, text=True, timeout=180,
-        )
-        self.assertEqual(0, create.returncode, create.stderr)
-
-        result = self.orbit_cli("db", "check", "--db", str(database), "--json")
-        self.assertEqual(0, result.returncode, result.stderr)
-        self.assertTrue(json.loads(result.stdout)["ok"])
 
     def test_the_installed_runtime_serves_over_http(self) -> None:
         """The end of the chain: built, installed, started, answering."""

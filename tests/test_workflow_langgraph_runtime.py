@@ -3969,7 +3969,6 @@ class LangGraphHttpApiTests(unittest.TestCase):
                 authorizer=Authorizer(lambda actor: (
                     READ_SCOPE, WRITE_SCOPE, OPS_WRITE_SCOPE,
                 )),
-                worker_count=1,
             )
             with AsgiHarness(app) as client:
                 started = client.post(
@@ -3997,7 +3996,7 @@ class LangGraphHttpApiTests(unittest.TestCase):
                     body={
                         "jsonrpc": "2.0", "id": 2, "method": "tools/call",
                         "params": {
-                            "name": "start_langgraph_run",
+                            "name": "start_run",
                             "arguments": {
                                 "workflow_id": ir.workflow_id,
                                 "input": {"value": 20},
@@ -4010,8 +4009,8 @@ class LangGraphHttpApiTests(unittest.TestCase):
         self.assertEqual(9, run["result"])
         self.assertEqual(run["run_id"], listed.json()["data"]["runs"][0]["run_id"])
         self.assertEqual(run["revision"], detail.json()["projection_version"])
-        self.assertIn("start_langgraph_run", {item["name"] for item in tools})
-        self.assertIn("cancel_langgraph_run", {item["name"] for item in tools})
+        self.assertIn("start_run", {item["name"] for item in tools})
+        self.assertIn("cancel_run", {item["name"] for item in tools})
         mcp_payload = json.loads(
             mcp_started["result"]["content"][0]["text"]
         )
@@ -4045,7 +4044,6 @@ class LangGraphHttpApiTests(unittest.TestCase):
                 langgraph_service=service,
                 authenticator=lambda request: request.headers.get("x-orbit-actor"),
                 authorizer=Authorizer(lambda actor: (READ_SCOPE,)),
-                worker_count=1,
             )
             with AsgiHarness(app) as client:
                 listed = client.get(
@@ -4077,7 +4075,7 @@ class LangGraphHttpApiTests(unittest.TestCase):
                     body={
                         "jsonrpc": "2.0", "id": 3, "method": "tools/call",
                         "params": {
-                            "name": "read_langgraph_artifact",
+                            "name": "read_artifact",
                             "arguments": {"artifact_id": artifact_id},
                         },
                     },
@@ -4104,7 +4102,6 @@ class LangGraphHttpApiTests(unittest.TestCase):
                 Path(directory) / "orbit.sqlite3",
                 authenticator=lambda request: request.headers.get("x-orbit-actor"),
                 authorizer=Authorizer(lambda actor: (READ_SCOPE,)),
-                worker_count=1,
             )
             with AsgiHarness(app) as client:
                 response = client.get("/api/v1/langgraph-runs")
@@ -4119,7 +4116,7 @@ class LangGraphHttpApiTests(unittest.TestCase):
                 ]["langgraph_workflows"]
         self.assertEqual(404, response.status_code)
         self.assertNotIn(
-            "start_langgraph_run", {item["name"] for item in tools}
+            "start_run", {item["name"] for item in tools}
         )
         self.assertEqual(
             {"available": False, "reason": "service_not_configured"}, capability
@@ -4131,12 +4128,10 @@ class LangGraphHttpApiTests(unittest.TestCase):
             app = create_app(
                 root / "orbit.sqlite3",
                 langgraph_state_directory=root,
-                legacy_execution=False,
                 authenticator=lambda request: request.headers.get("x-orbit-actor"),
                 authorizer=Authorizer(lambda actor: (
                     READ_SCOPE, WRITE_SCOPE, OPS_WRITE_SCOPE,
                 )),
-                worker_count=1,
             )
             with AsgiHarness(app) as client:
                 legacy_runs = client.get("/api/v1/runs", actor="test:reader")
@@ -4154,9 +4149,13 @@ class LangGraphHttpApiTests(unittest.TestCase):
         self.assertEqual(404, legacy_inbox.status_code)
         self.assertEqual(200, langgraph_runs.status_code)
         tool_names = {item["name"] for item in tools}
+        # The engine's tools carry the Runtime's plain names, and the deleted
+        # engine's own tools are not there under any name.
         self.assertIn("start_run", tool_names)
         self.assertNotIn("start_langgraph_run", tool_names)
         self.assertNotIn("submit_human_task", tool_names)
+        self.assertNotIn("runtime_status", tool_names)
+        self.assertNotIn("get_run_result", tool_names)
         self.assertEqual({"langgraph-timer"}, loop_names)
 
     def test_capability_and_startup_recovery_follow_optional_wiring(self) -> None:
@@ -4175,7 +4174,6 @@ class LangGraphHttpApiTests(unittest.TestCase):
                 langgraph_service=service,
                 authenticator=lambda request: request.headers.get("x-orbit-actor"),
                 authorizer=Authorizer(lambda actor: (READ_SCOPE,)),
-                worker_count=1,
             )
             self.assertIs(service, app.state.langgraph_service)
             with AsgiHarness(app) as client:
@@ -4209,7 +4207,6 @@ class LangGraphHttpApiTests(unittest.TestCase):
                 langgraph_service=BrokenService(),
                 authenticator=lambda request: request.headers.get("x-orbit-actor"),
                 authorizer=Authorizer(lambda actor: (READ_SCOPE,)),
-                worker_count=1,
             )
             with AsgiHarness(app) as client:
                 self.assertEqual(
@@ -4232,7 +4229,6 @@ class LangGraphHttpApiTests(unittest.TestCase):
                 langgraph_service=RecoveringService(),
                 authenticator=lambda request: request.headers.get("x-orbit-actor"),
                 authorizer=Authorizer(lambda actor: (READ_SCOPE,)),
-                worker_count=1,
             )
             with AsgiHarness(app):
                 pass
@@ -4252,7 +4248,6 @@ class LangGraphHttpApiTests(unittest.TestCase):
                 langgraph_service=PartialService(),
                 authenticator=lambda request: request.headers.get("x-orbit-actor"),
                 authorizer=Authorizer(lambda actor: (READ_SCOPE,)),
-                worker_count=1,
             )
             with AsgiHarness(app) as client:
                 self.assertEqual(
@@ -4350,7 +4345,6 @@ class LangGraphHttpApiTests(unittest.TestCase):
                 authorizer=Authorizer(lambda _actor: (
                     READ_SCOPE, WRITE_SCOPE, OPS_WRITE_SCOPE,
                 )),
-                worker_count=1,
                 poll_seconds=0.01,
             )
             with AsgiHarness(app) as client:
@@ -4385,14 +4379,14 @@ class LangGraphHttpApiTests(unittest.TestCase):
                     "run.start",
                     {command["command"] for command in generated["allowed_commands"]},
                 )
-                interrupted = mcp(client, "start_langgraph_run", {
+                interrupted = mcp(client, "start_run", {
                     "workflow_id": authored["result"]["workflow_id"],
                     "input": {"value": 42},
                     "idempotency_key": "run-generated-langgraph",
                 }, 3)
                 self.assertEqual("interrupted", interrupted["status"])
                 self.assertEqual("approve", interrupted["interrupts"][0]["value"]["node_id"])
-                run = mcp(client, "resume_langgraph_run", {
+                run = mcp(client, "resume_run", {
                     "run_id": interrupted["run_id"],
                     "value": {"result": {"decision": "approve", "value": 43}},
                     "expected_version": interrupted["revision"],
@@ -4435,7 +4429,6 @@ class LangGraphHttpApiTests(unittest.TestCase):
                     (READ_SCOPE,) if actor == "test:reader"
                     else (READ_SCOPE, WRITE_SCOPE, OPS_WRITE_SCOPE)
                 )),
-                worker_count=1,
             )
             with AsgiHarness(app) as client:
                 run = client.post(
@@ -4525,7 +4518,6 @@ class LangGraphHttpApiTests(unittest.TestCase):
                     (READ_SCOPE,) if actor == "test:reader"
                     else (READ_SCOPE, WRITE_SCOPE, OPS_WRITE_SCOPE)
                 )),
-                worker_count=1,
             )
             with AsgiHarness(app) as client:
                 started = client.post(

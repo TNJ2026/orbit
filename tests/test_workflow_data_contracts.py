@@ -193,7 +193,7 @@ class WorkflowDataContractTests(unittest.TestCase):
 
     def test_stability_and_error_registry_are_explicit(self):
         for name in (
-            "port_data_policy", "value_store_contracts", "artifact_contracts",
+            "port_data_policy", "artifact_contracts",
             "input_manifest", "data_commit_manifest",
         ):
             self.assertIs(ContractStability.STABLE, CONTRACT_STABILITY[name])

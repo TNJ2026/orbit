@@ -24,10 +24,7 @@ from starlette.routing import Route
 from ...workflow.api.artifact_read_models import PREVIEW_LIMIT_BYTES
 from ...workflow.api.routes import RateLimiter
 
-from . import (
-    artifacts, drafts, human, langgraph_runs, ops, plans, recovery, runs,
-    workflows,
-)
+from . import drafts, langgraph_runs, ops, workflows
 from .common import (
     OPS_READ_SCOPE, OPS_WRITE_SCOPE, READ_SCOPE, SENSITIVE_SCOPE, WRITE_SCOPE,
     Authorizer, authoring_timeout_seconds, error,
@@ -44,8 +41,8 @@ __all__ = [
 
 def build_api_v1(
     db_path: Path | str,
-    durable_service,
     *,
+    execution_registry=None,
     workflow_db_path: Path | str | None = None,
     authenticator: Callable[[Request], str | None] | None = None,
     authorizer: Authorizer | None = None,
@@ -68,7 +65,6 @@ def build_api_v1(
     authoring_jobs=None,
     shutdown_request: Callable[[], None] | None = None,
     langgraph_service=None,
-    legacy_execution: bool = True,
     workflow_ui_mode: str = "multi-agent",
     template_service=None,
 ) -> list[Route]:
@@ -81,7 +77,7 @@ def build_api_v1(
 
     ctx = ApiContext(
         db_path,
-        durable_service,
+        execution_registry=execution_registry,
         workflow_db_path=workflow_db_path,
         authenticator=authenticator,
         authorizer=authorizer,
@@ -104,7 +100,6 @@ def build_api_v1(
         authoring_jobs=authoring_jobs,
         shutdown_request=shutdown_request,
         langgraph_service=langgraph_service,
-        legacy_execution=legacy_execution,
         workflow_ui_mode=workflow_ui_mode,
     )
     # Both modes get the same surface. `workflow_ui_mode` selects how many
@@ -116,14 +111,6 @@ def build_api_v1(
         *workflows.build_routes(ctx),
         *drafts.build_routes(ctx),
     ]
-    if legacy_execution:
-        routes[:0] = [
-            *runs.build_routes(ctx),
-            *plans.build_routes(ctx),
-            *artifacts.build_routes(ctx),
-            *human.build_routes(ctx),
-            *recovery.build_routes(ctx),
-        ]
     if langgraph_service is not None:
         routes.extend(langgraph_runs.build_routes(
             ctx, langgraph_service, template_service=template_service,

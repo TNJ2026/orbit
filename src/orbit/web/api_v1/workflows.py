@@ -47,7 +47,7 @@ def build_routes(ctx) -> list[Route]:
         if isinstance(actor, JSONResponse):
             return actor
         may_start = ctx.guard.allows(actor, WRITE_SCOPE)
-        registry = getattr(ctx.durable_service, "execution_registry", None)
+        registry = ctx.execution_registry
         has_action_agent = bool(
             registry is not None and registry.sealed
             and any(
@@ -90,16 +90,8 @@ def build_routes(ctx) -> list[Route]:
                     "target_aggregate_id": item["workflow_id"],
                     "expected_version": 0,
                     "payload_schema": "langgraph-run-start/1.0",
-                }] if may_start and item["langgraph_compatibility"]["compatible"] else [{
-                    "command": "run.start",
-                    "label": "Start run",
-                    "method": "POST",
-                    "href": "/api/v1/runs",
-                    "target_aggregate_id": item["workflow_id"],
-                    "expected_version": 0,
-                    "payload_schema": "run-start/1.0",
-                }] if may_start and ctx.legacy_execution
-                and item["goal_readiness"] == "ready" else [])
+                }] if may_start and item["langgraph_compatibility"]["compatible"]
+                else [])
             if may_start and ctx.workflow_publisher is not None:
                 item["allowed_commands"].append({
                     "command": "workflow.delete",
@@ -436,7 +428,7 @@ def build_routes(ctx) -> list[Route]:
         simply refuses to start and nothing says which Agent moved.
         """
 
-        registry = getattr(ctx.durable_service, "execution_registry", None)
+        registry = ctx.execution_registry
         available: dict[str, Any] = {}
         if registry is not None and registry.sealed:
             for entry in registry.entries():
@@ -478,7 +470,7 @@ def build_routes(ctx) -> list[Route]:
             or not ctx.guard.allows(actor, WRITE_SCOPE)
         ):
             return {}
-        registry = getattr(ctx.durable_service, "execution_registry", None)
+        registry = ctx.execution_registry
         if registry is None or not registry.sealed:
             return {}
         agent_manifests = [
@@ -551,16 +543,7 @@ def build_routes(ctx) -> list[Route]:
             "expected_version": 0,
             "payload_schema": "langgraph-run-start/1.0",
         }] if ctx.guard.allows(actor, WRITE_SCOPE)
-        and item["langgraph_compatibility"]["compatible"] else [{
-            "command": "run.start",
-            "label": "Start run",
-            "method": "POST",
-            "href": "/api/v1/runs",
-            "target_aggregate_id": item["workflow_id"],
-            "expected_version": 0,
-            "payload_schema": "run-start/1.0",
-        }] if ctx.guard.allows(actor, WRITE_SCOPE) and ctx.legacy_execution
-        and item["goal_readiness"] == "ready" else [])
+        and item["langgraph_compatibility"]["compatible"] else [])
         if ctx.guard.allows(actor, WRITE_SCOPE) and ctx.workflow_publisher is not None:
             item["allowed_commands"].append({
                 "command": "workflow.delete",

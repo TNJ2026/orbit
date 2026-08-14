@@ -42,7 +42,7 @@ class PackageContentTests(unittest.TestCase):
     def test_the_runtime_packages_are_importable(self) -> None:
         for module in (
             "orbit.web.app", "orbit.web.api_v1", "orbit.web.mcp",
-            "orbit.platform.cutover", "orbit.workflow.api.plan_read_models",
+            "orbit.platform.cutover", "orbit.workflow.langgraph_runtime",
         ):
             with self.subTest(module=module):
                 __import__(module)

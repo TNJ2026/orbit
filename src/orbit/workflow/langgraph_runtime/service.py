@@ -104,6 +104,12 @@ class LangGraphWorkflowService:
                     request_hash TEXT NOT NULL,
                     run_id TEXT NOT NULL REFERENCES langgraph_runs(run_id)
                 );
+                CREATE TABLE IF NOT EXISTS langgraph_handler_attempts (
+                    attempt_id TEXT PRIMARY KEY,run_id TEXT NOT NULL,
+                    node_id TEXT NOT NULL,status TEXT NOT NULL,output_json TEXT,
+                    error TEXT,updated_at TEXT NOT NULL,
+                    handler_name TEXT NOT NULL DEFAULT ''
+                );
                 CREATE TABLE IF NOT EXISTS langgraph_timers (
                     timer_id TEXT PRIMARY KEY,run_id TEXT NOT NULL,node_id TEXT NOT NULL,
                     attempt_number INTEGER NOT NULL,due_at TEXT NOT NULL,
@@ -175,7 +181,13 @@ class LangGraphWorkflowService:
             timespec="microseconds"
         ).replace("+00:00", "Z")
 
-    def _workflow(self, workflow_id: str, version: int | None):
+    def _workflow(self, workflow_id: str, version: int | None, *, starting=False):
+        if starting and getattr(self.workflow_versions, "is_archived", None) is not None:
+            if self.workflow_versions.is_archived(workflow_id):
+                # The catalog card that offered this start was rendered before
+                # somebody deleted the workflow. Retrying cannot help, so it is
+                # not a conflict to reload past — the id is gone.
+                raise LookupError(f"workflow was deleted: {workflow_id}")
         resolved = self.workflow_versions.latest_version(workflow_id) if version is None else version
         if resolved < 1:
             raise LookupError(f"workflow not found: {workflow_id}")
@@ -197,7 +209,7 @@ class LangGraphWorkflowService:
             raise ValueError("idempotency_key is required")
         if not actor.strip():
             raise ValueError("actor is required")
-        record = self._workflow(workflow_id, workflow_version)
+        record = self._workflow(workflow_id, workflow_version, starting=True)
         request_hash = definition_hash({
             "workflow_id": workflow_id,
             "workflow_version": record.version.value,
@@ -793,7 +805,7 @@ class LangGraphWorkflowService:
 
     def list_runs(
         self, *, status: str | None = None, limit: int = 100,
-        actor: str | None = None,
+        actor: str | None = None, after: tuple[str, str] | None = None,
     ) -> tuple[LangGraphRun, ...]:
         if isinstance(limit, bool) or not 1 <= limit <= 500:
             raise ValueError("limit must be between 1 and 500")
@@ -807,6 +819,12 @@ class LangGraphWorkflowService:
             clauses.append("status=?"); params.append(status)
         if actor is not None:
             clauses.append("owner_actor=?"); params.append(actor)
+        if after is not None:
+            # Keyset, not offset: the list is ordered newest first and a run
+            # started while somebody is paging must not shift the page under
+            # them into showing one row twice and skipping another.
+            clauses.append("(created_at < ? OR (created_at = ? AND run_id > ?))")
+            params.extend([after[0], after[0], after[1]])
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         with self._connect() as connection:
             rows = connection.execute(
@@ -815,6 +833,108 @@ class LangGraphWorkflowService:
                 (*params, limit),
             ).fetchall()
         return tuple(self._record(row) for row in rows)
+
+    def counts(self) -> dict[str, Any]:
+        """Runs and timers by status — what an operator asks the engine for.
+
+        Reported from this adapter's own database rather than the project one:
+        the run tables the Ops page used to read belonged to the engine that
+        was deleted, and after it went they only ever answered zero.
+        """
+
+        with self._connect() as connection:
+            runs = {
+                str(row["status"]): int(row["count"])
+                for row in connection.execute(
+                    "SELECT status, COUNT(*) AS count FROM langgraph_runs"
+                    " GROUP BY status"
+                )
+            }
+            timers = {
+                str(row["status"]): int(row["count"])
+                for row in connection.execute(
+                    "SELECT status, COUNT(*) AS count FROM langgraph_timers"
+                    " GROUP BY status"
+                )
+            }
+            handlers = {
+                str(row["status"]): int(row["count"])
+                for row in connection.execute(
+                    "SELECT status, COUNT(*) AS count FROM langgraph_handler_attempts"
+                    " GROUP BY status"
+                )
+            }
+        return {
+            "runs_by_status": runs,
+            "timers_by_status": timers,
+            "handler_attempts_by_status": handlers,
+        }
+
+    def handler_attempts(self) -> dict[str, dict[str, Any]]:
+        """Per-Handler attempt totals and the latest one, for the Ops page."""
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT handler_name,
+                       COUNT(*) AS total,
+                       SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed
+                FROM langgraph_handler_attempts
+                WHERE handler_name <> ''
+                GROUP BY handler_name
+                """
+            ).fetchall()
+            latest = connection.execute(
+                """
+                SELECT handler_name, run_id, node_id, attempt_id, status, updated_at
+                FROM (
+                    SELECT *, ROW_NUMBER() OVER (
+                        PARTITION BY handler_name
+                        ORDER BY updated_at DESC, attempt_id DESC
+                    ) AS rank
+                    FROM langgraph_handler_attempts WHERE handler_name <> ''
+                ) WHERE rank = 1
+                """
+            ).fetchall()
+        recent = {
+            str(row["handler_name"]): {
+                "run_id": row["run_id"], "node_id": row["node_id"],
+                "attempt_id": row["attempt_id"], "status": row["status"],
+                "occurred_at": row["updated_at"],
+            }
+            for row in latest
+        }
+        return {
+            str(row["handler_name"]): {
+                "total": int(row["total"]), "failed": int(row["failed"] or 0),
+                "recent": recent.get(str(row["handler_name"])),
+            }
+            for row in rows
+        }
+
+    def last_change(self) -> str | None:
+        """The most recent run update, as the stored timestamp string."""
+
+        with self._connect() as connection:
+            return connection.execute(
+                "SELECT MAX(updated_at) FROM langgraph_runs"
+            ).fetchone()[0]
+
+    def workflow_usage(self) -> dict[str, dict[str, Any]]:
+        """Per-workflow run count and most recent start, for the catalog."""
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT workflow_id, MAX(created_at) AS last_run_at,"
+                " COUNT(*) AS run_count FROM langgraph_runs GROUP BY workflow_id"
+            ).fetchall()
+        return {
+            str(row["workflow_id"]): {
+                "last_run_at": row["last_run_at"],
+                "run_count": int(row["run_count"]),
+            }
+            for row in rows
+        }
 
     def recover_running(
         self, *, limit: int = 100, on_error: Callable[[str, Exception], None] | None = None

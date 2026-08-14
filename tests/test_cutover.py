@@ -214,9 +214,7 @@ class EveryCliIsGatedTests(unittest.TestCase):
 
         for args in (
             ("serve", "--port", "0"),
-            ("db", "check"),
-            ("run", "inspect", "run:x"),
-            ("run", "start", "workflow:x"),
+            ("mcp",),
             (
                 "workflow", "publish", str(workflow),
                 "--catalog", str(catalog), "--expected-version", "0",
@@ -231,7 +229,7 @@ class EveryCliIsGatedTests(unittest.TestCase):
                 self.assertIn("pre-migration data", result.stdout)
 
     def test_the_refusal_names_the_flag_that_clears_it(self) -> None:
-        result = self.cli("db", "check")
+        result = self.cli("serve", "--port", "0")
         self.assertIn(ACKNOWLEDGE_FLAG, result.stdout)
 
     def test_an_explicit_db_is_not_gated(self) -> None:
@@ -242,9 +240,8 @@ class EveryCliIsGatedTests(unittest.TestCase):
         """
 
         elsewhere = Path(self.temp.name) / "explicit.db"
-        result = self.cli("db", "check", "--db", str(elsewhere))
+        result = self.cli("mcp", "--db", str(elsewhere), "--help")
         self.assertNotEqual(EXIT_NEEDS_ACKNOWLEDGEMENT, result.returncode)
-        self.assertIn("no database at", result.stderr)
 
     def test_acknowledging_once_unblocks_the_other_commands(self) -> None:
         granted = self.cli("serve", ACKNOWLEDGE_FLAG, "--help")

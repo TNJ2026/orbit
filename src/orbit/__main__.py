@@ -104,71 +104,6 @@ def _artifact_root_path(explicit: str | None, db_path: str | Path) -> Path:
     return Path(db_path).expanduser().absolute().parent / "artifacts"
 
 
-def _add_db_check_arguments(command) -> None:
-    command.add_argument("--db", default=None, help="SQLite database path")
-    command.add_argument("--run-id", default=None, help="Optional run:<id> scope")
-    command.add_argument(
-        "--json", action="store_true", help="Emit stable machine-readable JSON"
-    )
-    command.add_argument(
-        "--drop-invalid-snapshots",
-        action="store_true",
-        help=(
-            "Explicitly delete corrupt snapshots; event and projection data "
-            "remain read-only"
-        ),
-    )
-
-
-def _db_check_command(args) -> None:
-    """Audit the runtime database. Read-only unless --drop-invalid-snapshots."""
-
-    from .workflow.domain.ids import EntityId
-    from .workflow.persistence.integrity import check_database
-
-    db_path = _runtime_db_path(args.db)
-    if not Path(db_path).exists():
-        # A mistyped --db is the common case here. A stack trace tells the user
-        # sqlite3 could not open a file; this tells them which one.
-        raise SystemExit(f"orbit db check: no database at {db_path}")
-
-    run_id = EntityId.parse(args.run_id) if args.run_id else None
-    try:
-        report = check_database(db_path, run_id=run_id)
-    except sqlite3.DatabaseError as exc:
-        raise SystemExit(f"orbit db check: cannot read {db_path}: {exc}") from None
-    payload = report.to_dict()
-
-    if args.drop_invalid_snapshots:
-        snapshot_ids = tuple(
-            item.entity_id
-            for item in report.issues
-            if item.code == "SNAPSHOT_CORRUPT" and item.entity_id is not None
-        )
-        if snapshot_ids:
-            from .workflow.persistence import SQLiteUnitOfWork
-
-            with SQLiteUnitOfWork(db_path) as uow:
-                for snapshot_id in snapshot_ids:
-                    uow.snapshots.delete(EntityId.parse(snapshot_id))
-                uow.commit()
-            report = check_database(db_path, run_id=run_id)
-            payload = report.to_dict()
-            payload["dropped_invalid_snapshots"] = list(snapshot_ids)
-
-    if getattr(args, "json", False):
-        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
-    elif report.ok:
-        print(
-            f"ok: {report.checked_events} events, {report.checked_snapshots} snapshots"
-        )
-    else:
-        print("\n".join(f"{item.code}: {item.message}" for item in report.issues))
-
-    if not report.ok:
-        raise SystemExit(4)
-
-
 def _goal_readiness_buckets(path: Path) -> dict[str, list[dict[str, object]]]:
     """Published Workflows grouped by whether a Goal can start them."""
 
@@ -335,62 +270,6 @@ def _workflow_command(args) -> None:
         raise SystemExit(3) from None
 
 
-def _run_command(args) -> None:
-    """`orbit run start|inspect`.
-
-    The CLI writes through the same RunApplicationService the HTTP API uses, so
-    a start from the terminal and a start from the UI produce identical events.
-    It talks to SQLite directly rather than to a running server: the kernel is
-    the concurrency boundary, and adding an HTTP hop would only mean the CLI
-    stops working whenever the server is down.
-    """
-
-    import uuid
-
-    from .workflow.application.durable_runtime_service import (
-        DurableRuntimeApplicationService,
-    )
-    from .workflow.application.run_service import (
-        RunApplicationService, RunStartError,
-    )
-
-    db_path = _runtime_db_path(args.db)
-    workflow_db_path = _workflow_db_path(args.db, args.ui_mode)
-    service = RunApplicationService(
-        db_path, DurableRuntimeApplicationService(
-            db_path, workflow_db_path=workflow_db_path,
-        ),
-        enforce_single_goal=True,
-        workflow_db_path=workflow_db_path,
-    )
-
-    try:
-        if args.run_action == "inspect":
-            print(json.dumps(service.inspect(args.run_id), ensure_ascii=False, indent=2, sort_keys=True))
-            return
-
-        started = service.start_run(
-            workflow_id=args.workflow_id,
-            version=args.workflow_version,
-            inputs=json.loads(args.input) if args.input else {},
-            goal=args.goal or "",
-            budget_microunits=args.budget_microunits,
-            actor=args.actor,
-            # A generated key still makes the start idempotent under retry
-            # inside one invocation; passing --idempotency-key is what makes a
-            # re-run of the whole command idempotent.
-            idempotency_key=args.idempotency_key or uuid.uuid4().hex,
-        )
-    except (RunStartError, ValueError) as exc:
-        raise SystemExit(f"orbit run: {exc}")
-
-    if args.json:
-        print(json.dumps(started.to_dict(), ensure_ascii=False, sort_keys=True))
-    else:
-        state = "replayed" if started.replayed else "started"
-        print(f"{state} {started.run_id} ({started.workflow_id}@{started.workflow_version})")
-
-
 def _structured_agents(values) -> dict[str, str] | None:
     """Parse repeated `--structured-agent NAME=MODEL` into a mapping.
 
@@ -504,7 +383,6 @@ def _serve(args) -> None:
             handlers=handlers,
             schemas=BUILTIN_SCHEMAS,
             artifact_backend=artifact_backend,
-            worker_count=1,
             discover_agents=not args.no_agent_discovery,
             serve_ui=True,
             authenticator=loopback_authenticator,
@@ -521,7 +399,6 @@ def _serve(args) -> None:
             operator_actors=(LOCAL_ACTOR,),
             shutdown_request=request_shutdown,
             langgraph_state_directory=langgraph_state_directory,
-            legacy_execution=False,
             workflow_ui_mode=args.ui_mode,
             agent_workspace_root=args.agent_workspace,
             structured_agents=structured_agents,
@@ -590,7 +467,6 @@ def _mcp(args) -> None:
         handlers=list(builtin_handlers()),
         schemas=BUILTIN_SCHEMAS,
         artifact_backend=artifact_backend,
-        worker_count=1,
         discover_agents=not args.no_agent_discovery,
         serve_ui=False,
         # There is no connection to authenticate. The person who started this
@@ -601,7 +477,6 @@ def _mcp(args) -> None:
         token_exempt_actors=(LOCAL_ACTOR,),
         operator_actors=(LOCAL_ACTOR,),
         langgraph_state_directory=Path(db_path).parent,
-        legacy_execution=False,
     )
     composition = app.state.runtime
     # Started by hand because no ASGI server will run the lifespan here.
@@ -661,7 +536,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     serve_cmd = sub.add_parser(
-        "serve", help="Start the Runtime: API, UI, workers and timers"
+        "serve", help="Start the Runtime: API, UI and background loops"
     )
     serve_cmd.add_argument("--host", default="127.0.0.1", help="Bind address (default: 127.0.0.1)")
     serve_cmd.add_argument("--port", type=int, default=8848, help="Port (default: 8848)")
@@ -817,34 +692,6 @@ def build_parser() -> argparse.ArgumentParser:
             _add_ui_mode_argument(command)
             command.add_argument("--expected-version", type=int, required=True)
             command.add_argument("--actor", default="local-cli")
-    run_cmd = sub.add_parser("run", help="Start and inspect workflow runs")
-    run_sub = run_cmd.add_subparsers(dest="run_action", required=True)
-    run_start = run_sub.add_parser("start", help="Start a run of a published workflow")
-    run_start.add_argument("workflow_id")
-    run_start.add_argument("--workflow-version", type=int, default=None, help="Default: latest published")
-    run_start.add_argument("--input", default=None, help="Run input as a JSON object")
-    run_start.add_argument("--goal", default=None)
-    run_start.add_argument("--budget-microunits", type=int, default=None)
-    run_start.add_argument("--actor", default="local-cli")
-    run_start.add_argument(
-        "--idempotency-key", default=None,
-        help="Reuse to make repeated invocations resolve to the same run",
-    )
-    run_inspect = run_sub.add_parser("inspect", help="Why is this run where it is")
-    run_inspect.add_argument("run_id")
-    for command in (run_start, run_inspect):
-        command.add_argument("--db", default=None, help="SQLite database path")
-        _add_ui_mode_argument(command)
-        command.add_argument("--json", action="store_true", help="Emit stable machine-readable JSON")
-
-    db_cmd = sub.add_parser("db", help="Inspect the project runtime database")
-    db_sub = db_cmd.add_subparsers(dest="db_action", required=True)
-    db_check = db_sub.add_parser(
-        "check",
-        help="Audit runtime event, projection, receipt, and snapshot integrity",
-    )
-    _add_db_check_arguments(db_check)
-
     return parser
 
 
@@ -853,14 +700,6 @@ def main() -> None:
 
     if args.command == "workflow":
         _workflow_command(args)
-        return
-
-    if args.command == "db":
-        _db_check_command(args)
-        return
-
-    if args.command == "run":
-        _run_command(args)
         return
 
     if args.command == "serve":

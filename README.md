@@ -154,11 +154,9 @@ acting.
 ```bash
 orbit serve
 orbit --version
-orbit run start <workflow_id> --goal "..."
-orbit run inspect <run_id> --json
+orbit mcp
 orbit workflow validate <file> --catalog <catalog.json>
 orbit workflow publish <file> --catalog <catalog.json> --expected-version <n>
-orbit db check
 ```
 
 `orbit serve` binds to `127.0.0.1` by default. Runtime state and Artifacts are

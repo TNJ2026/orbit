@@ -71,13 +71,13 @@ class DiscoveryTests(ApiTestCase):
             names = {item["name"] for item in tools}
             self.assertEqual(
                 {
-                    "list_runs", "inspect_run", "start_run", "cancel_run",
-                    "list_workflows", "get_run_result", "list_artifacts",
-                    "read_artifact", "list_inbox", "request_human_task_token",
-                    "submit_human_task", "generate_workflow",
-                    "get_authoring_job", "claim_authoring_request",
-                    "wait_authoring_request", "submit_authoring_response",
-                    "runtime_status",
+                    "list_runs", "inspect_run", "start_run", "resume_run",
+                    "recover_run", "cancel_run", "replay_langgraph_run",
+                    "list_workflows", "list_artifacts", "read_artifact",
+                    "get_artifact_lineage", "collect_artifacts",
+                    "generate_workflow", "get_authoring_job",
+                    "claim_authoring_request", "wait_authoring_request",
+                    "submit_authoring_response",
                 },
                 names,
             )
@@ -107,22 +107,21 @@ class ToolCallTests(ApiTestCase):
     def test_write_tool_starts_a_run(self) -> None:
         with AsgiHarness(self.app) as client:
             started = self._start(client)
-            self.assertTrue(started["run_id"].startswith("run:"))
-            self.assertFalse(started["replayed"])
+            self.assertTrue(started["run_id"].startswith("langgraph_run:"))
 
     def test_repeating_the_key_replays_instead_of_duplicating(self) -> None:
         with AsgiHarness(self.app) as client:
             first = self._start(client, key="same")
             second = self._start(client, key="same")
             self.assertEqual(first["run_id"], second["run_id"])
-            self.assertTrue(second["replayed"])
 
     def test_inspect_answers_why(self) -> None:
         with AsgiHarness(self.app) as client:
             run_id = self._start(client, key="inspect")["run_id"]
-            body = payload_of(tool(client, "inspect_run", {"run_id": run_id}, actor="reader"))
-            self.assertEqual(run_id, body["summary"]["run_id"])
-            self.assertIn("responsibilities", body)
+            # A run is scoped to the actor who started it.
+            body = payload_of(tool(client, "inspect_run", {"run_id": run_id}, actor="writer"))
+            self.assertEqual(run_id, body["run_id"])
+            self.assertIn("status", body)
 
     def test_cancel_with_a_stale_version_is_a_tool_error_not_a_crash(self) -> None:
         with AsgiHarness(self.app) as client:
@@ -216,11 +215,12 @@ class DiscoveryAndResultTests(ApiTestCase):
             ))
 
             payload = payload_of(tool(
-                client, "get_run_result", {"run_id": started["run_id"]},
-                actor="reader",
+                client, "inspect_run", {"run_id": started["run_id"]},
+                actor="writer",
             ))
 
-            self.assertIn("state", payload)
+            self.assertEqual("completed", payload["status"])
+            self.assertEqual([], payload["interrupts"])
 
     def test_artifacts_are_listable_and_scoped_to_a_run(self) -> None:
         with AsgiHarness(self.app) as client:
@@ -241,32 +241,6 @@ class DiscoveryAndResultTests(ApiTestCase):
 
             self.assertTrue(result["result"]["isError"])
             self.assertIn("error", payload_of(result))
-
-
-class OperationsToolTests(ApiTestCase):
-    def test_runtime_status_counts_the_runtime_itself(self) -> None:
-        with AsgiHarness(self.app) as client:
-            payload = payload_of(tool(client, "runtime_status", {}, actor="ops-reader"))
-
-            self.assertEqual(
-                {"jobs", "timers", "active_leases", "runs"}, set(payload)
-            )
-
-    def test_a_plain_reader_cannot_read_runtime_status(self) -> None:
-        """Ops state is a separate scope over MCP exactly as it is over HTTP."""
-
-        with AsgiHarness(self.app) as client:
-            body = tool(client, "runtime_status", {}, actor="reader")
-
-            self.assertEqual(-32001, body["error"]["code"])
-            self.assertIn("runtime.ops.read", body["error"]["message"])
-
-    def test_the_inbox_lists_what_is_waiting_on_a_person(self) -> None:
-        with AsgiHarness(self.app) as client:
-            payload = payload_of(tool(client, "list_inbox", {}, actor="reader"))
-
-            self.assertEqual([], payload["items"])
-            self.assertEqual(0, payload["action_count"])
 
 
 class AuthoringToolTests(ApiTestCase):
@@ -308,7 +282,7 @@ class ClientWrittenWorkflowTests(unittest.TestCase):
         app = create_app(
             Path(temp.name) / "runtime.db",
             handlers=[transform_registration()], schemas=SCHEMAS,
-            worker_count=1, poll_seconds=0.02,
+            poll_seconds=0.02,
             authenticator=lambda request: request.headers.get("x-orbit-actor"),
             authorizer=Authorizer(lambda _actor: [READ_SCOPE, WRITE_SCOPE]),
             workflow_generators=broker.generators(),
@@ -494,7 +468,7 @@ class SharedAuthoringServiceTests(unittest.TestCase):
         app = create_app(
             Path(temp.name) / "runtime.db",
             handlers=[transform_registration()], schemas=SCHEMAS,
-            worker_count=1, poll_seconds=0.02,
+            poll_seconds=0.02,
             workflow_generator=lambda _prompt: "{}",
         )
 
@@ -573,7 +547,8 @@ class StdioTransportTests(ApiTestCase):
 
         responses = self.run_stdio(
             '{"jsonrpc":"2.0","id":1,"method":"tools/call",'
-            '"params":{"name":"runtime_status","arguments":{}}}',
+            '"params":{"name":"start_run","arguments":'
+            '{"workflow_id":"workflow:linear","idempotency_key":"stdio-1"}}}',
             actor="reader",
         )
 

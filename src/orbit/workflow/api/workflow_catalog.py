@@ -19,10 +19,14 @@ from .graph_layout import graph_layout
 
 class WorkflowCatalogReadModelService:
     def __init__(
-        self, path: Path | str, schema_catalog, *, usage_path: Path | str | None = None,
+        self, path: Path | str, schema_catalog, *, usage_source=None,
     ) -> None:
         self.path = Path(path)
-        self.usage_path = Path(usage_path or path)
+        # How recently a definition ran is a fact the *engine* holds, so it is
+        # injected rather than queried here. It used to be read out of a run
+        # table in this database; that table belonged to an engine that has
+        # been deleted, and the column silently became "never used".
+        self.usage_source = usage_source
         self.schemas = schema_catalog
 
     @staticmethod
@@ -281,14 +285,7 @@ class WorkflowCatalogReadModelService:
             # How recently a definition was actually used is a fact about runs,
             # not about the definition. A catalog of dozens is ordered by it far
             # more often than by workflow_id, so the projection carries it.
-        with connect_workflow_database(self.usage_path, read_only=True) as connection:
-            usage = {
-                row["workflow_id"]: row
-                for row in connection.execute(
-                    "SELECT workflow_id, MAX(created_at) AS last_run_at,"
-                    " COUNT(*) AS run_count FROM workflow_runs GROUP BY workflow_id"
-                ).fetchall()
-            }
+        usage = {} if self.usage_source is None else self.usage_source()
         entries = []
         for row in rows:
             item = self._entry(row, include_definition=False)

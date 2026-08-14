@@ -58,8 +58,19 @@ class _HandlerAttemptJournal:
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS langgraph_handler_attempts("
                 "attempt_id TEXT PRIMARY KEY,run_id TEXT NOT NULL,node_id TEXT NOT NULL,"
-                "status TEXT NOT NULL,output_json TEXT,error TEXT,updated_at TEXT NOT NULL)"
+                "status TEXT NOT NULL,output_json TEXT,error TEXT,updated_at TEXT NOT NULL,"
+                "handler_name TEXT NOT NULL DEFAULT '')"
             )
+            columns = {
+                row["name"] for row in connection.execute(
+                    "PRAGMA table_info(langgraph_handler_attempts)"
+                )
+            }
+            if "handler_name" not in columns:
+                connection.execute(
+                    "ALTER TABLE langgraph_handler_attempts"
+                    " ADD COLUMN handler_name TEXT NOT NULL DEFAULT ''"
+                )
 
     def _connect(self):
         connection = sqlite3.connect(self.path)
@@ -71,7 +82,7 @@ class _HandlerAttemptJournal:
         return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
     def claim(
-        self, context, *, retry_failed: bool = False,
+        self, context, *, handler_name: str = "", retry_failed: bool = False,
     ) -> Mapping[str, Any] | None:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -95,8 +106,11 @@ class _HandlerAttemptJournal:
                     f"Handler attempt {context.attempt_id} has {row['status']} outcome"
                 )
             connection.execute(
-                "INSERT INTO langgraph_handler_attempts VALUES (?,?,?,'started',NULL,NULL,?)",
-                (context.attempt_id, context.run_id, context.node_id, self._now()),
+                "INSERT INTO langgraph_handler_attempts"
+                "(attempt_id,run_id,node_id,status,output_json,error,updated_at,"
+                "handler_name) VALUES (?,?,?,'started',NULL,NULL,?,?)",
+                (context.attempt_id, context.run_id, context.node_id, self._now(),
+                 handler_name),
             )
             connection.commit()
         return None
@@ -144,7 +158,7 @@ def _agent_adapter(
 
     def invoke(inputs, config, context):
         _validate_secret_refs(inputs, context, manifest)
-        replay = journal.claim(context)
+        replay = journal.claim(context, handler_name=manifest.name)
         if replay is not None:
             return replay
         deadline = datetime.now(timezone.utc) + timedelta(
@@ -253,6 +267,7 @@ def _tool_adapter(
             raise ValueError(f"Tool Handler validation {issue.path}: {issue.message}")
         replay = journal.claim(
             context,
+            handler_name=manifest.name,
             retry_failed=(
                 manifest.execution_safety is ExecutionSafety.REPLAY_SAFE
             ),

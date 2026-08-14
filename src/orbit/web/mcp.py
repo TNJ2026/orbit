@@ -5,8 +5,8 @@ protocol is small enough that a dependency would cost more than it saves, and
 the runtime already owns the identity, authorisation and idempotency rules that
 matter here.
 
-Every tool call goes through the same RunApplicationService as `/api/v1` and
-`orbit run`. Nothing is anonymous — a caller without the right scope gets the
+Every tool call goes through the same application services as `/api/v1`.
+Nothing is anonymous — a caller without the right scope gets the
 same refusal it would get over HTTP — and a write tool without an idempotency
 key is rejected rather than silently retried into a duplicate run.
 """
@@ -23,20 +23,13 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from ..workflow.api.artifact_read_models import ArtifactReadModelService
-from ..workflow.api.read_models import ReadModelService
 from ..workflow.api.workflow_catalog import WorkflowCatalogReadModelService
 from ..workflow.application.authoring_job_service import (
     AuthoringJobConflict, AuthoringJobService,
 )
-from ..workflow.application.human_service import HumanTaskService
-from ..workflow.application.run_service import RunApplicationService, RunStartError
 from ..workflow.catalogs import InMemorySchemaCatalog
-from ..workflow.domain.ids import EntityId
-from ..workflow.persistence.database import connect_workflow_database
 from .api_v1 import (
-    OPS_READ_SCOPE, OPS_WRITE_SCOPE, PREVIEW_LIMIT_BYTES, READ_SCOPE, SENSITIVE_SCOPE,
-    WRITE_SCOPE, Authorizer,
+    OPS_READ_SCOPE, OPS_WRITE_SCOPE, READ_SCOPE, WRITE_SCOPE, Authorizer,
 )
 
 PROTOCOL_VERSION = "2025-06-18"
@@ -71,11 +64,10 @@ def _content(payload: Any, *, is_error: bool = False) -> dict[str, Any]:
 
 def build_mcp_dispatcher(
     db_path: Path | str,
-    durable_service,
     *,
+    clock=None,
     workflow_db_path: Path | str | None = None,
     authorizer: Authorizer | None = None,
-    single_goal_mode: bool = True,
     schema_catalog=None,
     artifact_backend=None,
     authoring_service=None,
@@ -83,7 +75,6 @@ def build_mcp_dispatcher(
     authoring_jobs=None,
     authoring_broker=None,
     langgraph_service=None,
-    legacy_execution: bool = True,
 ) -> Callable[[Mapping[str, Any], str | None], dict[str, Any] | None]:
     """One JSON-RPC message in, at most one response out.
 
@@ -94,25 +85,10 @@ def build_mcp_dispatcher(
 
     path = Path(db_path)
     workflow_path = Path(workflow_db_path or db_path)
-    reads = ReadModelService(path)
-    runs = RunApplicationService(
-        path, durable_service, enforce_single_goal=single_goal_mode,
-        workflow_db_path=workflow_db_path,
-    )
     workflow_reads = WorkflowCatalogReadModelService(
-        workflow_path, schema_catalog or InMemorySchemaCatalog({}), usage_path=path,
+        workflow_path, schema_catalog or InMemorySchemaCatalog({}),
+        usage_source=getattr(langgraph_service, "workflow_usage", None),
     )
-    artifact_backend = artifact_backend or getattr(
-        durable_service, "artifact_backend", None
-    )
-
-    def read_preview_blob(blob_key: str) -> bytes:
-        if artifact_backend is None:
-            raise LookupError("Artifact store is unavailable")
-        return artifact_backend.read(blob_key, max_size_bytes=PREVIEW_LIMIT_BYTES)
-
-    artifact_reads = ArtifactReadModelService(path, blob_reader=read_preview_blob)
-    humans = HumanTaskService(path)
     # Shared with `/api/v1` rather than built again. Two of these against one
     # database each recover every queued job on their own thread, so a single
     # authoring job would run the Agent CLI twice — and the one constructed
@@ -128,64 +104,9 @@ def build_mcp_dispatcher(
         else None
     )
     guard = authorizer or Authorizer()
-    now = getattr(durable_service, "clock", None) or (
-        lambda: datetime.now(timezone.utc)
-    )
+    now = clock or (lambda: datetime.now(timezone.utc))
 
     tools = (
-        {
-            "name": "list_runs",
-            "description": "List workflow runs, newest first.",
-            "scope": READ_SCOPE,
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "limit": {"type": "integer", "minimum": 1, "maximum": 200},
-                    "active_only": {"type": "boolean"},
-                },
-            },
-        },
-        {
-            "name": "inspect_run",
-            "description": "Why a run is where it is: status, open responsibilities, recent errors.",
-            "scope": READ_SCOPE,
-            "inputSchema": {
-                "type": "object",
-                "properties": {"run_id": {"type": "string"}},
-                "required": ["run_id"],
-            },
-        },
-        {
-            "name": "start_run",
-            "description": "Start a run of a published workflow.",
-            "scope": WRITE_SCOPE,
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "workflow_id": {"type": "string"},
-                    "workflow_version": {"type": "integer"},
-                    "input": {"type": "object"},
-                    "goal": {"type": "string"},
-                    "idempotency_key": {"type": "string"},
-                },
-                "required": ["workflow_id", "idempotency_key"],
-            },
-        },
-        {
-            "name": "cancel_run",
-            "description": "Cancel a run at the version the caller last observed.",
-            "scope": WRITE_SCOPE,
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "run_id": {"type": "string"},
-                    "expected_version": {"type": "integer"},
-                    "reason": {"type": "string"},
-                    "idempotency_key": {"type": "string"},
-                },
-                "required": ["run_id", "expected_version", "idempotency_key"],
-            },
-        },
         # -- discovery ----------------------------------------------------
         # `start_run` needs a workflow_id, and until now nothing over MCP could
         # produce one: an agent had to be told out of band what it was allowed
@@ -207,101 +128,6 @@ def build_mcp_dispatcher(
                         "description": "Keep only workflows a goal can start.",
                     },
                 },
-            },
-        },
-        # -- results ------------------------------------------------------
-        # `inspect_run` says where a run is; these say what it produced. An
-        # agent that can start work but cannot read the answer is a write-only
-        # integration.
-        {
-            "name": "get_run_result",
-            "description": "The declared result of a run, once it has one.",
-            "scope": READ_SCOPE,
-            "inputSchema": {
-                "type": "object",
-                "properties": {"run_id": {"type": "string"}},
-                "required": ["run_id"],
-            },
-        },
-        {
-            "name": "list_artifacts",
-            "description": "Artifacts produced by runs, newest first.",
-            "scope": READ_SCOPE,
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "run_id": {"type": "string"},
-                    "content_type": {"type": "string"},
-                    "q": {"type": "string"},
-                    "limit": {"type": "integer", "minimum": 1, "maximum": 200},
-                },
-            },
-        },
-        {
-            "name": "read_artifact",
-            "description": "Metadata for one artifact: size, content type, origin.",
-            "scope": READ_SCOPE,
-            "inputSchema": {
-                "type": "object",
-                "properties": {"artifact_id": {"type": "string"}},
-                "required": ["artifact_id"],
-            },
-        },
-        # -- human tasks --------------------------------------------------
-        # A run that stops for a person looks identical to a stuck one from the
-        # outside. These make the difference legible, and let an agent that is
-        # itself a named participant answer.
-        {
-            "name": "list_inbox",
-            "description": (
-                "Open responsibilities: human tasks awaiting a decision, "
-                "exhausted budgets, and unknown results awaiting a call."
-            ),
-            "scope": READ_SCOPE,
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "limit": {"type": "integer", "minimum": 1, "maximum": 200},
-                },
-            },
-        },
-        {
-            "name": "request_human_task_token",
-            "description": (
-                "Mint this actor's submission token for a human task it "
-                "participates in. Refused for anyone the task does not name."
-            ),
-            "scope": WRITE_SCOPE,
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "task_id": {"type": "string"},
-                    "expected_version": {"type": "integer"},
-                },
-                "required": ["task_id", "expected_version"],
-            },
-        },
-        {
-            "name": "submit_human_task",
-            "description": (
-                "Answer a human task: approve, reject, or supply its value. "
-                "Needs the submission token from request_human_task_token."
-            ),
-            "scope": WRITE_SCOPE,
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "task_id": {"type": "string"},
-                    "submission_token": {"type": "string"},
-                    "decision": {"type": "string"},
-                    "value": {},
-                    "expected_version": {"type": "integer"},
-                    "idempotency_key": {"type": "string"},
-                },
-                "required": [
-                    "task_id", "submission_token", "decision",
-                    "expected_version", "idempotency_key",
-                ],
             },
         },
         # -- authoring ----------------------------------------------------
@@ -421,21 +247,11 @@ def build_mcp_dispatcher(
                 "required": ["request_id", "dsl"],
             },
         },
-        # -- operations ---------------------------------------------------
-        {
-            "name": "runtime_status",
-            "description": (
-                "Whether the runtime itself is healthy: job, timer and lease "
-                "counts by state."
-            ),
-            "scope": OPS_READ_SCOPE,
-            "inputSchema": {"type": "object", "properties": {}},
-        },
     )
     if langgraph_service is not None:
         tools += (
             {
-                "name": "list_langgraph_runs",
+                "name": "list_runs",
                 "description": "List workflow runs executed by LangGraph.",
                 "scope": READ_SCOPE,
                 "inputSchema": {
@@ -447,7 +263,7 @@ def build_mcp_dispatcher(
                 },
             },
             {
-                "name": "inspect_langgraph_run",
+                "name": "inspect_run",
                 "description": "Inspect one LangGraph run and its interrupts.",
                 "scope": READ_SCOPE,
                 "inputSchema": {
@@ -474,7 +290,7 @@ def build_mcp_dispatcher(
                 },
             },
             {
-                "name": "start_langgraph_run",
+                "name": "start_run",
                 "description": "Start a published workflow using LangGraph.",
                 "scope": WRITE_SCOPE,
                 "inputSchema": {
@@ -489,7 +305,7 @@ def build_mcp_dispatcher(
                 },
             },
             {
-                "name": "resume_langgraph_run",
+                "name": "resume_run",
                 "description": "Resume an interrupted LangGraph run at its observed revision.",
                 "scope": WRITE_SCOPE,
                 "inputSchema": {
@@ -507,7 +323,7 @@ def build_mcp_dispatcher(
                 },
             },
             {
-                "name": "recover_langgraph_run",
+                "name": "recover_run",
                 "description": "Recover a LangGraph run left running after process loss.",
                 "scope": OPS_WRITE_SCOPE,
                 "inputSchema": {
@@ -517,7 +333,7 @@ def build_mcp_dispatcher(
                 },
             },
             {
-                "name": "cancel_langgraph_run",
+                "name": "cancel_run",
                 "description": "Cancel a LangGraph run at its observed revision.",
                 "scope": WRITE_SCOPE,
                 "inputSchema": {
@@ -533,7 +349,7 @@ def build_mcp_dispatcher(
                 },
             },
             {
-                "name": "list_langgraph_artifacts",
+                "name": "list_artifacts",
                 "description": "List committed Artifacts produced by LangGraph runs.",
                 "scope": READ_SCOPE,
                 "inputSchema": {
@@ -545,7 +361,7 @@ def build_mcp_dispatcher(
                 },
             },
             {
-                "name": "read_langgraph_artifact",
+                "name": "read_artifact",
                 "description": "Read metadata for one committed LangGraph Artifact.",
                 "scope": READ_SCOPE,
                 "inputSchema": {
@@ -555,7 +371,7 @@ def build_mcp_dispatcher(
                 },
             },
             {
-                "name": "get_langgraph_artifact_lineage",
+                "name": "get_artifact_lineage",
                 "description": "Read upstream and downstream LangGraph Artifact lineage.",
                 "scope": READ_SCOPE,
                 "inputSchema": {
@@ -565,7 +381,7 @@ def build_mcp_dispatcher(
                 },
             },
             {
-                "name": "collect_langgraph_artifacts",
+                "name": "collect_artifacts",
                 "description": "Garbage-collect a bounded set of abandoned LangGraph Artifacts.",
                 "scope": OPS_WRITE_SCOPE,
                 "inputSchema": {
@@ -576,39 +392,6 @@ def build_mcp_dispatcher(
                 },
             },
         )
-    if not legacy_execution:
-        langgraph_tool_names = {
-            "list_langgraph_runs": "list_runs",
-            "inspect_langgraph_run": "inspect_run",
-            "start_langgraph_run": "start_run",
-            "resume_langgraph_run": "resume_run",
-            "recover_langgraph_run": "recover_run",
-            "cancel_langgraph_run": "cancel_run",
-            "list_langgraph_artifacts": "list_artifacts",
-            "read_langgraph_artifact": "read_artifact",
-            "get_langgraph_artifact_lineage": "get_artifact_lineage",
-            "collect_langgraph_artifacts": "collect_artifacts",
-        }
-        tools = tuple(
-            {**tool, "name": langgraph_tool_names.get(tool["name"], tool["name"])}
-            for tool in tools
-            if tool["name"] not in {
-                "list_runs", "inspect_run", "start_run", "cancel_run",
-                "get_run_result", "list_artifacts", "read_artifact",
-                "list_inbox", "request_human_task_token", "submit_human_task",
-                "runtime_status",
-            }
-        )
-        langgraph_only_tools = {
-            "list_workflows",
-            "generate_workflow",
-            "get_authoring_job",
-            "claim_authoring_request",
-            "wait_authoring_request",
-            "submit_authoring_response",
-            *langgraph_tool_names.values(),
-        }
-        tools = tuple(tool for tool in tools if tool["name"] in langgraph_only_tools)
     by_name = {tool["name"]: tool for tool in tools}
 
     def langgraph_run_dto(run) -> dict[str, Any]:
@@ -626,20 +409,7 @@ def build_mcp_dispatcher(
         }
 
     def call(name: str, arguments: Mapping[str, Any], actor: str) -> Any:
-        if not legacy_execution:
-            name = {
-                "list_runs": "list_langgraph_runs",
-                "inspect_run": "inspect_langgraph_run",
-                "start_run": "start_langgraph_run",
-                "resume_run": "resume_langgraph_run",
-                "recover_run": "recover_langgraph_run",
-                "cancel_run": "cancel_langgraph_run",
-                "list_artifacts": "list_langgraph_artifacts",
-                "read_artifact": "read_langgraph_artifact",
-                "get_artifact_lineage": "get_langgraph_artifact_lineage",
-                "collect_artifacts": "collect_langgraph_artifacts",
-            }.get(name, name)
-        if name == "list_langgraph_runs":
+        if name == "list_runs":
             return {"runs": [
                 langgraph_run_dto(run)
                 for run in langgraph_service.list_runs(
@@ -648,18 +418,18 @@ def build_mcp_dispatcher(
                     actor=actor,
                 )
             ]}
-        if name == "inspect_langgraph_run":
+        if name == "inspect_run":
             return langgraph_run_dto(
                 langgraph_service.get(str(arguments["run_id"]), actor=actor)
             )
-        if name == "start_langgraph_run":
+        if name == "start_run":
             return langgraph_run_dto(langgraph_service.start(
                 str(arguments["workflow_id"]), arguments.get("input") or {},
                 workflow_version=arguments.get("workflow_version"),
                 idempotency_key=str(arguments["idempotency_key"]),
                 actor=actor,
             ))
-        if name == "resume_langgraph_run":
+        if name == "resume_run":
             return langgraph_run_dto(langgraph_service.resume(
                 str(arguments["run_id"]), arguments.get("value"),
                 expected_revision=int(arguments["expected_version"]),
@@ -673,18 +443,18 @@ def build_mcp_dispatcher(
                 actor=actor,
                 limit=min(200, max(1, int(arguments.get("limit", 50)))),
             ))}
-        if name == "recover_langgraph_run":
+        if name == "recover_run":
             return langgraph_run_dto(
                 langgraph_service.recover(str(arguments["run_id"]))
             )
-        if name == "cancel_langgraph_run":
+        if name == "cancel_run":
             return langgraph_run_dto(langgraph_service.cancel(
                 str(arguments["run_id"]),
                 expected_revision=int(arguments["expected_version"]),
                 idempotency_key=str(arguments["idempotency_key"]),
                 actor=actor,
             ))
-        if name == "list_langgraph_artifacts":
+        if name == "list_artifacts":
             if getattr(langgraph_service, "artifacts", None) is None:
                 raise LookupError("LangGraph Artifact store is unavailable")
             return {"artifacts": list(langgraph_service.artifacts.list(
@@ -692,49 +462,25 @@ def build_mcp_dispatcher(
                 limit=min(200, max(1, int(arguments.get("limit", 20)))),
                 actor=actor,
             ))}
-        if name == "read_langgraph_artifact":
+        if name == "read_artifact":
             if getattr(langgraph_service, "artifacts", None) is None:
                 raise LookupError("LangGraph Artifact store is unavailable")
             return langgraph_service.artifacts.get(
                 str(arguments["artifact_id"]), actor=actor,
             )
-        if name == "get_langgraph_artifact_lineage":
+        if name == "get_artifact_lineage":
             if getattr(langgraph_service, "artifacts", None) is None:
                 raise LookupError("LangGraph Artifact store is unavailable")
             return langgraph_service.artifacts.lineage(
                 str(arguments["artifact_id"]), actor=actor,
             )
-        if name == "collect_langgraph_artifacts":
+        if name == "collect_artifacts":
             if getattr(langgraph_service, "artifacts", None) is None:
                 raise LookupError("LangGraph Artifact store is unavailable")
             collected = langgraph_service.artifacts.collect_abandoned(
                 limit=min(200, max(1, int(arguments.get("limit", 100))))
             )
             return {"collected_artifact_ids": list(collected)}
-        if name == "list_runs":
-            items, cursor = reads.list_runs(
-                limit=min(200, max(1, int(arguments.get("limit", 20)))),
-                active_only=bool(arguments.get("active_only", False)),
-            )
-            return {"runs": items, "next_cursor": cursor}
-        if name == "inspect_run":
-            return runs.inspect(str(arguments["run_id"]))
-        if name == "start_run":
-            started = runs.start_run(
-                workflow_id=str(arguments["workflow_id"]),
-                version=arguments.get("workflow_version"),
-                inputs=arguments.get("input") or {},
-                goal=str(arguments.get("goal", "")),
-                actor=actor,
-                idempotency_key=str(arguments["idempotency_key"]),
-            )
-            return started.to_dict()
-        if name == "cancel_run":
-            return runs.cancel_run(
-                str(arguments["run_id"]), int(arguments["expected_version"]),
-                actor=actor, idempotency_key=str(arguments["idempotency_key"]),
-                reason=str(arguments.get("reason", "cancelled via mcp")),
-            )
         if name == "list_workflows":
             items = workflow_reads.list()
             if arguments.get("ready_only"):
@@ -759,68 +505,6 @@ def build_mcp_dispatcher(
                     }
                     for item in items
                 ]
-            }
-        if name == "get_run_result":
-            return reads.outcome(
-                EntityId.parse(str(arguments["run_id"])), actor=actor,
-                content_visible=guard.allows(actor, SENSITIVE_SCOPE),
-            )
-        if name == "list_artifacts":
-            items, cursor = artifact_reads.list(
-                actor,
-                limit=min(200, max(1, int(arguments.get("limit", 50)))),
-                q=str(arguments.get("q", "")),
-                run_id=str(arguments.get("run_id", "")),
-                content_type=str(arguments.get("content_type", "")),
-                # A title is content. An actor without the sensitive scope gets
-                # the same catalog without it, never a refusal for the page.
-                with_titles=guard.allows(actor, SENSITIVE_SCOPE),
-            )
-            return {"artifacts": items, "next_cursor": cursor}
-        if name == "read_artifact":
-            return artifact_reads.detail(
-                actor, EntityId.parse(str(arguments["artifact_id"])),
-                with_title=guard.allows(actor, SENSITIVE_SCOPE),
-            )
-        if name == "list_inbox":
-            items, _cursor = reads.inbox(
-                limit=min(200, max(1, int(arguments.get("limit", 50)))),
-                actor=actor,
-            )
-            return {"items": items, "action_count": sum(
-                item["requires_actor_action"] for item in items
-            )}
-        if name == "request_human_task_token":
-            # The service decides whether this actor may hold one; being able
-            # to name the task is not the same as being named by it.
-            return humans.reissue_token(
-                EntityId.parse(str(arguments["task_id"])), actor=actor,
-                expected_version=int(arguments["expected_version"]), now=now(),
-            )
-        if name == "submit_human_task":
-            task_id = EntityId.parse(str(arguments["task_id"]))
-            version = int(arguments["expected_version"])
-            linked = humans.linked_scope(task_id)
-            if linked is not None:
-                # A task the graph is waiting on is answered through the
-                # kernel, so the run advances in the same transaction.
-                _node_run_id, run_id = linked
-                return durable_service.submit_human_task(
-                    task_id, run_id, version,
-                    token=str(arguments["submission_token"]),
-                    decision=str(arguments["decision"]),
-                    value=arguments.get("value"), actor=actor,
-                    idempotency_key=str(arguments["idempotency_key"]), now=now(),
-                )
-            status = humans.submit(
-                task_id, str(arguments["submission_token"]),
-                str(arguments["decision"]), arguments.get("value"),
-                actor=actor, expected_version=version, now=now(),
-            )
-            return {
-                "task_id": str(task_id),
-                "decision": str(arguments["decision"]),
-                "status": status.value,
             }
         if name == "generate_workflow":
             if authoring_jobs is None:
@@ -872,25 +556,6 @@ def build_mcp_dispatcher(
             return authoring_broker.respond(
                 str(arguments["request_id"]), arguments["dsl"], actor=actor,
             )
-        if name == "runtime_status":
-            with connect_workflow_database(path, read_only=True) as connection:
-                def counts(table: str) -> dict[str, int]:
-                    return {
-                        row["status"]: int(row["count"])
-                        for row in connection.execute(
-                            f"SELECT status, COUNT(*) AS count FROM {table}"
-                            " GROUP BY status"
-                        )
-                    }
-
-                return {
-                    "jobs": counts("jobs"),
-                    "timers": counts("durable_timers"),
-                    "active_leases": int(connection.execute(
-                        "SELECT COUNT(*) FROM job_leases WHERE status='active'"
-                    ).fetchone()[0]),
-                    "runs": counts("workflow_runs"),
-                }
         raise KeyError(name)
 
     def dispatch(message: Mapping[str, Any], actor: str | None) -> dict[str, Any] | None:
@@ -936,7 +601,7 @@ def build_mcp_dispatcher(
             return _result(request_id, _content(
                 {"error": exc.code, "job": exc.job}, is_error=True,
             ))
-        except (RunStartError, ValueError) as exc:
+        except ValueError as exc:
             # A tool that fails on its own terms is a result, not a protocol
             # error: the caller is an agent that needs to read the reason.
             return _result(request_id, _content({"error": str(exc)}, is_error=True))
@@ -956,7 +621,6 @@ def build_mcp_dispatcher(
 
 def build_mcp(
     db_path: Path | str,
-    durable_service,
     *,
     authenticator: Callable[[Request], str | None] | None = None,
     **kwargs: Any,
@@ -967,7 +631,7 @@ def build_mcp(
     second set of services against the same database."""
 
     return mcp_routes(
-        build_mcp_dispatcher(db_path, durable_service, **kwargs),
+        build_mcp_dispatcher(db_path, **kwargs),
         authenticator=authenticator,
     )
 

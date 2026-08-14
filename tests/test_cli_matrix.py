@@ -94,8 +94,6 @@ class HelpTests(unittest.TestCase):
         for args in (
             ("--help",), ("serve", "--help"), ("workflow", "--help"),
             ("workflow", "validate", "--help"), ("workflow", "publish", "--help"),
-            ("run", "--help"), ("run", "start", "--help"), ("run", "inspect", "--help"),
-            ("db", "--help"), ("db", "check", "--help"),
         ):
             with self.subTest(args=args):
                 result = cli(*args)
@@ -184,69 +182,6 @@ class WorkflowCommandTests(CliMatrixTestCase):
         self.assertIn("CONFLICT", result.stdout.upper())
 
 
-class RunCommandTests(CliMatrixTestCase):
-    def setUp(self) -> None:
-        super().setUp()
-        published = self.publish()
-        self.assertEqual(0, published.returncode, published.stderr)
-
-    def test_start_succeeds_and_reports_json(self) -> None:
-        result = cli(
-            "run", "start", WORKFLOW_ID, "--db", str(self.db), "--json",
-        )
-        self.assertEqual(0, result.returncode, result.stderr)
-        payload = json.loads(result.stdout)
-        self.assertTrue(payload["run_id"].startswith("run:"))
-        self.assertEqual(1, payload["workflow_version"])
-
-    def test_start_rejects_malformed_input(self) -> None:
-        result = cli(
-            "run", "start", WORKFLOW_ID, "--db", str(self.db), "--input", "not json",
-        )
-        self.assertNotEqual(0, result.returncode)
-        self.assertNotIn("Traceback", result.stderr)
-
-    def test_inspect_returns_a_full_projection(self) -> None:
-        started = json.loads(
-            cli(
-                "run", "start", WORKFLOW_ID, "--db", str(self.db), "--json",
-            ).stdout
-        )
-        result = cli("run", "inspect", started["run_id"], "--db", str(self.db))
-        self.assertEqual(0, result.returncode, result.stderr)
-        payload = json.loads(result.stdout)
-        self.assertEqual({"summary", "responsibilities", "recent_errors"}, set(payload))
-
-    def test_inspect_of_a_missing_run_fails_cleanly(self) -> None:
-        result = cli("run", "inspect", "run:nope", "--db", str(self.db))
-        self.assertNotEqual(0, result.returncode)
-        self.assertNotIn("Traceback", result.stderr)
-
-
-class DbCommandTests(CliMatrixTestCase):
-    def test_check_succeeds_with_human_and_json_output(self) -> None:
-        human = cli("db", "check", "--db", str(self.db))
-        self.assertEqual(0, human.returncode, human.stderr)
-        self.assertIn("ok:", human.stdout)
-
-        machine = cli("db", "check", "--db", str(self.db), "--json")
-        self.assertEqual(0, machine.returncode, machine.stderr)
-        self.assertTrue(json.loads(machine.stdout)["ok"])
-
-    def test_check_on_a_missing_file_says_so(self) -> None:
-        result = cli("db", "check", "--db", str(self.dir / "absent.db"))
-        self.assertNotEqual(0, result.returncode)
-        self.assertNotIn("Traceback", result.stderr)
-        self.assertIn("no database at", result.stderr)
-
-    def test_check_on_a_file_that_is_not_a_database_says_so(self) -> None:
-        junk = self.dir / "junk.db"
-        junk.write_text("this is not sqlite", encoding="utf-8")
-        result = cli("db", "check", "--db", str(junk))
-        self.assertNotEqual(0, result.returncode)
-        self.assertNotIn("Traceback", result.stderr)
-
-
 class JsonOutputTests(CliMatrixTestCase):
     def test_machine_output_is_a_single_parseable_object(self) -> None:
         """Anything with --json must be pipeable into jq without filtering."""
@@ -254,8 +189,6 @@ class JsonOutputTests(CliMatrixTestCase):
         self.publish()
         for args in (
             ("workflow", "validate", str(self.workflow), "--catalog", str(self.catalog)),
-            ("db", "check", "--db", str(self.db)),
-            ("run", "start", WORKFLOW_ID, "--db", str(self.db)),
         ):
             with self.subTest(args=args[0:2]):
                 result = cli(*args, "--json")

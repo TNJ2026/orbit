@@ -1,4 +1,9 @@
-"""Contract-test helpers for detecting impure Event reducers."""
+"""Contract-test helpers for detecting impure Event reducers.
+
+`guarded_replay` went with the event-sourced engine whose streams it replayed.
+The two checks left are about the *reducer*, not about any engine: they read
+its source for a clock or a socket and block the same calls at runtime.
+"""
 
 from __future__ import annotations
 
@@ -9,8 +14,6 @@ import inspect
 import textwrap
 from unittest import mock
 
-from .domain.replay import Reducer, StateT, replay_events
-from .domain.envelopes import EventEnvelope
 
 
 class SideEffectDetected(AssertionError):
@@ -50,7 +53,7 @@ def _root_name(node: ast.AST) -> str | None:
     return node.id if isinstance(node, ast.Name) else None
 
 
-def assert_reducer_source_is_pure(reducer: Reducer) -> None:
+def assert_reducer_source_is_pure(reducer) -> None:
     """Reject obvious clock, randomness, filesystem, process, and network use."""
 
     try:
@@ -65,19 +68,6 @@ def assert_reducer_source_is_pure(reducer: Reducer) -> None:
                 raise SideEffectDetected(
                     f"reducer contains forbidden side-effect source: {root}"
                 )
-
-
-def guarded_replay(
-    initial_state: StateT,
-    events: list[EventEnvelope],
-    reducer: Reducer[StateT],
-) -> StateT:
-    """Replay while actively blocking common nondeterministic side effects."""
-
-    assert_reducer_source_is_pure(reducer)
-
-    with side_effect_guard():
-        return replay_events(initial_state, events, reducer)
 
 
 @contextmanager

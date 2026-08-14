@@ -1,13 +1,13 @@
 """The single production composition root.
 
 Everything the Runtime needs is wired here and nowhere else: the database, the
-kernel, the handler registry, the durable worker pool, the timer dispatcher and
-the recovery scanner. Background components are owned by Starlette's lifespan,
-so a shutdown that leaves a worker (or a worker's child process) running is a
-test failure rather than a thing to notice in production.
+handler registry, the LangGraph service and the background loops that drive
+what no request can. Those loops are owned by Starlette's lifespan, so a
+shutdown that leaves one (or its child process) running is a test failure
+rather than a thing to notice in production.
 
-This module deliberately contains no state machine, no routing decision, no
-planner policy and no SQL.
+This module deliberately contains no state machine, no routing decision and
+no SQL.
 """
 
 from __future__ import annotations
@@ -26,25 +26,16 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route, WebSocketRoute
 
-from ..workflow.application.durable_runtime_service import (
-    DurableRuntimeApplicationService,
-)
 from ..workflow.application.handler_runtime_service import HandlerRuntimeBuilder
-from ..workflow.persistence.attempt_output import attempt_output_sink_factory
-from ..workflow.application.plan_service import PlanService
+from ..workflow.application.revision_worker import (
+    RevisionDispatcher, RevisionRecoveryScanner,
+)
 from ..workflow.catalogs import InMemorySchemaCatalog
 from ..workflow.persistence.database import connect_workflow_database
 from ..workflow.persistence.migrations import migrate_workflow_database
-from ..workflow.worker.runtime import (
-    ForeachReconciler, PlannerDispatcher, PlannerProposalReconciler,
-    RevisionDispatcher, RevisionRecoveryScanner,
-    SubflowReconciler,
-    TimerDispatcher, WorkerRuntime,
-)
 from .schema_guard import MixedSchemaError, assert_runtime_schema
 
 
-DEFAULT_WORKER_COUNT = 2
 DEFAULT_POLL_SECONDS = 0.5
 DEFAULT_SHUTDOWN_SECONDS = 10.0
 
@@ -144,39 +135,27 @@ class RuntimeComposition:
         handlers: Sequence[HandlerRegistration] = (),
         schemas: Mapping[str, Any] | None = None,
         secret_values: Mapping[str, str] | None = None,
-        worker_count: int = DEFAULT_WORKER_COUNT,
         poll_seconds: float = DEFAULT_POLL_SECONDS,
         clock: Callable[[], datetime] = utc_now,
         artifact_backend: Any = None,
-        planner_service: Any = None,
-        human_delivery: Any = None,
         draft_service: Any = None,
         revision_agent_command: str | None = None,
         revision_agent_commands: Mapping[str, str] | None = None,
         revision_model_id: str | None = None,
         workflow_db_path: Path | str | None = None,
         langgraph_service: Any = None,
-        legacy_execution: bool = True,
     ) -> None:
         self.db_path = Path(db_path)
         self.workflow_db_path = Path(workflow_db_path or db_path)
         self.clock = clock
-        self.worker_count = max(1, int(worker_count))
         self.poll_seconds = poll_seconds
-        self.planner_service = planner_service
+        self.artifact_backend = artifact_backend
         # Set when a reviser is wired; the revision loops key off it.
         self.draft_service = draft_service
         self.revision_agent_command = revision_agent_command
         self.revision_agent_commands = dict(revision_agent_commands or {})
         self.revision_model_id = revision_model_id
         self.langgraph_service = langgraph_service
-        self.legacy_execution = bool(legacy_execution)
-        if human_delivery is None:
-            from ..workflow.application.human_delivery import (
-                InMemoryHumanTaskDelivery,
-            )
-            human_delivery = InMemoryHumanTaskDelivery()
-        self.human_delivery = human_delivery
 
         # A file carrying legacy tables is refused before anything is wired:
         # continuing would mean serving a database whose semantics are half
@@ -190,15 +169,9 @@ class RuntimeComposition:
             connection.close()
         self.tables = assert_runtime_schema(self.db_path)
 
-        from ..workflow.application.budget_service import BudgetService
-        self.budget_service = BudgetService(self.db_path)
-
         self.schema_catalog = InMemorySchemaCatalog(dict(schemas or {}))
         builder = HandlerRuntimeBuilder(
             self.schema_catalog, secret_values=dict(secret_values or {}),
-            output_sink_factory=attempt_output_sink_factory(
-                self.db_path, clock=self.clock
-            ),
         )
         for registration in handlers:
             builder.register(
@@ -206,100 +179,25 @@ class RuntimeComposition:
                 registration.implementation,
                 implementation_id=registration.implementation_id,
             )
-        # Sealing before any worker starts is what makes "the plan's exact
-        # handler version" a runtime guarantee rather than a convention.
-        self.handler_executor = builder.build()
-        self.handler_registry = builder.registry
+        self.handler_registry = builder.seal()
         self.handler_summary = builder.summary()
 
-        self.service = DurableRuntimeApplicationService(
-            self.db_path,
-            execution_registry=self.handler_registry,
-            artifact_backend=artifact_backend,
-            human_task_delivery=self.human_delivery.deliver,
-            planner_service=planner_service,
-            budget_service=self.budget_service,
-            workflow_db_path=self.workflow_db_path,
-        )
-        # The executor is built before the service (it seals the registry the
-        # service binds to), so the Artifact capability is attached now that the
-        # service exists. Without this the adapter was defined but never reached
-        # a running Handler, and every artifact write hit the rejecting default.
-        self.handler_executor.artifact_access_factory = self.service.build_artifact_access
-
         self.loops: list[BackgroundLoop] = []
-        self._workers: list[WorkerRuntime] = []
         self._started = False
 
     # -- background components -------------------------------------------
 
     def _build_loops(self) -> list[BackgroundLoop]:
         loops: list[BackgroundLoop] = []
-        for index in range(self.worker_count if self.legacy_execution else 0):
-            # Each worker gets its own runtime object, so an execution_ref and
-            # its cancellation token are never shared between concurrent jobs.
-            # The HandlerExecutor is passed directly: WorkerRuntime detects an
-            # `execute` attribute and takes the production path that builds a
-            # typed ExecutorRequest and runs the LeaseSupervisor. Wrapping it in
-            # a callable would silently select the legacy compatibility path and
-            # drop lease renewal.
-            worker = WorkerRuntime(
-                self.service,
-                self.handler_executor,
-                worker_id=f"worker-{index + 1}",
-                clock=self.clock,
-            )
-            self._workers.append(worker)
-            loops.append(
-                BackgroundLoop(worker.worker_id, worker.run_once, self.poll_seconds)
-            )
-
-        if self.legacy_execution:
-            timer = TimerDispatcher(self.service, worker_id="timer-1", clock=self.clock)
-            loops.append(BackgroundLoop("timer-1", timer.run_once, self.poll_seconds))
+        # A durable timer that came due while nothing was running is the one
+        # piece of a LangGraph run no request can drive: the run is suspended
+        # and there is no caller left to resume it.
         if callable(getattr(self.langgraph_service, "recover_due", None)):
             loops.append(BackgroundLoop(
                 "langgraph-timer", lambda: bool(
                     self.langgraph_service.recover_due(limit=100)
                 ), self.poll_seconds,
             ))
-
-        if self.legacy_execution:
-            loops.append(
-                BackgroundLoop("recovery", self._recovery_pass, max(self.poll_seconds, 5.0))
-            )
-            subflows = SubflowReconciler(self.service, clock=self.clock)
-            loops.append(BackgroundLoop(
-                "subflow-reconciler", subflows.run_once, self.poll_seconds,
-            ))
-            foreach = ForeachReconciler(self.service, clock=self.clock)
-            loops.append(BackgroundLoop(
-                "foreach-reconciler", foreach.run_once, self.poll_seconds,
-            ))
-        if self.legacy_execution and self.planner_service is not None:
-            planner = PlannerDispatcher(
-                self.planner_service, worker_id="planner-1", clock=self.clock,
-                budget_service=self.budget_service,
-            )
-            loops.append(
-                BackgroundLoop("planner-1", planner.run_once, self.poll_seconds)
-            )
-            reconciler = PlannerProposalReconciler(
-                self.planner_service, self.service, clock=self.clock,
-                execution_registry=self.handler_registry,
-                plan_service_factory=lambda **options: PlanService(
-                    self.db_path, **options
-                ),
-            )
-            loops.append(BackgroundLoop(
-                "planner-proposals", reconciler.run_once, self.poll_seconds
-            ))
-            loops.append(
-                BackgroundLoop(
-                    "planner-recovery", self._planner_recovery_pass,
-                    max(self.poll_seconds, 5.0),
-                )
-            )
         # Agent workflow revisions are durable jobs: the editor enqueues, this
         # loop spends the model call, and a recovery pass fails jobs whose
         # worker died mid-flight.
@@ -322,22 +220,6 @@ class RuntimeComposition:
             ))
         return loops
 
-    def _recovery_pass(self) -> bool:
-        report = self.service.durable_recovery.scan_once(self.clock())
-        return bool(
-            report.expired_leases
-            or report.expired_timer_leases
-            or report.materialized_jobs
-        )
-
-    def _planner_recovery_pass(self) -> bool:
-        now = self.clock()
-        report = self.planner_service.recovery.scan_once(now)
-        settled = self.budget_service.reconcile_planner_reservations(
-            actor="planner-recovery", now=now,
-        )
-        return bool(report.parsed_responses or report.expired_unknown or settled)
-
     def start(self) -> None:
         if self._started:
             return
@@ -347,23 +229,10 @@ class RuntimeComposition:
         self._started = True
 
     def stop(self, timeout: float = DEFAULT_SHUTDOWN_SECONDS) -> list[str]:
-        """Stop every loop; returns the names that did not exit in time.
-
-        Order matters. A worker inside a minutes-long Agent call cannot notice
-        a stop flag, so waiting on it first only burns the shutdown budget and
-        then kills the process with the Handler still running — the lease then
-        expires unrenewed and the attempt ends `unknown_external_result` with
-        nothing recorded. Cancelling first gives that Handler the chance to
-        stop and report while the process is still alive to write it down.
-        """
+        """Stop every loop; returns the names that did not exit in time."""
 
         for loop in self.loops:
             loop.request_stop()
-        for worker in self._workers:
-            try:
-                worker.cancel_current()
-            except Exception:
-                pass
         stragglers = [loop.name for loop in self.loops if not loop.join(timeout)]
         self._started = False
         return stragglers
@@ -400,8 +269,12 @@ class RuntimeComposition:
         }
 
         components = [loop.status() for loop in self.loops]
+        # Every loop that exists is alive — not "at least one exists". A
+        # Runtime used only for authoring has nothing to drive in the
+        # background, and while the worker pool was unconditional an empty
+        # list could only mean the loops had died. It no longer does.
         checks["components"] = {
-            "ok": bool(components) and all(item["alive"] for item in components),
+            "ok": all(item["alive"] for item in components),
             "detail": components,
         }
 
@@ -443,11 +316,9 @@ def create_app(
     handlers: Sequence[HandlerRegistration] = (),
     schemas: Mapping[str, Any] | None = None,
     secret_values: Mapping[str, str] | None = None,
-    worker_count: int = DEFAULT_WORKER_COUNT,
     poll_seconds: float = DEFAULT_POLL_SECONDS,
     clock: Callable[[], datetime] = utc_now,
     artifact_backend: Any = None,
-    human_delivery: Any = None,
     extra_routes: Sequence[Route | Mount] = (),
     authenticator: Callable[[Any], str | None] | None = None,
     authorizer: Any = None,
@@ -467,7 +338,6 @@ def create_app(
     shutdown_request: Callable[[], None] | None = None,
     langgraph_service: Any = None,
     langgraph_state_directory: Path | str | None = None,
-    legacy_execution: bool = True,
     workflow_ui_mode: str = "multi-agent",
     agent_workspace_root: Path | str | None = None,
 ) -> Starlette:
@@ -494,13 +364,12 @@ def create_app(
         {} if workflow_generators is None else workflow_generators
     )
     registrations = list(handlers)
-    planner_service = None
     if discover_agents:
         from ..workflow.catalogs.agent_discovery import (
             catalog_entries, discover_agent_clis,
         )
 
-        from .builtin_handlers import agent_handlers, planner_provider_from_agents
+        from .builtin_handlers import agent_handlers
 
         discovered = discover_agent_clis()
         agent_catalog = catalog_entries(discovered)
@@ -522,20 +391,6 @@ def create_app(
             workspace_root=workspace_root,
         )
         registrations.extend(agent_registrations)
-
-        # The planner rides on the same discovery pass and the same trust
-        # rule: its command is the resolved executable, chosen here, never
-        # supplied by a request. No discovered CLI simply means no planner —
-        # the Runtime runs fine without one.
-        planner_provider = planner_provider_from_agents(invokable_agents)
-        if planner_provider is not None:
-            from ..workflow.application.planner_service import (
-                PlannerApplicationService,
-            )
-
-            planner_service = PlannerApplicationService(
-                db_path, provider=planner_provider
-            )
 
         # Workflow generation rides the same discovery result and the same
         # trust rule. Every discovered CLI gets a generator so the author can
@@ -631,23 +486,17 @@ def create_app(
         handlers=registrations,
         schemas=schemas,
         secret_values=secret_values,
-        worker_count=worker_count,
         poll_seconds=poll_seconds,
         clock=clock,
         artifact_backend=artifact_backend,
-        planner_service=planner_service,
-        human_delivery=human_delivery,
         workflow_db_path=workflow_db_path,
         langgraph_service=langgraph_service,
-        legacy_execution=legacy_execution,
     )
     if composition.workflow_db_path != composition.db_path:
         from ..workflow.persistence.workflow_versions import merge_workflow_library
 
-        # Definitions published into the project database. The back-fill was
-        # gated on `legacy_execution`, which `orbit serve` hard-codes to
-        # False, so nothing ever ran and a Workflow published by an earlier
-        # build simply stopped being visible.
+        # Definitions published into the project database, carried forward so
+        # a Workflow published by an earlier build stays visible.
         carried = merge_workflow_library(
             composition.db_path, composition.workflow_db_path
         )
@@ -772,40 +621,6 @@ def create_app(
             if artifact_backend is not None
             else {"available": False, "reason": "artifact_store_not_configured"}
         ),
-        "planner_dispatcher": (
-            {"available": True}
-            if planner_service is not None
-            else {
-                "available": False,
-                "reason": (
-                    "no_planner_provider" if discover_agents
-                    else "agent_discovery_disabled"
-                ),
-            }
-        ),
-        "planner": (
-            {"available": True}
-            if planner_service is not None
-            else {
-                "available": False,
-                "reason": (
-                    "no_planner_provider" if discover_agents
-                    else "agent_discovery_disabled"
-                ),
-            }
-        ),
-        "dynamic_plan_patch": (
-            {"available": True}
-            if planner_service is not None
-            and composition.handler_summary.handler_count > 0
-            else {
-                "available": False,
-                "reason": (
-                    "planner_not_configured"
-                    if planner_service is None else "no_registered_handlers"
-                ),
-            }
-        ),
         "agent_handlers": {
             "available": bool(agent_catalog),
             "agents": sorted(
@@ -814,8 +629,11 @@ def create_app(
             ),
             **({} if agent_catalog else {"reason": "no_discovered_agents"}),
         },
-        "foreach": {"available": True},
-        "subflow": {"available": True},
+        # Neither is a kind an author may draw (`LANGGRAPH_NODE_KINDS`) nor a
+        # kind the engine compiles. They were the deleted engine's, and this
+        # report went on advertising them after it went.
+        "foreach": {"available": False, "reason": "not_supported_by_engine"},
+        "subflow": {"available": False, "reason": "not_supported_by_engine"},
         "history_overlay": {"available": True},
         "langgraph_workflows": (
             {"available": True, "api": "/api/v1/langgraph-runs"}
@@ -930,10 +748,7 @@ def create_app(
         if getattr(generator, "command", None)
     }
 
-    operational_config = {
-        "worker_count": worker_count,
-        "poll_seconds": poll_seconds,
-    }
+    operational_config = {"poll_seconds": poll_seconds}
     # One AuthoringJobService for the whole process. It owns in-flight jobs —
     # their cancel scopes, their deadline timers, and the recovery that
     # restarts queued work at startup — so a second instance would run every
@@ -957,23 +772,23 @@ def create_app(
     # dispatcher over stdio instead of standing up its own services against a
     # database this process already has open.
     mcp_dispatch = build_mcp_dispatcher(
-        composition.db_path, composition.service,
+        composition.db_path,
+        clock=composition.clock,
         workflow_db_path=composition.workflow_db_path,
         authorizer=authorizer,
-        single_goal_mode=single_goal_mode,
         schema_catalog=composition.schema_catalog,
         artifact_backend=artifact_backend,
         authoring_jobs=authoring_jobs,
         authoring_broker=authoring_broker,
         langgraph_service=langgraph_service,
-        legacy_execution=legacy_execution,
     )
 
     routes: list[Route | Mount | WebSocketRoute] = [
         Route("/health/live", health_live, methods=["GET"]),
         Route("/health/ready", health_ready, methods=["GET"]),
         *build_api_v1(
-            composition.db_path, composition.service,
+            composition.db_path,
+            execution_registry=composition.handler_registry,
             workflow_db_path=composition.workflow_db_path,
             authenticator=authenticator, authorizer=authorizer,
             rate_limiter=rate_limiter,
@@ -992,7 +807,6 @@ def create_app(
             authoring_jobs=authoring_jobs,
             shutdown_request=shutdown_request,
             langgraph_service=langgraph_service,
-            legacy_execution=legacy_execution,
             workflow_ui_mode=workflow_ui_mode,
             template_service=template_service,
         ),
@@ -1076,9 +890,6 @@ def create_app(
     routes.extend(extra_routes)
     app = Starlette(routes=routes, lifespan=lifespan)
     app.state.runtime = composition
-    # None when discovery is off or found nothing; adapters must treat the
-    # planner as optional rather than assume it.
-    app.state.planner = composition.planner_service
     # `orbit mcp` reaches the tools through this instead of over its own HTTP
     # connection: same dispatcher, same services, one transport removed.
     app.state.mcp_dispatch = mcp_dispatch

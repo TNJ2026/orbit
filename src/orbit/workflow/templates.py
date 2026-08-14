@@ -83,7 +83,6 @@ class SingleAgentTemplateService:
         if self.definitions.store is not None:
             catalog = WorkflowCatalogReadModelService(
                 self.definitions.store.path, self.definitions.catalogs.schemas,
-                usage_path=self.definitions.store.path,
             )
             for item in catalog.list():
                 if item["labels"].get("orbit.mode") != "single-agent-template":

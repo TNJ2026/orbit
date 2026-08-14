@@ -41,7 +41,6 @@ except ImportError:  # pragma: no cover
 
 from orbit.web.app import create_app
 from orbit.web.local_identity import local_authorizer, loopback_authenticator
-from orbit.workflow.application.run_service import RunApplicationService
 from orbit.workflow.api.routes import RateLimiter
 from orbit.workflow.artifacts.local_cas import LocalCASBackend
 from orbit.workflow.persistence.database import connect_workflow_database
@@ -78,38 +77,53 @@ CHECKER_PNG = base64.b64decode(
 )
 
 
-def seed_visual_artifact(db, service, backend) -> str:
-    run_id = RunApplicationService(db, service).start_run(
-        workflow_id="workflow:linear", inputs={"value": 7}, actor="local",
-        idempotency_key="visual-artifact", goal="Publish the visual baseline",
-        now=datetime(2026, 1, 1, tzinfo=timezone.utc),
+def seed_visual_artifact(engine) -> str:
+    """One completed run carrying a stable Artifact of each rendered kind.
+
+    Written straight into the engine's own store rather than executed: the
+    baseline needs bytes that never change, and a Handler that produced them
+    would put a fresh checksum in the page on every capture.
+    """
+
+    started = engine.start(
+        "workflow:linear", {"value": 7},
+        idempotency_key="visual-artifact", actor="local",
     ).run_id
-    now = "2026-01-01T00:00:00+00:00"
-    for content, content_type, port in (
-        (b"# Stable visual artifact\n\nBody.\n", "text/markdown", "report"),
-        (CHECKER_PNG, "image/png", "chart"),
-    ):
-        receipt = backend.write(content, max_size_bytes=64 * 1024)
-        artifact_id = f"artifact:{receipt.checksum.value.removeprefix('sha256:')}"
-        with connect_workflow_database(db) as connection:
-            event_id = connection.execute(
-                "SELECT event_id FROM run_events WHERE run_id=? ORDER BY global_position LIMIT 1",
-                (run_id,),
-            ).fetchone()[0]
+    # The engine mints a random run id, and the page prints it. A baseline
+    # cannot be stable while a uuid is on screen, so the seeded run is given
+    # a fixed one — the only thing this fixture needs from it is determinism.
+    run_id = "langgraph_run:00000000000000000000000000000001"
+    with engine._connect() as connection:
+        # The receipt row references the run, so it moves with it.
+        connection.execute("PRAGMA foreign_keys=OFF")
+        connection.execute(
+            "UPDATE langgraph_run_receipts SET run_id=? WHERE run_id=?",
+            (run_id, started),
+        )
+        connection.execute(
+            "UPDATE langgraph_runs SET run_id=? WHERE run_id=?", (run_id, started),
+        )
+        connection.commit()
+    store = engine.artifacts
+    with store._connect() as connection:
+        for content, content_type, port in (
+            (b"# Stable visual artifact\n\nBody.\n", "text/markdown", "report"),
+            (CHECKER_PNG, "image/png", "chart"),
+        ):
+            receipt = store.backend.write(content, max_size_bytes=64 * 1024)
+            artifact_id = (
+                "artifact:" + receipt.checksum.value.removeprefix("sha256:")
+            )
             connection.execute(
-                "INSERT INTO artifacts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT OR REPLACE INTO langgraph_artifacts VALUES"
+                " (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
-                    artifact_id, run_id, "workflow:linear", "attempt", "attempt:visual",
-                    "node_run:visual", port, "schema:text", content_type,
-                    receipt.checksum.value, receipt.size_bytes, receipt.blob_key,
-                    "run", run_id, "committed", now, now, event_id, None,
+                    artifact_id, run_id, "attempt:visual", "work", port,
+                    "schema:text", content_type, receipt.size_bytes,
+                    receipt.blob_key, "committed", None, "local",
                 ),
             )
-            connection.execute(
-                "INSERT INTO artifact_acl VALUES (?,'local','read','local',?)",
-                (artifact_id, now),
-            )
-            connection.commit()
+        connection.commit()
     return run_id
 
 
@@ -167,7 +181,6 @@ class VisualCaptureCase(unittest.TestCase):
         cls.app = create_app(
             cls.db,
             handlers=[transform_registration()], schemas=SCHEMAS,
-            worker_count=1,
             poll_seconds=0.02,
             clock=lambda: datetime(2026, 1, 1, tzinfo=timezone.utc),
             authenticator=loopback_authenticator,
@@ -177,6 +190,7 @@ class VisualCaptureCase(unittest.TestCase):
             workflow_generator=lambda _prompt: source,
             serve_ui=True,
             single_goal_mode=True,
+            langgraph_state_directory=Path(cls.temp.name) / "langgraph",
         )
         publish_linear_workflow(
             cls.db,
@@ -197,9 +211,7 @@ class VisualCaptureCase(unittest.TestCase):
                 ),
             )
             connection.commit()
-        cls.visual_run_id = seed_visual_artifact(
-            cls.db, cls.app.state.runtime.service, cls.artifact_backend
-        )
+        cls.visual_run_id = seed_visual_artifact(cls.app.state.langgraph_service)
         port = free_port()
         cls.base = f"http://127.0.0.1:{port}"
         cls.server = uvicorn.Server(

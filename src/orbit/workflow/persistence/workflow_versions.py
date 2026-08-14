@@ -253,6 +253,21 @@ class SQLiteWorkflowVersionStore:
                 ).fetchone()[0]
             )
 
+    def is_archived(self, workflow_id: str) -> bool:
+        """Has this id been retired?
+
+        `get` deliberately still answers for an archived id: a run started
+        before the deletion has to be able to read the definition it is
+        executing. Starting a *new* run is the case that must be refused, and
+        that caller asks this.
+        """
+
+        with self._connect() as connection:
+            return connection.execute(
+                "SELECT 1 FROM archived_workflows WHERE workflow_id = ?",
+                (workflow_id,),
+            ).fetchone() is not None
+
     def delete(self, workflow_id: str, *, expected_latest_version: int) -> None:
         """Permanently retire an id while retaining versions for old runs."""
 

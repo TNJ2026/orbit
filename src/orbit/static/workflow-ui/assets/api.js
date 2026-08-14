@@ -108,31 +108,10 @@ export class Api {
     }
   }
 
-  listRuns({
-    cursor, limit = 25, activeOnly = false, terminalOnly = false,
-    q = "", status = "", responsibility = "",
-  } = {}) {
+  langGraphRuns({ limit = 25, status = "", cursor = "" } = {}) {
     const params = new URLSearchParams({ limit: String(limit) });
+    if (status) params.set("status", status);
     if (cursor) params.set("cursor", cursor);
-    if (activeOnly) params.set("active", "true");
-    if (terminalOnly) params.set("terminal", "true");
-    if (q.trim()) params.set("q", q.trim());
-    if (status) params.set("status", status);
-    if (responsibility) params.set("responsibility", responsibility);
-    return this.get(`/api/v1/runs?${params}`);
-  }
-
-  dashboard() {
-    return this.get("/api/v1/dashboard");
-  }
-
-  runSummary(runId) {
-    return this.get(`/api/v1/runs/${encodeURIComponent(runId)}`);
-  }
-
-  langGraphRuns({ limit = 25, status = "" } = {}) {
-    const params = new URLSearchParams({ limit: String(limit) });
-    if (status) params.set("status", status);
     return this.get(`/api/v1/langgraph-runs?${params}`);
   }
 
@@ -140,37 +119,18 @@ export class Api {
     return this.get(`/api/v1/langgraph-runs/${encodeURIComponent(runId)}`);
   }
 
-  responsibilities(runId) {
-    return this.get(`/api/v1/runs/${encodeURIComponent(runId)}/responsibilities`);
-  }
-
-  outcome(runId) {
-    return this.get(`/api/v1/runs/${encodeURIComponent(runId)}/outcome`);
-  }
-
-  runOutput(runId, after = 0, limit = 200, nodeRunId = "") {
+  artifacts({ runId = "", limit = 25 } = {}) {
     const params = new URLSearchParams({ limit: String(limit) });
-    if (after) params.set("after", String(after));
-    if (nodeRunId) params.set("node_run_id", nodeRunId);
-    return this.get(`/api/v1/runs/${encodeURIComponent(runId)}/output?${params}`);
-  }
-
-
-  artifacts({ cursor, q = "", runId = "", contentType = "", limit = 25 } = {}) {
-    const params = new URLSearchParams({ limit: String(limit) });
-    if (cursor) params.set("cursor", cursor);
-    if (q.trim()) params.set("q", q.trim());
     if (runId.trim()) params.set("run_id", runId.trim());
-    if (contentType.trim()) params.set("content_type", contentType.trim());
-    return this.get(`/api/v1/artifacts?${params}`);
+    return this.get(`/api/v1/langgraph-artifacts?${params}`);
   }
 
   artifact(artifactId) {
-    return this.get(`/api/v1/artifacts/${encodeURIComponent(artifactId)}`);
+    return this.get(`/api/v1/langgraph-artifacts/${encodeURIComponent(artifactId)}`);
   }
 
   async artifactPreview(artifactId) {
-    const path = `/api/v1/artifacts/${encodeURIComponent(artifactId)}/content`;
+    const path = `/api/v1/langgraph-artifacts/${encodeURIComponent(artifactId)}/content`;
     let response;
     try {
       response = await fetch(`${this.base}${path}`, { credentials: "same-origin" });
@@ -188,7 +148,7 @@ export class Api {
 
   /** Inline content, for an <img> the browser fetches itself. */
   artifactContentUrl(artifactId) {
-    return `${this.base}/api/v1/artifacts/${encodeURIComponent(artifactId)}/content`;
+    return `${this.base}/api/v1/langgraph-artifacts/${encodeURIComponent(artifactId)}/content`;
   }
 
   artifactDownloadUrl(artifactId) {
@@ -204,12 +164,6 @@ export class Api {
 
 
 
-
-
-  graph(runId, planVersion) {
-    const suffix = planVersion === undefined ? "" : `?plan_version=${planVersion}`;
-    return this.get(`/api/v1/runs/${encodeURIComponent(runId)}/graph${suffix}`);
-  }
 
 
   capabilities() {

@@ -264,7 +264,7 @@ class CompositionTests(unittest.TestCase):
         app = create_app(
             Path(temp.name) / "runtime.db",
             handlers=[transform_registration()], schemas=SCHEMAS,
-            worker_count=1, poll_seconds=0.02,
+            poll_seconds=0.02,
             workflow_generators=broker.generators(),
             workflow_generator=broker,
             authoring_broker=broker,

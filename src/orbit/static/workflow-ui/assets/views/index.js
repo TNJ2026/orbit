@@ -38,10 +38,8 @@ export function createViews(context) {
 
 
   function workflowStartCommand(entry) {
-    const commands = entry?.allowed_commands || [];
-    return commands.find((item) => item.command === "langgraph_run.start")
-      || (!shellFacts?.capabilities?.langgraph_workflows?.available
-        ? commands.find((item) => item.command === "run.start") : null);
+    return (entry?.allowed_commands || [])
+      .find((item) => item.command === "langgraph_run.start") || null;
   }
 
   /** Whether this composer can start `entry` from a goal.
@@ -60,8 +58,7 @@ export function createViews(context) {
    */
   function workflowRunnable(entry) {
     if (entry?.goal_readiness !== "ready") return false;
-    return entry?.langgraph_compatibility?.compatible === true
-      || !shellFacts?.capabilities?.langgraph_workflows?.available;
+    return entry?.langgraph_compatibility?.compatible === true;
   }
 
   function prepareSimplifiedComposer(summary, entries) {
@@ -256,20 +253,6 @@ export function createViews(context) {
   }
 
   async function renderSimplifiedWorkspace(root, selectedRunId = null) {
-    if (!shellFacts?.capabilities?.langgraph_workflows?.available) {
-      const [dashboardResponse, catalogResponse] = await Promise.all([
-        api.dashboard(), api.workflowCatalog(),
-      ]);
-      const runId = selectedRunId || dashboardResponse.data.active_goal?.run_id || null;
-      const entries = catalogResponse.data.workflows;
-      const summary = runId ? (await api.runSummary(runId)).data : null;
-      const historicalDetail = Boolean(
-        selectedRunId && summary && TERMINAL_RUN_STATUSES.has(summary.status),
-      );
-      if (!historicalDetail) renderSimplifiedComposer(root, entries, summary);
-      if (runId && summary) await renderSimplifiedRun(root, runId, summary);
-      return;
-    }
     // The published catalog, in both products. Single-agent mode used to
     // choose from built-in templates instead, which meant the workflow its own
     // Agent had just generated was not among the things it could start.
@@ -291,10 +274,10 @@ export function createViews(context) {
     if (!historicalDetail) {
       renderSimplifiedComposer(root, catalogResponse.data.workflows, summary);
     }
-    if (runId && summary) renderLangGraphRun(root, summary);
+    if (runId && summary) await renderLangGraphRun(root, summary);
   }
 
-  function renderLangGraphRun(root, run) {
+  async function renderLangGraphRun(root, run) {
     const commands = run.allowed_commands || [];
     const resume = commands.find((item) => item.command === "langgraph_run.resume");
     const cancel = commands.find((item) => item.command === "langgraph_run.cancel");
@@ -336,6 +319,36 @@ export function createViews(context) {
       }) : null,
       run.error ? el("div", { class: "banner error", text: run.error }) : null,
       actions.length ? el("div", { class: "actions" }, actions) : null,
+    ]));
+    await appendRunArtifacts(root, run.run_id);
+  }
+
+  /* What the run produced, and a way to open it.
+   *
+   * A failure here is reported in place rather than thrown: an Artifact store
+   * that cannot be read must not blank out the run the person came to see.
+   */
+  async function appendRunArtifacts(root, runId) {
+    let artifacts = [];
+    try {
+      artifacts = (await api.artifacts({ runId, limit: 25 })).data.artifacts || [];
+    } catch (error) {
+      root.append(el("section", { class: "panel" }, [
+        el("div", { class: "panel-head" }, [
+          el("div", { class: "panel-title", text: i18n.t("simplified.artifacts") }),
+        ]),
+        el("p", { class: "muted", text: error?.messageKey
+          ? i18n.t(error.messageKey, { message: error.message })
+          : String(error?.message || error) }),
+      ]));
+      return;
+    }
+    if (!artifacts.length) return;
+    root.append(el("section", { class: "panel simplified-artifacts" }, [
+      el("div", { class: "panel-head" }, [
+        el("div", { class: "panel-title", text: i18n.t("simplified.artifacts") }),
+      ]),
+      el("div", { class: "artifact-grid" }, artifacts.map((item) => artifactCard(item))),
     ]));
   }
 
@@ -475,15 +488,10 @@ export function createViews(context) {
         render();
       },
     }))));
-    const langGraphOnly = shellFacts?.capabilities?.langgraph_workflows?.available;
-    const requestedStatus = langGraphOnly && goalFilters.status === "succeeded"
+    const requestedStatus = goalFilters.status === "succeeded"
       ? "completed" : goalFilters.status;
     const [response, catalogResponse] = await Promise.all([
-      langGraphOnly
-        ? api.langGraphRuns({ limit: 25, status: requestedStatus })
-        : api.listRuns({
-          limit: 25, q: goalFilters.q, status: requestedStatus, terminalOnly: true,
-        }),
+      api.langGraphRuns({ limit: 25, status: requestedStatus }),
       api.workflowCatalog(),
     ]);
     const workflowNames = new Map(
@@ -516,9 +524,8 @@ export function createViews(context) {
       onclick: async () => {
         loadMore.disabled = true;
         try {
-          const next = await api.listRuns({
-            cursor: nextCursor, limit: 25, q: goalFilters.q,
-            status: requestedStatus, terminalOnly: true,
+          const next = await api.langGraphRuns({
+            cursor: nextCursor, limit: 25, status: requestedStatus,
           });
           appendHistoryRuns(list, next.data.runs, workflowNames);
           loadedCount += next.data.runs.length;
@@ -564,422 +571,6 @@ export function createViews(context) {
     return null;
   }
 
-  function simplifiedStepOutput(runId, nodeRunId, { live }) {
-    const log = el("pre", {
-      class: "console-log simplified-step-output-log", role: "log", tabindex: "0", hidden: true,
-    });
-    const state = el("span", { class: "muted", text: i18n.t("run.console.empty") });
-    const details = el("details", { class: "simplified-step-output" }, [
-      el("summary", { text: i18n.t("simplified.execution.output") }),
-      el("div", { class: "simplified-step-output-body" }, [state, log]),
-    ]);
-    let after = 0;
-    let timer = null;
-    let loading = false;
-    let stopped = false;
-
-    const draw = (chunks) => {
-      for (const chunk of chunks) {
-        log.append(el("span", {
-          class: `console-chunk ${chunk.stream}`, text: chunk.text,
-        }));
-      }
-      if (log.childElementCount) log.hidden = false;
-    };
-
-    const poll = async () => {
-      if (stopped || loading || !details.open) return;
-      loading = true;
-      if (!log.childElementCount) state.textContent = i18n.t("simplified.execution.output.loading");
-      try {
-        const response = await api.runOutput(runId, after, 200, nodeRunId);
-        after = response.data.after;
-        draw(response.data.chunks);
-        state.textContent = log.childElementCount
-          ? i18n.t(live ? "run.console.following" : "run.console.finished")
-          : i18n.t("run.console.empty");
-        if (response.data.has_more) timer = setTimeout(poll, 0);
-        else if (live) timer = setTimeout(poll, 2000);
-      } catch (error) {
-        stopped = true;
-        state.textContent = error instanceof ApiError && error.status === 403
-          ? i18n.t("run.console.forbidden")
-          : i18n.t("run.console.unavailable");
-      } finally {
-        loading = false;
-      }
-    };
-
-    details.addEventListener("toggle", () => {
-      if (details.open) poll();
-      else if (timer) {
-        clearTimeout(timer);
-        timer = null;
-      }
-    });
-
-    const previous = activeViewCleanup;
-    activeViewCleanup = () => {
-      stopped = true;
-      if (timer) clearTimeout(timer);
-      if (previous) previous();
-    };
-    return details;
-  }
-
-  /* Whether the running step is still alive, or only still recorded as running.
-   *
-   * "Running" survives a Handler that stopped talking and a worker that died,
-   * so on its own it is the status a stuck run and a working run share. These
-   * two facts separate them: when the process last printed, and how long its
-   * lease is still good for. Rendered only while the step is actually running —
-   * on a finished step they would describe a moment that no longer matters.
-   */
-  function stepLiveness(step) {
-    if (!step) return null;
-    const parts = [];
-    if (step.last_output_at) {
-      parts.push(i18n.t("simplified.execution.lastOutput", {
-        at: i18n.relativeTime(step.last_output_at),
-      }));
-    }
-    if (step.lease_expires_at) {
-      parts.push(i18n.t("simplified.execution.leaseUntil", {
-        at: i18n.relativeTime(step.lease_expires_at),
-        renewals: i18n.number(step.lease_renewals ?? 0),
-      }));
-    }
-    if (!parts.length) return null;
-    return el("div", {
-      class: "simplified-step-liveness muted", text: parts.join(" · "),
-    });
-  }
-
-  function simplifiedExecutionPanel(graph, summary, reload) {
-    const allowedCommands = summary.allowed_commands || [];
-    const cancelGoal = allowedCommands.find(
-      (allowed) => allowed.command === "run.cancel",
-    );
-    const header = () => el("div", { class: "panel-head simplified-execution-head" }, [
-      el("div", {}, [
-        el("div", { class: "panel-title", text: i18n.t("simplified.execution") }),
-        el("div", { class: "panel-subtitle", text: TERMINAL_RUN_STATUSES.has(summary.status)
-          ? i18n.t(`simplified.run.${summary.status}`)
-          : summary.current_step?.label || i18n.t("simplified.run.inProgress") }),
-      ]),
-      el("div", { class: "actions" }, [
-        !TERMINAL_RUN_STATUSES.has(summary.status)
-          ? el("span", { class: "simplified-live-label", text: i18n.t("simplified.execution.live") })
-          : null,
-        pill(summary.status),
-        cancelGoal ? el("button", {
-          type: "button", class: "button danger goal-cancel-execution",
-          text: i18n.t("goal.cancelExecution"),
-          onclick: () => promptAndExecute(cancelGoal, reload, allowedCommands),
-        }) : null,
-        ...commandButtons(
-          allowedCommands.filter((allowed) => allowed.command !== "run.cancel"),
-          reload,
-        ),
-      ].filter(Boolean)),
-    ]);
-    if (!graph) {
-      const status = TERMINAL_RUN_STATUSES.has(summary.status) ? summary.status : "running";
-      const mark = status === "succeeded" ? "✓"
-        : ["failed", "cancelled"].includes(status) ? "×" : "●";
-      return el("section", { class: "panel simplified-execution simplified-run-hero" }, [
-        header(),
-        el("div", { class: "panel-body" }, [
-          el("div", { class: `simplified-step-row ${status}` }, [
-            el("div", { class: "simplified-step-track" }, [
-              el("span", { class: "simplified-step-mark", text: mark }),
-            ]),
-            el("div", { class: "simplified-step-card" }, [
-              el("div", { class: "simplified-step-copy" }, [
-              el("strong", { text: summary.current_step?.label || i18n.t("simplified.execution.preparing") }),
-              el("span", { class: "muted", text: TERMINAL_RUN_STATUSES.has(summary.status)
-                ? i18n.t(`simplified.run.${summary.status}`)
-                : i18n.t("simplified.run.inProgress") }),
-              TERMINAL_RUN_STATUSES.has(summary.status)
-                ? null : stepLiveness(summary.current_step),
-              ].filter(Boolean)),
-              pill(status),
-            ]),
-          ]),
-        ]),
-      ]);
-    }
-    if (graph.error) {
-      return el("section", { class: "panel simplified-execution simplified-run-hero" }, [
-        header(),
-        el("div", { class: "panel-body" }, [
-          dataState(el, i18n, "error", { onRetry: reload }),
-        ]),
-      ]);
-    }
-    const definition = graph.definition;
-    const overlay = graph.runtime_overlay;
-    const statuses = new Map();
-    for (const node of overlay.nodes) {
-      const current = statuses.get(node.node_id);
-      if (!current || node.generation >= current.generation) statuses.set(node.node_id, node);
-    }
-    const positions = new Map(
-      definition.layout.positions.map((item) => [item.node_id, item]),
-    );
-    const executableNodes = definition.nodes.filter((node) => node.kind !== "terminal");
-    const nodes = (executableNodes.length ? executableNodes : definition.nodes).slice().sort((left, right) => {
-      const leftPosition = positions.get(left.node_id) || { depth: 0, lane: 0 };
-      const rightPosition = positions.get(right.node_id) || { depth: 0, lane: 0 };
-      return leftPosition.depth - rightPosition.depth || leftPosition.lane - rightPosition.lane;
-    });
-    const rows = nodes.map((node, index) => {
-      const runtime = statuses.get(node.node_id);
-      const runner = simplifiedStepRunner(node);
-      const status = runtime?.status || "pending";
-      const mark = status === "succeeded" ? "✓"
-        : ["failed", "cancelled"].includes(status) ? "×"
-          : status === "running" ? "●" : String(index + 1);
-      return el("div", { class: `simplified-step-row ${status}` }, [
-        el("div", { class: "simplified-step-track" }, [
-          el("span", { class: "simplified-step-mark", text: mark }),
-        ]),
-        el("div", { class: "simplified-step-card" }, [
-          el("div", { class: "simplified-step-card-head" }, [
-            el("div", { class: "simplified-step-copy" }, [
-              el("strong", { text: simplifiedStepName(node) }),
-              el("span", { class: "simplified-step-order", text: i18n.t("simplified.execution.step", {
-                count: i18n.number(index + 1),
-              }) }),
-            ]),
-            pill(status),
-          ]),
-          el("div", { class: "simplified-step-meta" }, [
-            runner ? el("span", {
-              class: `simplified-step-runner ${runner.kind}`, text: runner.text,
-            }) : null,
-            runtime ? el("span", { class: "muted", text: i18n.t("simplified.execution.attempts", {
-              count: i18n.number(runtime.attempts),
-            }) }) : el("span", { class: "muted", text: i18n.t("simplified.execution.waiting") }),
-          ]),
-          workflowViews().stepPrompt(node.config, "simplified-step-prompt"),
-          status === "running" && summary.current_step?.node_id === node.node_id
-            ? stepLiveness(summary.current_step) : null,
-          runtime?.node_run_id && node.handler_name
-            ? simplifiedStepOutput(summary.run_id, runtime.node_run_id, { live: status === "running" })
-            : null,
-        ].filter(Boolean)),
-      ]);
-    });
-    return el("section", { class: "panel simplified-execution simplified-run-hero" }, [
-      header(),
-      el("div", { class: "panel-body simplified-step-list" }, rows),
-    ]);
-  }
-
-  /** The mark on the empty Artifacts panel: a document, not a plus.
-   *
-   * A `+` is the universal invitation to add something, and this panel accepts
-   * nothing — Artifacts arrive because a step produced them. Drawn to the same
-   * spec as the navigation icons (currentColor, 1.5 stroke, round joins) so the
-   * two icon sets stay one family.
-   */
-  function artifactsMark() {
-    return svgEl("svg", {
-      class: "empty-mark-icon", viewBox: "0 0 24 24",
-      "aria-hidden": "true", focusable: "false",
-    }, [
-      svgEl("path", {
-        d: "M13.5 3.5H8A2 2 0 0 0 6 5.5v13a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V8z",
-      }),
-      // The folded corner, drawn as its own edge so it reads as paper rather
-      // than as a notch cut out of a rectangle.
-      svgEl("path", { d: "M13.5 3.5V6.5A1.5 1.5 0 0 0 15 8h3" }),
-      svgEl("path", { d: "M9.5 12.75h5M9.5 15.75h3" }),
-    ]);
-  }
-
-
-  function simplifiedResultBody(outcome) {
-    if (outcome.state !== "available") {
-      return el("div", { class: "muted", text: i18n.t(
-        `simplified.result.state.${outcome.state}`,
-      ) });
-    }
-    if (!outcome.content_visible) {
-      return el("div", { class: "muted", text: i18n.t(
-        "simplified.result.contentHidden",
-      ) });
-    }
-    if (outcome.kind === "text") {
-      return el("div", { class: "simplified-result-value", text: outcome.value });
-    }
-    if (outcome.kind === "json") {
-      return el("pre", {
-        class: "code-block simplified-result-value",
-        text: JSON.stringify(outcome.value, null, 2),
-      });
-    }
-    return null;
-  }
-
-  async function renderSimplifiedRun(root, runId, summary) {
-    const graphPromise = summary.plan_version
-      ? api.graph(runId).then((response) => response.data).catch((error) => ({ error }))
-      : Promise.resolve(null);
-    const [responsibilityResponse, artifactResponse, outcomeResponse, graph] = await Promise.all([
-      api.responsibilities(runId),
-      api.artifacts({ runId, limit: 25 }),
-      api.outcome(runId),
-      graphPromise,
-    ]);
-    const responsibilities = responsibilityResponse.data.responsibilities;
-    const artifacts = artifactResponse.data.artifacts;
-    const outcome = outcomeResponse.data.result;
-    const reload = () => navigate({ view: "run", runId });
-    const terminal = TERMINAL_RUN_STATUSES.has(summary.status);
-    const goalText = summary.goal || summary.name || summary.workflow_id || summary.run_id;
-    const side = el("aside", { class: "simplified-run-side" });
-
-    if (responsibilities.length) {
-      side.append(el("section", { class: "panel simplified-attention" }, [
-        el("div", { class: "panel-head" }, [
-          el("div", { class: "panel-title", text: i18n.t("simplified.attention") }),
-        ]),
-        el("div", { class: "panel-body responsibility-list" }, responsibilities.map((item) =>
-          el("div", { class: "responsibility-row" }, [
-            el("div", {}, [
-              el("strong", { text: item.label }),
-              item.detail ? el("div", { class: "muted", text: item.detail }) : null,
-            ]),
-            pill(item.status),
-            el("div", { class: "actions" }, commandButtons(item.allowed_commands || [], reload)),
-          ]))),
-      ]));
-    }
-
-    side.append(el("section", { class: "panel simplified-run-info" }, [
-      el("div", { class: "panel-head" }, [
-        el("div", { class: "panel-title", text: i18n.t("simplified.runInfo") }),
-      ]),
-      el("div", { class: "panel-body" }, [
-        el("dl", { class: "fact-grid" }, [
-          el("div", {}, [
-            el("dt", { text: i18n.t("simplified.runInfo.id") }),
-            el("dd", { class: "mono", text: summary.run_id }),
-          ]),
-          // Which workflow and which version of it are answers to a question
-          // this page is not asking: the Goal view is about one run in flight,
-          // and the definition behind it is one click away in Workflows.
-          el("div", {}, [
-            el("dt", { text: i18n.t("simplified.runInfo.started") }),
-            el("dd", { text: i18n.dateTime(summary.created_at) }),
-          ]),
-          el("div", {}, [
-            el("dt", { text: i18n.t("simplified.runInfo.updated") }),
-            el("dd", { text: i18n.dateTime(summary.updated_at) }),
-          ]),
-        ]),
-      ]),
-    ]));
-
-    side.append(el("section", { class: "panel simplified-result" }, [
-      el("div", { class: "panel-head" }, [
-        el("div", { class: "panel-title", text: i18n.t("simplified.result") }),
-      ]),
-      el("div", { class: "panel-body" }, [
-        pill(summary.status),
-        simplifiedResultBody(outcome),
-      ]),
-    ]));
-
-    root.append(el("div", { class: "simplified-run-page" }, [
-      el("section", { class: "panel simplified-goal-summary" }, [
-        el("div", { class: "simplified-goal-icon", "aria-hidden": "true", text: "◎" }),
-        el("div", { class: "simplified-goal-copy" }, [
-          el("h1", { text: i18n.t("simplified.goal") }),
-          el("p", { text: goalText }),
-        ]),
-        el("div", {
-          class: `simplified-goal-status ${summary.status}`,
-          role: "status",
-          "aria-label": i18n.status(summary.status),
-        }, [
-          el("span", { class: "simplified-goal-status-dot", "aria-hidden": "true" }),
-          el("span", { text: terminal
-            ? i18n.t(`simplified.run.${summary.status}`)
-            : i18n.t("simplified.run.inProgress") }),
-        ]),
-      ]),
-      el("div", { class: "simplified-run-columns" }, [
-        el("main", { class: "simplified-run-main" }, [
-          simplifiedExecutionPanel(graph, summary, reload),
-        ]),
-        side,
-      ]),
-      el("section", { class: "simplified-artifacts" }, [
-      el("div", { class: "section-heading" }, [
-        el("div", {}, [
-          el("h2", { text: i18n.t("simplified.artifacts") }),
-          el("p", { class: "muted", text: i18n.t("simplified.artifacts.description") }),
-        ]),
-      ]),
-      artifacts.length
-        ? el("div", { class: "artifact-grid" }, artifacts.map((item) => artifactCard(item)))
-        : el("div", {
-          class: "simplified-artifacts-empty",
-        }, [
-          el("div", { class: "simplified-artifacts-empty-mark", "aria-hidden": "true" }, [
-            artifactsMark(),
-          ]),
-          el("strong", { text: i18n.t(terminal
-            ? "simplified.artifacts.empty" : "simplified.artifacts.pending") }),
-          el("span", { class: "muted", text: i18n.t(terminal
-            ? "simplified.artifacts.emptyHint" : "simplified.artifacts.pendingHint") }),
-        ]),
-      ]),
-    ]));
-  }
-
-
-
-
-
-
-
-  /** What the Handlers' processes printed, followed while the run is alive.
-   *
-   * Values in the list below are results; this is the account of getting there.
-   * It is the only thing an attempt that ended `unknown_external_result` leaves,
-   * which is exactly when an operator most needs to read it.
-   */
-
-  /** One recorded value, readable rather than merely present.
-   *
-   * An Agent's answer is prose, and prose crammed into one JSON line at 500
-   * characters is data you can prove you stored and cannot actually read.
-   */
-
-
-  /** The plan, in three separately-labelled views.
-   *
-   * Definition, overlay and diff are fetched and rendered apart, and the overlay
-   * is only drawn against the plan version it names. Painting last version's
-   * statuses onto this version's graph is the bug this shape prevents; showing
-   * "no run state for this version" is the correct, honest alternative.
-   */
-
-
-
-
-
-  /** A cursor-paged section. Paging is the server's; the UI only carries tokens. */
-
-
-
-  /* Sidebar health card: the same facts `/health/ready` serves, nothing more.
-     A failed fetch means "degraded" — the card never claims a state the
-     runtime did not report. */
   async function refreshRuntimeCard() {
     const dot = document.getElementById("runtimeDot");
     const card = document.getElementById("runtimeCard");
@@ -1032,9 +623,14 @@ export function createViews(context) {
    * The <img> fetches the content endpoint itself, so a revoked ACL, a missing
    * Blob or a type the server declines to inline all arrive as a load error
    * rather than a broken picture. */
+  function isImage(item) {
+    return item.image_previewable
+      ?? String(item.content_type || "").startsWith("image/");
+  }
+
   function artifactThumb(item) {
     const badge = documentIcon(item.content_type);
-    if (!item.image_previewable) return badge;
+    if (!isImage(item)) return badge;
     const image = el("img", {
       class: "artifact-thumb", loading: "lazy", decoding: "async",
       src: api.artifactContentUrl(item.artifact_id), alt: "",
@@ -1047,15 +643,18 @@ export function createViews(context) {
 
   function artifactCard(item, selected = false) {
     // The port that produced it is the fallback name: a document with no title
-    // of its own must not be given one the file does not contain.
-    const name = item.display_name || item.title || item.output_port_id;
+    // of its own must not be given one the file does not contain. The engine
+    // names the port `port_id`; the field is read both ways so a card renders
+    // whichever projection produced it.
+    const name = item.display_name || item.title || item.filename
+      || item.output_port_id || item.port_id;
     return el("article", { class: `artifact-card panel list-option-card${selected ? " selected" : ""}` }, [
       el("button", {
         class: "artifact-card-main",
         "aria-current": selected ? "true" : null,
         onclick: () => openArtifactDialog(item.artifact_id),
       }, [
-        el("span", { class: `artifact-top${item.image_previewable ? " artifact-top-image" : ""}` }, [
+        el("span", { class: `artifact-top${isImage(item) ? " artifact-top-image" : ""}` }, [
           artifactThumb(item),
           el("span", { class: "artifact-size", text: i18n.t("artifacts.size", {
             size: i18n.number(item.size_bytes),
@@ -1070,15 +669,17 @@ export function createViews(context) {
             title: item.goal || item.run_id,
           }),
         ]),
-        el("span", { class: "artifact-origin" }, [
+        // The node that produced it. The engine's projection carries the node
+        // rather than the workflow — an Artifact is always read next to the
+        // run it came from, which already names the workflow.
+        item.node_id || item.workflow_id ? el("span", { class: "artifact-origin" }, [
           el("span", { class: "artifact-origin-label muted", text: i18n.t("artifacts.workflow") }),
-          // The `workflow:` prefix is the id's kind, and the row already says
-          // which kind this is. The full id stays on hover and on the detail.
           el("span", {
-            class: "artifact-origin-value mono", title: item.workflow_id,
-            text: item.workflow_id.replace(/^workflow:/, ""),
+            class: "artifact-origin-value mono",
+            title: item.node_id || item.workflow_id,
+            text: (item.node_id || item.workflow_id).replace(/^workflow:/, ""),
           }),
-        ]),
+        ]) : null,
         // Media type, producer and Artifact id are addressing, not identity:
         // they belong on the detail panel, where one Artifact is already open.
       ]),
@@ -1092,7 +693,7 @@ export function createViews(context) {
    * read the Artifact — and its own failure stays inside this box so a preview
    * the actor may not read never takes the metadata down with it. */
   function artifactContent(item) {
-    if (item.image_previewable) {
+    if (isImage(item)) {
       const holder = el("div", { class: "artifact-content" });
       const load = () => {
         const image = el("img", {
@@ -1100,7 +701,7 @@ export function createViews(context) {
           // an empty box where the Artifact should be.
           class: "artifact-image", decoding: "async",
           src: api.artifactContentUrl(item.artifact_id),
-          alt: item.title || item.output_port_id,
+          alt: item.title || item.output_port_id || item.port_id,
           onerror: () => holder.replaceChildren(dataState(el, i18n, "error", {
             onRetry: load,
           })),
@@ -1112,7 +713,10 @@ export function createViews(context) {
       load();
       return holder;
     }
-    if (!item.previewable) {
+    // The engine's projection does not pre-judge previewability, so text is
+    // attempted and its own failure stays inside this box.
+    const textual = item.previewable ?? String(item.content_type || "").startsWith("text/");
+    if (!textual) {
       return el("div", { class: "muted", text: i18n.t("artifacts.notPreviewable") });
     }
     const holder = el("div", { class: "artifact-content" }, [dataState(el, i18n, "loading")]);
@@ -2633,9 +2237,7 @@ export function createViews(context) {
        pre-flight stays — the composer must know which Workflow is runnable and
        the author must hear "no catalog" before typing a goal nobody can run. */
     try {
-      const runSource = shellFacts?.capabilities?.langgraph_workflows?.available
-        ? api.langGraphRuns({ limit: 25 }) : api.listRuns({ limit: 25 });
-      const active = (await runSource).data.runs.find(
+      const active = (await api.langGraphRuns({ limit: 25 })).data.runs.find(
         (item) => ["running", "waiting", "interrupted"].includes(item.status),
       );
       if (active) {

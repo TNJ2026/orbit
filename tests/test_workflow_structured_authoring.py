@@ -470,7 +470,6 @@ class AppWiringTests(unittest.TestCase):
             Path(directory.name) / "orbit.sqlite3",
             authenticator=lambda request: request.headers.get("x-orbit-actor"),
             authorizer=Authorizer(lambda actor: (READ_SCOPE,)),
-            worker_count=1,
             **kwargs,
         )
 

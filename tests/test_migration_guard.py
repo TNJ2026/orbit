@@ -255,7 +255,7 @@ class LegacyRemovalGuard(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertNotIn(command, advertised)
         self.assertIn("serve", advertised)
-        self.assertIn("run", advertised)
+        self.assertIn("workflow", advertised)
 
     def test_new_runtime_never_imports_the_legacy_engine(self) -> None:
         """This one is already a hard rule: the new Runtime must stay clean."""

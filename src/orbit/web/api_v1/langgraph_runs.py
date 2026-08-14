@@ -8,7 +8,9 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
-from ...workflow.api.dto import envelope, page_size
+from ...workflow.api.dto import (
+    CursorError, decode_cursor, encode_cursor, envelope, page_size,
+)
 
 from .common import OPS_WRITE_SCOPE, READ_SCOPE, WRITE_SCOPE, error
 
@@ -50,6 +52,9 @@ def _dto(run, *, can_write: bool) -> dict[str, Any]:
         "updated_at": run.updated_at,
         "allowed_commands": commands,
     }
+
+
+CURSOR_KIND = "langgraph-runs-v1"
 
 
 def build_routes(ctx, service, template_service=None) -> list[Route]:
@@ -144,21 +149,34 @@ def build_routes(ctx, service, template_service=None) -> list[Route]:
         if isinstance(actor, JSONResponse):
             return actor
         try:
-            unknown = set(request.query_params) - {"limit", "status"}
+            unknown = set(request.query_params) - {"limit", "status", "cursor"}
             if unknown:
                 raise ValueError(f"unknown query parameter: {sorted(unknown)[0]}")
             limit = page_size(request.query_params.get("limit"))
+            cursor = decode_cursor(request.query_params.get("cursor"))
             runs = service.list_runs(
                 status=request.query_params.get("status") or None,
                 limit=limit,
                 actor=actor,
+                after=(
+                    (cursor["created_at"], cursor["run_id"]) if cursor else None
+                ),
             )
-        except ValueError as exc:
+        except CursorError as exc:
+            return error("invalid_cursor", str(exc))
+        except (KeyError, ValueError) as exc:
             return error("invalid_request", str(exc))
         can_write = ctx.guard.allows(actor, WRITE_SCOPE)
-        return JSONResponse(envelope({
-            "runs": [_dto(run, can_write=can_write) for run in runs]
-        }))
+        # A full page means there may be another; a short one is the end.
+        next_cursor = encode_cursor({
+            "kind": CURSOR_KIND,
+            "created_at": runs[-1].created_at,
+            "run_id": runs[-1].run_id,
+        }) if len(runs) == limit else None
+        return JSONResponse(envelope(
+            {"runs": [_dto(run, can_write=can_write) for run in runs]},
+            next_cursor=next_cursor,
+        ))
 
     async def get_run(request: Request) -> JSONResponse:
         actor = ctx.authenticate(request, READ_SCOPE)

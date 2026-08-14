@@ -212,35 +212,6 @@ class AccessibilityTests(unittest.TestCase):
         self.assertRegex(css, r"\.simplified-goal-field textarea\s*\{[^}]*min-height:\s*200px")
         self.assertIn(".simplified-workflow-picker { grid-template-columns: 1fr; }", css)
 
-    def test_goal_run_detail_has_timeline_and_responsive_columns(self) -> None:
-        app_js = "\n".join(path.read_text(encoding="utf-8") for path in source_files())
-        css = stylesheet_source()
-        for marker in (
-            "simplified-run-page", "simplified-goal-summary",
-            "simplified-run-columns", "simplified-step-track",
-            "simplified-step-card", "simplified-artifacts-empty",
-        ):
-            self.assertIn(marker, app_js)
-            self.assertIn(f".{marker}", css)
-        self.assertRegex(
-            css,
-            r"\.simplified-run-columns\s*\{[^}]*grid-template-columns:"
-            r"\s*minmax\(0,\s*2fr\)\s*minmax\(260px,\s*1fr\)",
-        )
-        self.assertIn("@media (max-width: 900px)", css)
-        self.assertIn(".simplified-run-columns { grid-template-columns: 1fr; }", css)
-        self.assertIn("max-height: 620px", css)
-        self.assertIn("overflow-y: auto", css)
-        self.assertIn("summary.goal || summary.name || summary.workflow_id", app_js)
-        self.assertIn("commandButtons(item.allowed_commands || [], reload)", app_js)
-
-class CapacityRenderingTests(unittest.TestCase):
-    def test_active_goal_has_a_distinct_cancel_execution_control(self) -> None:
-        source = (ASSETS / "views" / "index.js").read_text(encoding="utf-8")
-        self.assertIn('class: "button danger goal-cancel-execution"', source)
-        self.assertIn('allowed.command === "run.cancel"', source)
-        self.assertIn('i18n.t("goal.cancelExecution")', source)
-
     def test_workflow_generation_progress_offers_server_authorized_cancel(self) -> None:
         generation_js = (
             ASSETS / "workflow" / "generation-progress.js"
@@ -252,33 +223,6 @@ class CapacityRenderingTests(unittest.TestCase):
         self.assertIn(
             '`workflow.authoring.cancel:${job.job_id}`', generation_js
         )
-
-    def test_the_console_follows_only_while_the_run_is_alive(self) -> None:
-        """Polling a finished run's console forever is a busy loop for nothing."""
-
-        app_js = "\n".join(path.read_text(encoding="utf-8") for path in source_files())
-        self.assertIn('{ live: status === "running" }', app_js)
-        self.assertIn("else if (live) timer = setTimeout(poll, 2000);", app_js)
-        self.assertIn("activeViewCleanup = () => {", app_js)
-
-
-if __name__ == "__main__":
-    unittest.main()
-
-
-@unittest.skipUnless(
-    EDITOR_SOURCE.is_dir(), "editor sources are not in this checkout"
-)
-class ViewerProtocolTests(unittest.TestCase):
-    """The two halves of the embedded graph viewer, held to one vocabulary.
-
-    The Runtime's pages draw a workflow by embedding the editor's canvas and
-    posting the graph into it. Both ends name the messages, and they cannot
-    share a module: the editor's is bundled by vite, this one is served as
-    source with no build step between them. So the strings are duplicated, and
-    a duplicate that nothing checks is a rename away from a frame that draws
-    nothing and says nothing about why.
-    """
 
     def messages(self, text: str) -> set[str]:
         return set(re.findall(r'"(orbit-viewer-[a-z-]+)"', text))

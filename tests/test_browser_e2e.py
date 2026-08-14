@@ -32,12 +32,8 @@ except ImportError:  # pragma: no cover - exercised by the skip
 from orbit.web.app import create_app
 from orbit.web.api_v1 import Authorizer, WRITE_SCOPE
 from orbit.web.local_identity import LOCAL_ACTOR, LOCAL_SCOPES, loopback_authenticator
-from orbit.workflow.application.budget_service import BudgetService
-from orbit.workflow.application.human_service import HumanTaskService
-from orbit.workflow.application.run_service import RunApplicationService
 from orbit.workflow.artifacts.local_cas import LocalCASBackend
 from orbit.workflow.api.routes import RateLimiter
-from orbit.workflow.domain.human import HumanTaskKind
 from orbit.workflow.domain.ids import EntityId
 from tests.test_web_composition import (
     SCHEMAS, publish_human_workflow, publish_linear_workflow,
@@ -77,7 +73,7 @@ class BrowserE2ETestCase(unittest.TestCase):
         app = create_app(
             cls.db,
             handlers=[transform_registration()], schemas=SCHEMAS,
-            worker_count=2, poll_seconds=0.02,
+            poll_seconds=0.02,
             authenticator=loopback_authenticator,
             authorizer=Authorizer(
                 lambda actor: tuple(cls.scopes) if actor == LOCAL_ACTOR else ()
@@ -85,6 +81,7 @@ class BrowserE2ETestCase(unittest.TestCase):
             artifact_backend=cls.artifact_backend,
             rate_limiter=RateLimiter(requests=1_000),
             serve_ui=True,
+            langgraph_state_directory=Path(cls.temp.name) / "langgraph",
             **cls.extra_app_kwargs(),
         )
         cls.app = app
@@ -134,19 +131,17 @@ class BrowserE2ETestCase(unittest.TestCase):
     # -- fixtures ---------------------------------------------------------
 
     def start_run(self, key: str) -> str:
-        service = RunApplicationService(self.db, self.app_service())
-        return service.start_run(
-            workflow_id="workflow:linear", inputs={"value": 1},
-            actor="local", idempotency_key=key,
+        return self.engine().start(
+            "workflow:linear", {"value": 1},
+            idempotency_key=key, actor=LOCAL_ACTOR,
         ).run_id
 
     def start_goal(
         self, key: str, goal: str, workflow_id: str = "workflow:linear",
     ) -> str:
-        service = RunApplicationService(self.db, self.app_service())
-        return service.start_run(
-            workflow_id=workflow_id, inputs={"value": 1}, goal=goal,
-            actor="local", idempotency_key=key,
+        return self.engine().start(
+            workflow_id, {"value": 1},
+            idempotency_key=key, actor=LOCAL_ACTOR,
         ).run_id
 
     def cancel_goal(self, run_id: str) -> None:
@@ -157,26 +152,20 @@ class BrowserE2ETestCase(unittest.TestCase):
         then fail for a reason that has nothing to do with them.
         """
 
-        from orbit.workflow.domain.ids import EntityId
-
-        run = self.app_service().get_run(EntityId.parse(run_id))
-        RunApplicationService(self.db, self.app_service()).cancel_run(
-            run_id, run.aggregate_version.value, actor="local",
+        run = self.engine().get(run_id)
+        self.engine().cancel(
+            run_id, expected_revision=run.revision, actor=LOCAL_ACTOR,
             idempotency_key=f"cleanup-{run_id}",
         )
 
-    def app_service(self):
-        from orbit.workflow.application.durable_runtime_service import (
-            DurableRuntimeApplicationService,
-        )
-
-        return DurableRuntimeApplicationService(self.db)
+    def engine(self):
+        return self.app.state.langgraph_service
 
     def wait_for_status(self, page, run_id: str, status: str, timeout: float = 20):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             payload = page.evaluate(
-                "id => fetch(`/api/v1/runs/${encodeURIComponent(id)}`)"
+                "id => fetch(`/api/v1/langgraph-runs/${encodeURIComponent(id)}`)"
                 ".then(r => r.json()).then(b => b.data.status)",
                 run_id,
             )
@@ -379,16 +368,19 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
                 "source": "run.goal", "node_id": "first",
                 "input_id": "value", "property": "goal", "value_shape": "object",
             }
+            entry["langgraph_compatibility"] = {"compatible": True}
             entry["allowed_commands"] = [{
-                "command": "run.start", "label": "Start goal", "method": "POST",
-                "href": "/api/v1/runs", "expected_version": 0,
+                "command": "langgraph_run.start", "label": "Start goal",
+                "method": "POST", "href": "/api/v1/langgraph-runs",
+                "expected_version": 0,
             }]
             route.fulfill(response=response, json=payload)
 
         def start_goal(route):
             if route.request.method != "POST":
                 return route.continue_()
-            goal = route.request.post_data_json["goal"]
+            body = route.request.post_data_json
+            goal = body.get("goal") or json.dumps(body.get("input") or {})
             run_id = self.start_goal(
                 "simplified-workspace-start", goal, "workflow:human",
             )
@@ -401,12 +393,12 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
                 status=200, content_type="application/json",
                 body=json.dumps({
                     "schema_version": "1.0", "projection_version": None,
-                    "data": {"run_id": run_id}, "next_cursor": None,
+                    "data": {"run": {"run_id": run_id}}, "next_cursor": None,
                 }),
             )
 
         page.route("**/api/v1/workflows", advertise_goal_ready_workflow)
-        page.route("**/api/v1/runs", start_goal)
+        page.route("**/api/v1/langgraph-runs", start_goal)
         page.reload()
         page.wait_for_selector(".simplified-workspace-composer")
         page.locator("#simplifiedWorkflow").evaluate(
@@ -415,14 +407,15 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
         )
         page.fill("#simplifiedGoal", "Prepare a concise report")
         page.click("#newGoalStart")
-        page.wait_for_function("() => location.hash.startsWith('#/runs/run%3A')")
-        page.wait_for_selector(".simplified-execution")
+        page.wait_for_function(
+            "() => location.hash.startsWith('#/runs/langgraph_run%3A')"
+        )
+        page.wait_for_selector(".simplified-run-hero")
 
         self.assertTrue(started["run_id"])
         self.assertIn("Prepare a concise report", page.input_value("#simplifiedGoal"))
         self.assertEqual("workflow:linear", page.input_value("#simplifiedWorkflow"))
-        self.assertTrue(page.locator(".simplified-result").is_visible())
-        self.assertTrue(page.locator(".simplified-artifacts").is_visible())
+        self.assertTrue(page.locator(".simplified-run-hero").is_visible())
 
     def test_run_detail_has_no_runtime_tabs(self) -> None:
         run_id = self.start_goal("simplified-run", "Prepare a concise report")
@@ -433,57 +426,8 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
         self.assertEqual(0, page.locator(".why-panel").count())
         self.assertEqual(0, page.locator(".simplified-workspace-composer").count())
         self.assertEqual(0, page.get_by_role("button", name="Run again").count())
-        self.assertTrue(page.locator(".simplified-execution").is_visible())
-        self.assertTrue(page.locator(".simplified-step-runner").first.is_visible())
-        self.assertIn("Tool", page.locator(".simplified-step-runner").first.inner_text())
-        self.assertTrue(page.locator(".simplified-result").is_visible())
-        self.assertTrue(page.locator(".simplified-result .panel-body > .pill.succeeded").is_visible())
-        self.assertNotIn("text/plain", page.locator(".simplified-result").inner_text())
-        self.assertTrue(page.locator(".simplified-artifacts").is_visible())
-
-    def test_run_step_output_loads_only_when_expanded(self) -> None:
-        run_id = self.start_goal("simplified-step-output", "Prepare a source summary")
-        context = self.browser.new_context(locale="en-US")
-        self.addCleanup(context.close)
-        page = context.new_page()
-        requested: list[str] = []
-
-        def output(route):
-            requested.append(route.request.url)
-            route.fulfill(
-                status=200, content_type="application/json",
-                body=json.dumps({
-                    "schema_version": "1.0", "projection_version": None,
-                    "data": {
-                        "chunks": [{
-                            "chunk_id": 1,
-                            "node_run_id": "node_run:test",
-                            "attempt_id": "attempt:test",
-                            "stream": "stdout",
-                            "text": "Collected and summarized the source.\n",
-                            "created_at": "2026-07-24T00:00:00+00:00",
-                        }],
-                        "after": 1,
-                        "has_more": False,
-                    },
-                    "next_cursor": None,
-                }),
-            )
-
-        page.route("**/api/v1/runs/*/output?*", output)
-        page.goto(f"{self.base}/ui/#/runs/{run_id}")
-        step_output = page.locator(".simplified-step-output").first
-        step_output.wait_for()
-
-        self.assertEqual([], requested)
-        step_output.locator("summary").click()
-        page.wait_for_function(
-            "() => document.querySelector('.simplified-step-output-log')"
-            ".textContent.includes('Collected and summarized the source.')"
-        )
-
-        self.assertTrue(any("node_run_id=" in url for url in requested))
-        self.assertTrue(step_output.locator(".simplified-step-output-log").is_visible())
+        self.assertTrue(page.locator(".simplified-run-hero").is_visible())
+        self.assertIn("workflow:linear", page.inner_text(".simplified-run-hero"))
 
     def test_refresh_interval_moves_to_the_topbar_and_settings_are_removed(self) -> None:
         page = self.open("en-US")
@@ -514,12 +458,15 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
 
     def test_history_lists_finished_goals_only(self) -> None:
         finished = self.start_goal("simplified-history", "Summarise the quarter")
-        self.wait_for_status(self.open("en-US"), finished, "succeeded")
+        self.wait_for_status(self.open("en-US"), finished, "completed")
 
         page = self.open("en-US", "/ui/#/goals")
         page.wait_for_selector(".history-goal-row")
         rows = page.locator(".history-goal-row")
-        self.assertIn("Summarise the quarter", rows.first.inner_text())
+        # The engine stores a run's inputs, not the sentence a person typed,
+        # so a finished goal is identified by its Workflow and its time.
+        self.assertIn(finished, rows.first.inner_text())
+        self.assertIn("Linear", rows.first.inner_text())
         self.assertIn("Artifacts", rows.first.inner_text())
         self.assertTrue(page.locator(".history-day-heading").first.is_visible())
         self.assertEqual(4, page.locator(".history-status-filter").count())
@@ -541,11 +488,11 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
         def history_page(route):
             second_page = "cursor=next" in route.request.url
             run = {
-                "run_id": f"run:{'second' if second_page else 'first'}",
+                "run_id": f"langgraph_run:{'second' if second_page else 'first'}",
                 "workflow_id": "workflow:linear", "workflow_version": 1,
                 "display_name": "Second page Goal" if second_page else "First page Goal",
                 "goal": "Second page Goal" if second_page else "First page Goal",
-                "status": "succeeded", "artifact_count": 1,
+                "status": "completed", "artifact_count": 1,
                 "created_at": "2026-07-24T08:00:00Z",
                 "updated_at": "2026-07-24T08:02:00Z",
             }
@@ -555,7 +502,7 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
                 "next_cursor": None if second_page else "next",
             }))
 
-        page.route("**/api/v1/runs?*", history_page)
+        page.route("**/api/v1/langgraph-runs?*", history_page)
         page.goto(f"{self.base}/ui/#/goals")
         page.wait_for_selector(".history-goal-row")
         self.assertEqual(1, page.locator(".history-goal-row").count())
@@ -593,7 +540,7 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
         """Twenty-five rows must not become fifty-one requests."""
 
         finished = self.start_goal("simplified-history-cost", "Tidy the archive")
-        self.wait_for_status(self.open("en-US"), finished, "succeeded")
+        self.wait_for_status(self.open("en-US"), finished, "completed")
 
         context = self.browser.new_context(locale="en-US")
         self.addCleanup(context.close)
@@ -967,7 +914,7 @@ class ReleaseHardeningTests(BrowserE2ETestCase):
             else:
                 route.continue_()
 
-        page.route("**/api/v1/dashboard*", network)
+        page.route("**/api/v1/langgraph-runs*", network)
         page.click("#refresh")
         page.wait_for_selector("#content .data-state.error")
         self.assertIn("Cannot reach the runtime", page.inner_text("#content"))
@@ -999,7 +946,7 @@ class ReleaseHardeningTests(BrowserE2ETestCase):
             else:
                 route.continue_()
 
-        page.route("**/api/v1/dashboard", unavailable)
+        page.route("**/api/v1/langgraph-runs*", unavailable)
         page.click('[data-view="home"]')
         page.wait_for_selector("#content .data-state.error")
         self.assertIn("projection is rebuilding", page.inner_text("#content"))
@@ -1030,7 +977,6 @@ class SingleAgentHomeTests(BrowserE2ETestCase):
         return {
             "single_goal_mode": True,
             "workflow_ui_mode": "single-agent",
-            "langgraph_state_directory": Path(cls.temp.name) / "langgraph",
             # Named as discovery names a CLI, with no `app:` prefix. The
             # prefix used to be required: single-agent mode took only `app:`
             # writers, so an install with working CLIs advertised them and

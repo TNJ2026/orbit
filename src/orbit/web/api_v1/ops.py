@@ -30,7 +30,7 @@ def build_routes(ctx) -> list[Route]:
         actor = ctx.authenticate(request, READ_SCOPE)
         if isinstance(actor, JSONResponse):
             return actor
-        registry = getattr(ctx.durable_service, "execution_registry", None)
+        registry = ctx.execution_registry
         if registry is None or not registry.sealed:
             return JSONResponse(
                 envelope({
@@ -120,27 +120,19 @@ def build_routes(ctx) -> list[Route]:
             return actor
         quick, integrity_checked_at = integrity_verdict()
         with connect_workflow_database(ctx.path) as connection:
-            jobs = {
-                row["status"]: int(row["count"])
-                for row in connection.execute(
-                    "SELECT status, COUNT(*) AS count FROM jobs GROUP BY status"
-                )
-            }
-            timers = {
-                row["status"]: int(row["count"])
-                for row in connection.execute(
-                    "SELECT status, COUNT(*) AS count FROM durable_timers GROUP BY status"
-                )
-            }
-            active_leases = int(connection.execute(
-                "SELECT COUNT(*) FROM job_leases WHERE status='active'"
-            ).fetchone()[0])
-            unknown_results = int(connection.execute(
-                "SELECT COUNT(*) FROM node_attempts WHERE status='unknown_external_result'"
-            ).fetchone()[0])
             migration_version = int(connection.execute(
                 "SELECT COALESCE(MAX(version), 0) FROM workflow_schema_migrations"
             ).fetchone()[0])
+        # Straight from the engine that runs the work. This used to count the
+        # job, lease and timer rows of a second engine; those tables are gone,
+        # and while they existed unwritten this page reported zeros as though
+        # the Runtime were idle.
+        counts = getattr(ctx.langgraph_service, "counts", None)
+        engine = counts() if counts is not None else {
+            "runs_by_status": {}, "timers_by_status": {},
+            "handler_attempts_by_status": {},
+        }
+        runs = engine["runs_by_status"]
         return JSONResponse(envelope({
             "observed_at": ctx.now().isoformat(),
             "integrity": {
@@ -149,20 +141,12 @@ def build_routes(ctx) -> list[Route]:
                 "migration_version": migration_version,
             },
             "capacity": {
-                "configured_workers": ctx.operational_config.get("worker_count"),
                 "poll_seconds": ctx.operational_config.get("poll_seconds"),
-                "ready_jobs": jobs.get("ready", 0),
-                "running_jobs": jobs.get("running", 0),
-                "leased_jobs": jobs.get("leased", 0),
-                "benchmark": {"available": False, "reason": "no_persisted_capacity_report"},
+                "running_runs": runs.get("running", 0),
+                "waiting_runs": runs.get("waiting", 0) + runs.get("interrupted", 0),
             },
-            "durable": {
-                "jobs_by_status": jobs, "timers_by_status": timers,
-                "active_leases": active_leases,
-                "unknown_external_results": unknown_results,
-            },
+            "engine": engine,
             "server_config": {
-                "worker_count": ctx.operational_config.get("worker_count"),
                 "poll_seconds": ctx.operational_config.get("poll_seconds"),
                 "artifact_store_configured": ctx.artifact_backend is not None,
             },

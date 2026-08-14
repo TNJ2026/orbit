@@ -127,7 +127,7 @@ class EditorBrowserTests(unittest.TestCase):
             cls.db,
             handlers=[transform_registration(), schema_bearing_registration()],
             schemas=SCHEMAS,
-            worker_count=1, poll_seconds=0.02,
+            poll_seconds=0.02,
             authenticator=loopback_authenticator,
             authorizer=Authorizer(
                 lambda actor: tuple(LOCAL_SCOPES) if actor == LOCAL_ACTOR else ()

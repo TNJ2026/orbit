@@ -156,7 +156,6 @@ class WorkflowCliTests(unittest.TestCase):
             create_app.call_args.kwargs["langgraph_state_directory"],
         )
 
-        self.assertFalse(create_app.call_args.kwargs["legacy_execution"])
         self.assertEqual(
             "single-agent", create_app.call_args.kwargs["workflow_ui_mode"]
         )
@@ -464,8 +463,7 @@ class WorkflowLibraryResolutionTests(unittest.TestCase):
             ("serve",),
             ("mcp",),
             ("workflow", "inventory"),
-            ("run", "inspect", "run:1"),
-        )
+                    )
         for mode in ("single-agent", "multi-agent"):
             expected = str(workflow_library_path(mode))
             for command in commands:
@@ -481,8 +479,7 @@ class WorkflowLibraryResolutionTests(unittest.TestCase):
             self.parse(*command).ui_mode
             for command in (
                 ("serve",), ("mcp",), ("workflow", "inventory"),
-                ("run", "inspect", "run:1"),
-            )
+                            )
         }
         self.assertEqual({"single-agent"}, defaults)
 

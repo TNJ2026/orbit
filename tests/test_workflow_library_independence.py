@@ -82,11 +82,9 @@ class WorkflowLibraryIndependenceTests(unittest.TestCase):
         create_app(
             str(self.runtime),
             workflow_db_path=self.library,
-            worker_count=0,
             # What `orbit serve` passes. The back-fill below used to be gated
             # on this being true, so testing with the default would have
             # watched the merge succeed on a path no product takes.
-            legacy_execution=False,
         )
 
     def test_a_new_library_takes_nothing_from_the_other_product(self) -> None:
@@ -120,7 +118,7 @@ class WorkflowLibraryIndependenceTests(unittest.TestCase):
     def test_an_explicit_database_is_its_own_library_and_merges_nothing(self) -> None:
         """`--db X` is self-contained, so there are not two paths to reconcile."""
 
-        create_app(str(self.runtime), workflow_db_path=self.runtime, worker_count=0)
+        create_app(str(self.runtime), workflow_db_path=self.runtime)
         published = _publish(self.runtime, "self-contained", 0)
         self.assertEqual({published}, _workflow_ids(self.runtime))
 

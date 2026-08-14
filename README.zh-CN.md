@@ -143,11 +143,9 @@ Runtime 事件可通过 `wait_app_event`、`list_app_events` 和 `ack_app_event`
 ```bash
 orbit serve
 orbit --version
-orbit run start <workflow_id> --goal "..."
-orbit run inspect <run_id> --json
+orbit mcp
 orbit workflow validate <file> --catalog <catalog.json>
 orbit workflow publish <file> --catalog <catalog.json> --expected-version <n>
-orbit db check
 ```
 
 `orbit serve` 默认只绑定 `127.0.0.1`。Runtime 状态和 Artifact 按项目隔离；已发布

@@ -93,26 +93,6 @@ class FrozenSchemaTests(unittest.TestCase):
         command["href"] = "/api/v1/runs/run:r/cancel"
         self.assertEqual([], list(checker.iter_errors(command)))
 
-    def test_wait_reason_vocabulary_matches_the_graph_summary(self) -> None:
-        """RunSummary 2.0 must not invent waiting words the runtime never emits.
-
-        The only addition over the graph summary's vocabulary is budget_wait,
-        which the aggregated inbox introduces (plan B2/B3).
-        """
-        from orbit.workflow.application import runtime_service
-
-        source = Path(runtime_service.__file__).read_text(encoding="utf-8")
-        produced = {
-            "human_wait", "unknown_wait", "retry_wait", "join_wait",
-            "timer_wait", "stalled",
-        }
-        for word in produced:
-            self.assertIn(f'"{word}"', source)
-        frozen = set(
-            load("run-summary.schema.json")["properties"]["wait_reason"]["enum"]
-        )
-        self.assertEqual(produced | {"budget_wait", None}, frozen)
-
 
 if __name__ == "__main__":
     unittest.main()

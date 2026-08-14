@@ -19,7 +19,6 @@ class RuntimeShutdownTests(unittest.TestCase):
         }
         return create_app(
             db_path,
-            worker_count=1,
             poll_seconds=0.01,
             authenticator=lambda request: request.headers.get("x-orbit-actor"),
             authorizer=Authorizer(lambda actor: scopes.get(actor, ())),
