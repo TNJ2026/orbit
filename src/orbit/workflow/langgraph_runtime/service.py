@@ -27,6 +27,12 @@ from .compiler import (
 )
 
 
+def _has_checkpoint_schema(connection: sqlite3.Connection) -> bool:
+    return connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='checkpoints'"
+    ).fetchone() is not None
+
+
 class LangGraphRunConflict(ValueError):
     pass
 
@@ -234,6 +240,7 @@ class LangGraphWorkflowService:
         # its identity and the cache lives here rather than globally.
         self._compatibility: dict[str, Mapping[str, Any]] = {}
         self._compatibility_lock = threading.Lock()
+        self._checkpoint_schema_lock = threading.Lock()
         self.run_db_path.parent.mkdir(parents=True, exist_ok=True)
         self.checkpoint_db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
@@ -335,6 +342,45 @@ class LangGraphWorkflowService:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys=ON")
         return connection
+
+    @contextmanager
+    def _saver(self, *, create: bool):
+        """A checkpointer that does not re-create the schema it is reading.
+
+        `SqliteSaver.setup()` runs on every fresh instance, and its first
+        statement is `PRAGMA journal_mode=WAL` — which SQLite will only do
+        under an *exclusive* lock and refuses immediately, without waiting for
+        any busy timeout, if another connection holds one. So opening a saver
+        to read a run collided with the run that was writing it: reading
+        `/steps` while a run executed failed with "database is locked", at
+        random, and a background run whose own saver lost the race failed the
+        run outright.
+
+        Doing it once per service and telling every later saver the schema is
+        there makes a read a read. Measured on a fresh checkpoint file against
+        a writer holding a transaction: forty attempts, forty failures before,
+        none after.
+        """
+
+        with SqliteSaver.from_conn_string(str(self.checkpoint_db_path)) as saver:
+            # Asked of the file rather than remembered, because the file can
+            # go: a run whose checkpoints were deleted must still read as an
+            # empty run rather than raise `no such table`. Reading
+            # `sqlite_master` takes no lock worth the name.
+            if _has_checkpoint_schema(saver.conn):
+                saver.is_setup = True
+            elif create:
+                with self._checkpoint_schema_lock:
+                    if _has_checkpoint_schema(saver.conn):
+                        saver.is_setup = True
+                    else:
+                        saver.setup()
+            else:
+                # Nothing has been recorded here. A reader says so; creating
+                # the schema on its behalf is what took the exclusive lock.
+                yield None
+                return
+            yield saver
 
     def _stamp(self) -> str:
         return self.clock().astimezone(timezone.utc).isoformat(
@@ -769,8 +815,8 @@ class LangGraphWorkflowService:
                 run_id, self._run_ir(current), resume=responses,
             )
         config = {"configurable": {"thread_id": run_id}}
-        with SqliteSaver.from_conn_string(str(self.checkpoint_db_path)) as saver:
-            has_checkpoint = saver.get_tuple(config) is not None
+        with self._saver(create=False) as saver:
+            has_checkpoint = saver is not None and saver.get_tuple(config) is not None
         with self._connect() as connection:
             row = connection.execute(
                 "SELECT input_json FROM langgraph_runs WHERE run_id=?", (run_id,)
@@ -853,9 +899,7 @@ class LangGraphWorkflowService:
             "thread_id": run_id, "actor": row["owner_actor"],
         }}
         try:
-            with self._executing(run_id), SqliteSaver.from_conn_string(
-                str(self.checkpoint_db_path)
-            ) as saver:
+            with self._executing(run_id), self._saver(create=True) as saver:
                 workflow = compile_workflow(ir, self.handlers, checkpointer=saver)
                 result = workflow.fire_join_deadline(node_id, config=config)
                 after = workflow.graph.get_state(config)
@@ -1129,7 +1173,9 @@ class LangGraphWorkflowService:
         """
 
         config = {"configurable": {"thread_id": run_id}}
-        with SqliteSaver.from_conn_string(str(self.checkpoint_db_path)) as saver:
+        with self._saver(create=False) as saver:
+            if saver is None:
+                return {}
             newest = next(iter(saver.list(config, limit=1)), None)
             if newest is None:
                 return {}
@@ -1396,8 +1442,8 @@ class LangGraphWorkflowService:
         self.get(run_id, actor=actor)
         config = {"configurable": {"thread_id": run_id}}
         steps: list[Mapping[str, Any]] = []
-        with SqliteSaver.from_conn_string(str(self.checkpoint_db_path)) as saver:
-            for entry in saver.list(config, limit=limit):
+        with self._saver(create=False) as saver:
+            for entry in [] if saver is None else saver.list(config, limit=limit):
                 values = entry.checkpoint.get("channel_values") or {}
                 metadata = entry.metadata or {}
                 steps.append({
@@ -1734,9 +1780,7 @@ class LangGraphWorkflowService:
             "thread_id": run_id, "actor": row["owner_actor"],
         }}
         try:
-            with self._executing(run_id), SqliteSaver.from_conn_string(
-                str(self.checkpoint_db_path)
-            ) as saver:
+            with self._executing(run_id), self._saver(create=True) as saver:
                 workflow = compile_workflow(ir, self.handlers, checkpointer=saver)
                 if resume is not ...:
                     result = workflow.resume(resume, config=config)

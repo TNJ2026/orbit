@@ -1226,5 +1226,79 @@ class EdgeReportTests(unittest.TestCase):
         self.assertEqual(0, report["onward"]["visits"])
 
 
+
+class ReadingARunWhileItIsWrittenTests(unittest.TestCase):
+    """A read of a run must not need the lock its writer is holding.
+
+    `SqliteSaver.setup()` runs on every fresh instance and its first statement
+    is `PRAGMA journal_mode=WAL`, which SQLite performs only under an
+    exclusive lock and refuses immediately — no busy timeout, no retry — when
+    another connection holds one. Every `/steps` call opened such an instance,
+    so reading a run while it executed failed at random, and a background run
+    whose own saver lost the race failed the run outright.
+    """
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.path = self.root / "runtime.db"
+        publish_human_workflow(self.path)
+        self.engine = build_service(
+            self.path, [transform_registration()],
+            state_directory=self.root / "langgraph",
+        )
+
+    def test_steps_read_through_a_writer_holding_the_checkpoint_file(self) -> None:
+        run = self.engine.start(
+            "workflow:human", {"value": 1}, idempotency_key="held", actor="local",
+        )
+        # Exactly what an executing run holds: an open write transaction on
+        # the checkpoint database.
+        holder = sqlite3.connect(self.engine.checkpoint_db_path, timeout=30)
+        self.addCleanup(holder.close)
+        holder.execute("BEGIN IMMEDIATE")
+        holder.execute(
+            "INSERT INTO writes VALUES ('other','','c','task',0,'ch','t',x'00')"
+        )
+        try:
+            steps = self.engine.steps(run.run_id, actor="local")
+            edges = self.engine.edges(run.run_id, actor="local")
+        finally:
+            holder.rollback()
+        self.assertTrue(steps)
+        self.assertTrue(edges)
+
+    def test_a_reader_arriving_on_a_half_written_checkpoint_file(self) -> None:
+        """The race as it actually happened: both savers on a new file.
+
+        The run that has just started is still creating the schema when the
+        page that started it asks where it got to.
+        """
+
+        service = build_service(
+            self.path, [transform_registration()],
+            state_directory=self.root / "fresh",
+        )
+        run = service.start(
+            "workflow:human", {"value": 1}, idempotency_key="fresh", actor="local",
+        )
+        service.checkpoint_db_path.unlink()
+        holder = sqlite3.connect(service.checkpoint_db_path, timeout=30)
+        self.addCleanup(holder.close)
+        holder.execute("BEGIN IMMEDIATE")
+        holder.execute("CREATE TABLE IF NOT EXISTS half_way(x)")
+        try:
+            steps = service.steps(run.run_id, actor="local")
+        finally:
+            holder.rollback()
+        # Its checkpoints are gone, so nothing reads as having run; the
+        # interrupt is on the run row and survives. The point is that it
+        # answers at all.
+        self.assertEqual(
+            {"not_reached", "waiting"}, {step["status"] for step in steps},
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
