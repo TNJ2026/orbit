@@ -91,7 +91,7 @@ class SingleAgentTemplateTests(unittest.TestCase):
             )
 
     def test_published_graph_rebinds_to_the_current_agent_for_each_run(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             catalogs = WorkflowCatalogs(
                 InMemoryHandlerCatalog([AGENT, CLAUDE]),
                 InMemorySchemaCatalog({"schema://object/1.0": {"type": "object"}}),
@@ -129,7 +129,7 @@ class SingleAgentTemplateTests(unittest.TestCase):
         registration = HandlerRegistration(
             AGENT, AgentHandler(client), "agent.codex@1.0.0",
         )
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             app = create_app(
                 Path(directory) / "runtime.db",
                 workflow_db_path=Path(directory) / "workflows.db",

@@ -39,7 +39,7 @@ def write_manifest(root: Path, **overrides) -> Path:
 
 class ManifestTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.temp = tempfile.TemporaryDirectory()
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.root = Path(self.temp.name)
 
     def tearDown(self) -> None:
@@ -91,7 +91,7 @@ class _Process:
 
 class HostTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.temp = tempfile.TemporaryDirectory()
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.root = Path(self.temp.name)
         self.workspace = self.root / "workspace"
         self.workspace.mkdir()
@@ -234,7 +234,7 @@ class HostTests(unittest.TestCase):
 
 class ProjectRootTests(unittest.TestCase):
     def test_explicit_project_root_selects_default_runtime_database(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:
             project_root = Path(temporary)
             (project_root / "pyproject.toml").write_text(
                 "[project]\nname='sample'\nversion='0'\n", encoding="utf-8"
@@ -247,7 +247,7 @@ class ProjectRootTests(unittest.TestCase):
 
 class McpProxyTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.temp = tempfile.TemporaryDirectory()
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.root = Path(self.temp.name)
         self.manifest = load_manifest(write_manifest(self.root))
 
@@ -335,7 +335,7 @@ class McpProxyTests(unittest.TestCase):
 
 class EventBridgeTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.temp = tempfile.TemporaryDirectory()
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(self.temp.cleanup)
         self.inbox = EventInbox(Path(self.temp.name) / "events.db")
 

@@ -31,7 +31,10 @@ export function createViews(context) {
   }
 
   function runName(run) {
-    return run.display_name || run.goal || run.run_id;
+    // `display_name` used to lead this list. No payload has ever carried one
+    // for a run — it was the deleted projection's word — so the goal a person
+    // typed is the name, and the id is what is left when there was none.
+    return run.goal || run.run_id;
   }
 
 
@@ -727,12 +730,9 @@ export function createViews(context) {
   }
 
   function artifactCard(item, selected = false) {
-    // The port that produced it is the fallback name: a document with no title
-    // of its own must not be given one the file does not contain. The engine
-    // names the port `port_id`; the field is read both ways so a card renders
-    // whichever projection produced it.
-    const name = item.display_name || item.title || item.filename
-      || item.output_port_id || item.port_id;
+    // The port that produced it is the fallback name: a document with no
+    // filename of its own must not be given one the file does not contain.
+    const name = item.filename || item.port_id;
     return el("article", { class: `artifact-card panel list-option-card${selected ? " selected" : ""}` }, [
       el("button", {
         class: "artifact-card-main",
@@ -784,7 +784,7 @@ export function createViews(context) {
           // an empty box where the Artifact should be.
           class: "artifact-image", decoding: "async",
           src: api.artifactContentUrl(item.artifact_id),
-          alt: item.title || item.output_port_id || item.port_id,
+          alt: item.filename || item.port_id,
           onerror: () => holder.replaceChildren(dataState(el, i18n, "error", {
             onRetry: load,
           })),
@@ -828,7 +828,7 @@ export function createViews(context) {
         el("div", { class: "panel-head" }, [
           el("div", {}, [
             el("div", { class: "eyebrow", text: i18n.t("artifacts.detail") }),
-            el("div", { class: "panel-title", text: item.display_name || item.output_port_id }),
+            el("div", { class: "panel-title", text: item.filename || item.port_id }),
           ]),
           el("div", { class: "actions" }, [
             el("a", {

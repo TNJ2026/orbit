@@ -258,7 +258,7 @@ class CompositionTests(unittest.TestCase):
         from orbit.web.app import create_app
         from tests.test_api_v1 import SCHEMAS, transform_registration
 
-        temp = tempfile.TemporaryDirectory()
+        temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(temp.cleanup)
         broker = ExternalAuthoringBroker()
         app = create_app(

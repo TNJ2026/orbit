@@ -16,7 +16,7 @@ from tests.test_workflow_dsl import VALID_DSL
 
 class WorkflowCliTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.temp_dir = tempfile.TemporaryDirectory()
+        self.temp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         root = Path(self.temp_dir.name)
         self.workflow = root / "workflow.json"
         self.catalog = root / "catalog.json"
@@ -236,7 +236,7 @@ class WorkflowInventoryCliTests(unittest.TestCase):
         )
         from tests.test_workflow_authoring_jobs import MANIFEST, dsl
 
-        self.temp_dir = tempfile.TemporaryDirectory()
+        self.temp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(self.temp_dir.cleanup)
         self.db = Path(self.temp_dir.name) / "runtime.db"
         with connect_workflow_database(self.db) as connection:

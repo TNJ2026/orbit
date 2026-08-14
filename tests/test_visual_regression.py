@@ -50,7 +50,6 @@ from tests.test_web_composition import (
 from tests.test_workflow_drafts import dsl as editable_dsl
 
 BASELINES = Path(__file__).parent / "visual_baselines"
-PROTOTYPE = Path(__file__).parent.parent / "prototypes" / "runtime-ui.html"
 UPDATE = os.environ.get("VISUAL_UPDATE") == "1"
 MAX_DIFF_PIXEL_RATIO = 0.001
 
@@ -183,7 +182,7 @@ class VisualCaptureCase(unittest.TestCase):
     def setUpClass(cls) -> None:
         import uvicorn
 
-        cls.temp = tempfile.TemporaryDirectory()
+        cls.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         cls.db = Path(cls.temp.name) / "runtime.db"
         cls.artifact_backend = LocalCASBackend(Path(cls.temp.name) / "artifacts")
         source = json.dumps(editable_dsl("linear", "Visual Editor"))

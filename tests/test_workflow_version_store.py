@@ -18,7 +18,7 @@ from tests.test_workflow_dsl import VALID_DSL
 
 class WorkflowVersionStoreTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.temp_dir = tempfile.TemporaryDirectory()
+        self.temp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.db_path = Path(self.temp_dir.name) / "workflow.db"
         self.store = SQLiteWorkflowVersionStore(self.db_path)
         self.schemas = InMemorySchemaCatalog(

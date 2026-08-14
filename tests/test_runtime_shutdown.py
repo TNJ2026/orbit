@@ -27,7 +27,7 @@ class RuntimeShutdownTests(unittest.TestCase):
         )
 
     def test_capabilities_advertise_shutdown_only_to_operator(self) -> None:
-        with tempfile.TemporaryDirectory() as root:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as root:
             stopped = []
             with AsgiHarness(self._app(f"{root}/runtime.db", stopped)) as client:
                 operator = client.get(
@@ -43,7 +43,7 @@ class RuntimeShutdownTests(unittest.TestCase):
                 self.assertEqual([], viewer["runtime"]["allowed_commands"])
 
     def test_shutdown_is_idempotent_and_runs_after_response(self) -> None:
-        with tempfile.TemporaryDirectory() as root:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as root:
             stopped = []
             with AsgiHarness(self._app(f"{root}/runtime.db", stopped)) as client:
                 response = client.post(
@@ -59,7 +59,7 @@ class RuntimeShutdownTests(unittest.TestCase):
                 self.assertEqual([True], stopped)
 
     def test_shutdown_requires_command_headers_and_operator_scope(self) -> None:
-        with tempfile.TemporaryDirectory() as root:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as root:
             stopped = []
             with AsgiHarness(self._app(f"{root}/runtime.db", stopped)) as client:
                 missing_key = client.post(

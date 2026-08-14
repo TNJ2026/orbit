@@ -431,7 +431,7 @@ class LangGraphWorkflowCompilerValidationTests(unittest.TestCase):
 class LangGraphArtifactStoreTests(unittest.TestCase):
     def test_stage_commit_and_scoped_read(self) -> None:
         output = artifact_port("document")
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             store = LangGraphArtifactStore(
                 Path(directory) / "runs.sqlite3", Path(directory) / "blobs",
             )
@@ -477,7 +477,7 @@ class LangGraphArtifactStoreTests(unittest.TestCase):
                 content_types=("text/plain",),
             ),
         )
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             store = LangGraphArtifactStore(
                 Path(directory) / "runs.sqlite3", Path(directory) / "blobs",
             )
@@ -509,7 +509,7 @@ class LangGraphArtifactStoreTests(unittest.TestCase):
 
     def test_lineage_tracks_authorized_artifact_derivation(self) -> None:
         output = artifact_port("document")
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             store = LangGraphArtifactStore(
                 Path(directory) / "runs.sqlite3", Path(directory) / "blobs",
             )
@@ -547,7 +547,7 @@ class LangGraphArtifactStoreTests(unittest.TestCase):
 
     def test_gc_preserves_deduplicated_blob_still_in_use(self) -> None:
         output = artifact_port("document")
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             store = LangGraphArtifactStore(
                 Path(directory) / "runs.sqlite3", Path(directory) / "blobs",
             )
@@ -1583,7 +1583,7 @@ class LangGraphWorkflowCompilerTests(unittest.TestCase):
 
         registry = LangGraphHandlerRegistry([binding("action", wait_for_value)])
         config = {"configurable": {"thread_id": "durable-interrupt"}}
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             database = str(Path(directory) / "checkpoints.sqlite3")
             with SqliteSaver.from_conn_string(database) as saver:
                 first = compile_workflow(ir, registry, checkpointer=saver)
@@ -2075,7 +2075,7 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
         registry = LangGraphHandlerRegistry([
             binding("fan", lambda values, config, context: dict(values)),
         ])
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             service = self.service(
                 directory, self.publish(directory, ir), registry,
             )
@@ -2148,7 +2148,7 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
         registry = LangGraphHandlerRegistry([
             binding("fan", lambda values, config, context: dict(values)),
         ])
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             store = self.publish(directory, ir)
             service = self.service(directory, store, registry)
             started = service.start(
@@ -2235,7 +2235,7 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
             binding("fast", lambda values, config, context: {"value": "fast"}),
         ])
         now = [datetime(2026, 1, 1, tzinfo=timezone.utc)]
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             store = self.publish(directory, ir)
             service = LangGraphWorkflowService(
                 store, registry,
@@ -2341,7 +2341,7 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
             "action", "1.0.0", FINGERPRINT, flaky, retry_safe=True,
         )])
         now = [datetime(2026, 1, 1, tzinfo=timezone.utc)]
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             store = self.publish(directory, ir)
             service = LangGraphWorkflowService(
                 store, registry,
@@ -2369,7 +2369,7 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
         self.assertEqual(2, len(calls))
 
     def test_service_migrates_early_run_metadata_schema(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             run_database = Path(directory) / "langgraph-runs.sqlite3"
             with sqlite3.connect(run_database) as connection:
                 connection.execute(
@@ -2451,7 +2451,7 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
             LangGraphRetryRequested,
         )
 
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             store = SQLiteWorkflowVersionStore(Path(directory) / "workflows.sqlite3")
             service = self.service(directory, store, LangGraphHandlerRegistry([]))
             run_id = "langgraph_run:" + uuid.uuid4().hex
@@ -2533,7 +2533,7 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
             entry=("left",), terminals=("join",), result=("join", "value"),
             policies=(deadline,),
         )
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             store = self.publish(directory, ir)
             service = self.service(directory, store, LangGraphHandlerRegistry([]))
             run = service.start(
@@ -2610,7 +2610,7 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
         registry = LangGraphHandlerRegistry([
             binding("fan", lambda values, config, context: dict(values)),
         ])
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             store = self.publish(directory, ir)
             service = self.service(directory, store, registry)
             run = service.start(
@@ -2687,7 +2687,7 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
             binding("after", explode),
         ])
         now = [datetime(2026, 1, 1, tzinfo=timezone.utc)]
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             store = self.publish(directory, ir)
             service = LangGraphWorkflowService(
                 store, registry,
@@ -2747,7 +2747,7 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
 
         registry = LangGraphHandlerRegistry([binding("action", slow)])
         run_id_holder = {"id": ""}
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             store = self.publish(directory, ir)
             service = self.service(directory, store, registry)
             run_id_holder["id"] = "langgraph_run:" + uuid.uuid4().hex
@@ -2804,7 +2804,7 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
             compiles.append(compiled_ir.workflow_id)
             return real(compiled_ir, handlers, **kwargs)
 
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             store = self.publish(directory, ir)
             service = self.service(directory, store, registry)
             with patch.object(langgraph_service_module, "compile_workflow", counted):
@@ -2860,7 +2860,7 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
             compiles.append(compiled_ir.workflow_id)
             return real(compiled_ir, handlers, **kwargs)
 
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             store = self.publish(directory, ir)
             # No Handler registered for `orphan`, so it cannot compile.
             service = self.service(directory, store, LangGraphHandlerRegistry([]))
@@ -2907,7 +2907,7 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
         registry = LangGraphHandlerRegistry([
             binding("first", record("first")), binding("second", record("second")),
         ])
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             store = self.publish(directory, ir)
             service = self.service(directory, store, registry)
             run = service.start(
@@ -2997,7 +2997,7 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
             binding("fan", lambda values, config, context: dict(values)),
             binding("fast", lambda values, config, context: {"value": "fast"}),
         ])
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             store = self.publish(directory, ir)
             service = self.service(directory, store, registry)
             run = service.start(
@@ -3032,7 +3032,7 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
             entry=("waiting",), terminals=("terminal",),
             result=("waiting", "value"),
         )
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             store = self.publish(directory, ir)
             service = self.service(directory, store, LangGraphHandlerRegistry([]))
             mine = service.start(
@@ -3121,7 +3121,7 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
         return service, visiting
 
     def test_one_unrecoverable_run_does_not_strand_the_rest_of_the_batch(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             service, run_ids = self._two_stranded_runs(directory)
             poisoned, healthy = run_ids
             observed: list[tuple[str, str]] = []
@@ -3142,7 +3142,7 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
             self.assertEqual([(poisoned, "handler build is gone")], observed)
 
     def test_recovery_without_an_observer_still_isolates_a_failure(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             service, run_ids = self._two_stranded_runs(directory)
             poisoned, healthy = run_ids
             original = service.recover
@@ -3156,7 +3156,7 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
             self.assertEqual([healthy], [item.run_id for item in recovered])
 
     def test_an_observer_that_raises_cannot_undo_the_isolation(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             service, run_ids = self._two_stranded_runs(directory)
             poisoned, healthy = run_ids
             original = service.recover
@@ -3208,7 +3208,7 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
             binding("first", record("first")),
             binding("second", record("second")),
         ])
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             store = self.publish(directory, ir)
             paths = {
                 "run_db_path": Path(directory) / "runs.sqlite3",
@@ -3264,7 +3264,7 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
             return {"value": "done"}
 
         registry = LangGraphHandlerRegistry([binding("after", record)])
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             store = self.publish(directory, ir)
             paths = {
                 "run_db_path": Path(directory) / "runs.sqlite3",
@@ -3313,7 +3313,7 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
                 "value": values["value"] + 1
             })
         ])
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             store = self.publish(directory, ir)
             service = self.service(directory, store, registry)
 
@@ -3347,7 +3347,7 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
                 "value": values["value"] + 1
             })
         ])
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             store = SQLiteWorkflowVersionStore(Path(directory) / "workflows.sqlite3")
             service = self.service(directory, store, registry)
             run = service.start_snapshot(
@@ -3376,7 +3376,7 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
             (edge("done", "action", "terminal"),),
             entry=("action",), terminals=("terminal",), result=("action", "value"),
         )
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             store = self.publish(directory, ir)
             unsupported = self.service(
                 directory, store, LangGraphHandlerRegistry([])
@@ -3411,7 +3411,7 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
         registry = LangGraphHandlerRegistry([
             binding("action", lambda values, config, context: values)
         ])
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             result = self.service(
                 directory, self.publish(directory, ir), registry
             ).compatibility(ir.workflow_id)
@@ -3436,7 +3436,7 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
             return {"value": values["value"] if accepted else -1}
 
         registry = LangGraphHandlerRegistry([binding("action", approval)])
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             store = self.publish(directory, ir)
             first = self.service(directory, store, registry)
             paused = first.start(
@@ -3487,7 +3487,7 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
             return {"value": values["value"] if accepted else -1}
 
         registry = LangGraphHandlerRegistry([binding("action", approval)])
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             empty_store = SQLiteWorkflowVersionStore(
                 Path(directory) / "empty-workflows.sqlite3"
             )
@@ -3526,7 +3526,7 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
             "action", "1.0.0", FINGERPRINT, approval,
             lambda run_id: not cancelled_runs.append(run_id),
         )])
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             store = self.publish(directory, ir)
             service = self.service(directory, store, registry)
             paused = service.start(
@@ -3578,7 +3578,7 @@ class LangGraphProductionWiringTests(unittest.TestCase):
     def test_successful_agent_attempt_is_replayed_from_journal(self) -> None:
         client = FakeAgentClient(AgentResponse({"value": 8}, None, "provider:1"))
         registration = self.registration(client)
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             registry = trusted_handlers(
                 [registration],
                 attempt_db_path=Path(directory) / "runs.sqlite3",
@@ -3611,7 +3611,7 @@ class LangGraphProductionWiringTests(unittest.TestCase):
         client = ArtifactClient()
         registration = self.registration(client)
         output = artifact_port("value")
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             database = Path(directory) / "runs.sqlite3"
             registry = trusted_handlers(
                 [registration], attempt_db_path=database,
@@ -3680,7 +3680,7 @@ class LangGraphProductionWiringTests(unittest.TestCase):
             ("produce",), ("consume",), (), (), {},
             IRResult("consume", "value"),
         )
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             registry = trusted_handlers(
                 [registration],
                 attempt_db_path=Path(directory) / "runs.sqlite3",
@@ -3716,7 +3716,7 @@ class LangGraphProductionWiringTests(unittest.TestCase):
             (credential,), (), (action,), (), ("agent",), ("agent",), (), (), {},
             IRResult("agent", "value"),
         )
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             registry = trusted_handlers(
                 [registration],
                 attempt_db_path=Path(directory) / "runs.sqlite3",
@@ -3742,7 +3742,7 @@ class LangGraphProductionWiringTests(unittest.TestCase):
 
         client = LeakingClient()
         registration = self.registration(client, required_secrets=("api_key",))
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             registry = trusted_handlers(
                 [registration],
                 attempt_db_path=Path(directory) / "runs.sqlite3",
@@ -3792,7 +3792,7 @@ class LangGraphProductionWiringTests(unittest.TestCase):
 
         adapter = Adapter()
         registration = self.tool_registration(adapter)
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             registry = trusted_handlers(
                 [registration],
                 attempt_db_path=Path(directory) / "runs.sqlite3",
@@ -3833,7 +3833,7 @@ class LangGraphProductionWiringTests(unittest.TestCase):
         registration = self.tool_registration(
             adapter, safety=ExecutionSafety.UNKNOWN_ON_LEASE_LOSS,
         )
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             registry = trusted_handlers(
                 [registration],
                 attempt_db_path=Path(directory) / "runs.sqlite3",
@@ -3864,7 +3864,7 @@ class LangGraphProductionWiringTests(unittest.TestCase):
             error=UnknownExternalResultError("connection lost after submission")
         )
         registration = self.registration(client)
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             registry = trusted_handlers(
                 [registration],
                 attempt_db_path=Path(directory) / "runs.sqlite3",
@@ -3895,7 +3895,7 @@ class LangGraphProductionWiringTests(unittest.TestCase):
             (edge("done", "agent", "terminal"),),
             entry=("agent",), terminals=("terminal",), result=("agent", "value"),
         )
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             root = Path(directory)
             store = SQLiteWorkflowVersionStore(root / "workflows.sqlite3")
             store.publish(
@@ -3958,7 +3958,7 @@ class LangGraphHttpApiTests(unittest.TestCase):
                 "value": values["value"] + 1
             })
         ])
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             store = self.publish(directory, ir)
             service = self.service(directory, store, registry)
             app = create_app(
@@ -4017,7 +4017,7 @@ class LangGraphHttpApiTests(unittest.TestCase):
         self.assertEqual(21, mcp_payload["result"])
 
     def test_artifact_http_and_mcp_projections_expose_committed_content(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             database = Path(directory) / "langgraph-runs.sqlite3"
             artifacts = LangGraphArtifactStore(
                 database, Path(directory) / "artifacts",
@@ -4097,7 +4097,7 @@ class LangGraphHttpApiTests(unittest.TestCase):
         )
 
     def test_routes_are_absent_without_explicit_service(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             app = create_app(
                 Path(directory) / "orbit.sqlite3",
                 authenticator=lambda request: request.headers.get("x-orbit-actor"),
@@ -4123,7 +4123,7 @@ class LangGraphHttpApiTests(unittest.TestCase):
         )
 
     def test_langgraph_only_composition_removes_legacy_execution_surfaces(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             root = Path(directory)
             app = create_app(
                 root / "orbit.sqlite3",
@@ -4168,7 +4168,7 @@ class LangGraphHttpApiTests(unittest.TestCase):
                 return ()
 
         service = RecoveringService()
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             app = create_app(
                 Path(directory) / "orbit.sqlite3",
                 langgraph_service=service,
@@ -4201,7 +4201,7 @@ class LangGraphHttpApiTests(unittest.TestCase):
             def recover_running(self, *, on_error=None):
                 raise sqlite3.DatabaseError("run database is malformed")
 
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             app = create_app(
                 Path(directory) / "orbit.sqlite3",
                 langgraph_service=BrokenService(),
@@ -4223,7 +4223,7 @@ class LangGraphHttpApiTests(unittest.TestCase):
             def recover_running(self, *, on_error=None):
                 return ()
 
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             app = create_app(
                 Path(directory) / "orbit.sqlite3",
                 langgraph_service=RecoveringService(),
@@ -4242,7 +4242,7 @@ class LangGraphHttpApiTests(unittest.TestCase):
                 on_error("run:stuck", RuntimeError("handler build is gone"))
                 return ()
 
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             app = create_app(
                 Path(directory) / "orbit.sqlite3",
                 langgraph_service=PartialService(),
@@ -4327,7 +4327,7 @@ class LangGraphHttpApiTests(unittest.TestCase):
             self.assertFalse(response["result"]["isError"], response)
             return json.loads(response["result"]["content"][0]["text"])
 
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             root = Path(directory)
             workflow_path = root / "workflows.sqlite3"
             registrations = list(builtin_handlers())
@@ -4417,7 +4417,7 @@ class LangGraphHttpApiTests(unittest.TestCase):
         registry = LangGraphHandlerRegistry([
             binding("action", lambda values, config, context: {"value": 21}),
         ])
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             store = self.publish(directory, ir)
             service = self.service(directory, store, registry)
             app = create_app(
@@ -4506,7 +4506,7 @@ class LangGraphHttpApiTests(unittest.TestCase):
             return {"value": values["value"] if accepted else -1}
 
         registry = LangGraphHandlerRegistry([binding("action", approval)])
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             store = self.publish(directory, ir)
             service = self.service(directory, store, registry)
             app = create_app(

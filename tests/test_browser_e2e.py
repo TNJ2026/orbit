@@ -63,7 +63,7 @@ class BrowserE2ETestCase(unittest.TestCase):
     def setUpClass(cls) -> None:
         import uvicorn
 
-        cls.temp = tempfile.TemporaryDirectory()
+        cls.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         cls.db = Path(cls.temp.name) / "runtime.db"
         cls.artifact_backend = LocalCASBackend(Path(cls.temp.name) / "artifacts")
         # Mutable only inside this test process: it lets a browser load an

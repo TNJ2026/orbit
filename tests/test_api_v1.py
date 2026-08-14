@@ -252,7 +252,7 @@ class RateLimitTests(unittest.TestCase):
     """The limit protects a shared deployment, never the local operator."""
 
     def build(self, **extra):
-        temp = tempfile.TemporaryDirectory()
+        temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(temp.cleanup)
         db = Path(temp.name) / "runtime.db"
         app = create_app(
@@ -353,7 +353,7 @@ class HandlerDriftTests(unittest.TestCase):
         from orbit.workflow.dsl import compile_source
         from orbit.workflow.persistence.workflow_versions import SQLiteWorkflowVersionStore
 
-        self.temp = tempfile.TemporaryDirectory()
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(self.temp.cleanup)
         self.db = Path(self.temp.name) / "runtime.db"
         self.app = create_app(
@@ -1813,7 +1813,7 @@ class PublicWorkflowLibraryTests(unittest.TestCase):
         import json as json_module
         from tests.test_workflow_drafts import dsl as shared_dsl
 
-        temp = tempfile.TemporaryDirectory()
+        temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(temp.cleanup)
         root = Path(temp.name)
         shared = root / "workflows" / "library.db"
@@ -2347,7 +2347,7 @@ class EditorMountTests(unittest.TestCase):
     """The graph editor is served beside the UI, and only when it is built."""
 
     def build(self, **extra):
-        temp = tempfile.TemporaryDirectory()
+        temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(temp.cleanup)
         return create_app(
             Path(temp.name) / "runtime.db",
@@ -2403,7 +2403,7 @@ class WorkflowCatalogModeTests(ApiTestCase):
     """The catalog is not a property of which authoring UI was chosen."""
 
     def build(self, mode: str):
-        temp = tempfile.TemporaryDirectory()
+        temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(temp.cleanup)
         return create_app(
             Path(temp.name) / "runtime.db",

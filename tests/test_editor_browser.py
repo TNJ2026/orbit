@@ -121,7 +121,7 @@ class EditorBrowserTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         import uvicorn
 
-        cls.temp = tempfile.TemporaryDirectory()
+        cls.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         cls.db = Path(cls.temp.name) / "runtime.db"
         app = create_app(
             cls.db,

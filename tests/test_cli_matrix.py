@@ -66,7 +66,7 @@ CATALOG = {
 
 class CliMatrixTestCase(unittest.TestCase):
     def setUp(self) -> None:
-        self.temp = tempfile.TemporaryDirectory()
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.dir = Path(self.temp.name)
         self.db = self.dir / "runtime.db"
         connection = connect_workflow_database(self.db)

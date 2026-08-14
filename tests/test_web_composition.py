@@ -304,7 +304,7 @@ def start_run_command(run_id: EntityId, digest) -> CommandEnvelope:
 
 class SchemaGuardTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.temp = tempfile.TemporaryDirectory()
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.db = Path(self.temp.name) / "runtime.db"
 
     def tearDown(self) -> None:
@@ -339,7 +339,7 @@ class SchemaGuardTests(unittest.TestCase):
     def test_every_legacy_table_is_detected(self) -> None:
         for table in sorted(LEGACY_TABLES):
             with self.subTest(table=table):
-                with tempfile.TemporaryDirectory() as temp:
+                with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
                     path = Path(temp) / "runtime.db"
                     connection = sqlite3.connect(path)
                     connection.execute(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY)")
@@ -351,7 +351,7 @@ class SchemaGuardTests(unittest.TestCase):
 
 class CompositionTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.temp = tempfile.TemporaryDirectory()
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.db = Path(self.temp.name) / "runtime.db"
 
     def tearDown(self) -> None:
@@ -404,7 +404,7 @@ class CompositionTests(unittest.TestCase):
 
 class HealthEndpointTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.temp = tempfile.TemporaryDirectory()
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.db = Path(self.temp.name) / "runtime.db"
         self.app = create_app(
             self.db, handlers=[transform_registration()], schemas=SCHEMAS,

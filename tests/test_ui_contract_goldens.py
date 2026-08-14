@@ -1,16 +1,22 @@
-"""P0 contract freeze for the Runtime UI plan's B2/B3 (delivery plan §3.2).
+"""Frozen shapes the UI is built against.
 
-These goldens pin the *target* DTO shapes — InboxItem 2.0, RunSummary 2.0 and
-the run query — before their projections exist. They validate frozen schemas
-against curated fixtures only; endpoint goldens arrive with API-1/API-3. The
-point is that P2/P5 build against a reviewed contract instead of whatever
-shape the first implementation happened to emit.
+These began as a forward contract: DTOs agreed before their projections
+existed, so the implementation would be written to a reviewed shape rather
+than the shape the first attempt happened to emit. Three of them — InboxItem,
+RunSummary and the run query — were pinning projections of the event-sourced
+engine, and went when it did. What is left describes shapes the Runtime still
+serves.
+
+Curated samples say what the schema means, including what it must reject. The
+served payload says the server still means it: a schema validated only against
+fixtures written beside it agrees with itself for ever.
 """
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
+import tempfile
 import unittest
 
 from jsonschema import Draft202012Validator
@@ -20,9 +26,6 @@ FIXTURES = Path(__file__).parent / "fixtures" / "ui_contracts" / "v2"
 
 SCHEMA_FILES = (
     "allowed-command.schema.json",
-    "inbox-item.schema.json",
-    "run-summary.schema.json",
-    "run-query.schema.json",
     "workflow-draft.schema.json",
 )
 
@@ -32,8 +35,8 @@ def load(name: str):
 
 
 def validator(schema_name: str) -> Draft202012Validator:
-    # inbox-item refers to allowed-command by relative file name; resolve every
-    # schema through one registry so the reference stays a plain file name.
+    # A schema may refer to another by relative file name; resolving every one
+    # through a single registry keeps the reference a plain name.
     resources = [
         (name, Resource.from_contents(load(name))) for name in SCHEMA_FILES
     ]
@@ -50,9 +53,6 @@ class FrozenSchemaTests(unittest.TestCase):
     def test_valid_samples_pass(self) -> None:
         samples = load("samples.json")
         cases = (
-            ("inbox-item.schema.json", samples["inbox_item_valid"]),
-            ("run-summary.schema.json", samples["run_summary_valid"]),
-            ("run-query.schema.json", samples["run_query_valid"]),
             ("workflow-draft.schema.json", samples["workflow_draft_valid"]),
         )
         for schema_name, values in cases:
@@ -65,9 +65,6 @@ class FrozenSchemaTests(unittest.TestCase):
     def test_invalid_samples_are_rejected_for_the_stated_reason(self) -> None:
         samples = load("samples.json")
         cases = (
-            ("inbox-item.schema.json", samples["inbox_item_invalid"]),
-            ("run-summary.schema.json", samples["run_summary_invalid"]),
-            ("run-query.schema.json", samples["run_query_invalid"]),
             ("workflow-draft.schema.json", samples["workflow_draft_invalid"]),
         )
         for schema_name, values in cases:
@@ -80,18 +77,48 @@ class FrozenSchemaTests(unittest.TestCase):
                         f"expected rejection: {reason}",
                     )
 
-    def test_inbox_commands_may_only_target_the_versioned_api(self) -> None:
-        """The '^/api/v1/' pattern is the frozen no-arbitrary-URL rule."""
+
+class ServedPayloadTests(unittest.TestCase):
+    """The shape as the Runtime actually emits it, not only as described."""
+
+    def test_the_commands_a_catalog_advertises_match_the_frozen_shape(self) -> None:
+        from orbit.web.api_v1 import (
+            Authorizer, OPS_READ_SCOPE, READ_SCOPE, WRITE_SCOPE,
+        )
+        from orbit.web.app import create_app
+        from tests.test_web_composition import (
+            AsgiHarness, SCHEMAS, publish_linear_workflow, transform_registration,
+        )
+
+        temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(temp.cleanup)
+        database = Path(temp.name) / "runtime.db"
+        app = create_app(
+            database,
+            handlers=[transform_registration()], schemas=SCHEMAS,
+            poll_seconds=0.02,
+            authenticator=lambda request: "author",
+            authorizer=Authorizer(
+                lambda _actor: [READ_SCOPE, WRITE_SCOPE, OPS_READ_SCOPE]
+            ),
+            langgraph_state_directory=Path(temp.name) / "langgraph",
+        )
+        publish_linear_workflow(database)
+        with AsgiHarness(app) as client:
+            catalog = client.get(
+                "/api/v1/workflows", actor="author",
+            ).json()["data"]["workflows"]
+
+        commands = [
+            command for entry in catalog
+            for command in entry.get("allowed_commands", ())
+        ]
+        self.assertTrue(commands, "the catalog advertised no commands to check")
         checker = validator("allowed-command.schema.json")
-        command = {
-            "command": "x", "label": "x", "method": "POST",
-            "href": "/api/legacy/x", "target_aggregate_id": "run:r",
-            "expected_version": 0, "payload_schema": "x/1.0",
-            "confirmation": "explicit",
-        }
-        self.assertTrue(any(checker.iter_errors(command)))
-        command["href"] = "/api/v1/runs/run:r/cancel"
-        self.assertEqual([], list(checker.iter_errors(command)))
+        for command in commands:
+            with self.subTest(command=command.get("command")):
+                errors = sorted(checker.iter_errors(command), key=str)
+                self.assertEqual([], errors, f"{command}: {errors}")
 
 
 if __name__ == "__main__":

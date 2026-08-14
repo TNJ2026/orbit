@@ -276,7 +276,7 @@ class ClientWrittenWorkflowTests(unittest.TestCase):
         from tests.test_api_v1 import SCHEMAS, transform_registration
         from orbit.web.api_v1 import Authorizer, READ_SCOPE, WRITE_SCOPE
 
-        temp = tempfile.TemporaryDirectory()
+        temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(temp.cleanup)
         broker = ExternalAuthoringBroker()
         app = create_app(
@@ -449,7 +449,7 @@ class SharedAuthoringServiceTests(unittest.TestCase):
         )
         from tests.test_api_v1 import SCHEMAS, transform_registration
 
-        temp = tempfile.TemporaryDirectory()
+        temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(temp.cleanup)
         constructed: list[object] = []
 

@@ -72,7 +72,7 @@ def dsl(workflow_id: str = "draftable", name: str = "Draftable") -> dict:
 
 class DraftTestCase(unittest.TestCase):
     def setUp(self) -> None:
-        self.temp = tempfile.TemporaryDirectory()
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(self.temp.cleanup)
         self.path = Path(self.temp.name) / "drafts.db"
         with connect_workflow_database(self.path) as connection:

@@ -464,7 +464,7 @@ class AppWiringTests(unittest.TestCase):
 
         from orbit.web.app import create_app
 
-        directory = tempfile.TemporaryDirectory()
+        directory = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(directory.cleanup)
         return create_app(
             Path(directory.name) / "orbit.sqlite3",

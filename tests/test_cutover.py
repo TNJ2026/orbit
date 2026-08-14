@@ -29,7 +29,7 @@ NOW = datetime(2026, 7, 19, tzinfo=timezone.utc)
 
 class CutoverTestCase(unittest.TestCase):
     def setUp(self) -> None:
-        self.temp = tempfile.TemporaryDirectory()
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.project = Path(self.temp.name) / "project"
         self.project.mkdir()
         self.state = Path(self.temp.name) / "state"
@@ -162,7 +162,7 @@ class EveryCliIsGatedTests(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        self.temp = tempfile.TemporaryDirectory()
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.home = Path(self.temp.name) / "home"
         self.project = Path(self.temp.name) / "project"
         (self.project / ".git").mkdir(parents=True)

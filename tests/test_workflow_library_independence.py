@@ -71,7 +71,7 @@ def _workflow_ids(path: Path) -> set[str]:
 
 class WorkflowLibraryIndependenceTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.temp_dir = tempfile.TemporaryDirectory()
+        self.temp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(self.temp_dir.cleanup)
         self.root = Path(self.temp_dir.name)
         self.runtime = self.root / "runtime.db"

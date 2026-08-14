@@ -211,7 +211,7 @@ class HermesProfileTests(unittest.TestCase):
     """Main's detection scope: each Hermes profile is its own agent."""
 
     def setUp(self) -> None:
-        self.temp = tempfile.TemporaryDirectory()
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.profile_root = Path(self.temp.name)
         self.spec = AgentCliSpec("hermes", "hermes")
 
@@ -324,7 +324,7 @@ class RegistrationTests(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        self.temp = tempfile.TemporaryDirectory()
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.db = Path(self.temp.name) / "runtime.db"
         # A real executable: the registry runs each handler's preflight before
         # sealing, and TrustedCliAgentClient refuses a CLI that is not on PATH.

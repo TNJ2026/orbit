@@ -28,7 +28,7 @@ class CleanInstallTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        cls.temp = tempfile.TemporaryDirectory()
+        cls.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         cls.dir = Path(cls.temp.name)
 
         build = subprocess.run(

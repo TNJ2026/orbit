@@ -664,7 +664,7 @@ class EventIdentityTests(unittest.TestCase):
                 "complete", "completion", {"required_terminal_count": 2},
             ),),
         )
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             root = Path(directory)
             store = SQLiteWorkflowVersionStore(root / "workflows.db")
             store.publish(
@@ -846,7 +846,7 @@ class HandlerConsoleWiringTests(unittest.TestCase):
         from orbit.workflow.langgraph_runtime.console import AttemptConsole
         from orbit.workflow.langgraph_runtime.wiring import trusted_handlers
 
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             root = Path(directory)
             script = root / "agent.py"
             script.write_text(

@@ -24,7 +24,7 @@ from orbit.platform import projects
 
 class ProjectResolutionTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.temp = tempfile.TemporaryDirectory()
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.root = Path(self.temp.name).resolve()
         (self.root / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
         self.nested = self.root / "src" / "deep"
@@ -37,7 +37,7 @@ class ProjectResolutionTests(unittest.TestCase):
         self.assertEqual(self.root, projects.resolve_project_root(self.nested))
 
     def test_unmarked_directory_resolves_to_itself(self) -> None:
-        with tempfile.TemporaryDirectory() as bare:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as bare:
             path = Path(bare).resolve()
             self.assertEqual(path, projects.resolve_project_root(path))
 
@@ -51,13 +51,13 @@ class ProjectResolutionTests(unittest.TestCase):
         first = projects.project_id(self.root)
         self.assertEqual(first, projects.project_id(self.nested.parent.parent))
         self.assertEqual(12, len(first))
-        with tempfile.TemporaryDirectory() as other:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as other:
             self.assertNotEqual(first, projects.project_id(other))
 
 
 class RuntimeDatabasePathTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.temp = tempfile.TemporaryDirectory()
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.root = Path(self.temp.name).resolve()
         (self.root / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
         self.state = self.root / "state"
@@ -71,7 +71,7 @@ class RuntimeDatabasePathTests(unittest.TestCase):
         self.assertNotIn("messages.db", str(path))
 
     def test_same_leaf_name_does_not_collide(self) -> None:
-        with tempfile.TemporaryDirectory() as other_parent:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as other_parent:
             twin = Path(other_parent) / self.root.name
             twin.mkdir()
             (twin / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
@@ -103,7 +103,7 @@ class LegacySentinelTests(unittest.TestCase):
     """The legacy paths exist to warn, never to read."""
 
     def setUp(self) -> None:
-        self.temp = tempfile.TemporaryDirectory()
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.root = Path(self.temp.name).resolve()
         (self.root / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
         self.state = self.root / "state"
@@ -174,7 +174,7 @@ class LegacySentinelTests(unittest.TestCase):
 
 class ProjectIndexTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.temp = tempfile.TemporaryDirectory()
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.root = Path(self.temp.name).resolve()
         (self.root / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
         self.index = self.root / "index.json"
