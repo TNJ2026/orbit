@@ -179,6 +179,11 @@ export function createViews(context) {
             workflow_version: fresh.latest_version,
             goal: goalText,
             input: bindGoalInput(fresh, goalText, {}),
+            // The run, not its outcome. Waiting for the whole thing before
+            // being told the id is what kept this page from ever showing a
+            // goal in progress: by the time it could navigate, there was
+            // nothing left to watch.
+            wait: false,
           }, `run.start:${crypto.randomUUID ? crypto.randomUUID() : Date.now()}`);
           const startedRun = started.data.run || started.data;
           simplifiedComposerState.runId = startedRun.run_id;

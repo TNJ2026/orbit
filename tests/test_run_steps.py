@@ -302,6 +302,11 @@ class ProgressIsObservableTests(unittest.TestCase):
     cursor until it was over.
     """
 
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+
     def slow_steps(self, count: int, seconds: float):
         from orbit.workflow.handlers.tools import ToolResult
 
@@ -342,6 +347,192 @@ class ProgressIsObservableTests(unittest.TestCase):
             result=(f"step{count - 1}", "value"),
         )
         return registration, ir
+
+    def test_the_page_that_started_it_is_given_the_run_not_the_outcome(self) -> None:
+        """The case the whole feature exists for.
+
+        A watcher could always poll a run somebody else started. The person
+        who clicks start could not: the request that created the run only
+        answered when the run was over, so by the time the page had an id
+        there was nothing left to watch. Asking for the run rather than its
+        outcome is what makes the common path the one that works.
+        """
+
+        from orbit.web.api_v1 import (
+            Authorizer, OPS_READ_SCOPE, READ_SCOPE, WRITE_SCOPE,
+        )
+        from orbit.web.app import create_app
+        from tests.test_web_composition import AsgiHarness
+
+        temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        registration, ir = self.slow_steps(2, 0.4)
+        SQLiteWorkflowVersionStore(root / "runtime.db").publish(
+            CompiledWorkflow(ir, definition_hash(ir), "test", "sha256:" + "c" * 64),
+            expected_latest_version=0, source_format="json",
+            source_text="{}", actor="test", dsl_version="1.3",
+        )
+        app = create_app(
+            root / "runtime.db",
+            handlers=[registration],
+            schemas={"schema://object/1.0": {"type": "object"},
+                     engine_tests.SCHEMA: {"type": "object"}},
+            poll_seconds=0.01,
+            authenticator=lambda request: "author",
+            authorizer=Authorizer(
+                lambda _actor: [READ_SCOPE, WRITE_SCOPE, OPS_READ_SCOPE]
+            ),
+            langgraph_state_directory=root / "langgraph",
+        )
+        with AsgiHarness(app) as client:
+            began = time.monotonic()
+            started = client.post(
+                "/api/v1/langgraph-runs", actor="author", key="deferred-1",
+                body={
+                    "workflow_id": ir.workflow_id, "input": {"value": 1},
+                    "wait": False,
+                },
+            )
+            answered_in = time.monotonic() - began
+            self.assertEqual(200, started.status_code, started.text)
+            run = started.json()["data"]["run"]
+            self.assertEqual("running", run["status"])
+            # Two steps of 0.4s. Being handed the id before they are done is
+            # the point; the bound is far from both numbers.
+            self.assertLess(answered_in, 0.4, f"waited {answered_in:.2f}s for the id")
+
+            steps = client.get(
+                f"/api/v1/langgraph-runs/{run['run_id']}/steps", actor="author",
+            ).json()["data"]["steps"]
+            self.assertIn("not_reached", [step["status"] for step in steps])
+
+            app.state.langgraph_service.wait_for_background(timeout=10)
+            settled = client.get(
+                f"/api/v1/langgraph-runs/{run['run_id']}", actor="author",
+            ).json()["data"]
+            self.assertEqual("completed", settled["status"])
+
+    def test_waiting_is_still_what_a_caller_gets_unless_it_says_otherwise(self) -> None:
+        """MCP and every embedder call the same command and want the answer."""
+
+        from orbit.web.api_v1 import Authorizer, READ_SCOPE, WRITE_SCOPE
+        from orbit.web.app import create_app
+        from tests.test_web_composition import (
+            AsgiHarness, SCHEMAS, publish_linear_workflow, transform_registration,
+        )
+
+        temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        app = create_app(
+            root / "runtime.db",
+            handlers=[transform_registration()], schemas=SCHEMAS,
+            poll_seconds=0.02,
+            authenticator=lambda request: "author",
+            authorizer=Authorizer(lambda _actor: [READ_SCOPE, WRITE_SCOPE]),
+            langgraph_state_directory=root / "langgraph",
+        )
+        publish_linear_workflow(root / "runtime.db")
+        with AsgiHarness(app) as client:
+            for body, expected in (
+                ({"workflow_id": "workflow:linear", "input": {"value": 1}},
+                 "completed"),
+                ({"workflow_id": "workflow:linear", "input": {"value": 1},
+                  "wait": True}, "completed"),
+            ):
+                with self.subTest(body=sorted(body)):
+                    response = client.post(
+                        "/api/v1/langgraph-runs", actor="author",
+                        key=f"wait-{len(body)}", body=body,
+                    )
+                    self.assertEqual(
+                        expected, response.json()["data"]["run"]["status"],
+                    )
+            refused = client.post(
+                "/api/v1/langgraph-runs", actor="author", key="wait-bad",
+                body={"workflow_id": "workflow:linear", "input": {"value": 1},
+                      "wait": "later"},
+            )
+            self.assertEqual(409, refused.status_code, refused.text)
+
+    def deferring_service(self, seconds: float, **extra):
+        store = SQLiteWorkflowVersionStore(self.root / "workflows.sqlite3")
+        work = engine_tests.node("work", inputs=("value",), outputs=("value",))
+        done = engine_tests.node(
+            "done", inputs=("value",), kind="terminal", handler=False,
+        )
+        ir = engine_tests.workflow(
+            (work, done), (engine_tests.edge("w_d", "work", "done"),),
+            entry=("work",), terminals=("done",), result=("work", "value"),
+        )
+        store.publish(
+            CompiledWorkflow(ir, definition_hash(ir), "test", "sha256:" + "c" * 64),
+            expected_latest_version=0, source_format="json",
+            source_text="{}", actor="test", dsl_version="1.3",
+        )
+        visits = {"count": 0}
+
+        def slow(values, config, context):
+            visits["count"] += 1
+            time.sleep(seconds)
+            return dict(values)
+
+        service = LangGraphWorkflowService(
+            store, LangGraphHandlerRegistry([engine_tests.binding("work", slow)]),
+            run_db_path=self.root / "runs.sqlite3",
+            checkpoint_db_path=self.root / "checkpoints.sqlite3",
+            **extra,
+        )
+        self.addCleanup(service.wait_for_background, 10.0)
+        return service, ir, visits
+
+    def test_replaying_a_deferred_start_does_not_execute_it_twice(self) -> None:
+        """Two threads on one run would both write its checkpoints.
+
+        The receipt is committed before the run is scheduled, so a repeat
+        returns from there and never reaches the scheduling — but nothing
+        about that is obvious from either half on its own.
+        """
+
+        service, ir, visits = self.deferring_service(0.5)
+        first = service.start(
+            ir.workflow_id, {"value": 1}, idempotency_key="same",
+            actor="local", wait=False,
+        )
+        again = service.start(
+            ir.workflow_id, {"value": 1}, idempotency_key="same",
+            actor="local", wait=False,
+        )
+        self.assertEqual(first.run_id, again.run_id)
+        service.wait_for_background(timeout=10)
+        self.assertEqual(1, visits["count"])
+        self.assertEqual("completed", service.get(first.run_id).status)
+
+    def test_the_single_goal_slot_is_held_by_a_run_nobody_is_waiting_for(self) -> None:
+        from orbit.workflow.langgraph_runtime.service import ActiveGoalExists
+
+        service, ir, _visits = self.deferring_service(0.5, single_goal=True)
+        service.start(
+            ir.workflow_id, {"value": 1}, idempotency_key="one",
+            actor="local", wait=False, goal="the first",
+        )
+        with self.assertRaises(ActiveGoalExists) as caught:
+            service.start(
+                ir.workflow_id, {"value": 2}, idempotency_key="two",
+                actor="local", wait=False,
+            )
+        self.assertEqual("the first", caught.exception.active_goal["goal"])
+
+    def test_a_shutdown_waits_for_runs_nobody_else_is_waiting_for(self) -> None:
+        service, ir, _visits = self.deferring_service(0.3)
+        run = service.start(
+            ir.workflow_id, {"value": 1}, idempotency_key="drain",
+            actor="local", wait=False,
+        )
+        self.assertEqual("running", run.status)
+        self.assertEqual((), service.wait_for_background(timeout=10))
+        self.assertEqual("completed", service.get(run.run_id).status)
 
     def test_a_watcher_sees_the_run_partly_done_rather_than_only_finished(self) -> None:
         """The property the marker exists for, asserted on what a page reads.

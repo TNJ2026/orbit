@@ -142,6 +142,10 @@ Runtime 事件可通过 `wait_app_event`、`list_app_events` 和 `ack_app_event`
 重放的 superstep 不会产生事件。
 事件只是提示，执行操作前应重新读取对应 Run。
 
+run 在启动它的那个请求里执行。`POST /api/v1/langgraph-runs` 带 `"wait": false`
+时，run 一创建就返回，执行放到后台 —— UI 用的就是这条，页面才能看着自己启动的目标。
+两种方式下"这个 run 能不能存在"都已经判定完毕；等待换来的只是知道它**怎么结束的**。
+
 单 Agent 模式下每个 actor 同时只跑一个目标：当已有 `running`、`waiting` 或
 `interrupted` 的 run 时，再启动会以 `active_goal_exists` 拒绝，并在拒绝里带上占用
 该槽位的 run，客户端可以直接跳过去。取消或结束即释放。

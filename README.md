@@ -153,6 +153,12 @@ attempt journal — the ones whose execution is an effect that must not repeat �
 so a replayed superstep announces nothing. Treat events as hints and re-read
 the referenced Run before acting.
 
+A run executes inside the request that starts it. `POST /api/v1/langgraph-runs`
+with `"wait": false` returns as soon as the run exists, and executes it in the
+background — what the UI asks for, so the page can watch a goal it started.
+Everything that decides whether the run may exist has already happened either
+way; what waiting buys is being told how it ended.
+
 In single-agent mode one goal runs at a time, per actor: starting a second
 while one is `running`, `waiting` or `interrupted` is refused with
 `active_goal_exists`, and the refusal names the run holding the slot so a

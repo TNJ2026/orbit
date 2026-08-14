@@ -298,6 +298,13 @@ def build_routes(ctx, service, template_service=None) -> list[Route]:
             if not workflow_id:
                 raise ValueError("workflow_id is required")
             version = body.get("workflow_version")
+            # `wait: false` asks for the run rather than its outcome. The
+            # page that starts a goal wants to watch it; an agent calling the
+            # same command over MCP wants the answer, and waiting is still
+            # what it gets unless it says otherwise.
+            wait = body.get("wait")
+            if wait is not None and not isinstance(wait, bool):
+                raise ValueError("wait must be true or false")
             try:
                 run = service.start(
                     workflow_id,
@@ -306,6 +313,7 @@ def build_routes(ctx, service, template_service=None) -> list[Route]:
                     idempotency_key=key,
                     actor=actor,
                     goal=str(body.get("goal") or ""),
+                    wait=True if wait is None else wait,
                 )
             except LookupError as exc:
                 raise ValueError(str(exc)) from None

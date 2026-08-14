@@ -234,6 +234,13 @@ class RuntimeComposition:
         for loop in self.loops:
             loop.request_stop()
         stragglers = [loop.name for loop in self.loops if not loop.join(timeout)]
+        # Runs whose caller did not wait have nobody else to wait for them.
+        # Walking away is safe — they stay `running` and startup recovery
+        # re-enters them — but re-entering costs a superstep that letting them
+        # finish does not.
+        settle = getattr(self.langgraph_service, "wait_for_background", None)
+        if settle is not None:
+            stragglers.extend(settle(timeout))
         self._started = False
         return stragglers
 

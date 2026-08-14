@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import sqlite3
 import threading
+from concurrent.futures import ThreadPoolExecutor, wait
 from typing import Any, Callable, Mapping, Sequence
 import uuid
 
@@ -197,6 +198,11 @@ class LangGraphWorkflowService:
         # is what the single-agent UI is built around. Off by default, so an
         # embedder running many workflows is not quietly serialised.
         self.single_goal = bool(single_goal)
+        # Runs started by a caller that did not wait. Created on first use so
+        # a service that never defers one starts no threads at all.
+        self._background: ThreadPoolExecutor | None = None
+        self._background_runs: set = set()
+        self._background_lock = threading.Lock()
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         # Runs this process is executing right now. `running` in the database
         # means "a process was executing this", and recovery exists because
@@ -374,7 +380,23 @@ class LangGraphWorkflowService:
         workflow_version: int | None = None,
         actor: str = "system:langgraph",
         goal: str = "",
+        wait: bool = True,
     ) -> LangGraphRun:
+        """Start a run, and by default see it through.
+
+        `wait=False` returns as soon as the run exists and executes it on a
+        thread of this service's own. Two callers want different things and
+        the difference is not incidental: an agent asking over MCP wants the
+        result, and a person clicking start wants the page — the run they
+        started is worth watching, and waiting for the whole thing before
+        being told its id is what made watching impossible.
+
+        Everything that decides whether the run may exist at all — the
+        receipt, the single-goal slot, the archived workflow — has already
+        happened either way by the time this returns. What `wait=False` gives
+        up is being told how the run *ended*, which is on the run.
+        """
+
         if not idempotency_key.strip():
             raise ValueError("idempotency_key is required")
         if not actor.strip():
@@ -425,7 +447,10 @@ class LangGraphWorkflowService:
             )
             self._append_event(connection, run_id)
             connection.commit()
-        return self._execute(run_id, record.ir, inputs=inputs)
+        if wait:
+            return self._execute(run_id, record.ir, inputs=inputs)
+        self._in_background(run_id, record.ir, inputs=inputs)
+        return self.get(run_id)
 
     def start_snapshot(
         self,
@@ -932,6 +957,45 @@ class LangGraphWorkflowService:
         if row is None or (actor is not None and row["owner_actor"] != actor):
             raise LookupError(f"LangGraph run not found: {run_id}")
         return self._record(row)
+
+    def _in_background(self, run_id: str, ir, *, inputs) -> None:
+        """Execute a run on a thread, and remember it is out there.
+
+        Failures are not raised anywhere a caller could catch them — there is
+        no caller left. `_execute` settles the run before it re-raises, so the
+        outcome is durable on the run itself, which is where a caller that did
+        not wait has to look for it anyway.
+        """
+
+        def run() -> None:
+            try:
+                self._execute(run_id, ir, inputs=inputs)
+            except Exception:  # noqa: BLE001 - settled on the run already
+                return
+
+        with self._background_lock:
+            if self._background is None:
+                self._background = ThreadPoolExecutor(
+                    max_workers=8, thread_name_prefix="langgraph-run",
+                )
+            self._background_runs.add(self._background.submit(run))
+
+    def wait_for_background(self, timeout: float = 10.0) -> tuple[str, ...]:
+        """Let runs started without a waiter finish; name the ones that did not.
+
+        A shutdown that walks away from them is not a correctness problem —
+        they are left `running` and startup recovery re-enters them, the same
+        path a killed process takes. It is a politeness problem, and one
+        worth a bounded wait: re-entering a run costs a superstep of work
+        that letting it finish does not.
+        """
+
+        with self._background_lock:
+            pending = tuple(self._background_runs)
+        done, not_done = wait(pending, timeout=timeout)
+        with self._background_lock:
+            self._background_runs.difference_update(done)
+        return tuple(f"background-run-{index}" for index in range(len(not_done)))
 
     def _executed_nodes(self, run_id: str) -> tuple[str, ...]:
         """Every node execution this run has recorded, oldest first.
