@@ -181,6 +181,8 @@ stream, written outside every transaction, and never something a replay reads.
 orbit serve
 orbit --version
 orbit mcp
+orbit run list
+orbit run inspect <run_id>
 orbit workflow validate <file> --catalog <catalog.json>
 orbit workflow publish <file> --catalog <catalog.json> --expected-version <n>
 ```

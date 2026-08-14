@@ -94,6 +94,8 @@ class HelpTests(unittest.TestCase):
         for args in (
             ("--help",), ("serve", "--help"), ("workflow", "--help"),
             ("workflow", "validate", "--help"), ("workflow", "publish", "--help"),
+            ("run", "--help"), ("run", "list", "--help"),
+            ("run", "inspect", "--help"),
         ):
             with self.subTest(args=args):
                 result = cli(*args)
@@ -198,3 +200,86 @@ class JsonOutputTests(CliMatrixTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RunCommandTests(CliMatrixTestCase):
+    """`orbit run` reads what a server wrote, without being one."""
+
+    def seed(self):
+        from tests.test_web_composition import (
+            publish_human_workflow, publish_linear_workflow,
+            transform_registration,
+        )
+        from orbit.workflow.langgraph_runtime import build_service
+
+        publish_linear_workflow(self.db)
+        publish_human_workflow(self.db)
+        # Wired the way `orbit serve` wires it: state beside the database, so
+        # the CLI and the server describe one engine rather than two.
+        engine = build_service(
+            self.db, [transform_registration()], state_directory=self.db.parent,
+        )
+        engine.start(
+            "workflow:linear", {"value": 1}, idempotency_key="done",
+            actor="local", goal="Summarise the quarter",
+        )
+        return engine.start(
+            "workflow:human", {"value": 1}, idempotency_key="live",
+            actor="local", goal="Review the draft",
+        )
+
+    def test_list_names_runs_by_the_goal_they_were_given(self) -> None:
+        self.seed()
+        result = cli("run", "list", "--db", str(self.db))
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("Summarise the quarter", result.stdout)
+        self.assertIn("Review the draft", result.stdout)
+        self.assertIn("interrupted", result.stdout)
+
+    def test_inspect_shows_how_far_through_its_steps_a_run_got(self) -> None:
+        waiting = self.seed()
+        result = cli("run", "inspect", waiting.run_id, "--db", str(self.db))
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("waiting", result.stdout)
+        self.assertIn("not_reached", result.stdout)
+        self.assertIn("succeeded", result.stdout)
+
+    def test_machine_output_is_one_object_per_command(self) -> None:
+        waiting = self.seed()
+        listed = cli("run", "list", "--db", str(self.db), "--json")
+        self.assertEqual(0, listed.returncode, listed.stderr)
+        self.assertIsInstance(json.loads(listed.stdout), list)
+        inspected = cli(
+            "run", "inspect", waiting.run_id, "--db", str(self.db), "--json",
+        )
+        payload = json.loads(inspected.stdout)
+        self.assertEqual("interrupted", payload["status"])
+        self.assertEqual("Review the draft", payload["goal"])
+        self.assertTrue(payload["steps"])
+
+    def test_an_unknown_run_is_refused_rather_than_traced(self) -> None:
+        self.seed()
+        result = cli(
+            "run", "inspect", "langgraph_run:nope", "--db", str(self.db),
+        )
+        self.assertEqual(1, result.returncode)
+        self.assertIn("orbit run:", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_an_empty_runtime_says_so(self) -> None:
+        result = cli("run", "list", "--db", str(self.db))
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("no runs", result.stdout)
+
+    def test_there_is_no_start_here(self) -> None:
+        """A run executes inside the process that starts it.
+
+        A CLI that started one would rebuild the whole Handler wiring a server
+        has — discovery, workspaces, secrets — and still behave differently
+        from the server that normally runs them. Starting is the UI's, or
+        `start_run` over `orbit mcp`.
+        """
+
+        result = cli("run", "start", "workflow:linear", "--db", str(self.db))
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("invalid choice", result.stderr)

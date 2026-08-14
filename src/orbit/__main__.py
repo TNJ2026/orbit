@@ -270,6 +270,96 @@ def _workflow_command(args) -> None:
         raise SystemExit(3) from None
 
 
+def _run_engine(args):
+    """The engine, wired for reading only.
+
+    No Handlers are registered. Reads never invoke one — `list`, `get` and
+    `steps` go to the run store and the checkpoint — so binding the Agent CLIs
+    a server would bind means discovering them, resolving their workspaces and
+    holding their secrets to answer a question about the past.
+
+    The state directory follows the same rule `serve` uses, or the two would
+    describe different engines against the same database.
+    """
+
+    from .workflow.langgraph_runtime import build_service
+
+    db_path = _runtime_db_path(args.db)
+    state = (
+        Path(args.langgraph_state_dir).expanduser().absolute()
+        if getattr(args, "langgraph_state_dir", None)
+        else Path(db_path).parent
+    )
+    return build_service(
+        Path(_workflow_db_path(args.db, args.ui_mode)),
+        [],
+        state_directory=state,
+    )
+
+
+def _run_command(args) -> None:
+    """`orbit run list|inspect` — read-only.
+
+    There is no `start` here. A run executes inside the process that starts
+    it, so a CLI that started one would have to rebuild the whole Handler
+    wiring a server has — discovery, workspaces, secrets — and would still
+    behave differently from the server that normally runs them. Starting
+    belongs to the UI, or to `start_run` over `orbit mcp`.
+    """
+
+    engine = _run_engine(args)
+    if args.run_action == "list":
+        runs = engine.list_runs(limit=args.limit)
+        if args.json:
+            print(json.dumps(
+                [
+                    {
+                        "run_id": run.run_id, "workflow_id": run.workflow_id,
+                        "status": run.status, "goal": run.goal,
+                        "created_at": run.created_at,
+                        "updated_at": run.updated_at,
+                    }
+                    for run in runs
+                ],
+                ensure_ascii=False, indent=2, sort_keys=True,
+            ))
+            return
+        if not runs:
+            print("no runs")
+            return
+        for run in runs:
+            print(f"{run.status:<12} {run.run_id}  {run.goal or run.workflow_id}")
+        return
+
+    try:
+        run = engine.get(args.run_id)
+        steps = engine.steps(args.run_id)
+    except LookupError as exc:
+        raise SystemExit(f"orbit run: {exc}") from None
+    if args.json:
+        print(json.dumps({
+            "run_id": run.run_id, "workflow_id": run.workflow_id,
+            "status": run.status, "goal": run.goal, "error": run.error,
+            "created_at": run.created_at, "updated_at": run.updated_at,
+            "steps": [dict(step) for step in steps],
+        }, ensure_ascii=False, indent=2, sort_keys=True))
+        return
+    print(f"{run.run_id}  {run.status}")
+    if run.goal:
+        print(f"  goal      {run.goal}")
+    print(f"  workflow  {run.workflow_id}@{run.workflow_version}")
+    if run.error:
+        print(f"  error     {run.error}")
+    marks = {
+        "succeeded": "✓", "failed": "✕", "running": "●",
+        "waiting": "◔", "not_reached": "○",
+    }
+    for step in steps:
+        repeated = f"  ×{step['runs']}" if step["runs"] > 1 else ""
+        print(f"  {marks.get(step['status'], '○')} {step['label']}"
+              f"  [{step['status']}]{repeated}")
+
+
 def _structured_agents(values) -> dict[str, str] | None:
     """Parse repeated `--structured-agent NAME=MODEL` into a mapping.
 
@@ -655,6 +745,29 @@ def build_parser() -> argparse.ArgumentParser:
             help="Host state directory (default: AGENT_APP_STATE_DIR or user state)",
         )
 
+    run_cmd = sub.add_parser(
+        "run", help="Look at workflow runs. Read-only."
+    )
+    run_sub = run_cmd.add_subparsers(dest="run_action", required=True)
+    run_list = run_sub.add_parser("list", help="Runs, newest first")
+    run_list.add_argument(
+        "--limit", type=int, default=20, help="How many to show (default: 20)"
+    )
+    run_inspect = run_sub.add_parser(
+        "inspect", help="One run, and how far through its steps it got"
+    )
+    run_inspect.add_argument("run_id")
+    for command in (run_list, run_inspect):
+        command.add_argument("--db", default=None, help="SQLite database path")
+        command.add_argument(
+            "--langgraph-state-dir", default=None,
+            help="Engine state directory (default: beside the database)",
+        )
+        _add_ui_mode_argument(command)
+        command.add_argument(
+            "--json", action="store_true", help="Emit stable machine-readable JSON"
+        )
+
     workflow_cmd = sub.add_parser(
         "workflow",
         help="Validate, compile, or publish a Workflow DSL 1.0 definition",
@@ -700,6 +813,10 @@ def main() -> None:
 
     if args.command == "workflow":
         _workflow_command(args)
+        return
+
+    if args.command == "run":
+        _run_command(args)
         return
 
     if args.command == "serve":

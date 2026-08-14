@@ -76,7 +76,7 @@ class CleanInstallTests(unittest.TestCase):
     def test_the_installed_cli_offers_only_the_target_commands(self) -> None:
         result = self.orbit_cli("--help")
         self.assertEqual(0, result.returncode, result.stderr)
-        for command in ("serve", "workflow", "mcp", "agent-app"):
+        for command in ("serve", "workflow", "mcp", "agent-app", "run"):
             with self.subTest(command=command):
                 self.assertIn(command, result.stdout)
         for retired in ("start", "up", "init", "config", "runner"):

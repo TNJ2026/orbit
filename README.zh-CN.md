@@ -165,6 +165,8 @@ scope。它是控制台而非日志：按尝试和流分别限量、写在所有
 orbit serve
 orbit --version
 orbit mcp
+orbit run list
+orbit run inspect <run_id>
 orbit workflow validate <file> --catalog <catalog.json>
 orbit workflow publish <file> --catalog <catalog.json> --expected-version <n>
 ```
