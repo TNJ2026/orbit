@@ -1044,18 +1044,27 @@ class LangGraphWorkflowService:
 
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT node_id, MIN(updated_at) AS first_at,"
-                " MAX(updated_at) AS last_at,"
-                " SUM(status='failed') AS failed,"
-                " SUM(status='unknown') AS unknown"
-                " FROM langgraph_handler_attempts WHERE run_id=?"
-                " GROUP BY node_id",
+                """
+                SELECT node_id, first_at, last_at, status AS latest FROM (
+                    SELECT node_id, status, updated_at,
+                           MIN(updated_at) OVER (PARTITION BY node_id) AS first_at,
+                           MAX(updated_at) OVER (PARTITION BY node_id) AS last_at,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY node_id
+                               ORDER BY updated_at DESC, attempt_id DESC
+                           ) AS rank
+                    FROM langgraph_handler_attempts WHERE run_id=?
+                ) WHERE rank = 1
+                """,
                 (run_id,),
             ).fetchall()
         return {
             str(row["node_id"]): {
                 "first_at": row["first_at"], "last_at": row["last_at"],
-                "failed": bool(row["failed"]), "unknown": bool(row["unknown"]),
+                # The newest attempt, not a tally of them. A node that failed
+                # and was retried is running, not failed; one whose retry
+                # failed again is failed, not running.
+                "latest": str(row["latest"]),
             }
             for row in rows
         }
@@ -1070,8 +1079,11 @@ class LangGraphWorkflowService:
         between them is the progress. Four statuses come out of that, and each
         means exactly one thing:
 
-        `succeeded`  the node is in the execution order and its attempts, if
-                     it keeps any, all settled.
+        `succeeded`  the node is in the execution order and its attempt, if
+                     it keeps one, has settled.
+        `running`    its newest attempt has started and not settled. Only a
+                     Handler with a journal can say this — which is the one
+                     that takes long enough for anybody to be watching.
         `failed`     its attempt journal says so. Only a Handler with a
                      journal can say it, so a pure node that raised is not
                      here — the run carries the error, the step does not.
@@ -1114,9 +1126,12 @@ class LangGraphWorkflowService:
         steps: list[Mapping[str, Any]] = []
         for node in sorted(ir.nodes, key=lambda n: placed.get(n.id, (0, 0))):
             fact = attempts.get(node.id, {})
+            latest = fact.get("latest")
             if node.id in waiting:
                 status = "waiting"
-            elif fact.get("failed") or fact.get("unknown"):
+            elif latest == "started":
+                status = "running"
+            elif latest in {"failed", "unknown"}:
                 status = "failed"
             elif counts.get(node.id):
                 status = "succeeded"

@@ -1302,3 +1302,30 @@
 @media (prefers-reduced-motion: reduce) {
   .simplified-goal-status-dot { animation: none !important; }
 }
+
+/* Where a run got to. The mark carries the state at a glance and the pill
+   spells it out, so meaning never rides on colour alone — the same rule the
+   run status pills follow. */
+.simplified-steps .step-list {
+  list-style: none; margin: 0; padding: 0; display: grid; gap: 2px;
+}
+.step-row {
+  display: grid; grid-template-columns: 24px 1fr auto; align-items: center;
+  gap: 10px; padding: 8px 4px; border-top: 1px solid var(--line);
+}
+.step-row:first-child { border-top: none; }
+.step-mark {
+  justify-self: center; font-size: 13px; line-height: 1; color: var(--muted-2);
+}
+.step-row.succeeded .step-mark { color: var(--green); }
+.step-row.failed .step-mark { color: var(--red); }
+.step-row.running .step-mark { color: var(--blue); }
+.step-row.waiting .step-mark { color: var(--amber); }
+.step-copy { display: grid; gap: 2px; min-width: 0; }
+.step-label { font-size: 14px; overflow-wrap: anywhere; }
+.step-detail { font-size: 12px; overflow-wrap: anywhere; }
+/* A step still to come is on the page from the first render, so the run's
+   shape is legible before it has done anything — but it must not compete
+   with the steps that have. */
+.step-row.not_reached .step-label,
+.step-row.not_reached .step-detail { color: var(--muted-2); }

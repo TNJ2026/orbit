@@ -455,6 +455,19 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
         self.assertIn("Prepare a concise report", hero)
         self.assertIn("workflow:linear", hero)
 
+    def test_the_run_page_shows_every_step_and_where_it_got_to(self) -> None:
+        """The rows are the definition's, so what is left is on the page too."""
+
+        run_id = self.start_run("steps-view")
+        page = self.open("en-US", f"/ui/#/runs/{run_id}")
+        page.wait_for_selector(".step-row")
+        rows = page.locator(".step-row")
+        self.assertGreater(rows.count(), 1)
+        # This fixture finishes in milliseconds, so by now every step has run.
+        text = page.inner_text(".simplified-steps")
+        self.assertIn("Done", text)
+        self.assertNotIn("Not started", text)
+
     def test_the_console_is_closed_until_asked_for(self) -> None:
         """The output panel exists on a run and fetches only when opened."""
 

@@ -297,3 +297,41 @@ class SelfContainedAssetTests(unittest.TestCase):
         # The display token survives the face it used to name, so a heading
         # still says it is one and can be given a face again in one place.
         self.assertIn("--font-display: var(--font)", css)
+
+
+class StepListRenderingTests(unittest.TestCase):
+    def test_the_steps_still_to_come_are_drawn_too(self) -> None:
+        """A list that grew as the run progressed would hide how much is left.
+
+        The rows come from the definition, so the shape of the run is legible
+        before it has done anything.
+        """
+
+        app_js = "\n".join(path.read_text(encoding="utf-8") for path in source_files())
+        self.assertIn("api.runSteps(runId)", app_js)
+        self.assertIn("not_reached", app_js)
+
+    def test_a_repeated_step_is_one_row_that_says_so(self) -> None:
+        app_js = "\n".join(path.read_text(encoding="utf-8") for path in source_files())
+        self.assertIn('i18n.t("simplified.steps.repeated"', app_js)
+
+    def test_every_step_state_has_a_word_and_a_colour(self) -> None:
+        """Meaning never rides on colour alone, the run pills' own rule."""
+
+        app_js = "\n".join(path.read_text(encoding="utf-8") for path in source_files())
+        css = stylesheet_source()
+        english = json.loads(
+            (ASSETS / "i18n.en-US.json").read_text(encoding="utf-8")
+        )
+        chinese = json.loads(
+            (ASSETS / "i18n.zh-CN.json").read_text(encoding="utf-8")
+        )
+        for status in (
+            "succeeded", "failed", "running", "waiting", "not_reached",
+        ):
+            with self.subTest(status=status):
+                self.assertIn(f"simplified.steps.status.{status}", english)
+                self.assertIn(f"simplified.steps.status.{status}", chinese)
+                self.assertIn(f"{status}:", app_js.split("STEP_MARKS")[1][:200])
+        self.assertIn(".step-row.succeeded .step-mark", css)
+        self.assertIn(".step-row.failed .step-mark", css)

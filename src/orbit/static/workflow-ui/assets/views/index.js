@@ -338,7 +338,65 @@ export function createViews(context) {
         live: !TERMINAL_LANGGRAPH_STATUSES.has(run.status),
       }),
     ]));
+    await renderRunSteps(root, run.run_id);
     await appendRunArtifacts(root, run.run_id);
+  }
+
+  /* Where the run got to, one row per step of its definition.
+   *
+   * Drawn from the definition rather than from what has happened, so the
+   * steps still to come are on the page from the first render: a list that
+   * grew as the run progressed would give no sense of how much is left.
+   *
+   * Redrawn in place. The whole view is rebuilt whenever the live cursor
+   * moves, which is often while a run works, and replacing this panel each
+   * time would collapse the console somebody had opened underneath it.
+   */
+  const STEP_MARKS = {
+    succeeded: "✓", failed: "✕", running: "●", waiting: "◔", not_reached: "○",
+  };
+
+  async function renderRunSteps(root, runId) {
+    const panel = el("section", { class: "panel simplified-steps" }, [
+      el("div", { class: "panel-head" }, [
+        el("div", { class: "panel-title", text: i18n.t("simplified.steps") }),
+      ]),
+    ]);
+    root.append(panel);
+    let steps;
+    try {
+      steps = (await api.runSteps(runId)).data.steps || [];
+    } catch (error) {
+      panel.append(el("p", { class: "muted", text: error?.messageKey
+        ? i18n.t(error.messageKey, { message: error.message })
+        : i18n.t("simplified.steps.unavailable") }));
+      return;
+    }
+    if (!steps.length) {
+      panel.append(el("p", { class: "muted", text: i18n.t("simplified.steps.empty") }));
+      return;
+    }
+    panel.append(el("ol", { class: "step-list" }, steps.map((step) => el(
+      "li", { class: `step-row ${step.status}` }, [
+        el("span", { class: "step-mark", "aria-hidden": "true",
+          text: STEP_MARKS[step.status] || "○" }),
+        el("div", { class: "step-copy" }, [
+          el("strong", { class: "step-label", text: step.label }),
+          el("span", { class: "step-detail muted", text: [
+            step.handler ? step.handler.name : step.kind,
+            // A loop is one row that says how many times, not a row per
+            // visit that would read as several different steps.
+            step.runs > 1
+              ? i18n.t("simplified.steps.repeated", { count: i18n.number(step.runs) })
+              : null,
+          ].filter(Boolean).join(" · ") }),
+        ]),
+        // Its own word list rather than the run's: a step is "working" or
+        // "not started", and a run is never either.
+        el("span", { class: `pill ${step.status}`,
+          text: i18n.t(`simplified.steps.status.${step.status}`) }),
+      ],
+    ))));
   }
 
   /* The Handler console, followed rather than paged.

@@ -120,6 +120,11 @@ export class Api {
     return this.get(`/api/v1/langgraph-runs/${encodeURIComponent(runId)}`);
   }
 
+  /** Where this run got to, one entry per node of its definition. */
+  runSteps(runId) {
+    return this.get(`/api/v1/langgraph-runs/${encodeURIComponent(runId)}/steps`);
+  }
+
   /** What this run's Handlers printed, from `after` onwards. */
   runOutput(runId, after = 0, limit = 200, nodeId = "") {
     const params = new URLSearchParams({ limit: String(limit) });

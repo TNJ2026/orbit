@@ -112,6 +112,20 @@ def seed_visual_artifact(engine) -> str:
             (run_id, stamp, stamp, started),
         )
         connection.commit()
+    # The checkpointer keys on the run id too. Renaming the run without it
+    # left the steps panel reading "not started" beside a run the hero called
+    # completed — a baseline nobody could tell from a broken feature.
+    import sqlite3
+
+    checkpoints = engine.checkpoint_db_path
+    if checkpoints.exists():
+        with sqlite3.connect(checkpoints) as connection:
+            for table in ("checkpoints", "writes"):
+                connection.execute(
+                    f"UPDATE {table} SET thread_id=? WHERE thread_id=?",
+                    (run_id, started),
+                )
+            connection.commit()
     store = engine.artifacts
     with store._connect() as connection:
         for content, content_type, port in (

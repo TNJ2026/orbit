@@ -487,6 +487,51 @@ class ProgressIsObservableTests(unittest.TestCase):
         self.addCleanup(service.wait_for_background, 10.0)
         return service, ir, visits
 
+    def test_the_step_being_worked_on_says_so(self) -> None:
+        """Otherwise the node in flight looks like one not yet started.
+
+        A live timeline whose current step reads `not_reached` is worse than
+        no timeline: it says the run has done nothing while an Agent is in the
+        middle of the thing you are waiting for.
+        """
+
+        from orbit.web.api_v1 import Authorizer, READ_SCOPE, WRITE_SCOPE
+        from orbit.web.app import create_app
+        from tests.test_web_composition import AsgiHarness
+
+        registration, ir = self.slow_steps(2, 0.5)
+        SQLiteWorkflowVersionStore(self.root / "runtime.db").publish(
+            CompiledWorkflow(ir, definition_hash(ir), "test", "sha256:" + "c" * 64),
+            expected_latest_version=0, source_format="json",
+            source_text="{}", actor="test", dsl_version="1.3",
+        )
+        app = create_app(
+            self.root / "runtime.db",
+            handlers=[registration],
+            schemas={"schema://object/1.0": {"type": "object"},
+                     engine_tests.SCHEMA: {"type": "object"}},
+            poll_seconds=0.01,
+            authenticator=lambda request: "author",
+            authorizer=Authorizer(lambda _actor: [READ_SCOPE, WRITE_SCOPE]),
+            langgraph_state_directory=self.root / "langgraph",
+        )
+        with AsgiHarness(app) as client:
+            started = client.post(
+                "/api/v1/langgraph-runs", actor="author", key="running-1",
+                body={"workflow_id": ir.workflow_id, "input": {"value": 1},
+                      "wait": False},
+            )
+            run_id = started.json()["data"]["run"]["run_id"]
+            time.sleep(0.2)
+            steps = client.get(
+                f"/api/v1/langgraph-runs/{run_id}/steps", actor="author",
+            ).json()["data"]["steps"]
+            app.state.langgraph_service.wait_for_background(timeout=10)
+
+        statuses = {step["node_id"]: step["status"] for step in steps}
+        self.assertEqual("running", statuses["step0"])
+        self.assertEqual("not_reached", statuses["step1"])
+
     def test_replaying_a_deferred_start_does_not_execute_it_twice(self) -> None:
         """Two threads on one run would both write its checkpoints.
 
