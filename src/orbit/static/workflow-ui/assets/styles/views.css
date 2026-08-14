@@ -1335,3 +1335,24 @@
 .run-canvas { border-top: 1px solid var(--line); padding-top: 8px; margin-top: 4px; }
 .run-canvas > summary { cursor: pointer; font-size: 13px; color: var(--blue); }
 .run-canvas-body:not(:empty) { margin-top: 10px; }
+
+/* Which way the run went at each fork. Only forks appear, so this stays a
+   footnote to the step list rather than a second copy of the graph. Every
+   pill carries its word: the colours only rank attention. */
+.run-branches { border-top: 1px solid var(--line); padding-top: 8px; margin-top: 4px; }
+.run-branches > summary { cursor: pointer; font-size: 13px; color: var(--blue); }
+.run-branches-body { display: grid; gap: 12px; margin-top: 10px; }
+.run-branch-source { font-size: 13px; }
+.run-branch-list { list-style: none; margin: 4px 0 0; padding: 0; display: grid; gap: 2px; }
+.run-branch {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  padding: 4px 0 4px 12px; font-size: 13px;
+}
+.run-branch-target::before { content: "\2192"; color: var(--muted-2); margin-right: 6px; }
+.run-branch-target { overflow-wrap: anywhere; }
+.run-branch.not_taken .run-branch-target,
+.run-branch.not_reached .run-branch-target,
+.run-branch.other_route .run-branch-target { color: var(--muted-2); }
+.pill.taken { background: var(--green-soft); color: var(--green); }
+.pill.not_taken, .pill.shadowed { background: var(--panel-3); color: var(--muted); }
+.pill.undecidable { background: var(--amber-soft); color: var(--amber); }

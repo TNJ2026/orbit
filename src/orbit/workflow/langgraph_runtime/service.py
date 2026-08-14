@@ -16,17 +16,28 @@ import uuid
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 from ..api.graph_layout import graph_layout
+from ..graph.conditions import ConditionEvaluationError
 from ..domain.serialization import canonical_json, definition_hash, to_primitive
 from ..domain.ir_schema import workflow_ir_from_primitive
 from .compiler import (
     LangGraphCompileError, LangGraphHandlerRegistry,
     LangGraphJoinDeadlineExceeded,
     LangGraphRetryRequested, LangGraphUnknownExternalResult, compile_workflow,
+    edge_is_selected, outgoing_edges,
 )
 
 
 class LangGraphRunConflict(ValueError):
     pass
+
+
+# Every answer `edges` can give about one edge. Named here rather than left
+# implicit in the method because a client renders each one as a word, and a
+# seventh added without a word renders as a raw key.
+EDGE_STATUSES = (
+    "taken", "shadowed", "not_taken", "other_route", "not_reached",
+    "undecidable",
+)
 
 
 # A run that has not finished and could still do something. `unknown` is not
@@ -1099,42 +1110,58 @@ class LangGraphWorkflowService:
             "artifacts": artifacts, "pruned": True,
         }
 
-    def _executed_nodes(self, run_id: str) -> tuple[str, ...]:
-        """Every node execution this run has recorded, oldest first.
+    def _latest_state(self, run_id: str) -> dict[str, Any]:
+        """The run's newest state, with its pending writes applied.
 
-        Read from the newest checkpoint *plus its pending writes*, and the
-        second half is not an optimisation. A branch that finished inside a
+        Applying them is not an optimisation. A branch that finished inside a
         superstep another branch interrupted is only in the pending writes:
         the committed checkpoint still says it never ran. Reading the
         checkpoint alone shows a completed parallel branch as not reached for
         as long as its sibling waits for a person.
 
+        Each channel is folded with its own reducer — `execution_order`
+        appends, the rest merge — so what comes out is the state the next
+        superstep would have started from.
+
         No graph is compiled to do it. `get_state` would apply the same writes
         and give the same answer, but compiling wires the Handlers back up,
         and nothing that only reads a run should be able to reach one.
-
-        A node appears once per execution: a loop that ran a node three times
-        is three entries, which is what makes "third attempt" sayable.
         """
 
         config = {"configurable": {"thread_id": run_id}}
         with SqliteSaver.from_conn_string(str(self.checkpoint_db_path)) as saver:
             newest = next(iter(saver.list(config, limit=1)), None)
             if newest is None:
-                return ()
-            order = list(
-                (newest.checkpoint.get("channel_values") or {}).get(
-                    "execution_order"
-                ) or ()
-            )
-            # Appended, matching the channel's own reducer.
+                return {}
+            values = dict(newest.checkpoint.get("channel_values") or {})
+            state: dict[str, Any] = {
+                "workflow_inputs": dict(values.get("workflow_inputs") or {}),
+                "node_outputs": dict(values.get("node_outputs") or {}),
+                "node_routes": dict(values.get("node_routes") or {}),
+                "execution_order": list(values.get("execution_order") or ()),
+            }
             for _task, channel, value in (newest.pending_writes or ()):
-                if channel != "execution_order":
-                    continue
-                order.extend(
-                    value if isinstance(value, (list, tuple)) else [value]
-                )
-        return tuple(str(node_id) for node_id in order)
+                if channel == "execution_order":
+                    state["execution_order"].extend(
+                        value if isinstance(value, (list, tuple)) else [value]
+                    )
+                elif channel in {"node_outputs", "node_routes"} and isinstance(
+                    value, Mapping
+                ):
+                    state[channel].update(value)
+        return state
+
+    def _executed_nodes(self, run_id: str) -> tuple[str, ...]:
+        """Every node execution this run has recorded, oldest first.
+
+        A node appears once per execution: a loop that ran a node three times
+        is three entries, which is what makes "third attempt" sayable.
+        """
+
+        return tuple(
+            str(node_id)
+            for node_id in self._latest_state(run_id).get("execution_order", ())
+        )
 
     def _attempt_facts(self, run_id: str) -> dict[str, dict[str, Any]]:
         """Per-node outcome and timing, for the nodes that keep an attempt.
@@ -1252,6 +1279,93 @@ class LangGraphWorkflowService:
                 "last_at": fact.get("last_at"),
             })
         return tuple(steps)
+
+    def edges(
+        self, run_id: str, *, actor: str | None = None,
+    ) -> tuple[Mapping[str, Any], ...]:
+        """Which branches this run took, and which it silently did not.
+
+        `steps` says a node was not reached. This says why, which is the half
+        that finds the bug. A condition below a port — `exists(source.x.y)` —
+        is checked no further than its `source.<port>` prefix at compile time,
+        and `exists` is built to answer False rather than raise when the path
+        does not resolve. So an author who names a field their Agent never
+        produces gets a branch that is never taken, on every run, with no
+        error anywhere. Something has to say it out loud.
+
+        Six answers — `EDGE_STATUSES` — each meaning one thing:
+
+        `taken`       the condition held and the engine followed this edge.
+        `shadowed`    the condition held, and an exclusive node had already
+                      picked a higher-priority edge. Dead for the same
+                      practical reason, found a different way — except on the
+                      unconditional edge, whose whole job is to be the one
+                      that loses when something else matched. That one is
+                      flagged `default` so a reader looking for dead branches
+                      can drop it rather than be told about it every run.
+        `not_taken`   the condition was false. The one to look at.
+        `other_route` the source left by its other route — an error edge on a
+                      node that succeeded, or the reverse. Not a dead branch,
+                      and kept apart so a report of dead branches is not
+                      three-quarters error handlers.
+        `not_reached` the source node never ran, so nothing was decided.
+        `undecidable` re-deriving the condition raised. Recorded rather than
+                      swallowed: it means the report cannot speak for this
+                      edge, which is not the same as the edge not firing.
+
+        Derived, like `steps` — re-evaluating the recorded state through the
+        engine's own selection helper and edge ordering, not a second copy of
+        the rules. One consequence is worth stating plainly: the checkpoint
+        keeps a node's *latest* output, so for a node inside a loop this
+        describes its last iteration, and `visits` says how many there were.
+        """
+
+        run = self.get(run_id, actor=actor)
+        ir = self._run_ir(run)
+        state = self._latest_state(run_id)
+        visits: dict[str, int] = {}
+        for node_id in state.get("execution_order", ()):
+            visits[str(node_id)] = visits.get(str(node_id), 0) + 1
+        report: list[Mapping[str, Any]] = []
+        for node in ir.nodes:
+            ordered = outgoing_edges(ir, node)
+            exclusive = (node.route_mode or "exclusive") != "parallel"
+            claimed = False
+            for edge in ordered:
+                try:
+                    selected = edge_is_selected(edge, state)
+                except ConditionEvaluationError as error:
+                    status, detail = "undecidable", str(error)
+                else:
+                    detail = None
+                    if selected is None:
+                        status = "not_reached"
+                    elif selected is False:
+                        status = (
+                            "other_route"
+                            if edge.route != state["node_routes"].get(
+                                node.id, "success"
+                            )
+                            else "not_taken"
+                        )
+                    elif exclusive and claimed:
+                        status = "shadowed"
+                    else:
+                        status = "taken"
+                        claimed = claimed or exclusive
+                report.append({
+                    "edge_id": edge.id,
+                    "source_node": edge.source_node,
+                    "target_node": edge.target_node,
+                    "route": edge.route,
+                    "priority": edge.priority,
+                    "back_edge": edge.back_edge,
+                    "default": edge.condition == {"op": "literal", "value": True},
+                    "status": status,
+                    "visits": visits.get(node.id, 0),
+                    "detail": detail,
+                })
+        return tuple(report)
 
     def replay(
         self, run_id: str, *, actor: str | None = None, limit: int = 100,

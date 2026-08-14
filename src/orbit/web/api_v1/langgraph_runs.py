@@ -252,6 +252,31 @@ def build_routes(ctx, service, template_service=None) -> list[Route]:
             {"steps": list(steps)}, projection_version=run.revision,
         ))
 
+    async def run_edges(request: Request) -> JSONResponse:
+        """Which branches this run took, and which it silently did not.
+
+        Same scope as `/steps` and for the same reason: an edge report says
+        which way the run went, never what flowed along it.
+        """
+
+        actor = ctx.authenticate(request, READ_SCOPE)
+        if isinstance(actor, JSONResponse):
+            return actor
+        try:
+            run_id = request.path_params["run_id"]
+            unknown = set(request.query_params)
+            if unknown:
+                raise ValueError(f"unknown query parameter: {sorted(unknown)[0]}")
+            run = service.get(run_id, actor=actor)
+            edges = service.edges(run_id, actor=actor)
+        except LookupError as exc:
+            return error("not_found", str(exc), 404)
+        except ValueError as exc:
+            return error("invalid_request", str(exc))
+        return JSONResponse(envelope(
+            {"edges": list(edges)}, projection_version=run.revision,
+        ))
+
     async def run_output(request: Request) -> JSONResponse:
         """What this run's Handlers printed, followed rather than paged.
 
@@ -456,6 +481,9 @@ def build_routes(ctx, service, template_service=None) -> list[Route]:
         Route("/api/v1/langgraph-runs/{run_id}", get_run, methods=["GET"]),
         Route(
             "/api/v1/langgraph-runs/{run_id}/steps", run_steps, methods=["GET"],
+        ),
+        Route(
+            "/api/v1/langgraph-runs/{run_id}/edges", run_edges, methods=["GET"],
         ),
         Route(
             "/api/v1/langgraph-runs/{run_id}/output", run_output, methods=["GET"],

@@ -125,6 +125,11 @@ export class Api {
     return this.get(`/api/v1/langgraph-runs/${encodeURIComponent(runId)}/steps`);
   }
 
+  /** Which branch this run took at each fork, and which it did not. */
+  runEdges(runId) {
+    return this.get(`/api/v1/langgraph-runs/${encodeURIComponent(runId)}/edges`);
+  }
+
   /** What this run's Handlers printed, from `after` onwards. */
   runOutput(runId, after = 0, limit = 200, nodeId = "") {
     const params = new URLSearchParams({ limit: String(limit) });

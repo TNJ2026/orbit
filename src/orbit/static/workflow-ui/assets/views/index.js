@@ -438,6 +438,59 @@ export function createViews(context) {
       ],
     ))));
     if (canvas) panel.append(canvas);
+    await renderRunBranches(panel, runId, steps);
+  }
+
+  /* Which way the run went at each fork.
+   *
+   * Only forks: a node with one outgoing edge decided nothing, and listing it
+   * would bury the nodes that did. Collapsed, and absent entirely when the
+   * definition has no fork — most runs have nothing to explain, and the ones
+   * that went somewhere surprising are the reason this is here at all.
+   */
+  async function renderRunBranches(panel, runId, steps) {
+    let edges;
+    try {
+      edges = (await api.runEdges(runId)).data.edges || [];
+    } catch (error) {
+      // Quietly: the steps above are the answer to the question that was
+      // asked, and this is a footnote to them.
+      return;
+    }
+    const labels = Object.fromEntries(
+      steps.map((step) => [step.node_id, step.label || step.node_id]),
+    );
+    const forks = new Map();
+    for (const edge of edges) {
+      if (!forks.has(edge.source_node)) forks.set(edge.source_node, []);
+      forks.get(edge.source_node).push(edge);
+    }
+    const branching = [...forks.entries()].filter(
+      ([, items]) => items.length > 1,
+    );
+    if (!branching.length) return;
+    panel.append(el("details", { class: "run-branches" }, [
+      el("summary", { text: i18n.t("simplified.branches") }),
+      el("div", { class: "run-branches-body" }, branching.map(
+        ([sourceId, items]) => el("div", { class: "run-branch-group" }, [
+          el("strong", { class: "run-branch-source",
+            text: labels[sourceId] || sourceId }),
+          el("ul", { class: "run-branch-list" }, items.map((edge) => el(
+            "li", { class: `run-branch ${edge.status}` }, [
+              el("span", { class: "run-branch-target",
+                text: labels[edge.target_node] || edge.target_node }),
+              el("span", { class: `pill ${edge.status}`, text: i18n.t(
+                `simplified.branches.status.${edge.status}`,
+              ) }),
+              edge.default
+                ? el("span", { class: "muted",
+                  text: i18n.t("simplified.branches.default") })
+                : null,
+            ].filter(Boolean),
+          ))),
+        ]),
+      )),
+    ]));
   }
 
   /* The Handler console, followed rather than paged.

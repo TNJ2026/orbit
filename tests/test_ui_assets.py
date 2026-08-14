@@ -315,6 +315,33 @@ class StepListRenderingTests(unittest.TestCase):
         app_js = "\n".join(path.read_text(encoding="utf-8") for path in source_files())
         self.assertIn('i18n.t("simplified.steps.repeated"', app_js)
 
+    def test_every_branch_state_the_server_can_send_has_a_word(self) -> None:
+        """The status is a template hole, so a missing word is a raw key.
+
+        The list is the engine's own: `edges()` documents six answers, and a
+        seventh added there without a string here would render as
+        `simplified.branches.status.whatever` on the page.
+        """
+
+        english = json.loads(
+            (ASSETS / "i18n.en-US.json").read_text(encoding="utf-8")
+        )
+        chinese = json.loads(
+            (ASSETS / "i18n.zh-CN.json").read_text(encoding="utf-8")
+        )
+        from orbit.workflow.langgraph_runtime.service import EDGE_STATUSES
+
+        self.assertGreaterEqual(len(EDGE_STATUSES), 6)
+        for status in EDGE_STATUSES:
+            with self.subTest(status=status):
+                self.assertIn(f"simplified.branches.status.{status}", english)
+                self.assertIn(f"simplified.branches.status.{status}", chinese)
+
+    def test_only_forks_are_reported_so_the_footnote_stays_one(self) -> None:
+        app_js = "\n".join(path.read_text(encoding="utf-8") for path in source_files())
+        self.assertIn("api.runEdges(runId)", app_js)
+        self.assertIn("items.length > 1", app_js)
+
     def test_every_step_state_has_a_word_and_a_colour(self) -> None:
         """Meaning never rides on colour alone, the run pills' own rule."""
 

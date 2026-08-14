@@ -162,9 +162,19 @@ separate surface. Omitting it leaves every route absent:
 | `GET` | `/api/v1/langgraph-runs` | `runtime.read` |
 | `POST` | `/api/v1/langgraph-runs` | `runtime.write` |
 | `GET` | `/api/v1/langgraph-runs/{run_id}` | `runtime.read` |
+| `GET` | `/api/v1/langgraph-runs/{run_id}/steps` | `runtime.read` |
+| `GET` | `/api/v1/langgraph-runs/{run_id}/edges` | `runtime.read` |
+| `GET` | `/api/v1/langgraph-runs/{run_id}/replay` | `runtime.read` |
+| `GET` | `/api/v1/langgraph-runs/{run_id}/output` | `runtime.read.sensitive` |
 | `POST` | `/api/v1/langgraph-runs/{run_id}/resume` | `runtime.write` |
 | `POST` | `/api/v1/langgraph-runs/{run_id}/cancel` | `runtime.write` |
 | `POST` | `/api/v1/langgraph-runs/{run_id}/recover` | `runtime.ops.write` |
+
+`/steps` says where a run got to and `/edges` says which way it went at each
+fork; both are derived from the definition and the checkpoint rather than
+recorded, and both are the ordinary read scope because they name nodes and
+edges without carrying what flowed along them. `/output` is sensitive
+because a Handler's console is whatever the Handler printed.
 
 Writes require the normal `idempotency-key` header. Read DTOs advertise a
 resume command only to actors with write scope and only while interrupted;

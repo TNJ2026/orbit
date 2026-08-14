@@ -600,7 +600,31 @@ class CompiledLangGraphWorkflow:
         }
 
 
-def _edge_is_selected(
+def outgoing_edges(ir: WorkflowIR, node: IRNode) -> tuple[IREdge, ...]:
+    """This node's edges in the order the engine considers them.
+
+    Priority then id, except that in exclusive mode an unconditional edge
+    sorts last however it was numbered: a default is what is left when no
+    condition matched, so letting it win on priority would make every
+    condition beside it unreachable.
+
+    Kept in one place because two things read it. The engine picks the first
+    match; the run's edge report says which edges never matched, and a report
+    that ordered them differently would name the wrong edge as shadowed.
+    """
+
+    exclusive = (node.route_mode or "exclusive") == "exclusive"
+    return tuple(sorted(
+        (edge for edge in ir.edges if edge.source_node == node.id),
+        key=lambda edge: (
+            exclusive and edge.condition == {"op": "literal", "value": True},
+            edge.priority,
+            edge.id,
+        ),
+    ))
+
+
+def edge_is_selected(
     edge: IREdge, state: Mapping[str, Any],
 ) -> bool | None:
     """Whether this edge fired, or `None` while its source has not run.
@@ -636,7 +660,7 @@ def _still_possible(
     """
 
     dead = {
-        edge.id for edge in ir.edges if _edge_is_selected(edge, state) is False
+        edge.id for edge in ir.edges if edge_is_selected(edge, state) is False
     }
     live: set[str] = set(frontier)
     queue = list(live)
@@ -680,7 +704,7 @@ def _join_is_ready(
         None,
     )
     mode = "all" if policy is None else policy.config.get("mode", "all")
-    arrived = sum(1 for edge in incoming if _edge_is_selected(edge, state) is True)
+    arrived = sum(1 for edge in incoming if edge_is_selected(edge, state) is True)
     if mode == "any":
         return arrived >= 1
     if mode == "n_of_m":
@@ -691,7 +715,7 @@ def _join_is_ready(
     # outstanding. A source that can no longer run is not worth waiting for.
     possible = _still_possible(ir, state, frontier)
     return not any(
-        _edge_is_selected(edge, state) is None and edge.source_node in possible
+        edge_is_selected(edge, state) is None and edge.source_node in possible
         for edge in incoming
     )
 
@@ -995,15 +1019,7 @@ def compile_workflow(
                 output = _normalize_outputs(current, outcome.output)
             route_name = "success" if implementation is None else outcome.route
             if route_name == "success":
-                outgoing = tuple(sorted(
-                    (edge for edge in ir.edges if edge.source_node == current.id),
-                    key=lambda edge: (
-                        (current.route_mode or "exclusive") == "exclusive"
-                        and edge.condition == {"op": "literal", "value": True},
-                        edge.priority,
-                        edge.id,
-                    ),
-                ))
+                outgoing = outgoing_edges(ir, current)
                 selected = [
                     edge for edge in outgoing
                     if edge.route == route_name and evaluate_condition(
@@ -1057,17 +1073,7 @@ def compile_workflow(
         builder.add_edge(START, entry)
 
     for node in ir.nodes:
-        outgoing = tuple(
-            sorted(
-                (edge for edge in ir.edges if edge.source_node == node.id),
-                key=lambda edge: (
-                    (node.route_mode or "exclusive") == "exclusive"
-                    and edge.condition == {"op": "literal", "value": True},
-                    edge.priority,
-                    edge.id,
-                ),
-            )
-        )
+        outgoing = outgoing_edges(ir, node)
         if not outgoing:
             builder.add_edge(node.id, END)
             continue
@@ -1129,7 +1135,7 @@ def compile_workflow(
                     continue
                 if not any(
                     edge.target_node == candidate.id
-                    and _edge_is_selected(edge, state) is True
+                    and edge_is_selected(edge, state) is True
                     for edge in ir.edges
                 ):
                     continue

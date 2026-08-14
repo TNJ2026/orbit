@@ -2324,6 +2324,60 @@ class RunStepsApiTests(unittest.TestCase):
                 actor="author",
             ).status_code)
 
+    def test_the_edge_report_says_which_way_a_waiting_run_went(self) -> None:
+        with AsgiHarness(self.app) as client:
+            run = self.start(client)
+            response = client.get(
+                f"/api/v1/langgraph-runs/{run['run_id']}/edges", actor="author",
+            )
+            self.assertEqual(200, response.status_code, response.text)
+            body = response.json()
+            self.assertEqual(run["revision"], body["projection_version"])
+            edges = body["data"]["edges"]
+            self.assertTrue(edges, "the fixture has edges to report on")
+            taken = [item for item in edges if item["status"] == "taken"]
+            self.assertEqual(
+                [("transform", "approve")],
+                [(item["source_node"], item["target_node"]) for item in taken],
+            )
+            # The run is interrupted at `approve`, so nothing below it has
+            # decided anything yet.
+            self.assertEqual(
+                {"not_reached"},
+                {
+                    item["status"] for item in edges
+                    if item["source_node"] == "approve"
+                },
+            )
+
+    def test_the_edge_report_carries_no_values(self) -> None:
+        """Same scope as steps, so it must be as quiet as steps."""
+
+        with AsgiHarness(self.app) as client:
+            run = self.start(client)
+            for item in client.get(
+                f"/api/v1/langgraph-runs/{run['run_id']}/edges", actor="author",
+            ).json()["data"]["edges"]:
+                self.assertNotIn("mapping", item)
+                self.assertNotIn("condition", item)
+                self.assertNotIn("value", item)
+
+    def test_an_unknown_run_and_an_unknown_parameter_are_told_apart_on_edges(
+        self,
+    ) -> None:
+        with AsgiHarness(self.app) as client:
+            run = self.start(client)
+            self.assertEqual(404, client.get(
+                "/api/v1/langgraph-runs/langgraph_run:nope/edges", actor="author",
+            ).status_code)
+            self.assertEqual(404, client.get(
+                f"/api/v1/langgraph-runs/{run['run_id']}/edges", actor="reader",
+            ).status_code)
+            self.assertEqual(400, client.get(
+                f"/api/v1/langgraph-runs/{run['run_id']}/edges?limit=5",
+                actor="author",
+            ).status_code)
+
 
 class HandlerConsoleApiTests(ApiTestCase):
     """Reading what a run's Handlers printed."""

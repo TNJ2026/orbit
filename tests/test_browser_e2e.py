@@ -491,6 +491,56 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
         self.assertIn("node-run", classes)
         self.assertIn("done", frame.locator(".node").first.inner_text().lower())
 
+    def test_a_fork_says_which_way_the_run_went(self) -> None:
+        """The report the server derives, rendered.
+
+        Served here rather than published, because what is under test is the
+        view: that only forks appear, that each answer arrives as a word, and
+        that the branch not taken is on the page rather than merely absent.
+        The derivation itself is tested where it is written.
+        """
+
+        run_id = self.start_run("branches-view")
+        page = self.open("en-US", f"/ui/#/runs/{run_id}")
+        page.route("**/edges", lambda route: route.fulfill(
+            status=200, content_type="application/json",
+            body=json.dumps({
+                "schema_version": "1.0", "projection_version": 1,
+                "next_cursor": None,
+                "data": {"edges": [
+                    {"edge_id": "e1", "source_node": "transform",
+                     "target_node": "urgent", "route": "success", "priority": 0,
+                     "back_edge": False, "default": False,
+                     "status": "not_taken", "visits": 1, "detail": None},
+                    {"edge_id": "e2", "source_node": "transform",
+                     "target_node": "done", "route": "success", "priority": 1,
+                     "back_edge": False, "default": True,
+                     "status": "taken", "visits": 1, "detail": None},
+                    {"edge_id": "e3", "source_node": "done",
+                     "target_node": "end", "route": "success", "priority": 0,
+                     "back_edge": False, "default": True,
+                     "status": "taken", "visits": 1, "detail": None},
+                ]},
+            }),
+        ))
+        page.reload()
+        page.wait_for_selector(".run-branches")
+
+        # `done` has one outgoing edge and so decided nothing; listing it
+        # would bury the node that did.
+        self.assertEqual(1, page.locator(".run-branch-group").count())
+        page.locator(".run-branches summary").click()
+        text = page.inner_text(".run-branches")
+        self.assertIn("Followed", text)
+        self.assertIn("Condition was false", text)
+        self.assertIn("urgent", text)
+
+    def test_a_run_without_a_fork_has_nothing_to_explain(self) -> None:
+        run_id = self.start_run("no-branches-view")
+        page = self.open("en-US", f"/ui/#/runs/{run_id}")
+        page.wait_for_selector(".step-row")
+        self.assertEqual(0, page.locator(".run-branches").count())
+
     def test_the_console_is_closed_until_asked_for(self) -> None:
         """The output panel exists on a run and fetches only when opened."""
 

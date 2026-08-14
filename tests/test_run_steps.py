@@ -21,7 +21,9 @@ from orbit.workflow.domain.definitions import (
 from orbit.workflow.domain.serialization import definition_hash
 from orbit.workflow.langgraph_runtime import build_service
 from orbit.workflow.langgraph_runtime.compiler import LangGraphHandlerRegistry
-from orbit.workflow.langgraph_runtime.service import LangGraphWorkflowService
+from orbit.workflow.langgraph_runtime.service import (
+    EDGE_STATUSES, LangGraphWorkflowService,
+)
 from orbit.workflow.persistence.workflow_versions import SQLiteWorkflowVersionStore
 
 import tests.test_workflow_langgraph_runtime as engine_tests
@@ -1013,6 +1015,215 @@ class RetryOnTheRealHandlerPathTests(unittest.TestCase):
         self.assertEqual(
             ["attempt 1\n", "attempt 2\n"], [item["text"] for item in chunks],
         )
+
+
+
+def exists(path: str):
+    return {"op": "call", "name": "exists", "args": [{"op": "ref", "path": path}]}
+
+
+class EdgeReportTests(unittest.TestCase):
+    """Which branches a run took, and which it silently did not.
+
+    The condition `exists(source.value.severity)` is checked no further than
+    its `source.value` prefix at compile time, and `exists` answers False
+    rather than raising when the rest of the path is missing. An author whose
+    Agent never produces `severity` therefore gets a branch that is never
+    taken, on every run, with nothing raised anywhere — which is the hole
+    this report exists to show.
+    """
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+
+    def run_with(self, output, *, edges, route_mode=None):
+        from orbit.workflow.handlers.tools import ToolResult
+        from orbit.workflow.langgraph_runtime.artifacts import LangGraphArtifactStore
+        from orbit.workflow.langgraph_runtime.wiring import trusted_handlers
+
+        class Adapter:
+            def execute(self, request, context):
+                return ToolResult({"value": output})
+
+            def cancel(self, execution_ref, context):
+                return None
+
+            def recover(self, recovery_ref, context):
+                return None
+
+        fixture = engine_tests.LangGraphProductionWiringTests("run")
+        registration = fixture.tool_registration(Adapter())
+        manifest = registration.manifest
+        classify = IRNode(
+            "classify", "action",
+            (engine_tests.port("value"),), (engine_tests.port("value"),),
+            IRHandlerRef(manifest.name, manifest.version, manifest.fingerprint),
+            {"tool_name": "example.read", "tool_version": "1.0.0"},
+            (), None, route_mode,
+        )
+        ir = engine_tests.workflow(
+            (
+                classify,
+                engine_tests.node(
+                    "urgent", inputs=("value",), outputs=("value",),
+                    kind="terminal", handler=False,
+                ),
+                engine_tests.node(
+                    "normal", inputs=("value",), outputs=("value",),
+                    kind="terminal", handler=False,
+                ),
+            ),
+            edges,
+            entry=("classify",), terminals=("urgent", "normal"),
+            result=("classify", "value"),
+        )
+        store = SQLiteWorkflowVersionStore(self.root / "workflows.sqlite3")
+        store.publish(
+            CompiledWorkflow(ir, definition_hash(ir), "test", "sha256:" + "c" * 64),
+            expected_latest_version=0, source_format="json",
+            source_text="{}", actor="test", dsl_version="1.3",
+        )
+        runs = self.root / "runs.sqlite3"
+        service = LangGraphWorkflowService(
+            store, trusted_handlers([registration], attempt_db_path=runs),
+            run_db_path=runs,
+            checkpoint_db_path=self.root / "checkpoints.sqlite3",
+            artifact_store=LangGraphArtifactStore(runs, self.root / "artifacts"),
+        )
+        run = service.start(
+            ir.workflow_id, {"value": {}}, idempotency_key="one", actor="local",
+        )
+        reported = service.edges(run.run_id, actor="local")
+        # The word the UI shows is looked up by this string, so a status the
+        # vocabulary does not declare would render as a raw key.
+        for item in reported:
+            assert item["status"] in EDGE_STATUSES, item["status"]
+        return service, run, {item["edge_id"]: item for item in reported}
+
+    def branching(self):
+        return (
+            engine_tests.edge(
+                "to_urgent", "classify", "urgent",
+                condition=exists("source.value.severity"),
+            ),
+            engine_tests.edge("to_normal", "classify", "normal"),
+        )
+
+    def test_a_branch_guarded_on_a_field_nobody_produces_is_named(self) -> None:
+        _service, _run, report = self.run_with({}, edges=self.branching())
+        self.assertEqual("not_taken", report["to_urgent"]["status"])
+        self.assertEqual("taken", report["to_normal"]["status"])
+        # It was decided, not merely unvisited: the node ran.
+        self.assertEqual(1, report["to_urgent"]["visits"])
+
+    def test_the_same_branch_when_the_field_is_there(self) -> None:
+        """The report must be capable of saying the branch is alive."""
+
+        _service, _run, report = self.run_with(
+            {"severity": "high"}, edges=self.branching(),
+        )
+        self.assertEqual("taken", report["to_urgent"]["status"])
+        # The default's condition did hold; being passed over is its job, and
+        # `default` is how a reader tells that apart from a dead branch.
+        self.assertEqual("shadowed", report["to_normal"]["status"])
+        self.assertTrue(report["to_normal"]["default"])
+        self.assertFalse(report["to_urgent"]["default"])
+
+    def test_an_unconditional_edge_is_tried_last_however_it_is_numbered(self) -> None:
+        """A default with a winning priority would kill every condition.
+
+        The report orders edges through the engine's own rule rather than a
+        copy of it; ordering them by priority alone would report the guarded
+        edge as shadowed and the run would disagree.
+        """
+
+        _service, _run, report = self.run_with(
+            {"severity": "high"},
+            edges=(
+                engine_tests.edge(
+                    "to_urgent", "classify", "urgent", priority=9,
+                    condition=exists("source.value.severity"),
+                ),
+                engine_tests.edge("to_normal", "classify", "normal", priority=0),
+            ),
+        )
+        self.assertEqual("taken", report["to_urgent"]["status"])
+        self.assertEqual("shadowed", report["to_normal"]["status"])
+
+    def test_a_branch_a_higher_priority_edge_always_wins_is_shadowed(self) -> None:
+        """True and still never followed — dead for a second reason.
+
+        `not_taken` would be a lie here: the condition held. What killed the
+        branch is an exclusive node having already chosen.
+        """
+
+        _service, _run, report = self.run_with(
+            {"severity": "high"},
+            edges=(
+                engine_tests.edge(
+                    "first", "classify", "normal", priority=0,
+                    condition=exists("source.value.severity"),
+                ),
+                engine_tests.edge(
+                    "second", "classify", "urgent", priority=1,
+                    condition=exists("source.value.severity"),
+                ),
+            ),
+        )
+        self.assertEqual("taken", report["first"]["status"])
+        self.assertEqual("shadowed", report["second"]["status"])
+
+    def test_a_parallel_node_shadows_nothing(self) -> None:
+        _service, _run, report = self.run_with(
+            {"severity": "high"},
+            route_mode="parallel",
+            edges=(
+                engine_tests.edge(
+                    "first", "classify", "normal", priority=0,
+                    condition=exists("source.value.severity"),
+                ),
+                engine_tests.edge(
+                    "second", "classify", "urgent", priority=1,
+                    condition=exists("source.value.severity"),
+                ),
+            ),
+        )
+        self.assertEqual(
+            {"taken"}, {report[name]["status"] for name in ("first", "second")},
+        )
+
+    def test_an_error_edge_on_a_node_that_succeeded_is_not_a_dead_branch(self) -> None:
+        """Kept apart so a report of dead branches is mostly dead branches."""
+
+        _service, _run, report = self.run_with(
+            {}, edges=(
+                engine_tests.edge("to_normal", "classify", "normal"),
+                engine_tests.edge(
+                    "on_error", "classify", "urgent", route="error",
+                ),
+            ),
+        )
+        self.assertEqual("other_route", report["on_error"]["status"])
+
+    def test_edges_below_a_node_that_never_ran_decided_nothing(self) -> None:
+        """`not_reached` and `not_taken` are different findings.
+
+        A branch under a node the run never got to says nothing about whether
+        its condition is satisfiable, and reporting it as never taken would
+        bury the branches that are.
+        """
+
+        _service, _run, report = self.run_with(
+            {}, edges=(
+                *self.branching(),
+                engine_tests.edge("onward", "urgent", "normal"),
+            ),
+        )
+        self.assertEqual("not_taken", report["to_urgent"]["status"])
+        self.assertEqual("not_reached", report["onward"]["status"])
+        self.assertEqual(0, report["onward"]["visits"])
 
 
 if __name__ == "__main__":
