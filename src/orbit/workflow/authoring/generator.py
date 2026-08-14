@@ -776,6 +776,7 @@ class WorkflowAuthoringService:
             "Never instruct an Agent to keep fixing until every test passes. Repetition requires an explicit back_edge and a bounded loop or rework policy.",
             "Each input port on a non-join node may have at most one incoming non-back edge. A back edge may return to an already-bound input when it has a bounded loop or rework policy.",
             "A condition that reads a member of an action's result must guard it with exists(), and every branch out of a decision must have a default edge whose condition is true. An action's result is an open object: a member you assumed is absent at run time, and the run fails after the Agent has already done its work.",
+            "A condition on a human node's output must branch on its `decision` field, whose shape is given in human_submission. A field you invent there is absent at run time, and a guarded condition that reads it is never true — the approval branch is then dead and the workflow always takes its default.",
             "A node routes to exactly one of its outgoing edges unless it declares route_mode 'parallel'. Any node whose branches are meant to run together — a fan-out into a join — must declare it. Without it only one branch runs, an 'all' join waits for an input that can never arrive, and the run dies there.",
             "When two or more forward branches converge, target an explicit join node: use join mode any for mutually-exclusive alternatives and all for parallel branches, then use one edge from the join to the downstream node.",
             "Use a join node only for real fan-in: it needs at least two incoming non-back edges and exactly one node policy reference to one top-level join policy.",
@@ -890,6 +891,27 @@ class WorkflowAuthoringService:
                     "node": "the node producing the Goal result",
                     "port": "one declared output port on that node",
                 },
+            },
+            # What a person's answer looks like. The Runtime defines it and
+            # the compiler enforces it — a human output port must accept
+            # `{decision, value}` — but nothing said so here, so a condition
+            # was written against an invented field, guarded with `exists`,
+            # and silently never taken: an approval workflow that could not
+            # approve. Unlike an action's open result, this shape is knowable.
+            "human_submission": {
+                "shape": {
+                    "decision": "approve | reject | the task's own vocabulary",
+                    "value": "whatever the person supplied, may be absent",
+                },
+                "reading_it": {
+                    "op": "eq",
+                    "left": {"op": "ref", "path": "source.<port>.decision"},
+                    "right": {"op": "literal", "value": "approve"},
+                },
+                "note": (
+                    "A human node's output carries the submission. Branch on "
+                    "`decision`; there is no field of your own invention on it."
+                ),
             },
             "policy_contract": {
                 "top_level_shape": {

@@ -299,12 +299,17 @@ def _handlerless_outputs(
     if not node.outputs:
         return {}
     copied = {port.id: inputs[port.id] for port in node.outputs if port.id in inputs}
-    if node.kind == "join" and not copied and len(node.outputs) == 1:
+    if not copied and len(node.outputs) == 1:
         if len(node.inputs) == 1:
-            # One in, one out: the join is a rendezvous and the value passes
-            # straight through, unwrapped.
+            # One in, one out, and no work in between: the value passes
+            # straight through. True of every node without a Handler — a
+            # decision routes what it was handed, a join is a rendezvous, a
+            # human node's submission is its output — and matching the port
+            # *names* was standing in for that. A node whose output happened
+            # to be called something else produced nothing and failed as a
+            # Handler that omitted its own declared output.
             copied[node.outputs[0].id] = inputs[node.inputs[0].id]
-        else:
+        elif node.kind == "join":
             # Several branches into one output. The merge policy has already
             # combined the edges feeding each input port; what was missing was
             # any rule for putting those ports together, so a join whose
@@ -934,6 +939,15 @@ def compile_workflow(
                         "node_id": current.id,
                         "input": to_primitive(inputs),
                         "config": to_primitive(current.config),
+                        # The shape of the answer, in the question. Without it
+                        # a caller had to fetch the definition to learn which
+                        # port to reply on, and a reply on the wrong one was
+                        # refused as a "handler" that returned undeclared
+                        # outputs — for a node that has no handler.
+                        "output_ports": [
+                            {"id": port.id, "schema_id": port.schema_id}
+                            for port in current.outputs
+                        ],
                     })
                     if isinstance(resumed, Mapping):
                         human_output = resumed

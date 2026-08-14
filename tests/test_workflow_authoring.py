@@ -555,6 +555,27 @@ class ExpressionVocabularyTests(unittest.TestCase):
         example = _expression_vocabulary()["comparison"]["example"]
         self.assertEqual(example, validate_expression_ast(example, "$.condition"))
 
+    def test_the_prompt_states_what_a_person_s_answer_looks_like(self) -> None:
+        """The Runtime defines it, the compiler enforces it, nothing said it.
+
+        A human node's output must accept `{decision, value}` — but the model
+        was left to guess, wrote a condition on a field of its own invention,
+        guarded it with `exists`, and produced an approval workflow whose
+        approval branch could never be taken. Observed: it always published
+        the rejection.
+        """
+
+        current = json.dumps(valid_document())
+        model = ScriptedModel([current] * 4)
+        service(model).revise(
+            current, "add an approval step",
+            expected_workflow_id="workflow:generated",
+        )
+        prompt = model.prompts[0]
+        self.assertIn('"human_submission"', prompt)
+        self.assertIn('"decision"', prompt)
+        self.assertIn("field of your own invention", prompt)
+
     def test_a_revision_prompt_carries_the_vocabulary(self) -> None:
         current = json.dumps(valid_document())
         model = ScriptedModel([current] * 4)

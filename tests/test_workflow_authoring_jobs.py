@@ -88,7 +88,12 @@ def dsl(*, nodes=("collect",), name="Research") -> dict:
 
 class AuthoringJobTestCase(unittest.TestCase):
     def setUp(self) -> None:
-        self.temp = tempfile.TemporaryDirectory()
+        # A SQLite connection opened during the test may still be waiting to
+        # be collected when the directory goes, and closing it writes `-wal`
+        # back into a directory `rmtree` has already walked. That failed in
+        # `tearDown`, in whichever test happened to be last — the assertions
+        # had all passed — about one run in eight.
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(self.temp.cleanup)
         self.path = Path(self.temp.name) / "jobs.db"
         with connect_workflow_database(self.path) as connection:

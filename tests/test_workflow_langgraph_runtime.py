@@ -1057,6 +1057,94 @@ class LangGraphWorkflowCompilerTests(unittest.TestCase):
         )
         self.assertEqual("merged", completed["result"])
 
+    def test_a_handlerless_node_carries_its_value_under_another_name(self) -> None:
+        """Matching port *names* was standing in for "this node does no work".
+
+        A decision routes what it was handed, a join is a rendezvous, a human
+        node's submission is its output — none of them transforms anything. A
+        node whose output happened to be called something else produced
+        nothing and failed as a Handler that omitted its own declared output.
+        Found on a decision an Agent wrote with input `approval` and output
+        `result`.
+        """
+
+        act = node("act", inputs=("value",), outputs=("value",))
+        choose = IRNode(
+            "choose", "decision", (port("approval"),), (port("result"),),
+            None, {}, (), None, None,
+        )
+        done = node("done", inputs=("result",), kind="terminal", handler=False)
+        ir = workflow(
+            (act, choose, done),
+            (
+                edge("to_choose", "act", "choose", target_port="approval"),
+                edge(
+                    "finish", "choose", "done",
+                    source_port="result", target_port="result",
+                ),
+            ),
+            entry=("act",), terminals=("done",), result=("choose", "result"),
+        )
+        compiled = compile_workflow(
+            ir,
+            LangGraphHandlerRegistry([
+                binding("act", lambda values, config, context: {"value": "carried"}),
+            ]),
+            checkpointer=InMemorySaver(),
+        )
+
+        completed = compiled.invoke(
+            {"value": "in"}, config={"configurable": {"thread_id": "renamed"}},
+        )
+
+        self.assertEqual("carried", completed["result"])
+        self.assertIn("done", completed["execution_order"])
+
+    def test_an_interrupt_says_which_ports_the_answer_goes_on(self) -> None:
+        """The shape of the answer belongs in the question.
+
+        Without it a caller had to fetch the definition to learn which port to
+        reply on, and a reply on the wrong one was refused as a Handler that
+        returned undeclared outputs — for a node that has none.
+        """
+
+        waiting = IRNode(
+            "waiting", "human", (port("value"),), (port("submission"),),
+            None,
+            {"task_kind": "approval", "participants": ["local"], "quorum": "any"},
+            (), None, None,
+        )
+        done = node("done", inputs=("submission",), kind="terminal", handler=False)
+        ir = workflow(
+            (waiting, done),
+            (edge(
+                "finish", "waiting", "done",
+                source_port="submission", target_port="submission",
+            ),),
+            entry=("waiting",), terminals=("done",),
+            result=("waiting", "submission"),
+        )
+        compiled = compile_workflow(
+            ir, LangGraphHandlerRegistry([]), checkpointer=InMemorySaver(),
+        )
+        config = {"configurable": {"thread_id": "asked"}}
+
+        compiled.invoke({"value": "in"}, config=config)
+        snapshot = compiled.graph.get_state(config)
+        asked = next(
+            item.value for task in snapshot.tasks for item in task.interrupts
+        )
+
+        self.assertEqual(
+            [{"id": "submission", "schema_id": SCHEMA}], asked["output_ports"],
+        )
+        # Answering on the port the question named is enough.
+        completed = compiled.resume(
+            {port["id"]: {"decision": "approve"} for port in asked["output_ports"]},
+            config=config,
+        )
+        self.assertEqual({"decision": "approve"}, completed["result"])
+
     def test_an_any_join_does_not_demand_the_branch_that_lost(self) -> None:
         """The join policy decides how many inputs must be there, not the port.
 
