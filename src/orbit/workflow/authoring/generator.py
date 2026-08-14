@@ -776,6 +776,7 @@ class WorkflowAuthoringService:
             "Never instruct an Agent to keep fixing until every test passes. Repetition requires an explicit back_edge and a bounded loop or rework policy.",
             "Each input port on a non-join node may have at most one incoming non-back edge. A back edge may return to an already-bound input when it has a bounded loop or rework policy.",
             "A condition that reads a member of an action's result must guard it with exists(), and every branch out of a decision must have a default edge whose condition is true. An action's result is an open object: a member you assumed is absent at run time, and the run fails after the Agent has already done its work.",
+            "A node routes to exactly one of its outgoing edges unless it declares route_mode 'parallel'. Any node whose branches are meant to run together — a fan-out into a join — must declare it. Without it only one branch runs, an 'all' join waits for an input that can never arrive, and the run dies there.",
             "When two or more forward branches converge, target an explicit join node: use join mode any for mutually-exclusive alternatives and all for parallel branches, then use one edge from the join to the downstream node.",
             "Use a join node only for real fan-in: it needs at least two incoming non-back edges and exactly one node policy reference to one top-level join policy.",
             "A join's merge_mode determines its real output type: use object_by_edge when its output schema is an object, and array_by_edge only when its output schema is an array. The downstream port must accept that same type.",
@@ -851,6 +852,17 @@ class WorkflowAuthoringService:
                     "id", "kind", "label", "inputs", "outputs", "handler",
                         "config", "policies", "route_mode",
                 ],
+                # Named in `node_fields` and never explained, so a fan-out was
+                # written without it and became a single branch — the join
+                # downstream then waited for an input no run could produce.
+                "route_mode": {
+                    "default": "exclusive",
+                    "meaning": {
+                        "exclusive": "take the first matching outgoing edge only",
+                        "parallel": "take every matching outgoing edge",
+                    },
+                    "required_for": "any node that fans out into a join",
+                },
                 "label": "the step's name as a person reading the flow would say it",
                 "edge_fields": [
                     "id", "from", "to", "condition", "mapping", "route",

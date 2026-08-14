@@ -106,6 +106,92 @@ def _find_cycle(nodes: set[str], outgoing: Mapping[str, list[str]]) -> tuple[str
     return None
 
 
+def _reachable_from(start: str, edges, exclude: str | None = None) -> set[str]:
+    """Nodes a run can arrive at from `start`, ignoring back edges.
+
+    `exclude` drops one edge id, which is how the branches of a fan-out are
+    told apart: each branch is what remains reachable through its own edge.
+    """
+
+    seen: set[str] = {start}
+    queue = [start]
+    while queue:
+        current = queue.pop()
+        for edge in edges:
+            if edge.get("back_edge"):
+                continue
+            if (edge.get("from") or {}).get("node") != current:
+                continue
+            if edge.get("id") == exclude:
+                continue
+            target = (edge.get("to") or {}).get("node")
+            if target is not None and target not in seen:
+                seen.add(target)
+                queue.append(target)
+    return seen
+
+
+def _unsatisfiable_join(join_id: str, edges, node_by_id, node_index):
+    """Ports of an `all` join that no single run can fill together.
+
+    Reported as (message, hint, path). Empty when the join is satisfiable, and
+    deliberately conservative: it accuses only when two ports are fed *solely*
+    from different branches of one exclusive node, which is a contradiction
+    rather than a smell.
+    """
+
+    feeders: dict[str, set[str]] = {}
+    for edge in edges:
+        if (edge.get("to") or {}).get("node") != join_id or edge.get("back_edge"):
+            continue
+        port = (edge.get("to") or {}).get("port")
+        source = (edge.get("from") or {}).get("node")
+        if port is not None and source is not None:
+            feeders.setdefault(port, set()).add(source)
+    if len(feeders) < 2:
+        return []
+
+    findings = []
+    for fan_out_id, fan_out in sorted(node_by_id.items()):
+        if (fan_out.get("route_mode") or "exclusive") != "exclusive":
+            continue
+        outgoing = [
+            edge for edge in edges
+            if (edge.get("from") or {}).get("node") == fan_out_id
+            and not edge.get("back_edge")
+        ]
+        if len(outgoing) < 2:
+            continue
+        # One branch per outgoing edge: what stays reachable through it alone.
+        branches = {
+            edge["id"]: _reachable_from(
+                (edge.get("to") or {}).get("node", ""), edges,
+            ) | {(edge.get("to") or {}).get("node", "")}
+            for edge in outgoing
+        }
+        placed: dict[str, str] = {}
+        for port, sources in feeders.items():
+            owning = {
+                edge_id for edge_id, reach in branches.items()
+                if sources <= reach
+            }
+            if len(owning) == 1:
+                placed[port] = next(iter(owning))
+        by_branch: dict[str, list[str]] = {}
+        for port, edge_id in placed.items():
+            by_branch.setdefault(edge_id, []).append(port)
+        if len(by_branch) > 1:
+            split = ", ".join(sorted(placed))
+            findings.append((
+                f"join {join_id!r} cannot be satisfied: {fan_out_id!r} routes "
+                f"exclusively, so its branches cannot both fill {split}",
+                "declare route_mode 'parallel' on the node that fans out, "
+                "or give the join mode 'any'",
+                ("nodes", node_index[fan_out_id], "route_mode"),
+            ))
+    return findings
+
+
 def analyze_dsl(
     document: ParsedDslDocument,
     handlers: HandlerCatalog,
@@ -731,6 +817,22 @@ def analyze_dsl(
             if len(join_policies) != 1:
                 diagnostics.append(_diagnostic(document, "DSL_JOIN_INVALID", "join node requires exactly one join policy", path + ("policies",)))
             else:
+                # An `all` join needs every input port filled, and an
+                # exclusive node fires exactly one of its outgoing edges. If
+                # two of this join's ports are fed from different branches of
+                # one exclusive fan-out, no single run can fill both — the run
+                # dies at the join, after the Agents upstream have done their
+                # work. The author meant the fan-out to be parallel; saying so
+                # here costs nothing and saying it at run time costs the work.
+                if join_policies[0]["config"].get("mode", "all") in {
+                    "all", "all_successful",
+                }:
+                    for message, hint, where in _unsatisfiable_join(
+                        node_id, edges, node_by_id, node_index,
+                    ):
+                        diagnostics.append(_diagnostic(
+                            document, "DSL_JOIN_INVALID", message, where, hint=hint,
+                        ))
                 merge_mode = join_policies[0]["config"].get(
                     "merge_mode", "array_by_edge"
                 )

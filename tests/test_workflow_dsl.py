@@ -843,3 +843,103 @@ class NodeLabelTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UnsatisfiableJoinTests(unittest.TestCase):
+    """A join no run can fill is a contradiction, not a runtime surprise.
+
+    A node routes to one outgoing edge unless it declares `route_mode:
+    parallel`. An Agent asked for parallel checks wrote the fan-out without
+    it, so only one branch ran and the `all` join downstream waited for an
+    input that could never arrive — the run died there, after the Agent that
+    did run had already done its work. It is visible in the definition, so it
+    is refused in the definition.
+    """
+
+    def document(self, *, route_mode=None):
+        port = {"id": "prompt", "schema_id": "example://request/1.0"}
+        result = {"id": "result", "schema_id": "example://request/1.0"}
+
+        def action(node_id):
+            return {
+                "id": node_id, "kind": "action",
+                "inputs": [dict(port)], "outputs": [dict(result)],
+                "handler": {"name": "collect", "version": "1.2.0"},
+            }
+
+        fan = action("fan")
+        if route_mode is not None:
+            fan["route_mode"] = route_mode
+        return {
+            "dsl_version": "1.3",
+            "metadata": {"id": "split", "name": "Split"},
+            "nodes": [
+                fan, action("left"), action("right"),
+                {
+                    "id": "gather", "kind": "join",
+                    "inputs": [
+                        {"id": "from_left", "schema_id": "example://request/1.0"},
+                        {"id": "from_right", "schema_id": "example://request/1.0"},
+                    ],
+                    "outputs": [dict(result)],
+                    "policies": ["all_of_them"],
+                },
+                {"id": "done", "kind": "terminal", "inputs": [dict(result)]},
+            ],
+            "edges": [
+                {"id": "to_left", "from": {"node": "fan", "port": "result"},
+                 "to": {"node": "left", "port": "prompt"}},
+                {"id": "to_right", "from": {"node": "fan", "port": "result"},
+                 "to": {"node": "right", "port": "prompt"}},
+                {"id": "left_in", "from": {"node": "left", "port": "result"},
+                 "to": {"node": "gather", "port": "from_left"}},
+                {"id": "right_in", "from": {"node": "right", "port": "result"},
+                 "to": {"node": "gather", "port": "from_right"}},
+                {"id": "finish", "from": {"node": "gather", "port": "result"},
+                 "to": {"node": "done", "port": "result"}},
+            ],
+            "entry": ["fan"], "terminals": ["done"],
+            "result": {"node": "gather", "port": "result"},
+            "policies": [{
+                "id": "all_of_them", "kind": "join",
+                "config": {"mode": "all", "merge_mode": "object_by_edge"},
+            }],
+        }
+
+    def setUp(self) -> None:
+        self.schemas = InMemorySchemaCatalog(
+            {"example://request/1.0": {"type": "object"}}
+        )
+        self.handlers = InMemoryHandlerCatalog([
+            HandlerManifest(
+                name="collect", version="1.2.0", node_kinds=("action",),
+                inputs={"prompt": "example://request/1.0"},
+                outputs={"result": "example://request/1.0"},
+                config_schema={"type": "object", "additionalProperties": False},
+                execution_safety=ExecutionSafety.REPLAY_SAFE,
+                resource_profile=ResourceProfile(0, 0, 0, 60, 0, "free"),
+                result_schema_id="example://request/1.0",
+            )
+        ])
+
+    def compile(self, document):
+        return compile_source(
+            json.dumps(document), self.handlers, self.schemas,
+            source_format="json",
+        )
+
+    def test_an_exclusive_fan_out_into_an_all_join_is_refused(self) -> None:
+        with self.assertRaises(DiagnosticError) as caught:
+            self.compile(self.document())
+        codes = {item.code for item in caught.exception.diagnostics}
+        self.assertIn("DSL_JOIN_INVALID", codes)
+        message = " ".join(item.message for item in caught.exception.diagnostics)
+        self.assertIn("routes exclusively", message)
+        self.assertIn("from_left", message)
+        self.assertIn("from_right", message)
+
+    def test_the_same_graph_is_accepted_when_the_fan_out_is_parallel(self) -> None:
+        """The refusal is about the contradiction, not about the shape."""
+
+        compiled = self.compile(self.document(route_mode="parallel"))
+        self.assertEqual("workflow:split", compiled.ir.workflow_id)
