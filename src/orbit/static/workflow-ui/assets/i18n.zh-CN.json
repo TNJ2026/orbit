@@ -27,6 +27,7 @@
   "artifacts.detail": "Artifacts详情",
   "artifacts.download": "下载",
   "artifacts.goal": "目标",
+  "artifacts.node": "步骤",
   "artifacts.idCopied": "Artifact 标识已复制",
   "artifacts.notPreviewable": "该 Artifact 无法在此展示。",
   "artifacts.size": "{size} 字节",

@@ -56,9 +56,18 @@
   --radius: 4px;
   --space-2: 8px;
   --space-3: 12px;
-  --font: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --font-display: "Hanken Grotesk", Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --mono: "JetBrains Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  /* The reader's own faces. `ui-sans-serif` and `ui-monospace` resolve to
+     whatever the platform considers its interface type — SF on Apple, Segoe
+     on Windows, the distribution's choice on Linux — and the names after them
+     are for browsers that do not know those keywords. A locale's script is
+     the system's business too: a Chinese desktop resolves this to its own UI
+     face without being told to. */
+  --font: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  /* Headings had a face of their own and no longer do. The token stays so
+     the distinction survives in one place: everything that wants display
+     type still says so, and giving it back a face is one line here. */
+  --font-display: var(--font);
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 }
 
 /* A cool-slate light theme that keeps the same layering discipline: the page

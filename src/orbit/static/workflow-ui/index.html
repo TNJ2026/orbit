@@ -5,12 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Orbit Runtime</title>
   <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
-  <!-- DESIGN.md type system: Hanken Grotesk (headlines), Inter (body),
-       JetBrains Mono (technical labels). display=swap keeps the fallback
-       stack rendering instantly, so an offline local runtime never blocks. -->
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&display=swap">
+  <!-- The type system is the reader's own. A Runtime that binds to loopback
+       reached a font CDN on every page load: an offline machine got the
+       fallback stack anyway, a machine behind a proxy got a hang before it,
+       and the request told a third party when this tool was opened. Nothing
+       here is loaded from anywhere but this server. -->
   <link rel="stylesheet" href="assets/app.css">
 </head>
 <body>

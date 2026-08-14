@@ -736,23 +736,21 @@ export function createViews(context) {
           }) }),
         ]),
         el("strong", { class: "artifact-name", text: name }),
-        el("span", { class: "artifact-origin" }, [
+        // What produced it, which is the step. The card is always read inside
+        // the run it belongs to, so repeating the run here said nothing — and
+        // said it under the word "Goal", against an id.
+        item.goal ? el("span", { class: "artifact-origin" }, [
           el("span", { class: "artifact-origin-label muted", text: i18n.t("artifacts.goal") }),
           // One line, clipped by CSS; the full title stays reachable on hover.
           el("span", {
-            class: "artifact-origin-value", text: item.goal || item.run_id,
-            title: item.goal || item.run_id,
+            class: "artifact-origin-value", text: item.goal, title: item.goal,
           }),
-        ]),
-        // The node that produced it. The engine's projection carries the node
-        // rather than the workflow — an Artifact is always read next to the
-        // run it came from, which already names the workflow.
-        item.node_id || item.workflow_id ? el("span", { class: "artifact-origin" }, [
-          el("span", { class: "artifact-origin-label muted", text: i18n.t("artifacts.workflow") }),
+        ]) : null,
+        item.node_id ? el("span", { class: "artifact-origin" }, [
+          el("span", { class: "artifact-origin-label muted", text: i18n.t("artifacts.node") }),
           el("span", {
             class: "artifact-origin-value mono",
-            title: item.node_id || item.workflow_id,
-            text: (item.node_id || item.workflow_id).replace(/^workflow:/, ""),
+            title: item.node_id, text: item.node_id,
           }),
         ]) : null,
         // Media type, producer and Artifact id are addressing, not identity:

@@ -27,6 +27,7 @@
   "artifacts.detail": "Artifact detail",
   "artifacts.download": "Download",
   "artifacts.goal": "Goal",
+  "artifacts.node": "Step",
   "artifacts.idCopied": "Artifact identifier copied",
   "artifacts.notPreviewable": "This Artifact cannot be shown here.",
   "artifacts.size": "{size} bytes",

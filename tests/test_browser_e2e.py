@@ -464,15 +464,18 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
             requested.append(request.url) if "/output" in request.url else None
         ))
         panel = page.locator(".simplified-step-output").first
+        page.wait_for_timeout(200)
         panel.wait_for()
         # Closed: the largest thing on the page has not been fetched.
         self.assertEqual([], requested)
 
-        with page.expect_request("**/output*"):
+        # Waiting on the response rather than on the text: this run prints
+        # nothing, so the panel's settled message is the same one it started
+        # with and no wait on it could tell the two apart.
+        with page.expect_response("**/output*") as answered:
             panel.locator("summary").click()
-        self.assertTrue(requested)
-        # This run's Handler is a transform, which prints nothing — the panel
-        # says so rather than staying blank.
+        self.assertEqual(200, answered.value.status)
+        # A Handler that printed nothing says so rather than staying blank.
         self.assertIn(
             "Nothing printed", page.inner_text(".simplified-step-output-body"),
         )

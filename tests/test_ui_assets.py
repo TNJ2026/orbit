@@ -273,3 +273,27 @@ class HandlerConsoleRenderingTests(unittest.TestCase):
         self.assertIn(
             "/api/v1/langgraph-runs/${encodeURIComponent(runId)}/output", api_js,
         )
+
+
+class SelfContainedAssetTests(unittest.TestCase):
+    def test_the_ui_loads_nothing_from_a_third_party(self) -> None:
+        """A Runtime that binds to loopback should not phone anywhere.
+
+        It used to fetch its typefaces from a font CDN on every page load,
+        which made an offline machine fall back anyway, gave a proxied one a
+        pause first, and told a third party when this tool was opened.
+        """
+
+        page = (ASSETS.parent / "index.html").read_text(encoding="utf-8")
+        css = stylesheet_source()
+        for source in (page, css):
+            for host in ("//fonts.googleapis.com", "//fonts.gstatic.com", "http://", "https://"):
+                self.assertNotIn(host, source)
+
+    def test_type_is_asked_of_the_platform(self) -> None:
+        css = stylesheet_source()
+        self.assertIn("--font: ui-sans-serif, system-ui", css)
+        self.assertIn("--mono: ui-monospace", css)
+        # The display token survives the face it used to name, so a heading
+        # still says it is one and can be given a face again in one place.
+        self.assertIn("--font-display: var(--font)", css)
