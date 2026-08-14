@@ -27,6 +27,13 @@ class LangGraphRunConflict(ValueError):
     pass
 
 
+# A goal is display text, not an input. It is bounded because it is stored
+# and shown, and refused rather than truncated: a person who pasted a page
+# into the box should be told, not handed a run labelled with the first
+# paragraph of what they meant.
+MAX_GOAL_LENGTH = 4000
+
+
 @dataclass(frozen=True)
 class LangGraphRun:
     run_id: str
@@ -41,6 +48,8 @@ class LangGraphRun:
     updated_at: str
     owner_actor: str
     template_id: str | None = None
+    goal: str = ""
+    artifact_count: int = 0
 
 
 EVENT_LOG_DDL = """
@@ -77,6 +86,15 @@ def ensure_event_log(connection) -> None:
             connection.execute(
                 f"ALTER TABLE langgraph_run_events ADD COLUMN {column} TEXT"
             )
+
+
+def _goal(value: str) -> str:
+    """A goal is text a person typed; this is all that is asked of it."""
+
+    goal = "" if value is None else str(value).strip()
+    if len(goal) > MAX_GOAL_LENGTH:
+        raise ValueError(f"goal must be at most {MAX_GOAL_LENGTH} characters")
+    return goal
 
 
 def append_event(
@@ -188,7 +206,8 @@ class LangGraphWorkflowService:
                     interrupts_json TEXT NOT NULL DEFAULT '[]',
                     error TEXT,
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    goal TEXT NOT NULL DEFAULT ''
                 );
                 CREATE TABLE IF NOT EXISTS langgraph_run_receipts (
                     idempotency_key TEXT PRIMARY KEY,
@@ -215,6 +234,11 @@ class LangGraphWorkflowService:
                 row["name"]
                 for row in connection.execute("PRAGMA table_info(langgraph_runs)")
             }
+            if "goal" not in columns:
+                connection.execute(
+                    "ALTER TABLE langgraph_runs ADD COLUMN goal TEXT NOT NULL"
+                    " DEFAULT ''"
+                )
             if "input_json" not in columns:
                 connection.execute(
                     "ALTER TABLE langgraph_runs ADD COLUMN input_json"
@@ -296,17 +320,22 @@ class LangGraphWorkflowService:
         idempotency_key: str,
         workflow_version: int | None = None,
         actor: str = "system:langgraph",
+        goal: str = "",
     ) -> LangGraphRun:
         if not idempotency_key.strip():
             raise ValueError("idempotency_key is required")
         if not actor.strip():
             raise ValueError("actor is required")
+        goal = _goal(goal)
         record = self._workflow(workflow_id, workflow_version, starting=True)
         request_hash = definition_hash({
             "workflow_id": workflow_id,
             "workflow_version": record.version.value,
             "inputs": inputs,
             "actor": actor,
+            # In the hash, so the same key with a different goal is a conflict
+            # rather than the first run handed back under the wrong label.
+            "goal": goal,
         }).value
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -327,11 +356,11 @@ class LangGraphWorkflowService:
             connection.execute(
                 "INSERT INTO langgraph_runs("
                 "run_id,workflow_id,workflow_version,status,revision,input_json,"
-                "result_json,error,created_at,updated_at,owner_actor)"
-                " VALUES (?,?,?,'running',0,?,NULL,NULL,?,?,?)",
+                "result_json,error,created_at,updated_at,owner_actor,goal)"
+                " VALUES (?,?,?,'running',0,?,NULL,NULL,?,?,?,?)",
                 (
                     run_id, workflow_id, record.version.value,
-                    canonical_json(inputs), now, now, actor,
+                    canonical_json(inputs), now, now, actor, goal,
                 ),
             )
             connection.execute(
@@ -351,9 +380,11 @@ class LangGraphWorkflowService:
         template_id: str,
         idempotency_key: str,
         actor: str = "system:langgraph",
+        goal: str = "",
     ) -> LangGraphRun:
         """Start an immutable per-Run graph without publishing a Workflow version."""
 
+        goal = _goal(goal)
         if not idempotency_key.strip():
             raise ValueError("idempotency_key is required")
         if not actor.strip():
@@ -363,7 +394,7 @@ class LangGraphWorkflowService:
         compile_workflow(ir, self.handlers)
         request_hash = definition_hash({
             "template_id": template_id, "graph": snapshot,
-            "inputs": inputs, "actor": actor,
+            "inputs": inputs, "actor": actor, "goal": goal,
         }).value
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -384,10 +415,11 @@ class LangGraphWorkflowService:
                 "INSERT INTO langgraph_runs("
                 "run_id,workflow_id,workflow_version,status,revision,input_json,"
                 "result_json,error,created_at,updated_at,owner_actor,template_id,"
-                "graph_snapshot_json) VALUES (?,?,0,'running',0,?,NULL,NULL,?,?,?,?,?)",
+                "graph_snapshot_json,goal)"
+                " VALUES (?,?,0,'running',0,?,NULL,NULL,?,?,?,?,?,?)",
                 (
                     run_id, workflow_id, canonical_json(inputs), now, now, actor,
-                    template_id, canonical_json(snapshot),
+                    template_id, canonical_json(snapshot), goal,
                 ),
             )
             connection.execute(
@@ -900,9 +932,14 @@ class LangGraphWorkflowService:
                 })
         return tuple(reversed(steps))
 
+    def _artifacts_are_here(self) -> bool:
+        database = getattr(self.artifacts, "database", None)
+        return database is not None and Path(database) == self.run_db_path
+
     def list_runs(
         self, *, status: str | None = None, limit: int = 100,
         actor: str | None = None, after: tuple[str, str] | None = None,
+        query: str = "",
     ) -> tuple[LangGraphRun, ...]:
         if isinstance(limit, bool) or not 1 <= limit <= 500:
             raise ValueError("limit must be between 1 and 500")
@@ -916,6 +953,17 @@ class LangGraphWorkflowService:
             clauses.append("status=?"); params.append(status)
         if actor is not None:
             clauses.append("owner_actor=?"); params.append(actor)
+        if query.strip():
+            # What a person can see on the row: the sentence they typed, the
+            # Workflow it ran, and the id they may have copied from elsewhere.
+            clauses.append(
+                "(goal LIKE ? ESCAPE '\\' OR workflow_id LIKE ? ESCAPE '\\'"
+                " OR run_id LIKE ? ESCAPE '\\')"
+            )
+            pattern = "%" + query.strip().replace(
+                "\\", "\\\\"
+            ).replace("%", "\\%").replace("_", "\\_") + "%"
+            params.extend([pattern, pattern, pattern])
         if after is not None:
             # Keyset, not offset: the list is ordered newest first and a run
             # started while somebody is paging must not shift the page under
@@ -924,9 +972,19 @@ class LangGraphWorkflowService:
             params.extend([after[0], after[0], after[1]])
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         with self._connect() as connection:
+            # Counted here so a list of fifty is one query rather than fifty,
+            # and only when the Artifact store is this same database: it is
+            # allowed to be another one, and a subquery would then be reading
+            # a table that is not there or not the right one.
+            count = (
+                "(SELECT COUNT(*) FROM langgraph_artifacts a"
+                " WHERE a.run_id = r.run_id AND a.status = 'committed')"
+                if self._artifacts_are_here() else "0"
+            )
             rows = connection.execute(
-                "SELECT * FROM langgraph_runs" + where
-                + " ORDER BY created_at DESC,run_id LIMIT ?",
+                f"SELECT r.*, {count} AS artifact_count FROM langgraph_runs r"
+                + where
+                + " ORDER BY r.created_at DESC,r.run_id LIMIT ?",
                 (*params, limit),
             ).fetchall()
         return tuple(self._record(row) for row in rows)
@@ -1329,4 +1387,6 @@ class LangGraphWorkflowService:
             row["updated_at"],
             row["owner_actor"],
             row["template_id"] if "template_id" in row.keys() else None,
+            (row["goal"] or "") if "goal" in row.keys() else "",
+            int(row["artifact_count"]) if "artifact_count" in row.keys() else 0,
         )

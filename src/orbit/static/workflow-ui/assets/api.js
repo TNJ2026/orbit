@@ -108,10 +108,11 @@ export class Api {
     }
   }
 
-  langGraphRuns({ limit = 25, status = "", cursor = "" } = {}) {
+  langGraphRuns({ limit = 25, status = "", cursor = "", q = "" } = {}) {
     const params = new URLSearchParams({ limit: String(limit) });
     if (status) params.set("status", status);
     if (cursor) params.set("cursor", cursor);
+    if (q.trim()) params.set("q", q.trim());
     return this.get(`/api/v1/langgraph-runs?${params}`);
   }
 

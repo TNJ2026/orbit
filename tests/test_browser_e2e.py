@@ -141,7 +141,7 @@ class BrowserE2ETestCase(unittest.TestCase):
     ) -> str:
         return self.engine().start(
             workflow_id, {"value": 1},
-            idempotency_key=key, actor=LOCAL_ACTOR,
+            idempotency_key=key, actor=LOCAL_ACTOR, goal=goal,
         ).run_id
 
     def cancel_goal(self, run_id: str) -> None:
@@ -450,7 +450,10 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
         self.assertEqual(0, page.locator(".simplified-workspace-composer").count())
         self.assertEqual(0, page.get_by_role("button", name="Run again").count())
         self.assertTrue(page.locator(".simplified-run-hero").is_visible())
-        self.assertIn("workflow:linear", page.inner_text(".simplified-run-hero"))
+        # Named by the goal, with the Workflow that ran it still on the page.
+        hero = page.inner_text(".simplified-run-hero")
+        self.assertIn("Prepare a concise report", hero)
+        self.assertIn("workflow:linear", hero)
 
     def test_the_console_is_closed_until_asked_for(self) -> None:
         """The output panel exists on a run and fetches only when opened."""
@@ -514,10 +517,7 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
         page = self.open("en-US", "/ui/#/goals")
         page.wait_for_selector(".history-goal-row")
         rows = page.locator(".history-goal-row")
-        # The engine stores a run's inputs, not the sentence a person typed,
-        # so a finished goal is identified by its Workflow and its time.
-        self.assertIn(finished, rows.first.inner_text())
-        self.assertIn("Linear", rows.first.inner_text())
+        self.assertIn("Summarise the quarter", rows.first.inner_text())
         self.assertIn("Artifacts", rows.first.inner_text())
         self.assertTrue(page.locator(".history-day-heading").first.is_visible())
         self.assertEqual(4, page.locator(".history-status-filter").count())

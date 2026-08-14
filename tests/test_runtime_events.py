@@ -422,6 +422,51 @@ class NodeEventTests(unittest.TestCase):
         self.assertEqual("langgraph_run:r", node_event["aggregate_id"])
 
 
+class RunGoalTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(self.temp.cleanup)
+        path = Path(self.temp.name) / "runtime.db"
+        publish_linear_workflow(path)
+        self.engine = build_service(
+            path, [transform_registration()],
+            state_directory=Path(self.temp.name) / "langgraph",
+        )
+
+    def test_one_key_with_two_goals_is_a_conflict(self) -> None:
+        """Otherwise the second caller is handed the first run, mislabelled.
+
+        The goal is part of what a start *was*, so it belongs in the request
+        hash beside the inputs — a replay has to be the same request. `/api/v1`
+        also guards the whole body by key, but MCP and an embedder reach this
+        service directly.
+        """
+
+        from orbit.workflow.langgraph_runtime.service import LangGraphRunConflict
+
+        self.engine.start(
+            "workflow:linear", {"value": 1}, idempotency_key="same",
+            actor="local", goal="Summarise the quarter",
+        )
+        with self.assertRaises(LangGraphRunConflict):
+            self.engine.start(
+                "workflow:linear", {"value": 1}, idempotency_key="same",
+                actor="local", goal="Something else",
+            )
+
+    def test_the_same_request_replays_to_the_same_run(self) -> None:
+        first = self.engine.start(
+            "workflow:linear", {"value": 1}, idempotency_key="same",
+            actor="local", goal="Summarise the quarter",
+        )
+        again = self.engine.start(
+            "workflow:linear", {"value": 1}, idempotency_key="same",
+            actor="local", goal="Summarise the quarter",
+        )
+        self.assertEqual(first.run_id, again.run_id)
+        self.assertEqual("Summarise the quarter", again.goal)
+
+
 class CompositionTests(unittest.TestCase):
     def test_the_socket_is_mounted_with_the_engine_behind_it(self) -> None:
         from orbit.web.app import create_app

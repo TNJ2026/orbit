@@ -150,6 +150,10 @@ class SingleAgentTemplateService:
         return self.langgraph.start_snapshot(
             run_workflow_id, ir, {"prompt": {"goal": goal}},
             template_id=template_id, idempotency_key=idempotency_key, actor=actor,
+            # Bound into the graph's input above and kept beside the run here:
+            # the first is what the workflow reads, the second is what a person
+            # reads on a list of their own goals.
+            goal=goal,
         )
 
     def publish(self, template_id: str, name: str, *, actor: str):

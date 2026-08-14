@@ -116,6 +116,9 @@ export function createViews(context) {
     }));
     const goal = el("textarea", {
       id: "simplifiedGoal", required: "required",
+      // The server refuses beyond this; the box says so first, so a long
+      // paste is stopped where it is typed rather than after a round trip.
+      maxlength: "4000",
       disabled: locked ? "disabled" : null,
       placeholder: i18n.t("simplified.start.placeholder"),
       text: simplifiedComposerState.goal,
@@ -306,8 +309,12 @@ export function createViews(context) {
     root.append(el("section", { class: "panel simplified-run-hero" }, [
       el("div", { class: "split" }, [
         el("div", {}, [
-          el("h2", { text: run.workflow_id }),
-          el("p", { class: "mono muted", text: run.run_id }),
+          // Named by what was asked for. The Workflow it ran stays beside the
+          // id: the title answers "what was this", the line under it answers
+          // "what ran it", and a run with no goal falls back to the id alone.
+          el("h2", { text: runName(run) }),
+          el("p", { class: "mono muted", text: run.goal
+            ? `${run.workflow_id} · ${run.run_id}` : run.run_id }),
         ]),
         pill(run.status),
       ]),
@@ -566,7 +573,9 @@ export function createViews(context) {
     const requestedStatus = goalFilters.status === "succeeded"
       ? "completed" : goalFilters.status;
     const [response, catalogResponse] = await Promise.all([
-      api.langGraphRuns({ limit: 25, status: requestedStatus }),
+      api.langGraphRuns({
+        limit: 25, status: requestedStatus, q: goalFilters.q,
+      }),
       api.workflowCatalog(),
     ]);
     const workflowNames = new Map(
@@ -601,6 +610,7 @@ export function createViews(context) {
         try {
           const next = await api.langGraphRuns({
             cursor: nextCursor, limit: 25, status: requestedStatus,
+            q: goalFilters.q,
           });
           appendHistoryRuns(list, next.data.runs, workflowNames);
           loadedCount += next.data.runs.length;

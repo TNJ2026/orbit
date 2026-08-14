@@ -88,6 +88,10 @@ def seed_visual_artifact(engine) -> str:
     started = engine.start(
         "workflow:linear", {"value": 7},
         idempotency_key="visual-artifact", actor="local",
+        # What a person would have typed. The history row and the run header
+        # are named by it, so a baseline without one shows an id where every
+        # real run shows a sentence.
+        goal="Publish the quarterly summary",
     ).run_id
     # The engine mints a random run id, and the page prints it. A baseline
     # cannot be stable while a uuid is on screen, so the seeded run is given

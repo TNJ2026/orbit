@@ -42,6 +42,13 @@ def _dto(run, *, can_write: bool) -> dict[str, Any]:
         })
     return {
         "run_id": run.run_id,
+        # What the person asked for, when they said it in words. The catalog
+        # binds it into an input as well, per workflow; this is the copy that
+        # is theirs rather than the graph's.
+        "goal": run.goal,
+        # Zero for a run read on its own; the list counts them in one query
+        # rather than making the client ask per row.
+        "artifact_count": run.artifact_count,
         "workflow_id": run.workflow_id,
         "workflow_version": run.workflow_version,
         "template_id": run.template_id,
@@ -151,7 +158,7 @@ def build_routes(ctx, service, template_service=None) -> list[Route]:
         if isinstance(actor, JSONResponse):
             return actor
         try:
-            unknown = set(request.query_params) - {"limit", "status", "cursor"}
+            unknown = set(request.query_params) - {"limit", "status", "cursor", "q"}
             if unknown:
                 raise ValueError(f"unknown query parameter: {sorted(unknown)[0]}")
             limit = page_size(request.query_params.get("limit"))
@@ -163,6 +170,7 @@ def build_routes(ctx, service, template_service=None) -> list[Route]:
                 after=(
                     (cursor["created_at"], cursor["run_id"]) if cursor else None
                 ),
+                query=request.query_params.get("q") or "",
             )
         except CursorError as exc:
             return error("invalid_cursor", str(exc))
@@ -271,6 +279,7 @@ def build_routes(ctx, service, template_service=None) -> list[Route]:
                     workflow_version=None if version is None else int(version),
                     idempotency_key=key,
                     actor=actor,
+                    goal=str(body.get("goal") or ""),
                 )
             except LookupError as exc:
                 raise ValueError(str(exc)) from None

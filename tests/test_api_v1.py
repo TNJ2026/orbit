@@ -1979,6 +1979,96 @@ class OperationsReadTests(ApiTestCase):
             self.assertTrue(changed["changed"])
 
 
+class RunGoalTests(ApiTestCase):
+    """The sentence a person typed, kept beside the run it started."""
+
+    def start(self, client, key: str, **extra):
+        return client.post(
+            "/api/v1/langgraph-runs", actor="author", key=key,
+            body={
+                "workflow_id": "workflow:linear", "input": {"value": 1},
+                **extra,
+            },
+        )
+
+    def test_a_goal_survives_the_start_and_comes_back_on_the_run(self) -> None:
+        with AsgiHarness(self.app) as client:
+            started = self.start(client, "goal-1", goal="Summarise the quarter")
+            self.assertEqual(200, started.status_code, started.text)
+            run = started.json()["data"]["run"]
+            self.assertEqual("Summarise the quarter", run["goal"])
+
+            detail = client.get(
+                f"/api/v1/langgraph-runs/{run['run_id']}", actor="author",
+            )
+            self.assertEqual("Summarise the quarter", detail.json()["data"]["goal"])
+            listed = client.get("/api/v1/langgraph-runs", actor="author")
+            self.assertEqual(
+                ["Summarise the quarter"],
+                [item["goal"] for item in listed.json()["data"]["runs"]],
+            )
+
+    def test_a_run_started_without_one_reads_as_empty_not_absent(self) -> None:
+        """The field is always there, so a client never branches on its absence."""
+
+        with AsgiHarness(self.app) as client:
+            started = self.start(client, "goal-none")
+            self.assertEqual("", started.json()["data"]["run"]["goal"])
+
+    def test_one_key_with_two_goals_is_refused_at_the_command_boundary(self) -> None:
+        """Over HTTP the idempotency key guards the whole body, goal included."""
+
+        with AsgiHarness(self.app) as client:
+            first = self.start(client, "goal-same", goal="Summarise the quarter")
+            self.assertEqual(200, first.status_code, first.text)
+            again = self.start(client, "goal-same", goal="Something else")
+            self.assertEqual(409, again.status_code, again.text)
+
+    def test_the_history_row_is_told_how_many_artifacts_a_run_produced(self) -> None:
+        """The row shows a count, and it used to be absent from the projection.
+
+        A field the client reads and the server never sends renders as zero,
+        so every finished goal reported "No artifacts" whatever it had made.
+        """
+
+        with AsgiHarness(self.app) as client:
+            started = self.start(client, "goal-artifacts", goal="Make something")
+            run_id = started.json()["data"]["run"]["run_id"]
+            listed = client.get("/api/v1/langgraph-runs", actor="author")
+            row = next(
+                item for item in listed.json()["data"]["runs"]
+                if item["run_id"] == run_id
+            )
+            self.assertIn("artifact_count", row)
+            self.assertEqual(0, row["artifact_count"])
+
+    def test_history_search_reaches_the_engine(self) -> None:
+        """The box collected a query the list route had no parameter for."""
+
+        with AsgiHarness(self.app) as client:
+            self.start(client, "goal-search-1", goal="Summarise the quarter")
+            self.start(client, "goal-search-2", goal="Draft the release notes")
+            found = client.get(
+                "/api/v1/langgraph-runs?q=quarter", actor="author",
+            )
+            self.assertEqual(200, found.status_code, found.text)
+            self.assertEqual(
+                ["Summarise the quarter"],
+                [item["goal"] for item in found.json()["data"]["runs"]],
+            )
+            # A wildcard is a character a person typed, not a pattern.
+            empty = client.get("/api/v1/langgraph-runs?q=%25", actor="author")
+            self.assertEqual([], empty.json()["data"]["runs"])
+
+    def test_a_goal_too_long_to_store_is_refused_not_trimmed(self) -> None:
+        """A person who pasted a page should be told, not quietly abridged."""
+
+        with AsgiHarness(self.app) as client:
+            response = self.start(client, "goal-long", goal="x" * 4001)
+            self.assertEqual(409, response.status_code, response.text)
+            self.assertIn("4000", response.json()["error"]["message"])
+
+
 class HandlerConsoleApiTests(ApiTestCase):
     """Reading what a run's Handlers printed."""
 
