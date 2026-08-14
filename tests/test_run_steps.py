@@ -8,8 +8,10 @@ moments it would be easiest to get wrong.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 import tempfile
+import time
 import unittest
 
 from orbit.workflow.domain.definitions import (
@@ -289,6 +291,146 @@ class FailedStepTests(unittest.TestCase):
         self.assertEqual("failed", steps["tool"]["status"])
         self.assertEqual("not_reached", steps["done"]["status"])
 
+
+class ProgressIsObservableTests(unittest.TestCase):
+    """Steps are only worth deriving if a page can see them arrive.
+
+    Two things had to be true for that and neither was. The run executed on
+    the event loop, so nothing was served while it worked; and the change
+    marker was made of the run row alone, which is written once at the start
+    and once at the end — so a page watching a long run polled a frozen
+    cursor until it was over.
+    """
+
+    def slow_steps(self, count: int, seconds: float):
+        from orbit.workflow.handlers.tools import ToolResult
+
+        class Adapter:
+            def execute(self, request, context):
+                time.sleep(seconds)
+                return ToolResult({"value": 1})
+
+            def cancel(self, execution_ref, context):
+                return None
+
+            def recover(self, recovery_ref, context):
+                return None
+
+        registration = engine_tests.LangGraphProductionWiringTests(
+            "run"
+        ).tool_registration(Adapter())
+        manifest = registration.manifest
+        nodes = tuple(
+            IRNode(
+                f"step{index}", "action",
+                (engine_tests.port("value"),), (engine_tests.port("value"),),
+                IRHandlerRef(manifest.name, manifest.version, manifest.fingerprint),
+                {"tool_name": "example.read", "tool_version": "1.0.0"}, (), None,
+            )
+            for index in range(count)
+        )
+        terminal = engine_tests.node(
+            "done", inputs=("value",), kind="terminal", handler=False,
+        )
+        edges = tuple(
+            engine_tests.edge(f"e{index}", f"step{index}", f"step{index + 1}")
+            for index in range(count - 1)
+        ) + (engine_tests.edge("last", f"step{count - 1}", "done"),)
+        ir = engine_tests.workflow(
+            (*nodes, terminal), edges,
+            entry=("step0",), terminals=("done",),
+            result=(f"step{count - 1}", "value"),
+        )
+        return registration, ir
+
+    def test_a_watcher_sees_the_run_partly_done_rather_than_only_finished(self) -> None:
+        """The property the marker exists for, asserted on what a page reads.
+
+        Counting cursor moves would pass without the change: the run row is
+        written at the start and at the end, so a marker made of it alone
+        already moves twice. What it cannot do is move *between* them, and
+        that is what a watcher polling the steps of a working run sees.
+        """
+
+        from orbit.web.api_v1 import (
+            Authorizer, OPS_READ_SCOPE, READ_SCOPE, WRITE_SCOPE,
+        )
+        from orbit.web.app import create_app
+        from tests.test_web_composition import AsgiHarness
+
+        temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        registration, ir = self.slow_steps(3, 0.4)
+        SQLiteWorkflowVersionStore(root / "runtime.db").publish(
+            CompiledWorkflow(ir, definition_hash(ir), "test", "sha256:" + "c" * 64),
+            expected_latest_version=0, source_format="json",
+            source_text="{}", actor="test", dsl_version="1.3",
+        )
+        app = create_app(
+            root / "runtime.db",
+            handlers=[registration],
+            schemas={"schema://object/1.0": {"type": "object"},
+                     engine_tests.SCHEMA: {"type": "object"}},
+            poll_seconds=0.01,
+            authenticator=lambda request: "author",
+            authorizer=Authorizer(
+                lambda _actor: [READ_SCOPE, WRITE_SCOPE, OPS_READ_SCOPE]
+            ),
+            langgraph_state_directory=root / "langgraph",
+        )
+        running = {"value": True}
+
+        with AsgiHarness(app) as client:
+            async def watch():
+                """A page that did not start the run, reading where it is.
+
+                It finds the run by listing, because the row is written before
+                execution begins — the caller that started it is still waiting
+                for its own POST and has no id yet to watch by.
+                """
+
+                seen = []
+                while running["value"]:
+                    await asyncio.sleep(0.1)
+                    listed = (await client.arequest(
+                        "GET", "/api/v1/langgraph-runs", actor="author",
+                    )).json()["data"]["runs"]
+                    if not listed:
+                        continue
+                    steps = (await client.arequest(
+                        "GET",
+                        f"/api/v1/langgraph-runs/{listed[0]['run_id']}/steps",
+                        actor="author",
+                    )).json()["data"]["steps"]
+                    seen.append(tuple(step["status"] for step in steps))
+                return seen
+
+            async def scenario():
+                watcher = asyncio.ensure_future(watch())
+                await asyncio.sleep(0.1)
+                try:
+                    return await client.arequest(
+                        "POST", "/api/v1/langgraph-runs", actor="author",
+                        headers={"idempotency-key": "progress-1"},
+                        body={"workflow_id": ir.workflow_id, "input": {"value": 1}},
+                    ), watcher
+                finally:
+                    running["value"] = False
+
+            started, watcher = client.gather(scenario())[0]
+            seen = client.gather(watcher)[0]
+
+        self.assertEqual(200, started.status_code, started.text)
+        self.assertEqual("completed", started.json()["data"]["run"]["status"])
+        partly = [
+            statuses for statuses in seen
+            if "succeeded" in statuses and "not_reached" in statuses
+        ]
+        self.assertTrue(
+            partly,
+            f"never saw the run partly done; readings were {sorted(set(seen))}",
+        )
 
 if __name__ == "__main__":
     unittest.main()

@@ -167,10 +167,18 @@ class ApiContext:
     def change_marker(self) -> Mapping[str, Any]:
         """A value that changes exactly when something a client polls changed.
 
-        Audit position covers authoring and drafts; the engine's own run clock
-        covers execution. It used to read the job and timer tables of the
-        engine that has since been deleted, which froze the marker and made
-        every poll answer "nothing changed".
+        Three sources, because a run changes in three ways a client cares
+        about. Audit position covers authoring and drafts. The engine's run
+        clock moves when a run settles. The engine's event position moves
+        while it is still working — a run row is written once at the start and
+        once at the end, so a marker made of those two alone said nothing at
+        all between them, and a page watching a long run saw a frozen cursor
+        until it was over.
+
+        Node events are recorded for Handlers with an attempt journal, so what
+        this makes visible is the beginning and end of each external step —
+        which is the granularity worth polling for, and the only one where the
+        wait is long enough to need it.
         """
 
         with connect_workflow_database(self.path) as connection:
@@ -179,9 +187,11 @@ class ApiContext:
             ).fetchone()[0]
         source = getattr(self.langgraph_service, "last_change", None)
         engine_updated = "" if source is None else (source() or "")
+        events = getattr(self.langgraph_service, "events_head", None)
         return {
             "audit_position": int(audit_position),
             "engine_updated": engine_updated,
+            "event_position": 0 if events is None else int(events()),
         }
 
     def authenticate(self, request: Request, scope: str) -> str | JSONResponse:

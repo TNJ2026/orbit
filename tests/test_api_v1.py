@@ -2211,6 +2211,43 @@ class SingleGoalApiTests(unittest.TestCase):
             )
 
 
+class LiveMarkerTests(ApiTestCase):
+    def test_the_cursor_moves_while_a_run_is_still_working(self) -> None:
+        """A run row is written once at the start and once at the end.
+
+        A marker made of those two alone cannot move between them, so a page
+        watching a long run polled a frozen cursor until it was over. The
+        engine's event position moves as each external step begins and ends,
+        which is the granularity where the wait is long enough to need it.
+        """
+
+        from orbit.workflow.langgraph_runtime.service import append_event
+
+        with AsgiHarness(self.app) as client:
+            started = client.post(
+                "/api/v1/langgraph-runs", actor="writer", key="marker-1",
+                body={"workflow_id": "workflow:linear", "input": {"value": 1}},
+            )
+            self.assertEqual(200, started.status_code, started.text)
+            run_id = started.json()["data"]["run"]["run_id"]
+            before = client.get("/api/v1/live", actor="reader").json()["data"]
+
+            # One node event and nothing else: the run row is untouched, which
+            # is exactly the state a working run is in.
+            engine = self.app.state.langgraph_service
+            with engine._connect() as connection:
+                append_event(
+                    connection, run_id, "langgraph_node.started",
+                    node_id="work", attempt_id="langgraph_attempt:work:1",
+                )
+                connection.commit()
+
+            after = client.get(
+                f"/api/v1/live?cursor={before['cursor']}", actor="reader",
+            ).json()["data"]
+            self.assertTrue(after["changed"], "a step finishing moved nothing")
+
+
 class RunStepsApiTests(unittest.TestCase):
     """Reading where a run got to."""
 
