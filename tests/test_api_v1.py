@@ -2069,6 +2069,69 @@ class RunGoalTests(ApiTestCase):
             self.assertIn("4000", response.json()["error"]["message"])
 
 
+class SingleGoalApiTests(unittest.TestCase):
+    """The refusal, in the shape the client is written against."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(self.temp.cleanup)
+        self.db = Path(self.temp.name) / "runtime.db"
+        self.app = create_app(
+            self.db,
+            handlers=[transform_registration()], schemas=SCHEMAS,
+            poll_seconds=0.02,
+            authenticator=lambda request: request.headers.get("x-orbit-actor"),
+            authorizer=Authorizer(lambda _actor: [READ_SCOPE, WRITE_SCOPE]),
+            single_goal_mode=True,
+            langgraph_state_directory=Path(self.temp.name) / "langgraph",
+        )
+        publish_human_workflow(self.db)
+
+    def start(self, client, key: str, **extra):
+        return client.post(
+            "/api/v1/langgraph-runs", actor="author", key=key,
+            body={
+                "workflow_id": "workflow:human", "input": {"value": 1}, **extra,
+            },
+        )
+
+    def test_the_report_and_the_refusal_agree(self) -> None:
+        """The capability said this before anything enforced it."""
+
+        with AsgiHarness(self.app) as client:
+            reported = client.get(
+                "/api/v1/capabilities", actor="author",
+            ).json()["data"]["product_mode"]["single_goal_mode"]
+            self.assertTrue(reported)
+
+            first = self.start(client, "goal-1", goal="Review the draft")
+            self.assertEqual(200, first.status_code, first.text)
+            second = self.start(client, "goal-2", goal="Something else")
+            self.assertEqual(409, second.status_code, second.text)
+            failure = second.json()["error"]
+            self.assertEqual("active_goal_exists", failure["code"])
+            # The client takes the person to this run, so it has to be there.
+            active = failure["details"]["active_goal"]
+            self.assertEqual(
+                first.json()["data"]["run"]["run_id"], active["run_id"],
+            )
+            self.assertEqual("Review the draft", active["goal"])
+
+    def test_the_slot_is_released_by_cancelling(self) -> None:
+        with AsgiHarness(self.app) as client:
+            first = self.start(client, "goal-1", goal="Review the draft")
+            run = first.json()["data"]["run"]
+            cancelled = client.post(
+                f"/api/v1/langgraph-runs/{run['run_id']}/cancel",
+                actor="author", key="cancel-1",
+                body={"expected_version": run["revision"]},
+            )
+            self.assertEqual(200, cancelled.status_code, cancelled.text)
+            self.assertEqual(
+                200, self.start(client, "goal-2", goal="Next").status_code,
+            )
+
+
 class HandlerConsoleApiTests(ApiTestCase):
     """Reading what a run's Handlers printed."""
 

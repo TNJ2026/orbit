@@ -142,6 +142,10 @@ Runtime 事件可通过 `wait_app_event`、`list_app_events` 和 `ack_app_event`
 重放的 superstep 不会产生事件。
 事件只是提示，执行操作前应重新读取对应 Run。
 
+单 Agent 模式下每个 actor 同时只跑一个目标：当已有 `running`、`waiting` 或
+`interrupted` 的 run 时，再启动会以 `active_goal_exists` 拒绝，并在拒绝里带上占用
+该槽位的 run，客户端可以直接跳过去。取消或结束即释放。
+
 Handler 进程打印的内容通过
 `GET /api/v1/langgraph-runs/{run_id}/output?after=<chunk_id>` 读取，需要 sensitive
 scope。它是控制台而非日志：按尝试和流分别限量、写在所有事务之外，且永远不参与重放。

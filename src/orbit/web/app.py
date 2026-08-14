@@ -479,6 +479,9 @@ def create_app(
             registrations,
             state_directory=langgraph_state_directory,
             secret_values=secret_values,
+            # The capability report has always said this; now the engine
+            # keeps it, so the report is a promise rather than a label.
+            single_goal=single_goal_mode,
         )
 
     composition = RuntimeComposition(

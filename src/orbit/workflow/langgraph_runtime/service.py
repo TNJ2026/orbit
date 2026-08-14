@@ -27,6 +27,27 @@ class LangGraphRunConflict(ValueError):
     pass
 
 
+# A run that has not finished and could still do something. `unknown` is not
+# here: nobody can tell whether it is still working, and holding the one goal
+# slot against a run that may never settle would leave the operator with no
+# way to start anything at all.
+ACTIVE_STATUSES = ("running", "waiting", "interrupted")
+
+
+class ActiveGoalExists(LangGraphRunConflict):
+    """One goal at a time, and this actor already has one.
+
+    Carries the run that holds the slot so the caller can be taken to it
+    rather than told only that it exists.
+    """
+
+    def __init__(self, active: Mapping[str, Any]) -> None:
+        super().__init__(
+            f"an active goal already exists: {active['run_id']}"
+        )
+        self.active_goal = dict(active)
+
+
 # A goal is display text, not an input. It is bounded because it is stored
 # and shown, and refused rather than truncated: a person who pasted a page
 # into the box should be told, not handed a run labelled with the first
@@ -160,6 +181,7 @@ class LangGraphWorkflowService:
         checkpoint_db_path: Path | str,
         artifact_store=None,
         console=None,
+        single_goal: bool = False,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.workflow_versions = workflow_versions
@@ -170,6 +192,10 @@ class LangGraphWorkflowService:
         # Read-side only: the Handler adapters write it, and they were handed
         # their own binding when they were built.
         self.console = console
+        # A product shape rather than an engine invariant: one goal at a time
+        # is what the single-agent UI is built around. Off by default, so an
+        # embedder running many workflows is not quietly serialised.
+        self.single_goal = bool(single_goal)
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         # Runs this process is executing right now. `running` in the database
         # means "a process was executing this", and recovery exists because
@@ -297,6 +323,32 @@ class LangGraphWorkflowService:
             timespec="microseconds"
         ).replace("+00:00", "Z")
 
+    def _refuse_second_goal(self, connection, actor: str) -> None:
+        """Refuse a start while this actor already has a run in flight.
+
+        Called inside the transaction that inserts the run, never before it:
+        two starts arriving together would otherwise both find nothing and
+        both insert. SQLite's write lock is what serialises them, so this
+        needs no lock file of its own — the previous engine kept one because
+        its check and its insert were in separate transactions.
+
+        Scoped to the owner. Runs are read by owner everywhere else, so a
+        global slot would let one actor block another with a run the second
+        cannot even open to see why.
+        """
+
+        if not self.single_goal:
+            return
+        placeholders = ",".join("?" for _ in ACTIVE_STATUSES)
+        row = connection.execute(
+            "SELECT run_id,goal,workflow_id,status FROM langgraph_runs"
+            f" WHERE owner_actor=? AND status IN ({placeholders})"
+            " ORDER BY created_at DESC,run_id LIMIT 1",
+            (actor, *ACTIVE_STATUSES),
+        ).fetchone()
+        if row is not None:
+            raise ActiveGoalExists(dict(row))
+
     def _workflow(self, workflow_id: str, version: int | None, *, starting=False):
         if starting and getattr(self.workflow_versions, "is_archived", None) is not None:
             if self.workflow_versions.is_archived(workflow_id):
@@ -351,6 +403,9 @@ class LangGraphWorkflowService:
                         "idempotency key was already used for another request"
                     )
                 return self.get(receipt["run_id"])
+            # After the receipt, so replaying a start is never refused for
+            # conflicting with the run it started.
+            self._refuse_second_goal(connection, actor)
             run_id = "langgraph_run:" + uuid.uuid4().hex
             now = self._stamp()
             connection.execute(
@@ -409,6 +464,8 @@ class LangGraphWorkflowService:
                         "idempotency key was already used for another request"
                     )
                 return self.get(receipt["run_id"])
+            # A template run is a goal like any other, and holds the slot.
+            self._refuse_second_goal(connection, actor)
             run_id = "langgraph_run:" + uuid.uuid4().hex
             now = self._stamp()
             connection.execute(

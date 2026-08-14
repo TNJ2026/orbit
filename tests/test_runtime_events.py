@@ -467,6 +467,123 @@ class RunGoalTests(unittest.TestCase):
         self.assertEqual("Summarise the quarter", again.goal)
 
 
+class SingleGoalTests(unittest.TestCase):
+    """One goal at a time, when the Runtime says that is how it works.
+
+    The capability report advertised this for as long as the engine has been
+    the LangGraph one, and nothing kept it: the check lived in the execution
+    engine that was deleted, and `orbit serve` had never routed through that
+    engine anyway.
+    """
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(self.temp.cleanup)
+        self.path = Path(self.temp.name) / "runtime.db"
+        publish_linear_workflow(self.path)
+        publish_human_workflow(self.path)
+
+    def engine(self, *, single_goal: bool = True):
+        return build_service(
+            self.path, [transform_registration()],
+            state_directory=Path(self.temp.name) / f"lg-{single_goal}",
+            single_goal=single_goal,
+        )
+
+    def start(self, engine, key: str, workflow: str = "workflow:human", **extra):
+        return engine.start(
+            workflow, {"value": 1}, idempotency_key=key, actor="local", **extra,
+        )
+
+    def test_a_second_goal_is_refused_and_names_the_first(self) -> None:
+        from orbit.workflow.langgraph_runtime.service import ActiveGoalExists
+
+        engine = self.engine()
+        first = self.start(engine, "one", goal="Review the draft")
+        self.assertEqual("interrupted", first.status)
+        with self.assertRaises(ActiveGoalExists) as caught:
+            self.start(engine, "two")
+        # Named, so the caller can be taken to it rather than told only that
+        # something is in the way.
+        self.assertEqual(first.run_id, caught.exception.active_goal["run_id"])
+        self.assertEqual("Review the draft", caught.exception.active_goal["goal"])
+
+    def test_replaying_a_start_is_not_a_conflict_with_its_own_run(self) -> None:
+        """The guard runs after the receipt, or a retry refuses itself."""
+
+        engine = self.engine()
+        first = self.start(engine, "one", goal="Review the draft")
+        again = self.start(engine, "one", goal="Review the draft")
+        self.assertEqual(first.run_id, again.run_id)
+
+    def test_a_finished_goal_does_not_hold_the_slot(self) -> None:
+        engine = self.engine()
+        done = self.start(engine, "one", workflow="workflow:linear")
+        self.assertEqual("completed", done.status)
+        self.assertEqual(
+            "completed", self.start(engine, "two", workflow="workflow:linear").status,
+        )
+
+    def test_cancelling_frees_it(self) -> None:
+        engine = self.engine()
+        first = self.start(engine, "one")
+        engine.cancel(
+            first.run_id, expected_revision=first.revision,
+            idempotency_key="cancel-one", actor="local",
+        )
+        self.assertEqual("interrupted", self.start(engine, "two").status)
+
+    def test_one_actor_does_not_block_another(self) -> None:
+        """A global slot would refuse an actor over a run they cannot open.
+
+        Runs are read by owner everywhere else, so the run holding the slot
+        would be invisible to the person being refused because of it.
+        """
+
+        engine = self.engine()
+        engine.start(
+            "workflow:human", {"value": 1}, idempotency_key="a",
+            actor="alice", goal="Alice's goal",
+        )
+        started = engine.start(
+            "workflow:human", {"value": 1}, idempotency_key="b",
+            actor="bob", goal="Bob's goal",
+        )
+        self.assertEqual("interrupted", started.status)
+
+    def test_without_the_mode_nothing_is_serialised(self) -> None:
+        """An embedder running many workflows is not quietly made sequential."""
+
+        engine = self.engine(single_goal=False)
+        self.start(engine, "one")
+        self.assertEqual("interrupted", self.start(engine, "two").status)
+
+    def test_two_starts_at_once_cannot_both_win(self) -> None:
+        """The check is in the transaction that inserts, not before it.
+
+        Two callers arriving together would otherwise both find no active run
+        and both create one.
+        """
+
+        from concurrent.futures import ThreadPoolExecutor
+
+        from orbit.workflow.langgraph_runtime.service import ActiveGoalExists
+
+        engine = self.engine()
+        started, refused = [], []
+
+        def attempt(index: int) -> None:
+            try:
+                started.append(self.start(engine, f"race-{index}"))
+            except ActiveGoalExists:
+                refused.append(index)
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            list(pool.map(attempt, range(4)))
+        self.assertEqual(1, len(started), f"{len(started)} goals started at once")
+        self.assertEqual(3, len(refused))
+
+
 class CompositionTests(unittest.TestCase):
     def test_the_socket_is_mounted_with_the_engine_behind_it(self) -> None:
         from orbit.web.app import create_app

@@ -25,6 +25,7 @@ from ...workflow.api.routes import (
 )
 from ...workflow.application.authoring_job_service import AuthoringJobService
 from ...workflow.catalogs.schemas import InMemorySchemaCatalog
+from ...workflow.langgraph_runtime.service import ActiveGoalExists
 from ...workflow.authoring import (
     AuthoringFailedError, AuthoringUnavailableError,
     UnknownGenerationAgentError,
@@ -214,6 +215,13 @@ class ApiContext:
             return error("command_in_progress", str(exc), 409)
         except PermissionError as exc:
             return error("forbidden", str(exc), 403)
+        except ActiveGoalExists as exc:
+            # The run holding the slot travels with the refusal: the client
+            # takes the person to it rather than reporting a dead end.
+            return error(
+                "active_goal_exists", str(exc), 409,
+                active_goal=exc.active_goal,
+            )
         except AuthoringFailedError as exc:
             # The agent could not produce a compilable revision. Return its
             # findings so the editor can show them, not a bare 500.

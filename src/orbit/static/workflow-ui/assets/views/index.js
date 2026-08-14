@@ -185,7 +185,7 @@ export function createViews(context) {
           if (error instanceof ApiError && error.code === "active_goal_exists") {
             const active = error.details.active_goal;
             announce(i18n.t("newRun.active.exists", {
-              goal: active?.display_name || active?.run_id || "",
+              goal: active ? runName(active) : "",
             }), "info");
             if (active?.run_id) navigate({ view: "run", runId: active.run_id });
           } else if (error instanceof ApiError && error.code === "handler_unavailable") {
