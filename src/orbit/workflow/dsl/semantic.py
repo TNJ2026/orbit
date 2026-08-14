@@ -304,6 +304,7 @@ def analyze_dsl(
     node_by_id = {item["id"]: item for item in nodes}
     node_index = {item["id"]: index for index, item in enumerate(nodes)}
     policy_ids = {item["id"] for item in policies}
+    policy_kinds = {item["id"]: item.get("kind") for item in policies}
     resolved: dict[str, HandlerManifest] = {}
 
     for index, node in enumerate(nodes):
@@ -674,6 +675,29 @@ def analyze_dsl(
                         node_path + ("policies", policy_index),
                     )
                 )
+                continue
+            # Retry re-runs the work a node did. A node with no Handler does
+            # none — a terminal, join or decision carries a value through, and
+            # a human node is answered rather than re-executed. This was
+            # accepted here and refused by the engine as a node whose
+            # "retry policy requires a retry-safe Handler", which is a Handler
+            # that kind may not declare: an author was told to fix something
+            # the contract forbids them to have.
+            if (
+                policy_kinds.get(policy_id) == "retry"
+                and node["kind"] in {"terminal", "join", "decision", "human"}
+            ):
+                diagnostics.append(_diagnostic(
+                    document,
+                    "DSL_POLICY_INVALID",
+                    f"a {node['kind']} node cannot carry a retry policy",
+                    node_path + ("policies", policy_index),
+                    hint=(
+                        "retry re-runs a Handler's work, and this node has "
+                        "none; a human node is chased with reminder and "
+                        "escalation rather than retried"
+                    ),
+                ))
 
     outgoing: dict[str, list[str]] = {node_id: [] for node_id in node_by_id}
     incoming: dict[str, list[str]] = {node_id: [] for node_id in node_by_id}

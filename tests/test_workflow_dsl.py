@@ -845,6 +845,95 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class RetryOnAHandlerlessNodeTests(unittest.TestCase):
+    """Retry re-runs a Handler's work; some nodes have none to re-run.
+
+    This was accepted here and refused by the engine as a node whose "retry
+    policy requires a retry-safe Handler" — a Handler that kind may not
+    declare. The author was told to fix something the contract forbids them
+    to have. Refused where the concept lives, saying what is actually wrong.
+    """
+
+    OBJECT = "example://request/1.0"
+
+    def setUp(self) -> None:
+        self.schemas = InMemorySchemaCatalog({
+            self.OBJECT: {"type": "object"},
+            "schema://object/1.0": {"type": "object"},
+        })
+        self.handlers = InMemoryHandlerCatalog([
+            HandlerManifest(
+                name="collect", version="1.2.0", node_kinds=("action",),
+                inputs={"prompt": self.OBJECT}, outputs={"result": self.OBJECT},
+                config_schema={"type": "object", "additionalProperties": False},
+                execution_safety=ExecutionSafety.REPLAY_SAFE,
+                resource_profile=ResourceProfile(0, 0, 0, 60, 0, "free"),
+                result_schema_id=self.OBJECT,
+            )
+        ])
+
+    def document(self, *, retried: str):
+        submission = {"id": "result", "schema_id": "schema://object/1.0"}
+        return {
+            "dsl_version": "1.3",
+            "metadata": {"id": "chased", "name": "Chased"},
+            "nodes": [
+                {
+                    "id": "act", "kind": "action",
+                    "inputs": [{"id": "prompt", "schema_id": self.OBJECT}],
+                    "outputs": [{"id": "result", "schema_id": self.OBJECT}],
+                    "handler": {"name": "collect", "version": "1.2.0"},
+                    "policies": ["again"] if retried == "act" else [],
+                },
+                {
+                    "id": "ask", "kind": "human",
+                    "inputs": [{"id": "result", "schema_id": self.OBJECT}],
+                    "outputs": [dict(submission)],
+                    "config": {
+                        "task_kind": "approval", "participants": ["local"],
+                        "quorum": "any",
+                    },
+                    "policies": ["again"] if retried == "ask" else [],
+                },
+                {"id": "done", "kind": "terminal", "inputs": [dict(submission)]},
+            ],
+            "edges": [
+                {"id": "a", "from": {"node": "act", "port": "result"},
+                 "to": {"node": "ask", "port": "result"}},
+                {"id": "b", "from": {"node": "ask", "port": "result"},
+                 "to": {"node": "done", "port": "result"}},
+            ],
+            "entry": ["act"], "terminals": ["done"],
+            "result": {"node": "ask", "port": "result"},
+            "policies": [{
+                "id": "again", "kind": "retry", "config": {"max_attempts": 2},
+            }],
+        }
+
+    def compile(self, document):
+        return compile_source(
+            json.dumps(document), self.handlers, self.schemas,
+            source_format="json",
+        )
+
+    def test_a_human_node_cannot_be_retried(self) -> None:
+        with self.assertRaises(DiagnosticError) as caught:
+            self.compile(self.document(retried="ask"))
+        found = [
+            item for item in caught.exception.diagnostics
+            if item.code == "DSL_POLICY_INVALID"
+        ]
+        self.assertTrue(found)
+        self.assertIn("cannot carry a retry policy", found[0].message)
+        self.assertIn("reminder and escalation", found[0].hint or "")
+
+    def test_an_action_still_can(self) -> None:
+        """The refusal is about having no work to re-run, not about retry."""
+
+        compiled = self.compile(self.document(retried="act"))
+        self.assertEqual("workflow:chased", compiled.ir.workflow_id)
+
+
 class UnsatisfiableJoinTests(unittest.TestCase):
     """A join no run can fill is a contradiction, not a runtime surprise.
 
