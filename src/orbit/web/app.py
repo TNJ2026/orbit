@@ -817,11 +817,15 @@ def create_app(
 
     # Durable notifications for Agent Apps. Frames are hints only: consumers
     # re-read HTTP/MCP state and execute only server-issued allowed_commands.
-    from .runtime_events import runtime_event_routes
+    # Mounted only with an engine behind it: a socket that accepts, heartbeats
+    # and never delivers is worse than one that is not there, because a
+    # consumer cannot tell it apart from a quiet Runtime.
+    if langgraph_service is not None:
+        from .runtime_events import runtime_event_routes
 
-    routes.extend(runtime_event_routes(
-        db_path, authenticator=authenticator, authorizer=authorizer,
-    ))
+        routes.extend(runtime_event_routes(
+            langgraph_service, authenticator=authenticator, authorizer=authorizer,
+        ))
 
     if authoring_broker is not None:
         # The push half of client-written generation. Claiming stays the only

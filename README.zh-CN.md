@@ -136,6 +136,8 @@ Orbit 随后显示 `app:claude-desktop`。仅连接 MCP 不会注册在线 App�
 DSL，并通过 `get_authoring_job` 处理编译反馈。
 
 Runtime 事件可通过 `wait_app_event`、`list_app_events` 和 `ack_app_event` 处理。
+事件即引擎的 run 状态变化：`event_type` 形如 `langgraph_run.<status>`，`run_id`
+指向对应的 Run。
 事件只是提示，执行操作前应重新读取对应 Run。
 
 ## CLI 快速参考

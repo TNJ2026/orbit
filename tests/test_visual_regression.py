@@ -93,6 +93,9 @@ def seed_visual_artifact(engine) -> str:
     # cannot be stable while a uuid is on screen, so the seeded run is given
     # a fixed one — the only thing this fixture needs from it is determinism.
     run_id = "langgraph_run:00000000000000000000000000000001"
+    # The engine keeps its own clock, so freezing the app's does not reach the
+    # timestamps the history row renders as a time and a duration.
+    stamp = "2026-01-01T00:00:00Z"
     with engine._connect() as connection:
         # The receipt row references the run, so it moves with it.
         connection.execute("PRAGMA foreign_keys=OFF")
@@ -101,7 +104,9 @@ def seed_visual_artifact(engine) -> str:
             (run_id, started),
         )
         connection.execute(
-            "UPDATE langgraph_runs SET run_id=? WHERE run_id=?", (run_id, started),
+            "UPDATE langgraph_runs SET run_id=?,created_at=?,updated_at=?"
+            " WHERE run_id=?",
+            (run_id, stamp, stamp, started),
         )
         connection.commit()
     store = engine.artifacts

@@ -104,6 +104,15 @@ class LangGraphWorkflowService:
                     request_hash TEXT NOT NULL,
                     run_id TEXT NOT NULL REFERENCES langgraph_runs(run_id)
                 );
+                CREATE TABLE IF NOT EXISTS langgraph_run_events (
+                    position INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    revision INTEGER NOT NULL,
+                    occurred_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS langgraph_run_events_by_run
+                    ON langgraph_run_events(run_id, position);
                 CREATE TABLE IF NOT EXISTS langgraph_handler_attempts (
                     attempt_id TEXT PRIMARY KEY,run_id TEXT NOT NULL,
                     node_id TEXT NOT NULL,status TEXT NOT NULL,output_json TEXT,
@@ -246,6 +255,7 @@ class LangGraphWorkflowService:
                 "INSERT INTO langgraph_run_receipts VALUES (?,?,?)",
                 (idempotency_key, request_hash, run_id),
             )
+            self._append_event(connection, run_id)
             connection.commit()
         return self._execute(run_id, record.ir, inputs=inputs)
 
@@ -301,6 +311,7 @@ class LangGraphWorkflowService:
                 "INSERT INTO langgraph_run_receipts VALUES (?,?,?)",
                 (idempotency_key, request_hash, run_id),
             )
+            self._append_event(connection, run_id)
             connection.commit()
         return self._execute(run_id, ir, inputs=inputs)
 
@@ -457,6 +468,7 @@ class LangGraphWorkflowService:
                 "INSERT INTO langgraph_run_receipts VALUES (?,?,?)",
                 (idempotency_key, request_hash, run_id),
             )
+            self._append_event(connection, run_id)
             connection.commit()
         if not ready:
             return self.get(run_id)
@@ -525,6 +537,7 @@ class LangGraphWorkflowService:
                 if claimed_run != 1 or changed_timer != 1:
                     connection.rollback()
                     return self.get(run_id)
+                self._append_event(connection, run_id)
                 connection.commit()
             current = self.get(run_id)
             if timer["purpose"] == "join_deadline":
@@ -724,6 +737,7 @@ class LangGraphWorkflowService:
                 "INSERT INTO langgraph_run_receipts VALUES (?,?,?)",
                 (idempotency_key, request_hash, run_id),
             )
+            self._append_event(connection, run_id)
             connection.commit()
         self.handlers.cancel(run_id)
         return self.get(run_id)
@@ -911,6 +925,64 @@ class LangGraphWorkflowService:
             }
             for row in rows
         }
+
+    def _append_event(self, connection, run_id: str) -> None:
+        """Record that this run changed, in the transaction that changed it.
+
+        Called after the write and before the commit, never on its own
+        connection: an event the stream carries for a change that rolled back
+        would tell a consumer to re-read state that was never written, and a
+        change with no event would strand one waiting for it.
+
+        What it records is read back rather than computed. The callers know
+        what they asked for, but only the row knows what was stored — and one
+        of them (a resume that completes the last interrupt) advances the
+        status without advancing the revision.
+        """
+
+        row = connection.execute(
+            "SELECT status,revision,updated_at FROM langgraph_runs WHERE run_id=?",
+            (run_id,),
+        ).fetchone()
+        if row is None:
+            return
+        connection.execute(
+            "INSERT INTO langgraph_run_events(run_id,event_type,revision,occurred_at)"
+            " VALUES (?,?,?,?)",
+            (
+                run_id, f"langgraph_run.{row['status']}",
+                int(row["revision"]), row["updated_at"],
+            ),
+        )
+
+    def events_head(self) -> int:
+        """The newest position, which is where a subscriber with no cursor starts."""
+
+        with self._connect() as connection:
+            return int(connection.execute(
+                "SELECT COALESCE(MAX(position), 0) FROM langgraph_run_events"
+            ).fetchone()[0])
+
+    def events_after(
+        self, position: int, *, limit: int = 200,
+    ) -> tuple[Mapping[str, Any], ...]:
+        """Events after `position`, oldest first, bounded.
+
+        `position` is the adapter's own autoincrement, so it is dense enough
+        to resume from and never reused: a subscriber that reconnects with the
+        last cursor it saw gets exactly what it missed.
+        """
+
+        if isinstance(limit, bool) or not 1 <= limit <= 500:
+            raise ValueError("limit must be between 1 and 500")
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT position,run_id,event_type,revision,occurred_at"
+                " FROM langgraph_run_events WHERE position > ?"
+                " ORDER BY position LIMIT ?",
+                (int(position), limit),
+            ).fetchall()
+        return tuple(dict(row) for row in rows)
 
     def last_change(self) -> str | None:
         """The most recent run update, as the stored timestamp string."""
@@ -1163,6 +1235,7 @@ class LangGraphWorkflowService:
                 if current.status == "cancelled":
                     return current
                 raise LookupError(f"LangGraph run not found: {run_id}")
+            self._append_event(connection, run_id)
             connection.commit()
         return self.get(run_id)
 

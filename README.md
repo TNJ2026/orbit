@@ -146,8 +146,9 @@ submit Workflow DSL with `submit_authoring_response` and process compiler
 feedback through `get_authoring_job`.
 
 Runtime events can be consumed with `wait_app_event`, `list_app_events`, and
-`ack_app_event`. Treat events as hints and re-read the referenced Run before
-acting.
+`ack_app_event`. They are the engine's run-state changes — `event_type` is
+`langgraph_run.<status>` and `run_id` addresses the run. Treat events as hints
+and re-read the referenced Run before acting.
 
 ## CLI quick reference
 

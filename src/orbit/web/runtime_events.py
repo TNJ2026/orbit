@@ -1,25 +1,29 @@
-"""Durable Runtime event notifications over WebSocket.
+"""Runtime event notifications over WebSocket.
 
 The socket carries event metadata, not authoritative state or command URLs.
 Clients resume with the opaque cursor in each frame, then re-read the relevant
 HTTP or MCP resource before acting. This keeps authorization and
 ``allowed_commands`` in the application services that already own them.
+
+The stream is the engine's own append-only run log. It used to be the
+event-sourced engine's store, and when that engine was deleted the socket kept
+its shape while nothing wrote to it any more — a subscriber saw a healthy
+connection, heartbeats, and no events, for ever. Frames now carry `schema_version`
+2: an engine with no command envelope has no correlation or causation id to
+report, and inventing one would be worse than leaving it out.
 """
 
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
 import re
 import time
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Mapping
 
 from starlette.routing import WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from ..workflow.api.dto import CursorError, decode_cursor, encode_cursor
-from ..workflow.persistence.database import connect_workflow_database
-from ..workflow.persistence.event_store import SQLiteEventStore
 
 
 CLOSE_BAD_SUBSCRIPTION = 4400
@@ -62,45 +66,31 @@ def _event_types(values: Iterable[str]) -> frozenset[str]:
     return frozenset(result)
 
 
-class RuntimeEventReader:
-    """Short-lived read connections make polling safe across worker threads."""
+def _frame(event: Mapping[str, Any]) -> dict[str, Any]:
+    """One recorded change, addressed well enough to go and read it.
 
-    def __init__(self, db_path: Path | str) -> None:
-        self.path = Path(db_path)
+    `event_id` is the position rather than the run and its revision. One
+    resume can advance a run's status without advancing its revision — the one
+    that answers the last outstanding interrupt — so a run-and-revision id
+    would collide there, and a consumer that dedupes on it (the Agent App
+    bridge does, with `INSERT OR IGNORE`) would silently drop the second.
+    """
 
-    def head(self) -> int:
-        with connect_workflow_database(self.path, read_only=True) as connection:
-            row = connection.execute(
-                "SELECT COALESCE(MAX(global_position), 0) FROM run_events"
-            ).fetchone()
-            return int(row[0])
-
-    def after(self, position: int, *, limit: int = MAX_BATCH_SIZE):
-        with connect_workflow_database(self.path, read_only=True) as connection:
-            return SQLiteEventStore(connection).read_all(
-                after_global_position=position, limit=limit
-            )
-
-
-def _frame(stored) -> dict[str, Any]:
-    event = stored.envelope
     return {
         "type": "runtime_event",
-        "schema_version": 1,
-        "event_id": str(event.event_id),
-        "event_type": event.event_type,
-        "run_id": str(stored.run_id),
-        "aggregate_id": str(event.aggregate_id),
-        "sequence": event.sequence.value,
-        "occurred_at": event.occurred_at.isoformat(),
-        "correlation_id": str(event.correlation_id),
-        "causation_id": str(event.causation_id),
-        "cursor": _cursor(stored.global_position),
+        "schema_version": 2,
+        "event_id": f"langgraph_event:{event['position']}",
+        "event_type": event["event_type"],
+        "run_id": event["run_id"],
+        "aggregate_id": event["run_id"],
+        "sequence": event["revision"],
+        "occurred_at": event["occurred_at"],
+        "cursor": _cursor(event["position"]),
     }
 
 
 def runtime_event_routes(
-    db_path: Path | str,
+    engine,
     *,
     authenticator: Callable[[Any], str | None] | None = None,
     authorizer: Any = None,
@@ -108,9 +98,12 @@ def runtime_event_routes(
     poll_seconds: float = DEFAULT_POLL_SECONDS,
     heartbeat_seconds: float = DEFAULT_HEARTBEAT_SECONDS,
 ) -> list[WebSocketRoute]:
-    """Expose resumable metadata notifications for durable run events."""
+    """Expose resumable metadata notifications for the engine's run events.
 
-    reader = RuntimeEventReader(db_path)
+    `engine` is the workflow service, asked for two things and nothing else:
+    where its log ends, and what came after a position. Reading its tables
+    from here instead would put a second owner on the adapter's schema.
+    """
 
     async def endpoint(websocket: WebSocket) -> None:
         actor = None if authenticator is None else authenticator(websocket)
@@ -128,9 +121,9 @@ def runtime_event_routes(
             run_id = websocket.query_params.get("run_id")
             if run_id is not None:
                 run_id = run_id.strip()
-                if not run_id.startswith("run:") or len(run_id) > 256:
+                if not run_id.startswith("langgraph_run:") or len(run_id) > 256:
                     raise ValueError("run_id must be a Runtime run id")
-            head = await asyncio.to_thread(reader.head)
+            head = await asyncio.to_thread(engine.events_head)
             if requested_position is not None and requested_position > head:
                 raise ValueError("cursor is beyond the Runtime event stream")
         except (CursorError, ValueError) as exc:
@@ -159,15 +152,17 @@ def runtime_event_routes(
         last_sent = time.monotonic()
         try:
             while True:
-                records = await asyncio.to_thread(reader.after, position)
+                records = await asyncio.to_thread(
+                    engine.events_after, position, limit=MAX_BATCH_SIZE,
+                )
                 if records:
-                    for stored in records:
-                        position = stored.global_position
-                        if selected_types and stored.envelope.event_type not in selected_types:
+                    for event in records:
+                        position = event["position"]
+                        if selected_types and event["event_type"] not in selected_types:
                             continue
-                        if run_id is not None and str(stored.run_id) != run_id:
+                        if run_id is not None and event["run_id"] != run_id:
                             continue
-                        await websocket.send_json(_frame(stored))
+                        await websocket.send_json(_frame(event))
                         last_sent = time.monotonic()
                     await websocket.send_json({
                         "type": "checkpoint",
