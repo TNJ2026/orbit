@@ -226,6 +226,32 @@ def build_routes(ctx, service, template_service=None) -> list[Route]:
         # no commands and is offered on the read scope.
         return JSONResponse(envelope({"steps": list(steps)}))
 
+    async def run_steps(request: Request) -> JSONResponse:
+        """Where this run got to, derived from its definition and checkpoint.
+
+        Read on the ordinary read scope, not the sensitive one: a step says
+        which node ran and how it ended, never what it produced. What a node
+        printed is behind `/output`, and what it made is an Artifact.
+        """
+
+        actor = ctx.authenticate(request, READ_SCOPE)
+        if isinstance(actor, JSONResponse):
+            return actor
+        try:
+            run_id = request.path_params["run_id"]
+            unknown = set(request.query_params)
+            if unknown:
+                raise ValueError(f"unknown query parameter: {sorted(unknown)[0]}")
+            run = service.get(run_id, actor=actor)
+            steps = service.steps(run_id, actor=actor)
+        except LookupError as exc:
+            return error("not_found", str(exc), 404)
+        except ValueError as exc:
+            return error("invalid_request", str(exc))
+        return JSONResponse(envelope(
+            {"steps": list(steps)}, projection_version=run.revision,
+        ))
+
     async def run_output(request: Request) -> JSONResponse:
         """What this run's Handlers printed, followed rather than paged.
 
@@ -420,6 +446,9 @@ def build_routes(ctx, service, template_service=None) -> list[Route]:
         ),
         Route("/api/v1/langgraph-runs", start_run, methods=["POST"]),
         Route("/api/v1/langgraph-runs/{run_id}", get_run, methods=["GET"]),
+        Route(
+            "/api/v1/langgraph-runs/{run_id}/steps", run_steps, methods=["GET"],
+        ),
         Route(
             "/api/v1/langgraph-runs/{run_id}/output", run_output, methods=["GET"],
         ),

@@ -2211,6 +2211,83 @@ class SingleGoalApiTests(unittest.TestCase):
             )
 
 
+class RunStepsApiTests(unittest.TestCase):
+    """Reading where a run got to."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(self.temp.cleanup)
+        self.db = Path(self.temp.name) / "runtime.db"
+        self.app = create_app(
+            self.db,
+            handlers=[transform_registration()], schemas=SCHEMAS,
+            poll_seconds=0.02,
+            authenticator=lambda request: request.headers.get("x-orbit-actor"),
+            authorizer=Authorizer(
+                lambda actor: [READ_SCOPE, WRITE_SCOPE]
+                if actor == "author" else [READ_SCOPE]
+            ),
+            single_goal_mode=False,
+            langgraph_state_directory=Path(self.temp.name) / "langgraph",
+        )
+        publish_human_workflow(self.db)
+
+    def start(self, client):
+        started = client.post(
+            "/api/v1/langgraph-runs", actor="author", key="steps-1",
+            body={"workflow_id": "workflow:human", "input": {"value": 1}},
+        )
+        self.assertEqual(200, started.status_code, started.text)
+        return started.json()["data"]["run"]
+
+    def test_the_steps_of_a_waiting_run_read_as_the_engine_derived_them(self) -> None:
+        with AsgiHarness(self.app) as client:
+            run = self.start(client)
+            response = client.get(
+                f"/api/v1/langgraph-runs/{run['run_id']}/steps", actor="author",
+            )
+            self.assertEqual(200, response.status_code, response.text)
+            body = response.json()
+            self.assertEqual(run["revision"], body["projection_version"])
+            self.assertEqual(
+                [("transform", "succeeded"), ("approve", "waiting"),
+                 ("done", "not_reached")],
+                [(step["node_id"], step["status"]) for step in body["data"]["steps"]],
+            )
+
+    def test_steps_are_the_ordinary_read_scope(self) -> None:
+        """A step says which node ran, never what it produced.
+
+        What a node printed is behind `/output` and what it made is an
+        Artifact; both are sensitive. Where the run got to is not.
+        """
+
+        with AsgiHarness(self.app) as client:
+            run = self.start(client)
+            path = f"/api/v1/langgraph-runs/{run['run_id']}/steps"
+            for step in client.get(path, actor="author").json()["data"]["steps"]:
+                self.assertNotIn("output", step)
+                self.assertNotIn("error", step)
+
+    def test_a_run_belonging_to_somebody_else_is_not_found(self) -> None:
+        with AsgiHarness(self.app) as client:
+            run = self.start(client)
+            self.assertEqual(404, client.get(
+                f"/api/v1/langgraph-runs/{run['run_id']}/steps", actor="reader",
+            ).status_code)
+
+    def test_an_unknown_run_and_an_unknown_parameter_are_told_apart(self) -> None:
+        with AsgiHarness(self.app) as client:
+            run = self.start(client)
+            self.assertEqual(404, client.get(
+                "/api/v1/langgraph-runs/langgraph_run:nope/steps", actor="author",
+            ).status_code)
+            self.assertEqual(400, client.get(
+                f"/api/v1/langgraph-runs/{run['run_id']}/steps?limit=5",
+                actor="author",
+            ).status_code)
+
+
 class HandlerConsoleApiTests(ApiTestCase):
     """Reading what a run's Handlers printed."""
 

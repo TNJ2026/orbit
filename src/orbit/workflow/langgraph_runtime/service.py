@@ -14,6 +14,7 @@ import uuid
 
 from langgraph.checkpoint.sqlite import SqliteSaver
 
+from ..api.graph_layout import graph_layout
 from ..domain.serialization import canonical_json, definition_hash, to_primitive
 from ..domain.ir_schema import workflow_ir_from_primitive
 from .compiler import (
@@ -931,6 +932,145 @@ class LangGraphWorkflowService:
         if row is None or (actor is not None and row["owner_actor"] != actor):
             raise LookupError(f"LangGraph run not found: {run_id}")
         return self._record(row)
+
+    def _executed_nodes(self, run_id: str) -> tuple[str, ...]:
+        """Every node execution this run has recorded, oldest first.
+
+        Read from the newest checkpoint *plus its pending writes*, and the
+        second half is not an optimisation. A branch that finished inside a
+        superstep another branch interrupted is only in the pending writes:
+        the committed checkpoint still says it never ran. Reading the
+        checkpoint alone shows a completed parallel branch as not reached for
+        as long as its sibling waits for a person.
+
+        No graph is compiled to do it. `get_state` would apply the same writes
+        and give the same answer, but compiling wires the Handlers back up,
+        and nothing that only reads a run should be able to reach one.
+
+        A node appears once per execution: a loop that ran a node three times
+        is three entries, which is what makes "third attempt" sayable.
+        """
+
+        config = {"configurable": {"thread_id": run_id}}
+        with SqliteSaver.from_conn_string(str(self.checkpoint_db_path)) as saver:
+            newest = next(iter(saver.list(config, limit=1)), None)
+            if newest is None:
+                return ()
+            order = list(
+                (newest.checkpoint.get("channel_values") or {}).get(
+                    "execution_order"
+                ) or ()
+            )
+            # Appended, matching the channel's own reducer.
+            for _task, channel, value in (newest.pending_writes or ()):
+                if channel != "execution_order":
+                    continue
+                order.extend(
+                    value if isinstance(value, (list, tuple)) else [value]
+                )
+        return tuple(str(node_id) for node_id in order)
+
+    def _attempt_facts(self, run_id: str) -> dict[str, dict[str, Any]]:
+        """Per-node outcome and timing, for the nodes that keep an attempt.
+
+        Only Handlers with a journal are here — an Agent or a Tool. A pure
+        node leaves no attempt, so it has no timing and its failure has
+        nowhere to be recorded; `steps` says so rather than guessing.
+        """
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT node_id, MIN(updated_at) AS first_at,"
+                " MAX(updated_at) AS last_at,"
+                " SUM(status='failed') AS failed,"
+                " SUM(status='unknown') AS unknown"
+                " FROM langgraph_handler_attempts WHERE run_id=?"
+                " GROUP BY node_id",
+                (run_id,),
+            ).fetchall()
+        return {
+            str(row["node_id"]): {
+                "first_at": row["first_at"], "last_at": row["last_at"],
+                "failed": bool(row["failed"]), "unknown": bool(row["unknown"]),
+            }
+            for row in rows
+        }
+
+    def steps(
+        self, run_id: str, *, actor: str | None = None,
+    ) -> tuple[Mapping[str, Any], ...]:
+        """What this run did, step by step — derived, not recorded.
+
+        There is no step table. This reads the definition for what the run
+        *could* do and the checkpoint for what it *did*, and the difference
+        between them is the progress. Four statuses come out of that, and each
+        means exactly one thing:
+
+        `succeeded`  the node is in the execution order and its attempts, if
+                     it keeps any, all settled.
+        `failed`     its attempt journal says so. Only a Handler with a
+                     journal can say it, so a pure node that raised is not
+                     here — the run carries the error, the step does not.
+        `waiting`    a person has been asked, and the run is interrupted at
+                     this node.
+        `not_reached` it is in the definition and has not run. Not "skipped":
+                     telling a branch nobody took from one still to come needs
+                     the routes walked, and a projection that guessed would be
+                     wrong on exactly the runs worth looking at.
+
+        Ordered by the same layout the catalog and the canvas use, so a node
+        keeps its place between the picture of the definition and the picture
+        of the run.
+        """
+
+        run = self.get(run_id, actor=actor)
+        ir = self._run_ir(run)
+        executed = self._executed_nodes(run_id)
+        attempts = self._attempt_facts(run_id)
+        counts: dict[str, int] = {}
+        for node_id in executed:
+            counts[node_id] = counts.get(node_id, 0) + 1
+        waiting = {
+            str((item.get("value") or {}).get("node_id"))
+            for item in run.interrupts
+            if isinstance(item.get("value"), Mapping)
+        }
+        layout = graph_layout(
+            [node.id for node in ir.nodes],
+            [
+                {"from": edge.source_node, "to": edge.target_node,
+                 "back_edge": edge.back_edge}
+                for edge in ir.edges
+            ],
+        )
+        placed = {
+            item["node_id"]: (item["depth"], item["lane"])
+            for item in layout["positions"]
+        }
+        steps: list[Mapping[str, Any]] = []
+        for node in sorted(ir.nodes, key=lambda n: placed.get(n.id, (0, 0))):
+            fact = attempts.get(node.id, {})
+            if node.id in waiting:
+                status = "waiting"
+            elif fact.get("failed") or fact.get("unknown"):
+                status = "failed"
+            elif counts.get(node.id):
+                status = "succeeded"
+            else:
+                status = "not_reached"
+            steps.append({
+                "node_id": node.id,
+                "label": node.label or node.id,
+                "kind": node.kind,
+                "handler": None if node.handler is None else {
+                    "name": node.handler.name, "version": node.handler.version,
+                },
+                "status": status,
+                "runs": counts.get(node.id, 0),
+                "first_at": fact.get("first_at"),
+                "last_at": fact.get("last_at"),
+            })
+        return tuple(steps)
 
     def replay(
         self, run_id: str, *, actor: str | None = None, limit: int = 100,
