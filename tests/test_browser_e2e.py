@@ -206,6 +206,17 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
         context.add_init_script(
             "localStorage.setItem('orbit.refreshSeconds', '5')"
         )
+        # Nothing this test asserts is about the public internet. The page
+        # asks a font CDN for its typefaces, and that request failing — which
+        # it does, roughly one run in six — was reported here as the Runtime
+        # raising an error on every view at once. Served empty instead, so the
+        # net catches this Runtime's faults and only those.
+        context.route(
+            "**/*",
+            lambda route: route.continue_()
+            if route.request.url.startswith(self.base)
+            else route.fulfill(status=200, body="", content_type="text/plain"),
+        )
         page = context.new_page()
         errors: list[str] = []
         page.on("pageerror", lambda exc: errors.append(str(exc)))
@@ -213,6 +224,15 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
             "console",
             lambda message: errors.append(f"console.error: {message.text}")
             if message.type == "error" else None,
+        )
+        # The browser's own console says only "Failed to load resource", which
+        # names neither the request nor the status. Recording the response
+        # beside it is the difference between a rerun and a diagnosis.
+        page.on(
+            "response",
+            lambda response: errors.append(
+                f"{response.status} {response.url}"
+            ) if response.status >= 400 else None,
         )
 
         views = (
@@ -226,7 +246,10 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
                 page.goto(f"{self.base}/ui/{fragment}")
                 page.wait_for_selector(ready)
                 page.wait_for_timeout(300)
-                self.assertEqual([], errors, f"{fragment} raised {errors}")
+                # Drained per view: one view's fault used to fail all four and
+                # leave every report naming the wrong page.
+                seen, errors[:] = list(errors), []
+                self.assertEqual([], seen, f"{fragment} raised {seen}")
 
         # The polling chain belongs to the shell rather than to any one view,
         # so one hold past a tick covers it — and costs six seconds instead of
@@ -428,6 +451,31 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
         self.assertEqual(0, page.get_by_role("button", name="Run again").count())
         self.assertTrue(page.locator(".simplified-run-hero").is_visible())
         self.assertIn("workflow:linear", page.inner_text(".simplified-run-hero"))
+
+    def test_the_console_is_closed_until_asked_for(self) -> None:
+        """The output panel exists on a run and fetches only when opened."""
+
+        run_id = self.start_run("console-view")
+        page = self.open("en-US", f"/ui/#/runs/{run_id}")
+        page.wait_for_selector(".simplified-run-hero")
+
+        requested = []
+        page.on("request", lambda request: (
+            requested.append(request.url) if "/output" in request.url else None
+        ))
+        panel = page.locator(".simplified-step-output").first
+        panel.wait_for()
+        # Closed: the largest thing on the page has not been fetched.
+        self.assertEqual([], requested)
+
+        with page.expect_request("**/output*"):
+            panel.locator("summary").click()
+        self.assertTrue(requested)
+        # This run's Handler is a transform, which prints nothing — the panel
+        # says so rather than staying blank.
+        self.assertIn(
+            "Nothing printed", page.inner_text(".simplified-step-output-body"),
+        )
 
     def test_refresh_interval_moves_to_the_topbar_and_settings_are_removed(self) -> None:
         page = self.open("en-US")

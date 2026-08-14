@@ -549,5 +549,185 @@ class EventIdentityTests(unittest.TestCase):
             self.assertGreater(len(pairs), len(set(pairs)))
 
 
+
+class HandlerConsoleTests(unittest.TestCase):
+    """What a Handler printed, and the rules that keep it from mattering too much."""
+
+    def setUp(self) -> None:
+        from orbit.workflow.langgraph_runtime.console import AttemptConsole
+
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(self.temp.cleanup)
+        self.console = AttemptConsole(Path(self.temp.name) / "runs.sqlite3")
+
+    def sink(self, **overrides):
+        from orbit.workflow.langgraph_runtime.console import AttemptConsoleSink
+
+        return AttemptConsoleSink(
+            self.console, run_id="langgraph_run:r", node_id="work",
+            attempt_id="langgraph_attempt:work:1", **overrides,
+        )
+
+    def test_both_streams_are_kept_in_the_order_they_were_printed(self) -> None:
+        sink = self.sink()
+        sink.emit("stderr", "thinking\n")
+        sink.emit("stdout", "working\n")
+        sink.emit("stdout", "done\n")
+        chunks, after, has_more = self.console.read("langgraph_run:r")
+        self.assertEqual(
+            [("stderr", "thinking\n"), ("stdout", "working\n"), ("stdout", "done\n")],
+            [(item["stream"], item["text"]) for item in chunks],
+        )
+        self.assertEqual(3, after)
+        self.assertFalse(has_more)
+
+    def test_a_follower_reads_forward_from_what_it_already_has(self) -> None:
+        sink = self.sink()
+        sink.emit("stdout", "one\n")
+        _first, after, _more = self.console.read("langgraph_run:r")
+        sink.emit("stdout", "two\n")
+        chunks, _after, _more = self.console.read("langgraph_run:r", after_chunk_id=after)
+        self.assertEqual(["two\n"], [item["text"] for item in chunks])
+
+    def test_has_more_distinguishes_a_full_page_from_the_end(self) -> None:
+        sink = self.sink()
+        for index in range(3):
+            sink.emit("stdout", f"line {index}\n")
+        chunks, after, has_more = self.console.read("langgraph_run:r", limit=2)
+        self.assertEqual(2, len(chunks))
+        self.assertTrue(has_more)
+        rest, _after, still_more = self.console.read(
+            "langgraph_run:r", after_chunk_id=after, limit=2,
+        )
+        self.assertEqual(1, len(rest))
+        self.assertFalse(still_more)
+
+    def test_a_chatty_handler_is_bounded_and_told_so(self) -> None:
+        """The Agent clients bound what they read; this bounds what is stored.
+
+        Without it one talkative CLI grows the database for ever, and the
+        reader is never told the tail is missing.
+        """
+
+        sink = self.sink(max_bytes=64)
+        sink.emit("stdout", "x" * 500)
+        sink.emit("stdout", "more that will not fit")
+        chunks, _after, _more = self.console.read("langgraph_run:r")
+        stored = "".join(item["text"] for item in chunks)
+        self.assertIn("truncated at 64 bytes", stored)
+        self.assertEqual(64, self.console.stored_bytes(
+            "langgraph_attempt:work:1", "stdout",
+        ) - len("\n… output truncated at 64 bytes\n"))
+
+    def test_the_bound_is_per_stream(self) -> None:
+        sink = self.sink(max_bytes=8)
+        sink.emit("stdout", "12345678")
+        sink.emit("stderr", "abcdefgh")
+        chunks, _after, _more = self.console.read("langgraph_run:r")
+        self.assertEqual(
+            {"stdout", "stderr"}, {item["stream"] for item in chunks},
+        )
+
+    def test_a_console_that_cannot_be_written_does_not_reach_the_handler(self) -> None:
+        """A Handler that cannot print is still a Handler that ran.
+
+        Failing a real attempt because its console could not be saved would
+        trade a completed unit of work for a log line.
+        """
+
+        class Broken:
+            def append(self, **_kwargs):
+                raise OSError("disk full")
+
+        from orbit.workflow.langgraph_runtime.console import AttemptConsoleSink
+
+        sink = AttemptConsoleSink(
+            Broken(), run_id="langgraph_run:r", node_id="work",
+            attempt_id="langgraph_attempt:work:1",
+        )
+        sink.emit("stdout", "this goes nowhere")  # must not raise
+
+    def test_an_unknown_stream_is_ignored_rather_than_stored(self) -> None:
+        sink = self.sink()
+        sink.emit("syslog", "not a stream a process has")
+        self.assertEqual(([], 0, False), self.console.read("langgraph_run:r"))
+
+    def test_output_is_scoped_to_one_node_when_asked(self) -> None:
+        self.sink().emit("stdout", "from work\n")
+        from orbit.workflow.langgraph_runtime.console import AttemptConsoleSink
+
+        AttemptConsoleSink(
+            self.console, run_id="langgraph_run:r", node_id="other",
+            attempt_id="langgraph_attempt:other:1",
+        ).emit("stdout", "from other\n")
+        chunks, _after, _more = self.console.read("langgraph_run:r", node_id="work")
+        self.assertEqual(["from work\n"], [item["text"] for item in chunks])
+
+
+class HandlerConsoleWiringTests(unittest.TestCase):
+    def test_a_real_subprocess_agent_has_its_console_kept(self) -> None:
+        """The adapter used to hand Handlers a sink that dropped everything.
+
+        The Agent client has always streamed its process output; what was
+        missing was somewhere for it to go, which is why an attempt that ended
+        `unknown` left no account of itself at all.
+        """
+
+        import sys as _sys
+
+        import tests.test_workflow_langgraph_runtime as engine_tests
+        from orbit.workflow.domain.definitions import IRHandlerRef, IRNode
+        from orbit.workflow.handlers.agent import TrustedCliAgentClient
+        from orbit.workflow.langgraph_runtime.compiler import (
+            LangGraphExecutionContext,
+        )
+        from orbit.workflow.langgraph_runtime.console import AttemptConsole
+        from orbit.workflow.langgraph_runtime.wiring import trusted_handlers
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            script = root / "agent.py"
+            script.write_text(
+                "import sys, json\n"
+                "sys.stderr.write('thinking\\n')\n"
+                "sys.stdin.read()\n"
+                "print(json.dumps({'output': {'value': 'done'},"
+                " 'artifact_refs': []}))\n"
+            )
+            registration = engine_tests.LangGraphProductionWiringTests(
+                "run"
+            ).registration(TrustedCliAgentClient((_sys.executable, str(script))))
+            database = root / "runs.sqlite3"
+            registry = trusted_handlers([registration], attempt_db_path=database)
+            manifest = registration.manifest
+            bound = registry.resolve(IRNode(
+                "agent", "action",
+                (engine_tests.port("value"),), (engine_tests.port("value"),),
+                IRHandlerRef(
+                    manifest.name, manifest.version, manifest.fingerprint,
+                ),
+                {}, (), None, None,
+            ))
+            context = LangGraphExecutionContext(
+                "workflow:test", "agent", "langgraph_run:c1",
+                "langgraph_attempt:c1:1",
+                output_ports=[{
+                    "id": "value", "schema_id": engine_tests.SCHEMA,
+                    "data_policy": {
+                        "transport": "inline", "max_size_bytes": 65536,
+                        "content_types": [],
+                    },
+                }],
+            )
+            bound.invoke({"value": "hi"}, {}, context)
+            chunks, _after, _more = AttemptConsole(database).read("langgraph_run:c1")
+
+        printed = {item["stream"]: item["text"] for item in chunks}
+        self.assertIn("thinking\n", printed.get("stderr", ""))
+        self.assertEqual(
+            {"agent"}, {item["node_id"] for item in chunks},
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

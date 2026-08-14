@@ -319,8 +319,83 @@ export function createViews(context) {
       }) : null,
       run.error ? el("div", { class: "banner error", text: run.error }) : null,
       actions.length ? el("div", { class: "actions" }, actions) : null,
+      runConsole(run.run_id, {
+        live: !TERMINAL_LANGGRAPH_STATUSES.has(run.status),
+      }),
     ]));
     await appendRunArtifacts(root, run.run_id);
+  }
+
+  /* The Handler console, followed rather than paged.
+   *
+   * Loaded only when opened: an Agent's output is the largest thing on the
+   * page and most visits do not want it. While the run is live it keeps
+   * asking; once it is over it reads to the end and stops.
+   */
+  function runConsole(runId, { live }) {
+    const log = el("pre", {
+      class: "console-log simplified-step-output-log", role: "log",
+      tabindex: "0", hidden: true,
+    });
+    const state = el("span", { class: "muted", text: i18n.t("run.console.empty") });
+    const details = el("details", { class: "simplified-step-output" }, [
+      el("summary", { text: i18n.t("simplified.execution.output") }),
+      el("div", { class: "simplified-step-output-body" }, [state, log]),
+    ]);
+    let after = 0;
+    let timer = null;
+    let loading = false;
+    let stopped = false;
+
+    const draw = (chunks) => {
+      for (const chunk of chunks) {
+        log.append(el("span", {
+          class: `console-chunk ${chunk.stream}`, text: chunk.text,
+        }));
+      }
+      if (log.childElementCount) log.hidden = false;
+    };
+
+    const poll = async () => {
+      if (stopped || loading || !details.open) return;
+      loading = true;
+      if (!log.childElementCount) {
+        state.textContent = i18n.t("simplified.execution.output.loading");
+      }
+      try {
+        const response = await api.runOutput(runId, after, 200);
+        after = response.data.after;
+        draw(response.data.chunks);
+        state.textContent = log.childElementCount
+          ? i18n.t(live ? "run.console.following" : "run.console.finished")
+          : i18n.t("run.console.empty");
+        if (response.data.has_more) timer = setTimeout(poll, 0);
+        else if (live) timer = setTimeout(poll, 2000);
+      } catch (error) {
+        stopped = true;
+        state.textContent = error instanceof ApiError && error.status === 403
+          ? i18n.t("run.console.forbidden")
+          : i18n.t("run.console.unavailable");
+      } finally {
+        loading = false;
+      }
+    };
+
+    details.addEventListener("toggle", () => {
+      if (details.open) poll();
+      else if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+    });
+
+    const previous = activeViewCleanup;
+    activeViewCleanup = () => {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+      if (previous) previous();
+    };
+    return details;
   }
 
   /* What the run produced, and a way to open it.

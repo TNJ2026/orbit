@@ -119,6 +119,15 @@ export class Api {
     return this.get(`/api/v1/langgraph-runs/${encodeURIComponent(runId)}`);
   }
 
+  /** What this run's Handlers printed, from `after` onwards. */
+  runOutput(runId, after = 0, limit = 200, nodeId = "") {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (after) params.set("after", String(after));
+    if (nodeId) params.set("node_id", nodeId);
+    const path = `/api/v1/langgraph-runs/${encodeURIComponent(runId)}/output`;
+    return this.get(`${path}?${params}`);
+  }
+
   artifacts({ runId = "", limit = 25 } = {}) {
     const params = new URLSearchParams({ limit: String(limit) });
     if (runId.trim()) params.set("run_id", runId.trim());

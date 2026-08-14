@@ -153,6 +153,11 @@ attempt journal â€” the ones whose execution is an effect that must not repeat â
 so a replayed superstep announces nothing. Treat events as hints and re-read
 the referenced Run before acting.
 
+What a run's Handlers printed is read from
+`GET /api/v1/langgraph-runs/{run_id}/output?after=<chunk_id>`, which needs the
+sensitive scope. It is a console, not a log: bounded per attempt and per
+stream, written outside every transaction, and never something a replay reads.
+
 ## CLI quick reference
 
 ```bash

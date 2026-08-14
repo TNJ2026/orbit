@@ -142,6 +142,10 @@ Runtime 事件可通过 `wait_app_event`、`list_app_events` 和 `ack_app_event`
 重放的 superstep 不会产生事件。
 事件只是提示，执行操作前应重新读取对应 Run。
 
+Handler 进程打印的内容通过
+`GET /api/v1/langgraph-runs/{run_id}/output?after=<chunk_id>` 读取，需要 sensitive
+scope。它是控制台而非日志：按尝试和流分别限量、写在所有事务之外，且永远不参与重放。
+
 ## CLI 快速参考
 
 ```bash

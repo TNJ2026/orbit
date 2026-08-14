@@ -20,6 +20,7 @@ from ..handlers.agent import AgentRequest
 from ..handlers.context import ScopedSecretResolver
 from ..persistence.workflow_versions import SQLiteWorkflowVersionStore
 from .artifacts import LangGraphArtifactStore
+from .console import AttemptConsole, AttemptConsoleSink
 from .compiler import (
     BoundHandler, LangGraphHandlerRegistry, LangGraphUnknownExternalResult,
 )
@@ -45,7 +46,24 @@ def _transform(inputs: Mapping[str, Any], config: Mapping[str, Any], _context):
     raise ValueError(f"unsupported transform operation: {operation}")
 
 
-class _DiscardedOutput:
+def _console_sink(console: AttemptConsole | None, context):
+    """Where a Handler's process output goes, or nowhere.
+
+    `None` is a real configuration — an embedder binding these adapters
+    without the adapter's own database — and a Handler that cannot print is
+    still a Handler that runs, so the absent case is silent rather than an
+    error.
+    """
+
+    if console is None:
+        return _Discarded()
+    return AttemptConsoleSink(
+        console, run_id=context.run_id, node_id=context.node_id,
+        attempt_id=context.attempt_id,
+    )
+
+
+class _Discarded:
     def emit(self, _stream: str, _text: str) -> None:
         return None
 
@@ -187,6 +205,7 @@ def _validate_secret_refs(inputs, context, manifest) -> None:
 
 def _agent_adapter(
     implementation: AgentHandler, manifest, journal, artifact_store, secret_values,
+    console: AttemptConsole | None = None,
 ):
     active: dict[str, set[str]] = {}
     active_lock = Lock()
@@ -236,7 +255,7 @@ def _agent_adapter(
                 input_ports=context.input_ports,
                 output_ports=context.output_ports,
             ),
-            output=_DiscardedOutput(),
+            output=_console_sink(console, context),
             artifacts=artifacts,
             secrets=secrets,
         )
@@ -290,6 +309,7 @@ def _agent_adapter(
 
 def _tool_adapter(
     implementation: ToolHandler, manifest, journal, secret_values,
+    console: AttemptConsole | None = None,
 ):
     active: dict[str, dict[str, Any]] = {}
     active_lock = Lock()
@@ -323,7 +343,7 @@ def _tool_adapter(
                 tuple(manifest.required_secrets), secret_values,
             ),
             artifacts=None,
-            output=_DiscardedOutput(),
+            output=_console_sink(console, context),
             clock=lambda: datetime.now(timezone.utc),
         )
         try:
@@ -381,6 +401,10 @@ def trusted_handlers(
         artifact_store = LangGraphArtifactStore(
             attempt_path, attempt_path.parent / "artifacts",
         )
+    # Beside the attempts it belongs to. Not in the same transaction as
+    # anything: a console is an observation, and a slow or failing write of it
+    # must not reach the attempt it is describing.
+    console = None if attempt_db_path is None else AttemptConsole(attempt_db_path)
     handlers: list[BoundHandler] = []
     secret_values = dict(secret_values or {})
     for registration in registrations:
@@ -401,7 +425,7 @@ def trusted_handlers(
             journal = _HandlerAttemptJournal(attempt_db_path)
             invoke, cancel_run = _agent_adapter(
                 registration.implementation, manifest, journal, artifact_store,
-                secret_values,
+                secret_values, console,
             )
             handlers.append(BoundHandler(
                 manifest.name,
@@ -418,6 +442,7 @@ def trusted_handlers(
             journal = _HandlerAttemptJournal(attempt_db_path)
             invoke, cancel_run = _tool_adapter(
                 registration.implementation, manifest, journal, secret_values,
+                console,
             )
             handlers.append(BoundHandler(
                 manifest.name,
@@ -457,4 +482,5 @@ def build_service(
         run_db_path=state / "langgraph-runs.sqlite3",
         checkpoint_db_path=state / "langgraph-checkpoints.sqlite3",
         artifact_store=artifact_store,
+        console=AttemptConsole(state / "langgraph-runs.sqlite3"),
     )

@@ -247,3 +247,29 @@ class AccessibilityTests(unittest.TestCase):
         canvas = (EDITOR_SOURCE / "catalog-graph.mjs").read_text(encoding="utf-8")
         self.assertIn("?readonly=1", page)
         self.assertIn('params.get("readonly") === "1"', canvas)
+
+
+class HandlerConsoleRenderingTests(unittest.TestCase):
+    def test_the_console_follows_only_while_the_run_is_alive(self) -> None:
+        """Polling a finished run's console for ever is a busy loop for nothing."""
+
+        app_js = "\n".join(path.read_text(encoding="utf-8") for path in source_files())
+        self.assertIn("else if (live) timer = setTimeout(poll, 2000);", app_js)
+        self.assertIn("activeViewCleanup = () => {", app_js)
+
+    def test_the_console_loads_only_when_it_is_opened(self) -> None:
+        """An Agent's output is the largest thing on the page.
+
+        Fetching it on every visit to a run detail spends the request on
+        something most visits never look at.
+        """
+
+        app_js = "\n".join(path.read_text(encoding="utf-8") for path in source_files())
+        self.assertIn('details.addEventListener("toggle"', app_js)
+        self.assertIn("if (stopped || loading || !details.open) return;", app_js)
+
+    def test_the_console_reads_the_engine_route(self) -> None:
+        api_js = (ASSETS / "api.js").read_text(encoding="utf-8")
+        self.assertIn(
+            "/api/v1/langgraph-runs/${encodeURIComponent(runId)}/output", api_js,
+        )

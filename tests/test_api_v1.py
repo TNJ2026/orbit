@@ -1979,6 +1979,58 @@ class OperationsReadTests(ApiTestCase):
             self.assertTrue(changed["changed"])
 
 
+class HandlerConsoleApiTests(ApiTestCase):
+    """Reading what a run's Handlers printed."""
+
+    def start(self, client, key: str) -> str:
+        started = client.post(
+            "/api/v1/langgraph-runs", actor="author", key=key,
+            body={"workflow_id": "workflow:linear", "input": {"value": 1}},
+        )
+        self.assertEqual(200, started.status_code, started.text)
+        return started.json()["data"]["run"]["run_id"]
+
+    def test_console_is_content_and_needs_the_scope_for_content(self) -> None:
+        """A subprocess prints whatever it was working on.
+
+        It is the same material as an Artifact's title, so it is behind the
+        same scope: a reader who may see that a run happened is not thereby
+        allowed to read what it said.
+        """
+
+        with AsgiHarness(self.app) as client:
+            run_id = self.start(client, "console-scope")
+            path = f"/api/v1/langgraph-runs/{run_id}/output"
+            self.assertEqual(200, client.get(path, actor="author").status_code)
+            self.assertEqual(403, client.get(path, actor="reader").status_code)
+
+    def test_a_run_that_printed_nothing_reads_as_empty_not_missing(self) -> None:
+        with AsgiHarness(self.app) as client:
+            run_id = self.start(client, "console-empty")
+            response = client.get(
+                f"/api/v1/langgraph-runs/{run_id}/output", actor="author",
+            )
+            self.assertEqual(200, response.status_code, response.text)
+            self.assertEqual(
+                {"chunks": [], "after": 0, "has_more": False},
+                response.json()["data"],
+            )
+
+    def test_an_unknown_run_and_a_bad_cursor_are_told_apart(self) -> None:
+        with AsgiHarness(self.app) as client:
+            run_id = self.start(client, "console-errors")
+            self.assertEqual(404, client.get(
+                "/api/v1/langgraph-runs/langgraph_run:nope/output", actor="author",
+            ).status_code)
+            self.assertEqual(400, client.get(
+                f"/api/v1/langgraph-runs/{run_id}/output?after=yesterday",
+                actor="author",
+            ).status_code)
+            self.assertEqual(400, client.get(
+                f"/api/v1/langgraph-runs/{run_id}/output?tail=1", actor="author",
+            ).status_code)
+
+
 class SurfaceTests(ApiTestCase):
     def test_no_mutating_route_outside_api_v1(self) -> None:
         mutating = []

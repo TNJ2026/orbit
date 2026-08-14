@@ -12,7 +12,9 @@ from ...workflow.api.dto import (
     CursorError, decode_cursor, encode_cursor, envelope, page_size,
 )
 
-from .common import OPS_WRITE_SCOPE, READ_SCOPE, WRITE_SCOPE, error
+from .common import (
+    OPS_WRITE_SCOPE, READ_SCOPE, SENSITIVE_SCOPE, WRITE_SCOPE, error,
+)
 
 
 def _dto(run, *, can_write: bool) -> dict[str, Any]:
@@ -216,6 +218,46 @@ def build_routes(ctx, service, template_service=None) -> list[Route]:
         # no commands and is offered on the read scope.
         return JSONResponse(envelope({"steps": list(steps)}))
 
+    async def run_output(request: Request) -> JSONResponse:
+        """What this run's Handlers printed, followed rather than paged.
+
+        `after` is the last chunk the caller already has, so a console tails
+        forwards without re-reading what it has shown. `has_more` says a
+        further page is waiting now; without it a follower cannot tell a
+        full page from the end of the output.
+        """
+
+        actor = ctx.authenticate(request, SENSITIVE_SCOPE)
+        if isinstance(actor, JSONResponse):
+            return actor
+        run_id = request.path_params["run_id"]
+        try:
+            unknown = set(request.query_params) - {"after", "limit", "node_id"}
+            if unknown:
+                raise ValueError(f"unknown query parameter: {sorted(unknown)[0]}")
+            # Whose run this is decides whether its console may be read, and
+            # it is asked before the console is touched.
+            service.get(run_id, actor=actor)
+            after = request.query_params.get("after") or "0"
+            if not after.isdigit():
+                raise ValueError("after must be a chunk id")
+            console = getattr(service, "console", None)
+            if console is None:
+                chunks, position, has_more = [], int(after), False
+            else:
+                chunks, position, has_more = console.read(
+                    run_id, after_chunk_id=int(after),
+                    limit=page_size(request.query_params.get("limit")),
+                    node_id=request.query_params.get("node_id") or None,
+                )
+        except LookupError as exc:
+            return error("not_found", str(exc), 404)
+        except ValueError as exc:
+            return error("invalid_request", str(exc))
+        return JSONResponse(envelope({
+            "chunks": chunks, "after": position, "has_more": has_more,
+        }))
+
     async def start_run(request: Request) -> JSONResponse:
         def command(body: Mapping[str, Any], actor: str, key: str):
             workflow_id = str(body.get("workflow_id") or "").strip()
@@ -369,6 +411,9 @@ def build_routes(ctx, service, template_service=None) -> list[Route]:
         ),
         Route("/api/v1/langgraph-runs", start_run, methods=["POST"]),
         Route("/api/v1/langgraph-runs/{run_id}", get_run, methods=["GET"]),
+        Route(
+            "/api/v1/langgraph-runs/{run_id}/output", run_output, methods=["GET"],
+        ),
         Route(
             "/api/v1/langgraph-runs/{run_id}/resume",
             resume_run,

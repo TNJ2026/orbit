@@ -141,6 +141,7 @@ class LangGraphWorkflowService:
         run_db_path: Path | str,
         checkpoint_db_path: Path | str,
         artifact_store=None,
+        console=None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.workflow_versions = workflow_versions
@@ -148,6 +149,9 @@ class LangGraphWorkflowService:
         self.run_db_path = Path(run_db_path)
         self.checkpoint_db_path = Path(checkpoint_db_path)
         self.artifacts = artifact_store
+        # Read-side only: the Handler adapters write it, and they were handed
+        # their own binding when they were built.
+        self.console = console
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         # Runs this process is executing right now. `running` in the database
         # means "a process was executing this", and recovery exists because
