@@ -1034,6 +1034,12 @@ class LangGraphWorkflowService:
                         "idempotency key was already used for another request"
                     )
                 return self.get(receipt["run_id"])
+            # Read inside the transaction that changes it, because what it
+            # was decides who releases what this cancellation makes the
+            # Handlers hold.
+            was = connection.execute(
+                "SELECT status FROM langgraph_runs WHERE run_id=?", (run_id,),
+            ).fetchone()
             changed = connection.execute(
                 "UPDATE langgraph_runs SET status='cancelled',revision=revision+1,"
                 "interrupts_json='[]',updated_at=? WHERE run_id=? AND revision=?"
@@ -1058,6 +1064,15 @@ class LangGraphWorkflowService:
             self._append_event(connection, run_id)
             connection.commit()
         self.handlers.cancel(run_id)
+        if was is None or was["status"] != "running":
+            # Signalled either way — a Handler that can be stopped should be
+            # told — but only a `running` run is being driven or waiting for a
+            # worker, and only a drive releases what cancelling made the
+            # Handlers hold. Nothing will drive this one: it can be reached
+            # again only through a resume, which reads the status just
+            # written. Releasing here is what keeps the mark's life bounded by
+            # the run rather than by the process.
+            self.handlers.finish(run_id)
         return self.get(run_id)
 
     def get(self, run_id: str, *, actor: str | None = None) -> LangGraphRun:
@@ -2010,9 +2025,17 @@ class LangGraphWorkflowService:
                 ).fetchone()
             if row is None:
                 raise LookupError(f"LangGraph run not found: {run_id}")
-            if row["status"] == "cancelled":
-                return self.get(run_id)
-            return self._drive(run_id, ir, row["owner_actor"], inputs, resume)
+            try:
+                if row["status"] == "cancelled":
+                    return self.get(run_id)
+                return self._drive(run_id, ir, row["owner_actor"], inputs, resume)
+            finally:
+                # Whatever the Handlers were holding on this run's behalf ends
+                # here. A cancellation mark that outlived the drive would be a
+                # guess about how long it is needed; this is the answer.
+                finish = getattr(self.handlers, "finish", None)
+                if finish is not None:
+                    finish(run_id)
 
     def _drive(self, run_id, ir, owner_actor, inputs, resume) -> LangGraphRun:
         config = {"configurable": {

@@ -196,8 +196,15 @@ still queued has no attempt to signal, so the engine declines it before
 compiling anything, and the Agent and Tool adapters refuse to begin an
 attempt for a cancelled run under the same lock a cancel takes — either the
 cancel lands first and no work starts, or the attempt claims first and the
-cancel has something to signal. Work already under way is stopped only as
-well as the Handler itself can be stopped, which is what it always was.
+cancel has something to signal. A Tool's `prepare` runs outside that lock,
+because holding it there would serialise every attempt behind one external
+call, so the mark is read again when the prepared execution is registered
+and anything left over is cancelled rather than executed. What a Handler
+refuses is remembered until the run stops being driven and released there —
+by name, not by age, since how long a cancellation needs to be remembered is
+not something a fixed number of recent ones can answer. Work already under
+way is stopped only as well as the Handler itself can be stopped, which is
+what it always was.
 
 Writes require the normal `idempotency-key` header. Read DTOs advertise a
 resume command only to actors with write scope and only while interrupted;

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
@@ -48,12 +47,6 @@ def _transform(inputs: Mapping[str, Any], config: Mapping[str, Any], _context):
     raise ValueError(f"unsupported transform operation: {operation}")
 
 
-# Runs cancelled while this process was still deciding whether to start work
-# for them. Bounded, because nothing here knows when a run is finished with;
-# cancels are rare and only the recent ones can still race a claim.
-CANCELLED_MEMORY = 1024
-
-
 class _CancelledRuns:
     """Which runs must not have work started for them, and nothing more.
 
@@ -62,19 +55,31 @@ class _CancelledRuns:
     stops it, or after it and finds an attempt to signal. There is no third
     order, which is the whole point: checking the run's status separately
     leaves a window where cancel is invisible to both.
+
+    Held until the run is finished being driven, and released there. It was
+    briefly a fixed number of recent cancellations, which is a guess about how
+    long a race lasts and therefore wrong: a run cancelled during a Handler
+    that takes minutes would have its mark evicted by enough other
+    cancellations, and its next node would then be allowed to start. The
+    engine's own check cannot cover that — by then the run is under way and
+    has passed it. So the mark's life is the drive's life, and the entry is
+    removed by name rather than by age.
     """
 
     def __init__(self) -> None:
-        self._seen: OrderedDict[str, None] = OrderedDict()
+        self._marked: set[str] = set()
 
     def add(self, run_id: str) -> None:
-        self._seen[run_id] = None
-        self._seen.move_to_end(run_id)
-        while len(self._seen) > CANCELLED_MEMORY:
-            self._seen.popitem(last=False)
+        self._marked.add(run_id)
+
+    def discard(self, run_id: str) -> None:
+        self._marked.discard(run_id)
 
     def __contains__(self, run_id: str) -> bool:
-        return run_id in self._seen
+        return run_id in self._marked
+
+    def __len__(self) -> int:
+        return len(self._marked)
 
 
 def _retryable(manifest, exc: Exception) -> Exception:
@@ -377,7 +382,13 @@ def _agent_adapter(
             implementation.client.cancel(f"agent:{attempt_id}")
         return bool(attempts)
 
-    return invoke, cancel_run
+    def finish_run(run_id: str) -> None:
+        """The run is no longer being driven, so its mark has no more work."""
+
+        with active_lock:
+            cancelled.discard(run_id)
+
+    return invoke, cancel_run, finish_run
 
 
 def _tool_adapter(
@@ -426,17 +437,31 @@ def _tool_adapter(
                     raise LangGraphRunCancelled(
                         f"run {context.run_id} was cancelled before this attempt"
                     )
-            # `prepare` is where an external execution begins, so the line
-            # above is the last moment at which refusing costs nothing.
+            # `prepare` is where an external execution begins, so the check
+            # above is the last moment at which refusing costs nothing — but
+            # it cannot be the only one. The lock is released across `prepare`
+            # on purpose, since holding it there would serialise every
+            # attempt this adapter runs behind one external call. So a cancel
+            # can land while `prepare` is in flight, and it would see no
+            # active entry to signal: registering and re-reading the mark in
+            # one acquisition is what closes that, and what is left over is
+            # cancelled rather than executed.
             prepared = implementation.prepare(
                 request, SimpleNamespace(request=request)
             )
             with active_lock:
-                active[context.attempt_id] = {
-                    "execution_ref": prepared.execution_ref,
-                    "context": handler_context,
-                    "run_id": context.run_id,
-                }
+                stranded = context.run_id in cancelled
+                if not stranded:
+                    active[context.attempt_id] = {
+                        "execution_ref": prepared.execution_ref,
+                        "context": handler_context,
+                        "run_id": context.run_id,
+                    }
+            if stranded:
+                implementation.cancel(prepared.execution_ref, handler_context)
+                raise LangGraphRunCancelled(
+                    f"run {context.run_id} was cancelled while preparing"
+                )
             try:
                 raw = implementation.execute(prepared, handler_context)
                 result = implementation.normalize_result(raw, handler_context)
@@ -475,7 +500,13 @@ def _tool_adapter(
             implementation.cancel(item["execution_ref"], item["context"])
         return bool(entries)
 
-    return invoke, cancel_run
+    def finish_run(run_id: str) -> None:
+        """The run is no longer being driven, so its mark has no more work."""
+
+        with active_lock:
+            cancelled.discard(run_id)
+
+    return invoke, cancel_run, finish_run
 
 
 def trusted_handlers(
@@ -512,7 +543,7 @@ def trusted_handlers(
             and artifact_store is not None
         ):
             journal = _HandlerAttemptJournal(attempt_db_path)
-            invoke, cancel_run = _agent_adapter(
+            invoke, cancel_run, finish_run = _agent_adapter(
                 registration.implementation, manifest, journal, artifact_store,
                 secret_values, console,
             )
@@ -522,6 +553,7 @@ def trusted_handlers(
                 manifest.fingerprint,
                 invoke,
                 cancel_run,
+                finish_run,
                 frozenset({"inline", "artifact_ref", "secret_ref"}),
             ))
         elif (
@@ -529,7 +561,7 @@ def trusted_handlers(
             and attempt_db_path is not None
         ):
             journal = _HandlerAttemptJournal(attempt_db_path)
-            invoke, cancel_run = _tool_adapter(
+            invoke, cancel_run, finish_run = _tool_adapter(
                 registration.implementation, manifest, journal, secret_values,
                 console,
             )
@@ -539,6 +571,7 @@ def trusted_handlers(
                 manifest.fingerprint,
                 invoke,
                 cancel_run,
+                finish_run,
                 frozenset({"inline", "secret_ref"}),
                 retry_safe=(
                     manifest.execution_safety is ExecutionSafety.REPLAY_SAFE

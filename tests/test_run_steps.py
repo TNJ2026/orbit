@@ -2161,6 +2161,190 @@ class CancellingAQueuedRunTests(unittest.TestCase):
         self.assertEqual(1, len(self.calls), "the second node ran anyway")
         self.assertEqual("cancelled", service.get(run.run_id).status)
 
+    def test_a_cancel_during_prepare_stops_the_execution_it_created(self) -> None:
+        """The window between deciding to start and being cancellable.
+
+        The lock is released across `prepare` on purpose — holding it would
+        serialise every attempt this adapter runs behind one external call —
+        so a cancel can land while `prepare` is in flight, and it sees no
+        active entry to signal. Registering and re-reading the mark in one
+        acquisition is what closes that: whatever `prepare` created is
+        cancelled rather than executed.
+        """
+
+        from orbit.workflow.handlers.tools import ToolResult
+        from orbit.workflow.langgraph_runtime.artifacts import LangGraphArtifactStore
+        from orbit.workflow.langgraph_runtime.wiring import trusted_handlers
+
+        preparing = threading.Event()
+        proceed = threading.Event()
+        self.addCleanup(proceed.set)
+        events: list[str] = []
+
+        class Adapter:
+            def execute(self, request, context):
+                events.append("execute")
+                return ToolResult({"value": 1})
+
+            def cancel(self, execution_ref, context):
+                events.append(f"cancel:{execution_ref}")
+                return None
+
+            def recover(self, recovery_ref, context):
+                return None
+
+        fixture = engine_tests.LangGraphProductionWiringTests("run")
+        registration = fixture.tool_registration(Adapter())
+        manifest = registration.manifest
+        # `prepare` belongs to the Tool Handler, not to the adapter under it,
+        # and holding it open is the only way to stand inside the window.
+        handler = registration.implementation
+        original = handler.prepare
+
+        def slow_prepare(request, context):
+            preparing.set()
+            proceed.wait(20)
+            return original(request, context)
+
+        handler.prepare = slow_prepare
+
+        ir = engine_tests.workflow(
+            (
+                IRNode(
+                    "tool0", "action",
+                    (engine_tests.port("value"),), (engine_tests.port("value"),),
+                    IRHandlerRef(
+                        manifest.name, manifest.version, manifest.fingerprint,
+                    ),
+                    {"tool_name": "example.read", "tool_version": "1.0.0"},
+                    (), None,
+                ),
+                engine_tests.node(
+                    "done", inputs=("value",), kind="terminal", handler=False,
+                ),
+            ),
+            (engine_tests.edge("last", "tool0", "done"),),
+            entry=("tool0",), terminals=("done",), result=("tool0", "value"),
+        )
+        store = SQLiteWorkflowVersionStore(self.root / "window.sqlite3")
+        store.publish(
+            CompiledWorkflow(ir, definition_hash(ir), "test", "sha256:" + "c" * 64),
+            expected_latest_version=0, source_format="json",
+            source_text="{}", actor="test", dsl_version="1.3",
+        )
+        runs = self.root / "window-runs.sqlite3"
+        service = LangGraphWorkflowService(
+            store, trusted_handlers([registration], attempt_db_path=runs),
+            run_db_path=runs,
+            checkpoint_db_path=self.root / "window-checkpoints.sqlite3",
+            artifact_store=LangGraphArtifactStore(runs, self.root / "window"),
+        )
+        run = service.start(
+            ir.workflow_id, {"value": 1}, idempotency_key="window",
+            actor="local", wait=False,
+        )
+        self.assertTrue(preparing.wait(20), "prepare never started")
+        service.cancel(
+            run.run_id, expected_revision=service.get(run.run_id).revision,
+            idempotency_key="cancel-preparing", actor="local",
+        )
+        proceed.set()
+        service.wait_for_background(timeout=20)
+
+        # The Tool Handler's execution ref is `tool:{attempt_id}`, so a
+        # cancel naming one is the prepared execution being cleaned up.
+        self.assertTrue(
+            [item for item in events if item.startswith("cancel:tool:")],
+            f"the prepared execution was left behind: {events}",
+        )
+        self.assertNotIn("execute", events, "the Tool ran after the cancel")
+        self.assertEqual("cancelled", service.get(run.run_id).status)
+
+    def test_a_mark_outlives_any_number_of_other_cancellations(self) -> None:
+        """Its life is the run's, not a guess about how long a race lasts.
+
+        A fixed window of recent cancellations was wrong for exactly the run
+        that needs it most: one cancelled during a Handler that takes minutes,
+        while other runs are cancelled meanwhile. Evicting its mark would let
+        its next node start.
+        """
+
+        from orbit.workflow.langgraph_runtime.wiring import _CancelledRuns
+
+        marks = _CancelledRuns()
+        marks.add("langgraph_run:slow")
+        for index in range(5000):
+            marks.add(f"langgraph_run:other{index}")
+        self.assertIn("langgraph_run:slow", marks)
+
+        # Released by name. One run finishing must not clear the marks of
+        # every other run still being driven beside it.
+        marks.discard("langgraph_run:slow")
+        self.assertNotIn("langgraph_run:slow", marks)
+        self.assertIn("langgraph_run:other0", marks)
+        self.assertEqual(5000, len(marks))
+
+    def test_a_drive_releases_what_it_made_the_handlers_hold(self) -> None:
+        """Somebody has to say when refusing can stop, and only the drive can.
+
+        The adapters see attempts, not runs, and a run's last attempt is only
+        recognisable afterwards — so the mark's life is the drive's life, and
+        the engine ends it.
+        """
+
+        service, ir = self.build()
+        released: list[str] = []
+        original = service.handlers.finish
+        service.handlers.finish = lambda run_id: (
+            released.append(run_id), original(run_id),
+        )[1]
+
+        run = service.start(
+            ir.workflow_id, {"value": 1}, idempotency_key="released",
+            actor="local", wait=False,
+        )
+        self.wait_for_calls(1)
+        service.cancel(
+            run.run_id, expected_revision=service.get(run.run_id).revision,
+            idempotency_key="cancel-released", actor="local",
+        )
+        self.release.set()
+        service.wait_for_background(timeout=20)
+        self.assertIn(run.run_id, released)
+
+    def test_a_run_nothing_will_drive_is_released_at_once(self) -> None:
+        """A run waiting for a person is not queued behind anything.
+
+        Only a resume can reach it again, and a resume reads the status the
+        cancellation just wrote. Holding a mark for it would be holding one
+        nothing ever releases.
+        """
+
+        temp_root = self.root / "waiting"
+        path = temp_root / "runtime.db"
+        publish_human_workflow(path)
+        service = build_service(
+            path, [transform_registration()],
+            state_directory=temp_root / "langgraph",
+        )
+        released: list[str] = []
+        original = service.handlers.finish
+        service.handlers.finish = lambda run_id: (
+            released.append(run_id), original(run_id),
+        )[1]
+
+        run = service.start(
+            "workflow:human", {"value": 1}, idempotency_key="paused",
+            actor="local",
+        )
+        self.assertEqual("interrupted", service.get(run.run_id).status)
+        released.clear()
+        service.cancel(
+            run.run_id, expected_revision=run.revision,
+            idempotency_key="cancel-paused", actor="local",
+        )
+        self.assertEqual([run.run_id], released)
+
     def test_a_cancellation_is_not_something_to_retry(self) -> None:
         """Otherwise a retry policy would resurrect a cancelled run."""
 

@@ -99,6 +99,7 @@ class BoundHandler:
     manifest_fingerprint: str
     invoke: HandlerCallable
     cancel_run: Callable[[str], bool] | None = None
+    finish_run: Callable[[str], None] | None = None
     supported_transports: frozenset[str] = frozenset({"inline"})
     retry_safe: bool = False
 
@@ -163,6 +164,19 @@ class LangGraphHandlerRegistry:
             if handler.cancel_run is not None:
                 signalled = handler.cancel_run(run_id) or signalled
         return signalled
+
+    def finish(self, run_id: str) -> None:
+        """This process is done driving the run; drop what was held for it.
+
+        Cancellation is remembered by the Handlers that must refuse to start
+        work, and something has to say when refusing can stop. Nothing else
+        knows: the adapters see attempts, not runs, and a run's last attempt
+        is only recognisable afterwards.
+        """
+
+        for handler in self._entries.values():
+            if handler.finish_run is not None:
+                handler.finish_run(run_id)
 
 
 def _merge_dicts(left: Mapping[str, Any], right: Mapping[str, Any]) -> dict[str, Any]:
