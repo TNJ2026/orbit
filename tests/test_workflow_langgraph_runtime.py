@@ -4640,10 +4640,16 @@ class LangGraphProductionWiringTests(unittest.TestCase):
                 ir.workflow_id, {"value": 7}, idempotency_key="unknown-agent"
             )
             recovered = service.recover(parked.run_id)
+            step_status = {
+                item["node_id"]: item["status"]
+                for item in service.steps(parked.run_id)
+            }
 
         self.assertEqual("unknown", parked.status)
         self.assertIn("connection lost", parked.error)
         self.assertEqual(parked, recovered)
+        self.assertEqual("unknown", step_status["agent"])
+        self.assertEqual("not_reached", step_status["terminal"])
         self.assertEqual(1, len(client.requests))
 
 

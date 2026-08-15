@@ -243,6 +243,7 @@
 .simplified-step-row.succeeded .simplified-step-mark { color: var(--green); border-color: var(--green); background: var(--green-soft); }
 .simplified-step-row.failed .simplified-step-mark,
 .simplified-step-row.cancelled .simplified-step-mark { color: var(--red); border-color: var(--red); background: var(--red-soft); }
+.simplified-step-row.unknown .simplified-step-mark { color: var(--blue); border-color: var(--blue); background: var(--blue-soft); }
 .simplified-step-copy { display: grid; gap: 3px; min-width: 0; }
 .simplified-step-copy strong { overflow-wrap: anywhere; }
 .simplified-step-copy span { font-size: 12px; }
@@ -1319,6 +1320,7 @@
 }
 .step-row.succeeded .step-mark, .step-row.answered .step-mark { color: var(--green); }
 .step-row.failed .step-mark { color: var(--red); }
+.step-row.unknown .step-mark { color: var(--blue); }
 .step-row.running .step-mark { color: var(--blue); }
 .step-row.waiting .step-mark { color: var(--amber); }
 .step-copy { display: grid; gap: 2px; min-width: 0; }

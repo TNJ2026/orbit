@@ -280,6 +280,8 @@ span.title:hover { border-color: transparent; }
 .node-run { border-left-width: 3px; border-left-style: solid; }
 .node-run-succeeded { border-left-color: var(--ok); }
 .node-run-failed { border-left-color: var(--bad); }
+.node-run-unknown { border-left-color: var(--accent); }
+.node-run-cancelled { border-left-color: var(--bad); }
 .node-run-running { border-left-color: var(--accent); }
 .node-run-waiting { border-left-color: #d97706; }
 .node-run-not_reached { border-left-color: var(--line); opacity: .62; }
@@ -289,4 +291,6 @@ span.title:hover { border-color: transparent; }
 }
 .node-run-succeeded .run-status { color: var(--ok); }
 .node-run-failed .run-status { color: var(--bad); }
+.node-run-unknown .run-status { color: var(--accent); }
+.node-run-cancelled .run-status { color: var(--bad); }
 .node-run-running .run-status { color: var(--accent); }

@@ -14,6 +14,9 @@ const RUN_STATUS_TEXT = {
   running: "working",
   waiting: "waiting",
   failed: "failed",
+  unknown: "outcome unknown",
+  cancelled: "cancelled",
+  answered: "answered",
   not_reached: "not started",
 };
 

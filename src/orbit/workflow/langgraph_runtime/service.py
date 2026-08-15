@@ -1378,7 +1378,7 @@ class LangGraphWorkflowService:
 
         There is no step table. This reads the definition for what the run
         *could* do and the checkpoint for what it *did*, and the difference
-        between them is the progress. Four statuses come out of that, and each
+        between them is the progress. These statuses come out of that, and each
         means exactly one thing:
 
         `succeeded`  the node is in the execution order and its attempt, if
@@ -1389,6 +1389,9 @@ class LangGraphWorkflowService:
         `failed`     its attempt journal says so. Only a Handler with a
                      journal can say it, so a pure node that raised is not
                      here — the run carries the error, the step does not.
+        `unknown`    the Handler may have acted, but its external outcome
+                     cannot be proved. It must not be presented as a failure:
+                     failure can be retried when policy permits; unknown cannot.
         `cancelled`  its in-flight attempt settled because this run was
                      cancelled, rather than because the Handler failed.
         `waiting`    a person has been asked, and the run is interrupted at
@@ -1459,7 +1462,9 @@ class LangGraphWorkflowService:
                 status = "cancelled"
             elif latest == "started":
                 status = "running"
-            elif latest in {"failed", "unknown"}:
+            elif latest == "unknown":
+                status = "unknown"
+            elif latest == "failed":
                 status = "failed"
             elif counts.get(node.id):
                 status = "succeeded"

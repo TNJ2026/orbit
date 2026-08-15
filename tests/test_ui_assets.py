@@ -354,7 +354,8 @@ class StepListRenderingTests(unittest.TestCase):
             (ASSETS / "i18n.zh-CN.json").read_text(encoding="utf-8")
         )
         for status in (
-            "succeeded", "failed", "running", "waiting", "answered", "not_reached",
+            "succeeded", "failed", "unknown", "cancelled", "running", "waiting",
+            "answered", "not_reached",
         ):
             with self.subTest(status=status):
                 self.assertIn(f"simplified.steps.status.{status}", english)
@@ -362,3 +363,9 @@ class StepListRenderingTests(unittest.TestCase):
                 self.assertIn(f"{status}:", app_js.split("STEP_MARKS")[1][:200])
         self.assertIn(".step-row.succeeded .step-mark", css)
         self.assertIn(".step-row.failed .step-mark", css)
+        self.assertIn(".step-row.unknown .step-mark", css)
+
+        node = (EDITOR_SOURCE / "WorkflowNode.jsx").read_text(encoding="utf-8")
+        editor_css = (EDITOR_SOURCE / "app.css").read_text(encoding="utf-8")
+        self.assertIn('unknown: "outcome unknown"', node)
+        self.assertIn(".node-run-unknown", editor_css)
