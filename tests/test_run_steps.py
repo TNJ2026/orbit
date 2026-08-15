@@ -2376,7 +2376,9 @@ class CancellingAQueuedRunTests(unittest.TestCase):
 
         from orbit.workflow.langgraph_runtime.compiler import BoundHandler
 
-        cancel = lambda _run_id: True
+        def cancel(_run_id: str) -> bool:
+            return True
+
         transports = frozenset({"inline", "artifact_ref"})
         handler = BoundHandler(
             "public", "1.0.0", "sha256:" + "a" * 64,

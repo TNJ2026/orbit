@@ -1002,14 +1002,6 @@ class LangGraphWorkflowService:
             self._finish_timer(run_id, "join_deadline", node_id)
             self._settle(run_id, "failed", error=f"{type(exc).__name__}: {exc}")
             raise
-        finally:
-            # A deadline fire is a drive in its own right rather than a call
-            # through `_execute`, so it must close the same Handler lifecycle.
-            # In particular, cancel marks created while downstream nodes are
-            # running must not live for the rest of the process.
-            finish = getattr(self.handlers, "finish", None)
-            if finish is not None:
-                finish(run_id)
 
     def cancel(
         self,
@@ -1993,7 +1985,15 @@ class LangGraphWorkflowService:
 
     @contextmanager
     def _executing(self, run_id: str):
-        """Hold `run_id` for as long as this process is driving its graph."""
+        """Hold `run_id` for as long as this process is driving its graph.
+
+        And so also where a drive ends, which is where whatever the Handlers
+        were holding on this run's behalf is released. Both drive paths pass
+        through here — an ordinary execute and a join deadline firing — and
+        attaching the release to those two call sites instead is how a
+        deadline fire came to keep a cancellation mark for the life of the
+        process. A third drive path would have done it again.
+        """
 
         with self._in_flight_lock:
             self._in_flight.add(run_id)
@@ -2002,6 +2002,9 @@ class LangGraphWorkflowService:
         finally:
             with self._in_flight_lock:
                 self._in_flight.discard(run_id)
+            finish = getattr(self.handlers, "finish", None)
+            if finish is not None:
+                finish(run_id)
 
     def _finish_timer(self, run_id: str, purpose: str, target_id: str) -> None:
         with self._connect() as connection:
@@ -2033,17 +2036,9 @@ class LangGraphWorkflowService:
                 ).fetchone()
             if row is None:
                 raise LookupError(f"LangGraph run not found: {run_id}")
-            try:
-                if row["status"] == "cancelled":
-                    return self.get(run_id)
-                return self._drive(run_id, ir, row["owner_actor"], inputs, resume)
-            finally:
-                # Whatever the Handlers were holding on this run's behalf ends
-                # here. A cancellation mark that outlived the drive would be a
-                # guess about how long it is needed; this is the answer.
-                finish = getattr(self.handlers, "finish", None)
-                if finish is not None:
-                    finish(run_id)
+            if row["status"] == "cancelled":
+                return self.get(run_id)
+            return self._drive(run_id, ir, row["owner_actor"], inputs, resume)
 
     def _drive(self, run_id, ir, owner_actor, inputs, resume) -> LangGraphRun:
         config = {"configurable": {
