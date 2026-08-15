@@ -375,6 +375,20 @@ class FailedStepTests(unittest.TestCase):
             "cancelled",
             by_id(service.steps(run.run_id, actor="local"))["tool"]["status"],
         )
+        # A Handler can race cancellation and return success after the run's
+        # terminal cancellation write. That late result is discarded by the
+        # run CAS, so the page must not resurrect the step as successful.
+        with sqlite3.connect(runs) as connection:
+            connection.execute(
+                "UPDATE langgraph_handler_attempts SET status='succeeded',"
+                "updated_at=? WHERE run_id=?",
+                ("0002-01-01T00:00:00Z", run.run_id),
+            )
+            connection.commit()
+        self.assertEqual(
+            "cancelled",
+            by_id(service.steps(run.run_id, actor="local"))["tool"]["status"],
+        )
 
 
 class ProgressIsObservableTests(unittest.TestCase):

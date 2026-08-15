@@ -104,6 +104,9 @@ class BoundHandler:
     # Appended after the original public fields so embedders that construct a
     # BoundHandler positionally keep the meaning of every existing argument.
     finish_run: Callable[[str], None] | None = None
+    # Attempt-scoped pruning for winner joins. Unlike ``cancel_run`` this must
+    # not poison the whole run: the winner and its downstream join continue.
+    cancel_attempts: Callable[[str, frozenset[str]], bool] | None = None
 
     def __post_init__(self) -> None:
         if not self.name.strip() or not self.version.strip():
@@ -114,6 +117,8 @@ class BoundHandler:
             raise TypeError("handler invoke must be callable")
         if self.cancel_run is not None and not callable(self.cancel_run):
             raise TypeError("handler cancel_run must be callable")
+        if self.cancel_attempts is not None and not callable(self.cancel_attempts):
+            raise TypeError("handler cancel_attempts must be callable")
         if not self.supported_transports or not self.supported_transports <= {
             "inline", "artifact_ref", "secret_ref",
         }:
@@ -165,6 +170,19 @@ class LangGraphHandlerRegistry:
         for handler in self._entries.values():
             if handler.cancel_run is not None:
                 signalled = handler.cancel_run(run_id) or signalled
+        return signalled
+
+    def cancel_attempts(self, run_id: str, attempt_ids: frozenset[str]) -> bool:
+        """Best-effort stop of selected attempts without cancelling their run."""
+
+        if not attempt_ids:
+            return False
+        signalled = False
+        for handler in self._entries.values():
+            if handler.cancel_attempts is not None:
+                signalled = (
+                    handler.cancel_attempts(run_id, attempt_ids) or signalled
+                )
         return signalled
 
     def finish(self, run_id: str) -> None:
@@ -946,6 +964,7 @@ def compile_workflow(
                 "required_terminal_count"
             )
     policies_by_id = {policy.id: policy for policy in ir.policies}
+    nodes_by_id = {node.id: node for node in ir.nodes}
     for edge in (item for item in ir.edges if item.back_edge):
         policy = policies_by_id.get(edge.policy_ref or "")
         if policy is None or policy.kind not in {"loop", "rework"}:
@@ -1026,6 +1045,35 @@ def compile_workflow(
                 )
 
     builder = StateGraph(_GraphState)
+
+    # An `any` join (and n-of-m with n=1) is deterministic, not a timing
+    # lottery: the first incoming edge in priority order wins. Once that exact
+    # source succeeds, no later branch can change the answer, so in-flight
+    # losers may be stopped before LangGraph waits for the whole parallel
+    # superstep. A lower-priority source cannot do this because a still-running
+    # higher-priority source may win.
+    early_winner_losers: dict[tuple[str, str], frozenset[str]] = {}
+    for join in (item for item in ir.nodes if item.kind == "join"):
+        policy = next((
+            policies_by_id[item] for item in join.policies
+            if item in policies_by_id and policies_by_id[item].kind == "join"
+        ), None)
+        mode = None if policy is None else policy.config.get("mode")
+        if not (
+            mode == "any"
+            or (mode == "n_of_m" and int(policy.config.get("threshold", 0)) == 1)
+        ):
+            continue
+        incoming = sorted(
+            (edge for edge in ir.edges if edge.target_node == join.id),
+            key=lambda edge: (edge.priority, edge.id),
+        )
+        if incoming:
+            winner = incoming[0].source_node
+            early_winner_losers[(winner, join.id)] = frozenset(
+                edge.source_node for edge in incoming
+                if edge.source_node != winner
+            )
 
     for node in ir.nodes:
         handler = bound.get(node.id)
@@ -1145,6 +1193,26 @@ def compile_workflow(
                             "without a selected error route"
                         )
                     route_name = "error"
+                if (
+                    route_name == "success" and implementation is not None
+                    and execution_context.run_id
+                ):
+                    losers = frozenset().union(*(
+                        early_winner_losers.get(
+                            (current.id, edge.target_node), frozenset(),
+                        )
+                        for edge in selected
+                    ))
+                    attempts = frozenset(
+                        "langgraph_attempt:"
+                        + execution_context.run_id
+                        + f":{node_id}:"
+                        + str(
+                            state.get("execution_order", ()).count(node_id) + 1
+                        )
+                        for node_id in losers
+                    )
+                    registry.cancel_attempts(execution_context.run_id, attempts)
             return {
                 "node_outputs": {current.id: output},
                 "node_routes": {current.id: route_name},
@@ -1152,8 +1220,6 @@ def compile_workflow(
             }
 
         builder.add_node(node.id, execute)
-
-    nodes_by_id = {node.id: node for node in ir.nodes}
 
     # A conditional router runs once per source branch and sees that branch's
     # pending write, not the writes of its siblings in the same superstep.

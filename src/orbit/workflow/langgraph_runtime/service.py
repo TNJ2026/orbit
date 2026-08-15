@@ -1442,11 +1442,13 @@ class LangGraphWorkflowService:
         for node in sorted(ir.nodes, key=lambda n: placed.get(n.id, (0, 0))):
             fact = attempts.get(node.id, {})
             latest = fact.get("latest")
-            cancelled_attempt = run.status == "cancelled" and (
-                latest == "started"
-                or (
-                    latest in {"failed", "unknown"}
-                    and fact.get("last_at") >= run.updated_at
+            cancelled_attempt = latest == "cancelled" or (
+                run.status == "cancelled" and (
+                    latest == "started"
+                    or (
+                        latest in {"succeeded", "failed", "unknown"}
+                        and fact.get("last_at") >= run.updated_at
+                    )
                 )
             )
             if node.id in waiting:

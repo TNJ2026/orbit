@@ -1541,6 +1541,140 @@ class LangGraphWorkflowCompilerTests(unittest.TestCase):
 
                 self.assertEqual(expected, result["result"])
 
+    def test_highest_priority_any_winner_cancels_an_in_flight_loser(self) -> None:
+        slow_started = threading.Event()
+        slow_release = threading.Event()
+        slow_cancelled = threading.Event()
+
+        def fast(values, config, context):
+            self.assertTrue(slow_started.wait(5))
+            return {"value": "fast"}
+
+        def slow(values, config, context):
+            slow_started.set()
+            self.assertTrue(slow_release.wait(5))
+            return HandlerOutcome(
+                {"value": None} if slow_cancelled.is_set() else {"value": "slow"},
+                route="cancel" if slow_cancelled.is_set() else "success",
+            )
+
+        def cancel_attempts(run_id, attempt_ids):
+            if not any(":slow:" in item for item in attempt_ids):
+                return False
+            slow_cancelled.set()
+            slow_release.set()
+            return True
+
+        fan = node(
+            "fan", inputs=("value",), outputs=("value",), route_mode="parallel",
+        )
+        fast_node = node("fast", inputs=("value",), outputs=("value",))
+        slow_node = node("slow", inputs=("value",), outputs=("value",))
+        policy = IRPolicy(
+            "first", "join", {"mode": "any", "merge_mode": "object_by_edge"},
+        )
+        join = IRNode(
+            "join", "join", (port("items"),), (port("merged"),),
+            None, {}, (policy.id,), None,
+        )
+        ir = workflow(
+            (fan, fast_node, slow_node, join),
+            (
+                edge("fan_fast", "fan", "fast"),
+                edge("fan_slow", "fan", "slow"),
+                edge(
+                    "fast_join", "fast", "join",
+                    target_port="items", priority=0,
+                ),
+                edge(
+                    "slow_join", "slow", "join",
+                    target_port="items", priority=1,
+                ),
+            ),
+            entry=("fan",), terminals=("join",), result=("join", "merged"),
+            policies=(policy,),
+        )
+        registry = LangGraphHandlerRegistry([
+            binding("fan", lambda values, config, context: dict(values)),
+            binding("fast", fast),
+            BoundHandler(
+                "slow", "1.0.0", FINGERPRINT, slow,
+                cancel_attempts=cancel_attempts,
+            ),
+        ])
+
+        result = compile_workflow(ir, registry).invoke(
+            {"value": "start"},
+            config={"configurable": {"thread_id": "winner-cancel"}},
+        )
+
+        self.assertTrue(slow_cancelled.is_set())
+        self.assertEqual({"fast_join": "fast"}, result["result"])
+
+    def test_lower_priority_any_result_does_not_prune_the_winner(self) -> None:
+        lower_finished = threading.Event()
+        cancelled_attempts = []
+
+        def higher(values, config, context):
+            self.assertTrue(lower_finished.wait(5))
+            return {"value": "higher"}
+
+        def lower(values, config, context):
+            lower_finished.set()
+            return {"value": "lower"}
+
+        def cancel_attempts(run_id, attempt_ids):
+            cancelled_attempts.extend(attempt_ids)
+            return bool(attempt_ids)
+
+        fan = node(
+            "fan", inputs=("value",), outputs=("value",), route_mode="parallel",
+        )
+        higher_node = node("higher", inputs=("value",), outputs=("value",))
+        lower_node = node("lower", inputs=("value",), outputs=("value",))
+        policy = IRPolicy(
+            "first", "join", {"mode": "any", "merge_mode": "object_by_edge"},
+        )
+        join = IRNode(
+            "join", "join", (port("items"),), (port("merged"),),
+            None, {}, (policy.id,), None,
+        )
+        ir = workflow(
+            (fan, higher_node, lower_node, join),
+            (
+                edge("fan_higher", "fan", "higher"),
+                edge("fan_lower", "fan", "lower"),
+                edge(
+                    "higher_join", "higher", "join",
+                    target_port="items", priority=0,
+                ),
+                edge(
+                    "lower_join", "lower", "join",
+                    target_port="items", priority=1,
+                ),
+            ),
+            entry=("fan",), terminals=("join",), result=("join", "merged"),
+            policies=(policy,),
+        )
+        registry = LangGraphHandlerRegistry([
+            binding("fan", lambda values, config, context: dict(values)),
+            BoundHandler(
+                "higher", "1.0.0", FINGERPRINT, higher,
+                cancel_attempts=cancel_attempts,
+            ),
+            binding("lower", lower),
+        ])
+
+        result = compile_workflow(ir, registry).invoke(
+            {"value": "start"},
+            config={"configurable": {"thread_id": "priority-cancel"}},
+        )
+
+        self.assertEqual({"higher_join": "higher"}, result["result"])
+        self.assertTrue(cancelled_attempts)
+        self.assertFalse(any(":higher:" in item for item in cancelled_attempts))
+        self.assertTrue(all(":lower:" in item for item in cancelled_attempts))
+
     def test_checkpointed_interrupt_resumes_with_same_thread(self) -> None:
         action = node("action", inputs=("value",), outputs=("value",))
         terminal = node(
@@ -4069,6 +4203,267 @@ class LangGraphProductionWiringTests(unittest.TestCase):
 
         self.assertEqual(["recorded-process"], client.recovered)
         self.assertEqual(1, len(client.requests))
+
+    def test_any_winner_prunes_a_running_agent_attempt(self) -> None:
+        class ParallelClient:
+            def __init__(self):
+                self.slow_started = threading.Event()
+                self.slow_release = threading.Event()
+                self.slow_cancelled = threading.Event()
+
+            def execute(self, request, context):
+                if request.config["branch"] == "fast":
+                    if not self.slow_started.wait(5):
+                        raise RuntimeError("slow Agent did not start")
+                    return AgentResponse({"value": "fast"}, None, "provider:fast")
+                self.slow_started.set()
+                if not self.slow_release.wait(5):
+                    raise RuntimeError("slow Agent was not pruned")
+                if self.slow_cancelled.is_set():
+                    raise UnknownExternalResultError("Agent cancellation is unknown")
+                return AgentResponse({"value": "slow"}, None, "provider:slow")
+
+            def cancel(self, execution_ref):
+                if ":slow:" in execution_ref:
+                    self.slow_cancelled.set()
+                    self.slow_release.set()
+                return None
+
+            def recover(self, recovery_ref):
+                return RecoveryResult(RecoveryDisposition.UNKNOWN)
+
+        client = ParallelClient()
+        registration = self.registration(client, max_duration_seconds=120)
+
+        def branch(node_id, name):
+            return IRNode(
+                node_id, "action", (port("value"),), (port("value"),),
+                IRHandlerRef(
+                    registration.manifest.name, registration.manifest.version,
+                    registration.manifest.fingerprint,
+                ),
+                {"branch": name}, (), None,
+            )
+
+        policy = IRPolicy(
+            "first", "join", {"mode": "any", "merge_mode": "object_by_edge"},
+        )
+        join = IRNode(
+            "join", "join", (port("items"),), (port("merged"),),
+            None, {}, (policy.id,), None,
+        )
+        ir = workflow(
+            (branch("fast", "fast"), branch("slow", "slow"), join),
+            (
+                edge(
+                    "fast_join", "fast", "join",
+                    target_port="items", priority=0,
+                ),
+                edge(
+                    "slow_join", "slow", "join",
+                    target_port="items", priority=1,
+                ),
+            ),
+            entry=("fast", "slow"), terminals=("join",),
+            result=("join", "merged"), policies=(policy,),
+        )
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            path = Path(directory) / "runs.sqlite3"
+            registry = trusted_handlers([registration], attempt_db_path=path)
+            result = compile_workflow(ir, registry).invoke(
+                {"value": "start"},
+                config={"configurable": {"thread_id": "agent-winner"}},
+            )
+            with sqlite3.connect(path) as connection:
+                attempts = dict(connection.execute(
+                    "SELECT node_id,status FROM langgraph_handler_attempts"
+                ))
+
+        self.assertTrue(client.slow_cancelled.is_set())
+        self.assertEqual({"fast_join": "fast"}, result["result"])
+        self.assertEqual({"fast": "succeeded", "slow": "cancelled"}, attempts)
+
+    def test_queued_winner_loser_is_pruned_by_exact_attempt(self) -> None:
+        client = FakeAgentClient(
+            AgentResponse({"value": "next-generation"}, None, "provider:next")
+        )
+        registration = self.registration(client)
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            registry = trusted_handlers(
+                [registration], attempt_db_path=Path(directory) / "runs.sqlite3",
+            )
+            bound = registry.resolve(self.bound_node(registration.manifest))
+            first = LangGraphExecutionContext(
+                "workflow:test", "agent", "langgraph_run:queued",
+                "langgraph_attempt:langgraph_run:queued:agent:1",
+            )
+            second = LangGraphExecutionContext(
+                "workflow:test", "agent", "langgraph_run:queued",
+                "langgraph_attempt:langgraph_run:queued:agent:2",
+            )
+            registry.cancel_attempts(first.run_id, frozenset({first.attempt_id}))
+            pruned = bound.invoke({"value": "first"}, {}, first)
+            completed = bound.invoke({"value": "second"}, {}, second)
+
+        self.assertIsInstance(pruned, HandlerOutcome)
+        self.assertEqual("cancel", pruned.route)
+        self.assertEqual({"value": "next-generation"}, completed)
+        self.assertEqual(1, len(client.requests))
+
+    def test_any_winner_prunes_a_running_tool_attempt(self) -> None:
+        class ParallelAdapter:
+            def __init__(self):
+                self.slow_started = threading.Event()
+                self.slow_release = threading.Event()
+                self.slow_cancelled = threading.Event()
+
+            def execute(self, request, context):
+                if request.config["branch"] == "fast":
+                    if not self.slow_started.wait(5):
+                        raise RuntimeError("slow Tool did not start")
+                    return ToolResult({"value": "fast"})
+                self.slow_started.set()
+                if not self.slow_release.wait(5):
+                    raise RuntimeError("slow Tool was not pruned")
+                if self.slow_cancelled.is_set():
+                    raise RuntimeError("Tool cancelled by winner join")
+                return ToolResult({"value": "slow"})
+
+            def cancel(self, execution_ref, context):
+                if context.request.config["branch"] == "slow":
+                    self.slow_cancelled.set()
+                    self.slow_release.set()
+                return None
+
+            def recover(self, recovery_ref, context):
+                return RecoveryResult(RecoveryDisposition.NOT_FOUND)
+
+        adapter = ParallelAdapter()
+        registration = self.tool_registration(adapter)
+
+        def branch(node_id, name):
+            return IRNode(
+                node_id, "action", (port("value"),), (port("value"),),
+                IRHandlerRef(
+                    registration.manifest.name, registration.manifest.version,
+                    registration.manifest.fingerprint,
+                ),
+                {
+                    "tool_name": "example.read", "tool_version": "1.0.0",
+                    "branch": name,
+                },
+                (), None,
+            )
+
+        policy = IRPolicy(
+            "first", "join", {"mode": "any", "merge_mode": "object_by_edge"},
+        )
+        join = IRNode(
+            "join", "join", (port("items"),), (port("merged"),),
+            None, {}, (policy.id,), None,
+        )
+        ir = workflow(
+            (branch("fast", "fast"), branch("slow", "slow"), join),
+            (
+                edge(
+                    "fast_join", "fast", "join",
+                    target_port="items", priority=0,
+                ),
+                edge(
+                    "slow_join", "slow", "join",
+                    target_port="items", priority=1,
+                ),
+            ),
+            entry=("fast", "slow"), terminals=("join",),
+            result=("join", "merged"), policies=(policy,),
+        )
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            path = Path(directory) / "runs.sqlite3"
+            registry = trusted_handlers([registration], attempt_db_path=path)
+            result = compile_workflow(ir, registry).invoke(
+                {"value": "start"},
+                config={"configurable": {"thread_id": "tool-winner"}},
+            )
+            with sqlite3.connect(path) as connection:
+                attempts = dict(connection.execute(
+                    "SELECT node_id,status FROM langgraph_handler_attempts"
+                ))
+
+        self.assertTrue(adapter.slow_cancelled.is_set())
+        self.assertEqual({"fast_join": "fast"}, result["result"])
+        self.assertEqual({"fast": "succeeded", "slow": "cancelled"}, attempts)
+
+    def test_success_arriving_after_run_cancel_projects_as_cancelled(self) -> None:
+        class LateSuccessClient:
+            def __init__(self):
+                self.started = threading.Event()
+                self.release = threading.Event()
+
+            def execute(self, request, context):
+                self.started.set()
+                if not self.release.wait(5):
+                    raise RuntimeError("late Agent was not released")
+                return AgentResponse({"value": "late"}, None, "provider:late")
+
+            def cancel(self, execution_ref):
+                self.release.set()
+                return None
+
+            def recover(self, recovery_ref):
+                return RecoveryResult(RecoveryDisposition.UNKNOWN)
+
+        client = LateSuccessClient()
+        registration = self.registration(client)
+        action = self.bound_node(registration.manifest)
+        terminal = node(
+            "terminal", inputs=("value",), kind="terminal", handler=False,
+        )
+        ir = workflow(
+            (action, terminal), (edge("done", "agent", "terminal"),),
+            entry=("agent",), terminals=("terminal",), result=("agent", "value"),
+        )
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            root = Path(directory)
+            store = SQLiteWorkflowVersionStore(root / "workflows.sqlite3")
+            store.publish(
+                CompiledWorkflow(
+                    ir, definition_hash(ir), "test", "sha256:" + "c" * 64,
+                ),
+                expected_latest_version=0, source_format="json", source_text="{}",
+                actor="test:author", dsl_version="1.3",
+            )
+            service = build_service(
+                store.path, [registration], state_directory=root,
+            )
+            run = service.start(
+                ir.workflow_id, {"value": "start"},
+                idempotency_key="cancel-late-success", wait=False,
+                actor="test:owner",
+            )
+            self.assertTrue(client.started.wait(5))
+            cancelled = service.cancel(
+                run.run_id, expected_revision=0,
+                idempotency_key="cancel-late-success-command",
+                actor="test:owner",
+            )
+            deadline = time.monotonic() + 5
+            attempt_status = "started"
+            while attempt_status == "started" and time.monotonic() < deadline:
+                with sqlite3.connect(root / "langgraph-runs.sqlite3") as connection:
+                    attempt_status = connection.execute(
+                        "SELECT status FROM langgraph_handler_attempts WHERE run_id=?",
+                        (run.run_id,),
+                    ).fetchone()[0]
+                if attempt_status == "started":
+                    time.sleep(0.01)
+            step = next(
+                item for item in service.steps(run.run_id)
+                if item["node_id"] == "agent"
+            )
+
+        self.assertEqual("cancelled", cancelled.status)
+        self.assertEqual("succeeded", attempt_status)
+        self.assertEqual("cancelled", step["status"])
 
     def test_unknown_agent_result_parks_the_run_without_reexecution(self) -> None:
         client = FakeAgentClient(

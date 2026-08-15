@@ -140,6 +140,7 @@ class TrustedCliAgentClient:
         self.leaked_reader_threads = 0
         self._lock = Lock()
         self._executions = {}
+        self._pending_cancellations = set()
 
     def execute(self, request, context):
         stdout = self._run(
@@ -187,49 +188,62 @@ class TrustedCliAgentClient:
                     pass
             return emit
 
-        def record_process(handle: ProcessHandle) -> None:
-            recorder = getattr(context, "record_execution", None)
-            if recorder is None:
-                return
-            identity = process_identity(handle.pid)
-            if identity is None:
-                raise UnknownExternalResultError(
-                    "cannot record a safe Agent process identity"
-                )
-            try:
-                recorder(json.dumps(
-                    {
-                        "kind": "local_process_v1", "pid": handle.pid,
-                        "identity": identity,
-                    },
-                    sort_keys=True, separators=(",", ":"),
-                ))
-            except UnknownExternalResultError:
-                raise
-            except Exception as exc:
-                raise UnknownExternalResultError(
-                    "cannot persist the Agent process identity"
-                ) from exc
-
-        handle = ProcessHandle(
-            (*self.command, *extra_args),
-            cwd=self._workspace(context),
-            env=self.environment,
-            stdin_text=payload.decode("utf-8"),
-            max_output_bytes=max_output_bytes or self.max_output_bytes,
-            on_stdout=publish("stdout"),
-            on_stderr=publish("stderr"),
-            on_start=record_process,
-        )
         execution_ref = f"agent:{context.request.attempt_id}"
-        with self._lock:
-            if execution_ref in self._executions:
-                handle.cancel(
-                    grace_seconds=self.kill_grace_seconds,
-                    reason="duplicate_execution",
-                )
-                raise RuntimeError("duplicate concurrent Agent execution reference")
-            self._executions[execution_ref] = handle
+        registered = False
+
+        def record_process(handle: ProcessHandle) -> None:
+            nonlocal registered
+            recorder = getattr(context, "record_execution", None)
+            if recorder is not None:
+                identity = process_identity(handle.pid)
+                if identity is None:
+                    raise UnknownExternalResultError(
+                        "cannot record a safe Agent process identity"
+                    )
+                try:
+                    recorder(json.dumps(
+                        {
+                            "kind": "local_process_v1", "pid": handle.pid,
+                            "identity": identity,
+                        },
+                        sort_keys=True, separators=(",", ":"),
+                    ))
+                except UnknownExternalResultError:
+                    raise
+                except Exception as exc:
+                    raise UnknownExternalResultError(
+                        "cannot persist the Agent process identity"
+                    ) from exc
+            with self._lock:
+                if execution_ref in self._executions:
+                    raise RuntimeError(
+                        "duplicate concurrent Agent execution reference"
+                    )
+                if execution_ref in self._pending_cancellations:
+                    self._pending_cancellations.discard(execution_ref)
+                    raise UnknownExternalResultError(
+                        "agent CLI was cancelled before request submission"
+                    )
+                self._executions[execution_ref] = handle
+                registered = True
+
+        try:
+            handle = ProcessHandle(
+                (*self.command, *extra_args),
+                cwd=self._workspace(context),
+                env=self.environment,
+                stdin_text=payload.decode("utf-8"),
+                max_output_bytes=max_output_bytes or self.max_output_bytes,
+                on_stdout=publish("stdout"),
+                on_stderr=publish("stderr"),
+                on_start=record_process,
+            )
+        except BaseException:
+            with self._lock:
+                if registered:
+                    self._executions.pop(execution_ref, None)
+                self._pending_cancellations.discard(execution_ref)
+            raise
         try:
             outcome = handle.wait(
                 timeout=self._attempt_timeout(context),
@@ -333,6 +347,28 @@ class TrustedCliAgentClient:
             reason="cancelled",
         )
         return CancelAck(CancelDisposition.UNKNOWN, "termination requested")
+
+    def request_cancel(self, execution_ref):
+        """Cancel an active CLI or remember the request until spawn registers."""
+
+        with self._lock:
+            handle = self._executions.get(execution_ref)
+            if handle is None:
+                self._pending_cancellations.add(execution_ref)
+                return CancelAck(
+                    CancelDisposition.UNKNOWN, "stop requested before spawn",
+                )
+        handle.cancel(
+            grace_seconds=self.kill_grace_seconds,
+            reason="cancelled",
+        )
+        return CancelAck(CancelDisposition.UNKNOWN, "termination requested")
+
+    def clear_cancel_request(self, execution_ref):
+        """Forget a pre-spawn request once its adapter has finished the attempt."""
+
+        with self._lock:
+            self._pending_cancellations.discard(execution_ref)
 
     def recover(self, recovery_ref):
         try:

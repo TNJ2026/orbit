@@ -24,7 +24,7 @@ from ..persistence.workflow_versions import SQLiteWorkflowVersionStore
 from .artifacts import LangGraphArtifactStore
 from .console import AttemptConsole, AttemptConsoleSink
 from .compiler import (
-    BoundHandler, LangGraphHandlerRegistry, LangGraphRetryableError,
+    BoundHandler, HandlerOutcome, LangGraphHandlerRegistry, LangGraphRetryableError,
     LangGraphRunCancelled, LangGraphUnknownExternalResult,
 )
 from .service import (
@@ -311,9 +311,42 @@ def _agent_adapter(
     implementation: AgentHandler, manifest, journal, artifact_store, secret_values,
     console: AttemptConsole | None = None,
 ):
-    active: dict[str, set[str]] = {}
+    active: dict[str, dict[str, str]] = {}
     active_lock = Lock()
     cancelled = _CancelledRuns()
+    pruned_attempts: set[str] = set()
+
+    def cancel_attempt(attempt_id: str) -> None:
+        execution_ref = f"agent:{attempt_id}"
+        request_cancel = getattr(implementation.client, "request_cancel", None)
+        if request_cancel is not None:
+            request_cancel(execution_ref)
+        else:
+            implementation.client.cancel(execution_ref)
+
+    def clear_cancel_attempt(attempt_id: str) -> None:
+        clear_cancel_request = getattr(
+            implementation.client, "clear_cancel_request", None,
+        )
+        if clear_cancel_request is not None:
+            clear_cancel_request(f"agent:{attempt_id}")
+
+    def consume_pruned_locked(attempt_id: str) -> bool:
+        if attempt_id not in pruned_attempts:
+            return False
+        pruned_attempts.discard(attempt_id)
+        return True
+
+    def consume_pruned(attempt_id: str) -> bool:
+        with active_lock:
+            return consume_pruned_locked(attempt_id)
+
+    def pruned_outcome(context, artifacts):
+        artifact_store.abandon(artifacts.produced_artifact_ids)
+        journal.settle(context.attempt_id, "cancelled", error="winner_join_pruned")
+        return HandlerOutcome(
+            {port["id"]: None for port in context.output_ports}, route="cancel",
+        )
 
     def invoke(inputs, config, context):
         _validate_secret_refs(inputs, context, manifest)
@@ -385,13 +418,21 @@ def _agent_adapter(
                 context.attempt_id, execution_ref,
             ),
         )
+        if consume_pruned(context.attempt_id):
+            return pruned_outcome(context, artifacts)
         try:
             with active_lock:
                 if context.run_id in cancelled:
                     raise LangGraphRunCancelled(
                         f"run {context.run_id} was cancelled before this attempt"
                     )
-                active.setdefault(context.run_id, set()).add(context.attempt_id)
+                pruned_before_start = consume_pruned_locked(context.attempt_id)
+                if not pruned_before_start:
+                    active.setdefault(context.run_id, {})[
+                        context.attempt_id
+                    ] = context.node_id
+            if pruned_before_start:
+                return pruned_outcome(context, artifacts)
             try:
                 response = implementation.client.execute(
                     AgentRequest(inputs, config, context.attempt_id), request_context
@@ -400,9 +441,12 @@ def _agent_adapter(
                 with active_lock:
                     attempts = active.get(context.run_id)
                     if attempts is not None:
-                        attempts.discard(context.attempt_id)
+                        attempts.pop(context.attempt_id, None)
                         if not attempts:
                             active.pop(context.run_id, None)
+                clear_cancel_attempt(context.attempt_id)
+            if consume_pruned(context.attempt_id):
+                return pruned_outcome(context, artifacts)
             if not isinstance(response.output, Mapping):
                 raise ValueError("Agent output must be an object")
             output = dict(response.output)
@@ -417,6 +461,8 @@ def _agent_adapter(
             journal.settle(context.attempt_id, "succeeded", output=output)
             return output
         except UnknownExternalResultError as exc:
+            if consume_pruned(context.attempt_id):
+                return pruned_outcome(context, artifacts)
             artifact_store.abandon(artifacts.produced_artifact_ids)
             journal.settle(context.attempt_id, "unknown", error=str(exc))
             raise LangGraphUnknownExternalResult(str(exc)) from None
@@ -439,7 +485,27 @@ def _agent_adapter(
             cancelled.add(run_id)
             attempts = tuple(active.get(run_id, ()))
         for attempt_id in attempts:
-            implementation.client.cancel(f"agent:{attempt_id}")
+            cancel_attempt(attempt_id)
+            with active_lock:
+                still_active = attempt_id in active.get(run_id, {})
+            if not still_active:
+                clear_cancel_attempt(attempt_id)
+        return bool(attempts)
+
+    def cancel_attempts(run_id: str, attempt_ids: frozenset[str]) -> bool:
+        with active_lock:
+            pruned_attempts.update(attempt_ids)
+            attempts = tuple(
+                attempt_id
+                for attempt_id in active.get(run_id, {})
+                if attempt_id in attempt_ids
+            )
+        for attempt_id in attempts:
+            cancel_attempt(attempt_id)
+            with active_lock:
+                still_active = attempt_id in active.get(run_id, {})
+            if not still_active:
+                clear_cancel_attempt(attempt_id)
         return bool(attempts)
 
     def finish_run(run_id: str) -> None:
@@ -447,8 +513,12 @@ def _agent_adapter(
 
         with active_lock:
             cancelled.discard(run_id)
+            prefix = f"langgraph_attempt:{run_id}:"
+            pruned_attempts.difference_update(
+                item for item in tuple(pruned_attempts) if item.startswith(prefix)
+            )
 
-    return invoke, cancel_run, finish_run
+    return invoke, cancel_run, cancel_attempts, finish_run
 
 
 def _tool_adapter(
@@ -458,6 +528,23 @@ def _tool_adapter(
     active: dict[str, dict[str, Any]] = {}
     active_lock = Lock()
     cancelled = _CancelledRuns()
+    pruned_attempts: set[str] = set()
+
+    def consume_pruned_locked(attempt_id: str) -> bool:
+        if attempt_id not in pruned_attempts:
+            return False
+        pruned_attempts.discard(attempt_id)
+        return True
+
+    def consume_pruned(attempt_id: str) -> bool:
+        with active_lock:
+            return consume_pruned_locked(attempt_id)
+
+    def pruned_outcome(context):
+        journal.settle(context.attempt_id, "cancelled", error="winner_join_pruned")
+        return HandlerOutcome(
+            {port["id"]: None for port in context.output_ports}, route="cancel",
+        )
 
     def invoke(inputs, config, context):
         _validate_secret_refs(inputs, context, manifest)
@@ -491,6 +578,8 @@ def _tool_adapter(
             output=_console_sink(console, context),
             clock=lambda: datetime.now(timezone.utc),
         )
+        if consume_pruned(context.attempt_id):
+            return pruned_outcome(context)
         try:
             with active_lock:
                 if context.run_id in cancelled:
@@ -511,23 +600,30 @@ def _tool_adapter(
             )
             with active_lock:
                 stranded = context.run_id in cancelled
-                if not stranded:
+                pruned_while_preparing = consume_pruned_locked(context.attempt_id)
+                if not stranded and not pruned_while_preparing:
                     active[context.attempt_id] = {
                         "execution_ref": prepared.execution_ref,
                         "context": handler_context,
                         "run_id": context.run_id,
+                        "node_id": context.node_id,
                     }
             if stranded:
                 implementation.cancel(prepared.execution_ref, handler_context)
                 raise LangGraphRunCancelled(
                     f"run {context.run_id} was cancelled while preparing"
                 )
+            if pruned_while_preparing:
+                implementation.cancel(prepared.execution_ref, handler_context)
+                return pruned_outcome(context)
             try:
                 raw = implementation.execute(prepared, handler_context)
                 result = implementation.normalize_result(raw, handler_context)
             finally:
                 with active_lock:
                     active.pop(context.attempt_id, None)
+            if consume_pruned(context.attempt_id):
+                return pruned_outcome(context)
             if not isinstance(result.output, Mapping):
                 raise ValueError("Tool output must be an object")
             output = dict(result.output)
@@ -542,6 +638,8 @@ def _tool_adapter(
             )
             raise
         except Exception as exc:
+            if consume_pruned(context.attempt_id):
+                return pruned_outcome(context)
             if manifest.execution_safety is ExecutionSafety.UNKNOWN_ON_LEASE_LOSS:
                 journal.settle(context.attempt_id, "unknown", error=type(exc).__name__)
                 raise LangGraphUnknownExternalResult(
@@ -560,13 +658,28 @@ def _tool_adapter(
             implementation.cancel(item["execution_ref"], item["context"])
         return bool(entries)
 
+    def cancel_attempts(run_id: str, attempt_ids: frozenset[str]) -> bool:
+        with active_lock:
+            pruned_attempts.update(attempt_ids)
+            entries = tuple(
+                (attempt_id, item) for attempt_id, item in active.items()
+                if item["run_id"] == run_id and attempt_id in attempt_ids
+            )
+        for _attempt_id, item in entries:
+            implementation.cancel(item["execution_ref"], item["context"])
+        return bool(entries)
+
     def finish_run(run_id: str) -> None:
         """The run is no longer being driven, so its mark has no more work."""
 
         with active_lock:
             cancelled.discard(run_id)
+            prefix = f"langgraph_attempt:{run_id}:"
+            pruned_attempts.difference_update(
+                item for item in tuple(pruned_attempts) if item.startswith(prefix)
+            )
 
-    return invoke, cancel_run, finish_run
+    return invoke, cancel_run, cancel_attempts, finish_run
 
 
 def trusted_handlers(
@@ -603,7 +716,7 @@ def trusted_handlers(
             and artifact_store is not None
         ):
             journal = _HandlerAttemptJournal(attempt_db_path)
-            invoke, cancel_run, finish_run = _agent_adapter(
+            invoke, cancel_run, cancel_attempts, finish_run = _agent_adapter(
                 registration.implementation, manifest, journal, artifact_store,
                 secret_values, console,
             )
@@ -617,13 +730,14 @@ def trusted_handlers(
                     "inline", "artifact_ref", "secret_ref",
                 }),
                 finish_run=finish_run,
+                cancel_attempts=cancel_attempts,
             ))
         elif (
             isinstance(registration.implementation, ToolHandler)
             and attempt_db_path is not None
         ):
             journal = _HandlerAttemptJournal(attempt_db_path)
-            invoke, cancel_run, finish_run = _tool_adapter(
+            invoke, cancel_run, cancel_attempts, finish_run = _tool_adapter(
                 registration.implementation, manifest, journal, secret_values,
                 console,
             )
@@ -638,6 +752,7 @@ def trusted_handlers(
                     manifest.execution_safety is ExecutionSafety.REPLAY_SAFE
                 ),
                 finish_run=finish_run,
+                cancel_attempts=cancel_attempts,
             ))
     return LangGraphHandlerRegistry(handlers)
 
