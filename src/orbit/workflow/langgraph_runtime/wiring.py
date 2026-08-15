@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
@@ -23,7 +24,7 @@ from .artifacts import LangGraphArtifactStore
 from .console import AttemptConsole, AttemptConsoleSink
 from .compiler import (
     BoundHandler, LangGraphHandlerRegistry, LangGraphRetryableError,
-    LangGraphUnknownExternalResult,
+    LangGraphRunCancelled, LangGraphUnknownExternalResult,
 )
 from .service import (
     LangGraphWorkflowService, append_event, ensure_event_log,
@@ -47,6 +48,35 @@ def _transform(inputs: Mapping[str, Any], config: Mapping[str, Any], _context):
     raise ValueError(f"unsupported transform operation: {operation}")
 
 
+# Runs cancelled while this process was still deciding whether to start work
+# for them. Bounded, because nothing here knows when a run is finished with;
+# cancels are rare and only the recent ones can still race a claim.
+CANCELLED_MEMORY = 1024
+
+
+class _CancelledRuns:
+    """Which runs must not have work started for them, and nothing more.
+
+    Read and written under the caller's own lock — the same one an adapter
+    takes to claim an attempt — so a cancel either lands before the claim and
+    stops it, or after it and finds an attempt to signal. There is no third
+    order, which is the whole point: checking the run's status separately
+    leaves a window where cancel is invisible to both.
+    """
+
+    def __init__(self) -> None:
+        self._seen: OrderedDict[str, None] = OrderedDict()
+
+    def add(self, run_id: str) -> None:
+        self._seen[run_id] = None
+        self._seen.move_to_end(run_id)
+        while len(self._seen) > CANCELLED_MEMORY:
+            self._seen.popitem(last=False)
+
+    def __contains__(self, run_id: str) -> bool:
+        return run_id in self._seen
+
+
 def _retryable(manifest, exc: Exception) -> Exception:
     """The same failure, said in the one way the engine can act on.
 
@@ -64,6 +94,11 @@ def _retryable(manifest, exc: Exception) -> Exception:
     being handed a misleading exception on the way out.
     """
 
+    if isinstance(exc, LangGraphRunCancelled):
+        # Nothing to repeat: the run was cancelled, and a retry policy that
+        # took this for a transient failure would schedule a timer that
+        # re-entered a run somebody stopped.
+        return exc
     if manifest.execution_safety is not ExecutionSafety.REPLAY_SAFE:
         return exc
     retryable = LangGraphRetryableError(f"{type(exc).__name__}: {exc}")
@@ -234,6 +269,7 @@ def _agent_adapter(
 ):
     active: dict[str, set[str]] = {}
     active_lock = Lock()
+    cancelled = _CancelledRuns()
 
     def invoke(inputs, config, context):
         _validate_secret_refs(inputs, context, manifest)
@@ -286,6 +322,10 @@ def _agent_adapter(
         )
         try:
             with active_lock:
+                if context.run_id in cancelled:
+                    raise LangGraphRunCancelled(
+                        f"run {context.run_id} was cancelled before this attempt"
+                    )
                 active.setdefault(context.run_id, set()).add(context.attempt_id)
             try:
                 response = implementation.client.execute(
@@ -315,6 +355,13 @@ def _agent_adapter(
             artifact_store.abandon(artifacts.produced_artifact_ids)
             journal.settle(context.attempt_id, "unknown", error=str(exc))
             raise LangGraphUnknownExternalResult(str(exc)) from None
+        except LangGraphRunCancelled:
+            # No work started, so there is no outcome to record beyond the
+            # attempt not having happened — and nothing to retry.
+            journal.settle(
+                context.attempt_id, "failed", error="LangGraphRunCancelled",
+            )
+            raise
         except Exception as exc:
             artifact_store.abandon(artifacts.produced_artifact_ids)
             journal.settle(
@@ -324,6 +371,7 @@ def _agent_adapter(
 
     def cancel_run(run_id: str) -> bool:
         with active_lock:
+            cancelled.add(run_id)
             attempts = tuple(active.get(run_id, ()))
         for attempt_id in attempts:
             implementation.client.cancel(f"agent:{attempt_id}")
@@ -338,6 +386,7 @@ def _tool_adapter(
 ):
     active: dict[str, dict[str, Any]] = {}
     active_lock = Lock()
+    cancelled = _CancelledRuns()
 
     def invoke(inputs, config, context):
         _validate_secret_refs(inputs, context, manifest)
@@ -372,6 +421,13 @@ def _tool_adapter(
             clock=lambda: datetime.now(timezone.utc),
         )
         try:
+            with active_lock:
+                if context.run_id in cancelled:
+                    raise LangGraphRunCancelled(
+                        f"run {context.run_id} was cancelled before this attempt"
+                    )
+            # `prepare` is where an external execution begins, so the line
+            # above is the last moment at which refusing costs nothing.
             prepared = implementation.prepare(
                 request, SimpleNamespace(request=request)
             )
@@ -393,6 +449,13 @@ def _tool_adapter(
             assert_no_secret_values(output, secret_values.values())
             journal.settle(context.attempt_id, "succeeded", output=output)
             return output
+        except LangGraphRunCancelled:
+            # No work started, so there is no outcome to record beyond the
+            # attempt not having happened — and nothing to retry.
+            journal.settle(
+                context.attempt_id, "failed", error="LangGraphRunCancelled",
+            )
+            raise
         except Exception as exc:
             if manifest.execution_safety is ExecutionSafety.UNKNOWN_ON_LEASE_LOSS:
                 journal.settle(context.attempt_id, "unknown", error=type(exc).__name__)
@@ -404,6 +467,7 @@ def _tool_adapter(
 
     def cancel_run(run_id: str) -> bool:
         with active_lock:
+            cancelled.add(run_id)
             entries = tuple(
                 item for item in active.values() if item["run_id"] == run_id
             )

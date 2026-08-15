@@ -119,6 +119,15 @@ class BoundHandler:
             raise TypeError("handler retry_safe must be boolean")
 
 
+class LangGraphRunCancelled(Exception):
+    """Raised where a Handler would have started work on a cancelled run.
+
+    Not a failure of the node and not retryable: the run was cancelled before
+    this attempt claimed anything, so the honest outcome is that no work
+    happened rather than that some work went wrong.
+    """
+
+
 class LangGraphHandlerRegistry:
     """Sealed exact-version allow-list used during graph compilation."""
 

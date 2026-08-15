@@ -1990,17 +1990,36 @@ class LangGraphWorkflowService:
             connection.commit()
 
     def _execute(self, run_id: str, ir, *, inputs=..., resume=...) -> LangGraphRun:
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT owner_actor FROM langgraph_runs WHERE run_id=?", (run_id,)
-            ).fetchone()
-        if row is None:
-            raise LookupError(f"LangGraph run not found: {run_id}")
+        # Registered before the run is read, and the order is the point. A
+        # deferred run can sit in the queue for as long as the runs ahead of
+        # it take, and cancelling it there signalled nothing: it had no
+        # attempt to cancel and nothing removed it from the queue, so a worker
+        # picked it up later and its Handlers ran — the effects arriving after
+        # the cancellation, on a run already recorded as cancelled.
+        #
+        # Reading the status first and registering after would leave the
+        # mirror of that hole: a cancel landing in between would find nothing
+        # registered to signal. Registering first means a cancel either
+        # commits before the read below and is seen, or commits after and
+        # finds this run to signal. There is no third order.
+        with self._executing(run_id):
+            with self._connect() as connection:
+                row = connection.execute(
+                    "SELECT owner_actor,status FROM langgraph_runs WHERE run_id=?",
+                    (run_id,),
+                ).fetchone()
+            if row is None:
+                raise LookupError(f"LangGraph run not found: {run_id}")
+            if row["status"] == "cancelled":
+                return self.get(run_id)
+            return self._drive(run_id, ir, row["owner_actor"], inputs, resume)
+
+    def _drive(self, run_id, ir, owner_actor, inputs, resume) -> LangGraphRun:
         config = {"configurable": {
-            "thread_id": run_id, "actor": row["owner_actor"],
+            "thread_id": run_id, "actor": owner_actor,
         }}
         try:
-            with self._executing(run_id), self._saver(create=True) as saver:
+            with self._saver(create=True) as saver:
                 workflow = compile_workflow(ir, self.handlers, checkpointer=saver)
                 if resume is not ...:
                     result = workflow.resume(resume, config=config)

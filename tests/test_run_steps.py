@@ -15,7 +15,9 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
 import time
+from types import SimpleNamespace
 import unittest
 
 from orbit.workflow.domain.definitions import (
@@ -23,6 +25,7 @@ from orbit.workflow.domain.definitions import (
 )
 from orbit.workflow.domain.serialization import definition_hash
 from orbit.workflow.langgraph_runtime import build_service
+from orbit.workflow.langgraph_runtime import service as service_module
 from orbit.workflow.langgraph_runtime.compiler import LangGraphHandlerRegistry
 from orbit.workflow.langgraph_runtime.service import (
     BRANCH_VERDICTS, EDGE_STATUSES, LangGraphWorkflowService,
@@ -1952,6 +1955,226 @@ class RunScopedGraphTests(unittest.TestCase):
         )
         with self.assertRaises(LookupError):
             self.engine.graph(run.run_id, actor="another")
+
+
+
+class CancellingAQueuedRunTests(unittest.TestCase):
+    """A cancelled run must not reach a Handler afterwards.
+
+    A deferred run can sit in the queue for as long as the runs ahead of it
+    take. Cancelling it there signalled nothing — it had no attempt to cancel
+    and nothing took it out of the queue — so a worker picked it up later and
+    its Handlers ran, producing external effects after the cancellation, on a
+    run already recorded as `cancelled`.
+    """
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        # One worker, so "still queued" is a fact rather than a race.
+        self.original_workers = service_module.BACKGROUND_WORKERS
+        service_module.BACKGROUND_WORKERS = 1
+        self.addCleanup(
+            setattr, service_module, "BACKGROUND_WORKERS", self.original_workers,
+        )
+        self.release = threading.Event()
+        self.addCleanup(self.release.set)
+        self.calls: list[str] = []
+
+    def build(self, *, nodes=1):
+        """A workflow whose Tool blocks, wired through the real adapters."""
+
+        from orbit.workflow.handlers.tools import ToolResult
+        from orbit.workflow.langgraph_runtime.artifacts import LangGraphArtifactStore
+        from orbit.workflow.langgraph_runtime.wiring import trusted_handlers
+
+        outer = self
+
+        class Adapter:
+            def execute(self, request, context):
+                # `execute` is handed what `prepare` returned; the
+                # original request is on the context.
+                outer.calls.append(context.request.attempt_id)
+                outer.release.wait(20)
+                return ToolResult({"value": 1})
+
+            def cancel(self, execution_ref, context):
+                outer.release.set()
+                return None
+
+            def recover(self, recovery_ref, context):
+                return None
+
+        fixture = engine_tests.LangGraphProductionWiringTests("run")
+        registration = fixture.tool_registration(Adapter())
+        manifest = registration.manifest
+        steps = tuple(
+            IRNode(
+                f"tool{index}", "action",
+                (engine_tests.port("value"),), (engine_tests.port("value"),),
+                IRHandlerRef(
+                    manifest.name, manifest.version, manifest.fingerprint,
+                ),
+                {"tool_name": "example.read", "tool_version": "1.0.0"},
+                (), None,
+            )
+            for index in range(nodes)
+        )
+        edges = tuple(
+            engine_tests.edge(f"e{index}", f"tool{index}", f"tool{index + 1}")
+            for index in range(nodes - 1)
+        ) + (engine_tests.edge("last", f"tool{nodes - 1}", "done"),)
+        ir = engine_tests.workflow(
+            (*steps, engine_tests.node(
+                "done", inputs=("value",), kind="terminal", handler=False,
+            )),
+            edges, entry=("tool0",), terminals=("done",),
+            result=(f"tool{nodes - 1}", "value"),
+        )
+        store = SQLiteWorkflowVersionStore(self.root / "workflows.sqlite3")
+        store.publish(
+            CompiledWorkflow(ir, definition_hash(ir), "test", "sha256:" + "c" * 64),
+            expected_latest_version=0, source_format="json",
+            source_text="{}", actor="test", dsl_version="1.3",
+        )
+        runs = self.root / "runs.sqlite3"
+        service = LangGraphWorkflowService(
+            store, trusted_handlers([registration], attempt_db_path=runs),
+            run_db_path=runs,
+            checkpoint_db_path=self.root / "checkpoints.sqlite3",
+            artifact_store=LangGraphArtifactStore(runs, self.root / "artifacts"),
+        )
+        return service, ir
+
+    def wait_for_calls(self, count: int, timeout: float = 20.0) -> None:
+        deadline = time.monotonic() + timeout
+        while len(self.calls) < count and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertGreaterEqual(len(self.calls), count, "the Handler never started")
+
+    def test_a_run_cancelled_while_queued_never_reaches_its_handler(self) -> None:
+        service, ir = self.build()
+        service.start(
+            ir.workflow_id, {"value": 1}, idempotency_key="first",
+            actor="local", wait=False,
+        )
+        self.wait_for_calls(1)
+        queued = service.start(
+            ir.workflow_id, {"value": 1}, idempotency_key="second",
+            actor="local", wait=False,
+        )
+        service.cancel(
+            queued.run_id, expected_revision=queued.revision,
+            idempotency_key="cancel-second", actor="local",
+        )
+        self.assertEqual("cancelled", service.get(queued.run_id).status)
+
+        self.release.set()
+        service.wait_for_background(timeout=20)
+        # One call, from the run that was never cancelled.
+        self.assertEqual(1, len(self.calls))
+        self.assertEqual("cancelled", service.get(queued.run_id).status)
+
+    def test_a_queued_run_is_refused_before_anything_is_compiled(self) -> None:
+        """Not every Handler is an Agent or a Tool.
+
+        The adapters refuse work for a cancelled run, but a node bound
+        directly — a transform, anything registered without the Agent and
+        Tool wiring — has no adapter to refuse on its behalf. The engine has
+        to decline the run itself, which also spares compiling a graph and
+        opening a checkpointer for a run nobody wants.
+        """
+
+        release = threading.Event()
+        self.addCleanup(release.set)
+        calls: list[str] = []
+
+        def blocking(values, config, context):
+            calls.append("first")
+            release.wait(20)
+            return dict(values)
+
+        work = engine_tests.node("work", inputs=("value",), outputs=("value",))
+        done = engine_tests.node(
+            "done", inputs=("value",), kind="terminal", handler=False,
+        )
+        ir = engine_tests.workflow(
+            (work, done), (engine_tests.edge("w_d", "work", "done"),),
+            entry=("work",), terminals=("done",), result=("work", "value"),
+        )
+        store = SQLiteWorkflowVersionStore(self.root / "plain.sqlite3")
+        store.publish(
+            CompiledWorkflow(ir, definition_hash(ir), "test", "sha256:" + "c" * 64),
+            expected_latest_version=0, source_format="json",
+            source_text="{}", actor="test", dsl_version="1.3",
+        )
+        service = LangGraphWorkflowService(
+            store, LangGraphHandlerRegistry([
+                engine_tests.binding("work", blocking),
+            ]),
+            run_db_path=self.root / "plain-runs.sqlite3",
+            checkpoint_db_path=self.root / "plain-checkpoints.sqlite3",
+        )
+        service.start(
+            ir.workflow_id, {"value": 1}, idempotency_key="ahead",
+            actor="local", wait=False,
+        )
+        deadline = time.monotonic() + 20
+        while not calls and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(1, len(calls), "the first run never started")
+
+        queued = service.start(
+            ir.workflow_id, {"value": 1}, idempotency_key="behind",
+            actor="local", wait=False,
+        )
+        service.cancel(
+            queued.run_id, expected_revision=queued.revision,
+            idempotency_key="cancel-behind", actor="local",
+        )
+        release.set()
+        service.wait_for_background(timeout=20)
+        self.assertEqual(1, len(calls), "the cancelled run ran anyway")
+        self.assertEqual("cancelled", service.get(queued.run_id).status)
+
+    def test_a_later_step_does_not_start_after_the_run_is_cancelled(self) -> None:
+        """The window the queue check alone would leave open.
+
+        By the time the first node's Handler is running, the run has passed
+        every status check the engine makes. What stops the second node is the
+        adapter refusing under the same lock a cancel takes.
+        """
+
+        service, ir = self.build(nodes=2)
+        run = service.start(
+            ir.workflow_id, {"value": 1}, idempotency_key="two-step",
+            actor="local", wait=False,
+        )
+        self.wait_for_calls(1)
+        service.cancel(
+            run.run_id, expected_revision=service.get(run.run_id).revision,
+            idempotency_key="cancel-mid", actor="local",
+        )
+        self.release.set()
+        service.wait_for_background(timeout=20)
+        self.assertEqual(1, len(self.calls), "the second node ran anyway")
+        self.assertEqual("cancelled", service.get(run.run_id).status)
+
+    def test_a_cancellation_is_not_something_to_retry(self) -> None:
+        """Otherwise a retry policy would resurrect a cancelled run."""
+
+        from orbit.workflow.langgraph_runtime.compiler import (
+            LangGraphRetryableError, LangGraphRunCancelled,
+        )
+        from orbit.workflow.langgraph_runtime.wiring import _retryable
+        from orbit.workflow.domain.durable_execution import ExecutionSafety
+
+        manifest = SimpleNamespace(execution_safety=ExecutionSafety.REPLAY_SAFE)
+        cancelled = LangGraphRunCancelled("gone")
+        self.assertNotIsInstance(
+            _retryable(manifest, cancelled), LangGraphRetryableError,
+        )
 
 
 if __name__ == "__main__":

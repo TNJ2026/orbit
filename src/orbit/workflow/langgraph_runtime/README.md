@@ -191,6 +191,14 @@ is parsed once and held: a published version is only ever inserted, so
 `(workflow_id, version)` names one IR permanently and the cache needs no
 invalidation.
 
+Cancelling refuses to start work rather than promising to stop it. A run
+still queued has no attempt to signal, so the engine declines it before
+compiling anything, and the Agent and Tool adapters refuse to begin an
+attempt for a cancelled run under the same lock a cancel takes — either the
+cancel lands first and no work starts, or the attempt claims first and the
+cancel has something to signal. Work already under way is stopped only as
+well as the Handler itself can be stopped, which is what it always was.
+
 Writes require the normal `idempotency-key` header. Read DTOs advertise a
 resume command only to actors with write scope and only while interrupted;
 clients do not infer commands from status. The existing Orbit `/api/v1/runs`
