@@ -250,7 +250,11 @@ class LangGraphWorkflowService:
         # attempt journal find a sibling's `started` row and settle a healthy
         # run as `unknown`. This is the part of that question this process can
         # answer for certain.
-        self._in_flight: set[str] = set()
+        # Count drives rather than only remembering membership. Recovery only
+        # asks whether the count is non-zero, but Handler cancellation state
+        # belongs to the last overlapping drive and must not be released when
+        # an earlier one exits.
+        self._in_flight: dict[str, int] = {}
         self._in_flight_lock = threading.Lock()
         # Whether a definition compiles under this engine, by definition hash.
         # The catalog asks once per workflow per GET and the UI polls it on
@@ -1996,15 +2000,22 @@ class LangGraphWorkflowService:
         """
 
         with self._in_flight_lock:
-            self._in_flight.add(run_id)
+            self._in_flight[run_id] = self._in_flight.get(run_id, 0) + 1
         try:
             yield
         finally:
+            finished = False
             with self._in_flight_lock:
-                self._in_flight.discard(run_id)
-            finish = getattr(self.handlers, "finish", None)
-            if finish is not None:
-                finish(run_id)
+                remaining = self._in_flight[run_id] - 1
+                if remaining:
+                    self._in_flight[run_id] = remaining
+                else:
+                    self._in_flight.pop(run_id, None)
+                    finished = True
+            if finished:
+                finish = getattr(self.handlers, "finish", None)
+                if finish is not None:
+                    finish(run_id)
 
     def _finish_timer(self, run_id: str, purpose: str, target_id: str) -> None:
         with self._connect() as connection:

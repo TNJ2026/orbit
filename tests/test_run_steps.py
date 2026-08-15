@@ -2312,6 +2312,24 @@ class CancellingAQueuedRunTests(unittest.TestCase):
         service.wait_for_background(timeout=20)
         self.assertIn(run.run_id, released)
 
+    def test_only_the_last_overlapping_drive_releases_handler_state(self) -> None:
+        """A first exit must not clear cancellation state used by its sibling."""
+
+        service, _ir = self.build()
+        released: list[str] = []
+        service.handlers.finish = released.append
+        run_id = "langgraph_run:overlapping"
+
+        with service._executing(run_id):
+            self.assertEqual(1, service._in_flight[run_id])
+            with service._executing(run_id):
+                self.assertEqual(2, service._in_flight[run_id])
+            self.assertEqual(1, service._in_flight[run_id])
+            self.assertEqual([], released)
+
+        self.assertNotIn(run_id, service._in_flight)
+        self.assertEqual([run_id], released)
+
     def test_a_run_nothing_will_drive_is_released_at_once(self) -> None:
         """A run waiting for a person is not queued behind anything.
 
