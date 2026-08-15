@@ -262,6 +262,7 @@
   "simplified.steps.repeated": "执行了 {count} 次",
   "simplified.steps.status.running": "进行中",
   "simplified.steps.status.waiting": "等待你的输入",
+  "simplified.steps.status.answered": "已提交，等待其他审核",
   "simplified.steps.status.succeeded": "已完成",
   "simplified.steps.status.failed": "失败",
   "simplified.steps.status.not_reached": "未开始",

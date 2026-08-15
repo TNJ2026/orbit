@@ -338,6 +338,11 @@ class LangGraphWorkflowService:
                     "ALTER TABLE langgraph_runs ADD COLUMN interrupt_responses_json"
                     " TEXT NOT NULL DEFAULT '{}'"
                 )
+            if "answered_interrupt_nodes_json" not in columns:
+                connection.execute(
+                    "ALTER TABLE langgraph_runs ADD COLUMN"
+                    " answered_interrupt_nodes_json TEXT NOT NULL DEFAULT '[]'"
+                )
             if "template_id" not in columns:
                 connection.execute(
                     "ALTER TABLE langgraph_runs ADD COLUMN template_id TEXT"
@@ -748,7 +753,8 @@ class LangGraphWorkflowService:
                     )
                 return self.get(receipt["run_id"])
             row = connection.execute(
-                "SELECT interrupt_responses_json FROM langgraph_runs"
+                "SELECT interrupt_responses_json,answered_interrupt_nodes_json"
+                " FROM langgraph_runs"
                 " WHERE run_id=? AND status='interrupted' AND revision=?",
                 (run_id, expected_revision),
             ).fetchone()
@@ -756,6 +762,15 @@ class LangGraphWorkflowService:
                 row["interrupt_responses_json"]
             )
             responses[interrupt_id] = value
+            answered_nodes = set() if row is None else set(json.loads(
+                row["answered_interrupt_nodes_json"] or "[]"
+            ))
+            answered_interrupt = next(
+                item for item in current.interrupts if item["id"] == interrupt_id
+            )
+            answered_value = answered_interrupt.get("value") or {}
+            if isinstance(answered_value, Mapping) and answered_value.get("node_id"):
+                answered_nodes.add(str(answered_value["node_id"]))
             ready = available <= set(responses)
             pending_interrupts = tuple(
                 item for item in current.interrupts
@@ -763,7 +778,8 @@ class LangGraphWorkflowService:
             )
             claimed = connection.execute(
                 "UPDATE langgraph_runs SET status=?,revision=revision+?,"
-                "interrupt_responses_json=?,interrupts_json=?,updated_at=?"
+                "interrupt_responses_json=?,answered_interrupt_nodes_json=?,"
+                "interrupts_json=?,updated_at=?"
                 " WHERE run_id=? AND status='interrupted' AND revision=?",
                 (
                     "running" if ready else "interrupted",
@@ -777,6 +793,7 @@ class LangGraphWorkflowService:
                     # with no trace. They are cleared in `_settle`, once the
                     # graph has actually consumed them.
                     canonical_json(responses),
+                    canonical_json(sorted(answered_nodes)),
                     "[]" if ready else canonical_json(pending_interrupts),
                     self._stamp(), run_id, expected_revision,
                 ),
@@ -1046,7 +1063,8 @@ class LangGraphWorkflowService:
             ).fetchone()
             changed = connection.execute(
                 "UPDATE langgraph_runs SET status='cancelled',revision=revision+1,"
-                "interrupts_json='[]',updated_at=? WHERE run_id=? AND revision=?"
+                "interrupts_json='[]',answered_interrupt_nodes_json='[]',"
+                "updated_at=? WHERE run_id=? AND revision=?"
                 " AND status IN ('running','waiting','interrupted')",
                 (self._stamp(), run_id, expected_revision),
             ).rowcount
@@ -1382,6 +1400,9 @@ class LangGraphWorkflowService:
                      here — the run carries the error, the step does not.
         `waiting`    a person has been asked, and the run is interrupted at
                      this node.
+        `answered`   this person's answer is durable, while another parallel
+                     interrupt still has to be answered before the graph can
+                     consume the whole superstep.
         `not_reached` it is in the definition and has not run. Not "skipped":
                      telling a branch nobody took from one still to come needs
                      the routes walked, and a projection that guessed would be
@@ -1404,6 +1425,14 @@ class LangGraphWorkflowService:
             for item in run.interrupts
             if isinstance(item.get("value"), Mapping)
         }
+        with self._connect() as connection:
+            answered_row = connection.execute(
+                "SELECT answered_interrupt_nodes_json FROM langgraph_runs"
+                " WHERE run_id=?", (run_id,),
+            ).fetchone()
+        answered = set(json.loads(
+            answered_row["answered_interrupt_nodes_json"] or "[]"
+        )) if answered_row is not None else set()
         layout = graph_layout(
             [node.id for node in ir.nodes],
             [
@@ -1422,6 +1451,8 @@ class LangGraphWorkflowService:
             latest = fact.get("latest")
             if node.id in waiting:
                 status = "waiting"
+            elif node.id in answered:
+                status = "answered"
             elif latest == "started":
                 status = "running"
             elif latest in {"failed", "unknown"}:
@@ -2158,6 +2189,7 @@ class LangGraphWorkflowService:
                 # finished, so whatever it was resumed with has been consumed.
                 "UPDATE langgraph_runs SET status=?,revision=revision+1,result_json=?,"
                 " interrupts_json=?,error=?,interrupt_responses_json='{}',"
+                " answered_interrupt_nodes_json='[]',"
                 " updated_at=? WHERE run_id=? AND status!='cancelled'",
                 (
                     status,

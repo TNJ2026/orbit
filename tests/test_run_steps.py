@@ -173,6 +173,59 @@ class DerivedStatusTests(unittest.TestCase):
         self.assertEqual("succeeded", steps["beside"]["status"])
         self.assertEqual("waiting", steps["ask"]["status"])
 
+    def test_an_answered_parallel_interrupt_is_not_called_not_reached(self) -> None:
+        fan = engine_tests.node(
+            "fan", inputs=("value",), outputs=("value",), route_mode="parallel",
+        )
+        left = engine_tests.node(
+            "left", inputs=("value",), outputs=("value",),
+            kind="human", handler=False,
+        )
+        right = engine_tests.node(
+            "right", inputs=("value",), outputs=("value",),
+            kind="human", handler=False,
+        )
+        ir = engine_tests.workflow(
+            (fan, left, right),
+            (engine_tests.edge("f_l", "fan", "left"),
+             engine_tests.edge("f_r", "fan", "right")),
+            entry=("fan",), terminals=("left", "right"),
+            result=("left", "value"),
+            policies=(IRPolicy(
+                "complete", "completion", {"required_terminal_count": 2},
+            ),),
+        )
+        service = self.service(ir, [
+            engine_tests.binding("fan", lambda values, config, context: dict(values)),
+        ])
+        run = service.start(
+            ir.workflow_id, {"value": "x"}, idempotency_key="parallel",
+            actor="local",
+        )
+        left_interrupt = next(
+            item for item in run.interrupts
+            if item["value"]["node_id"] == "left"
+        )
+
+        partial = service.resume(
+            run.run_id, {"value": "approved"},
+            expected_revision=run.revision, idempotency_key="answer-left",
+            interrupt_id=left_interrupt["id"], actor="local",
+        )
+        steps = by_id(service.steps(partial.run_id, actor="local"))
+
+        self.assertEqual("answered", steps["left"]["status"])
+        self.assertEqual("waiting", steps["right"]["status"])
+
+        rebuilt = LangGraphWorkflowService(
+            service.workflow_versions, service.handlers,
+            run_db_path=self.root / "runs.sqlite3",
+            checkpoint_db_path=self.root / "checkpoints.sqlite3",
+        )
+        rebuilt_steps = by_id(rebuilt.steps(partial.run_id, actor="local"))
+        self.assertEqual("answered", rebuilt_steps["left"]["status"])
+        self.assertEqual("waiting", rebuilt_steps["right"]["status"])
+
     def test_a_node_that_ran_more_than_once_says_how_many_times(self) -> None:
         """A loop is one row with a count, not a row that hides its repeats."""
 

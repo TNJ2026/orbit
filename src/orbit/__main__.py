@@ -352,7 +352,7 @@ def _run_command(args) -> None:
         print(f"  error     {run.error}")
     marks = {
         "succeeded": "✓", "failed": "✕", "running": "●",
-        "waiting": "◔", "not_reached": "○",
+        "waiting": "◔", "answered": "✓", "not_reached": "○",
     }
     for step in steps:
         repeated = f"  ×{step['runs']}" if step["runs"] > 1 else ""

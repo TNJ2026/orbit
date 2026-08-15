@@ -109,7 +109,7 @@ td.numeric, th.numeric { text-align: right; font-variant-numeric: tabular-nums; 
 .pill { display: inline-block; border-radius: 999px; padding: 2px 9px; font-size: 12px; font-weight: 600; background: var(--panel-3); color: var(--muted); }
 .pill.running, .pill.blue { background: var(--blue-soft); color: var(--blue); }
 .pill.waiting, .pill.amber { background: var(--amber-soft); color: var(--amber); }
-.pill.succeeded, .pill.green { background: var(--green-soft); color: var(--green); }
+.pill.succeeded, .pill.answered, .pill.green { background: var(--green-soft); color: var(--green); }
 .pill.failed, .pill.cancelled, .pill.red { background: var(--red-soft); color: var(--red); }
 .pill.purple { background: var(--purple-soft); color: var(--purple); }
 

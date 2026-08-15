@@ -359,7 +359,8 @@ export function createViews(context) {
    * time would collapse the console somebody had opened underneath it.
    */
   const STEP_MARKS = {
-    succeeded: "✓", failed: "✕", running: "●", waiting: "◔", not_reached: "○",
+    succeeded: "✓", failed: "✕", running: "●", waiting: "◔", answered: "✓",
+    not_reached: "○",
   };
 
   /* The same picture as the definition page, with the run drawn on it.

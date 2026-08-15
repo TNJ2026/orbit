@@ -1317,7 +1317,7 @@
 .step-mark {
   justify-self: center; font-size: 13px; line-height: 1; color: var(--muted-2);
 }
-.step-row.succeeded .step-mark { color: var(--green); }
+.step-row.succeeded .step-mark, .step-row.answered .step-mark { color: var(--green); }
 .step-row.failed .step-mark { color: var(--red); }
 .step-row.running .step-mark { color: var(--blue); }
 .step-row.waiting .step-mark { color: var(--amber); }

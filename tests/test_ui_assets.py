@@ -354,7 +354,7 @@ class StepListRenderingTests(unittest.TestCase):
             (ASSETS / "i18n.zh-CN.json").read_text(encoding="utf-8")
         )
         for status in (
-            "succeeded", "failed", "running", "waiting", "not_reached",
+            "succeeded", "failed", "running", "waiting", "answered", "not_reached",
         ):
             with self.subTest(status=status):
                 self.assertIn(f"simplified.steps.status.{status}", english)
