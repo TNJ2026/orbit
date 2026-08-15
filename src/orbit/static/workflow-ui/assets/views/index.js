@@ -3,6 +3,7 @@ import { dataState } from "../components/data-state.js";
 import { el, svgEl } from "../components/dom.js";
 import { syncCustomSelect } from "../components/custom-select.js";
 import { semanticWorkflowDiff } from "../workflow-diff.js";
+import { resumeActions } from "../run-resume.js";
 import { workflowGenerationProgress } from "../workflow/generation-progress.js";
 import { embeddedGraph } from "../workflow/definition-views.js";
 
@@ -294,17 +295,21 @@ export function createViews(context) {
     const resume = commands.find((item) => item.command === "langgraph_run.resume");
     const cancel = commands.find((item) => item.command === "langgraph_run.cancel");
     const actions = [];
-    if (resume) actions.push(el("button", {
-      class: "button primary", text: resume.label,
-      onclick: async () => {
-        const raw = window.prompt("Resume value (JSON)", "{}");
-        if (raw === null) return;
-        try {
-          await api.execute(resume, { value: JSON.parse(raw) }, `resume:${run.run_id}`);
-          await render();
-        } catch (error) { reportError(error); }
-      },
-    }));
+    if (resume) {
+      for (const action of resumeActions(run, resume)) actions.push(el("button", {
+        class: "button primary", text: action.label,
+        onclick: async () => {
+          const raw = window.prompt(action.prompt, JSON.stringify(action.payload.value));
+          if (raw === null) return;
+          try {
+            await api.execute(action.command, {
+              ...action.payload, value: JSON.parse(raw),
+            });
+            await render();
+          } catch (error) { reportError(error); }
+        },
+      }));
+    }
     if (cancel) actions.push(el("button", {
       class: "button danger", text: cancel.label,
       onclick: async () => {

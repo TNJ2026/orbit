@@ -22,6 +22,7 @@ const { I18n, preferredLocale, LOCALES } = await import(`${assets}/i18n.js`);
 const { readRoute, routeHash } = await import(`${assets}/router.js`);
 const { dataState } = await import(`${assets}/components/data-state.js`);
 const { semanticWorkflowDiff } = await import(`${assets}/workflow-diff.js`);
+const { resumeActions } = await import(`${assets}/run-resume.js`);
 
 function catalog(locale) {
   return JSON.parse(readFileSync(`${assets}/i18n.${locale}.json`, "utf8"));
@@ -94,6 +95,36 @@ test("workflow diff reports graph and workflow changes by stable identity", () =
 
 test("workflow diff preserves raw-source fallback for non-JSON DSL", () => {
   assert.equal(semanticWorkflowDiff("nodes: []", "nodes: [changed]"), null);
+});
+
+/* -- interrupted runs ---------------------------------------------------- */
+
+test("resume actions identify every pending interrupt", () => {
+  const command = { command: "langgraph_run.resume", label: "Resume" };
+  const actions = resumeActions({ interrupts: [
+    { id: "interrupt:left", value: { node_id: "left" } },
+    { id: "interrupt:right", value: { node_id: "right" } },
+  ] }, command);
+
+  assert.deepEqual(actions.map((item) => item.label), ["Resume · left", "Resume · right"]);
+  assert.deepEqual(actions.map((item) => item.payload.interrupt_id), [
+    "interrupt:left", "interrupt:right",
+  ]);
+});
+
+test("human resume defaults to the declared result port", () => {
+  const [action] = resumeActions({ interrupts: [{
+    id: "interrupt:review",
+    value: {
+      node_id: "review",
+      output_ports: [{ id: "result", schema_id: "schema:review" }],
+    },
+  }] }, { command: "langgraph_run.resume", label: "Resume" });
+
+  assert.deepEqual(action.payload, {
+    interrupt_id: "interrupt:review",
+    value: { result: { decision: "approve", value: null } },
+  });
 });
 
 /* -- error mapping -------------------------------------------------------- */
