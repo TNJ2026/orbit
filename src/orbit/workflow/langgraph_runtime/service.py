@@ -1002,6 +1002,14 @@ class LangGraphWorkflowService:
             self._finish_timer(run_id, "join_deadline", node_id)
             self._settle(run_id, "failed", error=f"{type(exc).__name__}: {exc}")
             raise
+        finally:
+            # A deadline fire is a drive in its own right rather than a call
+            # through `_execute`, so it must close the same Handler lifecycle.
+            # In particular, cancel marks created while downstream nodes are
+            # running must not live for the rest of the process.
+            finish = getattr(self.handlers, "finish", None)
+            if finish is not None:
+                finish(run_id)
 
     def cancel(
         self,

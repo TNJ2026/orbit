@@ -552,9 +552,11 @@ def trusted_handlers(
                 manifest.version,
                 manifest.fingerprint,
                 invoke,
-                cancel_run,
-                finish_run,
-                frozenset({"inline", "artifact_ref", "secret_ref"}),
+                cancel_run=cancel_run,
+                supported_transports=frozenset({
+                    "inline", "artifact_ref", "secret_ref",
+                }),
+                finish_run=finish_run,
             ))
         elif (
             isinstance(registration.implementation, ToolHandler)
@@ -570,12 +572,12 @@ def trusted_handlers(
                 manifest.version,
                 manifest.fingerprint,
                 invoke,
-                cancel_run,
-                finish_run,
-                frozenset({"inline", "secret_ref"}),
+                cancel_run=cancel_run,
+                supported_transports=frozenset({"inline", "secret_ref"}),
                 retry_safe=(
                     manifest.execution_safety is ExecutionSafety.REPLAY_SAFE
                 ),
+                finish_run=finish_run,
             ))
     return LangGraphHandlerRegistry(handlers)
 

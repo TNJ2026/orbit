@@ -99,9 +99,11 @@ class BoundHandler:
     manifest_fingerprint: str
     invoke: HandlerCallable
     cancel_run: Callable[[str], bool] | None = None
-    finish_run: Callable[[str], None] | None = None
     supported_transports: frozenset[str] = frozenset({"inline"})
     retry_safe: bool = False
+    # Appended after the original public fields so embedders that construct a
+    # BoundHandler positionally keep the meaning of every existing argument.
+    finish_run: Callable[[str], None] | None = None
 
     def __post_init__(self) -> None:
         if not self.name.strip() or not self.version.strip():

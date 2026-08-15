@@ -2345,6 +2345,49 @@ class CancellingAQueuedRunTests(unittest.TestCase):
         )
         self.assertEqual([run.run_id], released)
 
+    def test_a_join_deadline_drive_releases_handler_state(self) -> None:
+        """Deadline firing bypasses `_execute` but owns the same lifecycle."""
+
+        temp_root = self.root / "deadline-finish"
+        path = temp_root / "runtime.db"
+        publish_human_workflow(path)
+        service = build_service(
+            path, [transform_registration()],
+            state_directory=temp_root / "langgraph",
+        )
+        run = service.start(
+            "workflow:human", {"value": 1}, idempotency_key="deadline",
+            actor="local",
+        )
+        released: list[str] = []
+        original = service.handlers.finish
+        service.handlers.finish = lambda run_id: (
+            released.append(run_id), original(run_id),
+        )[1]
+
+        with self.assertRaises(ValueError):
+            service._fire_join_deadline(
+                run.run_id, service._run_ir(run), "not-a-join",
+            )
+        self.assertEqual([run.run_id], released)
+
+    def test_bound_handler_keeps_its_original_positional_contract(self) -> None:
+        """Adding finish_run must not shift transports or retry safety."""
+
+        from orbit.workflow.langgraph_runtime.compiler import BoundHandler
+
+        cancel = lambda _run_id: True
+        transports = frozenset({"inline", "artifact_ref"})
+        handler = BoundHandler(
+            "public", "1.0.0", "sha256:" + "a" * 64,
+            lambda values, config, context: values,
+            cancel, transports, True,
+        )
+        self.assertIs(handler.cancel_run, cancel)
+        self.assertEqual(transports, handler.supported_transports)
+        self.assertTrue(handler.retry_safe)
+        self.assertIsNone(handler.finish_run)
+
     def test_a_cancellation_is_not_something_to_retry(self) -> None:
         """Otherwise a retry policy would resurrect a cancelled run."""
 
