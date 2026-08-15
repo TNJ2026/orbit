@@ -9,8 +9,9 @@ from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import sqlite3
+import queue
 import threading
-from concurrent.futures import ThreadPoolExecutor, wait
+import time
 from typing import Any, Callable, Mapping, Sequence
 import uuid
 
@@ -26,6 +27,11 @@ from .compiler import (
     LangGraphRetryRequested, LangGraphUnknownExternalResult, compile_workflow,
     edge_is_selected, outgoing_edges,
 )
+
+
+# Deferred runs execute on at most this many threads, so a burst of starts
+# queues rather than opening a connection per run.
+BACKGROUND_WORKERS = 8
 
 
 # Parsed definitions held per service. Bounded because a long-lived process
@@ -225,11 +231,16 @@ class LangGraphWorkflowService:
         # is what the single-agent UI is built around. Off by default, so an
         # embedder running many workflows is not quietly serialised.
         self.single_goal = bool(single_goal)
-        # Runs started by a caller that did not wait. Created on first use so
-        # a service that never defers one starts no threads at all.
-        self._background: ThreadPoolExecutor | None = None
-        self._background_runs: set = set()
+        # Runs started by a caller that did not wait. Workers are created on
+        # first use, so a service that never defers one starts no threads.
+        self._background_queue: queue.Queue = queue.Queue()
+        self._background_workers: list[threading.Thread] = []
+        # Queued plus executing. A count rather than a set of handles: the
+        # handles were only ever read to ask "are they done", and keeping them
+        # meant a long-lived process accumulated one per deferred run for ever.
+        self._background_pending = 0
         self._background_lock = threading.Lock()
+        self._background_settled = threading.Condition(self._background_lock)
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         # Runs this process is executing right now. `running` in the database
         # means "a process was executing this", and recovery exists because
@@ -1082,11 +1093,40 @@ class LangGraphWorkflowService:
                 return
 
         with self._background_lock:
-            if self._background is None:
-                self._background = ThreadPoolExecutor(
-                    max_workers=8, thread_name_prefix="langgraph-run",
+            self._background_pending += 1
+            self._background_queue.put(run)
+            if len(self._background_workers) < BACKGROUND_WORKERS:
+                worker = threading.Thread(
+                    target=self._background_worker,
+                    name=f"langgraph-run-{len(self._background_workers)}",
+                    daemon=True,
                 )
-            self._background_runs.add(self._background.submit(run))
+                self._background_workers.append(worker)
+                worker.start()
+
+    def _background_worker(self) -> None:
+        """One of a fixed few threads draining deferred runs.
+
+        Daemon, and that is the whole point of not using a thread pool here.
+        `concurrent.futures` workers are not, and the interpreter joins every
+        non-daemon thread on the way out, so a Handler that hung made process
+        exit unbounded however short the shutdown timeout was — measured at
+        thirty seconds against a half-second bound, and unchanged by
+        unregistering the pool's own exit hook.
+
+        Abandoning a thread mid-run is safe for the same reason walking away
+        from it is: the run stays `running` and startup recovery re-enters it,
+        which is the path a killed process already takes.
+        """
+
+        while True:
+            run = self._background_queue.get()
+            try:
+                run()
+            finally:
+                with self._background_lock:
+                    self._background_pending -= 1
+                    self._background_settled.notify_all()
 
     def wait_for_background(self, timeout: float = 10.0) -> tuple[str, ...]:
         """Let runs started without a waiter finish; name the ones that did not.
@@ -1098,12 +1138,15 @@ class LangGraphWorkflowService:
         that letting it finish does not.
         """
 
-        with self._background_lock:
-            pending = tuple(self._background_runs)
-        done, not_done = wait(pending, timeout=timeout)
-        with self._background_lock:
-            self._background_runs.difference_update(done)
-        return tuple(f"background-run-{index}" for index in range(len(not_done)))
+        deadline = time.monotonic() + max(timeout, 0.0)
+        with self._background_settled:
+            while self._background_pending:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._background_settled.wait(remaining)
+            stranded = self._background_pending
+        return tuple(f"background-run-{index}" for index in range(stranded))
 
     # Runs that cannot do anything else. `unknown` is missing on purpose: it
     # is not resumable either, but nobody can say whether its Handler acted,

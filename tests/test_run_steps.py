@@ -11,7 +11,10 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 import sqlite3
+import subprocess
+import sys
 import tempfile
+import textwrap
 import time
 import unittest
 
@@ -1695,6 +1698,154 @@ class DefinitionsAreParsedOnceTests(unittest.TestCase):
         self.assertLessEqual(len(self.engine._ir_cache), IR_CACHE_SIZE)
         # Evicting is not forgetting: the answer is re-derived, not lost.
         self.assertTrue(self.engine.steps(run.run_id, actor="local"))
+
+
+
+class ShutdownIsActuallyBoundedTests(unittest.TestCase):
+    """The timeout has to bound the process, not just the wait on it.
+
+    `wait_for_background` returned inside its timeout and the runtime reported
+    its stragglers, but the process then sat waiting for them anyway: the
+    interpreter joins every non-daemon thread on the way out, and a thread
+    pool's workers are not daemon. Measured on a Handler that sleeps thirty
+    seconds against a half-second bound: the wait returned in half a second
+    and the process exited in thirty. Unregistering the pool's own exit hook
+    changed nothing, because it is the interpreter's join, not that hook.
+
+    A hung Handler is not even the common case. A worker parked on an empty
+    queue is also a non-daemon thread, so any process that had *ever* deferred
+    a run would refuse to exit at all — every run finished, nothing to wait
+    for, and the interpreter waiting anyway.
+    """
+
+    def exits_within(self, seconds: float, body: str) -> str:
+        root = str(Path(__file__).resolve().parents[1])
+        script = f"import sys\nsys.path.insert(0, {root!r})\n" + textwrap.dedent(body)
+        began = time.monotonic()
+        finished = subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True,
+            timeout=seconds,
+        )
+        elapsed = time.monotonic() - began
+        self.assertLess(
+            elapsed, seconds, f"the process took {elapsed:.1f}s to exit",
+        )
+        return finished.stdout + finished.stderr
+
+    def test_a_process_that_deferred_a_run_can_still_exit(self) -> None:
+        """Every run finished; nothing should be holding the door."""
+
+        output = self.exits_within(30, '''
+            import tempfile
+            from pathlib import Path
+            sys.path.insert(0, ".")
+            from orbit.workflow.langgraph_runtime import build_service
+            from tests.test_web_composition import (
+                publish_human_workflow, transform_registration,
+            )
+
+            root = Path(tempfile.mkdtemp())
+            path = root / "runtime.db"
+            publish_human_workflow(path)
+            engine = build_service(
+                path, [transform_registration()],
+                state_directory=root / "langgraph",
+            )
+            engine.start(
+                "workflow:human", {"value": 1}, idempotency_key="one",
+                actor="local", wait=False,
+            )
+            print("stragglers", len(engine.wait_for_background(timeout=10)),
+                  flush=True)
+        ''')
+        self.assertIn("stragglers 0", output)
+
+    def test_a_handler_that_will_not_return_does_not_hold_the_process(self) -> None:
+        output = self.exits_within(45, '''
+            import tempfile, threading, time
+            from pathlib import Path
+            sys.path.insert(0, ".")
+            from orbit.workflow.domain.definitions import CompiledWorkflow
+            from orbit.workflow.domain.serialization import definition_hash
+            from orbit.workflow.langgraph_runtime.compiler import (
+                LangGraphHandlerRegistry,
+            )
+            from orbit.workflow.langgraph_runtime.service import (
+                LangGraphWorkflowService,
+            )
+            from orbit.workflow.persistence.workflow_versions import (
+                SQLiteWorkflowVersionStore,
+            )
+            import tests.test_workflow_langgraph_runtime as engine_tests
+
+            root = Path(tempfile.mkdtemp())
+            entered = threading.Event()
+
+            def never_returns(values, config, context):
+                entered.set()
+                time.sleep(300)
+                return dict(values)
+
+            work = engine_tests.node("work", inputs=("value",), outputs=("value",))
+            done = engine_tests.node(
+                "done", inputs=("value",), kind="terminal", handler=False,
+            )
+            ir = engine_tests.workflow(
+                (work, done), (engine_tests.edge("w_d", "work", "done"),),
+                entry=("work",), terminals=("done",), result=("work", "value"),
+            )
+            store = SQLiteWorkflowVersionStore(root / "workflows.sqlite3")
+            store.publish(
+                CompiledWorkflow(
+                    ir, definition_hash(ir), "test", "sha256:" + "c" * 64,
+                ),
+                expected_latest_version=0, source_format="json",
+                source_text="{}", actor="test", dsl_version="1.3",
+            )
+            service = LangGraphWorkflowService(
+                store,
+                LangGraphHandlerRegistry([
+                    engine_tests.binding("work", never_returns),
+                ]),
+                run_db_path=root / "runs.sqlite3",
+                checkpoint_db_path=root / "checkpoints.sqlite3",
+            )
+            service.start(
+                ir.workflow_id, {"value": 1}, idempotency_key="hangs",
+                actor="local", wait=False,
+            )
+            entered.wait(20)
+            print("stragglers", len(service.wait_for_background(timeout=0.5)),
+                  flush=True)
+        ''')
+        self.assertIn("stragglers 1", output)
+
+    def test_finished_runs_are_not_remembered_for_ever(self) -> None:
+        """The bookkeeping is a count of what is outstanding, not a log.
+
+        Holding a handle per deferred run meant a long-lived process grew one
+        for every run anybody started without waiting, and nothing removed
+        them until shutdown.
+        """
+
+        temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        path = root / "runtime.db"
+        publish_human_workflow(path)
+        engine = build_service(
+            path, [transform_registration()], state_directory=root / "langgraph",
+        )
+        for index in range(12):
+            engine.start(
+                "workflow:human", {"value": 1}, idempotency_key=f"d{index}",
+                actor="local", wait=False,
+            )
+        self.assertEqual((), engine.wait_for_background(timeout=10))
+        self.assertEqual(0, engine._background_pending)
+        # Whatever is retained must not be one entry per run.
+        self.assertLessEqual(len(engine._background_workers), 8)
+
 
 
 if __name__ == "__main__":
