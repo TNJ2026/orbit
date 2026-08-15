@@ -2118,6 +2118,69 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
         self.assertEqual("completed", completed.status)
         self.assertEqual("left-approved", completed.result)
 
+    def test_n_of_m_completes_after_one_of_two_human_answers(self) -> None:
+        fan = node(
+            "fan", inputs=("value",), outputs=("value",), route_mode="parallel",
+        )
+        fast = node("fast", inputs=("value",), outputs=("value",))
+        left = node(
+            "left", inputs=("value",), outputs=("value",),
+            kind="human", handler=False,
+        )
+        right = node(
+            "right", inputs=("value",), outputs=("value",),
+            kind="human", handler=False,
+        )
+        policy = IRPolicy(
+            "two_of_three", "join",
+            {"mode": "n_of_m", "threshold": 2, "merge_mode": "object_by_edge"},
+        )
+        join = IRNode(
+            "join", "join", (port("items"),), (port("merged"),), None,
+            {}, (policy.id,), None,
+        )
+        ir = workflow(
+            (fan, fast, left, right, join),
+            (
+                edge("fan_fast", "fan", "fast"),
+                edge("fan_left", "fan", "left"),
+                edge("fan_right", "fan", "right"),
+                edge("fast_join", "fast", "join", target_port="items", priority=0),
+                edge("left_join", "left", "join", target_port="items", priority=1),
+                edge("right_join", "right", "join", target_port="items", priority=2),
+            ),
+            entry=("fan",), terminals=("join",), result=("join", "merged"),
+            policies=(policy,),
+        )
+        registry = LangGraphHandlerRegistry([
+            binding("fan", lambda values, config, context: dict(values)),
+            binding("fast", lambda values, config, context: {"value": "fast"}),
+        ])
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            service = self.service(directory, self.publish(directory, ir), registry)
+            started = service.start(
+                ir.workflow_id, {"value": "start"},
+                idempotency_key="n-of-m-human-start",
+            )
+            left_interrupt = next(
+                item for item in started.interrupts
+                if item["value"]["node_id"] == "left"
+            )
+
+            completed = service.resume(
+                started.run_id, "left-approved",
+                expected_revision=started.revision,
+                idempotency_key="n-of-m-human-left",
+                interrupt_id=left_interrupt["id"],
+            )
+
+        self.assertEqual("completed", completed.status)
+        self.assertEqual((), completed.interrupts)
+        self.assertEqual(
+            {"fast_join": "fast", "left_join": "left-approved"},
+            completed.result,
+        )
+
     def test_answers_survive_a_process_that_stops_mid_resume(self) -> None:
         """The window between committing the last answer and using it.
 

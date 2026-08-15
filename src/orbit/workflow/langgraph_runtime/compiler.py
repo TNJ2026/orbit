@@ -531,19 +531,64 @@ class CompiledLangGraphWorkflow:
         # handler's attempts.
         self.graph.update_state(
             self._config(config),
-            self._deadline_writes(node_id, values, state, config),
+            self._pending_join_writes(
+                node_id, values, state, config, deadline=True,
+            ),
             as_node=node_id,
         )
         if any(edge.source_node == node_id for edge in self.ir.edges):
             state = self.graph.invoke(None, config=self._config(config))
         return self._result(state)
 
-    def _deadline_writes(
+    def fire_ready_n_of_m(
+        self, *, config: Mapping[str, Any],
+    ) -> Mapping[str, Any] | None:
+        """Commit a satisfied winner join past unrelated pending interrupts.
+
+        LangGraph does not finish a superstep while any sibling task remains
+        interrupted. A partial resume can therefore produce the answer that
+        satisfies an n-of-m join without ever giving its router a turn. The
+        state (including pending writes) is complete enough to run that join;
+        persist it on a fresh checkpoint branch just as a deadline join does.
+        """
+
+        snapshot = self.graph.get_state(self._config(config))
+        values = dict(snapshot.values)
+        policies = {policy.id: policy for policy in self.ir.policies}
+        for join in self.ir.nodes:
+            if join.kind != "join" or join.id in values.get("execution_order", ()):
+                continue
+            policy = next((
+                policies[item] for item in join.policies
+                if item in policies and policies[item].kind == "join"
+            ), None)
+            if policy is None or policy.config.get("mode") != "n_of_m":
+                continue
+            if not _join_is_ready(self.ir, join, values, (), policies):
+                continue
+            state = self.graph.invoke(
+                Command(goto=Send(join.id, values)), config=self._config(config),
+            )
+            self.graph.update_state(
+                self._config(config),
+                self._pending_join_writes(
+                    join.id, values, state, config, deadline=False,
+                ),
+                as_node=join.id,
+            )
+            if any(edge.source_node == join.id for edge in self.ir.edges):
+                state = self.graph.invoke(None, config=self._config(config))
+            return self._result(state)
+        return None
+
+    def _pending_join_writes(
         self,
         node_id: str,
         values: Mapping[str, Any],
         state: Mapping[str, Any],
         config: Mapping[str, Any],
+        *,
+        deadline: bool,
     ) -> dict[str, Any]:
         """The join's own writes, plus the ones the checkpoint is missing.
 
@@ -561,7 +606,7 @@ class CompiledLangGraphWorkflow:
         missing = order[len(tuple(committed.get("execution_order") or ())):]
         outputs = values.get("node_outputs") or {}
         routes = values.get("node_routes") or {}
-        return {
+        writes = {
             "node_outputs": {
                 **{name: outputs[name] for name in missing if name in outputs},
                 node_id: state.get("node_outputs", {})[node_id],
@@ -571,8 +616,10 @@ class CompiledLangGraphWorkflow:
                 node_id: state.get("node_routes", {}).get(node_id, "success"),
             },
             "execution_order": (*missing, node_id),
-            "join_deadlines": {node_id: True},
         }
+        if deadline:
+            writes["join_deadlines"] = {node_id: True}
+        return writes
 
     def _committed_values(self, config: Mapping[str, Any]) -> Mapping[str, Any]:
         """What the checkpoint holds, without the writes still pending on it.
@@ -591,23 +638,9 @@ class CompiledLangGraphWorkflow:
         return stored.checkpoint.get("channel_values") or {}
 
     def _result(self, state: Mapping[str, Any]) -> Mapping[str, Any]:
-        completion = next((
-            policy for policy in self.ir.policies
-            if policy.kind == "completion"
-        ), None)
-        required_terminals = int(
-            completion.config.get("required_terminal_count", 1)
-            if completion is not None else 1
-        )
-        # Distinct terminals, not terminal executions. Counting repeats let a
-        # workflow with one terminal satisfy `required_terminal_count: 2` by
-        # reaching that terminal twice — which a rework or a loop back edge
-        # upstream makes reachable — without a second terminal ever existing.
-        reached_terminals = len({
-            node_id for node_id in state.get("execution_order", ())
-            if node_id in self.ir.terminals
-        })
-        if not state.get("__interrupt__") and reached_terminals < required_terminals:
+        if not state.get("__interrupt__") and not self.completion_satisfied(state):
+            required_terminals = self._required_terminal_count()
+            reached_terminals = self._reached_terminal_count(state)
             raise LangGraphCompletionUnsatisfied(
                 f"completion requires {required_terminals} successful terminals; "
                 f"reached {reached_terminals}"
@@ -623,6 +656,31 @@ class CompiledLangGraphWorkflow:
             "node_routes": dict(state.get("node_routes", {})),
             "execution_order": list(state.get("execution_order", ())),
         }
+
+    def _required_terminal_count(self) -> int:
+        completion = next((
+            policy for policy in self.ir.policies
+            if policy.kind == "completion"
+        ), None)
+        return int(
+            completion.config.get("required_terminal_count", 1)
+            if completion is not None else 1
+        )
+
+    def _reached_terminal_count(self, state: Mapping[str, Any]) -> int:
+        # Distinct terminals, not terminal executions. Counting repeats let a
+        # workflow with one terminal satisfy `required_terminal_count: 2` by
+        # reaching that terminal twice — which a rework or a loop back edge
+        # upstream makes reachable — without a second terminal ever existing.
+        return len({
+            node_id for node_id in state.get("execution_order", ())
+            if node_id in self.ir.terminals
+        })
+
+    def completion_satisfied(self, state: Mapping[str, Any]) -> bool:
+        """Whether the declared terminal quorum has already been reached."""
+
+        return self._reached_terminal_count(state) >= self._required_terminal_count()
 
 
 def outgoing_edges(ir: WorkflowIR, node: IRNode) -> tuple[IREdge, ...]:

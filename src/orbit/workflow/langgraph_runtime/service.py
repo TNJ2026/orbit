@@ -771,30 +771,22 @@ class LangGraphWorkflowService:
             answered_value = answered_interrupt.get("value") or {}
             if isinstance(answered_value, Mapping) and answered_value.get("node_id"):
                 answered_nodes.add(str(answered_value["node_id"]))
-            ready = available <= set(responses)
-            pending_interrupts = tuple(
-                item for item in current.interrupts
-                if item["id"] not in responses
-            )
             claimed = connection.execute(
                 "UPDATE langgraph_runs SET status=?,revision=revision+?,"
                 "interrupt_responses_json=?,answered_interrupt_nodes_json=?,"
                 "interrupts_json=?,updated_at=?"
                 " WHERE run_id=? AND status='interrupted' AND revision=?",
                 (
-                    "running" if ready else "interrupted",
-                    0 if ready else 1,
+                    "running",
+                    0,
                     # Kept, not cleared. This commits and *then* hands the
-                    # responses to the graph; a process that stops in between
-                    # used to leave `running` with nothing recorded, so
-                    # recovery re-entered with `invoke(None)`, the graph
-                    # interrupted at the same nodes, and every human answer
-                    # collected across the earlier partial resumes was gone
-                    # with no trace. They are cleared in `_settle`, once the
-                    # graph has actually consumed them.
+                    # response to the graph; if the process stops between
+                    # those operations recovery must resume with the durable
+                    # answer rather than re-enter the same interrupt. Cleared
+                    # in `_settle`, once the graph has consumed it.
                     canonical_json(responses),
                     canonical_json(sorted(answered_nodes)),
-                    "[]" if ready else canonical_json(pending_interrupts),
+                    "[]",
                     self._stamp(), run_id, expected_revision,
                 ),
             ).rowcount
@@ -811,8 +803,6 @@ class LangGraphWorkflowService:
             )
             self._append_event(connection, run_id)
             connection.commit()
-        if not ready:
-            return self.get(run_id)
         return self._execute(
             run_id, self._run_ir(current), resume=responses,
         )
@@ -2091,11 +2081,15 @@ class LangGraphWorkflowService:
                 workflow = compile_workflow(ir, self.handlers, checkpointer=saver)
                 if resume is not ...:
                     result = workflow.resume(resume, config=config)
+                    result = workflow.fire_ready_n_of_m(config=config) or result
                 else:
                     result = workflow.invoke(None if inputs is None else inputs, config=config)
                 snapshot = workflow.graph.get_state(config)
-            status = "interrupted" if snapshot.next else "completed"
-            if snapshot.next:
+            completed = workflow.completion_satisfied(snapshot.values)
+            status = "completed" if completed else (
+                "interrupted" if snapshot.next else "completed"
+            )
+            if snapshot.next and not completed:
                 self._schedule_join_deadlines(
                     run_id,
                     ir,
@@ -2107,13 +2101,18 @@ class LangGraphWorkflowService:
                     ),
                     execution_order=snapshot.values.get("execution_order", ()),
                 )
-            interrupts = tuple(
+            resumed_interrupts = (
+                frozenset(resume) if resume is not ... and isinstance(resume, Mapping)
+                else frozenset()
+            )
+            interrupts = () if completed else tuple(
                 {
                     "id": item.id,
                     "value": to_primitive(item.value),
                 }
                 for task in snapshot.tasks
                 for item in task.interrupts
+                if item.id not in resumed_interrupts
             )
             return self._settle(
                 run_id, status, result=result["result"], interrupts=interrupts,
@@ -2189,13 +2188,15 @@ class LangGraphWorkflowService:
                 # finished, so whatever it was resumed with has been consumed.
                 "UPDATE langgraph_runs SET status=?,revision=revision+1,result_json=?,"
                 " interrupts_json=?,error=?,interrupt_responses_json='{}',"
-                " answered_interrupt_nodes_json='[]',"
+                " answered_interrupt_nodes_json=CASE WHEN ?='interrupted'"
+                " THEN answered_interrupt_nodes_json ELSE '[]' END,"
                 " updated_at=? WHERE run_id=? AND status!='cancelled'",
                 (
                     status,
                     None if result is None else canonical_json(result),
                     canonical_json(interrupts),
                     error,
+                    status,
                     self._stamp(),
                     run_id,
                 ),
