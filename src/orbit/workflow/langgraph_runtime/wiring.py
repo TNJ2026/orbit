@@ -10,7 +10,9 @@ import sqlite3
 from threading import Lock
 from types import SimpleNamespace
 from typing import Any
+import uuid
 
+from ..domain.deadlines import MIN_AGENT_DURATION_SECONDS
 from ..domain.handlers import UnknownExternalResultError
 from ..domain.durable_execution import ExecutionSafety
 from ..domain.serialization import canonical_json
@@ -138,6 +140,7 @@ class _HandlerAttemptJournal:
 
     def __init__(self, path: Path | str) -> None:
         self.path = Path(path)
+        self.owner = uuid.uuid4().hex
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
             ensure_event_log(connection)
@@ -145,7 +148,8 @@ class _HandlerAttemptJournal:
                 "CREATE TABLE IF NOT EXISTS langgraph_handler_attempts("
                 "attempt_id TEXT PRIMARY KEY,run_id TEXT NOT NULL,node_id TEXT NOT NULL,"
                 "status TEXT NOT NULL,output_json TEXT,error TEXT,updated_at TEXT NOT NULL,"
-                "handler_name TEXT NOT NULL DEFAULT '')"
+                "handler_name TEXT NOT NULL DEFAULT '',execution_ref TEXT,"
+                "execution_owner TEXT)"
             )
             columns = {
                 row["name"] for row in connection.execute(
@@ -156,6 +160,14 @@ class _HandlerAttemptJournal:
                 connection.execute(
                     "ALTER TABLE langgraph_handler_attempts"
                     " ADD COLUMN handler_name TEXT NOT NULL DEFAULT ''"
+                )
+            if "execution_ref" not in columns:
+                connection.execute(
+                    "ALTER TABLE langgraph_handler_attempts ADD COLUMN execution_ref TEXT"
+                )
+            if "execution_owner" not in columns:
+                connection.execute(
+                    "ALTER TABLE langgraph_handler_attempts ADD COLUMN execution_owner TEXT"
                 )
 
     def _connect(self):
@@ -208,6 +220,33 @@ class _HandlerAttemptJournal:
             )
             connection.commit()
         return None
+
+    def record_execution(self, attempt_id: str, execution_ref: str) -> None:
+        if not isinstance(execution_ref, str) or not execution_ref.strip():
+            raise ValueError("execution_ref is required")
+        with self._connect() as connection:
+            changed = connection.execute(
+                "UPDATE langgraph_handler_attempts SET execution_ref=?,"
+                "execution_owner=?,updated_at=? WHERE attempt_id=? AND status='started'",
+                (execution_ref, self.owner, self._now(), attempt_id),
+            ).rowcount
+            connection.commit()
+        if changed != 1:
+            raise RuntimeError("Agent execution could not be attached to its attempt")
+
+    def stale_execution_ref(self, attempt_id: str) -> str | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT status,execution_ref,execution_owner"
+                " FROM langgraph_handler_attempts WHERE attempt_id=?",
+                (attempt_id,),
+            ).fetchone()
+        if (
+            row is None or row["status"] != "started" or not row["execution_ref"]
+            or row["execution_owner"] == self.owner
+        ):
+            return None
+        return str(row["execution_ref"])
 
     def _append(
         self, connection, outcome: str, run_id: str, node_id: str, attempt_id: str,
@@ -278,11 +317,29 @@ def _agent_adapter(
 
     def invoke(inputs, config, context):
         _validate_secret_refs(inputs, context, manifest)
+        recovery_ref = journal.stale_execution_ref(context.attempt_id)
+        if recovery_ref is not None:
+            try:
+                implementation.client.recover(recovery_ref)
+            except Exception:
+                # Recovery is cleanup, not evidence that the external result is
+                # known. `claim` below still prevents a replay and reports the
+                # durable started attempt as unknown.
+                pass
         replay = journal.claim(context, handler_name=manifest.name)
         if replay is not None:
             return replay
+        configured_timeout = config.get("timeout_seconds")
+        duration = manifest.resource_profile.max_duration_seconds
+        if (
+            isinstance(configured_timeout, int)
+            and not isinstance(configured_timeout, bool)
+        ):
+            duration = min(
+                duration, max(MIN_AGENT_DURATION_SECONDS, configured_timeout),
+            )
         deadline = datetime.now(timezone.utc) + timedelta(
-            seconds=manifest.resource_profile.max_duration_seconds
+            seconds=duration
         )
         artifacts = artifact_store.access(
             run_id=context.run_id,
@@ -324,6 +381,9 @@ def _agent_adapter(
             output=_console_sink(console, context),
             artifacts=artifacts,
             secrets=secrets,
+            record_execution=lambda execution_ref: journal.record_execution(
+                context.attempt_id, execution_ref,
+            ),
         )
         try:
             with active_lock:

@@ -46,6 +46,61 @@ def detached_process_kwargs() -> dict[str, object]:
     return {"start_new_session": True}
 
 
+def process_identity(pid: int) -> str | None:
+    """A stable birth token for ``pid``, or None when it cannot be proved.
+
+    A persisted pid is not enough for crash recovery: the operating system may
+    reuse it before Orbit restarts.  Linux exposes the process start tick in
+    procfs; the portable Unix fallback asks ``ps`` for the absolute start time.
+    Callers must refuse to signal a recovered pid when this token changed.
+    """
+
+    if pid <= 0:
+        return None
+    if IS_WINDOWS:
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.OpenProcess(0x1000, False, pid)
+            if not handle:
+                return None
+            creation = wintypes.FILETIME()
+            exit_time = wintypes.FILETIME()
+            kernel = wintypes.FILETIME()
+            user = wintypes.FILETIME()
+            try:
+                if not kernel32.GetProcessTimes(
+                    handle, ctypes.byref(creation), ctypes.byref(exit_time),
+                    ctypes.byref(kernel), ctypes.byref(user),
+                ):
+                    return None
+                return f"win:{creation.dwHighDateTime:08x}{creation.dwLowDateTime:08x}"
+            finally:
+                kernel32.CloseHandle(handle)
+        except (AttributeError, OSError, ValueError):
+            return None
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        # The command in field 2 may contain spaces and parentheses. Everything
+        # after its final ')' starts at field 3; starttime is field 22.
+        fields = stat[stat.rfind(")") + 2 :].split()
+        if len(fields) > 19:
+            return f"proc:{fields[19]}"
+    except (FileNotFoundError, OSError, UnicodeError, ValueError):
+        pass
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "lstart="],
+            capture_output=True, text=True, timeout=2, check=False,
+        )
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+        return None
+    started = " ".join(result.stdout.split())
+    return f"ps:{started}" if result.returncode == 0 and started else None
+
+
 # --- process tree discovery ------------------------------------------------
 
 
@@ -282,6 +337,24 @@ def stop_pid_tree(
     return dispatched
 
 
+def stop_pid_tree_if_identity(
+    pid: int, identity: str, *, grace_seconds: float = DEFAULT_KILL_GRACE_SECONDS,
+) -> bool:
+    """Stop a recovered tree only while ``pid`` is still the recorded process."""
+
+    if not identity or process_identity(pid) != identity:
+        return False
+
+    def wait_for(seconds: float) -> None:
+        deadline = time.monotonic() + seconds
+        while process_identity(pid) == identity:
+            if time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired(str(pid), seconds)
+            time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+
+    return stop_pid_tree(pid, grace_seconds=grace_seconds, wait_for=wait_for)
+
+
 def _pid_alive(pid: int) -> bool:
     if pid <= 0 or IS_WINDOWS:
         return False
@@ -482,6 +555,7 @@ class ProcessHandle:
         redactor: Redactor | None = None,
         on_stdout: Callable[[str], None] | None = None,
         on_stderr: Callable[[str], None] | None = None,
+        on_start: Callable[["ProcessHandle"], None] | None = None,
     ) -> None:
         if not argv or not all(argv):
             raise ValueError("argv must be a non-empty sequence of non-empty strings")
@@ -505,6 +579,20 @@ class ProcessHandle:
             stderr=subprocess.PIPE,
             **detached_process_kwargs(),
         )
+        if on_start is not None:
+            try:
+                on_start(self)
+            except BaseException:
+                # Stdin has not been written yet. Argument-based CLIs may see
+                # their prompt as soon as they spawn, so failure here is still
+                # an unknown external result; either way, never leave the
+                # untracked process alive.
+                kill_pid_tree(self._process.pid)
+                try:
+                    self._process.wait(timeout=DEFAULT_KILL_GRACE_SECONDS)
+                except (subprocess.TimeoutExpired, OSError):
+                    pass
+                raise
         if stdin_text is not None:
             self._write_stdin(stdin_text)
 

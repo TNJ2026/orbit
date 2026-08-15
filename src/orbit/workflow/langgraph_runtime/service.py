@@ -297,7 +297,8 @@ class LangGraphWorkflowService:
                     attempt_id TEXT PRIMARY KEY,run_id TEXT NOT NULL,
                     node_id TEXT NOT NULL,status TEXT NOT NULL,output_json TEXT,
                     error TEXT,updated_at TEXT NOT NULL,
-                    handler_name TEXT NOT NULL DEFAULT ''
+                    handler_name TEXT NOT NULL DEFAULT '',execution_ref TEXT,
+                    execution_owner TEXT
                 );
                 CREATE TABLE IF NOT EXISTS langgraph_timers (
                     timer_id TEXT PRIMARY KEY,run_id TEXT NOT NULL,node_id TEXT NOT NULL,

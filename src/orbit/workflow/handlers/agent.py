@@ -11,7 +11,9 @@ import hashlib
 from threading import Lock
 from typing import Any, Mapping, Protocol, runtime_checkable
 
-from ...platform.process import ProcessHandle
+from ...platform.process import (
+    ProcessHandle, process_identity, stop_pid_tree_if_identity,
+)
 from ..cli_environment import trusted_cli_environment
 from ..domain.deadlines import AGENT_KILL_GRACE_SECONDS
 from ..domain.ids import EntityId
@@ -185,6 +187,30 @@ class TrustedCliAgentClient:
                     pass
             return emit
 
+        def record_process(handle: ProcessHandle) -> None:
+            recorder = getattr(context, "record_execution", None)
+            if recorder is None:
+                return
+            identity = process_identity(handle.pid)
+            if identity is None:
+                raise UnknownExternalResultError(
+                    "cannot record a safe Agent process identity"
+                )
+            try:
+                recorder(json.dumps(
+                    {
+                        "kind": "local_process_v1", "pid": handle.pid,
+                        "identity": identity,
+                    },
+                    sort_keys=True, separators=(",", ":"),
+                ))
+            except UnknownExternalResultError:
+                raise
+            except Exception as exc:
+                raise UnknownExternalResultError(
+                    "cannot persist the Agent process identity"
+                ) from exc
+
         handle = ProcessHandle(
             (*self.command, *extra_args),
             cwd=self._workspace(context),
@@ -193,6 +219,7 @@ class TrustedCliAgentClient:
             max_output_bytes=max_output_bytes or self.max_output_bytes,
             on_stdout=publish("stdout"),
             on_stderr=publish("stderr"),
+            on_start=record_process,
         )
         execution_ref = f"agent:{context.request.attempt_id}"
         with self._lock:
@@ -308,6 +335,21 @@ class TrustedCliAgentClient:
         return CancelAck(CancelDisposition.UNKNOWN, "termination requested")
 
     def recover(self, recovery_ref):
+        try:
+            value = json.loads(recovery_ref)
+        except (TypeError, json.JSONDecodeError):
+            value = None
+        if (
+            isinstance(value, dict)
+            and value.get("kind") == "local_process_v1"
+            and isinstance(value.get("pid"), int)
+            and not isinstance(value.get("pid"), bool)
+            and isinstance(value.get("identity"), str)
+        ):
+            stop_pid_tree_if_identity(
+                value["pid"], value["identity"],
+                grace_seconds=self.kill_grace_seconds,
+            )
         return RecoveryResult(RecoveryDisposition.UNKNOWN, provider_request_id=recovery_ref)
 
 

@@ -33,7 +33,10 @@ from orbit.workflow.domain.definitions import (
 )
 from orbit.workflow.domain.durable_execution import ExecutionSafety
 from orbit.workflow.domain.data import PortDataPolicy, PortTransport
-from orbit.workflow.domain.handlers import ResourceProfile, UnknownExternalResultError
+from orbit.workflow.domain.handlers import (
+    RecoveryDisposition, RecoveryResult, ResourceProfile,
+    UnknownExternalResultError,
+)
 from orbit.workflow.domain.serialization import definition_hash, to_primitive
 from unittest.mock import patch
 
@@ -3677,12 +3680,14 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
 
 
 class LangGraphProductionWiringTests(unittest.TestCase):
-    def registration(self, client, *, required_secrets=()) -> HandlerRegistration:
+    def registration(
+        self, client, *, required_secrets=(), max_duration_seconds=30,
+    ) -> HandlerRegistration:
         manifest = HandlerManifest(
             "trusted_agent", "1.0.0", ("action",),
             {"value": SCHEMA}, {"value": SCHEMA},
             {"type": "object"}, ExecutionSafety.UNKNOWN_ON_LEASE_LOSS,
-            ResourceProfile(1000, 1000, 0, 30, 0, "agent"),
+            ResourceProfile(1000, 1000, 0, max_duration_seconds, 0, "agent"),
             "schema://object/1.0", ("agent.invoke",),
             tuple(required_secrets), True, True,
         )
@@ -4001,6 +4006,68 @@ class LangGraphProductionWiringTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "unknown outcome"):
                 bound.invoke({"value": 7}, {}, context)
 
+        self.assertEqual(1, len(client.requests))
+
+    def test_agent_node_timeout_is_raised_to_the_safe_minimum(self) -> None:
+        class CapturingClient(FakeAgentClient):
+            def execute(self, request, context):
+                self.deadline = context.request.deadline
+                return super().execute(request, context)
+
+        client = CapturingClient(AgentResponse({"value": 8}, None, "provider:1"))
+        registration = self.registration(client, max_duration_seconds=120)
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            registry = trusted_handlers(
+                [registration], attempt_db_path=Path(directory) / "runs.sqlite3",
+            )
+            bound = registry.resolve(self.bound_node(registration.manifest))
+            context = LangGraphExecutionContext(
+                "workflow:test", "agent", "langgraph_run:timeout",
+                "langgraph_attempt:test:timeout:1",
+            )
+            before = datetime.now(timezone.utc)
+            bound.invoke({"value": 7}, {"timeout_seconds": 1}, context)
+
+        remaining = (client.deadline - before).total_seconds()
+        self.assertGreaterEqual(remaining, 59)
+        self.assertLessEqual(remaining, 61)
+
+    def test_a_new_runtime_recovers_recorded_agent_process_before_parking(self) -> None:
+        class CrashClient(FakeAgentClient):
+            def __init__(self):
+                super().__init__()
+                self.recovered = []
+
+            def execute(self, request, context):
+                self.requests.append(request)
+                context.record_execution("recorded-process")
+                raise KeyboardInterrupt("simulated process loss")
+
+            def recover(self, recovery_ref):
+                self.recovered.append(recovery_ref)
+                return RecoveryResult(RecoveryDisposition.UNKNOWN)
+
+        client = CrashClient()
+        registration = self.registration(client)
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            path = Path(directory) / "runs.sqlite3"
+            first_registry = trusted_handlers([registration], attempt_db_path=path)
+            context = LangGraphExecutionContext(
+                "workflow:test", "agent", "langgraph_run:crash",
+                "langgraph_attempt:test:crash:1",
+            )
+            with self.assertRaises(KeyboardInterrupt):
+                first_registry.resolve(
+                    self.bound_node(registration.manifest)
+                ).invoke({"value": 7}, {}, context)
+
+            second_registry = trusted_handlers([registration], attempt_db_path=path)
+            with self.assertRaisesRegex(RuntimeError, "started outcome"):
+                second_registry.resolve(
+                    self.bound_node(registration.manifest)
+                ).invoke({"value": 7}, {}, context)
+
+        self.assertEqual(["recorded-process"], client.recovered)
         self.assertEqual(1, len(client.requests))
 
     def test_unknown_agent_result_parks_the_run_without_reexecution(self) -> None:

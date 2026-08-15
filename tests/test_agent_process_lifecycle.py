@@ -23,11 +23,14 @@ from orbit.workflow.domain.handlers import UnknownExternalResultError
 from orbit.workflow.handlers.agent import AgentRequest, TrustedPromptCliAgentClient
 
 
-def context(attempt_id: str = "attempt-1", deadline: datetime | None = None):
+def context(
+    attempt_id: str = "attempt-1", deadline: datetime | None = None,
+    record_execution=None,
+):
     request = SimpleNamespace(attempt_id=attempt_id)
     if deadline is not None:
         request.deadline = deadline
-    return SimpleNamespace(request=request)
+    return SimpleNamespace(request=request, record_execution=record_execution)
 
 
 class Cli:
@@ -196,6 +199,39 @@ class AgentProcessTreeTests(unittest.TestCase):
 
         self.assertTrue(child_pid, "the canceller never saw the child start")
         self.assert_gone(child_pid[0])
+
+    def test_recovery_stops_a_recorded_process_tree(self) -> None:
+        """A new Runtime can clean the tree the old Runtime left behind."""
+
+        from threading import Thread
+
+        client = self.client(HANGS_WITH_A_CHILD_HOLDING_STDOUT, timeout_seconds=60)
+        references: list[str] = []
+        failures: list[BaseException] = []
+
+        def execute() -> None:
+            try:
+                client.execute(
+                    AgentRequest({"prompt": "work"}, {}, "key"),
+                    context(record_execution=references.append),
+                )
+            except BaseException as exc:  # the stopped request is intentionally unknown
+                failures.append(exc)
+
+        worker = Thread(target=execute, daemon=True)
+        worker.start()
+        child_pid = self.recorded_pid()
+        deadline = time.monotonic() + 10
+        while not references and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(references, "the Agent process identity was not recorded")
+
+        client.recover(references[0])
+        worker.join(timeout=15)
+
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(any(isinstance(item, UnknownExternalResultError) for item in failures))
+        self.assert_gone(child_pid)
 
 
 class AttemptDeadlineTests(unittest.TestCase):
