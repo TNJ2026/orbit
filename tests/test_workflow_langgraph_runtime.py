@@ -1498,6 +1498,10 @@ class LangGraphWorkflowCompilerTests(unittest.TestCase):
             ("any", {}, {"left_join": "left"}),
             ("n_of_m", {"threshold": 1}, {"left_join": "left"}),
             (
+                "n_of_m", {"threshold": 2},
+                {"left_join": "left", "right_join": "right"},
+            ),
+            (
                 "all_successful", {},
                 {"left_join": "left", "right_join": "right"},
             ),

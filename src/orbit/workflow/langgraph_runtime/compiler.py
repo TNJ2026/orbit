@@ -1094,6 +1094,40 @@ def compile_workflow(
 
     nodes_by_id = {node.id: node for node in ir.nodes}
 
+    # A conditional router runs once per source branch and sees that branch's
+    # pending write, not the writes of its siblings in the same superstep.
+    # That is enough for `any` (and n=1), but every branch of an n>1 join used
+    # to observe an arrival count of one and hold the join forever.  Route
+    # those joins through a tiny barrier node: LangGraph coalesces the barrier
+    # scheduled by parallel siblings, and its following router sees the
+    # superstep's merged state.  If arrivals span supersteps the barrier may
+    # run again, which is exactly when readiness needs to be reconsidered.
+    join_gates: dict[str, str] = {}
+    used_node_ids = set(nodes_by_id)
+    for join in (item for item in ir.nodes if item.kind == "join"):
+        policy = next((
+            policies_by_id[item] for item in join.policies
+            if item in policies_by_id and policies_by_id[item].kind == "join"
+        ), None)
+        if (
+            policy is None or policy.config.get("mode") != "n_of_m"
+            or int(policy.config["threshold"]) <= 1
+        ):
+            continue
+        gate = f"__orbit_n_of_m_gate__{join.id}"
+        while gate in used_node_ids:
+            gate += "_"
+        used_node_ids.add(gate)
+        join_gates[join.id] = gate
+        builder.add_node(gate, lambda _state: {})
+
+        def gate_route(state: _GraphState, *, target=join):
+            return [target.id] if _join_is_ready(
+                ir, target, state, (), policies_by_id,
+            ) else []
+
+        builder.add_conditional_edges(gate, gate_route, [join.id])
+
     for entry in ir.entry:
         builder.add_edge(START, entry)
 
@@ -1141,6 +1175,8 @@ def compile_workflow(
             executed = state.get("node_outputs") or {}
 
             def ready(node_id: str, frontier: Sequence[str]) -> bool:
+                if node_id in join_gates:
+                    return True
                 target = nodes_by_id.get(node_id)
                 if target is None or target.kind != "join":
                     return True
@@ -1166,7 +1202,9 @@ def compile_workflow(
                     continue
                 if ready(candidate.id, scheduled):
                     scheduled.append(candidate.id)
-            return scheduled
+            return list(dict.fromkeys(
+                join_gates.get(node_id, node_id) for node_id in scheduled
+            ))
 
         # Every join is a possible target, not only the ones this node points
         # at: a router schedules a join that has become ready so that a branch
@@ -1177,6 +1215,7 @@ def compile_workflow(
             sorted(
                 {edge.target_node for edge in outgoing}
                 | {item.id for item in ir.nodes if item.kind == "join"}
+                | set(join_gates.values())
             ),
         )
 
