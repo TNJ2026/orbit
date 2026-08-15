@@ -182,7 +182,10 @@ is taken and the rest are not. That verdict needs the tally, which
 version's runs — an edge id is only the same edge within one — and reports as
 `taken`, `never_taken` or `no_evidence` beside the counts it drew them from.
 It re-reads the runs rather than keeping a counter, so pruning runs shrinks
-the evidence instead of leaving a tally of forty behind five surviving runs.
+the evidence instead of leaving a tally of forty behind five surviving runs. Re-reading is affordable because the definition
+is parsed once and held: a published version is only ever inserted, so
+`(workflow_id, version)` names one IR permanently and the cache needs no
+invalidation.
 
 Writes require the normal `idempotency-key` header. Read DTOs advertise a
 resume command only to actors with write scope and only while interrupted;

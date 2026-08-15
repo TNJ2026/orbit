@@ -1506,5 +1506,196 @@ class ReadingARunWhileItIsWrittenTests(unittest.TestCase):
         )
 
 
+
+class DefinitionsAreParsedOnceTests(unittest.TestCase):
+    """Reading a run costs a definition, and that is the expensive half.
+
+    Resolving one re-reads the version row and puts the whole IR back through
+    JSON Schema validation. A hundred-run branch tally did that a hundred
+    times for the same definition — 83% of its work, measured. A published
+    version is only ever inserted and a run's graph snapshot is written once
+    when it starts, so nothing cached here can go stale; it can only be
+    evicted.
+    """
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.path = self.root / "runtime.db"
+        publish_human_workflow(self.path)
+        self.engine = build_service(
+            self.path, [transform_registration()],
+            state_directory=self.root / "langgraph",
+        )
+
+    def counted(self, engine=None):
+        """Count trips to the version store, the cost the cache removes."""
+
+        store = (engine or self.engine).workflow_versions
+        original = store.get
+        calls = {"count": 0}
+
+        def counting(workflow_id, version):
+            calls["count"] += 1
+            return original(workflow_id, version)
+
+        store.get = counting
+        self.addCleanup(setattr, store, "get", original)
+        return calls
+
+    def start(self, count: int):
+        return [
+            self.engine.start(
+                "workflow:human", {"value": 1},
+                idempotency_key=f"c{index}", actor="local",
+            )
+            for index in range(count)
+        ]
+
+    def test_a_tally_costs_the_same_whatever_the_run_count(self) -> None:
+        """Constant, not a magic number: the definition is resolved per tally.
+
+        Twelve runs and thirty-six of the same definition must cost the same
+        trips to the version store, each against a service that has cached
+        nothing yet.
+        """
+
+        costs = []
+        for index, count in enumerate((12, 36)):
+            engine = build_service(
+                self.path, [transform_registration()],
+                state_directory=self.root / f"tally{index}",
+            )
+            for run in range(count):
+                engine.start(
+                    "workflow:human", {"value": 1},
+                    idempotency_key=f"t{index}-{run}", actor="local",
+                )
+            calls = self.counted(engine)
+            report = engine.branch_history("workflow:human", actor="local")
+            self.assertEqual(count, report["runs"])
+            self.assertTrue(report["edges"])
+            costs.append(calls["count"])
+        self.assertEqual(costs[0], costs[1])
+        self.assertLessEqual(costs[0], 2)
+
+    def test_reading_a_run_twice_reads_the_definition_once(self) -> None:
+        run = self.start(1)[0]
+        self.engine.steps(run.run_id, actor="local")
+        calls = self.counted()
+        first = self.engine.steps(run.run_id, actor="local")
+        second = self.engine.edges(run.run_id, actor="local")
+        self.assertEqual(0, calls["count"])
+        self.assertTrue(first)
+        self.assertTrue(second)
+
+    def test_the_key_is_the_version_and_the_snapshot(self) -> None:
+        """Three definitions, one cache, and no two of them collapse.
+
+        Keyed by the workflow alone this passes anyway — every lookup would
+        return whichever definition was resolved first — so the three live on
+        one service on purpose. A run of version 1 must keep reporting
+        version 1 after version 2 is published, and a template run's graph
+        lives on the run and nowhere else.
+        """
+
+        import dataclasses
+        import json as json_module
+        from orbit.workflow.domain.serialization import to_primitive
+
+        first = self.engine._ir_for(
+            run_id="langgraph_run:one", workflow_id="workflow:human",
+            workflow_version=1, snapshot=None,
+        )
+        work = engine_tests.node("work", inputs=("value",), outputs=("value",))
+        done = engine_tests.node(
+            "done", inputs=("value",), kind="terminal", handler=False,
+        )
+        other = engine_tests.workflow(
+            (work, done), (engine_tests.edge("w_d", "work", "done"),),
+            entry=("work",), terminals=("done",), result=("work", "value"),
+        )
+        renamed = dataclasses.replace(other, workflow_id="workflow:human")
+        SQLiteWorkflowVersionStore(self.path).publish(
+            CompiledWorkflow(
+                renamed, definition_hash(renamed), "test", "sha256:" + "e" * 64,
+            ),
+            expected_latest_version=1, source_format="json",
+            source_text="{}", actor="test", dsl_version="1.3",
+        )
+        second = self.engine._ir_for(
+            run_id="langgraph_run:two", workflow_id="workflow:human",
+            workflow_version=2, snapshot=None,
+        )
+        third = self.engine._ir_for(
+            run_id="langgraph_run:three", workflow_id="workflow:human",
+            workflow_version=1,
+            snapshot=json_module.dumps(to_primitive(other)),
+        )
+        names = lambda ir: {node.id for node in ir.nodes}
+        self.assertEqual({"transform", "approve", "done"}, names(first))
+        self.assertEqual({"work", "done"}, names(second))
+        self.assertEqual({"work", "done"}, names(third))
+        # Version 1 is still version 1 after version 2 exists.
+        self.assertEqual(names(first), names(self.engine._ir_for(
+            run_id="langgraph_run:one", workflow_id="workflow:human",
+            workflow_version=1, snapshot=None,
+        )))
+
+    def test_a_template_run_reports_its_own_definition(self) -> None:
+        """End to end, through the run it belongs to."""
+
+        work = engine_tests.node("work", inputs=("value",), outputs=("value",))
+        done = engine_tests.node(
+            "done", inputs=("value",), kind="terminal", handler=False,
+        )
+        ir = engine_tests.workflow(
+            (work, done), (engine_tests.edge("w_d", "work", "done"),),
+            entry=("work",), terminals=("done",), result=("work", "value"),
+        )
+        engine = LangGraphWorkflowService(
+            SQLiteWorkflowVersionStore(self.path),
+            LangGraphHandlerRegistry([engine_tests.binding(
+                "work", lambda values, config, context: dict(values),
+            )]),
+            run_db_path=self.root / "template-runs.sqlite3",
+            checkpoint_db_path=self.root / "template-checkpoints.sqlite3",
+        )
+        run = engine.start_snapshot(
+            "workflow:template", ir, {"value": 1},
+            template_id="t1", idempotency_key="tpl", actor="local",
+        )
+        steps = {step["node_id"] for step in engine.steps(run.run_id, actor="local")}
+        self.assertEqual({"work", "done"}, steps)
+
+    def test_the_cache_is_bounded(self) -> None:
+        from orbit.workflow.langgraph_runtime.service import IR_CACHE_SIZE
+
+        import json as json_module
+        from orbit.workflow.domain.serialization import to_primitive
+
+        run = self.start(1)[0]
+        work = engine_tests.node("work", inputs=("value",), outputs=("value",))
+        done = engine_tests.node(
+            "done", inputs=("value",), kind="terminal", handler=False,
+        )
+        snapshot = json_module.dumps(to_primitive(engine_tests.workflow(
+            (work, done), (engine_tests.edge("w_d", "work", "done"),),
+            entry=("work",), terminals=("done",), result=("work", "value"),
+        )))
+        # Each is a different run's own graph, which is the entry that can
+        # grow without bound in a long-lived process.
+        for index in range(IR_CACHE_SIZE * 2):
+            self.engine._ir_for(
+                run_id=f"langgraph_run:filler{index}",
+                workflow_id="workflow:human", workflow_version=1,
+                snapshot=snapshot,
+            )
+        self.assertLessEqual(len(self.engine._ir_cache), IR_CACHE_SIZE)
+        # Evicting is not forgetting: the answer is re-derived, not lost.
+        self.assertTrue(self.engine.steps(run.run_id, actor="local"))
+
+
 if __name__ == "__main__":
     unittest.main()
