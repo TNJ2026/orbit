@@ -17,6 +17,48 @@ from ..persistence.database import connect_workflow_database
 from .graph_layout import graph_layout
 
 
+def drawable_graph(ir: Mapping[str, Any]) -> dict[str, Any]:
+    """The definition as a drawable graph, in the plan's vocabulary.
+
+    The IR names an edge's ends ``source_node``/``target_node``; a run's
+    plan calls them ``from``/``to``. One renderer draws both pictures, so
+    the catalog speaks the plan's dialect rather than making the browser
+    translate.
+    """
+
+    nodes = [
+        {
+            "node_id": node["id"],
+            "kind": node["kind"],
+            # The step's own name, so a diagram can be read by someone who
+            # has never seen a node id.
+            "label": node.get("label"),
+            "handler_name": (node.get("handler") or {}).get("name"),
+            "handler_version": (node.get("handler") or {}).get("version"),
+        }
+        for node in ir.get("nodes") or ()
+    ]
+    edges = [
+        {
+            "edge_id": edge["id"],
+            "from": edge["source_node"],
+            "to": edge["target_node"],
+            "route": edge.get("route", "success"),
+            "priority": edge.get("priority", 0),
+            "back_edge": bool(edge.get("back_edge", False)),
+        }
+        for edge in ir.get("edges") or ()
+    ]
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "entry": list(ir.get("entry") or ()),
+        "terminals": list(ir.get("terminals") or ()),
+        "layout": graph_layout([node["node_id"] for node in nodes], edges),
+    }
+
+
+
 class WorkflowCatalogReadModelService:
     def __init__(
         self, path: Path | str, schema_catalog, *, usage_source=None,
@@ -190,47 +232,6 @@ class WorkflowCatalogReadModelService:
             reason,
         )
 
-    @staticmethod
-    def _graph(ir: Mapping[str, Any]) -> dict[str, Any]:
-        """The definition as a drawable graph, in the plan's vocabulary.
-
-        The IR names an edge's ends ``source_node``/``target_node``; a run's
-        plan calls them ``from``/``to``. One renderer draws both pictures, so
-        the catalog speaks the plan's dialect rather than making the browser
-        translate.
-        """
-
-        nodes = [
-            {
-                "node_id": node["id"],
-                "kind": node["kind"],
-                # The step's own name, so a diagram can be read by someone who
-                # has never seen a node id.
-                "label": node.get("label"),
-                "handler_name": (node.get("handler") or {}).get("name"),
-                "handler_version": (node.get("handler") or {}).get("version"),
-            }
-            for node in ir.get("nodes") or ()
-        ]
-        edges = [
-            {
-                "edge_id": edge["id"],
-                "from": edge["source_node"],
-                "to": edge["target_node"],
-                "route": edge.get("route", "success"),
-                "priority": edge.get("priority", 0),
-                "back_edge": bool(edge.get("back_edge", False)),
-            }
-            for edge in ir.get("edges") or ()
-        ]
-        return {
-            "nodes": nodes,
-            "edges": edges,
-            "entry": list(ir.get("entry") or ()),
-            "terminals": list(ir.get("terminals") or ()),
-            "layout": graph_layout([node["node_id"] for node in nodes], edges),
-        }
-
     def _entry(self, row, *, include_definition: bool) -> dict[str, Any]:
         ir = json.loads(row["canonical_ir_json"])
         inputs, input_mode = self._inputs(ir)
@@ -263,7 +264,7 @@ class WorkflowCatalogReadModelService:
         }
         if include_definition:
             item["definition"] = ir
-            item["graph"] = self._graph(ir)
+            item["graph"] = drawable_graph(ir)
         return item
 
     def list(self) -> list[dict[str, Any]]:

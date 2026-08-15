@@ -164,6 +164,7 @@ separate surface. Omitting it leaves every route absent:
 | `GET` | `/api/v1/langgraph-runs/{run_id}` | `runtime.read` |
 | `GET` | `/api/v1/langgraph-runs/{run_id}/steps` | `runtime.read` |
 | `GET` | `/api/v1/langgraph-runs/{run_id}/edges` | `runtime.read` |
+| `GET` | `/api/v1/langgraph-runs/{run_id}/graph` | `runtime.read` |
 | `GET` | `/api/v1/langgraph-runs/{run_id}/replay` | `runtime.read` |
 | `GET` | `/api/v1/langgraph-runs/{run_id}/output` | `runtime.read.sensitive` |
 | `POST` | `/api/v1/langgraph-runs/{run_id}/resume` | `runtime.write` |
@@ -173,8 +174,11 @@ separate surface. Omitting it leaves every route absent:
 `/steps` says where a run got to and `/edges` says which way it went at each
 fork; both are derived from the definition and the checkpoint rather than
 recorded, and both are the ordinary read scope because they name nodes and
-edges without carrying what flowed along them. `/output` is sensitive
-because a Handler's console is whatever the Handler printed.
+edges without carrying what flowed along them. `/graph` draws the definition the run
+actually executed — the catalog serves a workflow's latest version, so a run
+of an earlier one, or of a template that was never published, cannot be drawn
+from there. `/output` is sensitive because a Handler's console is whatever
+the Handler printed.
 
 Neither can call a branch dead: on any one run exactly one branch of a fork
 is taken and the rest are not. That verdict needs the tally, which

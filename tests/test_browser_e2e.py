@@ -481,6 +481,9 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
         page.wait_for_selector(".run-canvas")
         self.assertEqual(0, page.locator("iframe.workflow-graph-frame").count())
 
+        # Drawn from the run, so a republished workflow cannot change it.
+        drawn = []
+        page.on("request", lambda request: drawn.append(request.url))
         page.locator(".run-canvas summary").click()
         page.wait_for_selector("iframe.workflow-graph-frame")
         frame = page.frame_locator("iframe.workflow-graph-frame")
@@ -490,6 +493,10 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
         classes = frame.locator(".node").first.get_attribute("class")
         self.assertIn("node-run", classes)
         self.assertIn("done", frame.locator(".node").first.inner_text().lower())
+        self.assertTrue(
+            any(url.endswith("/graph") for url in drawn),
+            "the canvas asked the workflow catalog instead of the run",
+        )
 
     def test_a_fork_says_which_way_the_run_went(self) -> None:
         """The report the server derives, rendered.

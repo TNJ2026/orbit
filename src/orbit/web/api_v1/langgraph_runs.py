@@ -277,6 +277,31 @@ def build_routes(ctx, service, template_service=None) -> list[Route]:
             {"edges": list(edges)}, projection_version=run.revision,
         ))
 
+    async def run_graph(request: Request) -> JSONResponse:
+        """The definition this run executed, drawn from the run itself.
+
+        Not the workflow's current definition: those are the same thing only
+        until somebody republishes.
+        """
+
+        actor = ctx.authenticate(request, READ_SCOPE)
+        if isinstance(actor, JSONResponse):
+            return actor
+        try:
+            run_id = request.path_params["run_id"]
+            unknown = set(request.query_params)
+            if unknown:
+                raise ValueError(f"unknown query parameter: {sorted(unknown)[0]}")
+            run = service.get(run_id, actor=actor)
+            graph = service.graph(run_id, actor=actor)
+        except LookupError as exc:
+            return error("not_found", str(exc), 404)
+        except ValueError as exc:
+            return error("invalid_request", str(exc))
+        return JSONResponse(envelope(
+            {"graph": graph}, projection_version=run.revision,
+        ))
+
     async def run_output(request: Request) -> JSONResponse:
         """What this run's Handlers printed, followed rather than paged.
 
@@ -484,6 +509,9 @@ def build_routes(ctx, service, template_service=None) -> list[Route]:
         ),
         Route(
             "/api/v1/langgraph-runs/{run_id}/edges", run_edges, methods=["GET"],
+        ),
+        Route(
+            "/api/v1/langgraph-runs/{run_id}/graph", run_graph, methods=["GET"],
         ),
         Route(
             "/api/v1/langgraph-runs/{run_id}/output", run_output, methods=["GET"],

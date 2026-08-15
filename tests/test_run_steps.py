@@ -1848,5 +1848,111 @@ class ShutdownIsActuallyBoundedTests(unittest.TestCase):
 
 
 
+class RunScopedGraphTests(unittest.TestCase):
+    """A run is drawn from its own definition, not its workflow's latest.
+
+    The catalog serves the current version and says so. Drawing a finished run
+    from there put a graph the run never executed beside a step list derived
+    from the definition it really used — two pictures of one run that
+    disagreed. A template run, whose definition lives on the run and was never
+    published, had nothing to draw at all.
+    """
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.path = self.root / "runtime.db"
+        publish_human_workflow(self.path)
+        self.engine = build_service(
+            self.path, [transform_registration()],
+            state_directory=self.root / "langgraph",
+        )
+
+    def other_ir(self):
+        work = engine_tests.node("work", inputs=("value",), outputs=("value",))
+        done = engine_tests.node(
+            "done", inputs=("value",), kind="terminal", handler=False,
+        )
+        return engine_tests.workflow(
+            (work, done), (engine_tests.edge("w_d", "work", "done"),),
+            entry=("work",), terminals=("done",), result=("work", "value"),
+        )
+
+    def test_republishing_does_not_redraw_a_finished_run(self) -> None:
+        import dataclasses
+
+        run = self.engine.start(
+            "workflow:human", {"value": 1}, idempotency_key="drawn", actor="local",
+        )
+        before = self.engine.graph(run.run_id, actor="local")
+        self.assertEqual(
+            {"transform", "approve", "done"},
+            {node["node_id"] for node in before["nodes"]},
+        )
+
+        revised = dataclasses.replace(self.other_ir(), workflow_id="workflow:human")
+        SQLiteWorkflowVersionStore(self.path).publish(
+            CompiledWorkflow(
+                revised, definition_hash(revised), "test", "sha256:" + "f" * 64,
+            ),
+            expected_latest_version=1, source_format="json",
+            source_text="{}", actor="test", dsl_version="1.3",
+        )
+        after = self.engine.graph(run.run_id, actor="local")
+        self.assertEqual(before, after)
+        # And it still agrees with the steps drawn beside it.
+        self.assertEqual(
+            {node["node_id"] for node in after["nodes"]},
+            {step["node_id"] for step in
+             self.engine.steps(run.run_id, actor="local")},
+        )
+
+    def test_a_template_run_has_a_graph_at_all(self) -> None:
+        """Its definition was never published, so the catalog has none."""
+
+        ir = self.other_ir()
+        engine = LangGraphWorkflowService(
+            SQLiteWorkflowVersionStore(self.path),
+            LangGraphHandlerRegistry([engine_tests.binding(
+                "work", lambda values, config, context: dict(values),
+            )]),
+            run_db_path=self.root / "template-runs.sqlite3",
+            checkpoint_db_path=self.root / "template-checkpoints.sqlite3",
+        )
+        run = engine.start_snapshot(
+            "workflow:template", ir, {"value": 1},
+            template_id="t1", idempotency_key="tpl", actor="local",
+        )
+        graph = engine.graph(run.run_id, actor="local")
+        self.assertEqual(
+            {"work", "done"}, {node["node_id"] for node in graph["nodes"]},
+        )
+        self.assertEqual(["w_d"], [edge["edge_id"] for edge in graph["edges"]])
+        self.assertTrue(graph["layout"]["positions"])
+
+    def test_it_is_the_same_projection_the_catalog_draws(self) -> None:
+        """One renderer, so one vocabulary — `from`/`to`, not the IR's names."""
+
+        run = self.engine.start(
+            "workflow:human", {"value": 1}, idempotency_key="shape", actor="local",
+        )
+        graph = self.engine.graph(run.run_id, actor="local")
+        self.assertEqual(
+            {"nodes", "edges", "entry", "terminals", "layout"}, set(graph),
+        )
+        for edge in graph["edges"]:
+            self.assertIn("from", edge)
+            self.assertIn("to", edge)
+            self.assertNotIn("source_node", edge)
+
+    def test_somebody_else_cannot_read_the_graph(self) -> None:
+        run = self.engine.start(
+            "workflow:human", {"value": 1}, idempotency_key="mine", actor="local",
+        )
+        with self.assertRaises(LookupError):
+            self.engine.graph(run.run_id, actor="another")
+
+
 if __name__ == "__main__":
     unittest.main()

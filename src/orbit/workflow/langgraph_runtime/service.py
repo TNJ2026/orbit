@@ -18,6 +18,7 @@ import uuid
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 from ..api.graph_layout import graph_layout
+from ..api.workflow_catalog import drawable_graph
 from ..graph.conditions import ConditionEvaluationError
 from ..domain.serialization import canonical_json, definition_hash, to_primitive
 from ..domain.ir_schema import workflow_ir_from_primitive
@@ -1519,6 +1520,23 @@ class LangGraphWorkflowService:
                     "detail": detail,
                 })
         return tuple(report)
+
+    def graph(
+        self, run_id: str, *, actor: str | None = None,
+    ) -> Mapping[str, Any]:
+        """The definition this run executed, drawable.
+
+        Its own, which is the whole reason this exists. The catalog serves a
+        workflow's latest version and nothing else, so a page that drew a
+        finished run from there showed a graph that run never executed as soon
+        as the workflow was republished — beside a step list derived from the
+        definition it really used, disagreeing with it. A template run had it
+        worse: its definition lives on the run and was never published, so
+        there was nothing to draw at all.
+        """
+
+        run = self.get(run_id, actor=actor)
+        return drawable_graph(to_primitive(self._run_ir(run)))
 
     def replay(
         self, run_id: str, *, actor: str | None = None, limit: int = 100,

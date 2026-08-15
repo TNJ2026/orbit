@@ -125,6 +125,11 @@ export class Api {
     return this.get(`/api/v1/langgraph-runs/${encodeURIComponent(runId)}/steps`);
   }
 
+  /** The definition this run executed — its own, not the workflow's latest. */
+  runGraph(runId) {
+    return this.get(`/api/v1/langgraph-runs/${encodeURIComponent(runId)}/graph`);
+  }
+
   /** How each branch of a definition has gone across its runs. */
   workflowBranches(workflowId, limit = 100) {
     const path = `/api/v1/workflows/${encodeURIComponent(workflowId)}/branches`;

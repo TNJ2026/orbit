@@ -339,7 +339,7 @@ export function createViews(context) {
         live: !TERMINAL_LANGGRAPH_STATUSES.has(run.status),
       }),
     ]));
-    await renderRunSteps(root, run.run_id, run.workflow_id);
+    await renderRunSteps(root, run.run_id);
     await appendRunArtifacts(root, run.run_id);
   }
 
@@ -363,8 +363,13 @@ export function createViews(context) {
    * how many times, and a graph says which branches there were and which one
    * was taken. Neither is the other's summary. It is closed by default —
    * a frame is the heaviest thing on the page and most visits want the list.
+   *
+   * Drawn from the run rather than from its workflow. The catalog serves the
+   * latest version only, so once a workflow was republished this drew a graph
+   * the run never executed, next to a step list derived from the definition
+   * it really used. A template run had nothing to draw at all.
    */
-  function runCanvas(workflowId, statuses) {
+  function runCanvas(runId, statuses) {
     const url = shellFacts?.capabilities?.workflow_editor?.available
       ? (shellFacts.capabilities.workflow_editor.url || "/editor/")
       : null;
@@ -379,8 +384,8 @@ export function createViews(context) {
       if (!details.open || drawn) return;
       drawn = true;
       try {
-        const detail = await api.workflowDetail(workflowId);
-        body.append(embeddedGraph(detail.data.graph, {
+        const response = await api.runGraph(runId);
+        body.append(embeddedGraph(response.data.graph, {
           editorUrl: () => url, i18n, statuses,
         }));
       } catch (error) {
@@ -393,7 +398,7 @@ export function createViews(context) {
     return details;
   }
 
-  async function renderRunSteps(root, runId, workflowId) {
+  async function renderRunSteps(root, runId) {
     const panel = el("section", { class: "panel simplified-steps" }, [
       el("div", { class: "panel-head" }, [
         el("div", { class: "panel-title", text: i18n.t("simplified.steps") }),
@@ -413,7 +418,7 @@ export function createViews(context) {
       panel.append(el("p", { class: "muted", text: i18n.t("simplified.steps.empty") }));
       return;
     }
-    const canvas = runCanvas(workflowId, Object.fromEntries(
+    const canvas = runCanvas(runId, Object.fromEntries(
       steps.map((step) => [step.node_id, step.status]),
     ));
     panel.append(el("ol", { class: "step-list" }, steps.map((step) => el(
