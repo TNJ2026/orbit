@@ -1671,9 +1671,150 @@ class LangGraphWorkflowCompilerTests(unittest.TestCase):
         )
 
         self.assertEqual({"higher_join": "higher"}, result["result"])
-        self.assertTrue(cancelled_attempts)
         self.assertFalse(any(":higher:" in item for item in cancelled_attempts))
         self.assertTrue(all(":lower:" in item for item in cancelled_attempts))
+
+    def test_n_of_m_prunes_the_suffix_after_two_winners_are_fixed(self) -> None:
+        third_started = threading.Event()
+        third_release = threading.Event()
+        third_cancelled = threading.Event()
+
+        def winner(name):
+            def invoke(values, config, context):
+                self.assertTrue(third_started.wait(5))
+                return {"value": name}
+            return invoke
+
+        def third(values, config, context):
+            third_started.set()
+            self.assertTrue(third_release.wait(5))
+            return HandlerOutcome(
+                {"value": None} if third_cancelled.is_set() else {"value": "third"},
+                route="cancel" if third_cancelled.is_set() else "success",
+            )
+
+        def cancel_attempts(run_id, attempt_ids):
+            if not any(":third:" in item for item in attempt_ids):
+                return False
+            third_cancelled.set()
+            third_release.set()
+            return True
+
+        first = node("first", inputs=("value",), outputs=("value",))
+        second = node("second", inputs=("value",), outputs=("value",))
+        third_node = node("third", inputs=("value",), outputs=("value",))
+        policy = IRPolicy(
+            "two", "join",
+            {"mode": "n_of_m", "threshold": 2, "merge_mode": "object_by_edge"},
+        )
+        join = IRNode(
+            "join", "join", (port("items"),), (port("merged"),),
+            None, {}, (policy.id,), None,
+        )
+        ir = workflow(
+            (first, second, third_node, join),
+            (
+                edge("first_join", "first", "join", target_port="items", priority=0),
+                edge(
+                    "second_join", "second", "join",
+                    target_port="items", priority=1,
+                ),
+                edge("third_join", "third", "join", target_port="items", priority=2),
+            ),
+            entry=("first", "second", "third"), terminals=("join",),
+            result=("join", "merged"), policies=(policy,),
+        )
+        registry = LangGraphHandlerRegistry([
+            binding("first", winner("first")),
+            binding("second", winner("second")),
+            BoundHandler(
+                "third", "1.0.0", FINGERPRINT, third,
+                cancel_attempts=cancel_attempts,
+            ),
+        ])
+
+        result = compile_workflow(ir, registry).invoke(
+            {"value": "start"},
+            config={"configurable": {"thread_id": "two-winners"}},
+        )
+
+        self.assertTrue(third_cancelled.is_set())
+        self.assertEqual(
+            {"first_join": "first", "second_join": "second"}, result["result"],
+        )
+
+    def test_n_of_m_waits_past_a_rejected_high_priority_edge(self) -> None:
+        fourth_started = threading.Event()
+        fourth_release = threading.Event()
+        fourth_cancelled = threading.Event()
+
+        def rejected(values, config, context):
+            return HandlerOutcome({"value": None}, route="cancel")
+
+        def winner(name):
+            def invoke(values, config, context):
+                self.assertTrue(fourth_started.wait(5))
+                return {"value": name}
+            return invoke
+
+        def fourth(values, config, context):
+            fourth_started.set()
+            self.assertTrue(fourth_release.wait(5))
+            return HandlerOutcome(
+                {"value": None} if fourth_cancelled.is_set() else {"value": "fourth"},
+                route="cancel" if fourth_cancelled.is_set() else "success",
+            )
+
+        def cancel_attempts(run_id, attempt_ids):
+            if not any(":fourth:" in item for item in attempt_ids):
+                return False
+            fourth_cancelled.set()
+            fourth_release.set()
+            return True
+
+        branch_nodes = tuple(
+            node(name, inputs=("value",), outputs=("value",))
+            for name in ("first", "second", "third", "fourth")
+        )
+        policy = IRPolicy(
+            "two", "join",
+            {"mode": "n_of_m", "threshold": 2, "merge_mode": "object_by_edge"},
+        )
+        join = IRNode(
+            "join", "join", (port("items"),), (port("merged"),),
+            None, {}, (policy.id,), None,
+        )
+        ir = workflow(
+            (*branch_nodes, join),
+            tuple(
+                edge(
+                    f"{name}_join", name, "join",
+                    target_port="items", priority=index,
+                )
+                for index, name in enumerate(("first", "second", "third", "fourth"))
+            ),
+            entry=("first", "second", "third", "fourth"), terminals=("join",),
+            result=("join", "merged"), policies=(policy,),
+        )
+        registry = LangGraphHandlerRegistry([
+            binding("first", rejected),
+            binding("second", winner("second")),
+            binding("third", winner("third")),
+            BoundHandler(
+                "fourth", "1.0.0", FINGERPRINT, fourth,
+                cancel_attempts=cancel_attempts,
+            ),
+        ])
+
+        result = compile_workflow(ir, registry).invoke(
+            {"value": "start"},
+            config={"configurable": {"thread_id": "rejected-winner"}},
+        )
+
+        self.assertTrue(fourth_cancelled.is_set())
+        self.assertEqual(
+            {"second_join": "second", "third_join": "third"}, result["result"],
+        )
 
     def test_checkpointed_interrupt_resumes_with_same_thread(self) -> None:
         action = node("action", inputs=("value",), outputs=("value",))

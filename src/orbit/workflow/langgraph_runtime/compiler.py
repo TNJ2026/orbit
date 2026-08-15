@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+from threading import Lock
 from types import MappingProxyType
 from typing import Annotated, Any, TypedDict
 
@@ -147,6 +148,10 @@ class LangGraphHandlerRegistry:
                 raise ValueError(f"duplicate LangGraph handler: {handler.name}@{handler.version}")
             entries[key] = handler
         self._entries = MappingProxyType(entries)
+        self._join_lock = Lock()
+        self._join_progress: dict[
+            tuple[str, str, int], dict[str, bool]
+        ] = {}
 
     def resolve(self, node: IRNode) -> BoundHandler:
         reference = node.handler
@@ -185,6 +190,52 @@ class LangGraphHandlerRegistry:
                 )
         return signalled
 
+    def settle_join_source(
+        self,
+        run_id: str,
+        join_id: str,
+        generation: int,
+        incoming: tuple[tuple[str, str], ...],
+        source_node: str,
+        selected_edge_ids: frozenset[str],
+        threshold: int,
+        attempt_ids: Mapping[str, str],
+    ) -> bool:
+        """Prune a deterministic n-of-m suffix once its winners are fixed.
+
+        Incoming edges are priority ordered.  Seeing any ``threshold`` results
+        is not enough: an unresolved earlier edge could still displace a later
+        result.  Once the prefix through the Nth selected edge is fully
+        resolved, no edge after it can affect the join and its attempt may be
+        stopped.
+        """
+
+        key = (run_id, join_id, generation)
+        with self._join_lock:
+            progress = self._join_progress.setdefault(key, {})
+            for edge_id, edge_source in incoming:
+                if edge_source == source_node:
+                    progress[edge_id] = edge_id in selected_edge_ids
+            selected = 0
+            cutoff = None
+            for index, (edge_id, _edge_source) in enumerate(incoming):
+                if edge_id not in progress:
+                    break
+                if progress[edge_id]:
+                    selected += 1
+                    if selected == threshold:
+                        cutoff = index
+                        break
+            if cutoff is None:
+                return False
+            losers = frozenset(
+                attempt_ids[edge_source]
+                for edge_id, edge_source in incoming[cutoff + 1:]
+                if edge_id not in progress and edge_source in attempt_ids
+            )
+            self._join_progress.pop(key, None)
+        return self.cancel_attempts(run_id, losers)
+
     def finish(self, run_id: str) -> None:
         """This process is done driving the run; drop what was held for it.
 
@@ -197,6 +248,10 @@ class LangGraphHandlerRegistry:
         for handler in self._entries.values():
             if handler.finish_run is not None:
                 handler.finish_run(run_id)
+        with self._join_lock:
+            stale = [key for key in self._join_progress if key[0] == run_id]
+            for key in stale:
+                self._join_progress.pop(key, None)
 
 
 def _merge_dicts(left: Mapping[str, Any], right: Mapping[str, Any]) -> dict[str, Any]:
@@ -1046,33 +1101,33 @@ def compile_workflow(
 
     builder = StateGraph(_GraphState)
 
-    # An `any` join (and n-of-m with n=1) is deterministic, not a timing
-    # lottery: the first incoming edge in priority order wins. Once that exact
-    # source succeeds, no later branch can change the answer, so in-flight
-    # losers may be stopped before LangGraph waits for the whole parallel
-    # superstep. A lower-priority source cannot do this because a still-running
-    # higher-priority source may win.
-    early_winner_losers: dict[tuple[str, str], frozenset[str]] = {}
+    # Winner joins are deterministic, not timing lotteries.  Keep each join's
+    # incoming edges in priority order so the registry can stop the suffix only
+    # after the prefix through the Nth selected edge is fully resolved.  This
+    # works for every n-of-m threshold and still prevents a quick low-priority
+    # branch from displacing a slower high-priority one.
+    early_joins_by_source: dict[
+        str, list[tuple[str, tuple[tuple[str, str], ...], int]]
+    ] = {}
     for join in (item for item in ir.nodes if item.kind == "join"):
         policy = next((
             policies_by_id[item] for item in join.policies
             if item in policies_by_id and policies_by_id[item].kind == "join"
         ), None)
         mode = None if policy is None else policy.config.get("mode")
-        if not (
-            mode == "any"
-            or (mode == "n_of_m" and int(policy.config.get("threshold", 0)) == 1)
-        ):
+        if mode not in {"any", "n_of_m"}:
             continue
         incoming = sorted(
             (edge for edge in ir.edges if edge.target_node == join.id),
             key=lambda edge: (edge.priority, edge.id),
         )
-        if incoming:
-            winner = incoming[0].source_node
-            early_winner_losers[(winner, join.id)] = frozenset(
-                edge.source_node for edge in incoming
-                if edge.source_node != winner
+        ordered = tuple((edge.id, edge.source_node) for edge in incoming)
+        threshold = (
+            1 if mode == "any" else int(policy.config["threshold"])
+        )
+        for source_node in dict.fromkeys(edge.source_node for edge in incoming):
+            early_joins_by_source.setdefault(source_node, []).append(
+                (join.id, ordered, threshold)
             )
 
     for node in ir.nodes:
@@ -1193,26 +1248,43 @@ def compile_workflow(
                             "without a selected error route"
                         )
                     route_name = "error"
-                if (
-                    route_name == "success" and implementation is not None
-                    and execution_context.run_id
-                ):
-                    losers = frozenset().union(*(
-                        early_winner_losers.get(
-                            (current.id, edge.target_node), frozenset(),
-                        )
-                        for edge in selected
-                    ))
-                    attempts = frozenset(
-                        "langgraph_attempt:"
-                        + execution_context.run_id
-                        + f":{node_id}:"
-                        + str(
-                            state.get("execution_order", ()).count(node_id) + 1
-                        )
-                        for node_id in losers
+            run_id = str(config.get("configurable", {}).get("thread_id", ""))
+            if run_id:
+                outgoing = outgoing_edges(ir, current)
+                selected_for_route = [
+                    edge for edge in outgoing
+                    if edge.route == route_name and evaluate_condition(
+                        edge.condition,
+                        output,
+                        workflow_inputs=state["workflow_inputs"],
                     )
-                    registry.cancel_attempts(execution_context.run_id, attempts)
+                ]
+                if (current.route_mode or "exclusive") != "parallel":
+                    selected_for_route = selected_for_route[:1]
+                for join_id, incoming, threshold in early_joins_by_source.get(
+                    current.id, ()
+                ):
+                    sources = dict.fromkeys(source for _edge, source in incoming)
+                    registry.settle_join_source(
+                        run_id,
+                        join_id,
+                        state.get("execution_order", ()).count(current.id) + 1,
+                        incoming,
+                        current.id,
+                        frozenset(edge.id for edge in selected_for_route),
+                        threshold,
+                        {
+                            node_id: (
+                                f"langgraph_attempt:{run_id}:{node_id}:"
+                                + str(
+                                    state.get("execution_order", ()).count(node_id)
+                                    + 1
+                                )
+                            )
+                            for node_id in sources
+                            if nodes_by_id[node_id].handler is not None
+                        },
+                    )
             return {
                 "node_outputs": {current.id: output},
                 "node_routes": {current.id: route_name},
