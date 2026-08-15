@@ -353,6 +353,29 @@ class FailedStepTests(unittest.TestCase):
         self.assertEqual("failed", steps["tool"]["status"])
         self.assertEqual("not_reached", steps["done"]["status"])
 
+        # A failure that predates cancellation remains a failure. If the
+        # attempt settles after the run was cancelled, it is the cancellation
+        # outcome and must not be presented as a Handler failure.
+        with sqlite3.connect(runs) as connection:
+            connection.execute(
+                "UPDATE langgraph_runs SET status='cancelled',updated_at=?"
+                " WHERE run_id=?", ("9999-01-01T00:00:00Z", run.run_id),
+            )
+            connection.commit()
+        self.assertEqual(
+            "failed", by_id(service.steps(run.run_id, actor="local"))["tool"]["status"],
+        )
+        with sqlite3.connect(runs) as connection:
+            connection.execute(
+                "UPDATE langgraph_runs SET updated_at=? WHERE run_id=?",
+                ("0001-01-01T00:00:00Z", run.run_id),
+            )
+            connection.commit()
+        self.assertEqual(
+            "cancelled",
+            by_id(service.steps(run.run_id, actor="local"))["tool"]["status"],
+        )
+
 
 class ProgressIsObservableTests(unittest.TestCase):
     """Steps are only worth deriving if a page can see them arrive.

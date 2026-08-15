@@ -265,6 +265,7 @@
   "simplified.steps.status.answered": "已提交，等待其他审核",
   "simplified.steps.status.succeeded": "已完成",
   "simplified.steps.status.failed": "失败",
+  "simplified.steps.status.cancelled": "已取消",
   "simplified.steps.status.not_reached": "未开始",
   "simplified.branches": "分支去向",
   "simplified.branches.unavailable": "无法读取分支去向。",

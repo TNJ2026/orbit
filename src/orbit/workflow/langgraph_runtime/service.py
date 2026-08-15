@@ -1388,6 +1388,8 @@ class LangGraphWorkflowService:
         `failed`     its attempt journal says so. Only a Handler with a
                      journal can say it, so a pure node that raised is not
                      here — the run carries the error, the step does not.
+        `cancelled`  its in-flight attempt settled because this run was
+                     cancelled, rather than because the Handler failed.
         `waiting`    a person has been asked, and the run is interrupted at
                      this node.
         `answered`   this person's answer is durable, while another parallel
@@ -1439,10 +1441,19 @@ class LangGraphWorkflowService:
         for node in sorted(ir.nodes, key=lambda n: placed.get(n.id, (0, 0))):
             fact = attempts.get(node.id, {})
             latest = fact.get("latest")
+            cancelled_attempt = run.status == "cancelled" and (
+                latest == "started"
+                or (
+                    latest in {"failed", "unknown"}
+                    and fact.get("last_at") >= run.updated_at
+                )
+            )
             if node.id in waiting:
                 status = "waiting"
             elif node.id in answered:
                 status = "answered"
+            elif cancelled_attempt:
+                status = "cancelled"
             elif latest == "started":
                 status = "running"
             elif latest in {"failed", "unknown"}:
@@ -2081,7 +2092,7 @@ class LangGraphWorkflowService:
                 workflow = compile_workflow(ir, self.handlers, checkpointer=saver)
                 if resume is not ...:
                     result = workflow.resume(resume, config=config)
-                    result = workflow.fire_ready_n_of_m(config=config) or result
+                    result = workflow.fire_ready_winner_join(config=config) or result
                 else:
                     result = workflow.invoke(None if inputs is None else inputs, config=config)
                 snapshot = workflow.graph.get_state(config)

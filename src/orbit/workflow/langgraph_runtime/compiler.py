@@ -540,14 +540,14 @@ class CompiledLangGraphWorkflow:
             state = self.graph.invoke(None, config=self._config(config))
         return self._result(state)
 
-    def fire_ready_n_of_m(
+    def fire_ready_winner_join(
         self, *, config: Mapping[str, Any],
     ) -> Mapping[str, Any] | None:
         """Commit a satisfied winner join past unrelated pending interrupts.
 
         LangGraph does not finish a superstep while any sibling task remains
         interrupted. A partial resume can therefore produce the answer that
-        satisfies an n-of-m join without ever giving its router a turn. The
+        satisfies an any/n-of-m join without ever giving its router a turn. The
         state (including pending writes) is complete enough to run that join;
         persist it on a fresh checkpoint branch just as a deadline join does.
         """
@@ -562,7 +562,10 @@ class CompiledLangGraphWorkflow:
                 policies[item] for item in join.policies
                 if item in policies and policies[item].kind == "join"
             ), None)
-            if policy is None or policy.config.get("mode") != "n_of_m":
+            if (
+                policy is None
+                or policy.config.get("mode") not in {"any", "n_of_m"}
+            ):
                 continue
             if not _join_is_ready(self.ir, join, values, (), policies):
                 continue

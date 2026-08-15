@@ -2181,6 +2181,61 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
             completed.result,
         )
 
+    def test_any_completes_after_one_of_two_human_answers(self) -> None:
+        fan = node(
+            "fan", inputs=("value",), outputs=("value",), route_mode="parallel",
+        )
+        left = node(
+            "left", inputs=("value",), outputs=("value",),
+            kind="human", handler=False,
+        )
+        right = node(
+            "right", inputs=("value",), outputs=("value",),
+            kind="human", handler=False,
+        )
+        policy = IRPolicy(
+            "first", "join", {"mode": "any", "merge_mode": "object_by_edge"},
+        )
+        join = IRNode(
+            "join", "join", (port("items"),), (port("merged"),), None,
+            {}, (policy.id,), None,
+        )
+        ir = workflow(
+            (fan, left, right, join),
+            (
+                edge("fan_left", "fan", "left"),
+                edge("fan_right", "fan", "right"),
+                edge("left_join", "left", "join", target_port="items", priority=0),
+                edge("right_join", "right", "join", target_port="items", priority=1),
+            ),
+            entry=("fan",), terminals=("join",), result=("join", "merged"),
+            policies=(policy,),
+        )
+        registry = LangGraphHandlerRegistry([
+            binding("fan", lambda values, config, context: dict(values)),
+        ])
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            service = self.service(directory, self.publish(directory, ir), registry)
+            started = service.start(
+                ir.workflow_id, {"value": "start"},
+                idempotency_key="any-human-start",
+            )
+            left_interrupt = next(
+                item for item in started.interrupts
+                if item["value"]["node_id"] == "left"
+            )
+
+            completed = service.resume(
+                started.run_id, "left-approved",
+                expected_revision=started.revision,
+                idempotency_key="any-human-left",
+                interrupt_id=left_interrupt["id"],
+            )
+
+        self.assertEqual("completed", completed.status)
+        self.assertEqual((), completed.interrupts)
+        self.assertEqual({"left_join": "left-approved"}, completed.result)
+
     def test_answers_survive_a_process_that_stops_mid_resume(self) -> None:
         """The window between committing the last answer and using it.
 
