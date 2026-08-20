@@ -45,7 +45,7 @@ export default function Viewer() {
   if (!drawing?.graph) return <p className="viewer-state">…</p>;
 
   const { nodes, edges } = viewerGraph(
-    drawing.graph, drawing.editable, drawing.statuses,
+    drawing.graph, drawing.editable, drawing.statuses, drawing.bindings,
   );
   return (
     <div className="viewer">

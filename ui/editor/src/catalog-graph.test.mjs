@@ -130,7 +130,7 @@ test("a graph message from this origin is accepted", () => {
   };
   assert.deepEqual(
     readGraphMessage(message, "http://127.0.0.1:8848"),
-    { graph, editable: ["collect"], statuses: null },
+    { graph, editable: ["collect"], statuses: null, bindings: null },
   );
 });
 
@@ -153,7 +153,7 @@ test("a graph message may clear the drawing", () => {
   const origin = "http://127.0.0.1:8848";
   assert.deepEqual(
     readGraphMessage({ origin, data: { type: VIEWER_GRAPH } }, origin),
-    { graph: null, editable: [], statuses: null },
+    { graph: null, editable: [], statuses: null, bindings: null },
   );
 });
 
@@ -186,4 +186,37 @@ test("a definition nobody has run is drawn without any status", () => {
     nodes.every((node) => node.data.status === null),
     "a picture of a Workflow is not a picture of a run",
   );
+});
+
+test("a substituted Handler rides beside the published one", () => {
+  const { nodes } = viewerGraph(graph, [], null, {
+    collect: { name: "agent.claude", version: "1.2.3" },
+  });
+  const [collect, done] = nodes;
+
+  // The published binding is not overwritten: the drawing has to keep
+  // agreeing with the definition it is a picture of.
+  assert.deepEqual(
+    { name: "agent.hermes", version: "0.20.0" }, collect.data.handler,
+  );
+  assert.deepEqual(
+    { name: "agent.claude", version: "1.2.3" }, collect.data.rebound,
+  );
+  // A node nobody rebinds says nothing about it.
+  assert.equal(null, done.data.rebound);
+});
+
+test("a graph message carries the bindings it was sent", () => {
+  const bindings = { collect: { name: "agent.claude", version: "1.2.3" } };
+  const message = readGraphMessage(
+    { origin: "https://runtime", data: { type: VIEWER_GRAPH, graph, bindings } },
+    "https://runtime",
+  );
+
+  assert.deepEqual(bindings, message.bindings);
+  // Absent is absent, not an empty map that reads as "nothing is rebound".
+  assert.equal(null, readGraphMessage(
+    { origin: "https://runtime", data: { type: VIEWER_GRAPH, graph } },
+    "https://runtime",
+  ).bindings);
 });

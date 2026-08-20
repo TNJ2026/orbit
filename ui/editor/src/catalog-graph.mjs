@@ -26,7 +26,9 @@ import { DEPTH_WIDTH, LANE_HEIGHT } from "./dsl-graph.mjs";
  * workflow must not be able to produce one that differs from what was
  * published, whatever it is asked to do.
  */
-export function viewerGraph(graph, editable = [], statuses = null) {
+export function viewerGraph(
+  graph, editable = [], statuses = null, bindings = null,
+) {
   const editableIds = new Set(editable ?? []);
   const at_status = new Map(Object.entries(statuses ?? {}));
   const at = new Map(
@@ -48,6 +50,11 @@ export function viewerGraph(graph, editable = [], statuses = null) {
         handler: node.handler_name
           ? { name: node.handler_name, version: node.handler_version }
           : null,
+        // What will actually run this step, when the embedding page says the
+        // Runtime substitutes one. The published binding stays beside it: a
+        // drawing that quietly showed a different Handler than the definition
+        // names would be a second opinion about what was published.
+        rebound: (bindings ?? {})[node.node_id] ?? null,
         // The compiled projection carries no ports, so there are no handles to
         // draw and an edge joins node to node. Drawing invented ports would be
         // claiming a shape the catalog never reported.
@@ -113,5 +120,8 @@ export function readGraphMessage(event, origin) {
     editable: data.editable ?? [],
     // `{node_id: status}` when the page is drawing a run, absent otherwise.
     statuses: data.statuses ?? null,
+    // `{node_id: {name, version}}` when the Runtime will substitute the
+    // Handler a step names, absent otherwise.
+    bindings: data.bindings ?? null,
   };
 }

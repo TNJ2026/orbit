@@ -103,6 +103,22 @@ export function createViews(context) {
     };
   }
 
+  /** Which Handler each step will really use, by node, or null for none.
+   *
+   * Read off the catalog's own answer rather than derived here: the server
+   * decides what gets rebound and already reports it per node, and a second
+   * opinion computed in the browser could disagree with the run that follows.
+   */
+  function effectiveBindings(entry) {
+    const bound = (entry?.handler_bindings || [])
+      .filter((binding) => binding.status === "rebound" && binding.rebound_to);
+    if (!bound.length) return null;
+    return Object.fromEntries(bound.map((binding) => [
+      binding.node_id,
+      { name: binding.rebound_to, version: binding.available_version },
+    ]));
+  }
+
   function engineRefusalNotice(entry) {
     const refusal = engineRefusal(entry);
     if (!refusal) return null;
@@ -2048,6 +2064,7 @@ export function createViews(context) {
           // answers "what exactly is in it" — one tabbed surface for both.
           workflowViews().workflowDefinitionTabs(
             value.graph, definition, "workflows.definition",
+            {}, null, effectiveBindings(value),
           ),
         ].filter(Boolean));
       } catch (error) {
@@ -2096,6 +2113,7 @@ export function createViews(context) {
               (nodeId) => workflowViews().openActionEditorDialog(
                 current, nodeId, refreshPublished,
               ),
+              effectiveBindings(current),
             ),
           ].filter(Boolean));
         };

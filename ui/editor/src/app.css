@@ -169,6 +169,11 @@ span.title { display: block; }
 span.title:hover { border-color: transparent; }
 .node .handler { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
 .node .handler .version { opacity: 0.7; }
+/* A substituted Handler: the published name stays legible but stops being
+   the answer, and the one that will run is the one at full strength. */
+.node .handler .superseded { text-decoration: line-through; opacity: 0.55; }
+.node .handler .rebound-arrow { opacity: 0.55; }
+.node .handler .rebound { color: var(--ink); }
 
 /* Terminal and human nodes read differently at a glance; the kind is also
    written out, so colour is never the only carrier. */

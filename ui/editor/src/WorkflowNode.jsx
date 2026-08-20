@@ -62,10 +62,30 @@ export default function WorkflowNode({ id, data, selected }) {
           />
         )}
       </header>
+      {/* What the definition names, and — when the Runtime substitutes one
+          — what will really run it. Both, never one instead of the other: a
+          drawing that showed only the substitute would disagree with the
+          definition it is a picture of, and one that showed only the
+          published name would be wrong about the run. No wording, because
+          this bundle carries no translations; the arrow is the sentence, and
+          the page around it says the rest. */}
       {data.handler ? (
         <p className="handler">
-          {data.handler.name}
-          <span className="version"> {data.handler.version}</span>
+          <span className={data.rebound ? "superseded" : undefined}>
+            {data.handler.name}
+            {data.rebound ? null : (
+              <span className="version"> {data.handler.version}</span>
+            )}
+          </span>
+          {data.rebound ? (
+            <>
+              <span className="rebound-arrow" aria-hidden="true"> → </span>
+              <span className="rebound">
+                {data.rebound.name}
+                <span className="version"> {data.rebound.version}</span>
+              </span>
+            </>
+          ) : null}
         </p>
       ) : null}
       {/* A drawing needs somewhere for an edge to land. The compiled

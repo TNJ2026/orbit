@@ -1647,6 +1647,43 @@ class SingleAgentBindingNoticeTests(BrowserE2ETestCase):
 
         self.assertEqual(0, card.locator(".pill.failed").count())
 
+    def test_the_definition_shows_both_the_published_and_the_bound_agent(self) -> None:
+        """The picture must agree with the definition *and* with the run.
+
+        The definition list names the Handler each step was published
+        against, and in this mode not one of them is what will run. Showing
+        only the published name is wrong about the run; replacing it is wrong
+        about the definition. Both, with the substitution marked.
+        """
+
+        page = self.open("en-US")
+        page.goto(f"{self.base}/ui/#/workflows/workflow:single")
+        # The drawing is the default pane; the list is the other tab.
+        failures: list[str] = []
+        page.on("pageerror", lambda error: failures.append(str(error)))
+        page.wait_for_selector(".workflow-graph-frame")
+
+        canvas = page.frame_locator(".workflow-graph-frame")
+        canvas.locator(".node .handler").first.wait_for()
+        self.assertEqual(
+            "agent.absent", canvas.locator(".superseded").first.inner_text(),
+        )
+        self.assertIn(
+            "agent.claude", canvas.locator(".rebound").first.inner_text(),
+        )
+
+        # The list is a second picture of the same definition and has to say
+        # the same thing.
+        page.click('[data-workflow-tab="definition"]')
+        page.wait_for_selector(".defn-handler")
+        self.assertEqual(
+            "absent", page.locator('.defn-handler[data-rebound="true"]').inner_text(),
+        )
+        self.assertEqual(
+            "claude", page.locator(".defn-handler-bound").inner_text(),
+        )
+        self.assertEqual([], failures)
+
     def test_a_card_with_nothing_wrong_on_it_still_says_why(self) -> None:
         """Ready to bind a goal, current Handler, and the engine refuses.
 

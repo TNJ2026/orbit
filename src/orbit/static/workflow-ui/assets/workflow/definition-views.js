@@ -26,6 +26,7 @@ const VIEWER = {
  */
 export function embeddedGraph(graph, {
   viewerUrl, i18n, actionEditors = {}, onEditAction = null, statuses = null,
+  bindings = null,
 }) {
   const editable = Object.keys(actionEditors || {});
   const frame = el("iframe", {
@@ -35,7 +36,7 @@ export function embeddedGraph(graph, {
     loading: "lazy",
   });
   const send = () => frame.contentWindow?.postMessage(
-    { type: VIEWER.graph, graph, editable, statuses },
+    { type: VIEWER.graph, graph, editable, statuses, bindings },
     window.location.origin,
   );
   const onMessage = (event) => {
@@ -139,7 +140,19 @@ export function createWorkflowDefinitionViews({
     ]);
   }
 
-  function definitionList(definition, graph = null, actionEditors = {}, onEditAction = null) {
+  /** The Handler a step will really use, when that is not the one it names.
+   *
+   * The catalog says which node moves and where to; a step nobody rebinds is
+   * absent from the map and reads exactly as it was published.
+   */
+  function effective(bindings, nodeId) {
+    return (bindings || {})[nodeId]?.name || null;
+  }
+
+  function definitionList(
+    definition, graph = null, actionEditors = {}, onEditAction = null,
+    bindings = null,
+  ) {
     const positions = new Map(
       (graph?.layout?.positions || []).map((item) => [item.node_id, item]),
     );
@@ -167,7 +180,17 @@ export function createWorkflowDefinitionViews({
                 text: node.kind,
               }),
               node.handler ? el("span", {
-                class: "defn-handler", text: node.handler.name.replace(/^agent\./, ""),
+                class: "defn-handler",
+                text: node.handler.name.replace(/^agent\./, ""),
+                // Marked rather than replaced: this list is a reading of what
+                // was published, and rewriting the name in it would leave no
+                // way to see what the author chose.
+                "data-rebound": effective(bindings, node.id) ? "true" : null,
+              }) : null,
+              effective(bindings, node.id) ? el("span", {
+                class: "defn-handler defn-handler-bound",
+                text: effective(bindings, node.id).replace(/^agent\./, ""),
+                title: i18n.t("workflows.agentBinding.title"),
               }) : null,
             ]),
           ]),
@@ -340,21 +363,21 @@ export function createWorkflowDefinitionViews({
   // there is nothing to tab between and the list stands alone.
   function workflowDefinitionTabs(
     graph, definition, definitionKey = "workflows.definition",
-    actionEditors = {}, onEditAction = null,
+    actionEditors = {}, onEditAction = null, bindings = null,
   ) {
     // No drawing without a graph, and none without the canvas that draws it.
     // The editor bundle is a build artifact and a source checkout may not
     // carry it; the list says everything the picture does, so that is the
     // whole degradation.
     if (!graph || !viewerUrl()) return definitionList(
-      definition, graph, actionEditors, onEditAction,
+      definition, graph, actionEditors, onEditAction, bindings,
     );
     const panes = {
       graph: () => embeddedGraph(graph, {
-        viewerUrl, i18n, actionEditors, onEditAction,
+        viewerUrl, i18n, actionEditors, onEditAction, bindings,
       }),
       definition: () => definitionList(
-        definition, graph, actionEditors, onEditAction,
+        definition, graph, actionEditors, onEditAction, bindings,
       ),
     };
     const content = el("section", { class: "run-tab-content workflow-tab-content" });
