@@ -1302,10 +1302,18 @@ export function createViews(context) {
     return el("div", { class: "banner info workflow-agent-binding" }, [
       el("div", { class: "eyebrow", text: i18n.t("workflows.agentBinding.title") }),
       el("p", {
-        text: i18n.t("workflows.agentBinding.description", {
-          agent: bound.replace(/^agent\./, "").replace(/@.*$/, ""),
-          count: i18n.number(steps.length),
-        }),
+        // One step is a sentence about *it*, not about a count of one: the
+        // shared string read "1 steps name an Agent", which is the kind of
+        // wrong that makes a reader distrust the rest of the notice.
+        text: i18n.t(
+          steps.length === 1
+            ? "workflows.agentBinding.description.one"
+            : "workflows.agentBinding.description",
+          {
+            agent: bound.replace(/^agent\./, "").replace(/@.*$/, ""),
+            count: i18n.number(steps.length),
+          },
+        ),
       }),
     ]);
   }

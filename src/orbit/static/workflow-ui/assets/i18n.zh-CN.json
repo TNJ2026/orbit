@@ -332,6 +332,7 @@
   "workflows.deleteTitle": "永久删除工作流？",
   "workflows.agentBinding.title": "在这里将由其它 Agent 执行",
   "workflows.agentBinding.description": "有 {count} 个步骤指定的 Agent 不在本机。它们将改由 {agent} 执行；已发布的定义不会被修改。",
+  "workflows.agentBinding.description.one": "有 1 个步骤指定的 Agent 不在本机。它将改由 {agent} 执行；已发布的定义不会被修改。",
   "workflows.drift.changed": "绑定 {pinned}，已安装 {available}",
   "workflows.drift.missing": "绑定 {pinned}，已不再安装",
   "workflows.drift.rebind": "重新绑定到已安装的处理器",

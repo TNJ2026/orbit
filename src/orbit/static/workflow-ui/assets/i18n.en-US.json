@@ -332,6 +332,7 @@
   "workflows.deleteTitle": "Permanently delete workflow?",
   "workflows.agentBinding.title": "Runs on a different Agent here",
   "workflows.agentBinding.description": "{count} steps name an Agent this Runtime does not have. They will run on {agent} instead; the published definition is unchanged.",
+  "workflows.agentBinding.description.one": "One step names an Agent this Runtime does not have. It will run on {agent} instead; the published definition is unchanged.",
   "workflows.drift.changed": "pinned {pinned}, installed {available}",
   "workflows.drift.missing": "pinned {pinned}, no longer installed",
   "workflows.drift.rebind": "Rebind to installed handlers",
