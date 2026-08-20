@@ -488,6 +488,7 @@ def build_routes(ctx) -> list[Route]:
         registry = ctx.execution_registry
         if registry is None or not registry.sealed:
             return {}
+        bound = ctx.single_agent_target()
         agent_manifests = [
             entry.manifest for entry in registry.entries()
             if "agent.invoke" in entry.manifest.capabilities
@@ -508,6 +509,14 @@ def build_routes(ctx) -> list[Route]:
             node_id = str(node["id"])
             editors[node_id] = {
                 "handlers": choices,
+                # Offered for validation, and — where the Runtime binds every
+                # Agent step to one Agent — not a choice anybody can make: the
+                # pick would be overwritten at start by the Agent named here.
+                # The client is told which, rather than left to present a
+                # control that decides nothing.
+                **({"handler_bound": {
+                    "handler_name": bound.name, "version": bound.version,
+                }} if bound is not None else {}),
                 "allowed_command": {
                     "command": "workflow.action.update",
                     "label": "Update action",
@@ -679,12 +688,18 @@ def build_routes(ctx) -> list[Route]:
                 raise ValueError("label must be 1-80 characters")
             if not isinstance(prompt, str) or not prompt.strip() or len(prompt.strip()) > 4000:
                 raise ValueError("prompt must be 1-4000 characters")
-            if not isinstance(handler, Mapping) or set(handler) != {"name", "version"}:
-                raise ValueError("handler must contain exactly name and version")
-            handler_name = handler.get("name")
-            handler_version = handler.get("version")
-            if not isinstance(handler_name, str) or not isinstance(handler_version, str):
-                raise ValueError("handler name and version must be strings")
+            # Optional: omitting it leaves the published binding alone.
+            # Required, it made editing a step's wording an act that had to
+            # restate which Agent runs it — and where the Runtime binds every
+            # Agent step itself, there was no honest value to restate, because
+            # the one the definition names need not be installed at all.
+            if handler is not None:
+                if not isinstance(handler, Mapping) or set(handler) != {"name", "version"}:
+                    raise ValueError("handler must contain exactly name and version")
+                handler_name = handler.get("name")
+                handler_version = handler.get("version")
+                if not isinstance(handler_name, str) or not isinstance(handler_version, str):
+                    raise ValueError("handler name and version must be strings")
 
             item = ctx.workflow_reads.detail(workflow_id)
             if int(item["latest_version"]) != expected:
@@ -694,9 +709,15 @@ def build_routes(ctx) -> list[Route]:
             editor = action_editors(item, actor).get(node_id)
             if editor is None:
                 raise ValueError("node is not an editable action")
-            choice = {"name": handler_name.strip(), "version": handler_version.strip()}
-            if choice not in editor["handlers"]:
-                raise ValueError("handler is not compatible with this action's ports")
+            choice = None
+            if handler is not None:
+                choice = {
+                    "name": handler_name.strip(), "version": handler_version.strip(),
+                }
+                if choice not in editor["handlers"]:
+                    raise ValueError(
+                        "handler is not compatible with this action's ports"
+                    )
 
             source = item.get("source")
             source_format = item.get("source_format")
@@ -712,7 +733,8 @@ def build_routes(ctx) -> list[Route]:
             if node is None or node.get("kind") != "action":
                 raise ValueError("node is not an editable action")
             node["label"] = label.strip()
-            node["handler"] = choice
+            if choice is not None:
+                node["handler"] = choice
             config = node.get("config")
             if config is None:
                 config = {}
@@ -739,7 +761,10 @@ def build_routes(ctx) -> list[Route]:
                 "version": record.version.value,
                 "definition_hash": record.definition_hash.value,
                 "node_id": node_id,
-                "changed_fields": ["label", "handler", "prompt"],
+                "changed_fields": (
+                    ["label", "handler", "prompt"] if choice is not None
+                    else ["label", "prompt"]
+                ),
             }
 
         return await ctx.mutate(request, WRITE_SCOPE, "workflow.action.update", command)

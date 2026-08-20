@@ -358,6 +358,7 @@
   "workflows.editActionNamed": "编辑步骤：{name}",
   "workflows.actionTitle": "步骤标题",
   "workflows.actionAgent": "执行 Agent",
+  "workflows.actionAgentBound": "由 Runtime 决定：{agent}",
   "workflows.actionPrompt": "提示词",
   "workflows.saveAction": "保存并发布",
   "workflows.graphAria": "工作流图:{nodes} 个节点,{edges} 条边",

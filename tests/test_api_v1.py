@@ -974,6 +974,46 @@ class WorkflowDraftApiTests(ApiTestCase):
             single_goal_mode=False,
         )
 
+    def test_an_edit_need_not_restate_which_agent_runs_the_step(self) -> None:
+        """Changing the wording is not a decision about the Agent.
+
+        `handler` was required, so editing a label meant restating a binding
+        the editor had no business changing — and where the Runtime binds
+        every Agent step itself there is no honest value to restate, because
+        the Agent the definition names need not be installed at all.
+        """
+
+        with AsgiHarness(self._app_with_action_agents()) as client:
+            detail = client.get(
+                "/api/v1/workflows/workflow:draftable", actor="writer",
+            ).json()["data"]
+            editor = detail["action_editors"]["work"]
+            before = next(
+                node for node in detail["definition"]["nodes"] if node["id"] == "work"
+            )["handler"]
+
+            response = client.post(
+                editor["allowed_command"]["href"], actor="writer", key="wording-only",
+                body={
+                    "expected_version": editor["allowed_command"]["expected_version"],
+                    "label": "Search the web",
+                    "prompt": "Find reliable primary sources.",
+                },
+            )
+
+            self.assertEqual(200, response.status_code, response.json())
+            self.assertEqual(
+                ["label", "prompt"], response.json()["data"]["changed_fields"],
+            )
+            updated = client.get(
+                "/api/v1/workflows/workflow:draftable", actor="writer",
+            ).json()["data"]
+            work = next(
+                node for node in updated["definition"]["nodes"] if node["id"] == "work"
+            )
+            self.assertEqual("Search the web", work["label"])
+            self.assertEqual(before, work["handler"])
+
     def test_action_editor_updates_only_action_fields_as_a_new_version(self) -> None:
         with AsgiHarness(self._app_with_action_agents()) as client:
             detail = client.get(

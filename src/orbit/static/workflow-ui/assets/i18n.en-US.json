@@ -358,6 +358,7 @@
   "workflows.editActionNamed": "Edit step: {name}",
   "workflows.actionTitle": "Step title",
   "workflows.actionAgent": "Agent",
+  "workflows.actionAgentBound": "Chosen by the Runtime: {agent}",
   "workflows.actionPrompt": "Prompt",
   "workflows.saveAction": "Save and publish",
   "workflows.graphAria": "Workflow graph: {nodes} nodes, {edges} edges",

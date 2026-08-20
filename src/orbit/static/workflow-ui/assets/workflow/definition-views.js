@@ -232,14 +232,24 @@ export function createWorkflowDefinitionViews({
       id: titleId, type: "text", required: "required", maxlength: "80",
       value: node.label || "",
     });
-    const agent = el("select", { id: agentId, required: "required" },
-      editor.handlers.map((handler) => {
-        const value = `${handler.name}@${handler.version}`;
-        return el("option", {
-          value, text: handler.name.replace(/^agent\./, ""),
-          ...(value === currentHandler ? { selected: "selected" } : {}),
-        });
-      }));
+    // Where the Runtime binds every Agent step to one Agent, choosing one
+    // here decides nothing — the pick is overwritten when the run starts. A
+    // control that cannot change the outcome is worse than none: it invites a
+    // decision and then discards it. So the field reports the binding instead.
+    const bound = editor.handler_bound || null;
+    const agent = bound
+      ? el("p", { id: agentId, class: "muted field-static",
+        text: i18n.t("workflows.actionAgentBound", {
+          agent: bound.handler_name.replace(/^agent\./, ""),
+        }) })
+      : el("select", { id: agentId, required: "required" },
+        editor.handlers.map((handler) => {
+          const value = `${handler.name}@${handler.version}`;
+          return el("option", {
+            value, text: handler.name.replace(/^agent\./, ""),
+            ...(value === currentHandler ? { selected: "selected" } : {}),
+          });
+        }));
     const prompt = el("textarea", {
       id: promptId, required: "required", maxlength: "4000",
       text: typeof node.config?.prompt === "string" ? node.config.prompt : "",
@@ -273,14 +283,18 @@ export function createWorkflowDefinitionViews({
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
       if (!form.reportValidity()) return;
-      const selected = editor.handlers.find(
+      // No Handler in the payload when the Runtime owns the binding: the
+      // published one is left exactly as it is, and this edit says what it
+      // means — the wording changed, not who runs it.
+      const selected = bound ? null : editor.handlers.find(
         (handler) => `${handler.name}@${handler.version}` === agent.value,
       );
-      if (!selected) return;
+      if (!bound && !selected) return;
       save.disabled = true;
       try {
         await api.execute(editor.allowed_command, {
-          label: title.value.trim(), handler: selected, prompt: prompt.value.trim(),
+          label: title.value.trim(), prompt: prompt.value.trim(),
+          ...(selected ? { handler: selected } : {}),
         }, `workflow.action.update:${workflow.workflow_id}:${nodeId}:${workflow.latest_version}`);
         dialog.close();
         await onSaved();

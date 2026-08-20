@@ -584,9 +584,37 @@ class SingleAgentCatalogTests(unittest.TestCase):
             capabilities = client.get(
                 "/api/v1/capabilities", actor="local",
             ).json()["data"]
-        return next(
+            detail = client.get(
+                "/api/v1/workflows/workflow:single", actor="local",
+            ).json()["data"]
+        entry = next(
             item for item in workflows if item["workflow_id"] == "workflow:single"
-        ), capabilities
+        )
+        # `action_editors` is a detail-only field; the list does not carry it.
+        entry.setdefault("action_editors", detail.get("action_editors", {}))
+        return entry, capabilities
+
+    def test_the_agent_choice_is_reported_as_the_runtimes(self) -> None:
+        """A control that cannot change the outcome must not be offered.
+
+        The editor's Agent picker republishes a binding the Runtime then
+        overwrites at start. The catalog says so, so the client can report the
+        binding instead of presenting a decision it will discard.
+        """
+
+        single, _ = self.catalog("single-agent")
+        multi, _ = self.catalog("multi-agent")
+
+        editor = single["action_editors"]["execute"]
+        self.assertEqual(
+            {"handler_name": "agent.claude", "version": "1.2.3"},
+            editor["handler_bound"],
+        )
+        # Still listed, because the server validates a supplied choice against
+        # them — withdrawing the list would fail every edit, wording included.
+        self.assertEqual([{"name": "agent.claude", "version": "1.2.3"}],
+                         editor["handlers"])
+        self.assertNotIn("handler_bound", multi["action_editors"]["execute"])
 
     def test_a_rebound_step_is_not_drift(self) -> None:
         item, capabilities = self.catalog("single-agent")

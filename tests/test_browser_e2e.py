@@ -1684,6 +1684,22 @@ class SingleAgentBindingNoticeTests(BrowserE2ETestCase):
         )
         self.assertEqual([], failures)
 
+    def test_the_action_editor_reports_the_binding_instead_of_offering_it(self) -> None:
+        """The picker republished a choice the Runtime overwrites at start."""
+
+        page = self.open("en-US")
+        page.goto(f"{self.base}/ui/#/workflows/workflow:single/edit")
+        page.wait_for_selector('[data-workflow-tab="definition"]')
+        page.click('[data-workflow-tab="definition"]')
+        page.click(".defn-edit")
+        page.wait_for_selector(".action-editor-dialog")
+
+        dialog = page.locator(".action-editor-dialog")
+        self.assertEqual(0, dialog.locator("select").count())
+        self.assertIn("claude", dialog.locator(".field-static").inner_text())
+        # And the fields that do mean something are still editable.
+        self.assertEqual(1, dialog.locator("textarea").count())
+
     def test_a_card_with_nothing_wrong_on_it_still_says_why(self) -> None:
         """Ready to bind a goal, current Handler, and the engine refuses.
 
