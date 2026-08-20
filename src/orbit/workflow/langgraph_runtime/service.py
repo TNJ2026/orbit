@@ -727,12 +727,14 @@ class LangGraphWorkflowService:
             # is exactly the one single-Agent mode exists to answer yes for.
             ir, binding = self._bound(record.ir)
         except ValueError as exc:
-            # Not cached, and not `unsupported_workflow`: having no Agent to
-            # bind to is a fact about this Runtime right now, not about the
-            # definition, and it stops being true the moment one connects.
+            # Only a port the current Agent does not offer reaches here — an
+            # Agent that cannot be named leaves the published binding alone
+            # rather than refusing. Not cached and not `unsupported_workflow`,
+            # because the definition is not the thing at fault: it is this
+            # pairing, and a different Agent may well fit.
             return {
                 "compatible": False,
-                "reason": "agent_binding_unavailable",
+                "reason": "agent_rebind_failed",
                 "detail": str(exc),
             }
         key = record.definition_hash.value

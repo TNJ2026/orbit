@@ -487,6 +487,27 @@ class SingleAgentEngineTests(unittest.TestCase):
                     idempotency_key="start-1", actor="local",
                 )
 
+    def test_a_port_the_current_agent_lacks_is_this_pairings_fault(self) -> None:
+        """Not `unsupported_workflow`: the definition is fine, this Agent is not.
+
+        The only way rebinding still refuses. Every Agent this Runtime mints
+        has the same ports today, so reaching it takes a graph built against
+        different ones — and the answer has to say the pairing failed rather
+        than condemn a definition another Agent would run.
+        """
+
+        ir = single_step_workflow(agent_step(inputs=(port("payload"),)))
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            engine = self.engine(
+                Path(directory), ir, manifests=[manifest_for("claude")],
+            )
+
+            answer = engine.compatibility("workflow:single")
+
+            self.assertFalse(answer["compatible"])
+            self.assertEqual("agent_rebind_failed", answer["reason"])
+            self.assertIn("input ports", answer["detail"])
+
     def test_an_unrunnable_definition_says_a_connection_would_fix_it(self) -> None:
         """The Agent is missing *and* no substitute can be named yet.
 
