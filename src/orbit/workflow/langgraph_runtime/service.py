@@ -226,9 +226,10 @@ class LangGraphWorkflowService:
     ) -> None:
         self.workflow_versions = workflow_versions
         self.handlers = handlers
-        # Single-Agent mode's start policy, or None to run every Workflow as
-        # its author bound it. A callable rather than a mode flag: which Agent
-        # is current depends on who is connected, and this is built once.
+        # Where a step whose Handler is not installed here gets carried, or
+        # None to run every Workflow exactly as its author bound it. A
+        # callable rather than a fixed answer: which Agent stands in depends
+        # on who is connected, and this is built once.
         self.rebind = rebind
         self.run_db_path = Path(run_db_path)
         self.checkpoint_db_path = Path(checkpoint_db_path)
@@ -237,7 +238,7 @@ class LangGraphWorkflowService:
         # their own binding when they were built.
         self.console = console
         # A product shape rather than an engine invariant: one goal at a time
-        # is what the single-agent UI is built around. Off by default, so an
+        # is what the Goal UI is built around. Off by default, so an
         # embedder running many workflows is not quietly serialised.
         self.single_goal = bool(single_goal)
         # Runs started by a caller that did not wait. Workers are created on
@@ -487,8 +488,7 @@ class LangGraphWorkflowService:
         is written down as the run's own graph rather than recomputed. A
         resumed or recovered run re-reads that snapshot in `_ir_for`; without
         it the second half of a run would silently revert to the Agent the
-        definition names, which is the Agent single-Agent mode was asked to
-        ignore.
+        definition names — which is the Agent that was not there.
         """
 
         if self.rebind is None:
@@ -721,10 +721,10 @@ class LangGraphWorkflowService:
             return {"compatible": False, "reason": "workflow_not_found", "detail": str(exc)}
         try:
             # The same rebinding `start` would do. Asked before compiling,
-            # because in single-Agent mode the question is not "does this
-            # definition compile as published" — it is "can this Runtime run
-            # it", and a definition pinned to an Agent nobody installed here
-            # is exactly the one single-Agent mode exists to answer yes for.
+            # because the question is not "does this definition compile as
+            # published" — it is "can this Runtime run it", and a definition
+            # pinned to an Agent nobody installed here is exactly the one
+            # the fallback exists to answer yes for.
             ir, binding = self._bound(record.ir)
         except ValueError as exc:
             # Only a port the current Agent does not offer reaches here — an
@@ -749,16 +749,16 @@ class LangGraphWorkflowService:
         except (LangGraphCompileError, ValueError, TypeError) as exc:
             detail = str(exc)
             # A definition that names an Agent this Runtime does not have is
-            # exactly what single-Agent mode rebinds — so when it could not
-            # name one, say so, or the reader is left with a dead end where
-            # there is a next step.
+            # exactly what the fallback carries elsewhere — so when it could
+            # not name anywhere to carry it, say so, or the reader is left
+            # with a dead end where there is a next step.
             ambiguous = getattr(self.rebind, "ambiguous", None)
             if binding is None and ambiguous is not None and ambiguous():
                 # Joined with a separator rather than a space: the
                 # compiler's message is a fragment and ends without a stop,
                 # so a bare space ran the two sentences together.
                 detail += (
-                    " — single-Agent mode would run this on the Agent this "
+                    " — this step would be carried to the Agent this "
                     "Runtime is talking to, but no Agent App has introduced "
                     "itself yet."
                 )

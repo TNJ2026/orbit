@@ -64,9 +64,9 @@ def build_api_v1(
     authoring_jobs=None,
     shutdown_request: Callable[[], None] | None = None,
     langgraph_service=None,
-    workflow_ui_mode: str = "multi-agent",
     template_service=None,
     mcp_sessions=None,
+    agent_fallback=None,
 ) -> list[Route]:
     """Routes for `/api/v1`, ready to mount on the composition root.
 
@@ -99,8 +99,8 @@ def build_api_v1(
         authoring_jobs=authoring_jobs,
         shutdown_request=shutdown_request,
         langgraph_service=langgraph_service,
-        workflow_ui_mode=workflow_ui_mode,
         mcp_sessions=mcp_sessions,
+        agent_fallback=agent_fallback,
     )
     # Both modes get the same surface. `workflow_ui_mode` selects how many
     # Agents an author chooses between, not which features exist: a Runtime

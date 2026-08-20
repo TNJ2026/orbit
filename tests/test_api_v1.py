@@ -1103,8 +1103,17 @@ class WorkflowDraftApiTests(ApiTestCase):
             detail = client.get(
                 "/api/v1/workflows/workflow:agent-drift", actor="writer",
             ).json()["data"]
+            # Not drift: an Agent CLI release is an operational upgrade, and
+            # the step is carried to the build that is installed rather than
+            # sent for a recompile. `rebound` rather than `current`, because
+            # the engine's registry is pinned to the exact build — reporting
+            # "current" said no repair was needed while the run refused to
+            # start for a version nobody had moved off.
             self.assertEqual([], detail["handler_drift"])
-            self.assertEqual("current", detail["handler_bindings"][0]["status"])
+            binding = detail["handler_bindings"][0]
+            self.assertEqual("rebound", binding["status"])
+            self.assertEqual("agent.codex", binding["rebound_to"])
+            self.assertEqual("1.1.7", binding["available_version"])
             self.assertNotIn(
                 "workflow.rebind",
                 [command["command"] for command in detail["allowed_commands"]],
@@ -1347,7 +1356,6 @@ class WorkflowDraftApiTests(ApiTestCase):
             authenticator=lambda request: request.headers.get("x-orbit-actor"),
             authorizer=Authorizer(lambda actor: self.scopes.get(actor, [])),
             workflow_generators={"app:codex": lambda _prompt: "{}"}, single_goal_mode=False,
-            workflow_ui_mode="single-agent",
         )
         # The mode decides how many Agents an author picks between, not which
         # endpoints exist. A Runtime that advertised generation in its
@@ -1363,7 +1371,6 @@ class WorkflowDraftApiTests(ApiTestCase):
                 body={
                     "prompt": "implement the requested change",
                     "agent": "app:codex",
-                    "authoring_profile": "single_agent",
                 },
             )
 
@@ -1383,7 +1390,6 @@ class WorkflowDraftApiTests(ApiTestCase):
                 body={
                     "prompt": "use several specialist agents",
                     "agent": "codex",
-                    "authoring_profile": "multi_agent",
                 },
             )
             self.assertEqual(200, response.status_code, response.json())
@@ -1398,43 +1404,6 @@ class WorkflowDraftApiTests(ApiTestCase):
         self.assertTrue(prompts)
         self.assertNotIn("ORBIT_SINGLE_AGENT", prompts[0])
         self.assertIn("use several specialist agents", prompts[0])
-
-    def test_generation_accepts_either_authoring_profile(self) -> None:
-        """The profile names how many Agents an author picks between.
-
-        It is not a reason to refuse the request: both UIs generate the same
-        way, and which Agent writes it is settled by the name in `agent`.
-        """
-
-        # A Runtime each: one generation may be in flight at a time, so the
-        # second profile would be refused as a duplicate rather than judged.
-        for profile in ("single_agent", "multi_agent"):
-            with self.subTest(profile=profile):
-                app = self._app_with_named_agents({"codex": lambda _prompt: "{}"})
-                with AsgiHarness(app) as client:
-                    response = client.post(
-                        "/api/v1/workflows/generate", actor="writer",
-                        key=f"profile-{profile}",
-                        body={
-                            "prompt": "implement it", "agent": "codex",
-                            "execution_agent": "codex",
-                            "authoring_profile": profile,
-                        },
-                    )
-                self.assertEqual(200, response.status_code, response.text)
-
-    def test_generation_still_refuses_a_profile_it_does_not_know(self) -> None:
-        app = self._app_with_named_agents({"codex": lambda _prompt: "{}"})
-        with AsgiHarness(app) as client:
-            response = client.post(
-                "/api/v1/workflows/generate", actor="writer", key="unknown-profile",
-                body={
-                    "prompt": "implement it", "agent": "codex",
-                    "authoring_profile": "invented",
-                },
-            )
-        self.assertEqual(409, response.status_code)
-        self.assertIn("unknown authoring profile", response.json()["error"]["message"])
 
     def test_authoring_job_keeps_the_agent_cli_console(self) -> None:
         """A job that thinks for a minute must not be a black box.
@@ -1922,11 +1891,7 @@ class CapabilityTests(ApiTestCase):
             self.assertFalse(data["permissions"]["ops_read"])
             self.assertFalse(data["permissions"]["ops_write"])
             self.assertEqual(
-                {
-                    "single_goal_mode": False,
-                    "workflow_ui_mode": "multi-agent",
-                    "agent_binding": None,
-                },
+                {"single_goal_mode": False, "agent_fallback": None},
                 data["product_mode"],
             )
             caps = data["capabilities"]
@@ -1984,11 +1949,7 @@ class CapabilityTests(ApiTestCase):
                 "/api/v1/capabilities", actor="reader"
             ).json()["data"]
             self.assertEqual(
-                {
-                    "single_goal_mode": True,
-                    "workflow_ui_mode": "multi-agent",
-                    "agent_binding": None,
-                },
+                {"single_goal_mode": True, "agent_fallback": None},
                 data["product_mode"],
             )
             catalog = client.get(
@@ -2670,14 +2631,6 @@ class WorkflowViewerMountTests(unittest.TestCase):
         self.assertEqual(self._built(), "workflow-viewer" in mounted)
         self.assertIn("ui", mounted)
 
-    def test_the_viewer_is_served_in_both_authoring_modes(self) -> None:
-        """Both products embed workflow graphs, so both need the viewer."""
-
-        for mode in ("single-agent", "multi-agent"):
-            with self.subTest(mode=mode):
-                mounted = self._mounted(workflow_ui_mode=mode)
-                self.assertEqual(self._built(), "workflow-viewer" in mounted)
-                self.assertIn("ui", mounted)
 
     def test_the_viewer_is_static_files_and_needs_no_credentials(self) -> None:
         """Its graph arrives from the authenticated parent page by message."""
@@ -2695,10 +2648,16 @@ class WorkflowViewerMountTests(unittest.TestCase):
         self.assertEqual(404, response.status_code)
 
 
-class WorkflowCatalogModeTests(ApiTestCase):
-    """The catalog is not a property of which authoring UI was chosen."""
+class WorkflowCatalogSurfaceTests(ApiTestCase):
+    """Every authoring route is mounted, unconditionally.
 
-    def build(self, mode: str):
+    There were two authoring products and a flag choosing between them, and
+    this class existed to prove the flag never withheld an endpoint. The flag
+    is gone; what it was defending is worth keeping — the catalog and the
+    authoring surface belong to the Runtime, not to a product.
+    """
+
+    def build(self):
         temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(temp.cleanup)
         return create_app(
@@ -2707,42 +2666,32 @@ class WorkflowCatalogModeTests(ApiTestCase):
             poll_seconds=0.02,
             authenticator=lambda request: request.headers.get("x-orbit-actor"),
             authorizer=Authorizer(lambda actor: self.scopes.get(actor, [])),
-            workflow_ui_mode=mode,
         )
 
-    def test_the_catalog_is_readable_in_single_agent_mode(self) -> None:
-        with AsgiHarness(self.build("single-agent")) as client:
+    def test_the_catalog_is_readable(self) -> None:
+        with AsgiHarness(self.build()) as client:
             response = client.get("/api/v1/workflows", actor="reader")
         self.assertEqual(200, response.status_code, response.text)
         self.assertIn("workflows", response.json()["data"])
 
-    def test_the_authoring_contract_is_served_in_single_agent_mode(self) -> None:
+    def test_the_authoring_contract_is_served(self) -> None:
         """The editor fetches this before it draws anything."""
 
-        with AsgiHarness(self.build("single-agent")) as client:
+        with AsgiHarness(self.build()) as client:
             response = client.get(
                 "/api/v1/workflows/authoring-schema", actor="reader"
             )
         self.assertEqual(200, response.status_code, response.text)
         self.assertEqual("1.3", response.json()["data"]["dsl_version"])
 
-    def test_both_modes_mount_the_same_routes(self) -> None:
-        """The mode is which UI is served, not what the Runtime can do."""
-
+    def test_the_authoring_routes_are_mounted(self) -> None:
         # Compared on the mounted route names: what is being asked is which
         # endpoints exist, and a status code cannot tell "not mounted" from
         # "mounted and refused".
-        single = {
-            route.name for route in self.build("single-agent").routes
+        names = {
+            route.name for route in self.build().routes
             if getattr(route, "name", None)
         }
-        multi = {
-            route.name for route in self.build("multi-agent").routes
-            if getattr(route, "name", None)
-        }
-        # Identical in both directions: nothing added by one mode, nothing
-        # withheld by the other.
-        self.assertEqual(set(), multi ^ single)
         self.assertLessEqual(
             {
                 "workflow_catalog", "workflow_detail", "workflow_validate",
@@ -2750,5 +2699,5 @@ class WorkflowCatalogModeTests(ApiTestCase):
                 "workflow_generate", "workflow_modify", "workflow_delete",
                 "workflow_draft_create", "authoring_job_list",
             },
-            single,
+            names,
         )

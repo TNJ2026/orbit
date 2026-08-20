@@ -72,8 +72,8 @@ class ApiContext:
         authoring_jobs=None,
         shutdown_request: Callable[[], None] | None = None,
         langgraph_service=None,
-        workflow_ui_mode: str = "multi-agent",
         mcp_sessions=None,
+        agent_fallback=None,
     ) -> None:
         path = Path(db_path)
         workflow_path = Path(workflow_db_path or db_path)
@@ -83,7 +83,6 @@ class ApiContext:
         # authoring surface actually asked the old application service for.
         self.execution_registry = execution_registry
         self.langgraph_service = langgraph_service
-        self.workflow_ui_mode = workflow_ui_mode
         self.artifact_backend = artifact_backend
         self.workflow_reads = WorkflowCatalogReadModelService(
             workflow_path, schema_catalog or InMemorySchemaCatalog({}),
@@ -138,6 +137,7 @@ class ApiContext:
         # dispatcher rather than built here: a second registry would know only
         # the half of the traffic that arrived after it was constructed.
         self.mcp_sessions = mcp_sessions
+        self.agent_fallback_policy = agent_fallback
         # Derived, never passed: one goal at a time is a rule the engine
         # keeps, so this reads it from there. Given its own parameter it
         # became a second answer that could differ from the first — which is
@@ -146,16 +146,28 @@ class ApiContext:
             getattr(langgraph_service, "single_goal", False)
         )
 
-    def single_agent_target(self):
-        """The one Agent every Agent step is rebound to, or None.
+    def agent_fallback(self, handler_name: str | None = None):
+        """What a stranded Agent step would run on, or None for nothing to offer.
 
-        Read off the engine rather than off `workflow_ui_mode`: the mode is
-        what the deployment asked for, and this is what will actually happen —
-        including "nothing", when the mode is on but two Agents are registered
-        and no Agent App is connected to break the tie.
+        Named, it answers for that Agent — which is usually the same Agent's
+        installed build, because a CLI release is an upgrade rather than a
+        change of Agent. Unnamed, it answers with whichever Agent this Runtime
+        is talking to.
+
+        Read off the engine, because the engine is what will actually do it.
         """
 
-        binder = getattr(self.langgraph_service, "rebind", None)
+        # The composition's, not the engine's: which Agent stands in for a
+        # missing one is decided where the Handlers are registered, and the
+        # catalog has to be able to say it on a Runtime with no engine wired.
+        binder = self.agent_fallback_policy or getattr(
+            self.langgraph_service, "rebind", None,
+        )
+        if binder is None:
+            return None
+        if handler_name is not None:
+            resolve = getattr(binder, "target_for", None)
+            return None if resolve is None else resolve(handler_name)
         current = getattr(binder, "current", None)
         return None if current is None else current()
 

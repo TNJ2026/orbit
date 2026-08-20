@@ -182,13 +182,12 @@ def build_routes(ctx) -> list[Route]:
             "capabilities": dict(ctx.capabilities or {}),
             "product_mode": {
                 "single_goal_mode": ctx.single_goal_mode,
-                "workflow_ui_mode": ctx.workflow_ui_mode,
-                # Which Agent every Agent step will run on, when the Runtime
-                # binds them all to one. Null in multi-Agent mode, and null in
-                # single-Agent mode while the choice is still ambiguous — the
-                # client is told, it never infers this from the mode name.
-                "agent_binding": (
-                    None if (target := ctx.single_agent_target()) is None
+                # Where a step whose Agent is not installed here would be
+                # carried. Null when there is nowhere to carry it — no Agent
+                # registered, or several with nothing saying which one this
+                # Runtime uses. The client is told; it never infers this.
+                "agent_fallback": (
+                    None if (target := ctx.agent_fallback()) is None
                     else {"handler_name": target.name, "version": target.version}
                 ),
             },

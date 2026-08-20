@@ -1,11 +1,14 @@
-"""Bind every Agent node in a graph to one Agent, for single-Agent mode.
+"""Where an Agent step goes when the Agent it names is not on this machine.
 
-Single-Agent mode is a runtime binding policy, not a second catalog. The same
-published Workflow runs in both modes; in single-Agent mode every node that
-names an Agent is rebound to the one Agent this Runtime speaks for, and the
-Workflow's own choice of Agent is ignored.
+A published Workflow pins the exact Handler build it was compiled against,
+and for an Agent that build is its CLI version — so a Workflow written on
+another machine, or one whose CLI has since been upgraded, names something
+that is not here. The Agent it names is honoured wherever it exists; only a
+step with nowhere to go is carried elsewhere, and as little as possible: to
+the same Agent's installed build where there is one, and only failing that to
+whichever Agent this Runtime is talking to.
 
-The definition is never rewritten. Rebinding produces a per-Run graph that is
+The definition is never rewritten. A substitution produces a per-Run graph
 stored beside the run, so the published version keeps saying what its author
 published and the run keeps saying what actually executed.
 """
@@ -106,17 +109,23 @@ class AgentRebindError(ValueError):
 
 @dataclass(frozen=True)
 class AgentRebinding:
-    """A graph rebound to one Agent, and which nodes that moved."""
+    """A graph with substitutes wired in, and what each moved node now names.
+
+    A mapping rather than one Handler: a substitution is decided per step, so
+    a graph with two stranded Agents can land on two different ones.
+    """
 
     ir: WorkflowIR
-    handler: IRHandlerRef
-    rebound: tuple[str, ...]
+    rebound: Mapping[str, IRHandlerRef]
 
     @property
     def identity(self) -> str:
-        """What the run was bound to, short enough to put in a hash or a label."""
+        """What ran it, short enough to put in a hash or a label."""
 
-        return f"{self.handler.name}@{self.handler.version}"
+        return ", ".join(sorted({
+            f"{reference.name}@{reference.version}"
+            for reference in self.rebound.values()
+        }))
 
 
 def agent_manifests(
@@ -164,7 +173,7 @@ def is_agent_node(node: IRNode) -> bool:
 
     The name prefix, not the Handler's declared capability: the Agent a node
     was published against is frequently *not* installed here — that is the
-    case single-Agent mode exists to rescue — so there is no manifest to read
+    case this fallback exists to rescue — so there is no manifest to read
     a capability off. `agent_manifest` mints every Agent Handler as
     `agent.<name>`, which makes the prefix the durable signal.
     """
@@ -189,61 +198,94 @@ def _clamped_config(config: Any, manifest: HandlerManifest) -> Any:
     return {**dict(config), "timeout_seconds": ceiling}
 
 
+def _check_ports(node: IRNode, manifest: HandlerManifest) -> None:
+    """Refuse a substitute whose shape is not the one the graph is wired for.
+
+    Checked rather than assumed. Every Agent Handler this Runtime mints today
+    has the same one-in-one-out shape, so this never fires — which is exactly
+    why it has to be here: the day an Agent arrives with a different port, the
+    answer must be a refusal to start, not a graph wired to a port that does
+    not exist.
+    """
+
+    ports = tuple((port.id, port.schema_id) for port in node.inputs)
+    if ports != tuple(manifest.inputs.items()):
+        raise AgentRebindError(
+            f"node {node.id!r} has input ports {list(ports)}, which "
+            f"{manifest.name} does not offer"
+        )
+    ports = tuple((port.id, port.schema_id) for port in node.outputs)
+    if ports != tuple(manifest.outputs.items()):
+        raise AgentRebindError(
+            f"node {node.id!r} has output ports {list(ports)}, which "
+            f"{manifest.name} does not produce"
+        )
+
+
+def _apply(
+    ir: WorkflowIR, targets: Mapping[str, HandlerManifest],
+) -> AgentRebinding | None:
+    """Wire each named node to its target, or None when nothing moves."""
+
+    references = {}
+    for node in ir.nodes:
+        manifest = targets.get(node.id)
+        if manifest is None:
+            continue
+        _check_ports(node, manifest)
+        reference = IRHandlerRef(
+            manifest.name, manifest.version, manifest.fingerprint,
+        )
+        if (
+            node.handler != reference
+            or _clamped_config(node.config, manifest) != node.config
+        ):
+            references[node.id] = reference
+    if not references:
+        return None
+    return AgentRebinding(
+        replace(ir, nodes=tuple(
+            replace(
+                node, handler=references[node.id],
+                config=_clamped_config(node.config, targets[node.id]),
+            )
+            if node.id in references else node
+            for node in ir.nodes
+        )),
+        references,
+    )
+
+
 def rebind_agents(
     ir: WorkflowIR, manifest: HandlerManifest,
 ) -> AgentRebinding | None:
     """Point every Agent node at `manifest`, or None when none of them move.
 
-    Ports are checked rather than assumed. Every Agent Handler this Runtime
-    mints today has the same one-in-one-out shape, so the check never fires —
-    which is exactly why it has to be here: the day an Agent arrives with a
-    different port, the answer must be a refusal to start, not a graph wired
-    to a port that does not exist.
+    Every one, whatever it names: this is the template path, where the graph
+    is a shape and the Agent is whoever is here to run it.
     """
 
-    nodes = tuple(node for node in ir.nodes if is_agent_node(node))
-    if not nodes:
-        return None
-    expected_inputs = tuple(manifest.inputs.items())
-    expected_outputs = tuple(manifest.outputs.items())
-    for node in nodes:
-        ports = tuple((port.id, port.schema_id) for port in node.inputs)
-        if ports != expected_inputs:
-            raise AgentRebindError(
-                f"node {node.id!r} has input ports {list(ports)}, which "
-                f"{manifest.name} does not offer"
-            )
-        ports = tuple((port.id, port.schema_id) for port in node.outputs)
-        if ports != expected_outputs:
-            raise AgentRebindError(
-                f"node {node.id!r} has output ports {list(ports)}, which "
-                f"{manifest.name} does not produce"
-            )
-    reference = IRHandlerRef(manifest.name, manifest.version, manifest.fingerprint)
-    moved = tuple(
-        node.id for node in nodes
-        if node.handler != reference
-        or _clamped_config(node.config, manifest) != node.config
-    )
-    if not moved:
-        return None
-    identifiers = frozenset(node.id for node in nodes)
-    return AgentRebinding(
-        replace(ir, nodes=tuple(
-            replace(
-                node, handler=reference,
-                config=_clamped_config(node.config, manifest),
-            )
-            if node.id in identifiers else node
-            for node in ir.nodes
-        )),
-        reference,
-        moved,
-    )
+    return _apply(ir, {
+        node.id: manifest for node in ir.nodes if is_agent_node(node)
+    })
 
 
-class SingleAgentBinder:
-    """The single-Agent start policy, as one callable the engine can hold.
+class AgentFallback:
+    """A substitute for an Agent step whose Handler is not on this machine.
+
+    A published Workflow pins the exact Handler build it was compiled against,
+    and for an Agent that build is its CLI version. That pin is the guarantee
+    working — but it also means a Workflow written on one machine is dead on
+    the next, and a CLI upgrade retires every Workflow bound to the old one.
+    Neither is a fault the author can fix from where they are.
+
+    So a step whose Handler is *here* runs on it, exactly as published: this
+    changes nothing about a Workflow that names Agents this Runtime has, and
+    a graph that deliberately uses two Agents keeps using two. Only a step
+    that has nowhere to go is moved, and it is moved as little as possible —
+    to the same Agent's installed build where there is one, because a CLI
+    release is an operational upgrade rather than a change of Agent, and only
+    failing that to whichever Agent this Runtime is talking to.
 
     Late-bound on purpose: which Agent is current depends on who is connected
     right now, and the engine is built once at startup.
@@ -260,7 +302,7 @@ class SingleAgentBinder:
         self._clients = connected_clients or (lambda: ())
 
     def current(self) -> HandlerManifest | None:
-        """The Agent every Agent node would be rebound to, if there is one."""
+        """The Agent this Runtime is talking to, for a step with nowhere else."""
 
         return preferred_agent(tuple(self._manifests()), tuple(self._clients()))
 
@@ -276,26 +318,47 @@ class SingleAgentBinder:
             and self.current() is None
         )
 
+    def target_for(self, name: str) -> HandlerManifest | None:
+        """What a step naming `name` would run on, or None for nothing to offer."""
+
+        registered = agent_manifests(tuple(self._manifests()))
+        same = next(
+            (item for item in registered if item.name == name), None,
+        )
+        return same if same is not None else self.current()
+
     def __call__(self, ir: WorkflowIR) -> AgentRebinding | None:
-        if not any(is_agent_node(node) for node in ir.nodes):
-            # A Workflow with no Agent step runs identically in both modes, so
-            # it must not need an Agent to be named before it can start. Asked
-            # before the Agent is resolved, not after: a Runtime with no Agent
-            # installed could otherwise not run a graph that never wanted one.
+        manifests = tuple(self._manifests())
+        # Exactly what the engine's registry will resolve: name, version and
+        # fingerprint. Matching on the name alone would call a step bound to a
+        # CLI build that is gone "available", and it would fail at compile
+        # instead of being carried to the build that is here.
+        installed = {
+            (item.name, item.version, item.fingerprint) for item in manifests
+        }
+        stranded = [
+            node for node in ir.nodes
+            if is_agent_node(node) and (
+                node.handler.name,
+                node.handler.version,
+                node.handler.manifest_fingerprint,
+            ) not in installed
+        ]
+        if not stranded:
             return None
-        manifest = self.current()
-        if manifest is None:
-            # No Agent to bind to, so the binding the author published is the
-            # binding. Not a refusal: single-Agent mode is a policy about
-            # *which* Agent runs a step, and it must never leave a Workflow
-            # less runnable than it would be with the mode off. Refusing here
-            # stopped Workflows bound to an installed Agent — on any machine
-            # with two CLIs and no Agent App connected yet, which is where a
-            # freshly started Runtime sits, since the session registry lives
-            # in the process and every restart returns to it.
-            #
-            # Whether the published bindings actually resolve is the
-            # compiler's question, and it answers it the same way in both
-            # modes.
-            return None
-        return rebind_agents(ir, manifest)
+        registered = {item.name: item for item in agent_manifests(manifests)}
+        current, asked = None, False
+        targets: dict[str, HandlerManifest] = {}
+        for node in stranded:
+            same = registered.get(node.handler.name)
+            if same is not None:
+                targets[node.id] = same
+                continue
+            if not asked:
+                current, asked = self.current(), True
+            if current is not None:
+                targets[node.id] = current
+        # Nothing to offer is not a refusal: the published binding stands and
+        # the compiler says whether it resolves, the same answer it would give
+        # if this fallback did not exist.
+        return _apply(ir, targets) if targets else None

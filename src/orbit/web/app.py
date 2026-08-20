@@ -366,7 +366,6 @@ def create_app(
     langgraph_service: Any = None,
     langgraph_state_directory: Path | str | None = None,
     run_retention_days: int | None = None,
-    workflow_ui_mode: str = "multi-agent",
     agent_workspace_root: Path | str | None = None,
 ) -> Starlette:
     """Build the Runtime application.
@@ -376,8 +375,6 @@ def create_app(
     `app.state.runtime` rather than by importing anything from the old engine.
     """
 
-    if workflow_ui_mode not in {"single-agent", "multi-agent"}:
-        raise ValueError("workflow_ui_mode must be single-agent or multi-agent")
 
     # Discovery runs *before* the composition, because the composition seals
     # the handler registry in its constructor. Registering afterwards is not
@@ -495,11 +492,6 @@ def create_app(
         if workflow_generator is None:
             workflow_generator = built[sorted(built)[0]]
 
-    # Single-Agent mode is a binding policy over one catalog, not a catalog of
-    # its own: every published Workflow runs in both modes, and here each of
-    # its Agent steps is rebound to the one Agent this Runtime speaks for
-    # instead of the one its author happened to pick. Multi-Agent mode passes
-    # None and every Workflow runs exactly as it was published.
     # One registry for both transports: HTTP messages and the stdio pump feed
     # the same dispatcher, and `/api/v1/mcp/sessions` reads it back. Built up
     # here rather than beside the dispatcher because it is also the answer to
@@ -516,14 +508,17 @@ def create_app(
 
         return recent_agent_clients(mcp_sessions, authoring_broker)
 
-    agent_rebind = None
-    if workflow_ui_mode == "single-agent":
-        from ..workflow.agent_binding import SingleAgentBinder
+    # A Workflow names the exact Handler build it was compiled against, and
+    # for an Agent that build is its CLI version — so a Workflow written on
+    # another machine, or one whose CLI has since been upgraded, names
+    # something that is not here. A step with nowhere to go is carried to an
+    # Agent that is, and a step whose Agent *is* here is left alone.
+    from ..workflow.agent_binding import AgentFallback
 
-        agent_rebind = SingleAgentBinder(
-            [registration.manifest for registration in registrations],
-            connected_agent_clients,
-        )
+    agent_rebind = AgentFallback(
+        [registration.manifest for registration in registrations],
+        connected_agent_clients,
+    )
 
     if langgraph_state_directory is not None:
         if langgraph_service is not None:
@@ -563,15 +558,43 @@ def create_app(
         carried = merge_workflow_library(
             composition.db_path, composition.workflow_db_path
         )
-        # Only from the project database, and never from the other product's
-        # library. The two authoring products keep separate catalogs, and a
-        # seeding step that copied one into the other at any moment — even
-        # once, at creation — would make a single-agent library open with
-        # somebody's multi-agent workflows in it and need archiving by hand.
         if carried:
             print(
                 f"workflow library: carried {carried} definition version(s) "
                 f"forward into {composition.workflow_db_path}",
+                flush=True,
+            )
+
+    # There were two host-wide libraries, one per authoring product, kept
+    # deliberately apart. With one product there is one library — but `orbit
+    # serve` defaulted to the single-Agent one, so on a default install that
+    # file is where everything a person published actually is. Leaving it
+    # behind would open the catalog empty on the build that removed the mode.
+    #
+    # Merged rather than swapped to: the other library is not necessarily
+    # empty either, and `merge_workflow_library` is built for exactly this —
+    # equal definitions collapse, and a Workflow id with two histories keeps
+    # both as new immutable versions rather than one overwriting the other.
+    # Idempotent, so every boot after the first finds nothing to do.
+    from ..platform import public_workflow_db_path, retired_workflow_library_path
+
+    retired = retired_workflow_library_path()
+    # Only for the library it is the predecessor *of*. An explicit database is
+    # self-contained — that is the rule everywhere else — and without this the
+    # merge reached into the home directory from a Runtime that had been
+    # pointed somewhere else entirely, including every test with a temporary
+    # library of its own.
+    if (
+        retired.exists()
+        and Path(composition.workflow_db_path) == public_workflow_db_path()
+    ):
+        from ..workflow.persistence.workflow_versions import merge_workflow_library
+
+        moved = merge_workflow_library(retired, composition.workflow_db_path)
+        if moved:
+            print(
+                f"workflow library: merged {moved} definition version(s) from "
+                f"{retired} into {composition.workflow_db_path}",
                 flush=True,
             )
 
@@ -665,13 +688,6 @@ def create_app(
         return {
             "available": True, "agents": sorted(generation_agents),
             "default_agent": default_generation_agent(),
-            # Single-Agent authoring is intentionally stricter: only an App
-            # currently present through MCP may write it. Keep this separate
-            # from discovered CLIs and operator-configured model writers so the
-            # UI never has to infer connection state from a name.
-            "mcp_agents": (
-                authoring_broker.clients() if authoring_broker is not None else []
-            ),
         }
 
     capabilities = {
@@ -753,7 +769,7 @@ def create_app(
         authoring_catalogs, SQLiteWorkflowVersionStore(composition.workflow_db_path)
     )
     template_service = None
-    # Built wherever its two dependencies are, not only in single-agent mode.
+    # Built wherever its two dependencies are.
     # Starting a goal from a template is a feature, and which mode is on says
     # how many Agents an author picks between, not what the Runtime can do.
     if langgraph_service is not None and authoring_broker is not None:
@@ -879,9 +895,9 @@ def create_app(
             authoring_jobs=authoring_jobs,
             shutdown_request=shutdown_request,
             langgraph_service=langgraph_service,
-            workflow_ui_mode=workflow_ui_mode,
             template_service=template_service,
             mcp_sessions=mcp_sessions,
+            agent_fallback=agent_rebind,
         ),
         # The MCP surface is a second protocol over the same application
         # services and the same identity, not a second implementation.

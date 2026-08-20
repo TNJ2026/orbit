@@ -18,7 +18,7 @@ import unittest
 
 from orbit.workflow.agent_binding import (
     AgentRebindError,
-    SingleAgentBinder,
+    AgentFallback,
     preferred_agent,
     rebind_agents,
     recent_agent_clients,
@@ -117,7 +117,7 @@ class RebindTests(unittest.TestCase):
         rebinding = rebind_agents(ir, claude)
 
         self.assertIsNotNone(rebinding)
-        self.assertEqual(("execute",), rebinding.rebound)
+        self.assertEqual(("execute",), tuple(rebinding.rebound))
         self.assertEqual("agent.claude@1.2.3", rebinding.identity)
         self.assertEqual(
             IRHandlerRef("agent.claude", "1.2.3", claude.fingerprint),
@@ -142,7 +142,7 @@ class RebindTests(unittest.TestCase):
 
         rebinding = rebind_agents(ir, manifest_for("claude"))
 
-        self.assertEqual(("execute",), rebinding.rebound)
+        self.assertEqual(("execute",), tuple(rebinding.rebound))
         self.assertEqual(transform.handler, rebinding.ir.nodes[1].handler)
 
     def test_a_graph_already_on_this_agent_needs_no_rebinding(self) -> None:
@@ -163,7 +163,7 @@ class RebindTests(unittest.TestCase):
         self.assertIsNone(rebind_agents(ir, manifest_for("claude")))
         # And through the binder, where there is no Agent to be found at all:
         # a Workflow that never wanted one must still start.
-        self.assertIsNone(SingleAgentBinder([])(ir))
+        self.assertIsNone(AgentFallback([])(ir))
 
     def test_a_port_the_agent_does_not_offer_is_refused(self) -> None:
         ir = single_step_workflow(agent_step(inputs=(port("payload"),)))
@@ -228,7 +228,7 @@ class AgentSelectionTests(unittest.TestCase):
         for agents in ([manifest_for("claude"), manifest_for("codex")], []):
             with self.subTest(registered=len(agents)):
                 self.assertIsNone(
-                    SingleAgentBinder(agents)(single_step_workflow(agent_step()))
+                    AgentFallback(agents)(single_step_workflow(agent_step()))
                 )
 
 
@@ -347,7 +347,7 @@ class SingleAgentEngineTests(unittest.TestCase):
             ]),
             run_db_path=root / "runs.sqlite3",
             checkpoint_db_path=root / "checkpoints.sqlite3",
-            rebind=SingleAgentBinder(manifests) if rebind else None,
+            rebind=AgentFallback(manifests) if rebind else None,
             clock=lambda: datetime(2026, 1, 1, tzinfo=timezone.utc),
         )
 
@@ -427,7 +427,7 @@ class SingleAgentEngineTests(unittest.TestCase):
             self.assertEqual("agent.claude@1.2.3", run.agent_binding)
 
             # The Runtime moves on; the run does not.
-            engine.rebind = SingleAgentBinder([codex])
+            engine.rebind = AgentFallback([codex])
 
             self.assertEqual(
                 "agent.claude@1.2.3", engine.get(run.run_id).agent_binding,
@@ -479,7 +479,7 @@ class SingleAgentEngineTests(unittest.TestCase):
                 "workflow:single", {"prompt": {"goal": "x"}},
                 idempotency_key="start-1", actor="local",
             )
-            engine.rebind = SingleAgentBinder([codex])
+            engine.rebind = AgentFallback([codex])
 
             with self.assertRaises(LangGraphRunConflict):
                 engine.start(
@@ -531,12 +531,13 @@ class SingleAgentEngineTests(unittest.TestCase):
             self.assertIn("no Agent App has introduced itself", answer["detail"])
 
 
-class SingleAgentCatalogTests(unittest.TestCase):
-    """What the catalog says about a step that is going to be rebound.
+class AgentFallbackCatalogTests(unittest.TestCase):
+    """What the catalog says about a step that will be carried elsewhere.
 
     A pinned Agent that is not installed is drift everywhere else, and drift
-    is offered a recompile. In single-Agent mode it is neither: the step needs
-    no repair, because the start it is waiting for will rebind it.
+    is offered a recompile. For an Agent step it is neither: the step needs no
+    repair, because the start it is waiting for will carry it to an Agent that
+    is here.
     """
 
     def setUp(self) -> None:
@@ -545,19 +546,22 @@ class SingleAgentCatalogTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.db = self.root / "runtime.db"
         self.claude = manifest_for("claude")
-        ir = single_step_workflow(agent_step())
+
+    def publish(self, ir) -> None:
         SQLiteWorkflowVersionStore(self.db).publish(
             CompiledWorkflow(ir, definition_hash(ir), "test", "sha256:" + "c" * 64),
             expected_latest_version=0, source_format="json", source_text="{}",
             actor="test:author", dsl_version="1.3",
         )
 
-    def app(self, ui_mode: str):
+    def catalog(self, workflow_id="workflow:single"):
         from orbit.web.app import HandlerRegistration, create_app
         from orbit.workflow.handlers import TransformHandler
-        from tests.test_web_composition import SCHEMAS, transform_registration
+        from tests.test_web_composition import (
+            SCHEMAS, AsgiHarness, transform_registration,
+        )
 
-        return create_app(
+        app = create_app(
             self.db,
             handlers=[
                 transform_registration(),
@@ -570,54 +574,23 @@ class SingleAgentCatalogTests(unittest.TestCase):
             authenticator=lambda request: request.headers.get("x-orbit-actor"),
             authorizer=Authorizer(lambda actor: [READ_SCOPE, WRITE_SCOPE]),
             single_goal_mode=False,
-            workflow_ui_mode=ui_mode,
-            langgraph_state_directory=self.root / ui_mode,
+            langgraph_state_directory=self.root / "langgraph",
         )
-
-    def catalog(self, ui_mode: str):
-        from tests.test_web_composition import AsgiHarness
-
-        with AsgiHarness(self.app(ui_mode)) as client:
+        with AsgiHarness(app) as client:
             workflows = client.get(
                 "/api/v1/workflows", actor="local",
             ).json()["data"]["workflows"]
             capabilities = client.get(
                 "/api/v1/capabilities", actor="local",
             ).json()["data"]
-            detail = client.get(
-                "/api/v1/workflows/workflow:single", actor="local",
-            ).json()["data"]
-        entry = next(
-            item for item in workflows if item["workflow_id"] == "workflow:single"
-        )
-        # `action_editors` is a detail-only field; the list does not carry it.
-        entry.setdefault("action_editors", detail.get("action_editors", {}))
-        return entry, capabilities
+        return next(
+            item for item in workflows if item["workflow_id"] == workflow_id
+        ), capabilities
 
-    def test_the_agent_choice_is_reported_as_the_runtimes(self) -> None:
-        """A control that cannot change the outcome must not be offered.
+    def test_a_step_with_nowhere_to_go_is_carried_not_called_broken(self) -> None:
+        self.publish(single_step_workflow(agent_step()))
 
-        The editor's Agent picker republishes a binding the Runtime then
-        overwrites at start. The catalog says so, so the client can report the
-        binding instead of presenting a decision it will discard.
-        """
-
-        single, _ = self.catalog("single-agent")
-        multi, _ = self.catalog("multi-agent")
-
-        editor = single["action_editors"]["execute"]
-        self.assertEqual(
-            {"handler_name": "agent.claude", "version": "1.2.3"},
-            editor["handler_bound"],
-        )
-        # Still listed, because the server validates a supplied choice against
-        # them — withdrawing the list would fail every edit, wording included.
-        self.assertEqual([{"name": "agent.claude", "version": "1.2.3"}],
-                         editor["handlers"])
-        self.assertNotIn("handler_bound", multi["action_editors"]["execute"])
-
-    def test_a_rebound_step_is_not_drift(self) -> None:
-        item, capabilities = self.catalog("single-agent")
+        item, capabilities = self.catalog()
 
         binding = item["handler_compatibility"]["bindings"][0]
         self.assertEqual("rebound", binding["status"])
@@ -625,22 +598,30 @@ class SingleAgentCatalogTests(unittest.TestCase):
         self.assertTrue(item["handler_compatibility"]["compatible"])
         self.assertTrue(item["langgraph_compatibility"]["compatible"])
         self.assertEqual("ready", item["goal_readiness"])
-        self.assertIsNone(item["readiness_reason"])
         self.assertEqual(
             {"handler_name": "agent.claude", "version": "1.2.3"},
-            capabilities["product_mode"]["agent_binding"],
+            capabilities["product_mode"]["agent_fallback"],
         )
 
-    def test_multi_agent_mode_still_calls_it_missing(self) -> None:
-        """The same catalog, the same Workflow, and the honest older answer."""
+    def test_a_step_whose_agent_is_here_is_left_alone(self) -> None:
+        """The whole point of removing the mode: naming an Agent still means it.
 
-        item, capabilities = self.catalog("multi-agent")
+        A graph that deliberately picks an Agent keeps it, and nothing about
+        the fallback touches a step that has somewhere to go.
+        """
+
+        pinned = IRHandlerRef(
+            self.claude.name, self.claude.version, self.claude.fingerprint,
+        )
+        self.publish(single_step_workflow(agent_step(handler=pinned)))
+
+        item, _ = self.catalog()
 
         binding = item["handler_compatibility"]["bindings"][0]
-        self.assertEqual("missing", binding["status"])
-        self.assertFalse(item["handler_compatibility"]["compatible"])
-        self.assertEqual("handler_binding_unavailable", item["readiness_reason"])
-        self.assertIsNone(capabilities["product_mode"]["agent_binding"])
+        self.assertEqual("current", binding["status"])
+        self.assertNotIn("rebound_to", binding)
+        self.assertTrue(item["langgraph_compatibility"]["compatible"])
+        self.assertNotIn("agent_binding", item["langgraph_compatibility"])
 
 
 if __name__ == "__main__":

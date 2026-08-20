@@ -1,4 +1,10 @@
-"""Static single-Agent graph templates instantiated directly into Run snapshots."""
+"""Static one-Agent graph templates instantiated directly into Run snapshots.
+
+A template names no Agent of its own: it is a shape, and every Agent step in
+it runs on whichever Agent this Runtime is talking to. That is a property of a
+template, not of a mode — a published Workflow keeps the Agents its author
+chose.
+"""
 
 from __future__ import annotations
 
@@ -63,8 +69,8 @@ class SingleAgentTemplateService:
         clients = tuple(self.connected_clients())
         if not clients:
             return None
-        # One policy for *which* Agent, shared with single-Agent mode's start
-        # path. Readiness stays this service's own rule: a template run is
+        # One policy for *which* Agent, shared with the start-time
+        # fallback. Readiness stays this service's own rule: a template run is
         # started by a connected Agent App, so no client means not ready even
         # where the Runtime could name an Agent perfectly well.
         manifest = preferred_agent(tuple(self.manifests.values()), clients)
@@ -192,14 +198,14 @@ class SingleAgentTemplateService:
     def _bind_current_agent(ir, manifest: HandlerManifest):
         """The published template, run by whichever Agent is current.
 
-        The same rebinding every Workflow gets in single-Agent mode, plus one
-        rule of its own: a *template* with no Agent node left is not a
-        template, so an empty graph is an error here rather than a graph that
-        simply needs no work.
+        Every Agent step, whatever it names — a template is a shape, not a
+        choice of Agent. Plus one rule of its own: a template with no Agent
+        node left is not a template, so an empty graph is an error here rather
+        than a graph that simply needs no work.
         """
 
         if not any(is_agent_node(node) for node in ir.nodes):
-            raise ValueError("published single-Agent workflow has no Agent node")
+            raise ValueError("published template has no Agent node")
         rebinding = rebind_agents(ir, manifest)
         return ir if rebinding is None else rebinding.ir
 

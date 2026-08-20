@@ -33,14 +33,7 @@ from .common import (
 def build_routes(ctx) -> list[Route]:
 
     def _generation_prompt(body: Mapping[str, Any]) -> str:
-        prompt = str(body.get("prompt", body.get("instruction", ""))).strip()
-        # Either profile is generated the same way. The difference between the
-        # modes is how many Agents an author picks between, and that is settled
-        # by which name the request names, not by refusing the request.
-        profile = str(body.get("authoring_profile", "multi_agent"))
-        if profile not in {"multi_agent", "single_agent"}:
-            raise ValueError(f"unknown authoring profile: {profile}")
-        return prompt
+        return str(body.get("prompt", body.get("instruction", ""))).strip()
 
     async def workflow_catalog(request: Request) -> JSONResponse:
         actor = ctx.authenticate(request, READ_SCOPE)
@@ -434,11 +427,6 @@ def build_routes(ctx) -> list[Route]:
         if registry is not None and registry.sealed:
             for entry in registry.entries():
                 available[entry.manifest.name] = entry.manifest
-        # In single-Agent mode an Agent step does not have to find the Agent it
-        # was published against — it will be rebound to this one at start. That
-        # is a third answer beside current and drifted, and calling it drift
-        # would offer a recompile for a binding that needs no repair.
-        target = ctx.single_agent_target()
         bindings = []
         for node in item.get("definition", {}).get("nodes", ()):
             handler = node.get("handler")
@@ -447,27 +435,28 @@ def build_routes(ctx) -> list[Route]:
             name, pinned = handler["name"], handler["version"]
             current = available.get(name)
             current_version = None if current is None else current.version
-            agent_binding = (
-                current is not None and "agent.invoke" in current.capabilities
+            # An Agent step whose build is not here does not have to be
+            # repaired: it is carried at start to an Agent that is. That is a
+            # third answer beside current and drifted, and calling it drift
+            # would offer a recompile for a binding that needs none.
+            fallback = (
+                ctx.agent_fallback(name) if name.startswith("agent.")
+                and current_version != pinned else None
             )
-            rebound = (
-                target is not None
-                and name.startswith("agent.")
-                and target.name != name
-            )
+            rebound = fallback is not None
             bindings.append({
                 "node_id": node["id"],
                 "handler_name": name,
                 "pinned_version": pinned,
                 "available_version": (
-                    target.version if rebound else current_version
+                    fallback.version if rebound else current_version
                 ),
                 "status": (
                     "rebound" if rebound
-                    else "current" if current_version == pinned or agent_binding
+                    else "current" if current_version == pinned
                     else "missing" if current is None else "version_changed"
                 ),
-                **({"rebound_to": target.name} if rebound else {}),
+                **({"rebound_to": fallback.name} if rebound else {}),
             })
         return bindings
 
@@ -488,7 +477,6 @@ def build_routes(ctx) -> list[Route]:
         registry = ctx.execution_registry
         if registry is None or not registry.sealed:
             return {}
-        bound = ctx.single_agent_target()
         agent_manifests = [
             entry.manifest for entry in registry.entries()
             if "agent.invoke" in entry.manifest.capabilities
@@ -508,15 +496,10 @@ def build_routes(ctx) -> list[Route]:
                 continue
             node_id = str(node["id"])
             editors[node_id] = {
+                # Every choice here is an Agent that is installed and whose
+                # ports fit, so a pick is honoured: the start-time fallback
+                # only moves a step that has nowhere to go.
                 "handlers": choices,
-                # Offered for validation, and — where the Runtime binds every
-                # Agent step to one Agent — not a choice anybody can make: the
-                # pick would be overwritten at start by the Agent named here.
-                # The client is told which, rather than left to present a
-                # control that decides nothing.
-                **({"handler_bound": {
-                    "handler_name": bound.name, "version": bound.version,
-                }} if bound is not None else {}),
                 "allowed_command": {
                     "command": "workflow.action.update",
                     "label": "Update action",
