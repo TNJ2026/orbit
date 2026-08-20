@@ -754,8 +754,11 @@ class LangGraphWorkflowService:
             # there is a next step.
             ambiguous = getattr(self.rebind, "ambiguous", None)
             if binding is None and ambiguous is not None and ambiguous():
+                # Joined with a separator rather than a space: the
+                # compiler's message is a fragment and ends without a stop,
+                # so a bare space ran the two sentences together.
                 detail += (
-                    " Single-Agent mode would run this on the Agent this "
+                    " — single-Agent mode would run this on the Agent this "
                     "Runtime is talking to, but no Agent App has introduced "
                     "itself yet."
                 )

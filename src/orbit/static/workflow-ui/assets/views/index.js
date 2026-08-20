@@ -75,6 +75,46 @@ export function createViews(context) {
     return entry?.langgraph_compatibility?.compatible === true;
   }
 
+  /** Why the engine is withholding start, in its own words.
+   *
+   * `goal_readiness` has always explained itself on the card. The engine's
+   * half never did: the answer carries a `reason` and a `detail` written for
+   * a person, and no view read either — so a workflow the engine refused
+   * showed a card that said `ready`, a binding that said `current`, no
+   * banner, and no Start button, with the explanation sitting unread in the
+   * payload that drew it.
+   *
+   * The reason is a word this UI knows and translates. The detail is the
+   * Runtime's own sentence — which Handler, which port — and is passed
+   * through the way a run's `error` already is, because inventing a
+   * translation for it would mean dropping the specifics that make it
+   * actionable.
+   */
+  function engineRefusal(entry) {
+    const answer = entry?.langgraph_compatibility;
+    if (!answer || answer.compatible === true) return null;
+    const known = [
+      "agent_rebind_failed", "service_not_configured",
+      "unsupported_workflow", "workflow_not_found",
+    ].includes(answer.reason);
+    return {
+      summary: i18n.t(`workflows.blocked.${known ? answer.reason : "unknown"}`),
+      detail: answer.detail || "",
+    };
+  }
+
+  function engineRefusalNotice(entry) {
+    const refusal = engineRefusal(entry);
+    if (!refusal) return null;
+    return el("div", { class: "banner warn workflow-blocked" }, [
+      el("div", { class: "eyebrow", text: i18n.t("workflows.blocked.title") }),
+      el("p", { text: refusal.summary }),
+      refusal.detail
+        ? el("p", { class: "muted mono", text: refusal.detail })
+        : null,
+    ].filter(Boolean));
+  }
+
   function prepareSimplifiedComposer(summary, entries) {
     if (summary && simplifiedComposerState.runId !== summary.run_id) {
       simplifiedComposerState.runId = summary.run_id;
@@ -249,9 +289,11 @@ export function createViews(context) {
           }),
         ]),
         el("div", { class: "actions simplified-composer-actions" }, [start]),
-        chosen && !allowed ? el("div", {
-          class: "banner warn", text: i18n.t("simplified.workflow.unavailable"),
-        }) : null,
+        chosen && !allowed ? (
+          engineRefusalNotice(chosen) || el("div", {
+            class: "banner warn", text: i18n.t("simplified.workflow.unavailable"),
+          })
+        ) : null,
         problem,
       ]),
     ]);
@@ -1502,6 +1544,14 @@ export function createViews(context) {
                 : `workflows.readiness.${entry.goal_readiness}.description`,
             ),
           }) : null,
+          // The card's own silent case: a goal binds perfectly well and the
+          // engine still will not run it. Said here rather than only in the
+          // dialog, because the card is where the missing Start button is.
+          entry.goal_readiness === "ready" && engineRefusal(entry)
+            ? el("span", {
+              class: "muted workflow-card-blocked",
+              text: engineRefusal(entry).summary,
+            }) : null,
           el("span", { class: "workflow-meta workflow-stats" }, [
             el("span", { text: i18n.t("workflows.nodeCount", {
               count: i18n.number(entry.summary.node_count),
@@ -1991,6 +2041,7 @@ export function createViews(context) {
                 : navigate({ view: "workflows", runId: null }),
             }),
           ]),
+          engineRefusalNotice(value),
           agentBindingNotice(value),
           handlerDriftNotice(value, draw),
           // The drawing answers "what shape is this", the definition list

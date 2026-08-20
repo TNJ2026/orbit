@@ -1596,8 +1596,32 @@ class SingleAgentBindingNoticeTests(BrowserE2ETestCase):
             "operation": "build_object",
             "value": {"result": {"ok": True}},
         }))
-        SQLiteWorkflowVersionStore(cls.db).publish(
+        store = SQLiteWorkflowVersionStore(cls.db)
+        store.publish(
             CompiledWorkflow(ir, definition_hash(ir), "test", "sha256:" + "c" * 64),
+            expected_latest_version=0, source_format="json", source_text="{}",
+            actor="test:author", dsl_version="1.3",
+        )
+        # Bound to the Agent that *is* installed, so its binding reads
+        # current, and its entry port is the one a goal binds to, so it reads
+        # ready — and still unrunnable, because the result it declares is not
+        # the one that Agent produces. Every signal the card draws says this
+        # workflow is fine.
+        from orbit.workflow.domain.definitions import IRHandlerRef
+        from tests.test_agent_binding import port
+
+        pinned = IRHandlerRef(
+            cls.agent.name, cls.agent.version, cls.agent.fingerprint,
+        )
+        odd = single_step_workflow(
+            agent_step(
+                handler=pinned,
+                outputs=(port("result", "example://integer/1.0"),),
+            ),
+            workflow_id="workflow:ports",
+        )
+        store.publish(
+            CompiledWorkflow(odd, definition_hash(odd), "test", "sha256:" + "c" * 64),
             expected_latest_version=0, source_format="json", source_text="{}",
             actor="test:author", dsl_version="1.3",
         )
@@ -1622,6 +1646,29 @@ class SingleAgentBindingNoticeTests(BrowserE2ETestCase):
         card.wait_for()
 
         self.assertEqual(0, card.locator(".pill.failed").count())
+
+    def test_a_card_with_nothing_wrong_on_it_still_says_why(self) -> None:
+        """Ready to bind a goal, current Handler, and the engine refuses.
+
+        Every signal the card draws says this workflow is fine, so nothing
+        was drawn — and the Start button's absence was the only hint that
+        anything was wrong.
+        """
+
+        page = self.open("en-US")
+        page.goto(f"{self.base}/ui/#/workflows")
+        card = page.locator('.workflow-card[data-workflow-id="workflow:ports"]')
+        card.wait_for()
+
+        # The premise: nothing else on the card is complaining.
+        self.assertEqual(0, card.locator(".pill.failed").count())
+        self.assertEqual(0, card.locator(".pill.waiting").count())
+        self.assertEqual(0, card.locator("#rebindWorkflow").count())
+
+        self.assertIn(
+            "does not fit the Agent",
+            card.locator(".workflow-card-blocked").inner_text(),
+        )
 
     def test_the_run_page_names_the_agent_that_ran_it(self) -> None:
         """Recorded on the run, so it still answers after the binding moves.
@@ -1653,3 +1700,67 @@ class SingleAgentBindingNoticeTests(BrowserE2ETestCase):
         line.wait_for()
 
         self.assertIn("claude", line.inner_text())
+
+
+class EngineRefusalNoticeTests(BrowserE2ETestCase):
+    """A workflow the engine will not run has to say so on the page.
+
+    This is the silent state single-Agent mode could reach: a definition
+    whose Agent is not installed, on a Runtime with two Agents registered and
+    no Agent App connected to say which one is current. The catalog answered
+    `goal_readiness: ready`, the handler binding answered `current`, and the
+    Start button was simply absent — the engine's reason sat unread in the
+    payload that drew the card.
+    """
+
+    @classmethod
+    def extra_handlers(cls) -> list:
+        from tests.test_agent_binding import manifest_for
+
+        return [
+            HandlerRegistration(
+                manifest, TransformHandler(),
+                f"{manifest.name}@{manifest.version}",
+            )
+            # Two, so no single Agent is unambiguous and nothing is rebound.
+            for manifest in (manifest_for("claude"), manifest_for("codex"))
+        ]
+
+    @classmethod
+    def extra_app_kwargs(cls) -> dict:
+        return {"workflow_ui_mode": "single-agent"}
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        from orbit.workflow.domain.definitions import CompiledWorkflow
+        from orbit.workflow.domain.serialization import definition_hash
+        from orbit.workflow.persistence.workflow_versions import (
+            SQLiteWorkflowVersionStore,
+        )
+        from tests.test_agent_binding import agent_step, single_step_workflow
+
+        ir = single_step_workflow(agent_step())
+        SQLiteWorkflowVersionStore(cls.db).publish(
+            CompiledWorkflow(ir, definition_hash(ir), "test", "sha256:" + "c" * 64),
+            expected_latest_version=0, source_format="json", source_text="{}",
+            actor="test:author", dsl_version="1.3",
+        )
+
+    def test_the_page_carries_the_runtimes_own_sentence(self) -> None:
+        """The reason is translated; the detail is the Runtime's, verbatim.
+
+        Including the way out, which only the Runtime is in a position to
+        know: this definition becomes startable the moment an Agent App says
+        which Agent it is.
+        """
+
+        page = self.open("en-US")
+        page.goto(f"{self.base}/ui/#/workflows/workflow:single")
+        notice = page.locator(".workflow-blocked")
+        notice.wait_for()
+
+        text = notice.inner_text()
+        self.assertIn("The engine cannot run this definition.", text)
+        self.assertIn("agent.absent", text)
+        self.assertIn("no Agent App has introduced itself", text)
