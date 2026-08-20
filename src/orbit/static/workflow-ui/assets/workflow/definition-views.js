@@ -69,6 +69,16 @@ export function createWorkflowDefinitionViews({
     return i18n.t("simplified.workflow.step");
   }
 
+  /* One colour per node kind, read by both the glyph and the kind pill.
+   *
+   * Deleted with the second graph renderer and left referenced by the list
+   * that still uses it, so every attempt to draw a definition threw a
+   * ReferenceError and the pane rendered nothing at all. The values are the
+   * ones the stylesheet still carries classes for. */
+  const KIND_COLOR = {
+    action: "blue", human: "amber", decision: "purple", terminal: "muted",
+  };
+
   function kindGlyph(kind) {
     const paths = {
       action: ["M9 8l-4 4 4 4", "M15 8l4 4-4 4"],
