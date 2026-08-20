@@ -76,7 +76,7 @@ def build_routes(ctx, service, template_service=None) -> list[Route]:
         if isinstance(actor, JSONResponse):
             return actor
         if template_service is None:
-            return error("not_found", "single-Agent templates are not enabled", 404)
+            return error("not_found", "workflow templates are not enabled", 404)
         data = dict(template_service.list())
         can_start = data["ready"] and ctx.guard.allows(actor, WRITE_SCOPE)
         data["templates"] = [
@@ -121,7 +121,7 @@ def build_routes(ctx, service, template_service=None) -> list[Route]:
 
     async def start_template(request: Request) -> JSONResponse:
         if template_service is None:
-            return error("not_found", "single-Agent templates are not enabled", 404)
+            return error("not_found", "workflow templates are not enabled", 404)
 
         def command(body: Mapping[str, Any], actor: str, key: str):
             run = template_service.start(
@@ -138,7 +138,7 @@ def build_routes(ctx, service, template_service=None) -> list[Route]:
 
     async def publish_template(request: Request) -> JSONResponse:
         if template_service is None:
-            return error("not_found", "single-Agent templates are not enabled", 404)
+            return error("not_found", "workflow templates are not enabled", 404)
 
         def command(body: Mapping[str, Any], actor: str, _key: str):
             record = template_service.publish(

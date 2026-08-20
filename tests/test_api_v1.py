@@ -1348,7 +1348,7 @@ class WorkflowDraftApiTests(ApiTestCase):
             self.assertEqual("done", job["status"], job.get("error"))
             self.assertEqual(["codex"], asked)
 
-    def test_single_agent_http_mounts_the_same_authoring_routes(self) -> None:
+    def test_http_mounts_the_authoring_routes(self) -> None:
         app = create_app(
             self.db, handlers=[transform_registration(), self._agent_registration()],
             schemas=SCHEMAS,

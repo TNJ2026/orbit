@@ -495,7 +495,7 @@ def create_app(
     # One registry for both transports: HTTP messages and the stdio pump feed
     # the same dispatcher, and `/api/v1/mcp/sessions` reads it back. Built up
     # here rather than beside the dispatcher because it is also the answer to
-    # "which Agent is connected", which single-Agent binding is decided on.
+    # "which Agent is connected", which a substitution is decided on.
     from .mcp import McpSessionRegistry
 
     mcp_sessions = McpSessionRegistry()
@@ -773,11 +773,11 @@ def create_app(
     # Starting a goal from a template is a feature, and which mode is on says
     # how many Agents an author picks between, not what the Runtime can do.
     if langgraph_service is not None and authoring_broker is not None:
-        from ..workflow.templates import SingleAgentTemplateService
+        from ..workflow.templates import WorkflowTemplateService
 
-        template_service = SingleAgentTemplateService(
+        template_service = WorkflowTemplateService(
             workflow_publisher, manifests, langgraph_service,
-            # The same source the single-Agent binder reads. Two answers to
+            # The same source the start-time fallback reads. Two answers to
             # "which Agent" is one too many: a template and a Workflow started
             # a second apart would otherwise run on different Agents.
             connected_agent_clients,

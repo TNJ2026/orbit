@@ -1,11 +1,11 @@
-"""Single-Agent mode: one Agent runs every Agent step, in any Workflow.
+"""An Agent step whose Agent is not on this machine still runs, somewhere.
 
-The two modes share one catalog. A Workflow published against `agent.codex`
-is the same Workflow in single-Agent mode — it simply runs on whichever Agent
-this Runtime speaks for, and the Agent its author picked is ignored. These
-tests cover the three places that has to be true: the rebinding itself, the
+A Workflow published against `agent.codex` is the same Workflow here whether
+or not codex is installed: where it is, it runs on it; where it is not, the
+step is carried to an Agent that exists. These tests cover the four places
+that has to be true — the substitution itself, which Agent it picks, the
 engine that starts a run with it, and the catalog that has to stop calling a
-rebound step broken.
+carried step broken.
 """
 
 from __future__ import annotations

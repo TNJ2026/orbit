@@ -9,7 +9,7 @@ from orbit.workflow.catalogs import HandlerManifest, InMemoryHandlerCatalog, InM
 from orbit.workflow.catalogs.extensions import InMemoryExtensionRegistry
 from orbit.workflow.domain.durable_execution import ExecutionSafety
 from orbit.workflow.domain.handlers import ResourceProfile
-from orbit.workflow.templates import SingleAgentTemplateService, TEMPLATES
+from orbit.workflow.templates import WorkflowTemplateService, TEMPLATES
 from orbit.workflow.authoring import ExternalAuthoringBroker
 from orbit.workflow.handlers.agent import AgentHandler, AgentResponse, FakeAgentClient
 from orbit.workflow.persistence.workflow_versions import SQLiteWorkflowVersionStore
@@ -43,7 +43,7 @@ class FakeLangGraph:
         return {"started": True}
 
 
-class SingleAgentTemplateTests(unittest.TestCase):
+class WorkflowTemplateTests(unittest.TestCase):
     def setUp(self) -> None:
         catalogs = WorkflowCatalogs(
             InMemoryHandlerCatalog([AGENT]),
@@ -52,7 +52,7 @@ class SingleAgentTemplateTests(unittest.TestCase):
         )
         self.langgraph = FakeLangGraph()
         self.clients = ["chatgpt"]
-        self.service = SingleAgentTemplateService(
+        self.service = WorkflowTemplateService(
             WorkflowDefinitionService(catalogs), [AGENT], self.langgraph,
             lambda: self.clients,
         )
@@ -101,11 +101,11 @@ class SingleAgentTemplateTests(unittest.TestCase):
                 catalogs, SQLiteWorkflowVersionStore(Path(directory) / "workflows.db"),
             )
             langgraph = FakeLangGraph()
-            publisher = SingleAgentTemplateService(
+            publisher = WorkflowTemplateService(
                 definitions, [AGENT, CLAUDE], langgraph, lambda: ["chatgpt"],
             )
             published = publisher.publish("plan-execute", "Reusable", actor="local")
-            runner = SingleAgentTemplateService(
+            runner = WorkflowTemplateService(
                 definitions, [AGENT, CLAUDE], langgraph,
                 lambda: ["claude-desktop"],
             )
@@ -122,7 +122,7 @@ class SingleAgentTemplateTests(unittest.TestCase):
             node.handler.version for node in ir.nodes if node.handler is not None
         })
 
-    def test_single_agent_http_starts_and_publishes_templates(self) -> None:
+    def test_http_starts_and_publishes_templates(self) -> None:
         broker = ExternalAuthoringBroker()
         broker.claim(actor="test:agent", client="chatgpt")
         client = FakeAgentClient(AgentResponse({"result": {"ok": True}}, None, None))

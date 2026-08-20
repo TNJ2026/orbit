@@ -72,7 +72,6 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
 .simplified-workflow-picker > select,
 .simplified-workflow-picker > .custom-select { width: 100%; min-width: 0; }
 
-.template-graph {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -84,7 +83,6 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
   background: var(--line-soft);
 }
 
-.template-node {
   padding: .4rem .65rem;
   border: 1px solid var(--line);
   border-radius: .45rem;
@@ -93,8 +91,6 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
   font-weight: 600;
 }
 
-.template-node-human { border-style: dashed; }
-.template-node-terminal { border-radius: 999px; }
 .template-edge { color: var(--muted); }
 .simplified-workflow-picker > select,
 .simplified-workflow-picker > .custom-select,

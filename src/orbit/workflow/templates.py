@@ -28,6 +28,10 @@ class WorkflowTemplate:
     edges: tuple[tuple[str, str], ...]
 
 
+# What a published template is stored as, unchanged since it was minted: the
+# value is data in somebody's library, not a name this module is free to edit.
+TEMPLATE_LABEL = "single-agent-template"
+
 TEMPLATES = (
     WorkflowTemplate(
         "direct", "直接执行", "由当前 Agent 完成目标并返回结果。",
@@ -49,7 +53,7 @@ TEMPLATES = (
 )
 
 
-class SingleAgentTemplateService:
+class WorkflowTemplateService:
     def __init__(
         self,
         definitions: WorkflowDefinitionService,
@@ -84,7 +88,10 @@ class SingleAgentTemplateService:
                 self.definitions.store.path, self.definitions.catalogs.schemas,
             )
             for item in catalog.list():
-                if item["labels"].get("orbit.mode") != "single-agent-template":
+                # The label is what a published template is *stored* as, so
+                # it stays what it has always been: renaming it here would
+                # orphan every template anybody has already published.
+                if item["labels"].get("orbit.mode") != TEMPLATE_LABEL:
                     continue
                 detail = catalog.detail(item["workflow_id"])
                 published.append({
@@ -133,7 +140,7 @@ class SingleAgentTemplateService:
         if workflow_id:
             version = self.definitions.store.latest_version(workflow_id)
             record = self.definitions.get_workflow_version(workflow_id, version)
-            if record is None or record.ir.labels.get("orbit.mode") != "single-agent-template":
+            if record is None or record.ir.labels.get("orbit.mode") != TEMPLATE_LABEL:
                 raise ValueError(f"published template workflow not found: {workflow_id!r}")
             ir = self._bind_current_agent(record.ir, manifest)
             template_id = record.ir.labels.get("orbit.template") or "published"
@@ -174,7 +181,7 @@ class SingleAgentTemplateService:
         document["metadata"].update({
             "id": workflow_id, "name": name,
             "labels": {
-                "orbit.mode": "single-agent-template",
+                "orbit.mode": TEMPLATE_LABEL,
                 "orbit.template": template_id,
                 "orbit.agent_binding": "current",
             },
