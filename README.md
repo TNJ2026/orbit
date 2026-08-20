@@ -67,6 +67,23 @@ multi-Agent UI explicitly when needed:
 uv run orbit serve --ui-mode multi-agent
 ```
 
+Both modes serve one catalog and the same API, and a Workflow published in
+either runs in both. The difference is binding: in single-Agent mode every
+Agent step is rebound when the run starts to the Agent this Runtime is talking
+to, whatever Agent the definition names — so a Workflow written against
+`agent.codex` runs on `claude` without being edited or republished. The
+published definition is never rewritten; the rebound graph is stored with the
+run, so a finished run still names the Agent that actually executed it after
+the connected Agent has changed.
+
+Which Agent that is follows the most recent MCP client to introduce itself,
+and stays that Agent while none is connected. A Runtime with several Agent
+CLIs installed that has never heard from any client refuses to start rather
+than guess — connect an Agent, or run `--ui-mode multi-agent`.
+
+`--ui-mode` means the same thing on both surfaces: `orbit mcp` addresses the
+same library and binds the same way `orbit serve` does.
+
 ## Use Orbit in Codex
 
 ### Open and connect

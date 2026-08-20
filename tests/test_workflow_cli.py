@@ -185,6 +185,31 @@ class WorkflowCliTests(unittest.TestCase):
             self.db, create_app.call_args.kwargs["workflow_db_path"],
         )
 
+    def test_mcp_runs_in_the_same_mode_serve_does(self) -> None:
+        """One flag, one meaning, on both surfaces.
+
+        `--ui-mode` used to pick which library `orbit mcp` addressed and
+        nothing else, so a Workflow the UI could start — because single-Agent
+        mode rebinds its Agent steps to the installed Agent — was refused over
+        stdio for naming an Agent that is not installed. Both surfaces read
+        the same catalog; they have to run it the same way too.
+        """
+
+        for mode in ("single-agent", "multi-agent"):
+            with self.subTest(mode=mode):
+                with (
+                    patch("orbit.web.app.create_app") as create_app,
+                    patch("orbit.web.mcp.serve_stdio"),
+                ):
+                    self.run_cli(
+                        "mcp", "--db", str(self.db), "--no-agent-discovery",
+                        "--ui-mode", mode,
+                    )
+
+                self.assertEqual(
+                    mode, create_app.call_args.kwargs["workflow_ui_mode"],
+                )
+
     def test_serve_reports_an_unusable_artifact_root_without_a_traceback(self) -> None:
         invalid_root = Path(self.temp_dir.name) / "not-a-directory"
         invalid_root.write_text("occupied", encoding="utf-8")

@@ -559,6 +559,12 @@ def _mcp(args) -> None:
         artifact_backend=artifact_backend,
         discover_agents=not args.no_agent_discovery,
         serve_ui=False,
+        # The same mode `serve` runs in, not only the same library. `--ui-mode`
+        # decided which database this process addressed and nothing else, so a
+        # Workflow the UI could start — because single-Agent mode rebinds its
+        # Agent steps — was refused over stdio for naming an Agent that is not
+        # installed. One flag, one meaning, on both surfaces.
+        workflow_ui_mode=args.ui_mode,
         # There is no connection to authenticate. The person who started this
         # process is the caller, and on a local runtime that is `local` —
         # the same actor loopback would have resolved to.
