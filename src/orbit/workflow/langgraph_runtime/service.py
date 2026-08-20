@@ -218,10 +218,15 @@ class LangGraphWorkflowService:
         artifact_store=None,
         console=None,
         single_goal: bool = False,
+        rebind: Callable[[Any], Any] | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.workflow_versions = workflow_versions
         self.handlers = handlers
+        # Single-Agent mode's start policy, or None to run every Workflow as
+        # its author bound it. A callable rather than a mode flag: which Agent
+        # is current depends on who is connected, and this is built once.
+        self.rebind = rebind
         self.run_db_path = Path(run_db_path)
         self.checkpoint_db_path = Path(checkpoint_db_path)
         self.artifacts = artifact_store
@@ -462,6 +467,22 @@ class LangGraphWorkflowService:
             raise LookupError(f"workflow version not found: {workflow_id}@{resolved}")
         return record
 
+    def _bound(self, ir):
+        """The graph this Runtime will really execute, and what moved.
+
+        Rebinding is a decision taken once, when the run starts, so the result
+        is written down as the run's own graph rather than recomputed. A
+        resumed or recovered run re-reads that snapshot in `_ir_for`; without
+        it the second half of a run would silently revert to the Agent the
+        definition names, which is the Agent single-Agent mode was asked to
+        ignore.
+        """
+
+        if self.rebind is None:
+            return ir, None
+        binding = self.rebind(ir)
+        return (ir, None) if binding is None else (binding.ir, binding)
+
     def start(
         self,
         workflow_id: str,
@@ -494,7 +515,8 @@ class LangGraphWorkflowService:
             raise ValueError("actor is required")
         goal = _goal(goal)
         record = self._workflow(workflow_id, workflow_version, starting=True)
-        request_hash = definition_hash({
+        ir, binding = self._bound(record.ir)
+        request = {
             "workflow_id": workflow_id,
             "workflow_version": record.version.value,
             "inputs": inputs,
@@ -502,7 +524,15 @@ class LangGraphWorkflowService:
             # In the hash, so the same key with a different goal is a conflict
             # rather than the first run handed back under the wrong label.
             "goal": goal,
-        }).value
+        }
+        if binding is not None:
+            # Here too, and for the same reason: replaying a key after the
+            # current Agent changed would hand back a run that a different
+            # Agent executed. Added only when a node actually moved, so a
+            # Runtime that rebinds nothing hashes a start byte for byte as
+            # every earlier build did and receipts written then still replay.
+            request["agent_binding"] = binding.identity
+        request_hash = definition_hash(request).value
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             receipt = connection.execute(
@@ -525,11 +555,18 @@ class LangGraphWorkflowService:
             connection.execute(
                 "INSERT INTO langgraph_runs("
                 "run_id,workflow_id,workflow_version,status,revision,input_json,"
-                "result_json,error,created_at,updated_at,owner_actor,goal)"
-                " VALUES (?,?,?,'running',0,?,NULL,NULL,?,?,?,?)",
+                "result_json,error,created_at,updated_at,owner_actor,goal,"
+                "graph_snapshot_json)"
+                " VALUES (?,?,?,'running',0,?,NULL,NULL,?,?,?,?,?)",
                 (
                     run_id, workflow_id, record.version.value,
                     canonical_json(inputs), now, now, actor, goal,
+                    # Null unless a node moved: a run that executes its
+                    # definition unchanged is still named by its version, and
+                    # storing a copy of the graph would only invite the two to
+                    # be compared for a difference that cannot exist.
+                    None if binding is None
+                    else canonical_json(to_primitive(ir)),
                 ),
             )
             connection.execute(
@@ -539,8 +576,8 @@ class LangGraphWorkflowService:
             self._append_event(connection, run_id)
             connection.commit()
         if wait:
-            return self._execute(run_id, record.ir, inputs=inputs)
-        self._in_background(run_id, record.ir, inputs=inputs)
+            return self._execute(run_id, ir, inputs=inputs)
+        self._in_background(run_id, ir, inputs=inputs)
         return self.get(run_id)
 
     def start_snapshot(
@@ -667,13 +704,31 @@ class LangGraphWorkflowService:
             record = self._workflow(workflow_id, workflow_version)
         except LookupError as exc:
             return {"compatible": False, "reason": "workflow_not_found", "detail": str(exc)}
+        try:
+            # The same rebinding `start` would do. Asked before compiling,
+            # because in single-Agent mode the question is not "does this
+            # definition compile as published" — it is "can this Runtime run
+            # it", and a definition pinned to an Agent nobody installed here
+            # is exactly the one single-Agent mode exists to answer yes for.
+            ir, binding = self._bound(record.ir)
+        except ValueError as exc:
+            # Not cached, and not `unsupported_workflow`: having no Agent to
+            # bind to is a fact about this Runtime right now, not about the
+            # definition, and it stops being true the moment one connects.
+            return {
+                "compatible": False,
+                "reason": "agent_binding_unavailable",
+                "detail": str(exc),
+            }
         key = record.definition_hash.value
+        if binding is not None:
+            key = f"{key}#{binding.identity}"
         with self._compatibility_lock:
             cached = self._compatibility.get(key)
         if cached is not None:
             return cached
         try:
-            compile_workflow(record.ir, self.handlers)
+            compile_workflow(ir, self.handlers)
         except (LangGraphCompileError, ValueError, TypeError) as exc:
             answer: Mapping[str, Any] = {
                 "compatible": False,
@@ -686,6 +741,11 @@ class LangGraphWorkflowService:
                 "workflow_version": record.version.value,
                 "engine": "langgraph",
             }
+            if binding is not None:
+                # What the start button will actually do, said before it is
+                # pressed. A person looking at a Workflow bound to an Agent
+                # they do not have should be able to see why it is startable.
+                answer["agent_binding"] = binding.identity
         with self._compatibility_lock:
             # Bounded, because a workflow republished many times leaves an
             # entry per version. Cleared wholesale rather than evicted one at

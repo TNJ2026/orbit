@@ -764,6 +764,7 @@ def build_service(
     state_directory: Path | str,
     secret_values: Mapping[str, str] | None = None,
     single_goal: bool = False,
+    rebind: Any = None,
 ) -> LangGraphWorkflowService:
     """Build the isolated service and its two adapter-owned databases."""
 
@@ -784,4 +785,5 @@ def build_service(
         artifact_store=artifact_store,
         console=AttemptConsole(state / "langgraph-runs.sqlite3"),
         single_goal=single_goal,
+        rebind=rebind,
     )

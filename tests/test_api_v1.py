@@ -1882,7 +1882,11 @@ class CapabilityTests(ApiTestCase):
             self.assertFalse(data["permissions"]["ops_read"])
             self.assertFalse(data["permissions"]["ops_write"])
             self.assertEqual(
-                {"single_goal_mode": False, "workflow_ui_mode": "multi-agent"},
+                {
+                    "single_goal_mode": False,
+                    "workflow_ui_mode": "multi-agent",
+                    "agent_binding": None,
+                },
                 data["product_mode"],
             )
             caps = data["capabilities"]
@@ -1940,7 +1944,11 @@ class CapabilityTests(ApiTestCase):
                 "/api/v1/capabilities", actor="reader"
             ).json()["data"]
             self.assertEqual(
-                {"single_goal_mode": True, "workflow_ui_mode": "multi-agent"},
+                {
+                    "single_goal_mode": True,
+                    "workflow_ui_mode": "multi-agent",
+                    "agent_binding": None,
+                },
                 data["product_mode"],
             )
             catalog = client.get(

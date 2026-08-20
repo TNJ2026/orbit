@@ -146,6 +146,19 @@ class ApiContext:
             getattr(langgraph_service, "single_goal", False)
         )
 
+    def single_agent_target(self):
+        """The one Agent every Agent step is rebound to, or None.
+
+        Read off the engine rather than off `workflow_ui_mode`: the mode is
+        what the deployment asked for, and this is what will actually happen —
+        including "nothing", when the mode is on but two Agents are registered
+        and no Agent App is connected to break the tie.
+        """
+
+        binder = getattr(self.langgraph_service, "rebind", None)
+        current = getattr(binder, "current", None)
+        return None if current is None else current()
+
     def recent_handler_attempts(
         self,
     ) -> tuple[dict[str, Mapping[str, Any]], dict[str, int], dict[str, int]]:

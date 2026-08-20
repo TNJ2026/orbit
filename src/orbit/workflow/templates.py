@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 import json
 from typing import Any, Callable, Mapping, Sequence
 import uuid
 
+from .agent_binding import is_agent_node, preferred_agent, rebind_agents
 from .application.workflows import WorkflowDefinitionService
 from .api.workflow_catalog import WorkflowCatalogReadModelService
 from .catalogs import HandlerManifest
-from .domain.definitions import IRHandlerRef
 
 
 @dataclass(frozen=True)
@@ -60,22 +60,12 @@ class SingleAgentTemplateService:
         clients = sorted(self.connected_clients())
         if not clients:
             return None
-        client = clients[0]
-        aliases = {"chatgpt": "codex", "claude-desktop": "claude"}
-        preferred = f"agent.{aliases.get(client, client)}"
-        agents = sorted(
-            (
-                item for item in self.manifests.values()
-                if "agent.invoke" in item.capabilities
-            ),
-            key=lambda item: item.name,
-        )
-        manifest = self.manifests.get(preferred)
-        if manifest is not None and "agent.invoke" in manifest.capabilities:
-            return client, manifest
-        if len(agents) == 1:
-            return client, agents[0]
-        return None
+        # One policy for *which* Agent, shared with single-Agent mode's start
+        # path. Readiness stays this service's own rule: a template run is
+        # started by a connected Agent App, so no client means not ready even
+        # where the Runtime could name an Agent perfectly well.
+        manifest = preferred_agent(tuple(self.manifests.values()), clients[:1])
+        return None if manifest is None else (clients[0], manifest)
 
     def list(self) -> Mapping[str, Any]:
         binding = self._binding()
@@ -193,24 +183,18 @@ class SingleAgentTemplateService:
 
     @staticmethod
     def _bind_current_agent(ir, manifest: HandlerManifest):
-        agent_nodes = tuple(
-            node for node in ir.nodes
-            if node.handler is not None and node.handler.name.startswith("agent.")
-        )
-        if not agent_nodes:
+        """The published template, run by whichever Agent is current.
+
+        The same rebinding every Workflow gets in single-Agent mode, plus one
+        rule of its own: a *template* with no Agent node left is not a
+        template, so an empty graph is an error here rather than a graph that
+        simply needs no work.
+        """
+
+        if not any(is_agent_node(node) for node in ir.nodes):
             raise ValueError("published single-Agent workflow has no Agent node")
-        expected_inputs = tuple(manifest.inputs.items())
-        expected_outputs = tuple(manifest.outputs.items())
-        for node in agent_nodes:
-            if tuple((port.id, port.schema_id) for port in node.inputs) != expected_inputs:
-                raise ValueError("current Agent input ports do not match the published graph")
-            if tuple((port.id, port.schema_id) for port in node.outputs) != expected_outputs:
-                raise ValueError("current Agent output ports do not match the published graph")
-        reference = IRHandlerRef(manifest.name, manifest.version, manifest.fingerprint)
-        return replace(ir, nodes=tuple(
-            replace(node, handler=reference) if node in agent_nodes else node
-            for node in ir.nodes
-        ))
+        rebinding = rebind_agents(ir, manifest)
+        return ir if rebinding is None else rebinding.ir
 
     @staticmethod
     def _document(template: WorkflowTemplate, manifest: HandlerManifest) -> dict[str, Any]:

@@ -59,7 +59,8 @@ def build_routes(ctx) -> list[Route]:
         for item in workflows:
             bindings = handler_bindings(ctx.workflow_reads.detail(item["workflow_id"]))
             incompatible = [
-                binding for binding in bindings if binding["status"] != "current"
+                binding for binding in bindings
+                if binding["status"] not in {"current", "rebound"}
             ]
             item["handler_compatibility"] = {
                 "compatible": not incompatible,
@@ -433,6 +434,11 @@ def build_routes(ctx) -> list[Route]:
         if registry is not None and registry.sealed:
             for entry in registry.entries():
                 available[entry.manifest.name] = entry.manifest
+        # In single-Agent mode an Agent step does not have to find the Agent it
+        # was published against — it will be rebound to this one at start. That
+        # is a third answer beside current and drifted, and calling it drift
+        # would offer a recompile for a binding that needs no repair.
+        target = ctx.single_agent_target()
         bindings = []
         for node in item.get("definition", {}).get("nodes", ()):
             handler = node.get("handler")
@@ -444,15 +450,24 @@ def build_routes(ctx) -> list[Route]:
             agent_binding = (
                 current is not None and "agent.invoke" in current.capabilities
             )
+            rebound = (
+                target is not None
+                and name.startswith("agent.")
+                and target.name != name
+            )
             bindings.append({
                 "node_id": node["id"],
                 "handler_name": name,
                 "pinned_version": pinned,
-                "available_version": current_version,
+                "available_version": (
+                    target.version if rebound else current_version
+                ),
                 "status": (
-                    "current" if current_version == pinned or agent_binding
+                    "rebound" if rebound
+                    else "current" if current_version == pinned or agent_binding
                     else "missing" if current is None else "version_changed"
                 ),
+                **({"rebound_to": target.name} if rebound else {}),
             })
         return bindings
 
@@ -586,7 +601,7 @@ def build_routes(ctx) -> list[Route]:
         item["handler_bindings"] = handler_bindings(item)
         stale = [
             binding for binding in item["handler_bindings"]
-            if binding["status"] != "current"
+            if binding["status"] not in {"current", "rebound"}
         ]
         item["handler_drift"] = stale
         item["action_editors"] = action_editors(item, actor)

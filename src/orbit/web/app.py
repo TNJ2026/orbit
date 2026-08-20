@@ -495,6 +495,22 @@ def create_app(
         if workflow_generator is None:
             workflow_generator = built[sorted(built)[0]]
 
+    # Single-Agent mode is a binding policy over one catalog, not a catalog of
+    # its own: every published Workflow runs in both modes, and here each of
+    # its Agent steps is rebound to the one Agent this Runtime speaks for
+    # instead of the one its author happened to pick. Multi-Agent mode passes
+    # None and every Workflow runs exactly as it was published.
+    agent_rebind = None
+    if workflow_ui_mode == "single-agent":
+        from ..workflow.agent_binding import SingleAgentBinder
+
+        agent_rebind = SingleAgentBinder(
+            [registration.manifest for registration in registrations],
+            # Late-bound: which Agent is current follows who is connected now,
+            # and this is decided once, at startup.
+            authoring_broker.clients if authoring_broker is not None else None,
+        )
+
     if langgraph_state_directory is not None:
         if langgraph_service is not None:
             raise ValueError(
@@ -510,6 +526,7 @@ def create_app(
             # The capability report has always said this; now the engine
             # keeps it, so the report is a promise rather than a label.
             single_goal=single_goal_mode,
+            rebind=agent_rebind,
         )
 
     composition = RuntimeComposition(

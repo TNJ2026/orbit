@@ -183,6 +183,14 @@ def build_routes(ctx) -> list[Route]:
             "product_mode": {
                 "single_goal_mode": ctx.single_goal_mode,
                 "workflow_ui_mode": ctx.workflow_ui_mode,
+                # Which Agent every Agent step will run on, when the Runtime
+                # binds them all to one. Null in multi-Agent mode, and null in
+                # single-Agent mode while the choice is still ambiguous — the
+                # client is told, it never infers this from the mode name.
+                "agent_binding": (
+                    None if (target := ctx.single_agent_target()) is None
+                    else {"handler_name": target.name, "version": target.version}
+                ),
             },
             "permissions": {
                 "start_run": ctx.guard.allows(actor, WRITE_SCOPE),
