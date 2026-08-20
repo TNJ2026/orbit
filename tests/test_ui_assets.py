@@ -92,12 +92,37 @@ class CatalogTests(unittest.TestCase):
         }.isdisjoint(keys))
 
 
+def translation_calls(text: str):
+    """Every literal key inside an `i18n.t(...)` call, wherever it sits.
+
+    Not just the first argument. A key chosen by a conditional —
+    `i18n.t(count === 1 ? "history.artifacts.one" : "history.artifacts.many")`
+    — is as much a key as a literal one, and matching only the leading
+    literal made three of them invisible: two rendered their own key on the
+    history list for any goal that produced an Artifact, and the catalog
+    check passed the whole time.
+    """
+
+    for call in re.finditer(r"i18n\.t\(", text):
+        depth, index = 1, call.end()
+        while index < len(text) and depth:
+            if text[index] == "(":
+                depth += 1
+            elif text[index] == ")":
+                depth -= 1
+            index += 1
+        arguments = text[call.end():index - 1]
+        # A dotted lowercase literal is a key; `{ count: x }` and message
+        # strings are not.
+        yield from re.findall(r"""["']([a-z][\w]*(?:\.[\w]+)+)["']""", arguments)
+
+
 class SourceTests(unittest.TestCase):
     def test_every_key_used_in_source_exists(self) -> None:
         used = set()
         for path in source_files():
             text = path.read_text(encoding="utf-8")
-            used |= set(re.findall(r"""i18n\.t\(\s*["']([\w.]+)["']""", text))
+            used |= set(translation_calls(text))
             used |= set(re.findall(r'data-i18n(?:-label)?="([\w.]+)"', text))
         known = set(catalog("en-US"))
         # Keys built from a variable (`${titleKey}.empty`) are checked by the
