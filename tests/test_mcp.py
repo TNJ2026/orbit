@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import unittest
 
+from orbit.web.mcp import McpSessionRegistry
 from tests.test_api_v1 import ApiTestCase
 from tests.test_web_composition import AsgiHarness
 
@@ -553,6 +554,102 @@ class StdioTransportTests(ApiTestCase):
         )
 
         self.assertEqual(-32001, responses[0]["error"]["code"])
+
+
+class McpSessionRegistryTests(unittest.TestCase):
+    """Presence is observed, never declared: silent clients age out."""
+
+    def test_initialize_records_who_the_client_is(self) -> None:
+        registry = McpSessionRegistry(clock=lambda: 1000.0)
+        registry.observe("agent", "initialize", {
+            "clientInfo": {"name": "agent-reach", "version": "1.2.3"},
+            "protocolVersion": "2025-06-18",
+        })
+
+        (session,) = registry.sessions()
+        self.assertEqual("agent", session["session_id"])
+        self.assertEqual("agent", session["actor"])
+        self.assertEqual(
+            {"name": "agent-reach", "version": "1.2.3"}, session["client"],
+        )
+        self.assertEqual("2025-06-18", session["protocol_version"])
+        self.assertEqual(1, session["requests"])
+        self.assertTrue(session["connected"])
+
+    def test_a_silent_client_ages_out(self) -> None:
+        ticks = [1000.0]
+        registry = McpSessionRegistry(
+            presence_seconds=30, clock=lambda: ticks[0],
+        )
+        registry.observe("agent", "ping", {})
+
+        self.assertTrue(registry.sessions()[0]["connected"])
+        ticks[0] += 31
+        (session,) = registry.sessions()
+        self.assertFalse(session["connected"])
+        # Aging out is a verdict on the record, not a deletion: the operator
+        # still sees who was here and when they went quiet.
+        self.assertEqual("ping", session["last_method"])
+
+    def test_anonymous_messages_share_one_session(self) -> None:
+        registry = McpSessionRegistry(clock=lambda: 1000.0)
+        registry.observe(None, "initialize", {})
+        registry.observe(None, "tools/list", {})
+
+        (session,) = registry.sessions()
+        self.assertEqual("anonymous", session["session_id"])
+        self.assertIsNone(session["actor"])
+        self.assertEqual(2, session["requests"])
+
+
+class McpSessionEndpointTests(ApiTestCase):
+    def sessions(self, client, actor="reader"):
+        response = client.request("GET", "/api/v1/mcp/sessions", actor=actor)
+        self.assertEqual(200, response.status_code)
+        return response.json()["data"]
+
+    def test_no_traffic_reports_no_sessions(self) -> None:
+        with AsgiHarness(self.app) as client:
+            data = self.sessions(client)
+            self.assertEqual([], data["sessions"])
+            self.assertIn("presence_seconds", data)
+
+    def test_initialize_and_calls_make_a_connected_session(self) -> None:
+        with AsgiHarness(self.app) as client:
+            rpc(client, "initialize", {
+                "clientInfo": {"name": "agent-reach", "version": "1.2.3"},
+                "protocolVersion": "2025-06-18",
+            }, actor="reader")
+            tool(client, "list_workflows", {}, actor="reader")
+
+            (session,) = self.sessions(client)["sessions"]
+            self.assertEqual("reader", session["session_id"])
+            self.assertEqual(
+                {"name": "agent-reach", "version": "1.2.3"}, session["client"],
+            )
+            self.assertEqual("tools/call", session["last_method"])
+            self.assertEqual(2, session["requests"])
+            self.assertTrue(session["connected"])
+            self.assertIn("connected_at", session)
+            self.assertIn("last_seen", session)
+
+    def test_anonymous_handshake_is_visible_as_anonymous(self) -> None:
+        with AsgiHarness(self.app) as client:
+            rpc(client, "initialize", {})
+
+            (session,) = self.sessions(client)["sessions"]
+            self.assertEqual("anonymous", session["session_id"])
+            self.assertIsNone(session["actor"])
+            self.assertTrue(session["connected"])
+
+    def test_the_endpoint_requires_credentials(self) -> None:
+        with AsgiHarness(self.app) as client:
+            response = client.request("GET", "/api/v1/mcp/sessions")
+            self.assertEqual(401, response.status_code)
+            response = client.request(
+                "GET", "/api/v1/mcp/sessions", actor="nobody",
+            )
+            self.assertEqual(403, response.status_code)
 
 
 if __name__ == "__main__":

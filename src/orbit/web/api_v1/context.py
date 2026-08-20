@@ -73,6 +73,7 @@ class ApiContext:
         shutdown_request: Callable[[], None] | None = None,
         langgraph_service=None,
         workflow_ui_mode: str = "multi-agent",
+        mcp_sessions=None,
     ) -> None:
         path = Path(db_path)
         workflow_path = Path(workflow_db_path or db_path)
@@ -133,6 +134,10 @@ class ApiContext:
         self.workflow_publisher = workflow_publisher
         self.authoring_service = authoring_service
         self.shutdown_request = shutdown_request
+        # Which MCP clients the Runtime is hearing from. Shared with the `/mcp`
+        # dispatcher rather than built here: a second registry would know only
+        # the half of the traffic that arrived after it was constructed.
+        self.mcp_sessions = mcp_sessions
         # Derived, never passed: one goal at a time is a rule the engine
         # keeps, so this reads it from there. Given its own parameter it
         # became a second answer that could differ from the first — which is

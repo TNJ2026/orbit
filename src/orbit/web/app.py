@@ -599,7 +599,7 @@ def create_app(
 
     from ..workflow.application.authoring_job_service import AuthoringJobService
     from .api_v1 import authoring_timeout_seconds, build_api_v1
-    from .mcp import build_mcp_dispatcher, mcp_routes
+    from .mcp import McpSessionRegistry, build_mcp_dispatcher, mcp_routes
 
     from importlib import resources as _resources
 
@@ -803,6 +803,9 @@ def create_app(
     # than inside the route factory so `orbit mcp` can carry this very
     # dispatcher over stdio instead of standing up its own services against a
     # database this process already has open.
+    # One registry for both transports: HTTP messages and the stdio pump feed
+    # the same dispatcher, and `/api/v1/mcp/sessions` reads it back.
+    mcp_sessions = McpSessionRegistry()
     mcp_dispatch = build_mcp_dispatcher(
         composition.db_path,
         clock=composition.clock,
@@ -813,6 +816,7 @@ def create_app(
         authoring_jobs=authoring_jobs,
         authoring_broker=authoring_broker,
         langgraph_service=langgraph_service,
+        session_registry=mcp_sessions,
     )
 
     routes: list[Route | Mount | WebSocketRoute] = [
@@ -840,6 +844,7 @@ def create_app(
             langgraph_service=langgraph_service,
             workflow_ui_mode=workflow_ui_mode,
             template_service=template_service,
+            mcp_sessions=mcp_sessions,
         ),
         # The MCP surface is a second protocol over the same application
         # services and the same identity, not a second implementation.
@@ -928,6 +933,7 @@ def create_app(
     # `orbit mcp` reaches the tools through this instead of over its own HTTP
     # connection: same dispatcher, same services, one transport removed.
     app.state.mcp_dispatch = mcp_dispatch
+    app.state.mcp_sessions = mcp_sessions
     # Kept separate from the Orbit composition by design (ADR 002). Embedders
     # may operate the optional adapter without implying it is the default
     # event-sourced Runtime.

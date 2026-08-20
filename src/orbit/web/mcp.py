@@ -17,6 +17,8 @@ import asyncio
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import threading
+import time
 from typing import Any, Callable, Mapping
 
 from starlette.requests import Request
@@ -41,6 +43,90 @@ METHOD_NOT_FOUND = -32601
 INVALID_PARAMS = -32602
 PARSE_ERROR = -32700
 NOT_AUTHORIZED = -32001
+
+MCP_SESSION_PRESENCE_SECONDS = 60.0
+
+
+class McpSessionRegistry:
+    """Which MCP clients the Runtime has heard from, and when.
+
+    The HTTP transport has no connection to watch, so presence is observed,
+    never declared: a client counts as connected for `presence_seconds` after
+    its last message, the same rule the authoring broker applies to its
+    pollers. Sessions are keyed by actor — the one identity every message
+    already carries — with ``anonymous`` standing in for calls that arrive
+    without credentials, since those can still handshake and discover tools.
+    """
+
+    def __init__(
+        self,
+        *,
+        presence_seconds: float = MCP_SESSION_PRESENCE_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
+        wall_clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._lock = threading.Lock()
+        self._sessions: dict[str, dict[str, Any]] = {}
+        self.presence_seconds = float(presence_seconds)
+        self.clock = clock
+        self.wall_clock = wall_clock or (lambda: datetime.now(timezone.utc))
+
+    def observe(
+        self, actor: str | None, method: str, params: Mapping[str, Any],
+    ) -> None:
+        """One JSON-RPC message from a client: create or refresh its session.
+
+        `initialize` is the only message that says who the client is; every
+        message says it is still there. Both facts are worth keeping.
+        """
+
+        key = actor if actor else "anonymous"
+        client_info = None
+        protocol_version = None
+        if method == "initialize" and isinstance(params, Mapping):
+            info = params.get("clientInfo")
+            if isinstance(info, Mapping):
+                client_info = {
+                    "name": str(info.get("name", "")),
+                    "version": str(info.get("version", "")),
+                }
+            declared = params.get("protocolVersion")
+            protocol_version = None if declared is None else str(declared)
+        seen = self.clock()
+        stamp = self.wall_clock().isoformat()
+        with self._lock:
+            session = self._sessions.get(key)
+            if session is None:
+                session = {
+                    "session_id": key, "actor": actor,
+                    "client": None, "protocol_version": None,
+                    "connected_at": stamp, "requests": 0,
+                }
+                self._sessions[key] = session
+            session["seen"] = seen
+            session["last_seen"] = stamp
+            session["last_method"] = method
+            session["requests"] += 1
+            if client_info is not None:
+                session["client"] = client_info
+            if protocol_version is not None:
+                session["protocol_version"] = protocol_version
+
+    def sessions(self) -> list[dict[str, Any]]:
+        """Every session seen, most recent first, with a `connected` verdict."""
+
+        cutoff = self.clock() - self.presence_seconds
+        with self._lock:
+            sessions = list(self._sessions.values())
+        return [
+            {
+                key: value for key, value in session.items() if key != "seen"
+            }
+            | {"connected": session["seen"] > cutoff}
+            for session in sorted(
+                sessions, key=lambda item: item["last_seen"], reverse=True,
+            )
+        ]
 
 
 def _result(request_id: Any, payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -75,6 +161,7 @@ def build_mcp_dispatcher(
     authoring_jobs=None,
     authoring_broker=None,
     langgraph_service=None,
+    session_registry: McpSessionRegistry | None = None,
 ) -> Callable[[Mapping[str, Any], str | None], dict[str, Any] | None]:
     """One JSON-RPC message in, at most one response out.
 
@@ -105,6 +192,7 @@ def build_mcp_dispatcher(
     )
     guard = authorizer or Authorizer()
     now = clock or (lambda: datetime.now(timezone.utc))
+    sessions = session_registry or McpSessionRegistry()
 
     tools = (
         # -- discovery ----------------------------------------------------
@@ -562,6 +650,10 @@ def build_mcp_dispatcher(
         request_id = message.get("id")
         method = message.get("method")
         params = message.get("params") or {}
+
+        # Every well-formed message is a sign of life, including the
+        # notifications that get no response.
+        sessions.observe(actor, str(method or ""), params)
 
         if method == "initialize":
             return _result(request_id, {

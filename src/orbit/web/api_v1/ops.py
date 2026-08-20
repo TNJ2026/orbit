@@ -235,9 +235,31 @@ def build_routes(ctx) -> list[Route]:
             asyncio.get_running_loop().call_later(0.05, ctx.shutdown_request)
         return response
 
+    async def mcp_session_list(request: Request) -> JSONResponse:
+        """Which MCP clients the Runtime has heard from, and for how long ago.
+
+        The HTTP `/mcp` transport has no connection to report, so this answers
+        "is an Agent connected" the only honest way: who called, what they
+        called themselves at `initialize`, and whether their last message is
+        inside the presence window.
+        """
+
+        actor = ctx.authenticate(request, READ_SCOPE)
+        if isinstance(actor, JSONResponse):
+            return actor
+        registry = ctx.mcp_sessions
+        return JSONResponse(envelope({
+            "sessions": registry.sessions() if registry is not None else [],
+            "presence_seconds": (
+                registry.presence_seconds if registry is not None else None
+            ),
+            "observed_at": ctx.now().isoformat(),
+        }))
+
     return [
         Route("/api/v1/handler-catalog", handler_catalog, methods=["GET"]),
         Route("/api/v1/live", live_cursor, methods=["GET"]),
+        Route("/api/v1/mcp/sessions", mcp_session_list, methods=["GET"]),
         Route("/api/v1/ops/status", ops_status, methods=["GET"]),
         Route("/api/v1/capabilities", capability_read, methods=["GET"]),
         Route("/api/v1/runtime/shutdown", runtime_shutdown, methods=["POST"]),
