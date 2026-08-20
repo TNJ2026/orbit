@@ -211,12 +211,25 @@ class AgentSelectionTests(unittest.TestCase):
         agents = [manifest_for("claude"), manifest_for("codex")]
 
         self.assertIsNone(preferred_agent(agents, []))
-        with self.assertRaisesRegex(AgentRebindError, "which Agent"):
-            SingleAgentBinder(agents)(single_step_workflow(agent_step()))
 
-    def test_no_agent_at_all_says_so(self) -> None:
-        with self.assertRaisesRegex(AgentRebindError, "no Agent Handler"):
-            SingleAgentBinder([])(single_step_workflow(agent_step()))
+    def test_an_unnameable_agent_leaves_the_graph_as_published(self) -> None:
+        """Single-Agent mode must never be worse than not having it on.
+
+        Several CLIs installed and nothing connected yet is the state a fresh
+        `orbit serve` is in on a developer's machine — the session registry
+        lives in the process, so every restart returns to it. Refusing there
+        stopped Workflows that had started perfectly well the moment before,
+        bound to an Agent that is installed, for a substitution nobody asked
+        for. With no Agent to bind to, the Agent the author published is the
+        binding, and the compiler decides whether it works exactly as it does
+        in multi-Agent mode.
+        """
+
+        for agents in ([manifest_for("claude"), manifest_for("codex")], []):
+            with self.subTest(registered=len(agents)):
+                self.assertIsNone(
+                    SingleAgentBinder(agents)(single_step_workflow(agent_step()))
+                )
 
 
 class ConnectedClientTests(unittest.TestCase):
@@ -474,7 +487,14 @@ class SingleAgentEngineTests(unittest.TestCase):
                     idempotency_key="start-1", actor="local",
                 )
 
-    def test_an_ambiguous_binding_is_reported_as_the_runtimes_fault(self) -> None:
+    def test_an_unrunnable_definition_says_a_connection_would_fix_it(self) -> None:
+        """The Agent is missing *and* no substitute can be named yet.
+
+        The compiler's verdict is the accurate one and stays the reason. What
+        it cannot know is that connecting an Agent App would make this
+        startable — which is the difference between a dead end and a step.
+        """
+
         ir = single_step_workflow(agent_step())
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             engine = self.engine(
@@ -485,7 +505,9 @@ class SingleAgentEngineTests(unittest.TestCase):
             answer = engine.compatibility("workflow:single")
 
             self.assertFalse(answer["compatible"])
-            self.assertEqual("agent_binding_unavailable", answer["reason"])
+            self.assertEqual("unsupported_workflow", answer["reason"])
+            self.assertIn("agent.absent", answer["detail"])
+            self.assertIn("no Agent App has introduced itself", answer["detail"])
 
 
 class SingleAgentCatalogTests(unittest.TestCase):

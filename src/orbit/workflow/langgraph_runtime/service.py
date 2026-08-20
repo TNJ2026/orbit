@@ -745,10 +745,22 @@ class LangGraphWorkflowService:
         try:
             compile_workflow(ir, self.handlers)
         except (LangGraphCompileError, ValueError, TypeError) as exc:
+            detail = str(exc)
+            # A definition that names an Agent this Runtime does not have is
+            # exactly what single-Agent mode rebinds — so when it could not
+            # name one, say so, or the reader is left with a dead end where
+            # there is a next step.
+            ambiguous = getattr(self.rebind, "ambiguous", None)
+            if binding is None and ambiguous is not None and ambiguous():
+                detail += (
+                    " Single-Agent mode would run this on the Agent this "
+                    "Runtime is talking to, but no Agent App has introduced "
+                    "itself yet."
+                )
             answer: Mapping[str, Any] = {
                 "compatible": False,
                 "reason": "unsupported_workflow",
-                "detail": str(exc),
+                "detail": detail,
             }
         else:
             answer = {

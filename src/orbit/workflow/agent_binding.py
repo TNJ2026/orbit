@@ -264,6 +264,18 @@ class SingleAgentBinder:
 
         return preferred_agent(tuple(self._manifests()), tuple(self._clients()))
 
+    def ambiguous(self) -> bool:
+        """Agents are installed, and nothing says which one this Runtime uses.
+
+        Worth telling a reader apart from "no Agent installed": connecting an
+        Agent App resolves this one and cannot resolve the other.
+        """
+
+        return (
+            bool(agent_manifests(tuple(self._manifests())))
+            and self.current() is None
+        )
+
     def __call__(self, ir: WorkflowIR) -> AgentRebinding | None:
         if not any(is_agent_node(node) for node in ir.nodes):
             # A Workflow with no Agent step runs identically in both modes, so
@@ -273,15 +285,17 @@ class SingleAgentBinder:
             return None
         manifest = self.current()
         if manifest is None:
-            agents = agent_manifests(tuple(self._manifests()))
-            if not agents:
-                raise AgentRebindError(
-                    "single-Agent mode has no Agent to bind to: no Agent "
-                    "Handler is registered"
-                )
-            raise AgentRebindError(
-                "single-Agent mode cannot tell which Agent to bind to: "
-                + ", ".join(item.name for item in agents)
-                + " are registered and no Agent App has introduced itself"
-            )
+            # No Agent to bind to, so the binding the author published is the
+            # binding. Not a refusal: single-Agent mode is a policy about
+            # *which* Agent runs a step, and it must never leave a Workflow
+            # less runnable than it would be with the mode off. Refusing here
+            # stopped Workflows bound to an installed Agent — on any machine
+            # with two CLIs and no Agent App connected yet, which is where a
+            # freshly started Runtime sits, since the session registry lives
+            # in the process and every restart returns to it.
+            #
+            # Whether the published bindings actually resolve is the
+            # compiler's question, and it answers it the same way in both
+            # modes.
+            return None
         return rebind_agents(ir, manifest)
