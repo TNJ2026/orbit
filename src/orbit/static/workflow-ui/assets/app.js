@@ -56,12 +56,24 @@ function generationAgents() {
   return capability?.available ? capability.agents || [] : [];
 }
 
+function mcpGenerationAgents() {
+  const capability = shellFacts?.capabilities?.workflow_generation;
+  if (!capability?.available) return [];
+  if (Array.isArray(capability.mcp_agents)) return capability.mcp_agents;
+  // Compatibility with a Runtime already running when this UI was updated:
+  // discovered Handler names are not MCP registrations.
+  const handlers = new Set(
+    shellFacts?.capabilities?.agent_handlers?.agents || [],
+  );
+  return (capability.agents || []).filter((name) => !handlers.has(name));
+}
+
 /** The Agent this Runtime writes with when a request names none.
  *
  * The list is sorted for display, so its first entry is not the fallback the
  * server would actually use; the server names that one for us. */
-function defaultGenerationAgent() {
-  const agents = generationAgents();
+function defaultGenerationAgent(mcpOnly = false) {
+  const agents = mcpOnly ? mcpGenerationAgents() : generationAgents();
   // Whatever the Runtime says it will use when nobody names one. This used to
   // look for an `app:` prefix and prefer it, which made the *kind* of Agent
   // part of its name: an author has no reason to care whether a writer is a
@@ -72,8 +84,8 @@ function defaultGenerationAgent() {
 }
 
 
-function generationAgentField(id, selected, onchange) {
-  const agents = generationAgents();
+function generationAgentField(id, selected, onchange, mcpOnly = false) {
+  const agents = mcpOnly ? mcpGenerationAgents() : generationAgents();
   if (!agents.length) return null;
   if (agents.length === 1) return el("div", { class: "field" }, [
     el("span", { class: "field-label", text: i18n.t("generate.writtenBy") }),
@@ -121,11 +133,11 @@ function reportError(error) {
 function workflowViews() {
   return createWorkflowDefinitionViews({
     api, i18n, reportError,
-    // The canvas that draws a workflow, where this Runtime says it has one.
-    // Absent in a checkout that never built the editor bundle, and the
+    // The read-only canvas that draws a workflow, where this Runtime says it
+    // has one. Absent in a checkout that never built the viewer bundle, and the
     // definition list stands alone there.
-    editorUrl: () => shellFacts?.capabilities?.workflow_editor?.available
-      ? (shellFacts.capabilities.workflow_editor.url || "/editor/")
+    viewerUrl: () => shellFacts?.capabilities?.workflow_viewer?.available
+      ? (shellFacts.capabilities.workflow_viewer.url || "/viewer/")
       : null,
   });
 }
@@ -211,6 +223,35 @@ function navigate(next) {
   router.navigate(next);
 }
 
+/* Single/multi-Agent is presentation-only — both modes serve the same API —
+   so the top-bar switch keeps its choice in localStorage and overrides what
+   the Runtime reports, exactly like the theme next to it. */
+function uiModeOverride() {
+  const value = localStorage.getItem("orbit.uiMode");
+  return value === "single-agent" || value === "multi-agent" ? value : null;
+}
+
+function effectiveWorkflowUiMode() {
+  return uiModeOverride() || shellFacts?.product_mode?.workflow_ui_mode;
+}
+
+function applyUiModeOverride(facts) {
+  const override = uiModeOverride();
+  if (override && facts?.product_mode) {
+    facts.product_mode = { ...facts.product_mode, workflow_ui_mode: override };
+  }
+  return facts;
+}
+
+function syncUiModeToggle() {
+  const mode = effectiveWorkflowUiMode();
+  for (const option of document.querySelectorAll("#uiModeToggle .theme-option")) {
+    const active = option.dataset.uiMode === mode;
+    option.classList.toggle("active", active);
+    option.setAttribute("aria-pressed", String(active));
+  }
+}
+
 async function render() {
   // Old bookmarks to retired views land on the workspace instead of a 404.
   if (["ops", "settings", "inbox", "artifacts"].includes(route.view)) {
@@ -250,8 +291,9 @@ async function render() {
     // Agent App registrations are live rather than startup configuration.
     // Refresh capabilities with the view so a newly connected app can become
     // the initial writer without requiring a full browser reload.
-    shellFacts = (await api.capabilities()).data;
+    shellFacts = applyUiModeOverride((await api.capabilities()).data);
     mayStartRun = Boolean(shellFacts.permissions && shellFacts.permissions.start_run);
+    syncUiModeToggle();
     // One Agent instead of several is the whole difference between the two
     // products. The Workflow catalog is not part of it: single-agent mode
     // authors workflows too, and hiding the page they land in left the one it
@@ -263,11 +305,21 @@ async function render() {
       navigate({ view: "home", runId: null });
       return;
     }
-    views.update({ i18n, shellFacts, mayStartRun });
+    views.update({ i18n, shellFacts, mayStartRun, route });
     const fresh = el("div", { class: "content" });
     if (route.view === "home") await views.renderSimplifiedWorkspace(fresh);
-    else if (route.view === "goal") await views.renderHistory(fresh, route.runId);
-    else if (route.view === "goals") await views.renderHistory(fresh);
+    else if (route.view === "goal") {
+      // The goal detail is a right-hand drawer over History: the list stays
+      // rendered behind it, and dismissing walks back.
+      await views.renderHistory(fresh);
+      await views.openGoalModal(route.runId);
+    }
+    else if (route.view === "goals") {
+      await views.renderHistory(fresh);
+      // A click-opened modal owns no address; a background render must not
+      // close it for good, so the list re-attaches whatever was open.
+      await views.reopenGoalModal();
+    }
     else if (route.view === "workflows") await views.renderWorkflows(fresh);
     else if (route.view === "workflow") {
       // The catalog stays rendered (dimmed) behind the centred detail modal.
@@ -326,7 +378,7 @@ async function setLocale(locale) {
   document.getElementById("localeSelect").value = locale;
   syncCustomSelect(document.getElementById("localeSelect"));
   applyStaticText();
-  views.update({ i18n, shellFacts, mayStartRun });
+  views.update({ i18n, shellFacts, mayStartRun, route });
   views.syncRefreshIntervalSelect(document.getElementById("refreshInterval"));
   await render();
   await views.refreshRuntimeCard();
@@ -460,22 +512,14 @@ async function boot() {
   installMoreMenu();
 
   try {
-    shellFacts = (await api.capabilities()).data;
+    shellFacts = applyUiModeOverride((await api.capabilities()).data);
     mayStartRun = Boolean(shellFacts.permissions && shellFacts.permissions.start_run);
+    syncUiModeToggle();
     const agentsNav = document.querySelector('[data-view="agents"]');
     if (agentsNav) {
       agentsNav.hidden = shellFacts.product_mode?.workflow_ui_mode === "single-agent";
     }
-    // Hidden where the Runtime says there is no editor, rather than offered
-    // as a link that 404s: the bundle is a build artifact and a source
-    // checkout may not carry it.
-    const editorNav = document.getElementById("editorNav");
-    if (editorNav) {
-      const editor = shellFacts.capabilities?.workflow_editor;
-      editorNav.hidden = !editor?.available;
-      if (editor?.url) editorNav.href = editor.url;
-    }
-    views.update({ i18n, shellFacts, mayStartRun });
+    views.update({ i18n, shellFacts, mayStartRun, route });
     const shutdown = runtimeShutdownCommand();
     document.getElementById("shutdownRuntime").hidden = !shutdown;
     document.getElementById("shutdownRuntime").addEventListener(
@@ -489,6 +533,15 @@ async function boot() {
   document.documentElement.dataset.shell = "ready";
 
   document.getElementById("refresh").addEventListener("click", () => render());
+  for (const option of document.querySelectorAll("#uiModeToggle .theme-option")) {
+    option.addEventListener("click", () => {
+      if (option.dataset.uiMode === effectiveWorkflowUiMode()) return;
+      localStorage.setItem("orbit.uiMode", option.dataset.uiMode);
+      // render() re-fetches capabilities and re-applies the override, so the
+      // nav and the authoring profile follow the new mode in one pass.
+      render();
+    });
+  }
   window.addEventListener("orbit:refresh", () => render());
   views.scheduleLivePolling();
   for (const button of document.querySelectorAll(".nav-button[data-view]")) {

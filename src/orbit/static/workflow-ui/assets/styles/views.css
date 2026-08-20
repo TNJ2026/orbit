@@ -13,7 +13,26 @@
   white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
 }
 .console-log:empty::before { content: ""; }
-.console-chunk.stderr { color: var(--amber); }
+.console-chunk.stderr { color: #ffffff; }
+/* White is invisible on the light theme's chip background; fall back to the
+   theme's primary text colour there. */
+html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
+/* Each stream sits on its own card: a quiet label over a chip-toned body, so
+   stdout and stderr scan as sections, not one undifferentiated scroll. */
+.console-stream-block {
+  margin-top: 8px; padding: 8px 12px;
+  background: var(--chip-bg); border: 1px solid var(--line-soft);
+  border-radius: 8px;
+}
+.console-stream-block:first-child { margin-top: 0; }
+.console-stream-title {
+  margin: 0 0 8px; color: var(--blue);
+  font-size: 14px; font-weight: 700; letter-spacing: .08em;
+}
+.console-stream-body {
+  margin: 0; white-space: pre-wrap;
+  overflow-wrap: anywhere; word-break: break-word;
+}
 
 .with-dot { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
 /* The text next to the dot ellipsizes; pills keep their full state word. */
@@ -271,7 +290,8 @@
   width: fit-content; cursor: pointer; color: var(--blue); font-size: 13px; font-weight: 650;
 }
 .simplified-step-output-body { display: grid; gap: 4px; padding-top: 6px; }
-.simplified-step-output-log { min-height: 0; max-height: 240px; margin-top: 2px; }
+/* The run log expands to its full height; the page scrolls, not the box. */
+.simplified-step-output-log { min-height: 0; max-height: none; overflow: visible; margin-top: 2px; }
 .simplified-attention { border-color: color-mix(in srgb, var(--amber) 28%, var(--line)); }
 .simplified-result .panel-body { font-size: 14px; line-height: 1.65; }
 .simplified-result .pill { background: transparent; }
@@ -450,36 +470,181 @@
    from the right, so a tall graph gets vertical room a centered dialog never
    has. The catalog stays rendered (and visible) under the scrim. The inner
    panel drops its own chrome — the drawer already draws the card. */
-/* Workflow detail opens as a centred modal over the dimmed catalog. The root
+/* A detail opens as a centred modal over the dimmed page that listed it —
+   the Workflow catalog and the History list both use this shell. The root
    sits one layer below the sticky topbar, so the bar stays live and un-dimmed
-   while everything under it darkens; Escape, the scrim and × all walk back. */
-.workflow-modal-root { position: fixed; inset: 0; z-index: 8; }
-.workflow-modal-scrim {
+   while everything under it darkens; Escape, the scrim and the Close button
+   all walk back. */
+.page-modal-root { position: fixed; inset: 0; z-index: 8; }
+.page-modal-scrim {
   position: absolute; top: var(--topbar-h, 0px); left: 0; right: 0; bottom: 0;
   background: rgba(0, 0, 0, .5);
   -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px);
   opacity: 0; transition: opacity .24s ease;
 }
-.workflow-modal {
+.page-modal {
   position: absolute; top: var(--topbar-h, 0px); left: 0; right: 0; bottom: 0;
   display: flex; align-items: center; justify-content: center; padding: 24px;
 }
-.workflow-modal-panel {
+.page-modal-panel {
   width: min(1120px, 100%); max-height: 100%; overflow: auto;
   padding: 24px 28px; background: var(--bg); border: 1px solid var(--line);
   border-radius: var(--radius); box-shadow: var(--shadow); outline: none;
   opacity: 0; transform: translateY(10px) scale(.985);
   transition: opacity .24s ease, transform .24s cubic-bezier(.45, .05, .35, 1);
 }
-.workflow-modal-root.open .workflow-modal-scrim { opacity: 1; }
-.workflow-modal-root.open .workflow-modal-panel { opacity: 1; transform: none; }
-.workflow-modal-root.closing .workflow-modal-scrim { opacity: 0; }
-.workflow-modal-root.closing .workflow-modal-panel {
+.page-modal-root.open .page-modal-scrim { opacity: 1; }
+.page-modal-root.open .page-modal-panel { opacity: 1; transform: none; }
+.page-modal-root.closing .page-modal-scrim { opacity: 0; }
+.page-modal-root.closing .page-modal-panel {
   opacity: 0; transform: translateY(8px) scale(.99);
 }
-.workflow-modal-panel > .data-state { margin: 8px 0; }
+.page-drawer-root .page-modal {
+  align-items: stretch; justify-content: flex-end; padding: 0;
+}
+.page-drawer-panel {
+  width: min(880px, calc(100vw - 48px)); height: 100%; max-height: none;
+  padding: 24px 28px; border-width: 0 0 0 1px; border-radius: 0;
+  transform: translateX(32px); overflow-y: auto;
+  transition: opacity .2s ease, transform .24s cubic-bezier(.2, .7, .2, 1);
+}
+.page-drawer-root.open .page-drawer-panel { opacity: 1; transform: translateX(0); }
+.page-drawer-root.closing .page-drawer-panel {
+  opacity: 0; transform: translateX(32px);
+}
+.page-modal-panel > .data-state { margin: 8px 0; }
 /* The panel owns the entrance, so the inner page animation would double up. */
-.workflow-modal-panel .workflow-detail { animation: none; }
+.page-modal-panel .workflow-detail { animation: none; }
+/* The goal detail follows the History prototype (goal_detail/code.html):
+   four titled sections, each heading outside its card. The head pairs the
+   first heading with the Close button. */
+.goal-modal-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; margin-bottom: 16px;
+}
+.goal-modal-close {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px; padding: 0;
+  color: var(--muted-2); background: transparent; border: 0;
+  border-radius: var(--radius); cursor: pointer;
+}
+.goal-modal-close:hover { color: var(--muted); background: var(--line-soft); }
+.goal-modal-close:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+.goal-modal-body { display: flex; flex-direction: column; gap: 16px; }
+
+/* Goal detail sections. Headings sit outside their card at 16px semibold,
+   the prototype's body-md weight; cards are 12px-rounded tonal surfaces with
+   a hairline border and 24px of air inside. */
+.goal-section-title { margin: 0; padding: 0 4px; font-size: 16px; font-weight: 600; }
+.goal-card {
+  display: flex; flex-direction: column; gap: 16px;
+  background: var(--panel); border: 1px solid var(--line-soft);
+  border-radius: 12px; padding: 24px;
+}
+/* The Goal folds at 120px and unfolds in place; the toggle beneath it is a
+   link with a caret, exactly as the prototype draws it. */
+.goal-text-clamp { max-height: 120px; overflow: hidden; }
+.goal-text-clamp.expanded { max-height: none; }
+.goal-text {
+  margin: 0; font-size: 16px; font-weight: 400; line-height: 24px;
+  overflow-wrap: anywhere; white-space: pre-wrap;
+}
+.goal-expand-toggle {
+  display: inline-flex; align-items: center; gap: 4px; margin-top: 8px;
+  padding: 0; border: 0; background: none; cursor: pointer;
+  color: var(--blue); font-size: 14px; font-weight: 500; width: fit-content;
+}
+.goal-expand-toggle:hover { opacity: .8; }
+.goal-expand-toggle svg { transition: transform .2s ease; }
+.goal-expand-toggle.expanded svg { transform: rotate(180deg); }
+/* The Result leads with one status chip: low-alpha wash, saturated text and
+   a tinted hairline, so the fate scans without vibrating on the dark card. */
+.goal-status-pill {
+  display: inline-flex; align-items: center; gap: 6px; width: fit-content;
+  padding: 4px 8px; border-radius: 6px; border: 1px solid transparent;
+  font-size: 14px; font-weight: 500;
+}
+.goal-status-pill.completed, .goal-status-pill.succeeded,
+.goal-status-pill.answered {
+  color: var(--green); background: var(--green-soft);
+  border-color: rgba(86, 214, 160, .4);
+}
+.goal-status-pill.failed, .goal-status-pill.cancelled {
+  color: var(--red); background: var(--red-soft);
+  border-color: rgba(240, 86, 86, .4);
+}
+.goal-status-pill.running, .goal-status-pill.waiting,
+.goal-status-pill.interrupted, .goal-status-pill.unknown {
+  color: var(--blue); background: var(--blue-soft);
+  border-color: rgba(77, 142, 255, .4);
+}
+.goal-result-code {
+  margin: 0; padding: 16px; border-radius: 8px;
+  background: var(--chip-bg); border: 1px solid var(--line-soft);
+  font-family: var(--mono); font-size: 13px; line-height: 1.5;
+  overflow-x: auto; white-space: pre;
+}
+/* The full step list, no inner scroll: the drawer's own scrollbar is the
+   only one on the page. A step that never ran is dimmed rather than
+   absent, the way the prototype keeps it on the page. */
+.goal-steps-card { padding: 0; gap: 0; }
+.goal-steps-note { margin: 0; padding: 16px; }
+.goal-step-row {
+  display: flex; align-items: flex-start; gap: 16px;
+  padding: 16px; border-bottom: 1px solid var(--line-soft);
+}
+.goal-step-row:last-child { border-bottom: 0; }
+.goal-step-row:not(.not_reached):hover { background: rgba(255, 255, 255, .02); }
+.goal-step-row.not_reached { opacity: .6; }
+.goal-step-row.not_reached:hover { opacity: 1; }
+.goal-step-glyph { display: inline-flex; flex: none; margin-top: 2px; color: var(--muted-2); }
+.goal-step-row.succeeded .goal-step-glyph,
+.goal-step-row.answered .goal-step-glyph { color: var(--green); }
+.goal-step-row.failed .goal-step-glyph,
+.goal-step-row.cancelled .goal-step-glyph { color: var(--red); }
+.goal-step-row.running .goal-step-glyph,
+.goal-step-row.unknown .goal-step-glyph { color: var(--blue); }
+.goal-step-row.waiting .goal-step-glyph { color: var(--amber); }
+.goal-step-copy { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.goal-step-line {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; width: 100%;
+}
+.goal-step-label { font-size: 14px; font-weight: 500; overflow-wrap: anywhere; }
+.goal-step-handler { font-size: 12px; }
+/* The log fold reads as the prototype's link-with-arrow: a caret that turns
+   with the open state instead of the browser's disclosure triangle. */
+.goal-step-row .simplified-step-output { grid-column: auto; }
+.goal-step-row .simplified-step-output > summary {
+  display: inline-flex; align-items: center; gap: 6px; width: fit-content;
+  margin-top: 4px; color: var(--blue); font-size: 12px; font-weight: 500;
+  list-style: none; cursor: pointer;
+}
+.goal-step-row .simplified-step-output > summary::-webkit-details-marker { display: none; }
+.goal-step-row .simplified-step-output > summary::marker { content: ""; }
+.goal-step-row .simplified-step-output > summary::before {
+  content: ""; width: 0; height: 0;
+  border-left: 5px solid currentColor;
+  border-top: 4px solid transparent; border-bottom: 4px solid transparent;
+  transition: transform .15s ease;
+}
+.goal-step-row .simplified-step-output[open] > summary::before { transform: rotate(90deg); }
+.goal-step-row .simplified-step-output-body { padding: 6px 0 0 11px; }
+/* The diagram card is a fixed-height dotted canvas; the frame brings its own
+   panning and zooming, the card only the surface it sits on. */
+.goal-canvas-card { height: 600px; padding: 0; overflow: hidden; }
+.goal-canvas-body {
+  display: flex; width: 100%; height: 100%;
+  background: var(--bg) radial-gradient(circle, var(--line-soft) 1px, transparent 1px);
+  background-size: 20px 20px;
+}
+.goal-canvas-body > .muted { padding: 16px; }
+.goal-canvas-body .workflow-graph-pane { flex: 1; min-height: 0; }
+.goal-canvas-body .workflow-graph-frame { min-height: 0; background: transparent; }
+
+@media (max-width: 640px) {
+  .page-drawer-panel { width: 100%; padding: 18px 16px; }
+}
 
 /* Workflow detail is its own page (design/workflow_detail.html): an identity
    header, a two-up stat row, then one bordered, tabbed surface that holds the
@@ -615,7 +780,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .workflow-editor-wrap, .workflow-modal-scrim, .workflow-modal-panel { transition: none; }
+  .workflow-editor-wrap, .page-modal-scrim, .page-modal-panel { transition: none; }
   .defn-row, .defn-glyph, .defn-tools, .defn-edit { transition: none; }
   .workflow-edit-page, .workflow-detail { animation: none; }
 }
@@ -1334,9 +1499,12 @@
 
 /* The graph as a second view of the same run. Closed by default: a frame is
    the heaviest thing on this page and most visits read the list. */
-.run-canvas { border-top: 1px solid var(--line); padding-top: 8px; margin-top: 4px; }
-.run-canvas > summary { cursor: pointer; font-size: 13px; color: var(--blue); }
-.run-canvas-body:not(:empty) { margin-top: 10px; }
+/* The graph is a section of its own, same card as the steps beside it, and
+   open from the first paint: the frame fetches itself while the rest of the
+   page settles, so nothing waits on it and nothing hides behind a fold. */
+.run-canvas { overflow: hidden; }
+.run-canvas-body { padding: 12px 14px; }
+.run-canvas-body:empty { padding: 0; }
 
 /* Which way the run went at each fork. Only forks appear, so this stays a
    footnote to the step list rather than a second copy of the graph. Every

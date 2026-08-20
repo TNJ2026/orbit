@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  VIEWER_GRAPH, readGraphMessage, viewerGraph, viewerRequest,
+  VIEWER_GRAPH, readGraphMessage, viewerGraph,
 } from "./catalog-graph.mjs";
 import { DEPTH_WIDTH, LANE_HEIGHT } from "./dsl-graph.mjs";
 
@@ -35,7 +35,7 @@ const graph = {
   },
 };
 
-test("a node is placed where the server said, at the editor's spacing", () => {
+test("a node is placed where the server said, at the canvas spacing", () => {
   const { nodes } = viewerGraph(graph);
   assert.deepEqual(
     nodes.map((node) => [node.id, node.position]),
@@ -121,12 +121,6 @@ test("a node the layout forgot is still drawn", () => {
 test("an absent graph is an empty canvas, not a crash", () => {
   assert.deepEqual(viewerGraph(undefined), { nodes: [], edges: [] });
   assert.deepEqual(viewerGraph({}), { nodes: [], edges: [] });
-});
-
-test("the request is read from the query string", () => {
-  assert.deepEqual(viewerRequest("?readonly=1"), { readOnly: true });
-  assert.deepEqual(viewerRequest("?readonly=0"), { readOnly: false });
-  assert.deepEqual(viewerRequest(""), { readOnly: false });
 });
 
 test("a graph message from this origin is accepted", () => {

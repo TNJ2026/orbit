@@ -25,12 +25,12 @@ const VIEWER = {
  * the page is drawing a run; without it the frame draws the definition alone.
  */
 export function embeddedGraph(graph, {
-  editorUrl, i18n, actionEditors = {}, onEditAction = null, statuses = null,
+  viewerUrl, i18n, actionEditors = {}, onEditAction = null, statuses = null,
 }) {
   const editable = Object.keys(actionEditors || {});
   const frame = el("iframe", {
     class: "workflow-graph-frame",
-    src: `${editorUrl()}?readonly=1`,
+    src: viewerUrl(),
     title: i18n.t("workflows.graph"),
     loading: "lazy",
   });
@@ -61,7 +61,7 @@ export function embeddedGraph(graph, {
 }
 
 export function createWorkflowDefinitionViews({
-  api, i18n, reportError, editorUrl = () => null,
+  api, i18n, reportError, viewerUrl = () => null,
 }) {
   function readableNodeName(node) {
     const label = node?.label;
@@ -336,12 +336,12 @@ export function createWorkflowDefinitionViews({
     // The editor bundle is a build artifact and a source checkout may not
     // carry it; the list says everything the picture does, so that is the
     // whole degradation.
-    if (!graph || !editorUrl()) return definitionList(
+    if (!graph || !viewerUrl()) return definitionList(
       definition, graph, actionEditors, onEditAction,
     );
     const panes = {
       graph: () => embeddedGraph(graph, {
-        editorUrl, i18n, actionEditors, onEditAction,
+        viewerUrl, i18n, actionEditors, onEditAction,
       }),
       definition: () => definitionList(
         definition, graph, actionEditors, onEditAction,

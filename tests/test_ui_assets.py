@@ -71,6 +71,8 @@ class CatalogTests(unittest.TestCase):
             "artifacts.idLabel",
             "artifacts.title",
             "nav.artifacts",
+            "run.console.stderr",
+            "run.console.stdout",
             "run.data.kind.artifact",
             "shell.breadcrumb.root",
             "wait.none",
@@ -238,15 +240,16 @@ class AccessibilityTests(unittest.TestCase):
         )
         self.assertEqual(self.messages(page), self.messages(canvas))
 
-    def test_the_page_asks_for_the_flag_the_canvas_reads(self) -> None:
-        """A frame opened without it would be the editor, inside a modal."""
+    def test_the_canvas_has_no_editor_mode(self) -> None:
+        """The embedded bundle always renders the read-only viewer."""
 
         page = (ASSETS / "workflow" / "definition-views.js").read_text(
             encoding="utf-8"
         )
-        canvas = (EDITOR_SOURCE / "catalog-graph.mjs").read_text(encoding="utf-8")
-        self.assertIn("?readonly=1", page)
-        self.assertIn('params.get("readonly") === "1"', canvas)
+        main = (EDITOR_SOURCE / "main.jsx").read_text(encoding="utf-8")
+        self.assertNotIn("?readonly=1", page)
+        self.assertIn("<Viewer />", main)
+        self.assertNotIn("<App />", main)
 
 
 class HandlerConsoleRenderingTests(unittest.TestCase):

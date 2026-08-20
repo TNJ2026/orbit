@@ -634,7 +634,7 @@ def create_app(
 
     from importlib import resources as _resources
 
-    editor_available = _resources.files("orbit").joinpath(
+    workflow_viewer_available = _resources.files("orbit").joinpath(
         "static/workflow-editor/index.html"
     ).is_file()
 
@@ -665,19 +665,25 @@ def create_app(
         return {
             "available": True, "agents": sorted(generation_agents),
             "default_agent": default_generation_agent(),
+            # Single-Agent authoring is intentionally stricter: only an App
+            # currently present through MCP may write it. Keep this separate
+            # from discovered CLIs and operator-configured model writers so the
+            # UI never has to infer connection state from a name.
+            "mcp_agents": (
+                authoring_broker.clients() if authoring_broker is not None else []
+            ),
         }
 
     capabilities = {
         "static_graph": {"available": True},
         "human_tasks": {"available": True},
-        # The graph editor ships as a build artifact, so a source checkout
-        # that has not run it serves no /editor/. Reported rather than left to
-        # be discovered: a nav link to a 404 is the thing this endpoint exists
-        # to prevent.
-        "workflow_editor": (
-            {"available": True, "url": "/editor/"}
-            if editor_available
-            else {"available": False, "reason": "editor_bundle_not_built"}
+        # The read-only workflow canvas ships as a build artifact. It is an
+        # implementation detail of the workflow and run pages, not a separate
+        # authoring surface.
+        "workflow_viewer": (
+            {"available": True, "url": "/viewer/"}
+            if workflow_viewer_available
+            else {"available": False, "reason": "viewer_bundle_not_built"}
         ),
         "artifacts": (
             {"available": True}
@@ -937,24 +943,18 @@ def create_app(
             )
         )
 
-        # The graph editor is a separate surface with a build step of its own,
-        # mounted beside the hand-written UI rather than inside it. Keeping
-        # them apart is what lets the editor use a framework without the rest
-        # of the UI acquiring one.
-        #
-        # Served in both modes, because the API it lives on is: the workflow
-        # catalog is not a property of which authoring UI was chosen. Absent
-        # only from a source checkout that has not run the build, and a missing
-        # directory must not stop the Runtime.
-        editor_root = resources.files("orbit").joinpath("static/workflow-editor")
-        if editor_root.joinpath("index.html").is_file():
+        # The graph canvas is embedded by workflow and run pages. It remains a
+        # separate bundle so the rest of the UI does not acquire its framework,
+        # but it is no longer exposed as an editor page.
+        viewer_root = resources.files("orbit").joinpath("static/workflow-editor")
+        if viewer_root.joinpath("index.html").is_file():
             routes.append(
                 Mount(
-                    "/editor",
+                    "/viewer",
                     app=RevalidatedStaticFiles(
-                        directory=str(editor_root), html=True
+                        directory=str(viewer_root), html=True
                     ),
-                    name="editor",
+                    name="workflow-viewer",
                 )
             )
 

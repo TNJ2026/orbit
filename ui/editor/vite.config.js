@@ -5,11 +5,11 @@ import { defineConfig } from "vite";
 
 // The build lands inside the Python package, and the result is committed.
 // Someone installing orbit with pip has no node and no way to run this, so the
-// wheel has to ship the editor already built; hatchling includes every
+// wheel has to ship the viewer already built; hatchling includes every
 // non-ignored file under src/orbit, which is what puts it there.
 export default defineConfig({
   plugins: [react()],
-  base: "/editor/",
+  base: "/viewer/",
   build: {
     outDir: fileURLToPath(
       new URL("../../src/orbit/static/workflow-editor", import.meta.url),

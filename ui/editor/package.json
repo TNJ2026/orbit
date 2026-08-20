@@ -1,5 +1,5 @@
 {
-  "name": "orbit-workflow-editor",
+  "name": "orbit-workflow-viewer",
   "private": true,
   "type": "module",
   "scripts": {

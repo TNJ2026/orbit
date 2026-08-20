@@ -2594,8 +2594,8 @@ class AuthoringSchemaApiTests(ApiTestCase):
         self.assertIn("schema", data)
 
 
-class EditorMountTests(unittest.TestCase):
-    """The graph editor is served beside the UI, and only when it is built."""
+class WorkflowViewerMountTests(unittest.TestCase):
+    """The read-only graph viewer is served only as an embedded UI asset."""
 
     def build(self, **extra):
         temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
@@ -2625,29 +2625,34 @@ class EditorMountTests(unittest.TestCase):
             "static/workflow-editor/index.html"
         ).is_file()
 
-    def test_the_editor_is_mounted_when_it_has_been_built(self) -> None:
+    def test_the_viewer_is_mounted_when_it_has_been_built(self) -> None:
         mounted = self._mounted()
-        self.assertEqual(self._built(), "editor" in mounted)
+        self.assertEqual(self._built(), "workflow-viewer" in mounted)
         self.assertIn("ui", mounted)
 
-    def test_the_editor_is_served_in_both_authoring_modes(self) -> None:
-        """The catalog it reads is in both, so the editor is too."""
+    def test_the_viewer_is_served_in_both_authoring_modes(self) -> None:
+        """Both products embed workflow graphs, so both need the viewer."""
 
         for mode in ("single-agent", "multi-agent"):
             with self.subTest(mode=mode):
                 mounted = self._mounted(workflow_ui_mode=mode)
-                self.assertEqual(self._built(), "editor" in mounted)
+                self.assertEqual(self._built(), "workflow-viewer" in mounted)
                 self.assertIn("ui", mounted)
 
-    def test_the_editor_is_static_files_and_needs_no_credentials(self) -> None:
-        """It reaches the Runtime through /api/v1, which does check them."""
+    def test_the_viewer_is_static_files_and_needs_no_credentials(self) -> None:
+        """Its graph arrives from the authenticated parent page by message."""
 
         if not self._built():
-            self.skipTest("editor bundle is not built in this checkout")
+            self.skipTest("viewer bundle is not built in this checkout")
         with AsgiHarness(self.build()) as client:
-            response = client.get("/editor/")
+            response = client.get("/viewer/")
         self.assertEqual(200, response.status_code)
         self.assertIn("<div id=\"root\">", response.text)
+
+    def test_the_editor_page_is_not_served(self) -> None:
+        with AsgiHarness(self.build()) as client:
+            response = client.get("/editor/")
+        self.assertEqual(404, response.status_code)
 
 
 class WorkflowCatalogModeTests(ApiTestCase):

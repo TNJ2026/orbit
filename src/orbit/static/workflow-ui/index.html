@@ -71,20 +71,6 @@
             </svg>
             <span class="nav-label" data-i18n="nav.agents">Agents</span>
           </button>
-          <!-- A link, not a view: the editor is its own page with its own
-               bundle, so this leaves the shell rather than routing inside it.
-               It carries no data-view for that reason, which is also what
-               keeps the router's handlers off it. -->
-          <a class="nav-button" id="editorNav" href="/editor/"
-             data-i18n-label="nav.editor" aria-label="Editor">
-            <svg class="nav-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-              <rect x="1.5" y="2.25" width="5" height="4" rx="1.25"/>
-              <rect x="9.5" y="9.75" width="5" height="4" rx="1.25"/>
-              <path d="M4 6.25v3.25a2 2 0 0 0 2 2h6"/>
-              <path d="M10.25 9.5 12 11.75l1.75-2.25" fill="none"/>
-            </svg>
-            <span class="nav-label" data-i18n="nav.editor">Editor</span>
-          </a>
         </nav>
 
         <div class="topbar-controls">
@@ -92,6 +78,17 @@
                aria-live="polite" data-i18n-label="shell.runtime.checking"
                aria-label="Checking runtime…">
             <span class="live-dot" id="runtimeDot" aria-hidden="true"></span>
+          </div>
+          <!-- Single/multi-Agent is a presentation preference (the API surface
+               is identical in both modes), so it lives beside Refresh as a
+               local segmented control rather than a server setting — the same
+               shape the theme toggle uses. -->
+          <div class="theme-toggle ui-mode-toggle" id="uiModeToggle" role="group"
+               data-i18n-label="settings.uiMode" aria-label="Agent mode">
+            <button class="theme-option" id="uiModeSingle" type="button"
+                    data-ui-mode="single-agent" data-i18n="shell.uiMode.single">Single Agent</button>
+            <button class="theme-option" id="uiModeMulti" type="button"
+                    data-ui-mode="multi-agent" data-i18n="shell.uiMode.multi">Multi Agent</button>
           </div>
           <button class="button" id="refresh" data-i18n="action.refresh">Refresh</button>
           <button class="button" id="shutdownRuntime" type="button" hidden

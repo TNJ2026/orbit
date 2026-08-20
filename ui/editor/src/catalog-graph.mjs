@@ -1,7 +1,7 @@
 /**
  * The catalog's picture of a published Workflow, as xyflow nodes and edges.
  *
- * The editor reads a workflow's authored *source*, which not every published
+ * The former editor read a workflow's authored *source*, which not every published
  * version has — early ones were published without one, and the catalog says so
  * with `source_available`. Those can still be looked at, so the read-only
  * viewer reads the compiled `graph` instead: every published version has one,
@@ -11,7 +11,7 @@
  * that every picture of one definition places a node in the same spot, and a
  * viewer that laid the graph out for itself would be a second opinion about
  * where things go. Only the pixel spacing is decided here, and it is the
- * spacing the editor uses.
+ * spacing used by the workflow canvas.
  *
  * Free of React and of xyflow, like `dsl-graph.mjs`, so it can be tested
  * without a DOM.
@@ -85,12 +85,6 @@ export function viewerGraph(graph, editable = [], statuses = null) {
     },
   }));
   return { nodes, edges };
-}
-
-/** Whether this page was asked to be a viewer rather than the editor. */
-export function viewerRequest(search) {
-  const params = new URLSearchParams(search ?? "");
-  return { readOnly: params.get("readonly") === "1" };
 }
 
 /** What the embedding page and the viewer say to each other.

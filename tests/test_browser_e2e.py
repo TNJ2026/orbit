@@ -250,6 +250,7 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
         views = (
             ("#/workflows", "#content"),
             ("#/goals", "#content"),
+            (f"#/goals/{run_id}", ".page-modal-panel .goal-detail"),
             (f"#/runs/{run_id}", ".simplified-run-hero"),
             ("#/home", ".simplified-workspace-composer"),
         )
@@ -269,34 +270,12 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
         page.wait_for_timeout(6_000)
         self.assertEqual([], errors, f"the refresh chain raised {errors}")
 
-    def test_the_editor_is_reachable_from_the_navigation(self) -> None:
-        """A page nobody can find is not shipped.
-
-        The editor is its own bundle at its own address, so this is a link out
-        of the shell rather than a view inside it — and it is offered only
-        where the Runtime says the bundle is there, because a nav entry that
-        404s is what the capability report exists to prevent.
-        """
-
-        from importlib import resources
-
+    def test_the_editor_page_is_absent(self) -> None:
         page = self.open("en-US")
         page.wait_for_selector(".simplified-workspace-composer")
-        link = page.locator("#editorNav")
-        built = resources.files("orbit").joinpath(
-            "static/workflow-editor/index.html"
-        ).is_file()
-        self.assertEqual(built, link.is_visible())
-        if not built:
-            self.skipTest("editor bundle is not built in this checkout")
-
-        self.assertEqual("/editor/", link.get_attribute("href"))
-        link.click()
-        page.wait_for_load_state("networkidle")
-        self.assertTrue(page.url.endswith("/editor/"))
-        self.assertEqual(
-            1, page.locator("select[aria-label='Workflow']").count()
-        )
+        self.assertEqual(0, page.locator("#editorNav").count())
+        response = page.goto(f"{self.base}/editor/")
+        self.assertEqual(404, response.status)
 
     def test_navigation_and_workflow_catalog_use_the_simplified_product_mode(self) -> None:
         page = self.open("en-US")
@@ -483,20 +462,20 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
     def test_the_graph_is_a_second_view_of_the_same_run(self) -> None:
         """A list says how far along; a graph says which branches there were.
 
-        Neither summarises the other, so the canvas is offered beside the
-        steps rather than instead of them — and closed, because a frame is
-        the heaviest thing on the page and most visits read the list.
+        Neither summarises the other, so the canvas sits beside the steps in
+        a card of its own, open from the first paint.
         """
 
         run_id = self.start_run("canvas-view")
-        page = self.open("en-US", f"/ui/#/runs/{run_id}")
-        page.wait_for_selector(".run-canvas")
-        self.assertEqual(0, page.locator("iframe.workflow-graph-frame").count())
-
-        # Drawn from the run, so a republished workflow cannot change it.
+        # The frame fetches itself on first paint, so the ear has to be on
+        # before the page is.
+        context = self.browser.new_context(locale="en-US")
+        self.addCleanup(context.close)
+        page = context.new_page()
         drawn = []
         page.on("request", lambda request: drawn.append(request.url))
-        page.locator(".run-canvas summary").click()
+        page.goto(f"{self.base}/ui/#/runs/{run_id}")
+        page.wait_for_selector(".run-canvas")
         page.wait_for_selector("iframe.workflow-graph-frame")
         frame = page.frame_locator("iframe.workflow-graph-frame")
         frame.locator(".node").first.wait_for(timeout=15000)
@@ -561,17 +540,20 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
         self.assertEqual(0, page.locator(".run-branches").count())
 
     def test_the_console_is_closed_until_asked_for(self) -> None:
-        """The output panel exists on a run and fetches only when opened."""
+        """Each executed step owns a lazy, node-filtered output panel."""
 
         run_id = self.start_run("console-view")
         page = self.open("en-US", f"/ui/#/runs/{run_id}")
-        page.wait_for_selector(".simplified-run-hero")
+        page.wait_for_selector(".step-row .simplified-step-output")
 
         requested = []
         page.on("request", lambda request: (
             requested.append(request.url) if "/output" in request.url else None
         ))
         panel = page.locator(".simplified-step-output").first
+        self.assertEqual(0, page.locator(
+            ".simplified-run-hero .simplified-step-output"
+        ).count())
         page.wait_for_timeout(200)
         panel.wait_for()
         # Closed: the largest thing on the page has not been fetched.
@@ -583,6 +565,7 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
         with page.expect_response("**/output*") as answered:
             panel.locator("summary").click()
         self.assertEqual(200, answered.value.status)
+        self.assertIn("node_id=", answered.value.url)
         # A Handler that printed nothing says so rather than staying blank.
         self.assertIn(
             "Nothing printed", page.inner_text(".simplified-step-output-body"),
@@ -632,9 +615,50 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
         self.assertEqual(0, page.locator("select[aria-label='Filter goals by status']").count())
 
         rows.first.click()
-        page.wait_for_selector(".simplified-run-hero")
+        # The detail slides in as a right-hand page: the goal card renders
+        # inside the drawer, the list stays behind it, and the address never
+        # changes.
+        page.wait_for_selector(".page-drawer-panel .goal-text-card")
+        self.assertIn(
+            "Summarise the quarter",
+            page.locator(".page-drawer-panel .goal-text-card").inner_text(),
+        )
+        page.wait_for_timeout(300)
+        drawer_box = page.locator(".page-drawer-panel").bounding_box()
+        viewport = page.viewport_size
+        self.assertIsNotNone(drawer_box)
+        self.assertAlmostEqual(
+            viewport["width"], drawer_box["x"] + drawer_box["width"], delta=1,
+        )
+        self.assertTrue(page.locator(".history-goal-list").is_visible())
+        self.assertEqual("#/goals", page.evaluate("location.hash"))
         self.assertEqual(0, page.locator(".simplified-workspace-composer").count())
         self.assertEqual(0, page.get_by_role("button", name="Run again").count())
+
+    def test_history_goal_detail_closes_where_it_opened(self) -> None:
+        """A click opens the modal in place; closing it changes nothing."""
+
+        finished = self.start_goal("simplified-history-dismiss", "Read a goal back")
+        self.wait_for_status(self.open("en-US"), finished, "completed")
+
+        page = self.open("en-US", "/ui/#/goals")
+        page.wait_for_selector(".history-goal-row")
+        page.locator(".history-goal-row").first.click()
+        page.wait_for_selector(".page-drawer-panel .goal-text-card")
+        self.assertEqual("#/goals", page.evaluate("location.hash"))
+
+        page.get_by_role("button", name="Close").click()
+        page.wait_for_function("() => !document.querySelector('.page-modal-root')")
+        page.wait_for_selector(".history-goal-list")
+        self.assertEqual("#/goals", page.evaluate("location.hash"))
+
+        # A pasted address still opens the detail, and from there the route
+        # is what Escape walks back.
+        page.goto(f"{self.base}/ui/#/goals/{quote(finished, safe='')}")
+        page.wait_for_selector(".page-drawer-panel .goal-text-card")
+        page.keyboard.press("Escape")
+        page.wait_for_function("() => location.hash === '#/goals'")
+        page.wait_for_function("() => !document.querySelector('.page-modal-root')")
 
     def test_history_loads_the_next_cursor_page(self) -> None:
         context = self.browser.new_context(locale="en-US")
@@ -1194,6 +1218,11 @@ class SingleAgentHomeTests(BrowserE2ETestCase):
     @classmethod
     def extra_app_kwargs(cls) -> dict:
         from tests.test_workflow_authoring_jobs import dsl
+        from orbit.workflow.authoring import ExternalAuthoringBroker
+
+        broker = ExternalAuthoringBroker(presence_seconds=3600)
+        broker.claim(actor=LOCAL_ACTOR, client="Codex")
+        broker.claim(actor=LOCAL_ACTOR, client="Remote")
 
         return {
             "single_goal_mode": True,
@@ -1207,7 +1236,14 @@ class SingleAgentHomeTests(BrowserE2ETestCase):
                 "codex": lambda _prompt: json.dumps(
                     dsl(name="Generated by the single Agent")
                 ),
+                "Codex": lambda _prompt: json.dumps(
+                    dsl(name="Generated by the connected Agent")
+                ),
+                "Remote": lambda _prompt: json.dumps(
+                    dsl(name="Generated by another connected Agent")
+                ),
             },
+            "authoring_broker": broker,
         }
 
     def test_the_home_composer_offers_the_published_catalog(self) -> None:
@@ -1463,25 +1499,45 @@ class SingleAgentHomeTests(BrowserE2ETestCase):
         # is not passing because the cards rendered no buttons at all.
         self.assertTrue(page.locator(".upgrade-workflow, .edit-workflow").count() > 0)
 
-    def test_a_discovered_cli_can_be_the_one_agent(self) -> None:
-        """Writing with *the* Agent is not the same as writing with none.
-
-        Single-agent mode offers no choice of writer, which is the point. It
-        took only connected MCP Apps, so an install whose only Agents are
-        discovered CLIs — the common one — showed "No Agent available" over a
-        disabled button while advertising two working writers.
-        """
+    def test_single_agent_mode_can_choose_which_agent_writes(self) -> None:
+        """One Agent in the workflow does not mean one available writer."""
 
         page = self.open("en-US")
         page.locator('[data-view="workflows"]').click()
         page.wait_for_selector(".simplified-workflow-generator")
 
-        self.assertEqual(
-            "codex", page.locator(".agent-choice-static").inner_text().strip()
-        )
+        writer = page.locator("#workflowGenerateAgent")
+        self.assertEqual(["Codex", "Remote"], writer.locator("option").evaluate_all(
+            "nodes => nodes.map(node => node.value)"
+        ))
+        self.assertEqual("Codex", writer.input_value())
+        page.get_by_role("combobox", name="Written by").click()
+        page.get_by_role("option", name="Remote", exact=True).click()
+        self.assertEqual("Remote", writer.input_value())
         self.assertFalse(page.locator("#generateWorkflow").is_disabled())
-        # Still no choice: the field states the Agent, it does not offer one.
+
+    def test_single_agent_mode_requires_a_registered_mcp_agent(self) -> None:
+        context = self.browser.new_context(locale="en-US")
+        page = context.new_page()
+        self.addCleanup(context.close)
+
+        def without_mcp_agents(route):
+            response = route.fetch()
+            body = response.json()
+            body["data"]["capabilities"]["workflow_generation"]["mcp_agents"] = []
+            route.fulfill(response=response, json=body)
+
+        page.route("**/api/v1/capabilities", without_mcp_agents)
+        page.goto(f"{self.base}/ui/#/workflows")
+        page.wait_for_selector(".simplified-workflow-generator")
+
         self.assertEqual(0, page.locator("#workflowGenerateAgent").count())
+        self.assertTrue(page.locator(".simplified-workflow-mcp-required").is_visible())
+        self.assertIn(
+            "Connect an Agent through MCP",
+            page.locator(".simplified-workflow-mcp-required").inner_text(),
+        )
+        self.assertTrue(page.locator("#generateWorkflow").is_disabled())
 
     def test_one_agent_is_still_the_difference(self) -> None:
         """What single-agent mode does withhold, it still withholds."""

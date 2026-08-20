@@ -85,6 +85,14 @@
   height: 36px; display: inline-flex; align-items: center; justify-content: center;
 }
 
+/* The Agent-mode control reuses the theme toggle's segmented shape; its
+   options carry text instead of glyphs, so they size to their labels and
+   match the 36px top-bar row. */
+.ui-mode-toggle .theme-option {
+  width: auto; height: 34px; padding: 0 10px; font-size: 12px;
+  white-space: nowrap;
+}
+
 /* "More" popover: theme, language and refresh interval tucked behind one
    button. An overlay, so it uses the reading surface with a 1px border and a
    backdrop blur (DESIGN.md), and it sits above the sticky top bar. */

@@ -21,6 +21,15 @@ export function createViews(context) {
   let activeViewCleanup = null;
   let activeViewLeaveGuard = null;
   const goalFilters = { q: "", status: "" };
+  // The shell's current route, threaded through update(): a modal dismisses
+  // back only when the address still names it, and knowing that is the
+  // shell's fact, not something the views module may read off a global.
+  let currentRoute = null;
+  // A goal modal opened by a click carries no address of its own, so a
+  // background render that tears down the page would lose it for good. The
+  // id of the run being read keeps the modal alive across re-renders the way
+  // the route keeps a route-opened one alive; dismissing clears it.
+  let goalModalRunId = null;
   const simplifiedComposerState = {
     runId: null, workflowId: "", templateId: "", goal: "",
   };
@@ -290,7 +299,10 @@ export function createViews(context) {
     if (runId && summary) await renderLangGraphRun(root, summary);
   }
 
-  async function renderLangGraphRun(root, run) {
+  /* The run's own commands, as buttons. The workspace hero and the History
+   * detail draw them in different frames, but a run that can be resumed or
+   * cancelled must offer the same acts in both. */
+  function runActionButtons(run) {
     const commands = run.allowed_commands || [];
     const resume = commands.find((item) => item.command === "langgraph_run.resume");
     const cancel = commands.find((item) => item.command === "langgraph_run.cancel");
@@ -320,6 +332,11 @@ export function createViews(context) {
         } catch (error) { reportError(error); }
       },
     }));
+    return actions;
+  }
+
+  async function renderLangGraphRun(root, run, { branches = true } = {}) {
+    const actions = runActionButtons(run);
     root.append(el("section", { class: "panel simplified-run-hero" }, [
       el("div", { class: "split" }, [
         el("div", {}, [
@@ -350,11 +367,10 @@ export function createViews(context) {
       }) : null,
       run.error ? el("div", { class: "banner error", text: run.error }) : null,
       actions.length ? el("div", { class: "actions" }, actions) : null,
-      runConsole(run.run_id, {
-        live: !TERMINAL_LANGGRAPH_STATUSES.has(run.status),
-      }),
     ]));
-    await renderRunSteps(root, run.run_id);
+    await renderRunSteps(root, run.run_id, {
+      branches, live: !TERMINAL_LANGGRAPH_STATUSES.has(run.status),
+    });
     await appendRunArtifacts(root, run.run_id);
   }
 
@@ -377,8 +393,9 @@ export function createViews(context) {
    *
    * A second view rather than a replacement: a list says how far along and
    * how many times, and a graph says which branches there were and which one
-   * was taken. Neither is the other's summary. It is closed by default —
-   * a frame is the heaviest thing on the page and most visits want the list.
+   * was taken. Neither is the other's summary, so the graph is a card of its
+   * own beside the steps, drawn as soon as the page is — no fold between the
+   * reader and half the answer.
    *
    * Drawn from the run rather than from its workflow. The catalog serves the
    * latest version only, so once a workflow was republished this drew a graph
@@ -386,35 +403,35 @@ export function createViews(context) {
    * it really used. A template run had nothing to draw at all.
    */
   function runCanvas(runId, statuses) {
-    const url = shellFacts?.capabilities?.workflow_editor?.available
-      ? (shellFacts.capabilities.workflow_editor.url || "/editor/")
+    const url = shellFacts?.capabilities?.workflow_viewer?.available
+      ? (shellFacts.capabilities.workflow_viewer.url || "/viewer/")
       : null;
     if (!url) return null;
     const body = el("div", { class: "run-canvas-body" });
-    const details = el("details", { class: "run-canvas" }, [
-      el("summary", { text: i18n.t("simplified.steps.canvas") }),
+    const section = el("section", { class: "panel run-canvas" }, [
+      el("div", { class: "panel-head" }, [
+        el("div", { class: "panel-title", text: i18n.t("simplified.steps.canvas") }),
+      ]),
       body,
     ]);
-    let drawn = false;
-    details.addEventListener("toggle", async () => {
-      if (!details.open || drawn) return;
-      drawn = true;
+    // The frame fetches on its own, like an Artifact thumbnail: the card is
+    // on the page immediately and a slow viewer never delays the steps.
+    (async () => {
       try {
         const response = await api.runGraph(runId);
         body.append(embeddedGraph(response.data.graph, {
-          editorUrl: () => url, i18n, statuses,
+          viewerUrl: () => url, i18n, statuses,
         }));
       } catch (error) {
-        drawn = false;
         body.append(el("p", { class: "muted", text: error?.messageKey
           ? i18n.t(error.messageKey, { message: error.message })
           : i18n.t("simplified.steps.unavailable") }));
       }
-    });
-    return details;
+    })();
+    return section;
   }
 
-  async function renderRunSteps(root, runId) {
+  async function renderRunSteps(root, runId, { branches = true, live = false } = {}) {
     const panel = el("section", { class: "panel simplified-steps" }, [
       el("div", { class: "panel-head" }, [
         el("div", { class: "panel-title", text: i18n.t("simplified.steps") }),
@@ -456,10 +473,12 @@ export function createViews(context) {
         // "not started", and a run is never either.
         el("span", { class: `pill ${step.status}`,
           text: i18n.t(`simplified.steps.status.${step.status}`) }),
+        step.status !== "not_reached"
+          ? runConsole(runId, { live, nodeId: step.node_id }) : null,
       ],
     ))));
-    if (canvas) panel.append(canvas);
-    await renderRunBranches(panel, runId, steps);
+    if (canvas) root.append(canvas);
+    if (branches) await renderRunBranches(panel, runId, steps);
   }
 
   /* Which way the run went at each fork.
@@ -520,24 +539,50 @@ export function createViews(context) {
    * page and most visits do not want it. While the run is live it keeps
    * asking; once it is over it reads to the end and stops.
    */
-  function runConsole(runId, { live }) {
-    const log = el("pre", {
+  function runConsole(runId, {
+    live, nodeId, hideWhenEmpty = false, showState = true,
+  }) {
+    const log = el("div", {
       class: "console-log simplified-step-output-log", role: "log",
       tabindex: "0", hidden: true,
     });
-    const state = el("span", { class: "muted", text: i18n.t("run.console.empty") });
+    // History reads runs that are over: a line saying the stream ended
+    // states nothing the status pill above has not already said, so the
+    // drawer withholds it while the run page keeps it.
+    const state = showState
+      ? el("span", { class: "muted", text: i18n.t("run.console.empty") }) : null;
+    const setState = (text) => { if (state) state.textContent = text; };
     const details = el("details", { class: "simplified-step-output" }, [
       el("summary", { text: i18n.t("simplified.execution.output") }),
       el("div", { class: "simplified-step-output-body" }, [state, log]),
     ]);
+    // A step that said nothing offers nothing to read: the fold stays out of
+    // the way until output exists, probing while the run is still live.
+    if (hideWhenEmpty) details.hidden = true;
     let after = 0;
     let timer = null;
     let loading = false;
     let stopped = false;
 
+    /* Each stream is a titled card of its own, so stdout and stderr read as
+     * sections rather than one undifferentiated scroll. */
+    let lastStream = null;
+    let blockBody = null;
     const draw = (chunks) => {
       for (const chunk of chunks) {
-        log.append(el("span", {
+        if (chunk.stream !== lastStream) {
+          lastStream = chunk.stream;
+          blockBody = el("pre", { class: "console-stream-body" });
+          log.append(el("div", { class: `console-stream-block ${chunk.stream}` }, [
+            el("div", {
+              class: "console-stream-title",
+              text: i18n.t(chunk.stream === "stderr"
+                ? "run.console.stderr" : "run.console.stdout"),
+            }),
+            blockBody,
+          ]));
+        }
+        blockBody.append(el("span", {
           class: `console-chunk ${chunk.stream}`, text: chunk.text,
         }));
       }
@@ -548,26 +593,53 @@ export function createViews(context) {
       if (stopped || loading || !details.open) return;
       loading = true;
       if (!log.childElementCount) {
-        state.textContent = i18n.t("simplified.execution.output.loading");
+        setState(i18n.t("simplified.execution.output.loading"));
       }
       try {
-        const response = await api.runOutput(runId, after, 200);
+        const response = await api.runOutput(runId, after, 200, nodeId);
         after = response.data.after;
         draw(response.data.chunks);
-        state.textContent = log.childElementCount
+        setState(log.childElementCount
           ? i18n.t(live ? "run.console.following" : "run.console.finished")
-          : i18n.t("run.console.empty");
+          : i18n.t("run.console.empty"));
         if (response.data.has_more) timer = setTimeout(poll, 0);
         else if (live) timer = setTimeout(poll, 2000);
       } catch (error) {
         stopped = true;
-        state.textContent = error instanceof ApiError && error.status === 403
+        setState(error instanceof ApiError && error.status === 403
           ? i18n.t("run.console.forbidden")
-          : i18n.t("run.console.unavailable");
+          : i18n.t("run.console.unavailable"));
       } finally {
         loading = false;
       }
     };
+
+    /* While the fold is hidden nobody can open it, and the only question is
+     * whether the step said anything at all: probe until it does or the run
+     * dies, then hand the cadence back to the open-driven poll. A probe that
+     * cannot read the output keeps the fold hidden rather than offering a
+     * banner nobody asked for.
+     */
+    const probe = async () => {
+      if (stopped || loading || !details.hidden) return;
+      loading = true;
+      try {
+        const response = await api.runOutput(runId, after, 200, nodeId);
+        after = response.data.after;
+        draw(response.data.chunks);
+        if (log.childElementCount) {
+          details.hidden = false;
+          setState(i18n.t(
+            live ? "run.console.following" : "run.console.finished",
+          ));
+        } else if (live) timer = setTimeout(probe, 2000);
+      } catch (error) {
+        stopped = true;
+      } finally {
+        loading = false;
+      }
+    };
+    if (hideWhenEmpty) probe();
 
     details.addEventListener("toggle", () => {
       if (details.open) poll();
@@ -672,7 +744,9 @@ export function createViews(context) {
     ].filter(Boolean).join(" · ");
     return el("button", {
       class: "history-goal-row",
-      onclick: () => navigate({ view: "run", runId: run.run_id }),
+      // The detail opens where the list is: a modal, no address change.
+      // `#/goals/{id}` still addresses a run for people who paste one.
+      onclick: () => openGoalModal(run.run_id),
     }, [
       el("span", { class: "history-goal-copy" }, [
         el("strong", { class: "history-goal-title", text: runName(run) }),
@@ -704,7 +778,7 @@ export function createViews(context) {
     }
   }
 
-  async function renderHistory(root, selectedRunId = null) {
+  async function renderHistory(root) {
     root.append(el("header", { class: "view-intro" }, [
       el("div", {}, [
         el("h2", { text: i18n.t("history.eyebrow") }),
@@ -1241,26 +1315,13 @@ export function createViews(context) {
     }
 
     {
-      // Single-agent mode writes with *the* Agent rather than offering a
-      // choice — which is not the same as writing with nothing.
-      // `defaultGenerationAgent` already ranks them the way this product
-      // wants: a connected Agent App first, because it is already running in
-      // the author's session, and a discovered CLI otherwise. Taking only
-      // `app:` names left an install with three working CLIs advertising
-      // them, reporting "No MCP Agent connected", and refusing to generate at
-      // all.
-      let writerAgent = defaultGenerationAgent();
+      // Single-agent constrains the generated workflow, not who writes it.
+      // When several writers are available the author can choose one; the
+      // Runtime's default remains selected initially.
       const authoringProfile = shellFacts?.product_mode?.workflow_ui_mode === "single-agent"
         ? "single_agent" : "multi_agent";
-      const connectedAgent = el("div", {
-        class: "field simplified-workflow-connected-agent",
-      }, [
-        el("span", { class: "field-label", text: i18n.t("generate.connectedAgent") }),
-        el("div", {
-          class: "agent-choice-static mono",
-          text: writerAgent || i18n.t("generate.connectedAgent.none"),
-        }),
-      ]);
+      const mcpOnly = authoringProfile === "single_agent";
+      let writerAgent = defaultGenerationAgent(mcpOnly);
       const instruction = el("textarea", {
         id: "generateInstruction", required: "required", maxlength: "4000",
         disabled: activeGeneration ? "disabled" : null,
@@ -1272,8 +1333,8 @@ export function createViews(context) {
       });
       const submit = el("button", {
         class: "button primary", type: "submit", id: "generateWorkflow",
-        disabled: !generateCommand || activeGeneration
-          || (authoringProfile === "single_agent" && !writerAgent) ? "disabled" : null,
+        disabled: !generateCommand || activeGeneration || (mcpOnly && !writerAgent)
+          ? "disabled" : null,
       }, [
         el("span", { class: "generate-spark", "aria-hidden": "true", text: "✦" }),
         el("span", { text: activeGeneration
@@ -1311,14 +1372,17 @@ export function createViews(context) {
           }
         },
       }, [
-        authoringProfile === "single_agent"
-          ? connectedAgent
-          : el("div", { class: "simplified-workflow-generator-agent" }, [
-            generationAgentField(
-              "workflowGenerateAgent", writerAgent,
-              (value) => { writerAgent = value; },
-            ),
-          ]),
+        el("div", { class: "simplified-workflow-generator-agent" }, [
+          generationAgentField(
+            "workflowGenerateAgent", writerAgent,
+            (value) => { writerAgent = value; },
+            mcpOnly,
+          ),
+        ]),
+        mcpOnly && !writerAgent ? el("div", {
+          class: "banner info simplified-workflow-mcp-required",
+          text: i18n.t("generate.mcpAgent.required"),
+        }) : null,
         el("div", { class: "field" }, [
           el("label", {
             class: "sr-only", for: "generateInstruction",
@@ -1539,21 +1603,29 @@ export function createViews(context) {
       : [el("div", { class: "muted", text: i18n.t("agents.empty") })]));
   }
 
-  /* The detail reads as a centred modal over the catalog, not a page under it.
+  /* A detail reads as a centred modal over the page that listed it, not a
+   * page under it.
    *
-   * `#/workflows/{id}` stays the address, so the modal is opened by the route
+   * The owning route stays the address, so the modal is opened by the route
    * and dismissing it navigates back — Escape, the scrim and the Close button
-   * all end in the same place. The catalog behind it stays rendered (dimmed),
-   * so a dismissal is one gesture instead of one fetch. The root lives one
-   * layer under the sticky topbar, leaving the bar live and un-dimmed. */
-  async function openWorkflowModal(workflowId) {
+   * all end in the same place. The page behind it stays rendered (dimmed), so
+   * a dismissal is one gesture instead of one fetch. The root lives one layer
+   * under the sticky topbar, leaving the bar live and un-dimmed.
+   *
+   * `back.matches(currentRoute)` guards the walk home: a modal closed by a
+   * navigation must not undo that navigation. */
+  function openPageModal({ label, back, onDismiss = null, placement = "modal" }) {
+    const isDrawer = placement === "drawer";
     const panel = el("div", {
-      class: "workflow-modal-panel", role: "dialog", "aria-modal": "true",
-      "aria-label": i18n.t("workflows.detail"), tabindex: "-1",
+      class: `page-modal-panel${isDrawer ? " page-drawer-panel" : ""}`,
+      role: "dialog", "aria-modal": "true",
+      "aria-label": label, tabindex: "-1",
     }, [dataState(el, i18n, "loading")]);
-    const scrim = el("div", { class: "workflow-modal-scrim" });
-    const stage = el("div", { class: "workflow-modal" }, [panel]);
-    const root = el("div", { class: "workflow-modal-root" }, [scrim, stage]);
+    const scrim = el("div", { class: "page-modal-scrim" });
+    const stage = el("div", { class: "page-modal" }, [panel]);
+    const root = el("div", {
+      class: `page-modal-root${isDrawer ? " page-drawer-root" : ""}`,
+    }, [scrim, stage]);
 
     // The scrim starts below the topbar; measure it once and on resize so a
     // wrapping bar never leaves a gap or eats the modal's top edge.
@@ -1571,15 +1643,19 @@ export function createViews(context) {
     const dismiss = () => {
       if (settled) return;
       settled = true;
+      if (onDismiss) onDismiss();
       teardown();
       root.classList.add("closing");
+      // The timeout is a fallback for a transitionend that never fires; both
+      // race, so the guard makes the dismissal one act — a second finish
+      // landing after another modal has opened would match its route and
+      // navigate away from it.
+      let finished = false;
       const finish = () => {
+        if (finished) return;
+        finished = true;
         if (root.isConnected) root.remove();
-        // Only walk back if this Workflow is still what the address names: a
-        // modal closed by a navigation must not undo that navigation.
-        if (route.view === "workflow" && route.workflowId === workflowId) {
-          navigate({ view: "workflows", runId: null });
-        }
+        if (back.matches(currentRoute)) navigate(back.route);
       };
       panel.addEventListener("transitionend", (event) => {
         if (event.target === panel) finish();
@@ -1619,7 +1695,266 @@ export function createViews(context) {
     void root.offsetWidth;
     root.classList.add("open");
     panel.focus();
+    return { panel, dismiss };
+  }
+
+  async function openWorkflowModal(workflowId) {
+    const { panel, dismiss } = openPageModal({
+      label: i18n.t("workflows.detail"),
+      back: {
+        matches: (route) => route?.view === "workflow" && route.workflowId === workflowId,
+        route: { view: "workflows", runId: null },
+      },
+    });
     await renderWorkflowDetail(panel, workflowId, dismiss);
+  }
+
+  /* A goal from History opens in a right-hand drawer: the list stays rendered
+   * under the scrim, while the full-height detail has room to be read like a
+   * page. `#/goals/{id}` remains the shareable address. */
+  async function openGoalModal(runId) {
+    goalModalRunId = runId;
+    const { panel, dismiss } = openPageModal({
+      label: i18n.t("history.detail"),
+      placement: "drawer",
+      onDismiss: () => { goalModalRunId = null; },
+      back: {
+        matches: (route) => route?.view === "goal" && route.runId === runId,
+        route: { view: "goals", runId: null },
+      },
+    });
+    await renderGoalDetail(panel, runId, dismiss);
+  }
+
+  /* A click-opened modal owns no address, so a background render that
+   * rebuilds the page would drop it; re-attaching it afterwards keeps the
+   * History reading position the way a run-page selection survives. */
+  async function reopenGoalModal() {
+    if (goalModalRunId) await openGoalModal(goalModalRunId);
+  }
+
+  /* The goal detail follows the History prototype (goal_detail/code.html):
+   * four titled sections stacked in the drawer — the Goal itself, the Result,
+   * the Steps and the flow diagram — each heading outside its card. History
+   * is for reading a run back, not starting the next one, so the composer
+   * stays out; resume and cancel still surface when the run offers them.
+   */
+
+  /* One circle glyph per step fate: the ring scans, the mark inside it says
+   * which way, and the colour is never the only carrier of the meaning. */
+  function goalStepGlyph(status) {
+    const svg = (children) => svgEl("svg", {
+      viewBox: "0 0 24 24", width: "20", height: "20", "aria-hidden": "true",
+      fill: "none", stroke: "currentColor", "stroke-width": "1.8",
+      "stroke-linecap": "round", "stroke-linejoin": "round",
+    }, children);
+    if (status === "succeeded" || status === "answered") {
+      return svg([
+        svgEl("circle", { cx: "12", cy: "12", r: "9" }),
+        svgEl("path", { d: "M8.5 12.5l2.5 2.5 4.5-5" }),
+      ]);
+    }
+    if (status === "failed" || status === "cancelled") {
+      return svg([
+        svgEl("circle", { cx: "12", cy: "12", r: "9" }),
+        svgEl("path", { d: "M9.5 9.5l5 5" }),
+        svgEl("path", { d: "M14.5 9.5l-5 5" }),
+      ]);
+    }
+    if (status === "running" || status === "waiting") {
+      return svg([
+        svgEl("circle", { cx: "12", cy: "12", r: "9" }),
+        svgEl("path", { d: "M12 7.5V12l3 2" }),
+      ]);
+    }
+    if (status === "unknown") {
+      return svg([
+        svgEl("circle", { cx: "12", cy: "12", r: "9" }),
+        svgEl("path", { d: "M9.8 9.6a2.3 2.3 0 014.4.9c0 1.5-2.2 1.9-2.2 3" }),
+        svgEl("path", { d: "M12 16.6v.2" }),
+      ]);
+    }
+    return svg([svgEl("circle", { cx: "12", cy: "12", r: "9" })]);
+  }
+
+  function goalStatusPill(status) {
+    return el("span", { class: `goal-status-pill ${status}` }, [
+      goalStepGlyph(status === "completed" ? "succeeded" : status),
+      el("span", { text: i18n.status(status) }),
+    ]);
+  }
+
+  /* The Goal names the run; a long paste folds at 120px and unfolds in
+   * place, so the card never grows taller than the reader asked for. */
+  function goalTextCard(run) {
+    const clamp = el("div", { class: "goal-text-clamp" }, [
+      el("h1", { class: "goal-text", text: runName(run) }),
+    ]);
+    const label = el("span", { text: i18n.t("goal.showAll") });
+    const toggle = el("button", {
+      class: "goal-expand-toggle", type: "button",
+      onclick: () => {
+        const expanded = clamp.classList.toggle("expanded");
+        label.textContent = i18n.t(expanded ? "goal.collapse" : "goal.showAll");
+        toggle.classList.toggle("expanded", expanded);
+      },
+    }, [
+      label,
+      svgEl("svg", {
+        viewBox: "0 0 24 24", width: "18", height: "18", "aria-hidden": "true",
+        fill: "none", stroke: "currentColor", "stroke-width": "2",
+        "stroke-linecap": "round", "stroke-linejoin": "round",
+      }, [svgEl("path", { d: "M6 9l6 6 6-6" })]),
+    ]);
+    // The toggle earns its place only when the text actually overflows.
+    requestAnimationFrame(() => {
+      toggle.hidden = clamp.scrollHeight <= clamp.clientHeight;
+    });
+    return el("section", { class: "goal-card goal-text-card" }, [clamp, toggle]);
+  }
+
+  /* The run's facts as the engine reports them: identity lines, the final
+   * status, and the result document under one code block. */
+  function goalResultCard(run) {
+    const lines = [run.workflow_id, run.run_id, "", run.status];
+    if (run.result !== null && run.result !== undefined) {
+      lines.push(JSON.stringify(run.result, null, 2));
+    }
+    const actions = runActionButtons(run);
+    return el("section", { class: "goal-card goal-result-card" }, [
+      goalStatusPill(run.status),
+      el("pre", { class: "goal-result-code", text: lines.join("\n") }),
+      run.interrupts?.length ? el("pre", {
+        class: "goal-result-code", text: JSON.stringify(run.interrupts, null, 2),
+      }) : null,
+      run.error ? el("div", { class: "banner error", text: run.error }) : null,
+      actions.length ? el("div", { class: "actions" }, actions) : null,
+    ]);
+  }
+
+  function goalStepsCard(run, steps) {
+    const card = el("section", { class: "goal-card goal-steps-card" });
+    if (steps === null) {
+      card.append(el("p", {
+        class: "muted goal-steps-note", text: i18n.t("simplified.steps.unavailable"),
+      }));
+      return card;
+    }
+    if (!steps.length) {
+      card.append(el("p", {
+        class: "muted goal-steps-note", text: i18n.t("simplified.steps.empty"),
+      }));
+      return card;
+    }
+    const live = !TERMINAL_LANGGRAPH_STATUSES.has(run.status);
+    for (const step of steps) {
+      card.append(el("div", { class: `goal-step-row ${step.status}` }, [
+        el("span", { class: "goal-step-glyph" }, [goalStepGlyph(step.status)]),
+        el("div", { class: "goal-step-copy" }, [
+          el("div", { class: "goal-step-line" }, [
+            el("span", { class: "goal-step-label", text: step.label }),
+            el("span", { class: `pill ${step.status}`,
+              text: i18n.t(`simplified.steps.status.${step.status}`) }),
+          ]),
+          el("span", { class: "goal-step-handler muted", text: [
+            step.handler ? step.handler.name : step.kind,
+            step.runs > 1
+              ? i18n.t("simplified.steps.repeated", { count: i18n.number(step.runs) })
+              : null,
+          ].filter(Boolean).join(" · ") }),
+          step.status !== "not_reached"
+            ? runConsole(run.run_id, {
+              live, nodeId: step.node_id, hideWhenEmpty: true, showState: false,
+            }) : null,
+        ]),
+      ]));
+    }
+    return card;
+  }
+
+  /* The diagram under its own heading, on the dotted canvas the prototype
+   * draws it on. The frame fetches on its own, like an Artifact thumbnail:
+   * the card is on the page immediately and a slow viewer never delays the
+   * steps above it. */
+  function goalCanvasSection(body, run, steps) {
+    const url = shellFacts?.capabilities?.workflow_viewer?.available
+      ? (shellFacts.capabilities.workflow_viewer.url || "/viewer/")
+      : null;
+    if (!url) return;
+    body.append(
+      el("h2", { class: "goal-section-title", text: i18n.t("simplified.steps.canvas") }),
+    );
+    const pane = el("div", { class: "goal-canvas-body" });
+    body.append(el("section", { class: "goal-card goal-canvas-card" }, [pane]));
+    (async () => {
+      try {
+        const response = await api.runGraph(run.run_id);
+        pane.append(embeddedGraph(response.data.graph, {
+          viewerUrl: () => url, i18n,
+          statuses: Object.fromEntries(steps.map((step) => [step.node_id, step.status])),
+        }));
+      } catch (error) {
+        pane.append(el("p", { class: "muted", text: error?.messageKey
+          ? i18n.t(error.messageKey, { message: error.message })
+          : i18n.t("simplified.steps.unavailable") }));
+      }
+    })();
+  }
+
+  async function renderGoalDetail(panel, runId, dismiss) {
+    const draw = async () => {
+      panel.replaceChildren(dataState(el, i18n, "loading"));
+      try {
+        const run = (await api.langGraphRun(runId)).data;
+        let steps = [];
+        try {
+          steps = (await api.runSteps(runId)).data.steps || [];
+        } catch (error) {
+          // The sections above and below still answer; the step card says
+          // so in place rather than taking the whole detail down.
+          steps = null;
+        }
+        const body = el("div", { class: "goal-modal-body goal-detail" });
+        panel.replaceChildren(
+          el("div", { class: "goal-modal-head" }, [
+            el("h2", {
+              class: "goal-section-title", text: i18n.t("goal.heading.goal"),
+            }),
+            el("button", {
+              class: "goal-modal-close", type: "button",
+              "aria-label": i18n.t("action.close"),
+              title: i18n.t("action.close"),
+              onclick: () => dismiss(),
+            }, [
+              svgEl("svg", {
+                viewBox: "0 0 24 24", width: "16", height: "16",
+                "aria-hidden": "true", fill: "none", stroke: "currentColor",
+                "stroke-width": "1.8", "stroke-linecap": "round",
+              }, [
+                svgEl("path", { d: "M6 6l12 12" }),
+                svgEl("path", { d: "M18 6L6 18" }),
+              ]),
+            ]),
+          ]),
+          body,
+        );
+        body.append(
+          goalTextCard(run),
+          el("h2", {
+            class: "goal-section-title", text: i18n.t("goal.heading.result"),
+          }),
+          goalResultCard(run),
+          el("h2", { class: "goal-section-title", text: i18n.t("simplified.steps") }),
+          goalStepsCard(run, steps),
+        );
+        goalCanvasSection(body, run, steps || []);
+        await appendRunArtifacts(body, run.run_id);
+      } catch (error) {
+        panel.replaceChildren(dataState(el, i18n, "error", { onRetry: draw }));
+        reportError(error);
+      }
+    };
+    await draw();
   }
 
   /** One published definition, at its own address.
@@ -2605,11 +2940,15 @@ export function createViews(context) {
 
 
   return {
-    update(next) { i18n = next.i18n; shellFacts = next.shellFacts; mayStartRun = next.mayStartRun; },
+    update(next) {
+      i18n = next.i18n; shellFacts = next.shellFacts; mayStartRun = next.mayStartRun;
+      if (next.route) currentRoute = next.route;
+    },
     canLeave() { return !activeViewLeaveGuard || activeViewLeaveGuard(); },
     cleanup() { if (activeViewCleanup) activeViewCleanup(); activeViewCleanup = null; },
     stopPolling() { if (refreshTimer) clearTimeout(refreshTimer); },
     renderSimplifiedWorkspace, renderHistory, renderWorkflows, openWorkflowModal,
+    openGoalModal, reopenGoalModal,
     renderWorkflowEdit, renderAgents, refreshRuntimeCard,
     syncRefreshIntervalSelect, saveRefreshInterval, scheduleLivePolling,
   };
