@@ -256,20 +256,6 @@ def _apply(
     )
 
 
-def rebind_agents(
-    ir: WorkflowIR, manifest: HandlerManifest,
-) -> AgentRebinding | None:
-    """Point every Agent node at `manifest`, or None when none of them move.
-
-    Every one, whatever it names: this is the template path, where the graph
-    is a shape and the Agent is whoever is here to run it.
-    """
-
-    return _apply(ir, {
-        node.id: manifest for node in ir.nodes if is_agent_node(node)
-    })
-
-
 class AgentFallback:
     """A substitute for an Agent step whose Handler is not on this machine.
 

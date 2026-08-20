@@ -20,7 +20,6 @@ from orbit.workflow.agent_binding import (
     AgentRebindError,
     AgentFallback,
     preferred_agent,
-    rebind_agents,
     recent_agent_clients,
 )
 from orbit.workflow.catalogs.agent_discovery import (
@@ -110,11 +109,11 @@ class AgentInterchangeabilityTests(unittest.TestCase):
                 self.assertIn("agent.invoke", manifest.capabilities)
 
 
-class RebindTests(unittest.TestCase):
-    def test_every_agent_step_moves_to_the_current_agent(self) -> None:
+class SubstitutionTests(unittest.TestCase):
+    def test_a_stranded_step_moves_to_an_agent_that_is_here(self) -> None:
         claude = manifest_for("claude")
         ir = single_step_workflow(agent_step())
-        rebinding = rebind_agents(ir, claude)
+        rebinding = AgentFallback([claude])(ir)
 
         self.assertIsNotNone(rebinding)
         self.assertEqual(("execute",), tuple(rebinding.rebound))
@@ -140,17 +139,17 @@ class RebindTests(unittest.TestCase):
             IRResult("shape", "result"),
         )
 
-        rebinding = rebind_agents(ir, manifest_for("claude"))
+        rebinding = AgentFallback([manifest_for("claude")])(ir)
 
         self.assertEqual(("execute",), tuple(rebinding.rebound))
         self.assertEqual(transform.handler, rebinding.ir.nodes[1].handler)
 
-    def test_a_graph_already_on_this_agent_needs_no_rebinding(self) -> None:
+    def test_a_step_already_on_an_installed_agent_does_not_move(self) -> None:
         claude = manifest_for("claude")
         reference = IRHandlerRef("agent.claude", "1.2.3", claude.fingerprint)
         ir = single_step_workflow(agent_step(handler=reference))
 
-        self.assertIsNone(rebind_agents(ir, claude))
+        self.assertIsNone(AgentFallback([claude])(ir))
 
     def test_a_graph_with_no_agent_step_needs_no_agent(self) -> None:
         transform = IRNode(
@@ -160,7 +159,7 @@ class RebindTests(unittest.TestCase):
         )
         ir = single_step_workflow(transform, workflow_id="workflow:plain")
 
-        self.assertIsNone(rebind_agents(ir, manifest_for("claude")))
+        self.assertIsNone(AgentFallback([manifest_for("claude")])(ir))
         # And through the binder, where there is no Agent to be found at all:
         # a Workflow that never wanted one must still start.
         self.assertIsNone(AgentFallback([])(ir))
@@ -169,7 +168,7 @@ class RebindTests(unittest.TestCase):
         ir = single_step_workflow(agent_step(inputs=(port("payload"),)))
 
         with self.assertRaisesRegex(AgentRebindError, "input ports"):
-            rebind_agents(ir, manifest_for("claude"))
+            AgentFallback([manifest_for("claude")])(ir)
 
     def test_a_budget_above_the_new_agents_ceiling_is_lowered(self) -> None:
         claude = manifest_for("claude")
@@ -178,7 +177,7 @@ class RebindTests(unittest.TestCase):
             config={"prompt": "do it", "timeout_seconds": ceiling + 600},
         ))
 
-        rebound = rebind_agents(ir, claude).ir.nodes[0]
+        rebound = AgentFallback([claude])(ir).ir.nodes[0]
 
         self.assertEqual(ceiling, rebound.config["timeout_seconds"])
         # A budget the new Agent can honour is the author's, and stays.
@@ -186,7 +185,7 @@ class RebindTests(unittest.TestCase):
             config={"prompt": "do it", "timeout_seconds": 60},
         ))
         self.assertEqual(
-            60, rebind_agents(under, claude).ir.nodes[0].config["timeout_seconds"],
+            60, AgentFallback([claude])(under).ir.nodes[0].config["timeout_seconds"],
         )
 
 

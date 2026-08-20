@@ -64,7 +64,6 @@ def build_api_v1(
     authoring_jobs=None,
     shutdown_request: Callable[[], None] | None = None,
     langgraph_service=None,
-    template_service=None,
     mcp_sessions=None,
     agent_fallback=None,
 ) -> list[Route]:
@@ -113,6 +112,6 @@ def build_api_v1(
     ]
     if langgraph_service is not None:
         routes.extend(langgraph_runs.build_routes(
-            ctx, langgraph_service, template_service=template_service,
+            ctx, langgraph_service,
         ))
     return routes

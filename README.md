@@ -95,26 +95,10 @@ Codex starts or reuses the project Runtime, opens the UI, and calls
 `wait_authoring_request(client="chatgpt")`. The wait is automatically renewed
 while the task remains active.
 
-### Use a workflow template
-
-1. On the Orbit home page, confirm that **Connected Agent** shows `app:chatgpt`.
-2. Choose **Direct execution**, **Plan then execute**, or **Execute then review**.
-3. Review the read-only graph, enter the goal, and select **Start goal**; or
-   provide a name and select **Publish workflow** to save a reusable flow.
-4. Published workflows appear at the top of the selector with their full graph.
-5. Before every run, Orbit binds all Agent nodes to the currently connected
-   Agent Handler, stores the resolved graph snapshot, and executes it with LangGraph.
-
-Single-Agent mode exposes no DSL, draft, or version number. Publishing reuses
-the existing Workflow version store internally for durable storage and graph
-projection, while the UI shows only the current definition. Changes affect only
-new Runs; an existing Run always recovers from its own graph snapshot. The
-multi-Agent UI retains full Workflow authoring.
-
 ### Run a goal
 
 1. Open **Goal**.
-2. Select a workflow template.
+2. Select a published workflow, or describe one and let an Agent write it.
 3. Enter the goal and start it.
 4. Follow step progress in the workspace or inspect completed runs in
    **History**.

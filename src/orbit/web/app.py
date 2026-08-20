@@ -768,20 +768,6 @@ def create_app(
     workflow_publisher = WorkflowDefinitionService(
         authoring_catalogs, SQLiteWorkflowVersionStore(composition.workflow_db_path)
     )
-    template_service = None
-    # Built wherever its two dependencies are.
-    # Starting a goal from a template is a feature, and which mode is on says
-    # how many Agents an author picks between, not what the Runtime can do.
-    if langgraph_service is not None and authoring_broker is not None:
-        from ..workflow.templates import WorkflowTemplateService
-
-        template_service = WorkflowTemplateService(
-            workflow_publisher, manifests, langgraph_service,
-            # The same source the start-time fallback reads. Two answers to
-            # "which Agent" is one too many: a template and a Workflow started
-            # a second apart would otherwise run on different Agents.
-            connected_agent_clients,
-        )
     from ..workflow.application.workflow_draft_service import (
         WorkflowDraftApplicationService,
     )
@@ -895,7 +881,6 @@ def create_app(
             authoring_jobs=authoring_jobs,
             shutdown_request=shutdown_request,
             langgraph_service=langgraph_service,
-            template_service=template_service,
             mcp_sessions=mcp_sessions,
             agent_fallback=agent_rebind,
         ),
