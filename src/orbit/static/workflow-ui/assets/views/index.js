@@ -1733,7 +1733,7 @@ export function createViews(context) {
     if (goalModalRunId) await openGoalModal(goalModalRunId);
   }
 
-  /* The goal detail follows the History prototype (goal_detail/code.html):
+  /* The goal detail follows the History prototype (prototypes/goal-detail/code.html):
    * four titled sections stacked in the drawer — the Goal itself, the Result,
    * the Steps and the flow diagram — each heading outside its card. History
    * is for reading a run back, not starting the next one, so the composer

@@ -1,0 +1,454 @@
+<!DOCTYPE html><html class="dark" lang="zh" style=""><head>
+<meta charset="utf-8">
+<meta content="width=device-width, initial-scale=1.0" name="viewport">
+<title>Execution Detail View</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=Hanken+Grotesk:wght@600;700&amp;family=JetBrains+Mono:wght@500&amp;display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet">
+<script id="tailwind-config">
+        tailwind.config = {
+          darkMode: "class",
+          theme: {
+            extend: {
+              "colors": {
+                      "tertiary-container": "#df7412",
+                      "on-primary": "#002e6a",
+                      "surface-container-low": "#191b23",
+                      "surface-container": "#1d2027",
+                      "on-primary-fixed-variant": "#004395",
+                      "on-secondary-container": "#a7b6cc",
+                      "outline-variant": "#424754",
+                      "tertiary-fixed-dim": "#ffb786",
+                      "on-secondary-fixed-variant": "#39485a",
+                      "on-primary-container": "#00285d",
+                      "primary-fixed": "#d8e2ff",
+                      "surface-container-highest": "#32353c",
+                      "on-error": "#690005",
+                      "on-surface": "#e1e2ec",
+                      "inverse-on-surface": "#2e3038",
+                      "outline": "#8c909f",
+                      "surface": "#10131a",
+                      "surface-tint": "#adc6ff",
+                      "surface-container-high": "#272a31",
+                      "secondary-fixed": "#d4e4fa",
+                      "on-tertiary-container": "#461f00",
+                      "inverse-surface": "#e1e2ec",
+                      "on-secondary": "#233143",
+                      "tertiary": "#ffb786",
+                      "surface-dim": "#10131a",
+                      "on-tertiary-fixed": "#311400",
+                      "on-secondary-fixed": "#0d1c2d",
+                      "secondary": "#b9c8de",
+                      "on-tertiary-fixed-variant": "#723600",
+                      "on-background": "#e1e2ec",
+                      "primary-fixed-dim": "#adc6ff",
+                      "background": "#10131a",
+                      "tertiary-fixed": "#ffdcc6",
+                      "surface-variant": "#32353c",
+                      "surface-bright": "#363941",
+                      "error": "#ffb4ab",
+                      "secondary-fixed-dim": "#b9c8de",
+                      "on-primary-fixed": "#001a42",
+                      "primary-container": "#4d8eff",
+                      "primary": "#adc6ff",
+                      "on-error-container": "#ffdad6",
+                      "surface-container-lowest": "#0b0e15",
+                      "error-container": "#93000a",
+                      "secondary-container": "#39485a",
+                      "inverse-primary": "#005ac2",
+                      "on-tertiary": "#502400",
+                      "on-surface-variant": "#c2c6d6"
+              },
+              "borderRadius": {
+                      "DEFAULT": "0.125rem",
+                      "lg": "0.25rem",
+                      "xl": "0.5rem",
+                      "full": "0.75rem"
+              },
+              "spacing": {
+                      "xl": "32px",
+                      "xs": "4px",
+                      "gutter": "24px",
+                      "container-max": "1280px",
+                      "md": "16px",
+                      "lg": "24px",
+                      "sm": "8px",
+                      "unit": "4px"
+              },
+              "fontFamily": {
+                      "body-sm": [
+                              "Inter"
+                      ],
+                      "display-lg": [
+                              "Hanken Grotesk"
+                      ],
+                      "body-md": [
+                              "Inter"
+                      ],
+                      "headline-lg": [
+                              "Hanken Grotesk"
+                      ],
+                      "headline-lg-mobile": [
+                              "Hanken Grotesk"
+                      ],
+                      "label-code": [
+                              "JetBrains Mono"
+                      ]
+              },
+              "fontSize": {
+                      "body-sm": [
+                              "14px",
+                              {
+                                      "lineHeight": "20px",
+                                      "fontWeight": "400"
+                              }
+                      ],
+                      "display-lg": [
+                              "48px",
+                              {
+                                      "lineHeight": "56px",
+                                      "letterSpacing": "-0.02em",
+                                      "fontWeight": "700"
+                              }
+                      ],
+                      "body-md": [
+                              "16px",
+                              {
+                                      "lineHeight": "24px",
+                                      "fontWeight": "400"
+                              }
+                      ],
+                      "headline-lg": [
+                              "32px",
+                              {
+                                      "lineHeight": "40px",
+                                      "fontWeight": "600"
+                              }
+                      ],
+                      "headline-lg-mobile": [
+                              "24px",
+                              {
+                                      "lineHeight": "32px",
+                                      "fontWeight": "600"
+                              }
+                      ],
+                      "label-code": [
+                              "13px",
+                              {
+                                      "lineHeight": "16px",
+                                      "fontWeight": "500"
+                              }
+                      ]
+              }
+      },
+          },
+        }
+      </script>
+<style>
+        .material-symbols-outlined {
+          font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+        .icon-fill {
+            font-variation-settings: 'FILL' 1, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+      </style>
+</head>
+<body class="bg-background text-on-background font-body-md antialiased h-screen overflow-hidden flex flex-col">
+<!-- TopNavBar -->
+<header class="w-full h-16 bg-background border-b border-surface-variant flex justify-between items-center px-lg fixed top-0 z-50">
+<div class="flex items-center gap-lg">
+<div class="font-headline-lg text-primary font-bold">FlowState</div>
+<nav class="hidden md:flex items-center gap-md">
+<a class="text-on-surface-variant hover:text-primary transition-colors duration-200 font-body-md text-body-md cursor-pointer active:opacity-80" href="#">Dashboard</a>
+<a class="text-primary font-bold border-b-2 border-primary pb-1 font-body-md text-body-md cursor-pointer active:opacity-80" href="#">Workflows</a>
+<a class="text-on-surface-variant hover:text-primary transition-colors duration-200 font-body-md text-body-md cursor-pointer active:opacity-80" href="#">Team</a>
+</nav>
+</div>
+<div class="flex items-center gap-md">
+<button class="text-on-surface-variant hover:text-primary transition-colors duration-200 cursor-pointer active:opacity-80 flex items-center justify-center p-sm rounded-full">
+<span class="material-symbols-outlined">notifications</span>
+</button>
+<button class="text-on-surface-variant hover:text-primary transition-colors duration-200 cursor-pointer active:opacity-80 flex items-center justify-center p-sm rounded-full">
+<span class="material-symbols-outlined">help</span>
+</button>
+<img alt="User profile settings" class="w-8 h-8 rounded-full border border-surface-variant cursor-pointer active:opacity-80 object-cover" data-alt="A generic professional user profile picture in a sleek dark mode UI context." src="https://lh3.googleusercontent.com/aida-public/AB6AXuCX9wPSu_9u9Ue3eMk0tybIDo3n4QJdIU7XdrNdUwIN8WtABFMK1vpHKfje7O75tJH2NMYwhBRiqP9YL-83LViE-mhzmfmknw55g0KUlfp0uph-C7LSrihBqWuoQnf54R2YEpt8IWPF-tBVf8XXqOJEDDMXS2rRtj9YOGy5b4xg4waX3_6RQrX4KBYpB9YeKJwx-B61M26X8b064zXPt15QNfm3d5MDw1vNb4Fuzsm84hAdjVGlrYRv">
+</div>
+</header>
+<div class="flex flex-1 pt-16 h-full w-full">
+<!-- SideNavBar -->
+<aside class="w-64 h-[calc(100vh-4rem)] bg-surface-container-low border-r border-surface-variant hidden md:flex flex-col p-md gap-sm fixed left-0 top-16 z-40 overflow-y-auto">
+<div class="flex items-center gap-md p-sm mb-md">
+<div class="w-10 h-10 rounded-lg bg-surface-variant flex items-center justify-center overflow-hidden flex-shrink-0">
+<img alt="Organization workspace" class="w-full h-full object-cover" data-alt="Abstract geometric logo representing an organization workspace in deep charcoal and primary blue." src="https://lh3.googleusercontent.com/aida-public/AB6AXuDNCXx3pGF9qzBDCjxgDTI3a9OcdWoma0AalQHfDdnQeY6OKgdVh-TPftxNZTr0FEuhF4WtGiD0_OEPZomTkBfP64jR_rZuwwtqoAM8vNalwOf3saoScuyLJZjSV89cWmMlqWGNnWrdBVjKe1rTM0HrnzyTUr65pkKgosxIXY69liO6_ioegnFURMsm9z8QgvbsZN2d1RuMkFktVJyeW2n2ImiYDHQ_8r3mpC7MoxUfYujdG5Vt30Vy">
+</div>
+<div class="flex flex-col overflow-hidden">
+<span class="font-body-md text-body-md font-semibold text-on-surface truncate">Main Workspace</span>
+<span class="font-body-sm text-body-sm text-on-surface-variant truncate">Pro Plan</span>
+</div>
+</div>
+<button class="w-full bg-primary text-on-primary font-body-md text-body-md font-medium py-2 px-4 rounded-lg mb-md hover:bg-primary/90 transition-colors flex items-center justify-center gap-2">
+<span class="material-symbols-outlined text-[20px]">add</span>
+                New Workflow
+            </button>
+<nav class="flex flex-col gap-1 w-full flex-1">
+<a class="flex items-center gap-md p-sm rounded-xl text-on-surface-variant hover:bg-surface-variant transition-all duration-200 font-body-sm text-body-sm active:scale-95 cursor-pointer" href="#">
+<span class="material-symbols-outlined text-[20px]">account_tree</span>
+                    All Workflows
+                </a>
+<a class="flex items-center gap-md p-sm rounded-xl bg-secondary-container text-on-secondary-container font-medium transition-all duration-200 font-body-sm text-body-sm active:scale-95 cursor-pointer" href="#">
+<span class="material-symbols-outlined text-[20px]">play_circle</span>
+                    Active
+                </a>
+<a class="flex items-center gap-md p-sm rounded-xl text-on-surface-variant hover:bg-surface-variant transition-all duration-200 font-body-sm text-body-sm active:scale-95 cursor-pointer" href="#">
+<span class="material-symbols-outlined text-[20px]">insights</span>
+                    Analytics
+                </a>
+<a class="flex items-center gap-md p-sm rounded-xl text-on-surface-variant hover:bg-surface-variant transition-all duration-200 font-body-sm text-body-sm active:scale-95 cursor-pointer" href="#">
+<span class="material-symbols-outlined text-[20px]">archive</span>
+                    Archived
+                </a>
+</nav>
+<div class="mt-auto">
+<a class="flex items-center gap-md p-sm rounded-xl text-on-surface-variant hover:bg-surface-variant transition-all duration-200 font-body-sm text-body-sm active:scale-95 cursor-pointer" href="#">
+<span class="material-symbols-outlined text-[20px]">settings</span>
+                    Settings
+                </a>
+</div>
+</aside>
+<!-- Main Content -->
+<main class="flex-1 md:ml-64 bg-background overflow-y-auto w-full h-full p-lg pb-xl">
+<div class="max-w-container-max mx-auto w-full flex flex-col gap-lg">
+<!-- Header Card -->
+<div class="flex flex-col gap-md"><div class="flex justify-between items-center w-full"><h2 class="font-body-md text-body-md font-semibold text-on-surface px-xs">目标</h2><button class="p-sm text-on-surface-variant hover:text-on-surface hover:bg-surface-variant rounded-full transition-colors flex-shrink-0"><span class="material-symbols-outlined">close</span></button></div>
+
+<div class="flex flex-col gap-md">
+  <!-- Top Card: Prompt and Toggle -->
+  <div class="bg-surface-container rounded-xl border border-surface-variant p-lg flex flex-col gap-md">
+    <div class="flex justify-between items-start gap-md">
+      <div class="flex flex-col gap-2 w-full">
+        <div class="flex justify-between items-start">
+          <div class="flex-1 relative">
+            <div id="goal-text-container" class="overflow-hidden transition-all duration-200 relative" style="max-height: 120px;"><h1 class="text-on-surface leading-tight text-[16px] font-normal">检查当前项目 README 是否存在，并简要说明其用途</h1></div><button onclick="const container = document.getElementById('goal-text-container'); const icon = this.querySelector('.material-symbols-outlined'); const text = this.querySelector('span:not(.material-symbols-outlined)'); const isExpanded = container.style.maxHeight === 'none'; if (isExpanded) { container.style.maxHeight = '120px'; text.innerText = '显示全部'; icon.style.transform = 'rotate(0deg)'; } else { container.style.maxHeight = 'none'; text.innerText = '收起'; icon.style.transform = 'rotate(180deg)'; }" class="mt-2 text-primary hover:text-primary-container text-body-sm font-medium flex items-center gap-1 transition-colors"><span class="transition-all">显示全部</span><span class="material-symbols-outlined text-[18px] transition-transform duration-200">expand_more</span></button>
+            
+          </div>
+        </div>
+      </div>
+      
+    </div>
+  </div>
+
+  <!-- Bottom Card: Status and Code Block -->
+  <h2 class="font-body-md text-body-md font-semibold text-on-surface px-xs mt-2">执行结果</h2><div class="bg-surface-container rounded-xl border border-surface-variant p-lg flex flex-col gap-md">
+    <div class="flex flex-wrap items-center gap-md font-body-sm text-body-sm">
+      <span class="px-2 py-1 rounded-md bg-green-900/30 text-green-400 border border-green-800/50 flex items-center gap-1">
+        <span class="material-symbols-outlined text-[16px]">check_circle</span>
+        Completed
+      </span>
+    </div>
+    <div class="bg-surface-container-highest rounded-lg p-md border border-outline-variant font-label-code text-label-code text-on-surface-variant mt-sm overflow-x-auto whitespace-pre">workflow:wf_9d4eeeea-c4f2-4a93-aadb-8f7136b56914
+langgraph_run:a2b0546333c14a37ac9b0c64e50a46a5
+
+completed
+{
+  "decision": "approve",
+  "value": null
+}</div>
+  </div>
+</div>
+</div>
+<!-- Stacked Layout for Steps and Diagram -->
+<div class="flex flex-col gap-lg pb-xl">
+<!-- Steps Column -->
+<div class="flex flex-col gap-md">
+<h2 class="font-body-md text-body-md font-semibold text-on-surface px-xs">步骤</h2>
+<div class="bg-surface-container rounded-xl border border-surface-variant flex flex-col overflow-y-auto h-[400px] flex-shrink-0">
+<!-- Step Item: Completed -->
+<div class="flex flex-col p-md border-b border-surface-variant hover:bg-surface-variant/30 transition-colors">
+<div class="flex items-start gap-md">
+<span class="material-symbols-outlined text-green-400 mt-0.5 text-[20px]">check_circle</span>
+<div class="flex-1 flex flex-col gap-xs">
+<div class="flex justify-between items-center w-full">
+<span class="font-body-sm text-body-sm font-medium text-on-surface">执行验收任务</span>
+<span class="px-2 py-0.5 rounded text-[11px] font-medium bg-green-900/20 text-green-400 border border-green-800/30">已完成</span>
+</div>
+<span class="font-body-sm text-body-sm text-on-surface-variant text-[12px]">agent.codex</span>
+<button class="text-primary hover:text-primary-container text-[12px] flex items-center gap-1 w-fit mt-1 transition-colors">
+<span class="material-symbols-outlined text-[14px]">arrow_right</span>
+                                            查看运行日志
+                                        </button>
+</div>
+</div>
+</div>
+<!-- Step Item: Completed -->
+<div class="flex flex-col p-md border-b border-surface-variant hover:bg-surface-variant/30 transition-colors">
+<div class="flex items-start gap-md">
+<span class="material-symbols-outlined text-green-400 mt-0.5 text-[20px]">check_circle</span>
+<div class="flex-1 flex flex-col gap-xs">
+<div class="flex justify-between items-center w-full">
+<span class="font-body-sm text-body-sm font-medium text-on-surface">判断是否循环</span>
+<span class="px-2 py-0.5 rounded text-[11px] font-medium bg-green-900/20 text-green-400 border border-green-800/30">已完成</span>
+</div>
+<span class="font-body-sm text-body-sm text-on-surface-variant text-[12px]">decision</span>
+<button class="text-primary hover:text-primary-container text-[12px] flex items-center gap-1 w-fit mt-1 transition-colors">
+<span class="material-symbols-outlined text-[14px]">arrow_right</span>
+                                            查看运行日志
+                                        </button>
+</div>
+</div>
+</div>
+<!-- Step Item: Pending -->
+<div class="flex flex-col p-md border-b border-surface-variant opacity-60 hover:opacity-100 hover:bg-surface-variant/30 transition-all">
+<div class="flex items-start gap-md">
+<span class="material-symbols-outlined text-outline mt-0.5 text-[20px]">radio_button_unchecked</span>
+<div class="flex-1 flex flex-col gap-xs">
+<div class="flex justify-between items-center w-full">
+<span class="font-body-sm text-body-sm font-medium text-on-surface">循环耗尽</span>
+<span class="px-2 py-0.5 rounded text-[11px] font-medium text-on-surface-variant border border-outline-variant">未开始</span>
+</div>
+<span class="font-body-sm text-body-sm text-on-surface-variant text-[12px]">terminal</span>
+</div>
+</div>
+</div>
+<!-- Step Item: Completed -->
+<div class="flex flex-col p-md border-b border-surface-variant hover:bg-surface-variant/30 transition-colors">
+<div class="flex items-start gap-md">
+<span class="material-symbols-outlined text-green-400 mt-0.5 text-[20px]">check_circle</span>
+<div class="flex-1 flex flex-col gap-xs">
+<div class="flex justify-between items-center w-full">
+<span class="font-body-sm text-body-sm font-medium text-on-surface">并行分发检查</span>
+<span class="px-2 py-0.5 rounded text-[11px] font-medium bg-green-900/20 text-green-400 border border-green-800/30">已完成</span>
+</div>
+<span class="font-body-sm text-body-sm text-on-surface-variant text-[12px]">decision</span>
+<button class="text-primary hover:text-primary-container text-[12px] flex items-center gap-1 w-fit mt-1 transition-colors">
+<span class="material-symbols-outlined text-[14px]">arrow_right</span>
+                                            查看运行日志
+                                        </button>
+</div>
+</div>
+</div>
+<!-- Additional Steps (Truncated for layout logic demonstration) -->
+<div class="flex flex-col p-md border-b border-surface-variant hover:bg-surface-variant/30 transition-colors">
+<div class="flex items-start gap-md">
+<span class="material-symbols-outlined text-green-400 mt-0.5 text-[20px]">check_circle</span>
+<div class="flex-1 flex flex-col gap-xs">
+<div class="flex justify-between items-center w-full">
+<span class="font-body-sm text-body-sm font-medium text-on-surface">人工审核结果</span>
+<span class="px-2 py-0.5 rounded text-[11px] font-medium bg-green-900/20 text-green-400 border border-green-800/30">已完成</span>
+</div>
+<span class="font-body-sm text-body-sm text-on-surface-variant text-[12px]">human</span>
+<button class="text-primary hover:text-primary-container text-[12px] flex items-center gap-1 w-fit mt-1 transition-colors">
+<span class="material-symbols-outlined text-[14px]">arrow_right</span>
+                                            查看运行日志
+                                        </button>
+</div>
+</div>
+</div>
+<!-- Pending Step -->
+<div class="flex flex-col p-md border-b border-surface-variant opacity-60 hover:opacity-100 hover:bg-surface-variant/30 transition-all">
+<div class="flex items-start gap-md">
+<span class="material-symbols-outlined text-outline mt-0.5 text-[20px]">radio_button_unchecked</span>
+<div class="flex-1 flex flex-col gap-xs">
+<div class="flex justify-between items-center w-full">
+<span class="font-body-sm text-body-sm font-medium text-on-surface">已拒绝</span>
+<span class="px-2 py-0.5 rounded text-[11px] font-medium text-on-surface-variant border border-outline-variant">未开始</span>
+</div>
+<span class="font-body-sm text-body-sm text-on-surface-variant text-[12px]">terminal</span>
+</div>
+</div>
+</div>
+</div>
+</div>
+<!-- Flow Diagram Column -->
+<div class="flex flex-col gap-md h-[600px]">
+<h2 class="font-body-md text-body-md font-semibold text-on-surface px-xs">查看流程图</h2>
+<div class="bg-surface-container rounded-xl border border-surface-variant h-full flex flex-col overflow-hidden relative">
+<!-- Mock Diagram Area -->
+<div class="flex-1 w-full bg-surface-dim relative overflow-hidden flex items-center justify-center p-lg" style="background-image: radial-gradient(circle, #32353c 1px, transparent 1px); background-size: 20px 20px;">
+<!-- Simple representation of a node diagram layout -->
+<div class="flex items-center gap-xl overflow-x-auto min-w-full pb-xl justify-center scale-90 md:scale-100 origin-center">
+<!-- Node cluster 1 -->
+<div class="flex flex-col gap-lg items-center relative">
+<div class="bg-surface-container border border-surface-variant rounded-lg p-md w-40 flex flex-col gap-sm shadow-md">
+<div class="flex items-center gap-2">
+<div class="w-2 h-2 rounded-full bg-red-400"></div>
+<span class="font-label-code text-[10px] text-on-surface-variant uppercase">Terminal</span>
+</div>
+<span class="font-body-sm text-body-sm font-medium text-on-surface">循环耗尽</span>
+</div>
+<div class="h-8 w-px bg-surface-variant"></div>
+<div class="bg-surface-container border border-green-800/50 rounded-lg p-md w-40 flex flex-col gap-sm shadow-md ring-1 ring-green-900/30">
+<div class="flex items-center gap-2">
+<div class="w-2 h-2 rounded-full bg-green-400"></div>
+<span class="font-label-code text-[10px] text-on-surface-variant uppercase">Decision</span>
+</div>
+<span class="font-body-sm text-body-sm font-medium text-on-surface">并行分发检查</span>
+</div>
+</div>
+<!-- Connecting Line -->
+<div class="w-16 h-px bg-surface-variant relative">
+<div class="absolute right-0 top-1/2 -translate-y-1/2 w-2 h-2 border-t border-r border-surface-variant rotate-45"></div>
+</div>
+<!-- Node cluster 2 -->
+<div class="flex flex-col gap-lg items-center relative">
+<div class="bg-surface-container border border-green-800/50 rounded-lg p-md w-40 flex flex-col gap-sm shadow-md ring-1 ring-green-900/30">
+<div class="flex items-center gap-2">
+<div class="w-2 h-2 rounded-full bg-green-400"></div>
+<span class="font-label-code text-[10px] text-on-surface-variant uppercase">Decision</span>
+</div>
+<span class="font-body-sm text-body-sm font-medium text-on-surface">检查结果完整性</span>
+</div>
+</div>
+<!-- Connecting Line -->
+<div class="w-16 h-px bg-surface-variant relative">
+<div class="absolute right-0 top-1/2 -translate-y-1/2 w-2 h-2 border-t border-r border-surface-variant rotate-45"></div>
+</div>
+<!-- Node cluster 3 -->
+<div class="flex flex-col gap-lg items-center relative">
+<div class="bg-surface-container border border-green-800/50 rounded-lg p-md w-40 flex flex-col gap-sm shadow-md ring-1 ring-green-900/30">
+<div class="flex items-center gap-2">
+<div class="w-2 h-2 rounded-full bg-green-400"></div>
+<span class="font-label-code text-[10px] text-on-surface-variant uppercase">Join</span>
+</div>
+<span class="font-body-sm text-body-sm font-medium text-on-surface">汇总完整性检查路由</span>
+</div>
+</div>
+</div>
+<!-- Zoom Controls -->
+<div class="absolute bottom-md left-md flex flex-col bg-surface-container border border-surface-variant rounded-lg overflow-hidden shadow-sm">
+<button class="p-2 text-on-surface-variant hover:text-on-surface hover:bg-surface-variant transition-colors border-b border-surface-variant flex items-center justify-center">
+<span class="material-symbols-outlined text-[18px]">add</span>
+</button>
+<button class="p-2 text-on-surface-variant hover:text-on-surface hover:bg-surface-variant transition-colors border-b border-surface-variant flex items-center justify-center">
+<span class="material-symbols-outlined text-[18px]">remove</span>
+</button>
+<button class="p-2 text-on-surface-variant hover:text-on-surface hover:bg-surface-variant transition-colors flex items-center justify-center">
+<span class="material-symbols-outlined text-[18px]">fit_screen</span>
+</button>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</main>
+</div>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+</body></html>

@@ -515,7 +515,7 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
 .page-modal-panel > .data-state { margin: 8px 0; }
 /* The panel owns the entrance, so the inner page animation would double up. */
 .page-modal-panel .workflow-detail { animation: none; }
-/* The goal detail follows the History prototype (goal_detail/code.html):
+/* The goal detail follows the History prototype (prototypes/goal-detail/code.html):
    four titled sections, each heading outside its card. The head pairs the
    first heading with the Close button. */
 .goal-modal-head {
