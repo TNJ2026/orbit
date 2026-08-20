@@ -140,6 +140,10 @@ class SingleAgentTemplateService:
         return self.langgraph.start_snapshot(
             run_workflow_id, ir, {"prompt": {"goal": goal}},
             template_id=template_id, idempotency_key=idempotency_key, actor=actor,
+            # Which Agent carried it out, kept on the run: a template names no
+            # Agent of its own, so without this a finished goal cannot say who
+            # did it once the connected Agent has changed.
+            agent_binding=f"{manifest.name}@{manifest.version}",
             # Bound into the graph's input above and kept beside the run here:
             # the first is what the workflow reads, the second is what a person
             # reads on a list of their own goals.

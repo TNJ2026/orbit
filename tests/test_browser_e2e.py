@@ -29,7 +29,8 @@ try:
 except ImportError:  # pragma: no cover - exercised by the skip
     sync_playwright = None
 
-from orbit.web.app import create_app
+from orbit.web.app import HandlerRegistration, create_app
+from orbit.workflow.handlers import TransformHandler
 from orbit.web.api_v1 import Authorizer, WRITE_SCOPE
 from orbit.web.local_identity import LOCAL_ACTOR, LOCAL_SCOPES, loopback_authenticator
 from orbit.workflow.artifacts.local_cas import LocalCASBackend
@@ -60,6 +61,16 @@ class BrowserE2ETestCase(unittest.TestCase):
         return {}
 
     @classmethod
+    def extra_handlers(cls) -> list:
+        """Subclass hook for Handlers to register beside the transform.
+
+        Separate from `extra_app_kwargs` because `handlers` is passed by the
+        base composition: a subclass returning it there would be a duplicate
+        keyword argument rather than an addition.
+        """
+        return []
+
+    @classmethod
     def setUpClass(cls) -> None:
         import uvicorn
 
@@ -72,7 +83,8 @@ class BrowserE2ETestCase(unittest.TestCase):
         cls.scopes = set(LOCAL_SCOPES)
         app = create_app(
             cls.db,
-            handlers=[transform_registration()], schemas=SCHEMAS,
+            handlers=[transform_registration(), *cls.extra_handlers()],
+            schemas=SCHEMAS,
             poll_seconds=0.02,
             authenticator=loopback_authenticator,
             authorizer=Authorizer(
@@ -1482,3 +1494,106 @@ class SingleAgentHomeTests(BrowserE2ETestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SingleAgentBindingNoticeTests(BrowserE2ETestCase):
+    """The page shows one Agent per step and the run uses another. Say so.
+
+    The definition list names the Handler each step was published against,
+    node by node. In single-Agent mode none of those is what will run, and a
+    workflow bound to an Agent this machine has never had is startable anyway
+    — so the page has to state the substitution rather than leave the reader
+    to conclude, correctly and wrongly, that it will run on what it says.
+    """
+
+    @classmethod
+    def extra_handlers(cls) -> list:
+        from tests.test_agent_binding import manifest_for
+
+        cls.agent = manifest_for("claude")
+        return [HandlerRegistration(
+            cls.agent, TransformHandler(),
+            f"{cls.agent.name}@{cls.agent.version}",
+        )]
+
+    @classmethod
+    def extra_app_kwargs(cls) -> dict:
+        return {"workflow_ui_mode": "single-agent"}
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        from orbit.workflow.domain.definitions import CompiledWorkflow
+        from orbit.workflow.domain.serialization import definition_hash
+        from orbit.workflow.persistence.workflow_versions import (
+            SQLiteWorkflowVersionStore,
+        )
+        from tests.test_agent_binding import agent_step, single_step_workflow
+
+        # Published against an Agent this Runtime does not have, which is the
+        # whole case: in multi-Agent mode it is unstartable drift. The config
+        # is the stand-in Handler's, not an Agent's — the transform registered
+        # under the Agent's manifest is what plays the CLI here, and it has to
+        # be told to answer on the port the graph declares.
+        ir = single_step_workflow(agent_step(config={
+            "prompt": "do the thing",
+            "operation": "build_object",
+            "value": {"result": {"ok": True}},
+        }))
+        SQLiteWorkflowVersionStore(cls.db).publish(
+            CompiledWorkflow(ir, definition_hash(ir), "test", "sha256:" + "c" * 64),
+            expected_latest_version=0, source_format="json", source_text="{}",
+            actor="test:author", dsl_version="1.3",
+        )
+
+    def test_the_workflow_page_names_the_agent_that_will_run_it(self) -> None:
+        page = self.open("en-US")
+        page.goto(f"{self.base}/ui/#/workflows/workflow:single")
+        notice = page.locator(".workflow-agent-binding")
+        notice.wait_for()
+
+        self.assertIn("claude", notice.inner_text())
+        # And it is not sold as damage: a rebound step is not drift, so the
+        # repair banner beside it stays away.
+        self.assertEqual(0, page.locator(".workflow-drift").count())
+
+    def test_the_catalog_still_offers_the_workflow(self) -> None:
+        """The premise, from the outside: this one used to be unstartable."""
+
+        page = self.open("en-US")
+        page.goto(f"{self.base}/ui/#/workflows")
+        card = page.locator('.workflow-card[data-workflow-id="workflow:single"]')
+        card.wait_for()
+
+        self.assertEqual(0, card.locator(".pill.failed").count())
+
+    def test_the_run_page_names_the_agent_that_ran_it(self) -> None:
+        """Recorded on the run, so it still answers after the binding moves.
+
+        The run's own steps carry no Handler name on this page, and the
+        definition it points at names the Agent that did *not* run it — so
+        without this line a finished goal has nothing that says who did it.
+        """
+
+        page = self.open("en-US")
+        run = page.evaluate(
+            """() => fetch("/api/v1/langgraph-runs", {
+                 method: "POST",
+                 headers: {
+                   "content-type": "application/json",
+                   "idempotency-key": "start-single",
+                 },
+                 body: JSON.stringify({
+                   workflow_id: "workflow:single", input: {prompt: {goal: "x"}},
+                 }),
+               }).then((r) => r.json())""",
+        )
+        self.assertIn("data", run, run)
+        run_id = run["data"]["run"]["run_id"]
+        self.assertEqual("agent.claude@1.2.3", run["data"]["run"]["agent_binding"])
+
+        page.goto(f"{self.base}/ui/#/runs/{quote(run_id, safe='')}")
+        line = page.locator(".run-agent-binding")
+        line.wait_for()
+
+        self.assertIn("claude", line.inner_text())

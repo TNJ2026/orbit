@@ -107,6 +107,9 @@ class LangGraphRun:
     template_id: str | None = None
     goal: str = ""
     artifact_count: int = 0
+    # `agent.claude@1.2.3`, or None for a run that executed the Agents its
+    # definition names.
+    agent_binding: str | None = None
 
 
 EVENT_LOG_DDL = """
@@ -357,6 +360,16 @@ class LangGraphWorkflowService:
                 connection.execute(
                     "ALTER TABLE langgraph_runs ADD COLUMN graph_snapshot_json TEXT"
                 )
+            if "agent_binding" not in columns:
+                # Which Agent this run's Agent steps were bound to, denormalised
+                # out of the snapshot beside it. The snapshot is the authority;
+                # this is the column a run list can read without parsing every
+                # graph it lists, and it stays true after the current binding
+                # moves on — a run is auditable by what ran it, not by what
+                # would run it today.
+                connection.execute(
+                    "ALTER TABLE langgraph_runs ADD COLUMN agent_binding TEXT"
+                )
             timer_columns = {
                 row["name"]
                 for row in connection.execute("PRAGMA table_info(langgraph_timers)")
@@ -556,8 +569,8 @@ class LangGraphWorkflowService:
                 "INSERT INTO langgraph_runs("
                 "run_id,workflow_id,workflow_version,status,revision,input_json,"
                 "result_json,error,created_at,updated_at,owner_actor,goal,"
-                "graph_snapshot_json)"
-                " VALUES (?,?,?,'running',0,?,NULL,NULL,?,?,?,?,?)",
+                "graph_snapshot_json,agent_binding)"
+                " VALUES (?,?,?,'running',0,?,NULL,NULL,?,?,?,?,?,?)",
                 (
                     run_id, workflow_id, record.version.value,
                     canonical_json(inputs), now, now, actor, goal,
@@ -567,6 +580,7 @@ class LangGraphWorkflowService:
                     # be compared for a difference that cannot exist.
                     None if binding is None
                     else canonical_json(to_primitive(ir)),
+                    None if binding is None else binding.identity,
                 ),
             )
             connection.execute(
@@ -590,6 +604,7 @@ class LangGraphWorkflowService:
         idempotency_key: str,
         actor: str = "system:langgraph",
         goal: str = "",
+        agent_binding: str | None = None,
     ) -> LangGraphRun:
         """Start an immutable per-Run graph without publishing a Workflow version."""
 
@@ -626,11 +641,11 @@ class LangGraphWorkflowService:
                 "INSERT INTO langgraph_runs("
                 "run_id,workflow_id,workflow_version,status,revision,input_json,"
                 "result_json,error,created_at,updated_at,owner_actor,template_id,"
-                "graph_snapshot_json,goal)"
-                " VALUES (?,?,0,'running',0,?,NULL,NULL,?,?,?,?,?,?)",
+                "graph_snapshot_json,goal,agent_binding)"
+                " VALUES (?,?,0,'running',0,?,NULL,NULL,?,?,?,?,?,?,?)",
                 (
                     run_id, workflow_id, canonical_json(inputs), now, now, actor,
-                    template_id, canonical_json(snapshot), goal,
+                    template_id, canonical_json(snapshot), goal, agent_binding,
                 ),
             )
             connection.execute(
@@ -2313,4 +2328,5 @@ class LangGraphWorkflowService:
             row["template_id"] if "template_id" in row.keys() else None,
             (row["goal"] or "") if "goal" in row.keys() else "",
             int(row["artifact_count"]) if "artifact_count" in row.keys() else 0,
+            row["agent_binding"] if "agent_binding" in row.keys() else None,
         )

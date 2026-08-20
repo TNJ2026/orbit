@@ -52,6 +52,10 @@ def _dto(run, *, can_write: bool) -> dict[str, Any]:
         "workflow_id": run.workflow_id,
         "workflow_version": run.workflow_version,
         "template_id": run.template_id,
+        # Which Agent actually carried out this run's Agent steps, when that
+        # was not the one its definition names. Recorded when the run started,
+        # so it keeps saying who ran it after the current binding moves on.
+        "agent_binding": run.agent_binding,
         "status": run.status,
         "revision": run.revision,
         "result": run.result,

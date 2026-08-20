@@ -306,6 +306,29 @@ class SingleAgentEngineTests(unittest.TestCase):
                 stored.nodes[0].handler,
             )
 
+    def test_the_run_remembers_who_ran_it_after_the_binding_moves(self) -> None:
+        """A finished run is auditable by what ran it, not by what runs today."""
+
+        claude, codex = manifest_for("claude"), manifest_for("codex")
+        ir = single_step_workflow(agent_step())
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            engine = self.engine(Path(directory), ir, manifests=[claude])
+            run = engine.start(
+                "workflow:single", {"prompt": {"goal": "x"}},
+                idempotency_key="start-1", actor="local",
+            )
+            self.assertEqual("agent.claude@1.2.3", run.agent_binding)
+
+            # The Runtime moves on; the run does not.
+            engine.rebind = SingleAgentBinder([codex])
+
+            self.assertEqual(
+                "agent.claude@1.2.3", engine.get(run.run_id).agent_binding,
+            )
+            self.assertEqual(
+                "agent.claude@1.2.3", engine.list_runs()[0].agent_binding,
+            )
+
     def test_a_run_that_rebinds_nothing_stores_no_graph(self) -> None:
         """A Workflow with no Agent step is the same run in either mode."""
 
@@ -336,6 +359,7 @@ class SingleAgentEngineTests(unittest.TestCase):
                 ).fetchone()["graph_snapshot_json"]
 
             self.assertIsNone(snapshot)
+            self.assertIsNone(engine.get(run.run_id).agent_binding)
 
     def test_replaying_a_start_after_the_agent_changed_is_a_conflict(self) -> None:
         """The receipt has to know which Agent ran, or it hands back the wrong run."""

@@ -329,7 +329,17 @@ export function createViews(context) {
           el("h2", { text: runName(run) }),
           el("p", { class: "mono muted", text: run.goal
             ? `${run.workflow_id} · ${run.run_id}` : run.run_id }),
-        ]),
+          // Who actually did the work, when that was not who the definition
+          // names. Recorded on the run rather than read from the current
+          // binding: the answer for a run that happened last week is the
+          // Agent that ran it, not the one that would run it now.
+          run.agent_binding ? el("p", {
+            class: "muted run-agent-binding",
+            text: i18n.t("run.agentBinding", {
+              agent: run.agent_binding.replace(/^agent\./, "").replace(/@.*$/, ""),
+            }),
+          }) : null,
+        ].filter(Boolean)),
         pill(run.status),
       ]),
       run.interrupts?.length ? el("pre", {
@@ -1139,6 +1149,35 @@ export function createViews(context) {
    * binding to the old one and the run refuses to start. The server states the
    * drift; the UI shows which node moved and offers the one-click recompile it
    * advertised, when every stale binding has a newer version to land on. */
+  /** Say which Agent will actually run this workflow's Agent steps.
+   *
+   * In single-Agent mode every Agent step runs on the one Agent the Runtime
+   * speaks for, whatever the definition names — and the definition on this
+   * very page names the other one, node by node. Without this the page shows
+   * a workflow bound to an Agent that may not even be installed and says
+   * nothing about the substitution that makes it startable.
+   *
+   * Driven by what the server says it will do, never by the mode switch in
+   * the top bar: that switch is a local presentation override, and a notice
+   * that followed it would promise a rebinding this Runtime is not doing. */
+  function agentBindingNotice(value) {
+    const bound = value.langgraph_compatibility?.agent_binding;
+    if (!bound) return null;
+    const steps = (value.handler_bindings || []).filter(
+      (binding) => binding.status === "rebound",
+    );
+    if (!steps.length) return null;
+    return el("div", { class: "banner info workflow-agent-binding" }, [
+      el("div", { class: "eyebrow", text: i18n.t("workflows.agentBinding.title") }),
+      el("p", {
+        text: i18n.t("workflows.agentBinding.description", {
+          agent: bound.replace(/^agent\./, "").replace(/@.*$/, ""),
+          count: i18n.number(steps.length),
+        }),
+      }),
+    ]);
+  }
+
   function handlerDriftNotice(value, redraw) {
     const drift = value.handler_drift || [];
     if (!drift.length) return null;
@@ -1617,6 +1656,7 @@ export function createViews(context) {
                 : navigate({ view: "workflows", runId: null }),
             }),
           ]),
+          agentBindingNotice(value),
           handlerDriftNotice(value, draw),
           // The drawing answers "what shape is this", the definition list
           // answers "what exactly is in it" — one tabbed surface for both.
@@ -1662,6 +1702,7 @@ export function createViews(context) {
             version: i18n.number(current.latest_version),
           });
           canvas.replaceChildren(...[
+            agentBindingNotice(current),
             handlerDriftNotice(current, refreshPublished),
             workflowViews().workflowDefinitionTabs(
               current.graph, current.definition, "workflows.definition",
