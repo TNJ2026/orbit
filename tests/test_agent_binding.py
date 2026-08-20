@@ -13,6 +13,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 
 from orbit.workflow.agent_binding import (
@@ -20,6 +21,7 @@ from orbit.workflow.agent_binding import (
     SingleAgentBinder,
     preferred_agent,
     rebind_agents,
+    recent_agent_clients,
 )
 from orbit.workflow.catalogs.agent_discovery import (
     TRUSTED_AGENT_CLIS, DiscoveredAgent, agent_manifest,
@@ -215,6 +217,98 @@ class AgentSelectionTests(unittest.TestCase):
     def test_no_agent_at_all_says_so(self) -> None:
         with self.assertRaisesRegex(AgentRebindError, "no Agent Handler"):
             SingleAgentBinder([])(single_step_workflow(agent_step()))
+
+
+class ConnectedClientTests(unittest.TestCase):
+    """Who counts as "the Agent connected right now", and in what order.
+
+    Only one Agent is ever connected to this Runtime at a time, so the whole
+    question is which single name to trust. Getting the *order* wrong is not a
+    tie-break detail: it is how a Runtime keeps running workflows on an Agent
+    the person swapped out.
+    """
+
+    def test_the_client_that_spoke_last_wins(self) -> None:
+        from orbit.web.mcp import McpSessionRegistry
+
+        now = [0.0]
+        sessions = McpSessionRegistry(presence_seconds=60, clock=lambda: now[0])
+        sessions.observe("alice", "initialize", {"clientInfo": {"name": "codex"}})
+        now[0] = 30.0
+        sessions.observe("bob", "initialize", {"clientInfo": {"name": "claude"}})
+
+        self.assertEqual(
+            ("claude", "codex"), recent_agent_clients(sessions),
+        )
+        self.assertEqual(
+            "agent.claude",
+            preferred_agent(
+                [manifest_for("claude"), manifest_for("codex")],
+                recent_agent_clients(sessions),
+            ).name,
+        )
+
+    def test_one_actor_keeps_one_session_so_a_swap_replaces_it(self) -> None:
+        """Loopback is one actor: the row *is* the Agent connected now."""
+
+        from orbit.web.mcp import McpSessionRegistry
+
+        sessions = McpSessionRegistry()
+        sessions.observe("local", "initialize", {"clientInfo": {"name": "codex"}})
+        sessions.observe("local", "initialize", {"clientInfo": {"name": "claude"}})
+
+        self.assertEqual(("claude",), recent_agent_clients(sessions))
+
+    def test_a_quiet_client_is_still_the_last_agent_seen(self) -> None:
+        """Sticky on purpose: silence is not a reason to refuse to run."""
+
+        from orbit.web.mcp import McpSessionRegistry
+
+        now = [0.0]
+        sessions = McpSessionRegistry(presence_seconds=60, clock=lambda: now[0])
+        sessions.observe("local", "initialize", {"clientInfo": {"name": "claude"}})
+        now[0] = 10_000.0
+        self.assertFalse(sessions.sessions()[0]["connected"])
+
+        self.assertEqual(("claude",), recent_agent_clients(sessions))
+
+    def test_mcp_outranks_the_authoring_broker(self) -> None:
+        """The broker's window is ten minutes and its list is sorted by name."""
+
+        from orbit.web.mcp import McpSessionRegistry
+
+        sessions = McpSessionRegistry()
+        sessions.observe("local", "initialize", {"clientInfo": {"name": "codex"}})
+        broker = SimpleNamespace(clients=lambda: ["claude", "codex"])
+
+        self.assertEqual(
+            ("codex", "claude"), recent_agent_clients(sessions, broker),
+        )
+
+    def test_a_client_names_itself_however_it_likes(self) -> None:
+        agents = [manifest_for("claude"), manifest_for("codex")]
+        for spoken, expected in (
+            ("Codex", "agent.codex"),
+            ("claude-code", "agent.claude"),
+            ("Claude Code", "agent.claude"),
+            ("claude-code-2.1", "agent.claude"),
+            ("chatgpt", "agent.codex"),
+            ("Claude Desktop", "agent.claude"),
+        ):
+            with self.subTest(client=spoken):
+                self.assertEqual(
+                    expected, preferred_agent(agents, [spoken]).name,
+                )
+
+    def test_a_name_that_means_nothing_here_falls_through(self) -> None:
+        agents = [manifest_for("claude"), manifest_for("codex")]
+
+        self.assertIsNone(preferred_agent(agents, ["some-other-editor"]))
+        # And with one Agent installed there was never a choice to make.
+        self.assertEqual(
+            "agent.claude",
+            preferred_agent([manifest_for("claude")], ["some-other-editor"]).name,
+        )
 
 
 class SingleAgentEngineTests(unittest.TestCase):

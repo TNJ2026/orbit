@@ -13,6 +13,7 @@ published and the run keeps saying what actually executed.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import re
 from typing import Any, Callable, Mapping, Sequence
 
 from .catalogs.handlers import HandlerManifest
@@ -20,8 +21,84 @@ from .domain.definitions import IRHandlerRef, IRNode, WorkflowIR
 
 AGENT_CAPABILITY = "agent.invoke"
 
-# An MCP client's name for itself is not always the Agent CLI's name.
+# An MCP client's name for itself is not always the Agent CLI's name. Only the
+# ones that cannot be derived need to be here: `candidate_agent_names` already
+# tries each leading stem, so `claude-code` finds `agent.claude` unaided.
 CLIENT_AGENT_ALIASES = {"chatgpt": "codex", "claude-desktop": "claude"}
+
+_SEPARATORS = re.compile(r"[^a-z0-9]+")
+
+
+def candidate_agent_names(client: Any) -> tuple[str, ...]:
+    """Handler names a client's own name for itself could mean, best first.
+
+    A client says what it is at `initialize`, in whatever shape it likes:
+    `Codex`, `claude-code`, `Claude Desktop`. Matching that against
+    `agent.<cli>` by string equality found none of them, and the Runtime then
+    fell back to "is there exactly one Agent installed" — so on a machine with
+    three CLIs, an Agent that had just introduced itself was answered with
+    "cannot tell which Agent to bind to".
+
+    Case and punctuation are folded, the alias table covers the names that do
+    not resemble their CLI at all, and each leading stem is tried so a client
+    that appends something to its name still resolves.
+    """
+
+    token = _SEPARATORS.sub("-", str(client or "").strip().lower()).strip("-")
+    if not token:
+        return ()
+    names: list[str] = []
+
+    def offer(name: str) -> None:
+        if name not in names:
+            names.append(name)
+
+    aliased = CLIENT_AGENT_ALIASES.get(token)
+    if aliased is not None:
+        offer(f"agent.{aliased}")
+    parts = token.split("-")
+    for size in range(len(parts), 0, -1):
+        stem = "-".join(parts[:size])
+        offer(f"agent.{CLIENT_AGENT_ALIASES.get(stem, stem)}")
+    return tuple(names)
+
+
+def recent_agent_clients(sessions=None, broker=None) -> tuple[str, ...]:
+    """Client names this Runtime has heard from, most recent first.
+
+    The MCP session registry leads because it answers the question actually
+    being asked — who is talking to this Runtime — and it answers it in order,
+    newest first, keyed by actor. On loopback that is one row whose client
+    name is whoever handshook last, which is exactly "the Agent connected
+    right now" when only one connects at a time.
+
+    The authoring broker follows as a fallback for an App that polls for
+    generation work without ever speaking MCP. It is second on purpose: its
+    presence window is ten minutes and it returns a *set sorted by name*, so
+    an Agent swapped out ten minutes ago could outrank the one at the keyboard
+    for as long as the window lasted.
+
+    Nothing is filtered by presence. A client that has gone quiet is still the
+    last Agent this process spoke to, and refusing to run a workflow because
+    nobody has said anything for a minute is worse than running it on the
+    Agent that was there — the sticky answer is the right one where only one
+    Agent is ever connected.
+    """
+
+    names: list[str] = []
+    listing = getattr(sessions, "sessions", None)
+    if listing is not None:
+        for session in listing():
+            info = session.get("client")
+            name = (info or {}).get("name") if isinstance(info, Mapping) else None
+            if name and name not in names:
+                names.append(name)
+    if broker is not None:
+        for name in broker.clients():
+            if name not in names:
+                names.append(name)
+    return tuple(names)
+
 
 class AgentRebindError(ValueError):
     """This graph's Agent nodes cannot be rebound to the Agent on offer."""
@@ -58,11 +135,16 @@ def preferred_agent(
 ) -> HandlerManifest | None:
     """Which single Agent this Runtime speaks for, or None when it is ambiguous.
 
-    A connected MCP client names itself, and the Agent it belongs to is the
-    one a person is already talking to — so it wins. Failing that, a Runtime
-    with exactly one Agent registered has no choice to make. Two Agents and no
-    client is genuinely ambiguous, and guessing would mean a workflow silently
-    ran on whichever name sorted first.
+    `clients` is **most recent first** — see `recent_agent_clients`. The order
+    is the policy: a client names itself, and where only one Agent is ever
+    connected the one that spoke last is the one at the keyboard. Ranking them
+    any other way (by name, say) means an Agent that was swapped out still
+    wins for as long as it lingers in a presence window.
+
+    Failing every client, a Runtime with exactly one Agent registered has no
+    choice to make. Two Agents and nothing ever heard from is genuinely
+    ambiguous, and guessing there would mean a workflow silently ran on
+    whichever name sorted first.
     """
 
     agents = agent_manifests(manifests)
@@ -70,11 +152,10 @@ def preferred_agent(
         return None
     by_name = {item.name: item for item in agents}
     for client in clients:
-        candidate = by_name.get(
-            f"agent.{CLIENT_AGENT_ALIASES.get(client, client)}"
-        )
-        if candidate is not None:
-            return candidate
+        for name in candidate_agent_names(client):
+            candidate = by_name.get(name)
+            if candidate is not None:
+                return candidate
     return agents[0] if len(agents) == 1 else None
 
 
@@ -181,7 +262,7 @@ class SingleAgentBinder:
     def current(self) -> HandlerManifest | None:
         """The Agent every Agent node would be rebound to, if there is one."""
 
-        return preferred_agent(tuple(self._manifests()), sorted(self._clients()))
+        return preferred_agent(tuple(self._manifests()), tuple(self._clients()))
 
     def __call__(self, ir: WorkflowIR) -> AgentRebinding | None:
         if not any(is_agent_node(node) for node in ir.nodes):
@@ -201,6 +282,6 @@ class SingleAgentBinder:
             raise AgentRebindError(
                 "single-Agent mode cannot tell which Agent to bind to: "
                 + ", ".join(item.name for item in agents)
-                + " are registered and no Agent App is connected"
+                + " are registered and no Agent App has introduced itself"
             )
         return rebind_agents(ir, manifest)

@@ -57,14 +57,17 @@ class SingleAgentTemplateService:
         self.connected_clients = connected_clients
 
     def _binding(self) -> tuple[str, HandlerManifest] | None:
-        clients = sorted(self.connected_clients())
+        # Order preserved, not sorted: the source hands them over most recent
+        # first and that ordering *is* the policy — sorting them by name is
+        # how an Agent swapped out ten minutes ago kept winning.
+        clients = tuple(self.connected_clients())
         if not clients:
             return None
         # One policy for *which* Agent, shared with single-Agent mode's start
         # path. Readiness stays this service's own rule: a template run is
         # started by a connected Agent App, so no client means not ready even
         # where the Runtime could name an Agent perfectly well.
-        manifest = preferred_agent(tuple(self.manifests.values()), clients[:1])
+        manifest = preferred_agent(tuple(self.manifests.values()), clients)
         return None if manifest is None else (clients[0], manifest)
 
     def list(self) -> Mapping[str, Any]:

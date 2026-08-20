@@ -500,15 +500,29 @@ def create_app(
     # its Agent steps is rebound to the one Agent this Runtime speaks for
     # instead of the one its author happened to pick. Multi-Agent mode passes
     # None and every Workflow runs exactly as it was published.
+    # One registry for both transports: HTTP messages and the stdio pump feed
+    # the same dispatcher, and `/api/v1/mcp/sessions` reads it back. Built up
+    # here rather than beside the dispatcher because it is also the answer to
+    # "which Agent is connected", which single-Agent binding is decided on.
+    from .mcp import McpSessionRegistry
+
+    mcp_sessions = McpSessionRegistry()
+
+    # Most recent first, MCP before the authoring broker. Read at call time,
+    # never captured: which Agent is current follows who last introduced
+    # itself, and this composition happens once at startup.
+    def connected_agent_clients() -> tuple[str, ...]:
+        from ..workflow.agent_binding import recent_agent_clients
+
+        return recent_agent_clients(mcp_sessions, authoring_broker)
+
     agent_rebind = None
     if workflow_ui_mode == "single-agent":
         from ..workflow.agent_binding import SingleAgentBinder
 
         agent_rebind = SingleAgentBinder(
             [registration.manifest for registration in registrations],
-            # Late-bound: which Agent is current follows who is connected now,
-            # and this is decided once, at startup.
-            authoring_broker.clients if authoring_broker is not None else None,
+            connected_agent_clients,
         )
 
     if langgraph_state_directory is not None:
@@ -616,7 +630,7 @@ def create_app(
 
     from ..workflow.application.authoring_job_service import AuthoringJobService
     from .api_v1 import authoring_timeout_seconds, build_api_v1
-    from .mcp import McpSessionRegistry, build_mcp_dispatcher, mcp_routes
+    from .mcp import build_mcp_dispatcher, mcp_routes
 
     from importlib import resources as _resources
 
@@ -741,7 +755,10 @@ def create_app(
 
         template_service = SingleAgentTemplateService(
             workflow_publisher, manifests, langgraph_service,
-            authoring_broker.clients,
+            # The same source the single-Agent binder reads. Two answers to
+            # "which Agent" is one too many: a template and a Workflow started
+            # a second apart would otherwise run on different Agents.
+            connected_agent_clients,
         )
     from ..workflow.application.workflow_draft_service import (
         WorkflowDraftApplicationService,
@@ -820,9 +837,6 @@ def create_app(
     # than inside the route factory so `orbit mcp` can carry this very
     # dispatcher over stdio instead of standing up its own services against a
     # database this process already has open.
-    # One registry for both transports: HTTP messages and the stdio pump feed
-    # the same dispatcher, and `/api/v1/mcp/sessions` reads it back.
-    mcp_sessions = McpSessionRegistry()
     mcp_dispatch = build_mcp_dispatcher(
         composition.db_path,
         clock=composition.clock,
