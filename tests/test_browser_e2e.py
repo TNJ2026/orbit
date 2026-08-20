@@ -1200,15 +1200,13 @@ class ReleaseHardeningTests(BrowserE2ETestCase):
         page.wait_for_selector("#content .simplified-workspace-composer")
 
 
-class SingleAgentHomeTests(BrowserE2ETestCase):
-    """Single-agent mode starts published Workflows, not built-in templates.
+class GoalHomeTests(BrowserE2ETestCase):
+    """The Goal home starts published Workflows, not built-in templates.
 
-    One Agent instead of several was supposed to be the whole difference
-    between the two products. It was not: the single-agent home offered a
-    fixed list of built-in templates, and the Workflow catalog — the page its
-    own Agent publishes into — was hidden from the navigation entirely. A
-    Workflow it had just generated had nowhere to be opened and no way to be
-    started.
+    It offered a fixed list of built-in templates instead, and the Workflow
+    catalog — the page its own Agent publishes into — was hidden from the
+    navigation entirely, so a Workflow it had just generated had nowhere to be
+    opened and no way to be started.
 
     This is also the only browser coverage of the LangGraph home screen; the
     rest of the suite runs the pre-LangGraph composer, which is why the
@@ -1226,7 +1224,6 @@ class SingleAgentHomeTests(BrowserE2ETestCase):
 
         return {
             "single_goal_mode": True,
-            "workflow_ui_mode": "single-agent",
             # Named as discovery names a CLI, with no `app:` prefix. The
             # prefix used to be required: single-agent mode took only `app:`
             # writers, so an install with working CLIs advertised them and
@@ -1499,67 +1496,50 @@ class SingleAgentHomeTests(BrowserE2ETestCase):
         # is not passing because the cards rendered no buttons at all.
         self.assertTrue(page.locator(".upgrade-workflow, .edit-workflow").count() > 0)
 
-    def test_single_agent_mode_can_choose_which_agent_writes(self) -> None:
-        """One Agent in the workflow does not mean one available writer."""
+    def test_the_author_can_choose_which_agent_writes(self) -> None:
+        """Every writer the Runtime has, not the subset one product allowed.
+
+        The choice used to be narrowed to Apps connected over MCP, because
+        single-Agent authoring was deliberately stricter than the rest of the
+        Runtime. With one product there is one answer: whoever can write.
+        """
 
         page = self.open("en-US")
         page.locator('[data-view="workflows"]').click()
         page.wait_for_selector(".simplified-workflow-generator")
 
         writer = page.locator("#workflowGenerateAgent")
-        self.assertEqual(["Codex", "Remote"], writer.locator("option").evaluate_all(
+        options = writer.locator("option").evaluate_all(
             "nodes => nodes.map(node => node.value)"
-        ))
-        self.assertEqual("Codex", writer.input_value())
+        )
+        self.assertIn("Codex", options)
+        self.assertIn("Remote", options)
         page.get_by_role("combobox", name="Written by").click()
         page.get_by_role("option", name="Remote", exact=True).click()
         self.assertEqual("Remote", writer.input_value())
         self.assertFalse(page.locator("#generateWorkflow").is_disabled())
 
-    def test_single_agent_mode_requires_a_registered_mcp_agent(self) -> None:
-        context = self.browser.new_context(locale="en-US")
-        page = context.new_page()
-        self.addCleanup(context.close)
-
-        def without_mcp_agents(route):
-            response = route.fetch()
-            body = response.json()
-            body["data"]["capabilities"]["workflow_generation"]["mcp_agents"] = []
-            route.fulfill(response=response, json=body)
-
-        page.route("**/api/v1/capabilities", without_mcp_agents)
-        page.goto(f"{self.base}/ui/#/workflows")
-        page.wait_for_selector(".simplified-workflow-generator")
-
-        self.assertEqual(0, page.locator("#workflowGenerateAgent").count())
-        self.assertTrue(page.locator(".simplified-workflow-mcp-required").is_visible())
-        self.assertIn(
-            "Connect an Agent through MCP",
-            page.locator(".simplified-workflow-mcp-required").inner_text(),
-        )
-        self.assertTrue(page.locator("#generateWorkflow").is_disabled())
-
-    def test_one_agent_is_still_the_difference(self) -> None:
-        """What single-agent mode does withhold, it still withholds."""
+    def test_every_page_the_shell_offers_is_reachable(self) -> None:
+        """The Agents page used to be hidden by the mode. Nothing hides it now."""
 
         page = self.open("en-US")
         page.wait_for_selector(".simplified-workspace-composer")
 
-        self.assertFalse(page.locator('[data-view="agents"]').is_visible())
+        self.assertTrue(page.locator('[data-view="agents"]').is_visible())
 
 
 if __name__ == "__main__":
     unittest.main()
 
 
-class SingleAgentBindingNoticeTests(BrowserE2ETestCase):
-    """The page shows one Agent per step and the run uses another. Say so.
+class AgentSubstitutionNoticeTests(BrowserE2ETestCase):
+    """The page names one Agent per step and another one runs it. Say so.
 
     The definition list names the Handler each step was published against,
-    node by node. In single-Agent mode none of those is what will run, and a
-    workflow bound to an Agent this machine has never had is startable anyway
-    — so the page has to state the substitution rather than leave the reader
-    to conclude, correctly and wrongly, that it will run on what it says.
+    node by node. A step whose Agent this machine has never had is startable
+    anyway, on a different one — so the page has to state the substitution
+    rather than leave the reader to conclude, correctly and wrongly, that it
+    will run on what it says.
     """
 
     @classmethod
@@ -1574,7 +1554,7 @@ class SingleAgentBindingNoticeTests(BrowserE2ETestCase):
 
     @classmethod
     def extra_app_kwargs(cls) -> dict:
-        return {"workflow_ui_mode": "single-agent"}
+        return {}
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -1602,22 +1582,15 @@ class SingleAgentBindingNoticeTests(BrowserE2ETestCase):
             expected_latest_version=0, source_format="json", source_text="{}",
             actor="test:author", dsl_version="1.3",
         )
-        # Bound to the Agent that *is* installed, so its binding reads
-        # current, and its entry port is the one a goal binds to, so it reads
-        # ready — and still unrunnable, because the result it declares is not
-        # the one that Agent produces. Every signal the card draws says this
-        # workflow is fine.
-        from orbit.workflow.domain.definitions import IRHandlerRef
+        # Its Agent is not here, so it has to be carried — and the result it
+        # declares is not one the Agent it would be carried to produces. Its
+        # binding reads rebound and its entry port is the one a goal binds to,
+        # so it reads ready: every signal the card draws says this workflow is
+        # fine, and it cannot start.
         from tests.test_agent_binding import port
 
-        pinned = IRHandlerRef(
-            cls.agent.name, cls.agent.version, cls.agent.fingerprint,
-        )
         odd = single_step_workflow(
-            agent_step(
-                handler=pinned,
-                outputs=(port("result", "example://integer/1.0"),),
-            ),
+            agent_step(outputs=(port("result", "example://integer/1.0"),)),
             workflow_id="workflow:ports",
         )
         store.publish(
@@ -1684,8 +1657,14 @@ class SingleAgentBindingNoticeTests(BrowserE2ETestCase):
         )
         self.assertEqual([], failures)
 
-    def test_the_action_editor_reports_the_binding_instead_of_offering_it(self) -> None:
-        """The picker republished a choice the Runtime overwrites at start."""
+    def test_the_action_editor_offers_the_agents_that_are_installed(self) -> None:
+        """A pick here is honoured: the fallback only moves a stranded step.
+
+        While one Agent ran everything, this control republished a choice the
+        Runtime then discarded, and the dialog reported the binding instead.
+        Now the Agent a step names is the Agent that runs it wherever it
+        exists, so choosing one decides something again.
+        """
 
         page = self.open("en-US")
         page.goto(f"{self.base}/ui/#/workflows/workflow:single/edit")
@@ -1695,9 +1674,11 @@ class SingleAgentBindingNoticeTests(BrowserE2ETestCase):
         page.wait_for_selector(".action-editor-dialog")
 
         dialog = page.locator(".action-editor-dialog")
-        self.assertEqual(0, dialog.locator("select").count())
-        self.assertIn("claude", dialog.locator(".field-static").inner_text())
-        # And the fields that do mean something are still editable.
+        self.assertEqual(1, dialog.locator("select").count())
+        self.assertIn(
+            "claude",
+            dialog.locator("select option").first.inner_text(),
+        )
         self.assertEqual(1, dialog.locator("textarea").count())
 
     def test_a_card_with_nothing_wrong_on_it_still_says_why(self) -> None:
@@ -1781,7 +1762,7 @@ class EngineRefusalNoticeTests(BrowserE2ETestCase):
 
     @classmethod
     def extra_app_kwargs(cls) -> dict:
-        return {"workflow_ui_mode": "single-agent"}
+        return {}
 
     @classmethod
     def setUpClass(cls) -> None:

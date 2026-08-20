@@ -56,24 +56,12 @@ function generationAgents() {
   return capability?.available ? capability.agents || [] : [];
 }
 
-function mcpGenerationAgents() {
-  const capability = shellFacts?.capabilities?.workflow_generation;
-  if (!capability?.available) return [];
-  if (Array.isArray(capability.mcp_agents)) return capability.mcp_agents;
-  // Compatibility with a Runtime already running when this UI was updated:
-  // discovered Handler names are not MCP registrations.
-  const handlers = new Set(
-    shellFacts?.capabilities?.agent_handlers?.agents || [],
-  );
-  return (capability.agents || []).filter((name) => !handlers.has(name));
-}
-
 /** The Agent this Runtime writes with when a request names none.
  *
  * The list is sorted for display, so its first entry is not the fallback the
  * server would actually use; the server names that one for us. */
-function defaultGenerationAgent(mcpOnly = false) {
-  const agents = mcpOnly ? mcpGenerationAgents() : generationAgents();
+function defaultGenerationAgent() {
+  const agents = generationAgents();
   // Whatever the Runtime says it will use when nobody names one. This used to
   // look for an `app:` prefix and prefer it, which made the *kind* of Agent
   // part of its name: an author has no reason to care whether a writer is a
@@ -84,8 +72,8 @@ function defaultGenerationAgent(mcpOnly = false) {
 }
 
 
-function generationAgentField(id, selected, onchange, mcpOnly = false) {
-  const agents = mcpOnly ? mcpGenerationAgents() : generationAgents();
+function generationAgentField(id, selected, onchange) {
+  const agents = generationAgents();
   if (!agents.length) return null;
   if (agents.length === 1) return el("div", { class: "field" }, [
     el("span", { class: "field-label", text: i18n.t("generate.writtenBy") }),
@@ -223,35 +211,6 @@ function navigate(next) {
   router.navigate(next);
 }
 
-/* Single/multi-Agent is presentation-only — both modes serve the same API —
-   so the top-bar switch keeps its choice in localStorage and overrides what
-   the Runtime reports, exactly like the theme next to it. */
-function uiModeOverride() {
-  const value = localStorage.getItem("orbit.uiMode");
-  return value === "single-agent" || value === "multi-agent" ? value : null;
-}
-
-function effectiveWorkflowUiMode() {
-  return uiModeOverride() || shellFacts?.product_mode?.workflow_ui_mode;
-}
-
-function applyUiModeOverride(facts) {
-  const override = uiModeOverride();
-  if (override && facts?.product_mode) {
-    facts.product_mode = { ...facts.product_mode, workflow_ui_mode: override };
-  }
-  return facts;
-}
-
-function syncUiModeToggle() {
-  const mode = effectiveWorkflowUiMode();
-  for (const option of document.querySelectorAll("#uiModeToggle .theme-option")) {
-    const active = option.dataset.uiMode === mode;
-    option.classList.toggle("active", active);
-    option.setAttribute("aria-pressed", String(active));
-  }
-}
-
 async function render() {
   // Old bookmarks to retired views land on the workspace instead of a 404.
   if (["ops", "settings", "inbox", "artifacts"].includes(route.view)) {
@@ -291,20 +250,8 @@ async function render() {
     // Agent App registrations are live rather than startup configuration.
     // Refresh capabilities with the view so a newly connected app can become
     // the initial writer without requiring a full browser reload.
-    shellFacts = applyUiModeOverride((await api.capabilities()).data);
+    shellFacts = (await api.capabilities()).data;
     mayStartRun = Boolean(shellFacts.permissions && shellFacts.permissions.start_run);
-    syncUiModeToggle();
-    // One Agent instead of several is the whole difference between the two
-    // products. The Workflow catalog is not part of it: single-agent mode
-    // authors workflows too, and hiding the page they land in left the one it
-    // had just generated with nowhere to be opened.
-    const singleAgentUi = shellFacts.product_mode?.workflow_ui_mode === "single-agent";
-    const agentsNav = document.querySelector('[data-view="agents"]');
-    if (agentsNav) agentsNav.hidden = singleAgentUi;
-    if (singleAgentUi && route.view === "agents") {
-      navigate({ view: "home", runId: null });
-      return;
-    }
     views.update({ i18n, shellFacts, mayStartRun, route });
     const fresh = el("div", { class: "content" });
     if (route.view === "home") await views.renderSimplifiedWorkspace(fresh);
@@ -512,13 +459,8 @@ async function boot() {
   installMoreMenu();
 
   try {
-    shellFacts = applyUiModeOverride((await api.capabilities()).data);
+    shellFacts = (await api.capabilities()).data;
     mayStartRun = Boolean(shellFacts.permissions && shellFacts.permissions.start_run);
-    syncUiModeToggle();
-    const agentsNav = document.querySelector('[data-view="agents"]');
-    if (agentsNav) {
-      agentsNav.hidden = shellFacts.product_mode?.workflow_ui_mode === "single-agent";
-    }
     views.update({ i18n, shellFacts, mayStartRun, route });
     const shutdown = runtimeShutdownCommand();
     document.getElementById("shutdownRuntime").hidden = !shutdown;
@@ -533,15 +475,6 @@ async function boot() {
   document.documentElement.dataset.shell = "ready";
 
   document.getElementById("refresh").addEventListener("click", () => render());
-  for (const option of document.querySelectorAll("#uiModeToggle .theme-option")) {
-    option.addEventListener("click", () => {
-      if (option.dataset.uiMode === effectiveWorkflowUiMode()) return;
-      localStorage.setItem("orbit.uiMode", option.dataset.uiMode);
-      // render() re-fetches capabilities and re-applies the override, so the
-      // nav and the authoring profile follow the new mode in one pass.
-      render();
-    });
-  }
   window.addEventListener("orbit:refresh", () => render());
   views.scheduleLivePolling();
   for (const button of document.querySelectorAll(".nav-button[data-view]")) {

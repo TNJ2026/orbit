@@ -54,11 +54,14 @@ uv run orbit serve
 
 UI 地址为 `http://127.0.0.1:8848/ui`。
 
-默认启动单 Agent 编排 UI。如需使用保持原有能力的多 Agent 高级 UI：
+只有一个 UI、一个目录、一个已发布 Workflow 库。工作流点名哪些 Agent，就在这些
+Agent 存在的地方用它们。
 
-```bash
-uv run orbit serve --ui-mode multi-agent
-```
+已发布的工作流钉住的是编译时那个精确的 Handler 构建，而 Agent 的构建就是它的 CLI
+版本——所以在别的机器上写的工作流、或者 CLI 升级过之后，它点名的东西可能不在这里。
+无处可去的步骤会被送到一个在的 Agent 上，且尽可能少动：优先送到同一个 Agent 已安装
+的构建，实在不行才送到本 Runtime 正在对话的那个 Agent。**点名的 Agent 在，就绝不
+移动**——所以刻意用两个 Agent 的工作流仍然用两个。
 
 ## 在 Codex 中使用
 
@@ -84,7 +87,7 @@ Codex 会启动或复用当前项目的 Runtime、打开 UI，并调用
 5. Orbit 在每次运行前将图中的 Agent 节点绑定到当前唯一 Agent Handler，保存本次
    Run 的解析后图快照并交给 LangGraph。
 
-单 Agent 模式不让用户接触 DSL、草稿或版本号。发布操作在内部复用现有 Workflow
+Goal UI 不让用户接触 DSL、草稿或版本号。发布操作在内部复用现有 Workflow
 版本库，以获得稳定存储和流程图读取能力；UI 始终只展示当前定义。模板或已发布
 Workflow 的变化只影响新 Run，已经启动的 Run 始终使用自己的图快照恢复。多 Agent
 UI 继续保留完整工作流建模能力。
@@ -130,10 +133,9 @@ App 必须保持下面的调用处于等待状态，才会被 Orbit 识别为当
 wait_authoring_request(client="claude-desktop", timeout_seconds=300)
 ```
 
-Orbit 随后显示 `app:claude-desktop`。仅连接 MCP 不会注册在线 App。默认单 Agent
-模式只利用该等待调用判断在线状态，并直接启动模板；只有使用
-`--ui-mode multi-agent` 时，App 才需要用 `submit_authoring_response` 提交 Workflow
-DSL，并通过 `get_authoring_job` 处理编译反馈。
+Orbit 随后显示 `app:claude-desktop`。仅连接 MCP 不会注册在线 App——是这个等待调用
+让它可被寻址。被请求撰写 Workflow 的 App 用 `submit_authoring_response` 提交 DSL，
+并通过 `get_authoring_job` 处理编译反馈。
 
 Runtime 事件可通过 `wait_app_event`、`list_app_events` 和 `ack_app_event` 处理。
 `event_type` 为 `langgraph_run.<status>`（run 状态变化）或
@@ -146,7 +148,7 @@ run 在启动它的那个请求里执行。`POST /api/v1/langgraph-runs` 带 `"w
 时，run 一创建就返回，执行放到后台 —— UI 用的就是这条，页面才能看着自己启动的目标。
 两种方式下"这个 run 能不能存在"都已经判定完毕；等待换来的只是知道它**怎么结束的**。
 
-单 Agent 模式下每个 actor 同时只跑一个目标：当已有 `running`、`waiting` 或
+每个 actor 同时只跑一个目标：当已有 `running`、`waiting` 或
 `interrupted` 的 run 时，再启动会以 `active_goal_exists` 拒绝，并在拒绝里带上占用
 该槽位的 run，客户端可以直接跳过去。取消或结束即释放。
 

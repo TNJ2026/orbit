@@ -60,29 +60,26 @@ uv run orbit serve
 
 The UI is available at `http://127.0.0.1:8848/ui`.
 
-The single-Agent authoring UI is the default. Start the unchanged advanced
-multi-Agent UI explicitly when needed:
+There is one UI, one catalog and one published Workflow library. A Workflow
+names the Agents its author chose and runs on them wherever they exist.
 
-```bash
-uv run orbit serve --ui-mode multi-agent
-```
+A published Workflow pins the exact Handler build it was compiled against, and
+for an Agent that build is its CLI version — so a Workflow written on another
+machine, or one whose CLI has since been upgraded, names something that is not
+here. A step with nowhere to go is carried to an Agent that is, and as little
+as possible: to the same Agent's installed build where there is one, and only
+failing that to whichever Agent this Runtime is talking to. A step whose Agent
+*is* installed is never moved, so a Workflow that deliberately uses two Agents
+keeps using two.
 
-Both modes serve one catalog and the same API, and a Workflow published in
-either runs in both. The difference is binding: in single-Agent mode every
-Agent step is rebound when the run starts to the Agent this Runtime is talking
-to, whatever Agent the definition names — so a Workflow written against
-`agent.codex` runs on `claude` without being edited or republished. The
-published definition is never rewritten; the rebound graph is stored with the
-run, so a finished run still names the Agent that actually executed it after
-the connected Agent has changed.
+Which Agent stands in for a missing one follows the most recent MCP client to
+introduce itself, and stays that Agent while none is connected. Where nothing
+can be named the published binding stands and the compiler says whether it
+resolves, exactly as it would if this fallback did not exist.
 
-Which Agent that is follows the most recent MCP client to introduce itself,
-and stays that Agent while none is connected. A Runtime with several Agent
-CLIs installed that has never heard from any client refuses to start rather
-than guess — connect an Agent, or run `--ui-mode multi-agent`.
-
-`--ui-mode` means the same thing on both surfaces: `orbit mcp` addresses the
-same library and binds the same way `orbit serve` does.
+The published definition is never rewritten; the substituted graph is stored
+with the run, so a finished run still names the Agent that actually executed
+it after the connected Agent has changed.
 
 ## Use Orbit in Codex
 
@@ -157,10 +154,9 @@ wait_authoring_request(client="claude-desktop", timeout_seconds=300)
 ```
 
 Orbit then shows `app:claude-desktop`. Connecting MCP alone does not register
-an online App. Default single-Agent mode uses the pending call only for presence
-and starts templates directly. Only `--ui-mode multi-agent` asks the App to
-submit Workflow DSL with `submit_authoring_response` and process compiler
-feedback through `get_authoring_job`.
+an online App: the pending call is what makes one addressable. An App asked to
+write a Workflow submits the DSL with `submit_authoring_response` and processes
+compiler feedback through `get_authoring_job`.
 
 Runtime events can be consumed with `wait_app_event`, `list_app_events`, and
 `ack_app_event`. `event_type` is `langgraph_run.<status>` for a run's state
@@ -176,7 +172,7 @@ background — what the UI asks for, so the page can watch a goal it started.
 Everything that decides whether the run may exist has already happened either
 way; what waiting buys is being told how it ended.
 
-In single-agent mode one goal runs at a time, per actor: starting a second
+One goal runs at a time, per actor: starting a second
 while one is `running`, `waiting` or `interrupted` is refused with
 `active_goal_exists`, and the refusal names the run holding the slot so a
 client can go to it. Cancelling or finishing releases it.

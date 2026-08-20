@@ -79,17 +79,6 @@
                aria-label="Checking runtime…">
             <span class="live-dot" id="runtimeDot" aria-hidden="true"></span>
           </div>
-          <!-- Single/multi-Agent is a presentation preference (the API surface
-               is identical in both modes), so it lives beside Refresh as a
-               local segmented control rather than a server setting — the same
-               shape the theme toggle uses. -->
-          <div class="theme-toggle ui-mode-toggle" id="uiModeToggle" role="group"
-               data-i18n-label="settings.uiMode" aria-label="Agent mode">
-            <button class="theme-option" id="uiModeSingle" type="button"
-                    data-ui-mode="single-agent" data-i18n="shell.uiMode.single">Single Agent</button>
-            <button class="theme-option" id="uiModeMulti" type="button"
-                    data-ui-mode="multi-agent" data-i18n="shell.uiMode.multi">Multi Agent</button>
-          </div>
           <button class="button" id="refresh" data-i18n="action.refresh">Refresh</button>
           <button class="button" id="shutdownRuntime" type="button" hidden
                   data-i18n="runtime.shutdown.action">Stop Orbit</button>

@@ -1283,11 +1283,11 @@ export function createViews(context) {
    * advertised, when every stale binding has a newer version to land on. */
   /** Say which Agent will actually run this workflow's Agent steps.
    *
-   * In single-Agent mode every Agent step runs on the one Agent the Runtime
-   * speaks for, whatever the definition names — and the definition on this
-   * very page names the other one, node by node. Without this the page shows
-   * a workflow bound to an Agent that may not even be installed and says
-   * nothing about the substitution that makes it startable.
+   * A step whose Agent is not on this machine is carried to one that is,
+   * and the definition on this very page goes on naming the other one,
+   * node by node. Without this the page shows a workflow bound to an Agent
+   * nobody has and says nothing about the substitution that makes it
+   * startable.
    *
    * Driven by what the server says it will do, never by the mode switch in
    * the top bar: that switch is a local presentation override, and a notice
@@ -1373,13 +1373,9 @@ export function createViews(context) {
     }
 
     {
-      // Single-agent constrains the generated workflow, not who writes it.
-      // When several writers are available the author can choose one; the
-      // Runtime's default remains selected initially.
-      const authoringProfile = shellFacts?.product_mode?.workflow_ui_mode === "single-agent"
-        ? "single_agent" : "multi_agent";
-      const mcpOnly = authoringProfile === "single_agent";
-      let writerAgent = defaultGenerationAgent(mcpOnly);
+      // Several writers may be available; the author can choose one and the
+      // Runtime's default is selected initially.
+      let writerAgent = defaultGenerationAgent();
       const instruction = el("textarea", {
         id: "generateInstruction", required: "required", maxlength: "4000",
         disabled: activeGeneration ? "disabled" : null,
@@ -1391,8 +1387,7 @@ export function createViews(context) {
       });
       const submit = el("button", {
         class: "button primary", type: "submit", id: "generateWorkflow",
-        disabled: !generateCommand || activeGeneration || (mcpOnly && !writerAgent)
-          ? "disabled" : null,
+        disabled: !generateCommand || activeGeneration ? "disabled" : null,
       }, [
         el("span", { class: "generate-spark", "aria-hidden": "true", text: "✦" }),
         el("span", { text: activeGeneration
@@ -1413,7 +1408,6 @@ export function createViews(context) {
               {
                 prompt: instruction.value.trim(),
                 display_language: i18n.locale,
-                authoring_profile: authoringProfile,
                 ...(writerAgent ? { agent: writerAgent } : {}),
               },
               `workflow.generate:${Date.now()}`,
@@ -1434,13 +1428,8 @@ export function createViews(context) {
           generationAgentField(
             "workflowGenerateAgent", writerAgent,
             (value) => { writerAgent = value; },
-            mcpOnly,
           ),
         ]),
-        mcpOnly && !writerAgent ? el("div", {
-          class: "banner info simplified-workflow-mcp-required",
-          text: i18n.t("generate.mcpAgent.required"),
-        }) : null,
         el("div", { class: "field" }, [
           el("label", {
             class: "sr-only", for: "generateInstruction",
@@ -1455,14 +1444,8 @@ export function createViews(context) {
         class: "view-intro simplified-workflow-generator-copy",
       }, [
         el("div", {}, [
-          el("h2", { text: i18n.t(
-            authoringProfile === "single_agent"
-              ? "generate.single.title" : "generate.title",
-          ) }),
-          el("p", { class: "muted", text: i18n.t(
-            authoringProfile === "single_agent"
-              ? "generate.single.hint" : "generate.hint",
-          ) }),
+          el("h2", { text: i18n.t("generate.title") }),
+          el("p", { class: "muted", text: i18n.t("generate.hint") }),
         ]),
       ]));
       page.append(el("section", { class: "panel simplified-workflow-generator" }, [
