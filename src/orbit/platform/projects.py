@@ -44,14 +44,17 @@ def public_workflow_db_path() -> Path:
     return DEFAULT_WORKFLOW_LIBRARY_PATH
 
 
-def workflow_library_path(ui_mode: str) -> Path:
-    """An isolated published Workflow library for one authoring product."""
+def retired_workflow_library_path() -> Path:
+    """Where the single-Agent product kept its own, now-merged library.
 
-    if ui_mode == "single-agent":
-        return DEFAULT_SINGLE_AGENT_WORKFLOW_LIBRARY_PATH
-    if ui_mode == "multi-agent":
-        return DEFAULT_WORKFLOW_LIBRARY_PATH
-    raise ValueError("ui_mode must be single-agent or multi-agent")
+    There were two libraries, one per authoring product, deliberately never
+    seeded from each other. With one product there is one library — but
+    `orbit serve` defaulted to the single-Agent one, so on a default install
+    this file is where everything a person published actually is. It is read
+    once, merged forward, and then only ever read again to find nothing new.
+    """
+
+    return DEFAULT_SINGLE_AGENT_WORKFLOW_LIBRARY_PATH
 
 PROJECT_MARKERS = (".git", "pyproject.toml")
 

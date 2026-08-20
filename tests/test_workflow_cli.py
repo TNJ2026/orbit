@@ -156,9 +156,6 @@ class WorkflowCliTests(unittest.TestCase):
             create_app.call_args.kwargs["langgraph_state_directory"],
         )
 
-        self.assertEqual(
-            "single-agent", create_app.call_args.kwargs["workflow_ui_mode"]
-        )
         # An explicit --db is self-contained, in every command alike. A
         # sibling file only this command knew about is what made a Workflow
         # published with `orbit workflow publish --db X` invisible in the UI
@@ -166,49 +163,6 @@ class WorkflowCliTests(unittest.TestCase):
         self.assertEqual(
             self.db, create_app.call_args.kwargs["workflow_db_path"],
         )
-
-    def test_serve_can_select_the_multi_agent_ui(self) -> None:
-        with (
-            patch("orbit.web.app.create_app") as create_app,
-            patch("orbit.__main__.upsert_project"),
-            patch("orbit.__main__.uvicorn.run"),
-        ):
-            self.run_cli(
-                "serve", "--db", str(self.db), "--no-agent-discovery",
-                "--ui-mode", "multi-agent",
-            )
-
-        self.assertEqual(
-            "multi-agent", create_app.call_args.kwargs["workflow_ui_mode"]
-        )
-        self.assertEqual(
-            self.db, create_app.call_args.kwargs["workflow_db_path"],
-        )
-
-    def test_mcp_runs_in_the_same_mode_serve_does(self) -> None:
-        """One flag, one meaning, on both surfaces.
-
-        `--ui-mode` used to pick which library `orbit mcp` addressed and
-        nothing else, so a Workflow the UI could start — because single-Agent
-        mode rebinds its Agent steps to the installed Agent — was refused over
-        stdio for naming an Agent that is not installed. Both surfaces read
-        the same catalog; they have to run it the same way too.
-        """
-
-        for mode in ("single-agent", "multi-agent"):
-            with self.subTest(mode=mode):
-                with (
-                    patch("orbit.web.app.create_app") as create_app,
-                    patch("orbit.web.mcp.serve_stdio"),
-                ):
-                    self.run_cli(
-                        "mcp", "--db", str(self.db), "--no-agent-discovery",
-                        "--ui-mode", mode,
-                    )
-
-                self.assertEqual(
-                    mode, create_app.call_args.kwargs["workflow_ui_mode"],
-                )
 
     def test_serve_reports_an_unusable_artifact_root_without_a_traceback(self) -> None:
         invalid_root = Path(self.temp_dir.name) / "not-a-directory"
@@ -461,13 +415,12 @@ if __name__ == "__main__":
 class WorkflowLibraryResolutionTests(unittest.TestCase):
     """One rule for which library a command addresses, for every command.
 
-    Each surface used to resolve it for itself. `orbit serve` defaults to
-    `--ui-mode single-agent` and so read `single-agent-library.db`, while
-    `orbit mcp`, `orbit workflow inventory|publish` and `orbit run start`
-    resolved `library.db` — a default install where a Workflow published from
-    the command line never appeared in the UI, and one authored in the UI
+    Each surface used to resolve it for itself, against one of two host-wide
+    libraries chosen by a flag — a default install where a Workflow published
+    from the command line never appeared in the UI, and one authored in the UI
     could not be started from the command line. Nothing failed; the two
-    catalogs simply had nothing to do with each other.
+    catalogs simply had nothing to do with each other. There is one library
+    now, so there is nothing left to disagree about.
     """
 
     def parse(self, *arguments: str):
@@ -478,45 +431,27 @@ class WorkflowLibraryResolutionTests(unittest.TestCase):
     def resolved(self, *arguments: str) -> str:
         from orbit.__main__ import _workflow_db_path
 
-        args = self.parse(*arguments)
-        return _workflow_db_path(args.db, args.ui_mode)
+        return _workflow_db_path(self.parse(*arguments).db)
 
-    def test_every_default_surface_resolves_the_same_library_for_a_mode(self) -> None:
-        from orbit.platform.projects import workflow_library_path
+    def test_every_default_surface_resolves_the_one_library(self) -> None:
+        from orbit.platform.projects import public_workflow_db_path
 
-        commands = (
-            ("serve",),
-            ("mcp",),
-            ("workflow", "inventory"),
-                    )
-        for mode in ("single-agent", "multi-agent"):
-            expected = str(workflow_library_path(mode))
-            for command in commands:
-                with self.subTest(command=command, mode=mode):
-                    self.assertEqual(
-                        expected, self.resolved(*command, "--ui-mode", mode)
-                    )
+        expected = str(public_workflow_db_path())
+        for command in (("serve",), ("mcp",), ("workflow", "inventory")):
+            with self.subTest(command=command):
+                self.assertEqual(expected, self.resolved(*command))
 
-    def test_the_default_mode_is_the_same_everywhere(self) -> None:
-        """Agreeing only when the operator names the mode is not agreeing."""
-
-        defaults = {
-            self.parse(*command).ui_mode
-            for command in (
-                ("serve",), ("mcp",), ("workflow", "inventory"),
-                            )
-        }
-        self.assertEqual({"single-agent"}, defaults)
+    def test_no_command_takes_a_mode_that_would_split_them_again(self) -> None:
+        for command in (("serve",), ("mcp",), ("workflow", "inventory")):
+            with self.subTest(command=command):
+                self.assertFalse(hasattr(self.parse(*command), "ui_mode"))
 
     def test_an_explicit_database_is_self_contained_in_every_command(self) -> None:
         """No sibling file that only one command knows the name of."""
 
         for command in (("serve",), ("mcp",), ("workflow", "inventory")):
-            for mode in ("single-agent", "multi-agent"):
-                with self.subTest(command=command, mode=mode):
-                    self.assertEqual(
-                        "/tmp/named.db",
-                        self.resolved(
-                            *command, "--db", "/tmp/named.db", "--ui-mode", mode
-                        ),
-                    )
+            with self.subTest(command=command):
+                self.assertEqual(
+                    "/tmp/named.db",
+                    self.resolved(*command, "--db", "/tmp/named.db"),
+                )

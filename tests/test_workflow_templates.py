@@ -139,7 +139,7 @@ class SingleAgentTemplateTests(unittest.TestCase):
                 authenticator=lambda request: request.headers.get("x-orbit-actor"),
                 authorizer=Authorizer(lambda _actor: (READ_SCOPE, WRITE_SCOPE)),
                 langgraph_state_directory=directory,
-                workflow_ui_mode="single-agent", discover_agents=False,
+                discover_agents=False,
             )
             with AsgiHarness(app) as http:
                 listed = http.get(

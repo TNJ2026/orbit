@@ -18,51 +18,27 @@ from .platform.cutover import (
 )
 from .platform.projects import (
     project_db_path,
-    workflow_library_path,
+    public_workflow_db_path,
     project_state_dir,
     resolve_project_root,
     upsert_project,
 )
 
 
-def _workflow_db_path(explicit: str | None, ui_mode: str = "single-agent") -> str:
+def _workflow_db_path(explicit: str | None) -> str:
     """Which library holds published definitions, for every command alike.
 
-    Two rules, and both have to be the same everywhere or the catalog splits:
-    an explicit database is self-contained, and the default is the host-wide
-    library for the authoring product named by `ui_mode`.
-
-    They were not the same everywhere. `orbit serve` defaults to
-    `--ui-mode single-agent` and so read `single-agent-library.db`, while
-    `orbit mcp`, `orbit workflow inventory|publish` and `orbit run start` all
-    resolved the multi-agent `library.db` — so on a default install, a
-    Workflow published from the command line was never visible in the UI, and
-    one published in the UI could not be started from the command line. Both
-    surfaces were right about their own file and wrong about each other.
+    One rule now, which is the point: an explicit database is self-contained,
+    and everything else is the one host-wide library. There used to be two,
+    one per authoring product, and which one a command addressed depended on a
+    flag — so a Workflow published from the command line could be invisible in
+    the UI served from the same machine.
     """
 
     if explicit:
         return explicit
     _runtime_db_path(None)  # Preserve the existing cutover acknowledgement gate.
-    return str(workflow_library_path(ui_mode))
-
-
-def _add_ui_mode_argument(command) -> None:
-    """Which product's library this command addresses.
-
-    Every command that resolves the default library needs it, or it addresses
-    a different one than the UI does. The default matches `orbit serve`.
-    """
-
-    command.add_argument(
-        "--ui-mode",
-        choices=("single-agent", "multi-agent"),
-        default="single-agent",
-        help=(
-            "Which authoring product's published Workflow library to use "
-            "(default: single-agent). Ignored when --db is given."
-        ),
-    )
+    return str(public_workflow_db_path())
 
 
 def _runtime_db_path(
@@ -170,7 +146,7 @@ def _workflow_inventory(args, machine_output: bool) -> None:
     safe to run against a live database.
     """
 
-    path = Path(_workflow_db_path(args.db, args.ui_mode))
+    path = Path(_workflow_db_path(args.db))
     if not path.exists():
         raise SystemExit(
             f"no runtime database at {path}; run `orbit serve` once, or pass --db"
@@ -217,7 +193,7 @@ def _workflow_command(args) -> None:
         store = None
         if args.workflow_action == "publish":
             store = SQLiteWorkflowVersionStore(
-                _workflow_db_path(args.db, args.ui_mode)
+                _workflow_db_path(args.db)
             )
         service = WorkflowDefinitionService(catalogs, store)
         if args.workflow_action == "validate":
@@ -291,7 +267,7 @@ def _run_engine(args):
         else Path(db_path).parent
     )
     return build_service(
-        Path(_workflow_db_path(args.db, args.ui_mode)),
+        Path(_workflow_db_path(args.db)),
         [],
         state_directory=state,
     )
@@ -452,7 +428,7 @@ def _serve(args) -> None:
         handlers.extend(dev_handlers)
         print(f"dev tools: {', '.join(tool_names) or 'none granted'}", flush=True)
 
-    workflow_db_path = Path(_workflow_db_path(args.db, args.ui_mode))
+    workflow_db_path = Path(_workflow_db_path(args.db))
     langgraph_state_directory = (
         Path(args.langgraph_state_dir).expanduser().absolute()
         if args.langgraph_state_dir else Path(db_path).parent
@@ -489,7 +465,6 @@ def _serve(args) -> None:
             operator_actors=(LOCAL_ACTOR,),
             shutdown_request=request_shutdown,
             langgraph_state_directory=langgraph_state_directory,
-            workflow_ui_mode=args.ui_mode,
             agent_workspace_root=args.agent_workspace,
             structured_agents=structured_agents,
         )
@@ -553,18 +528,12 @@ def _mcp(args) -> None:
 
     app = create_app(
         db_path,
-        workflow_db_path=_workflow_db_path(args.db, args.ui_mode),
+        workflow_db_path=_workflow_db_path(args.db),
         handlers=list(builtin_handlers()),
         schemas=BUILTIN_SCHEMAS,
         artifact_backend=artifact_backend,
         discover_agents=not args.no_agent_discovery,
         serve_ui=False,
-        # The same mode `serve` runs in, not only the same library. `--ui-mode`
-        # decided which database this process addressed and nothing else, so a
-        # Workflow the UI could start — because single-Agent mode rebinds its
-        # Agent steps — was refused over stdio for naming an Agent that is not
-        # installed. One flag, one meaning, on both surfaces.
-        workflow_ui_mode=args.ui_mode,
         # There is no connection to authenticate. The person who started this
         # process is the caller, and on a local runtime that is `local` —
         # the same actor loopback would have resolved to.
@@ -664,7 +633,6 @@ def build_parser() -> argparse.ArgumentParser:
             "point this at a checkout only when that is the intent."
         ),
     )
-    _add_ui_mode_argument(serve_cmd)
     serve_cmd.add_argument(
         "--no-agent-discovery",
         action="store_true",
@@ -728,7 +696,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-agent-discovery", action="store_true",
         help="Skip probing for installed Agent CLIs at startup",
     )
-    _add_ui_mode_argument(mcp_cmd)
 
     agent_app_cmd = sub.add_parser(
         "agent-app", help="Host a manifest-declared local Agent App",
@@ -769,7 +736,6 @@ def build_parser() -> argparse.ArgumentParser:
             "--langgraph-state-dir", default=None,
             help="Engine state directory (default: beside the database)",
         )
-        _add_ui_mode_argument(command)
         command.add_argument(
             "--json", action="store_true", help="Emit stable machine-readable JSON"
         )
@@ -793,7 +759,6 @@ def build_parser() -> argparse.ArgumentParser:
     inventory.add_argument(
         "--json", action="store_true", help="Emit stable machine-readable JSON"
     )
-    _add_ui_mode_argument(inventory)
     for action in ("validate", "compile", "publish"):
         command = workflow_sub.add_parser(action)
         command.add_argument("file", help="Workflow DSL .yaml, .yml, or .json file")
@@ -808,7 +773,6 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("--output", default="-", help="Canonical IR output path (default: stdout)")
         if action == "publish":
             command.add_argument("--db", default=None, help="SQLite database path")
-            _add_ui_mode_argument(command)
             command.add_argument("--expected-version", type=int, required=True)
             command.add_argument("--actor", default="local-cli")
     return parser
