@@ -67,9 +67,11 @@ class CatalogTests(unittest.TestCase):
         shared = {key for key in zh if zh[key] == en[key]}
         # Brand names, identifiers, and terms deliberately kept in English.
         intentional = {
+            "agents.title",
             "app.title",
             "artifacts.idLabel",
             "artifacts.title",
+            "nav.agents",
             "nav.artifacts",
             "run.console.stderr",
             "run.console.stdout",
