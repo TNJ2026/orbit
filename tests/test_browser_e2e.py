@@ -1079,6 +1079,53 @@ class SimplifiedUpgradeTests(BrowserE2ETestCase):
         self.assertGreaterEqual(len(reads), 1)
 
 
+    def test_a_background_change_does_not_take_the_account_away(self) -> None:
+        """The live tick redraws the page; this one must not be redrawn.
+
+        Publishing a revision is itself a change, and so is anything else
+        happening in the Runtime meanwhile — so the account of what just
+        changed was on screen only until the next tick, which is why it
+        seemed to keep the confirmation button for a while and then move on
+        without being asked. The tick is answered here rather than waited
+        for, so the change is certain instead of incidental.
+        """
+
+        import json as json_module
+
+        page = self.open("en-US", "/ui/#/workflows")
+        self.card(page).locator(".upgrade-workflow").click()
+        page.wait_for_selector(".workflow-editor textarea")
+        page.get_by_role("button", name="Revise").click()
+        page.wait_for_selector("#confirmRevision", timeout=30_000)
+
+        ticks, reads = [], []
+        page.route("**/api/v1/live*", lambda route: (
+            ticks.append(1),
+            route.fulfill(status=200, content_type="application/json",
+                          body=json_module.dumps({
+                              "schema_version": "1.0", "projection_version": None,
+                              "next_cursor": None,
+                              "data": {"changed": True, "cursor": f"c{len(ticks)}"},
+                          })),
+        ))
+        page.on("request", lambda request: (
+            reads.append(1)
+            if "/api/v1/workflows/workflow" in request.url and "?" not in request.url
+            else None
+        ))
+        page.wait_for_timeout(18_000)
+
+        # The tick happened and said something changed …
+        self.assertGreaterEqual(len(ticks), 1)
+        # … and the page did not go and rebuild itself around it.
+        self.assertEqual([], reads)
+        self.assertEqual(1, page.locator("#confirmRevision").count())
+        self.assertIn(
+            "Upgrade this workflow",
+            page.locator(".workflow-generation-prompt-value").inner_text(),
+        )
+
+
 class SimplifiedRegenerateTests(BrowserE2ETestCase):
 
     @classmethod

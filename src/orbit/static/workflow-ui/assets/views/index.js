@@ -46,6 +46,13 @@ export function createViews(context) {
   // the view, so a tick after navigating away redraws rather than patching a
   // page that is gone.
   let liveRun = null;
+  // Whether the view on screen owns something a background redraw would
+  // destroy — an instruction half typed, or a finished revision whose account
+  // nobody has said they have read yet. The comment on the live tick has
+  // claimed for a long time that an editor is never torn down by a projection
+  // change; nothing implemented it, so publishing a revision tore down the
+  // very account of it that had just been put on screen.
+  let viewHolds = null;
   let focusSimplifiedGoalOnRender = false;
   let simplifiedWorkflowGenerationPending = false;
 
@@ -1389,7 +1396,7 @@ export function createViews(context) {
           // unlocks, the commands change, a result appears — so that one is
           // still a redraw. It happens once, at the end, rather than on
           // every tick of the run it ends.
-          if (live.changed) {
+          if (live.changed && !viewHolds?.()) {
             const patched = liveRun ? await patchLiveRun() : false;
             if (!patched) await render();
           }
@@ -3058,6 +3065,13 @@ export function createViews(context) {
         },
       ));
     };
+
+    // A job on screen — running, or finished and unread — is this panel's to
+    // dismiss, and so is an instruction someone is still typing. A background
+    // render would take all three away without being asked.
+    viewHolds = () => Boolean(job)
+      || Boolean(section.querySelector("textarea")?.value.trim());
+    installViewCleanup(() => { viewHolds = null; });
 
     draw();
     // Two frames: the grid-row transition needs the zero-height pose committed
