@@ -655,6 +655,33 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
         self.assertEqual(0, page.locator(".simplified-workspace-composer").count())
         self.assertEqual(0, page.get_by_role("button", name="Run again").count())
 
+    def test_history_rows_carry_the_run_id(self) -> None:
+        """The id is what a row is found by again, so the row shows it.
+
+        A run with no goal is the exception: its title already is the id, and
+        printing it twice in one row says nothing the first line did not.
+        """
+
+        named = self.start_goal("simplified-history-id", "Reconcile the ledger")
+        page = self.open("en-US")
+        self.wait_for_status(page, named, "completed")
+        anonymous = self.start_goal("simplified-history-anon", "")
+        self.wait_for_status(page, anonymous, "completed")
+
+        page = self.open("en-US", "/ui/#/goals")
+        page.wait_for_selector(".history-goal-row")
+        rows = page.locator(".history-goal-row")
+
+        titled = rows.filter(has_text="Reconcile the ledger").first
+        self.assertIn(named, titled.inner_text())
+        self.assertEqual(named, titled.locator(".history-goal-id").inner_text())
+
+        untitled = rows.filter(has_text=anonymous).first
+        self.assertEqual(anonymous, untitled.locator(
+            ".history-goal-title"
+        ).inner_text())
+        self.assertEqual(0, untitled.locator(".history-goal-id").count())
+
     def test_history_goal_detail_closes_where_it_opened(self) -> None:
         """A click opens the modal in place; closing it changes nothing."""
 

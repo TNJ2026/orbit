@@ -904,6 +904,10 @@ export function createViews(context) {
       historyTime(run.updated_at),
       duration,
     ].filter(Boolean).join(" · ");
+    // The id a person needs to find this run again — in a log, in the search
+    // box above the list, or in a question to somebody else. Left off only
+    // when the run had no goal, because then the title already is the id.
+    const identity = run.goal ? run.run_id : "";
     return el("button", {
       class: "history-goal-row",
       // The detail opens where the list is: a modal, no address change.
@@ -912,7 +916,12 @@ export function createViews(context) {
     }, [
       el("span", { class: "history-goal-copy" }, [
         el("strong", { class: "history-goal-title", text: runName(run) }),
-        el("span", { class: "history-goal-meta muted", text: metadata }),
+        el("span", { class: "history-goal-meta muted" }, [
+          el("span", { text: metadata }),
+          identity ? el("span", {
+            class: "history-goal-id", text: identity,
+          }) : null,
+        ]),
         el("span", {
           class: `history-goal-artifacts${run.artifact_count ? " available" : ""}`,
           text: historyArtifactCount(run.artifact_count),

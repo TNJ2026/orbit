@@ -834,6 +834,11 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
   -webkit-line-clamp: 2; line-clamp: 2; line-height: 1.35;
 }
 .history-goal-meta { overflow-wrap: anywhere; font-size: 13px; }
+/* Monospaced so the id reads as an identifier rather than as more of the
+   sentence before it, and its own separator so a narrow row may wrap between
+   the two without leaving a dot stranded at the end of a line. */
+.history-goal-id { font-family: var(--mono); }
+.history-goal-id::before { content: " · "; }
 .history-goal-artifacts { color: var(--muted); font-size: 13px; font-weight: 650; }
 .history-goal-artifacts.available { color: var(--blue); }
 .history-goal-tail { display: inline-flex; align-items: center; gap: 12px; }
