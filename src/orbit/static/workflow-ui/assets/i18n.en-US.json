@@ -207,6 +207,7 @@
   "run.resume.labelNamed": "Value for {node} (JSON)",
   "run.resume.submit": "Resume",
   "run.resume.title": "Answer this step",
+  "run.close": "Close",
   "run.console.empty": "Nothing printed yet.",
   "run.console.finished": "Complete",
   "run.console.following": "Following",

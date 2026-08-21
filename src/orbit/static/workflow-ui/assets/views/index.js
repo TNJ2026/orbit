@@ -452,7 +452,19 @@ export function createViews(context) {
         // Beside the status rather than under the card: stopping a run is
         // what a watcher comes here to do, and it was below everything the
         // run had produced so far.
-        el("div", { class: "simplified-run-state" }, [pill(run.status), ...actions]),
+        //
+        // The way out sits in the same place once there is nothing left to
+        // stop. A finished run is a page a reader is done with, and the only
+        // exits were the browser's back button and the nav — neither of which
+        // says that starting the next goal is what happens next.
+        el("div", { class: "simplified-run-state" }, [
+          pill(run.status),
+          ...actions,
+          TERMINAL_LANGGRAPH_STATUSES.has(run.status) ? el("button", {
+            class: "button", text: i18n.t("run.close"),
+            onclick: () => navigate({ view: "home", runId: null }),
+          }) : null,
+        ].filter(Boolean)),
       ]),
       run.interrupts?.length ? el("pre", {
         class: "code-block", text: JSON.stringify(run.interrupts, null, 2),

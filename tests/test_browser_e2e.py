@@ -1533,6 +1533,51 @@ class GoalHomeTests(BrowserE2ETestCase):
             "取消执行", state.locator("button.danger").inner_text(),
         )
 
+    def test_a_finished_run_offers_the_way_to_the_next_goal(self) -> None:
+        """The run page is somewhere a reader is finished with.
+
+        Its only exits were the browser's back button and the nav, neither of
+        which says that starting the next goal is what happens next. The way
+        out appears where the stop button was, and only once there is nothing
+        left to stop.
+        """
+
+        page = self.open("zh-CN")
+        page.wait_for_selector(".simplified-workspace-composer")
+        workflow_id = self.publish(page, self.runnable(human=True))
+
+        # While it is still running there is a stop, and no way out: leaving a
+        # working run behind is not what the button beside it should mean.
+        running = self.start(page, workflow_id, goal="仍在执行")
+        page.goto(f"{self.base}/ui/#/runs/{quote(running['run_id'], safe='')}")
+        page.wait_for_selector(".simplified-run-hero")
+        state = page.locator(".simplified-run-state")
+        self.assertIn("取消执行", state.inner_text())
+        self.assertEqual(0, state.get_by_role(
+            "button", name="关闭", exact=True,
+        ).count())
+
+        # One goal at a time per actor, so this one has to be let go of before
+        # the next can be started.
+        self.cancel(page, running)
+        finished = self.start(
+            page, self.publish(page, self.runnable(human=False)), goal="已经跑完",
+        )
+        self.wait_for_status(page, finished["run_id"], "completed")
+        page.goto(f"{self.base}/ui/#/runs/{quote(finished['run_id'], safe='')}")
+        page.wait_for_selector(".simplified-run-hero")
+
+        page.locator(".simplified-run-state").get_by_role(
+            "button", name="关闭", exact=True,
+        ).click()
+
+        page.wait_for_selector(".simplified-workspace-composer")
+        self.assertEqual("#/home", page.evaluate("location.hash"))
+        # A fresh composer, not the finished goal reloaded into it.
+        self.assertEqual("", page.locator(
+            ".simplified-workspace-composer textarea"
+        ).input_value())
+
     def test_watching_a_run_does_not_redraw_the_page_around_it(self) -> None:
         """A tick changes which steps got where, so that is what it changes.
 

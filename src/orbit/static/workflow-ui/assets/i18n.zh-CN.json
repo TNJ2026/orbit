@@ -207,6 +207,7 @@
   "run.resume.labelNamed": "{node} 的值（JSON）",
   "run.resume.submit": "继续",
   "run.resume.title": "回答这个步骤",
+  "run.close": "关闭",
   "run.console.empty": "还没有任何输出。",
   "run.console.finished": "已结束",
   "run.console.following": "实时跟随中",
