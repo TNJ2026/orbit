@@ -166,6 +166,22 @@ class PromptTransportTests(unittest.TestCase):
         with self.assertRaises(UnknownExternalResultError):
             self.call(client)
 
+    def test_a_silent_cli_is_not_a_successful_answer(self) -> None:
+        """Exit 0 with nothing on stdout used to fill the result port with "".
+
+        Unknown rather than failed: the CLI was handed a prompt and a
+        workspace, and saying nothing is no evidence it did nothing.
+        """
+
+        client = self.client("pass", prompt_flag="-p")
+        with self.assertRaises(UnknownExternalResultError):
+            self.call(client)
+
+    def test_whitespace_alone_is_silence_too(self) -> None:
+        client = self.client("print('   \\n\\n  ')", prompt_flag="-p")
+        with self.assertRaises(UnknownExternalResultError):
+            self.call(client)
+
     def test_a_hanging_cli_is_killed_and_reported_as_unknown(self) -> None:
         client = self.client(
             "import time; time.sleep(30)", prompt_flag="-p", timeout_seconds=1,

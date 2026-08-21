@@ -486,6 +486,16 @@ class TrustedPromptCliAgentClient(TrustedCliAgentClient):
             completion_marker=AGENT_COMPLETION_MARKER,
         )
         text = stdout.decode("utf-8", errors="replace").strip()
+        if not text:
+            # A clean exit with nothing said is not an answer, and this is the
+            # one shape of that which needs no judgement: the node's result
+            # port would carry an empty string to whatever reads it next.
+            # Unknown rather than failed, for the same reason a non-zero exit
+            # is — the CLI had a workspace and a prompt, and silence is no
+            # evidence that it left the world alone.
+            raise UnknownExternalResultError(
+                "agent CLI exited cleanly without saying anything"
+            )
         return _agent_result(text, context)
 
 
