@@ -24,12 +24,37 @@ from orbit.workflow.domain.handlers import (
     CancelDisposition, HandlerValidationError, UnknownExternalResultError,
 )
 from orbit.workflow.handlers.agent import (
-    AGENT_RESULT_PORT, AGENT_RESULT_TEXT_KEY, AGENT_RUNTIME_COMPLETION_PROTOCOL, AgentRequest,
-    TrustedPromptCliAgentClient, render_agent_prompt,
+    AGENT_COMPLETION_MARKER, AGENT_RESULT_PORT, AGENT_RESULT_TEXT_KEY,
+    AGENT_RUNTIME_COMPLETION_PROTOCOL, AgentRequest,
+    TrustedPromptCliAgentClient, attempt_completion_marker, render_agent_prompt,
 )
 
-def runtime_prompt(value: str) -> str:
+def runtime_prompt(value: str, attempt_id: str = "attempt-1") -> str:
+    """What the Agent is given, including this attempt's own end token."""
+
+    protocol = AGENT_RUNTIME_COMPLETION_PROTOCOL.replace(
+        AGENT_COMPLETION_MARKER, attempt_completion_marker(attempt_id),
+    )
+    return f"{value}\n\n{protocol}"
+
+
+def generic_prompt(value: str) -> str:
+    """render_agent_prompt's own default, before a client mints an attempt."""
+
     return f"{value}\n\n{AGENT_RUNTIME_COMPLETION_PROTOCOL}"
+
+
+# A stand-in CLI cannot hard-code the token it is meant to end with: it is
+# minted per attempt. It reads it back out of the prompt it was handed, which
+# is also the only proof the Agent was ever told what it is.
+def echoing_marker(body: str) -> str:
+    return f"""
+import re, sys
+_seen = " ".join(sys.argv[1:])
+_found = re.search(r"ORBIT_RESULT_COMPLETE_[0-9a-f]+", _seen)
+MARKER = _found.group(0) if _found else "MARKER_NEVER_SENT"
+{body}
+"""
 
 
 def context(attempt_id: str = "attempt-1") -> SimpleNamespace:
@@ -105,14 +130,19 @@ class PromptTransportTests(unittest.TestCase):
 
     def test_the_reply_is_returned_as_text(self) -> None:
         client = self.client(
-            "print('  the answer  \\nORBIT_RESULT_COMPLETE')", prompt_flag="-p"
+            echoing_marker("print('  the answer  '); print(MARKER)"),
+            prompt_flag="-p",
         )
         self.assertEqual("the answer", self.call(client))
 
     def test_a_completed_reply_survives_a_cli_that_hangs_after_output(self) -> None:
         started = time.monotonic()
         client = self.client(
-            "import time; print('answer\\nORBIT_RESULT_COMPLETE', flush=True); time.sleep(30)",
+            echoing_marker(
+                "import time\n"
+                "print('answer', flush=True); print(MARKER, flush=True)\n"
+                "time.sleep(30)"
+            ),
             prompt_flag="-p", timeout_seconds=20, kill_grace_seconds=.1,
         )
         self.assertEqual("answer", self.call(client))
@@ -120,11 +150,46 @@ class PromptTransportTests(unittest.TestCase):
 
     def test_a_standalone_marker_completes_even_when_output_follows_it(self) -> None:
         client = self.client(
-            "print('answer\\nORBIT_RESULT_COMPLETE\\nlate output')",
+            echoing_marker("print('answer'); print(MARKER); print('late output')"),
             prompt_flag="-p",
         )
 
         self.assertEqual("answer", self.call(client))
+
+    def test_the_generic_marker_in_mid_answer_does_not_end_the_turn(self) -> None:
+        """An Agent quoting the protocol used to cut itself off.
+
+        The marker is a line the Agent has just read, so anything that makes
+        it repeat its instructions printed the terminal line early: the
+        process was killed there and the half-written reply was committed as
+        the whole answer, recorded a success. The token is minted per attempt
+        now, so the quoted one is the wrong one.
+        """
+
+        client = self.client(
+            echoing_marker(
+                "print('here is the protocol Orbit gave me:')\n"
+                "print('ORBIT_RESULT_COMPLETE')\n"
+                "print('and here is the rest of the answer')\n"
+                "print(MARKER)"
+            ),
+            prompt_flag="-p",
+        )
+
+        answer = self.call(client)
+        self.assertIn("and here is the rest of the answer", answer)
+        self.assertIn("ORBIT_RESULT_COMPLETE", answer)
+
+    def test_the_attempt_decides_the_token(self) -> None:
+        """Two attempts, two tokens, each derived and not drawn at random."""
+
+        first = attempt_completion_marker("attempt-1")
+        self.assertEqual(first, attempt_completion_marker("attempt-1"))
+        self.assertNotEqual(first, attempt_completion_marker("attempt-2"))
+        self.assertTrue(first.startswith(f"{AGENT_COMPLETION_MARKER}_"))
+        # The bare stem must not satisfy an attempt's own marker, which is the
+        # whole reason for the suffix.
+        self.assertNotEqual(AGENT_COMPLETION_MARKER, first)
 
     def test_a_complete_untruncated_marker_is_not_invalidated_by_drain_health(
         self,
@@ -136,7 +201,8 @@ class PromptTransportTests(unittest.TestCase):
 
         client = self.client("print('unused')", prompt_flag="-p")
         outcome = ProcessResult(
-            returncode=-15, stdout="answer\nORBIT_RESULT_COMPLETE\n",
+            returncode=-15,
+            stdout=f"answer\n{attempt_completion_marker('attempt-1')}\n",
             stderr="", stdout_truncated=False, stderr_truncated=False,
             cancelled=False, timed_out=False,
             termination_reason="completed_output", leaked_drain_threads=1,
@@ -395,11 +461,11 @@ class AgentArtifactRoutingTests(unittest.TestCase):
 
 class PromptRenderingTests(unittest.TestCase):
     def test_a_string_input_is_the_prompt(self) -> None:
-        self.assertEqual(runtime_prompt("go"), render_agent_prompt({"prompt": "go"}, {}))
+        self.assertEqual(generic_prompt("go"), render_agent_prompt({"prompt": "go"}, {}))
 
     def test_a_structured_input_is_rendered_as_stable_json(self) -> None:
         rendered = render_agent_prompt({"prompt": {"b": 2, "a": 1}}, {})
-        self.assertEqual(runtime_prompt('{"a": 1, "b": 2}'), rendered)
+        self.assertEqual(generic_prompt('{"a": 1, "b": 2}'), rendered)
 
     def test_an_authored_preamble_precedes_the_runtime_value(self) -> None:
         rendered = render_agent_prompt({"prompt": "x"}, {"prompt": "You summarize."})
@@ -408,7 +474,7 @@ class PromptRenderingTests(unittest.TestCase):
         self.assertTrue(rendered.endswith(AGENT_RUNTIME_COMPLETION_PROTOCOL))
 
     def test_an_input_without_a_prompt_port_is_rendered_whole(self) -> None:
-        self.assertEqual(runtime_prompt('{"value": 3}'), render_agent_prompt({"value": 3}, {}))
+        self.assertEqual(generic_prompt('{"value": 3}'), render_agent_prompt({"value": 3}, {}))
 
 
 class InvocationSpecTests(unittest.TestCase):

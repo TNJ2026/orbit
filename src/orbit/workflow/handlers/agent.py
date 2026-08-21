@@ -41,12 +41,36 @@ AGENT_RESULT_PORT = "result"
 AGENT_RESULT_TEXT_KEY = "text"
 AGENT_COMPLETION_MARKER = "ORBIT_RESULT_COMPLETE"
 
-AGENT_RUNTIME_COMPLETION_PROTOCOL = """RUNTIME EXECUTION CONSTRAINTS
+
+def _completion_protocol(marker: str) -> str:
+    return f"""RUNTIME EXECUTION CONSTRAINTS
 Work within the available time and stop starting new operations when time is short.
 Prefer tests targeted at the changes; do not run the full test suite by default.
 When asked to wrap up, a test fails, or progress is blocked, return immediately with the current result.
 Always report completed changes, tests run, errors, and remaining work, even when the task is only partially complete.
-After the complete final response, print ORBIT_RESULT_COMPLETE on a line by itself. Orbit treats that line as completion; do not print anything after it."""
+After the complete final response, print {marker} on a line by itself. Orbit treats that line as completion; do not print anything after it."""
+
+
+AGENT_RUNTIME_COMPLETION_PROTOCOL = _completion_protocol(AGENT_COMPLETION_MARKER)
+
+
+def attempt_completion_marker(attempt_id: str) -> str:
+    """The end-of-answer token for one attempt, and no other.
+
+    A fixed marker is a string the Agent has just read, so anything that
+    makes it repeat its instructions — asked to quote them, to document this
+    Runtime, or to write a prompt for another Agent that contains this very
+    protocol — prints the terminal line in the middle of an answer. The
+    process is killed there and everything before it is committed as the
+    result: a truncated reply, recorded a success.
+
+    Suffixing the attempt makes the accidental line the wrong one. Derived
+    rather than random so the same attempt reads the same way twice, in a log
+    as much as in a rerun.
+    """
+
+    digest = hashlib.sha256(str(attempt_id).encode("utf-8")).hexdigest()[:12]
+    return f"{AGENT_COMPLETION_MARKER}_{digest}"
 
 
 @dataclass(frozen=True)
@@ -436,7 +460,10 @@ class TrustedPromptCliAgentClient(TrustedCliAgentClient):
         # reference (a large output that never went inline). Resolve it back to
         # text before rendering, so the prompt is the prose, not a reference.
         resolved_input = _resolve_artifact_inputs(request.input, context)
-        prompt = render_agent_prompt(resolved_input, request.config)
+        # Asked for and watched for under the same token, so the line the
+        # Agent was told to print is the only one that ends its turn.
+        marker = attempt_completion_marker(context.request.attempt_id)
+        prompt = render_agent_prompt(resolved_input, request.config, marker=marker)
         encoded = prompt.encode("utf-8")
         # A prompt fed by an artifact input may be far larger than the inline
         # cap — the point of carrying it as an artifact. Only a stdin CLI can
@@ -483,7 +510,7 @@ class TrustedPromptCliAgentClient(TrustedCliAgentClient):
             max_output_bytes = result_port.get("data_policy", {}).get("max_size_bytes")
         stdout = self._run(
             extra, payload, context, max_output_bytes=max_output_bytes,
-            completion_marker=AGENT_COMPLETION_MARKER,
+            completion_marker=marker,
         )
         text = stdout.decode("utf-8", errors="replace").strip()
         if not text:
@@ -594,7 +621,8 @@ def _agent_result(text: str, context) -> "AgentResponse":
 
 
 def render_agent_prompt(
-    node_input: Mapping[str, Any], config: Mapping[str, Any]
+    node_input: Mapping[str, Any], config: Mapping[str, Any],
+    *, marker: str = AGENT_COMPLETION_MARKER,
 ) -> str:
     """One prompt string from the node's authored config and its runtime input.
 
@@ -616,7 +644,7 @@ def render_agent_prompt(
         parts.append(f"INPUT-BEGIN\n{rendered}\nINPUT-END")
     else:
         parts.append(rendered)
-    parts.append(AGENT_RUNTIME_COMPLETION_PROTOCOL)
+    parts.append(_completion_protocol(marker))
     return "\n\n".join(parts)
 
 
