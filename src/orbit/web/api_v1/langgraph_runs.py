@@ -148,8 +148,10 @@ def build_routes(ctx, service) -> list[Route]:
         """Where this run got to, derived from its definition and checkpoint.
 
         Read on the ordinary read scope, not the sensitive one: a step says
-        which node ran and how it ended, never what it produced. What a node
-        printed is behind `/output`, and what it made is an Artifact.
+        which node ran, how it ended, and what it was asked — never what it
+        produced. What a node printed is behind `/output`, and what it made is
+        an Artifact. The instruction is the definition's, readable at this
+        same scope from the catalog, so carrying it here grants nothing new.
         """
 
         actor = ctx.authenticate(request, READ_SCOPE)

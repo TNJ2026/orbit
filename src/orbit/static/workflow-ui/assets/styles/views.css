@@ -288,6 +288,13 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
 .simplified-step-output-body { display: grid; gap: 4px; padding-top: 6px; }
 /* The run log expands to its full height; the page scrolls, not the box. */
 .simplified-step-output-log { min-height: 0; max-height: none; overflow: visible; margin-top: 2px; }
+/* `.step-prompt` folds to three lines where it sits in a dense row. Here the
+   reader opened the drawer to read, so it is shown whole. */
+.simplified-step-prompt {
+  display: block; -webkit-line-clamp: none; margin-top: 0;
+  padding: 8px 10px; border-radius: var(--radius);
+  background: var(--chrome, var(--panel)); border: 1px solid var(--line-soft);
+}
 .simplified-attention { border-color: color-mix(in srgb, var(--amber) 28%, var(--line)); }
 .simplified-result .panel-body { font-size: 14px; line-height: 1.65; }
 .simplified-result .pill { background: transparent; }

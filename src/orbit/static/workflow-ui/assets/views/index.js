@@ -542,7 +542,9 @@ export function createViews(context) {
         el("span", { class: `pill ${step.status}`,
           text: i18n.t(`simplified.steps.status.${step.status}`) }),
         step.status !== "not_reached"
-          ? runConsole(runId, { live, nodeId: step.node_id }) : null,
+          ? runConsole(runId, {
+            live, nodeId: step.node_id, prompt: step.prompt,
+          }) : null,
       ],
     ))));
     if (canvas) root.append(canvas);
@@ -608,7 +610,7 @@ export function createViews(context) {
    * asking; once it is over it reads to the end and stops.
    */
   function runConsole(runId, {
-    live, nodeId, hideWhenEmpty = false, showState = true,
+    live, nodeId, prompt = null, hideWhenEmpty = false, showState = true,
   }) {
     const log = el("div", {
       class: "console-log simplified-step-output-log", role: "log",
@@ -622,7 +624,14 @@ export function createViews(context) {
     const setState = (text) => { if (state) state.textContent = text; };
     const details = el("details", { class: "simplified-step-output" }, [
       el("summary", { text: i18n.t("simplified.execution.output") }),
-      el("div", { class: "simplified-step-output-body" }, [state, log]),
+      el("div", { class: "simplified-step-output-body" }, [
+        // What this step was asked, above what it said back. A log without
+        // the instruction that produced it is half a transcript: the reader
+        // opened this to find out what happened, and what was asked is the
+        // other half of that.
+        workflowViews().stepPrompt({ prompt }, "simplified-step-prompt"),
+        state, log,
+      ].filter(Boolean)),
     ]);
     // A step that said nothing offers nothing to read: the fold stays out of
     // the way until output exists, probing while the run is still live.
@@ -1958,7 +1967,8 @@ export function createViews(context) {
           ].filter(Boolean).join(" · ") }),
           step.status !== "not_reached"
             ? runConsole(run.run_id, {
-              live, nodeId: step.node_id, hideWhenEmpty: true, showState: false,
+              live, nodeId: step.node_id, prompt: step.prompt,
+              hideWhenEmpty: true, showState: false,
             }) : null,
         ]),
       ]));

@@ -448,6 +448,17 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
         self.assertIn(run_id, hero)
         self.assertNotIn("Prepare a concise report", hero)
 
+    def test_a_step_with_no_instruction_shows_no_instruction(self) -> None:
+        """These steps are transforms: nobody wrote them a prompt."""
+
+        run_id = self.start_run("steps-no-prompt")
+        page = self.open("en-US", f"/ui/#/runs/{run_id}")
+        page.wait_for_selector(".simplified-step-output summary")
+        page.locator(".simplified-step-output summary").first.click()
+        page.wait_for_timeout(400)
+
+        self.assertEqual(0, page.locator(".simplified-step-prompt").count())
+
     def test_the_run_page_shows_every_step_and_where_it_got_to(self) -> None:
         """The rows are the definition's, so what is left is on the page too."""
 
@@ -1805,6 +1816,44 @@ class AgentSubstitutionNoticeTests(BrowserE2ETestCase):
         self.assertIn(
             "does not fit the Agent",
             card.locator(".workflow-card-blocked").inner_text(),
+        )
+
+    def test_the_run_log_shows_what_the_step_was_asked(self) -> None:
+        """A log without the instruction that produced it is half a transcript.
+
+        The drawer is opened to find out what happened at a step, and what it
+        was asked is the other half of that — it lived only in the workflow's
+        definition, a page away from the run being read.
+        """
+
+        page = self.open("en-US")
+        run = page.evaluate(
+            """() => fetch("/api/v1/langgraph-runs", {
+                 method: "POST",
+                 headers: {
+                   "content-type": "application/json",
+                   "idempotency-key": "start-prompt-drawer",
+                 },
+                 body: JSON.stringify({
+                   workflow_id: "workflow:single", input: {prompt: {goal: "x"}},
+                 }),
+               }).then((r) => r.json())""",
+        )
+        self.assertIn("data", run, run)
+
+        page.goto(f"{self.base}/ui/#/runs/"
+                  f"{quote(run['data']['run']['run_id'], safe='')}")
+        page.wait_for_selector(".simplified-step-output summary")
+        page.locator(".simplified-step-output summary").first.click()
+        prompt = page.locator(".simplified-step-prompt").first
+        prompt.wait_for()
+
+        self.assertIn("do the thing", prompt.inner_text())
+        # Above what the step said back, not after it.
+        self.assertLess(
+            prompt.bounding_box()["y"],
+            page.locator(".simplified-step-output-body > :nth-child(2)")
+            .first.bounding_box()["y"],
         )
 
     def test_the_run_page_names_the_agent_that_ran_it(self) -> None:

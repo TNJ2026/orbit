@@ -1562,10 +1562,19 @@ class LangGraphWorkflowService:
                 status = "succeeded"
             else:
                 status = "not_reached"
+            # The step's own instruction, from the definition this run is
+            # executing rather than the workflow's current one — a republished
+            # workflow must not rewrite what a finished run was asked to do.
+            prompt = None
+            if isinstance(node.config, Mapping):
+                authored = node.config.get("prompt")
+                if isinstance(authored, str) and authored.strip():
+                    prompt = authored
             steps.append({
                 "node_id": node.id,
                 "label": node.label or node.id,
                 "kind": node.kind,
+                "prompt": prompt,
                 "handler": None if node.handler is None else {
                     "name": node.handler.name, "version": node.handler.version,
                 },
