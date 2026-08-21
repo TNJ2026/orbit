@@ -970,15 +970,13 @@ class SimplifiedUpgradeTests(BrowserE2ETestCase):
         summary = page.locator(".workflow-editor .change-summary").inner_text()
         self.assertIn("Fact check", summary)
         self.assertIn("runs before the report", summary)
-        page.click("#confirmRevision")
         page.wait_for_function(
             "() => document.querySelector('.workflow-editing-version')"
             "?.textContent.includes('v2')"
         )
         # Drawn by the editor's canvas in a frame now, so the assertion has to
-        # cross into it rather than read this document. Confirming rebuilds the
-        # whole page rather than swapping the canvas alone, so the frame here
-        # is a new one and has to be waited for.
+        # cross into it rather than read this document. The canvas is swapped
+        # when the revision lands, so the frame is a new one to wait for.
         canvas = page.frame_locator(".workflow-graph-frame").locator(".react-flow")
         canvas.locator(".react-flow__node").first.wait_for(timeout=15_000)
         self.assertIn("Fact Check", canvas.inner_text())
@@ -1052,31 +1050,21 @@ class SimplifiedUpgradeTests(BrowserE2ETestCase):
             page.locator(".workflow-generation-prompt-value").inner_text(),
         )
         self.assertTrue(page.locator(".workflow-editor .change-summary").is_visible())
-
-        # Nothing under the account has moved yet. Counted as requests rather
-        # than read off the version chip: this class shares one server, so what
-        # version the workflow is on depends on which tests ran first, and
-        # whether the page went back to the server does not.
-        reads = []
-        page.on("request", lambda request: (
-            reads.append(1)
-            if request.url.endswith("/api/v1/workflows/workflow%3Alegacy")
-            or request.url.endswith("/api/v1/workflows/workflow:legacy")
-            else None
-        ))
-        page.wait_for_timeout(1500)
-        self.assertEqual([], reads)
+        # The picture below has already caught up — a summary is read against
+        # the thing it describes — while the account itself waits to be
+        # dismissed.
+        page.frame_locator(".workflow-graph-frame").locator(
+            ".react-flow__node"
+        ).first.wait_for(timeout=15_000)
         # Still saying it revised, not that it generated something.
         self.assertNotIn(
             "Generat",
             page.locator(".workflow-generation-head").inner_text(),
         )
 
+        # Dismissing it is what brings the instruction box back.
         page.click("#confirmRevision")
         page.wait_for_selector(".workflow-editor textarea")
-        # …and now it has: the diagram, the header and the instruction box all
-        # describe the version that exists, because they were all re-read.
-        self.assertGreaterEqual(len(reads), 1)
 
 
     def test_a_background_change_does_not_take_the_account_away(self) -> None:
@@ -1098,7 +1086,7 @@ class SimplifiedUpgradeTests(BrowserE2ETestCase):
         page.get_by_role("button", name="Revise").click()
         page.wait_for_selector("#confirmRevision", timeout=30_000)
 
-        ticks, reads = [], []
+        ticks = []
         page.route("**/api/v1/live*", lambda route: (
             ticks.append(1),
             route.fulfill(status=200, content_type="application/json",
@@ -1108,17 +1096,14 @@ class SimplifiedUpgradeTests(BrowserE2ETestCase):
                               "data": {"changed": True, "cursor": f"c{len(ticks)}"},
                           })),
         ))
-        page.on("request", lambda request: (
-            reads.append(1)
-            if "/api/v1/workflows/workflow" in request.url and "?" not in request.url
-            else None
-        ))
         page.wait_for_timeout(18_000)
 
         # The tick happened and said something changed …
         self.assertGreaterEqual(len(ticks), 1)
-        # … and the page did not go and rebuild itself around it.
-        self.assertEqual([], reads)
+        # … and the account is still on screen to be dismissed. Asserted on
+        # what a reader would see rather than on requests: the canvas is
+        # refreshed once when the revision lands, so a request counter here
+        # would be counting the wrong thing.
         self.assertEqual(1, page.locator("#confirmRevision").count())
         self.assertIn(
             "Upgrade this workflow",

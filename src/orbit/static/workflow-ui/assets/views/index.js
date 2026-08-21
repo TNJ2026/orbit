@@ -2334,7 +2334,7 @@ export function createViews(context) {
           ]),
           // The revise panel is the editing surface — lead with it, above the
           // diagram, so the primary "change this workflow" action comes first.
-          modify ? workflowEditorPanel(modify, value, draw) : null,
+          modify ? workflowEditorPanel(modify, value, draw, refreshPublished) : null,
           canvas,
         ].filter(Boolean));
         drawDefinition(value);
@@ -2925,7 +2925,7 @@ export function createViews(context) {
 
   /* The revision editor is the lower band of the dedicated edit page. It stays
    * beside the graph it revises instead of becoming a second floating dialog. */
-  function workflowEditorPanel(modifyCommand, workflow, onDone) {
+  function workflowEditorPanel(modifyCommand, workflow, onDone, onPublished = null) {
     const upgrading = workflow.goal_readiness === "needs_upgrade";
     const title = i18n.t(upgrading ? "workflows.upgrade" : "editor.edit");
     const section = el("section", { class: "workflow-editor", "aria-label": title });
@@ -2971,9 +2971,9 @@ export function createViews(context) {
         el("div", { class: "actions" }, [el("button", {
           type: "button", class: "button primary", id: "confirmRevision",
           text: i18n.t("editor.revision.confirm"),
-          // Everything at once, and only when asked: a full re-fetch brings
-          // the diagram, the version in the header and a fresh instruction
-          // box, all describing the version that now exists.
+          // The diagram is already current; this is the reader saying they
+          // are done with the account, and a full re-fetch is how the panel
+          // gets back to an empty instruction box.
           onclick: () => onDone(),
         })]),
       ]
@@ -3048,10 +3048,15 @@ export function createViews(context) {
       // and what is offered at the end, and those are the arguments.
       section.replaceChildren(workflowGenerationProgress(
         job,
-        // Settling is not the moment to redraw anything: the reader is still
-        // looking at what changed, and swapping the diagram under them while
-        // they read it is the page moving on without them.
-        (settled) => { job = settled; },
+        // The picture catches up straight away — a summary of a change is
+        // read against the thing it changed, and leaving the old diagram
+        // under a published revision is showing two different answers. What
+        // waits is only the way out: the account of what happened stays until
+        // it is dismissed.
+        async (settled) => {
+          job = settled;
+          if (onPublished) await onPublished();
+        },
         {
           api, i18n, reportError, defaultGenerationAgent,
           installCleanup: (stop) => { stopProgress = stop; installViewCleanup(stop); },
