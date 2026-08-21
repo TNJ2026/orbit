@@ -262,7 +262,7 @@
   "simplified.start.placeholder": "What do you want to accomplish?",
   "simplified.start.shortcut": "Cmd/Ctrl + Enter to launch",
   "simplified.steps": "Steps",
-  "simplified.steps.canvas": "Show the graph",
+  "simplified.steps.canvas": "Flow",
   "simplified.steps.empty": "This workflow has no steps to show.",
   "simplified.steps.unavailable": "Steps are unavailable.",
   "simplified.steps.repeated": "ran {count} times",

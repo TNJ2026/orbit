@@ -262,7 +262,7 @@
   "simplified.start.placeholder": "你想完成什么？",
   "simplified.start.shortcut": "Cmd/Ctrl + Enter 启动",
   "simplified.steps": "步骤",
-  "simplified.steps.canvas": "查看流程图",
+  "simplified.steps.canvas": "流程图",
   "simplified.steps.empty": "此工作流没有可展示的步骤。",
   "simplified.steps.unavailable": "无法读取步骤。",
   "simplified.steps.repeated": "执行了 {count} 次",
