@@ -1681,6 +1681,47 @@ class AgentSubstitutionNoticeTests(BrowserE2ETestCase):
         )
         self.assertEqual(1, dialog.locator("textarea").count())
 
+    def test_the_canvas_follows_the_page_and_not_the_operating_system(self) -> None:
+        """The frame is a document of its own and had no way to know.
+
+        It followed `prefers-color-scheme` while the page followed the theme
+        the operator picked here, so anyone whose system disagreed with their
+        choice got a white canvas in the middle of a dark page. The page posts
+        its palette in; this browser is told the system is light while the UI
+        defaults to dark, which is exactly that disagreement.
+        """
+
+        context = self.browser.new_context(locale="en-US", color_scheme="light")
+        page = context.new_page()
+        self.addCleanup(context.close)
+        page.goto(f"{self.base}/ui/#/workflows/workflow:single")
+        page.wait_for_selector(".workflow-graph-frame")
+
+        self.assertEqual("dark", page.evaluate(
+            "document.documentElement.dataset.theme"
+        ))
+        canvas = page.frame_locator(".workflow-graph-frame")
+        canvas.locator(".node").first.wait_for()
+        self.assertEqual("dark", canvas.locator(":root").get_attribute("data-theme"))
+
+    def test_the_canvas_follows_a_theme_change_after_it_is_drawn(self) -> None:
+        """The choice outlives one drawing, so one message at load is not enough."""
+
+        page = self.open("en-US")
+        page.goto(f"{self.base}/ui/#/workflows/workflow:single")
+        page.wait_for_selector(".workflow-graph-frame")
+        canvas = page.frame_locator(".workflow-graph-frame")
+        canvas.locator(".node").first.wait_for()
+
+        # The theme control lives behind the overflow menu.
+        page.click("#moreButton")
+        page.click("#themeLight")
+
+        page.wait_for_function(
+            "document.querySelector('.workflow-graph-frame')"
+            ".contentDocument.documentElement.dataset.theme === 'light'"
+        )
+
     def test_a_card_with_nothing_wrong_on_it_still_says_why(self) -> None:
         """Ready to bind a goal, current Handler, and the engine refuses.
 

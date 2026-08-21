@@ -3,7 +3,8 @@ import { Background, Controls, ReactFlow } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 
 import {
-  VIEWER_NODE_CLICK, VIEWER_READY, readGraphMessage, viewerGraph,
+  VIEWER_NODE_CLICK, VIEWER_READY, readGraphMessage,
+  readThemeMessage, viewerGraph,
 } from "./catalog-graph.mjs";
 import WorkflowEdge from "./WorkflowEdge.jsx";
 import WorkflowNode from "./WorkflowNode.jsx";
@@ -27,10 +28,17 @@ const FIT_VIEW = { padding: 0.2, maxZoom: 1 };
  */
 export default function Viewer() {
   const [drawing, setDrawing] = useState(null);
+  // Null until the embedding page says. Held rather than only written to the
+  // document because xyflow themes its own furniture — the zoom controls
+  // above all — from `colorMode`, and left on "system" they stayed white in
+  // a dark canvas while everything this bundle styles had already followed.
+  const [theme, setTheme] = useState(null);
 
   useEffect(() => {
     const origin = globalThis.location?.origin;
     const onMessage = (event) => {
+      const chosen = readThemeMessage(event, origin);
+      if (chosen) setTheme(chosen);
       const message = readGraphMessage(event, origin);
       if (message) setDrawing(message);
     };
@@ -41,6 +49,13 @@ export default function Viewer() {
     globalThis.parent?.postMessage({ type: VIEWER_READY }, origin);
     return () => globalThis.removeEventListener("message", onMessage);
   }, []);
+
+  // The palette is CSS custom properties on `:root`, so it is set on the
+  // document rather than passed down: nothing this component renders needs
+  // to know which one is in force.
+  useEffect(() => {
+    if (theme) globalThis.document.documentElement.dataset.theme = theme;
+  }, [theme]);
 
   if (!drawing?.graph) return <p className="viewer-state">…</p>;
 
@@ -54,7 +69,7 @@ export default function Viewer() {
         edges={edges}
         nodeTypes={nodeTypes}
         edgeTypes={edgeTypes}
-        colorMode="system"
+        colorMode={theme ?? "system"}
         fitView
         fitViewOptions={FIT_VIEW}
         // Panning and zooming are how a graph is read, so they stay. Every

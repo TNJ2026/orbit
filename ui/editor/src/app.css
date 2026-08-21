@@ -1,6 +1,12 @@
-/* Theme-aware to match the Runtime UI it sits beside: the operator's system
-   preference decides, and neither palette is defined only inside a media
-   query, so nothing renders on an unpainted background. */
+/* Theme-aware to match the Runtime UI it sits beside.
+ *
+ * Three states, because there are three. The embedding page posts the palette
+ * the operator chose and it wins outright — this is a canvas inside a page,
+ * not a document with a preference of its own, and following the *system*
+ * while the page followed the operator is how a white canvas ended up in the
+ * middle of a dark page. Opened on its own it has nobody to ask, so the
+ * system preference decides. Neither palette is defined only inside a media
+ * query, so nothing renders on an unpainted background. */
 :root {
   color-scheme: light dark;
   --bg: #f6f7f9;
@@ -14,7 +20,7 @@
 }
 
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --bg: #0f1115;
     --panel: #171a21;
     --ink: #e8eaee;
@@ -24,6 +30,17 @@
     --ok: #4ade80;
     --bad: #f87171;
   }
+}
+
+:root[data-theme="dark"] {
+  --bg: #0f1115;
+  --panel: #171a21;
+  --ink: #e8eaee;
+  --muted: #9aa2b1;
+  --line: #2a2f39;
+  --accent: #3b82f6;
+  --ok: #4ade80;
+  --bad: #f87171;
 }
 
 * { box-sizing: border-box; }

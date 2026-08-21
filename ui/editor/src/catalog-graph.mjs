@@ -103,6 +103,7 @@ export function viewerGraph(
  */
 export const VIEWER_READY = "orbit-viewer-ready";
 export const VIEWER_GRAPH = "orbit-viewer-graph";
+export const VIEWER_THEME = "orbit-viewer-theme";
 export const VIEWER_NODE_CLICK = "orbit-viewer-node-click";
 
 /** The graph in a message, or `null` if this was not one.
@@ -111,6 +112,20 @@ export const VIEWER_NODE_CLICK = "orbit-viewer-node-click";
  * Runtime and embedded by the Runtime, so a message from anywhere else is not
  * a drawing instruction.
  */
+/** The theme the embedding page is using, or null when it is not saying.
+ *
+ * This document has no theme of its own to speak of: it is a canvas inside a
+ * page, and the operator picked the page's palette. Left to `prefers-color-
+ * scheme` it followed the *system* instead, which is a white canvas in the
+ * middle of a dark page for anyone whose choices differ.
+ */
+export function readThemeMessage(event, origin) {
+  if (!event || event.origin !== origin) return null;
+  const data = event.data;
+  if (!data || data.type !== VIEWER_THEME) return null;
+  return data.theme === "light" || data.theme === "dark" ? data.theme : null;
+}
+
 export function readGraphMessage(event, origin) {
   if (!event || event.origin !== origin) return null;
   const data = event.data;

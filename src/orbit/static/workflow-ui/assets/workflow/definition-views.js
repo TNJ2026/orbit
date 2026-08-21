@@ -10,6 +10,7 @@ const VIEWER = {
   ready: "orbit-viewer-ready",
   graph: "orbit-viewer-graph",
   nodeClick: "orbit-viewer-node-click",
+  theme: "orbit-viewer-theme",
 };
 
 /** The published graph, drawn by the editor's canvas in a frame.
@@ -39,10 +40,22 @@ export function embeddedGraph(graph, {
     { type: VIEWER.graph, graph, editable, statuses, bindings },
     window.location.origin,
   );
+  // The frame is a document of its own, so it sees the operator's *system*
+  // preference and not the theme they picked in this UI — a dark page with a
+  // white canvas in the middle of it. Told rather than guessed, and told
+  // again whenever it changes, because the choice outlives one drawing.
+  const sendTheme = () => frame.contentWindow?.postMessage(
+    { type: VIEWER.theme, theme: document.documentElement.dataset.theme || null },
+    window.location.origin,
+  );
+  const watchTheme = new MutationObserver(sendTheme);
+  watchTheme.observe(document.documentElement, {
+    attributes: true, attributeFilter: ["data-theme"],
+  });
   const onMessage = (event) => {
     if (event.origin !== window.location.origin) return;
     if (event.source !== frame.contentWindow) return;
-    if (event.data?.type === VIEWER.ready) send();
+    if (event.data?.type === VIEWER.ready) { sendTheme(); send(); }
     if (event.data?.type === VIEWER.nodeClick && onEditAction) {
       onEditAction(event.data.nodeId);
     }
@@ -54,6 +67,7 @@ export function embeddedGraph(graph, {
   const stop = new MutationObserver(() => {
     if (!frame.isConnected) {
       window.removeEventListener("message", onMessage);
+      watchTheme.disconnect();
       stop.disconnect();
     }
   });

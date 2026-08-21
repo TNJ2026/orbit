@@ -260,7 +260,10 @@ class AccessibilityTests(unittest.TestCase):
         )
         canvas = (EDITOR_SOURCE / "catalog-graph.mjs").read_text(encoding="utf-8")
         self.assertEqual(
-            {"orbit-viewer-ready", "orbit-viewer-graph", "orbit-viewer-node-click"},
+            {
+                "orbit-viewer-ready", "orbit-viewer-graph",
+                "orbit-viewer-node-click", "orbit-viewer-theme",
+            },
             self.messages(page),
         )
         self.assertEqual(self.messages(page), self.messages(canvas))
