@@ -170,6 +170,31 @@ class AuthoringServiceTests(unittest.TestCase):
         self.assertIn("useful partial result", prompt)
         self.assertIn("explicit back_edge", prompt)
 
+    def test_prompt_says_how_to_tell_a_blocked_agent_from_a_finished_one(
+        self,
+    ) -> None:
+        """Both halves, or neither works.
+
+        The condition needs a token to read, and the token only exists if the
+        Agent was told to print it. A rule that asked for the check without
+        the prompt wording would produce decisions that are never true.
+        """
+
+        model = ScriptedModel([json.dumps(valid_document())])
+        service(model).generate("请把审批流程画出来")
+        prompt = model.prompts[0]
+
+        self.assertIn("agent_outcome", prompt)
+        # The half that makes the answer readable.
+        self.assertIn("ORBIT_TASK_OK", prompt)
+        self.assertIn("do not print it", prompt)
+        # The half that reads it, guarded the way an open result must be.
+        self.assertIn("source.<port>.text", prompt)
+        self.assertIn('"exists"', prompt)
+        # And why it is needed at all, so the rule is not read as ceremony.
+        self.assertIn("exits successfully whether it did the work", prompt)
+        self.assertIn("Do not put a check after every action", prompt)
+
     def test_prompt_tiers_its_rules_and_shows_one_whole_document(self) -> None:
         """Two dozen peer rules give no way to tell a compile error from taste."""
 

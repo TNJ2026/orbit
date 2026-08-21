@@ -776,7 +776,8 @@ class WorkflowAuthoringService:
             "Never instruct an Agent to keep fixing until every test passes. Repetition requires an explicit back_edge and a bounded loop or rework policy.",
             "Each input port on a non-join node may have at most one incoming non-back edge. A back edge may return to an already-bound input when it has a bounded loop or rework policy.",
             "A condition that reads a member of an action's result must guard it with exists(), and every branch out of a decision must have a default edge whose condition is true. An action's result is an open object: a member you assumed is absent at run time, and the run fails after the Agent has already done its work.",
-            "A condition on a human node's output must branch on its `decision` field, whose shape is given in human_submission. A field you invent there is absent at run time, and a guarded condition that reads it is never true — the approval branch is then dead and the workflow always takes its default.",
+            "Check an agent.* action's outcome wherever a later step depends on it having actually done something — written a file, changed code, produced a deliverable another node consumes. Follow that action with a decision node built from `agent_outcome`: ask for the token in the action's own config.prompt, branch on it, and route the failure branch to a terminal instead of letting the run continue on a report of the failure. Nothing else can see the difference — the Agent's CLI exits successfully whether it did the work or explained that it could not. Do not put a check after every action; one on the step whose silent failure would otherwise be inherited by everything downstream is worth more than a decision after each.",
+                        "A condition on a human node's output must branch on its `decision` field, whose shape is given in human_submission. A field you invent there is absent at run time, and a guarded condition that reads it is never true — the approval branch is then dead and the workflow always takes its default.",
             "A node routes to exactly one of its outgoing edges unless it declares route_mode 'parallel'. Any node whose branches are meant to run together — a fan-out into a join — must declare it. Without it only one branch runs, an 'all' join waits for an input that can never arrive, and the run dies there.",
             "When two or more forward branches converge, target an explicit join node: use join mode any for mutually-exclusive alternatives and all for parallel branches, then use one edge from the join to the downstream node.",
             "Use a join node only for real fan-in: it needs at least two incoming non-back edges and exactly one node policy reference to one top-level join policy.",
@@ -911,6 +912,41 @@ class WorkflowAuthoringService:
                 "note": (
                     "A human node's output carries the submission. Branch on "
                     "`decision`; there is no field of your own invention on it."
+                ),
+            },
+            # What an Agent's answer looks like, and why reading it is the
+            # only way to know whether the step did anything.
+            #
+            # Nothing else can tell. The CLI exits 0 whether it did the work
+            # or explained that it could not; its own structured output
+            # reports `is_error: false` either way. So a step that was blocked
+            # is recorded a success, and every node after it runs on a report
+            # of the failure as though it were the result.
+            #
+            # The prompt has to ask for the token, or there is nothing to
+            # branch on. That is why this fact carries both halves.
+            "agent_outcome": {
+                "shape": {"text": "everything the Agent said, as one string"},
+                "asking_for_it": (
+                    "End the node's config.prompt with: 'If you completed the "
+                    "task, print ORBIT_TASK_OK on its own line at the very "
+                    "end. If anything blocked you, do not print it — say what "
+                    "blocked you instead.'"
+                ),
+                "reading_it": {
+                    "op": "and",
+                    "args": [
+                        {"op": "call", "name": "exists",
+                         "args": [{"op": "ref", "path": "source.<port>.text"}]},
+                        {"op": "in",
+                         "left": {"op": "literal", "value": "ORBIT_TASK_OK"},
+                         "right": {"op": "ref", "path": "source.<port>.text"}},
+                    ],
+                },
+                "note": (
+                    "An Agent that was blocked answers in prose that reads "
+                    "like any other answer. A token it was told to withhold on "
+                    "failure is the difference a condition can see."
                 ),
             },
             "policy_contract": {
