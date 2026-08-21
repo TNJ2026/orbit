@@ -1523,7 +1523,13 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
 /* Which way the run went at each fork. Only forks appear, so this stays a
    footnote to the step list rather than a second copy of the graph. Every
    pill carries its word: the colours only rank attention. */
-.run-branches { border-top: 1px solid var(--line); padding-top: 8px; margin-top: 4px; }
+/* Its own block inside the steps panel, so it is spaced like one: the panel
+   has no padding of its own and this section had only a top edge, which left
+   the summary against the left border and the last branch against the bottom
+   one. Same scale as the panel head above it. */
+.run-branches {
+  border-top: 1px solid var(--line); margin-top: 4px; padding: 12px 14px;
+}
 .run-branches > summary { cursor: pointer; font-size: 13px; color: var(--blue); }
 .run-branches-body { display: grid; gap: 12px; margin-top: 10px; }
 .run-branch-source { font-size: 13px; }
