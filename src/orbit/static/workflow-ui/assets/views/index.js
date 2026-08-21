@@ -34,6 +34,18 @@ export function createViews(context) {
   const simplifiedComposerState = {
     runId: null, workflowId: "", templateId: "", goal: "",
   };
+  // One glyph per step state, so a row reads as far along without its
+  // colour. Up here with the module's own state because both the first
+  // render and the live patch that follows it reach for the same table.
+  const STEP_MARKS = {
+    succeeded: "✓", failed: "✕", unknown: "?", running: "●", waiting: "◔",
+    answered: "✓", cancelled: "✕", not_reached: "○",
+  };
+
+  // The run this page is watching, while it is still running. Cleared with
+  // the view, so a tick after navigating away redraws rather than patching a
+  // page that is gone.
+  let liveRun = null;
   let focusSimplifiedGoalOnRender = false;
   let simplifiedWorkflowGenerationPending = false;
 
@@ -450,26 +462,39 @@ export function createViews(context) {
       }) : null,
       run.error ? el("div", { class: "banner error", text: run.error }) : null,
     ]));
-    await renderRunSteps(root, run.run_id, {
-      branches, live: !TERMINAL_LANGGRAPH_STATUSES.has(run.status),
-    });
+    const live = !TERMINAL_LANGGRAPH_STATUSES.has(run.status);
+    const drawn = await renderRunSteps(root, run.run_id, { branches, live });
+    // Watching a run used to mean redrawing the page around it every couple
+    // of seconds: the fold somebody had opened closed, the graph frame
+    // reloaded its bundle and redrew, and the scroll position moved. What
+    // actually changes on a tick is which steps have got where, so that is
+    // what a tick changes.
+    if (live && drawn) {
+      liveRun = {
+        runId: run.run_id,
+        status: run.status,
+        interrupts: run.interrupts?.length || 0,
+        patch: async () => {
+          const steps = (await api.runSteps(run.run_id)).data.steps || [];
+          for (const step of steps) {
+            const handle = drawn.rows.get(step.node_id);
+            if (!handle) continue;
+            handle.row.className = `step-row ${step.status}`;
+            handle.mark.textContent = STEP_MARKS[step.status] || "○";
+            handle.status.className = `pill ${step.status}`;
+            handle.status.textContent = i18n.t(
+              `simplified.steps.status.${step.status}`,
+            );
+          }
+          drawn.canvas?.updateStatuses?.(Object.fromEntries(
+            steps.map((step) => [step.node_id, step.status]),
+          ));
+        },
+      };
+      installViewCleanup(() => { liveRun = null; });
+    }
     await appendRunArtifacts(root, run.run_id);
   }
-
-  /* Where the run got to, one row per step of its definition.
-   *
-   * Drawn from the definition rather than from what has happened, so the
-   * steps still to come are on the page from the first render: a list that
-   * grew as the run progressed would give no sense of how much is left.
-   *
-   * Redrawn in place. The whole view is rebuilt whenever the live cursor
-   * moves, which is often while a run works, and replacing this panel each
-   * time would collapse the console somebody had opened underneath it.
-   */
-  const STEP_MARKS = {
-    succeeded: "✓", failed: "✕", unknown: "?", running: "●", waiting: "◔",
-    answered: "✓", cancelled: "✕", not_reached: "○",
-  };
 
   /* The same picture as the definition page, with the run drawn on it.
    *
@@ -501,9 +526,11 @@ export function createViews(context) {
     (async () => {
       try {
         const response = await api.runGraph(runId);
-        body.append(embeddedGraph(response.data.graph, {
+        const pane = embeddedGraph(response.data.graph, {
           viewerUrl: () => url, i18n, statuses,
-        }));
+        });
+        body.append(pane);
+        section.updateStatuses = pane.updateStatuses;
       } catch (error) {
         body.append(el("p", { class: "muted", text: error?.messageKey
           ? i18n.t(error.messageKey, { message: error.message })
@@ -513,6 +540,17 @@ export function createViews(context) {
     return section;
   }
 
+  /* Where the run got to, one row per step of its definition.
+   *
+   * Drawn from the definition rather than from what has happened, so the
+   * steps still to come are on the page from the first render: a list that
+   * grew as the run progressed would give no sense of how much is left.
+   *
+   * Returns handles on what it drew rather than nothing, so a live tick can
+   * move the rows it already put on the page. Re-rendering the panel each
+   * time the cursor moved would collapse a console somebody had opened
+   * underneath it and reload the graph frame beside it.
+   */
   async function renderRunSteps(root, runId, { branches = true, live = false } = {}) {
     const panel = el("section", { class: "panel simplified-steps" }, [
       el("div", { class: "panel-head" }, [
@@ -536,10 +574,15 @@ export function createViews(context) {
     const canvas = runCanvas(runId, Object.fromEntries(
       steps.map((step) => [step.node_id, step.status]),
     ));
-    panel.append(el("ol", { class: "step-list" }, steps.map((step) => el(
+    const rows = new Map();
+    panel.append(el("ol", { class: "step-list" }, steps.map((step) => {
+      const mark = el("span", { class: "step-mark", "aria-hidden": "true",
+        text: STEP_MARKS[step.status] || "○" });
+      const status = el("span", { class: `pill ${step.status}`,
+        text: i18n.t(`simplified.steps.status.${step.status}`) });
+      const row = el(
       "li", { class: `step-row ${step.status}` }, [
-        el("span", { class: "step-mark", "aria-hidden": "true",
-          text: STEP_MARKS[step.status] || "○" }),
+        mark,
         el("div", { class: "step-copy" }, [
           el("strong", { class: "step-label", text: step.label }),
           el("span", { class: "step-detail muted", text: [
@@ -553,8 +596,7 @@ export function createViews(context) {
         ]),
         // Its own word list rather than the run's: a step is "working" or
         // "not started", and a run is never either.
-        el("span", { class: `pill ${step.status}`,
-          text: i18n.t(`simplified.steps.status.${step.status}`) }),
+        status,
         step.status !== "not_reached"
           // A step that printed nothing has no log to view, and a fold that
           // opens on "nothing yet" is a promise the row could have kept to
@@ -563,10 +605,13 @@ export function createViews(context) {
             live, nodeId: step.node_id, prompt: step.prompt,
             hideWhenEmpty: true,
           }) : null,
-      ],
-    ))));
+      ]);
+      rows.set(step.node_id, { row, mark, status });
+      return row;
+    })));
     if (canvas) root.append(canvas);
     if (branches) await renderRunBranches(panel, runId, steps);
+    return { rows, canvas };
   }
 
   /* Which way the run went at each fork.
@@ -1274,6 +1319,28 @@ export function createViews(context) {
     announce(i18n.t("settings.saved"));
   }
 
+  /* The watched run's own progress, without redrawing the page around it.
+   *
+   * False when the page has to be redrawn instead: the run settled, it began
+   * waiting on somebody, or it could not be read at all. The caller falls
+   * back, so a wrong answer here costs a redraw rather than a stale page.
+   */
+  async function patchLiveRun() {
+    if (!liveRun) return false;
+    let run;
+    try {
+      run = (await api.langGraphRun(liveRun.runId)).data;
+    } catch (error) {
+      return false;
+    }
+    if (
+      run.status !== liveRun.status
+      || (run.interrupts?.length || 0) !== liveRun.interrupts
+    ) return false;
+    await liveRun.patch();
+    return true;
+  }
+
   function scheduleLivePolling() {
     // A timeout chain rather than an interval, so failures can back off:
     // doubling up to five minutes instead of repainting the error banner every
@@ -1297,7 +1364,14 @@ export function createViews(context) {
           failures = 0;
           // An Editor owns unsaved local text. Background projection changes
           // must never tear down that view; explicit Draft commands redraw it.
-          if (live.changed) await render();
+          // A change of fate changes the page's shape — the composer
+          // unlocks, the commands change, a result appears — so that one is
+          // still a redraw. It happens once, at the end, rather than on
+          // every tick of the run it ends.
+          if (live.changed) {
+            const patched = liveRun ? await patchLiveRun() : false;
+            if (!patched) await render();
+          }
         }
       } catch (error) {
         failures += 1;

@@ -72,7 +72,12 @@ export function embeddedGraph(graph, {
     }
   });
   stop.observe(document.body, { childList: true, subtree: true });
-  return el("div", { class: "workflow-graph-pane" }, [frame]);
+  const pane = el("div", { class: "workflow-graph-pane" }, [frame]);
+  // A run's node statuses change while it is watched. Re-posting them costs
+  // one message; rebuilding the pane would reload the bundle and redraw the
+  // graph, which is what watching a run used to do every couple of seconds.
+  pane.updateStatuses = (next) => { statuses = next; send(); };
+  return pane;
 }
 
 export function createWorkflowDefinitionViews({

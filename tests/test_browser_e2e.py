@@ -23,6 +23,7 @@ import time
 import unittest
 import urllib.request
 from urllib.parse import quote
+import uuid
 
 try:
     from playwright.sync_api import sync_playwright
@@ -1374,18 +1375,22 @@ class GoalHomeTests(BrowserE2ETestCase):
         return workflow_id
 
     def start(self, page, workflow_id: str, goal: str = "") -> dict:
+        # A key per call, not per (workflow, goal length): two tests picking
+        # eight-letter goals replayed each other's run, and the second one
+        # then watched a run the first had already cancelled.
+        key = f"start-{workflow_id}-{uuid.uuid4().hex}"
         return page.evaluate(
-            """([id, goal]) => fetch("/api/v1/langgraph-runs", {
+            """([id, goal, key]) => fetch("/api/v1/langgraph-runs", {
                  method: "POST",
                  headers: {
                    "content-type": "application/json",
-                   "idempotency-key": "start-" + id + goal.length,
+                   "idempotency-key": key,
                  },
                  body: JSON.stringify({
                    workflow_id: id, input: {value: 1}, goal,
                  }),
                }).then((r) => r.json()).then((b) => b.data.run)""",
-            [workflow_id, goal],
+            [workflow_id, goal, key],
         )
 
     def test_a_long_goal_folds_and_offers_the_way_out_of_the_fold(self) -> None:
@@ -1500,6 +1505,69 @@ class GoalHomeTests(BrowserE2ETestCase):
         self.assertEqual(
             "取消执行", state.locator("button.danger").inner_text(),
         )
+
+    def test_watching_a_run_does_not_redraw_the_page_around_it(self) -> None:
+        """A tick changes which steps got where, so that is what it changes.
+
+        Watching used to redraw everything every few seconds: the fold
+        somebody had opened closed, the graph frame reloaded its bundle and
+        drew again, and the page moved under the reader. The live endpoint is
+        answered here rather than waited on, so the tick is deterministic;
+        what is measured is what the tick did to the page.
+        """
+
+        import json as json_module
+
+        page = self.open("en-US")
+        page.wait_for_selector(".simplified-workspace-composer")
+        workflow_id = self.publish(page, self.runnable(human=True))
+        run = self.start(page, workflow_id, goal="watching")
+        self.addCleanup(self.cancel, page, run)
+
+        ticks = []
+        page.route("**/api/v1/live*", lambda route: (
+            ticks.append(1),
+            route.fulfill(status=200, content_type="application/json",
+                          body=json_module.dumps({
+                              "schema_version": "1.0", "projection_version": None,
+                              "next_cursor": None,
+                              "data": {"changed": True, "cursor": f"c{len(ticks)}"},
+                          })),
+        ))
+        page.goto(f"{self.base}/ui/#/runs/{quote(run['run_id'], safe='')}")
+        page.wait_for_selector(".step-row")
+        page.wait_for_timeout(600)
+
+        # Marked so a rebuild is detectable, and a fold left open: the fold
+        # and the graph frame are what a reader actually loses when the page
+        # is thrown away and drawn again.
+        page.evaluate("""() => {
+          document.querySelector('.step-list').dataset.probe = 'kept';
+          document.querySelector('iframe').dataset.probe = 'kept';
+          document.querySelector('details').open = true;
+        }""")
+        steps = []
+        page.on("request", lambda request: (
+            steps.append(1) if "/steps" in request.url else None
+        ))
+
+        # The default cadence, waited out rather than reconfigured: the
+        # interval control is a custom widget over a hidden native select, and
+        # driving it would be testing that instead of this.
+        page.wait_for_timeout(18000)
+
+        self.assertGreaterEqual(len(ticks), 1)
+        # The tick did happen — the steps were re-read …
+        self.assertGreaterEqual(len(steps), 1)
+        # … and the page around them was left alone.
+        self.assertEqual({"list": True, "frame": True, "open": True},
+                         page.evaluate("""() => ({
+                           list: document.querySelector('.step-list')
+                                 ?.dataset.probe === 'kept',
+                           frame: document.querySelector('iframe')
+                                  ?.dataset.probe === 'kept',
+                           open: document.querySelector('details')?.open === true,
+                         })"""))
 
     def test_answering_a_step_is_asked_in_the_page(self) -> None:
         """Resume took a JSON value through the browser's prompt box.
