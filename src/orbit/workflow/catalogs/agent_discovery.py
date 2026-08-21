@@ -126,10 +126,31 @@ class AgentCliSpec:
 # off its help text: the argv is what actually produced a reply on stdout.
 # `--skip-git-repo-check` and `--skip-trust` waive the CLI's *directory* trust
 # check only; neither waives its tool-permission prompts.
+#
+# Tool permissions are waived here on purpose, and this is where that decision
+# is reviewed. A CLI's permission prompt asks a person, and a workflow step has
+# no person: the prompt is not answered, it is refused, and the CLI then prints
+# its refusal as prose and exits 0. The step is recorded a success that wrote
+# nothing. So each entry either gets the setting that lets an unattended run
+# actually work, or it gets none because it never prompted to begin with —
+# kimi, pi, hermes and opencode all write without asking.
+#
+# The two settings are not the same strength, and the weaker one is preferred
+# where a CLI offers it. Codex has a real sandbox of its own, so it is confined
+# to the directory it was given rather than let out of it; Claude and
+# Antigravity have no equivalent lever, so they are trusted outright. Nothing
+# here is an OS boundary — see TrustedCliAgentClient.workspace_root.
 TRUSTED_AGENT_CLIS: tuple[AgentCliSpec, ...] = (
-    AgentCliSpec("claude", "claude", invocation=AgentInvocation(prompt_flag="-p")),
+    AgentCliSpec("claude", "claude", invocation=AgentInvocation(
+        args=("--dangerously-skip-permissions",), prompt_flag="-p",
+    )),
     AgentCliSpec("codex", "codex", invocation=AgentInvocation(
-        args=("exec", "--skip-git-repo-check"), prompt_positional=True,
+        # workspace-write, not a full bypass: Codex keeps enforcing its own
+        # sandbox and confines the run to the workspace it was handed. Under
+        # the default read-only sandbox every write came back "rejected by
+        # user approval settings", with nobody to ask.
+        args=("exec", "--skip-git-repo-check", "--sandbox", "workspace-write"),
+        prompt_positional=True,
     )),
     AgentCliSpec("gemini", "gemini", invocation=AgentInvocation(
         args=("--skip-trust",), prompt_flag="-p",

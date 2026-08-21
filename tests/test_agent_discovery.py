@@ -76,6 +76,47 @@ class SpecValidationTests(unittest.TestCase):
         )
 
 
+    def test_the_permission_settings_are_exactly_the_reviewed_ones(self) -> None:
+        """Which CLIs are let past their permission prompt, pinned per CLI.
+
+        A workflow step has nobody to answer a permission prompt, so a CLI
+        that asks is a CLI that refuses — in prose, on stdout, with exit 0, so
+        the step is recorded a success that did nothing. Waiving the prompt is
+        the fix and also a real widening, which is why the set is written down
+        here and not left to whoever next edits the allowlist.
+
+        Codex is confined rather than trusted: it has a sandbox of its own and
+        keeps enforcing it over the workspace. The rest were probed writing a
+        file without being asked, so they are given nothing.
+        """
+
+        settings = {
+            spec.name: tuple(
+                argument for argument in (spec.invocation.args if spec.invocation else ())
+                if "permission" in argument or "sandbox" in argument
+                or argument == "workspace-write"
+            )
+            for spec in TRUSTED_AGENT_CLIS
+        }
+        self.assertEqual(
+            {
+                "claude": ("--dangerously-skip-permissions",),
+                "antigravity": ("--dangerously-skip-permissions",),
+                "codex": ("--sandbox", "workspace-write"),
+                # Probed writing a file with no prompt of their own, so there
+                # is nothing here to waive.
+                "hermes": (), "kimi": (), "pi": (), "opencode": (),
+                # Not probed: no Gemini CLI was installed where this was
+                # settled. Its `--skip-trust` waives directory trust and not
+                # the tool prompt, so it may well need a setting — but this
+                # file's rule is that an invocation is what a CLI was seen to
+                # accept, never what its help text claims.
+                "gemini": (),
+            },
+            settings,
+        )
+
+
 class DiscoveryTests(unittest.TestCase):
     def test_trusted_cli_environment_keeps_identity_but_not_provider_tokens(self) -> None:
         environment = trusted_cli_environment({
