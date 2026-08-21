@@ -32,16 +32,23 @@ export default function WorkflowNode({ id, data, selected }) {
       data-node-id={id}
     >
       <header>
-        <span className="kind">{data.kind}</span>
-        {/* Where a run got to, when one is being drawn. Spelled as well as
-            coloured: a picture whose only difference is a hue is unreadable
-            to anyone who cannot see the hue, and this canvas already refuses
-            to let meaning ride on colour for routes. */}
-        {data.status ? (
-          <span className={`run-status run-status-${data.status}`}>
-            {RUN_STATUS_TEXT[data.status] ?? data.status}
-          </span>
-        ) : null}
+        {/* Kind and state share one row, not one each. They are the same
+            register of small print about the same node, and a card drawing a
+            run was a whole line taller than the same card drawing its
+            definition — enough for a two-line label to reach out of its lane
+            and into the node below it. */}
+        <span className="meta">
+          <span className="kind">{data.kind}</span>
+          {/* Where a run got to, when one is being drawn. Spelled as well as
+              coloured: a picture whose only difference is a hue is unreadable
+              to anyone who cannot see the hue, and this canvas already refuses
+              to let meaning ride on colour for routes. */}
+          {data.status ? (
+            <span className={`run-status run-status-${data.status}`}>
+              {RUN_STATUS_TEXT[data.status] ?? data.status}
+            </span>
+          ) : null}
+        </span>
         {/* The label is the one part of a node this canvas can already change,
             so it is edited in place rather than behind a panel. `nodrag` stops
             xyflow from treating a click in the field as the start of a drag,
@@ -51,7 +58,11 @@ export default function WorkflowNode({ id, data, selected }) {
             as somewhere an author could type, and there is nothing here to
             type into. */}
         {data.readOnly ? (
-          <span className="title">{data.label ?? id}</span>
+          // Two lines and then an ellipsis, with the whole of it on hover. A
+          // label is meant to be a short title, but nothing enforces that, and
+          // an unbounded one grows the card past the fixed lane it is placed
+          // in — which the reader sees as two nodes drawn on top of each other.
+          <span className="title" title={data.label ?? id}>{data.label ?? id}</span>
         ) : (
           <input
             className="title nodrag"

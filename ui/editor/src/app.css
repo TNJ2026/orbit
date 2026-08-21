@@ -182,7 +182,10 @@ body {
 .node .title:focus { border-color: var(--accent); outline: none; background: var(--bg); }
 /* The viewer's label is a span, so it must not offer the field's affordances:
    a box that lights up under the pointer says it can be typed in. */
-span.title { display: block; }
+span.title {
+  display: -webkit-box; overflow: hidden;
+  -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2;
+}
 span.title:hover { border-color: transparent; }
 .node .handler { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
 .node .handler .version { opacity: 0.7; }
@@ -307,9 +310,10 @@ span.title:hover { border-color: transparent; }
 .node-run-running { border-left-color: var(--accent); }
 .node-run-waiting { border-left-color: #d97706; }
 .node-run-not_reached { border-left-color: var(--line); opacity: .62; }
+.node .meta { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
 .run-status {
   font-size: 10px; text-transform: uppercase; letter-spacing: .06em;
-  color: var(--muted); align-self: flex-start;
+  color: var(--muted); white-space: nowrap;
 }
 .node-run-succeeded .run-status { color: var(--ok); }
 .node-run-failed .run-status { color: var(--bad); }

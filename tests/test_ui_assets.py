@@ -412,3 +412,31 @@ class StepListRenderingTests(unittest.TestCase):
         editor_css = (EDITOR_SOURCE / "app.css").read_text(encoding="utf-8")
         self.assertIn('unknown: "outcome unknown"', node)
         self.assertIn(".node-run-unknown", editor_css)
+
+    def test_a_run_node_card_is_no_taller_than_a_definition_one(self) -> None:
+        """The lane a node is placed in has a fixed height; the card does not.
+
+        Positions come from the server as a depth and a lane, and the canvas
+        multiplies the lane by LANE_HEIGHT — so a card that outgrows that
+        spacing is drawn on top of the node beneath it. Drawing a run used to
+        add a whole line for the status, which put a two-line label over the
+        edge on the run page while the same workflow read fine on its own.
+
+        Two rules keep the card inside the lane: the state shares the kind's
+        row rather than taking one of its own, and the label stops at two
+        lines instead of growing without limit.
+        """
+
+        node = (EDITOR_SOURCE / "WorkflowNode.jsx").read_text(encoding="utf-8")
+        css = (EDITOR_SOURCE / "app.css").read_text(encoding="utf-8")
+
+        # One row carrying both, not a status line under the kind line.
+        self.assertIn('<span className="meta">', node)
+        self.assertIn(".node .meta { display: flex", css)
+        meta = node.split('<span className="meta">')[1].split("</span>\n        </span>")[0]
+        self.assertIn('className="kind"', meta)
+        self.assertIn("run-status run-status-", meta)
+
+        # A bounded label, with the whole of it still reachable.
+        self.assertIn("-webkit-line-clamp: 2", css.split("span.title {")[1][:200])
+        self.assertIn('title={data.label ?? id}', node)
