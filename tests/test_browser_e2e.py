@@ -441,10 +441,12 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
         self.assertEqual(0, page.locator(".simplified-workspace-composer").count())
         self.assertEqual(0, page.get_by_role("button", name="Run again").count())
         self.assertTrue(page.locator(".simplified-run-hero").is_visible())
-        # Named by the goal, with the Workflow that ran it still on the page.
+        # Which run this is and how it went. The goal is read on the goal
+        # page; a paragraph of it here pushed the rest of the card down.
         hero = page.inner_text(".simplified-run-hero")
-        self.assertIn("Prepare a concise report", hero)
         self.assertIn("workflow:linear", hero)
+        self.assertIn(run_id, hero)
+        self.assertNotIn("Prepare a concise report", hero)
 
     def test_the_run_page_shows_every_step_and_where_it_got_to(self) -> None:
         """The rows are the definition's, so what is left is on the page too."""
@@ -1369,14 +1371,13 @@ class GoalHomeTests(BrowserE2ETestCase):
             [workflow_id, goal],
         )
 
-    def test_the_run_page_shows_the_goal_the_way_history_does(self) -> None:
-        """One goal, one presentation, wherever it is read.
+    def test_a_long_goal_folds_and_offers_the_way_out_of_the_fold(self) -> None:
+        """A goal is frequently a paragraph, and the goal page is where it is read.
 
-        A goal is frequently a paragraph. History rendered it as text — line
-        breaks kept, folded at 120px, unfoldable — while the page it is
-        watched on rendered it as a heading, which collapses the newlines and
-        never folds. The same paste read properly in one place and as a wall
-        of text in the other.
+        It keeps its line breaks, folds at 120px and unfolds in place. The
+        measurement that decides whether the fold needs a toggle once ran in
+        a single animation frame — before the block was in the document, so
+        it compared 0 against 0 and hid the toggle on a goal that needed it.
         """
 
         page = self.open("en-US")
@@ -1385,49 +1386,58 @@ class GoalHomeTests(BrowserE2ETestCase):
         goal = "\n".join(f"line {index} of a long pasted goal" for index in range(30))
         run = self.start(page, workflow_id, goal=goal)
 
-        page.goto(f"{self.base}/ui/#/runs/{quote(run['run_id'], safe='')}")
-        hero = page.locator(".simplified-run-hero")
-        hero.locator(".goal-text-clamp").wait_for()
+        page.goto(f"{self.base}/ui/#/goals/{quote(run['run_id'], safe='')}")
+        card = page.locator(".goal-text-card")
+        card.wait_for()
 
-        # Folded, and the way out of the fold is offered — the measurement
-        # that decides this once ran before the block was in the document and
-        # compared 0 against 0, hiding the toggle on a goal that needed it.
-        toggle = hero.locator(".goal-expand-toggle")
+        toggle = card.locator(".goal-expand-toggle")
         toggle.wait_for()
         self.assertTrue(toggle.is_visible())
-        clamped = hero.locator(".goal-text-clamp")
+        clamped = card.locator(".goal-text-clamp")
         self.assertLess(
             clamped.bounding_box()["height"],
-            hero.locator(".goal-text").bounding_box()["height"],
+            card.locator(".goal-text").bounding_box()["height"],
         )
 
         toggle.click()
         self.assertEqual(
             clamped.bounding_box()["height"],
-            hero.locator(".goal-text").bounding_box()["height"],
+            card.locator(".goal-text").bounding_box()["height"],
         )
 
-    def test_a_finished_run_hands_the_composer_back(self) -> None:
-        """The two engines do not share a word for "over".
+    def test_the_run_card_carries_identity_status_and_the_way_to_stop(self) -> None:
+        """What a watcher came for, above everything the run produced.
 
-        The legacy Runtime finishes a run as `succeeded`; LangGraph finishes
-        one as `completed`. One set of terminal statuses served both, so a
-        finished LangGraph run was never terminal here: the composer stayed
-        rendered, and rendered *disabled* — a summary is present, so every
-        control locks and the button reads "in progress" — for a run that had
-        been over for as long as it stayed selected.
+        The card led with the goal — frequently a paragraph — and put Cancel
+        underneath the interrupts and the result, so the control for stopping
+        a run in flight was below the fold of the run in flight.
         """
 
         page = self.open("en-US")
         page.wait_for_selector(".simplified-workspace-composer")
-        workflow_id = self.publish(page, self.runnable(human=False))
-        run = self.start(page, workflow_id)
-        self.assertEqual("completed", run["status"])
+        workflow_id = self.publish(page, self.runnable(human=True))
+        run = self.start(page, workflow_id, goal="a goal long enough to have pushed this down")
+        self.addCleanup(self.cancel, page, run)
 
         page.goto(f"{self.base}/ui/#/runs/{quote(run['run_id'], safe='')}")
-        page.wait_for_selector("#content .panel")
+        hero = page.locator(".simplified-run-hero")
+        hero.wait_for()
 
-        self.assertEqual(0, page.locator(".simplified-workspace-composer").count())
+        ids = hero.locator(".simplified-run-ids").inner_text()
+        self.assertIn(workflow_id, ids)
+        self.assertIn(run["run_id"], ids)
+        # The goal is read on the goal page; this card is not where it goes.
+        self.assertNotIn("a goal long enough", hero.inner_text())
+
+        state = hero.locator(".simplified-run-state")
+        self.assertEqual(1, state.locator(".pill").count())
+        cancel = state.locator("button.danger")
+        self.assertTrue(cancel.is_visible())
+        # Above the run's own output, not after it.
+        self.assertLess(
+            cancel.bounding_box()["y"],
+            hero.locator(".code-block").first.bounding_box()["y"],
+        )
 
     def test_a_run_still_in_flight_keeps_the_composer_locked(self) -> None:
         """The other half: `interrupted` is not over, and must still lock."""

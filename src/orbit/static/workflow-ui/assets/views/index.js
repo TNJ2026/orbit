@@ -396,14 +396,14 @@ export function createViews(context) {
   async function renderLangGraphRun(root, run, { branches = true } = {}) {
     const actions = runActionButtons(run);
     root.append(el("section", { class: "panel simplified-run-hero" }, [
-      el("div", { class: "split" }, [
-        el("div", {}, [
-          // Named by what was asked for. The Workflow it ran stays beside the
-          // id: the goal answers "what was this", the line under it answers
-          // "what ran it", and a run with no goal falls back to the id alone.
-          ...goalTextBlock(run, "h2"),
-          el("p", { class: "mono muted", text: run.goal
-            ? `${run.workflow_id} · ${run.run_id}` : run.run_id }),
+      // Identity and fate, not the goal. A goal is frequently a paragraph and
+      // it pushed everything a watcher is here for — which run this is, how
+      // it is going, how to stop it — below the fold. It is read in full on
+      // the goal page, which is the page for reading it.
+      el("div", { class: "simplified-run-identity" }, [
+        el("div", { class: "simplified-run-ids" }, [
+          el("p", { class: "mono muted", text: run.workflow_id }),
+          el("p", { class: "mono muted", text: run.run_id }),
           // Who actually did the work, when that was not who the definition
           // names. Recorded on the run rather than read from the current
           // binding: the answer for a run that happened last week is the
@@ -415,7 +415,10 @@ export function createViews(context) {
             }),
           }) : null,
         ].filter(Boolean)),
-        pill(run.status),
+        // Beside the status rather than under the card: stopping a run is
+        // what a watcher comes here to do, and it was below everything the
+        // run had produced so far.
+        el("div", { class: "simplified-run-state" }, [pill(run.status), ...actions]),
       ]),
       run.interrupts?.length ? el("pre", {
         class: "code-block", text: JSON.stringify(run.interrupts, null, 2),
@@ -424,7 +427,6 @@ export function createViews(context) {
         class: "code-block", text: JSON.stringify(run.result, null, 2),
       }) : null,
       run.error ? el("div", { class: "banner error", text: run.error }) : null,
-      actions.length ? el("div", { class: "actions" }, actions) : null,
     ]));
     await renderRunSteps(root, run.run_id, {
       branches, live: !TERMINAL_LANGGRAPH_STATUSES.has(run.status),
