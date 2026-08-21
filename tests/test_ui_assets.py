@@ -437,6 +437,26 @@ class StepListRenderingTests(unittest.TestCase):
         )[1]
         self.assertIn("overflow-y: auto", listing.split("}")[0])
 
+    def test_the_diagram_names_the_agent_without_its_version(self) -> None:
+        """A build number is not something anyone reads off a diagram.
+
+        The exception is a substitution between two builds of one Agent: the
+        version is then the only thing the arrow points at, and dropping it
+        would leave the card reading "claude → claude".
+        """
+
+        node = (EDITOR_SOURCE / "WorkflowNode.jsx").read_text(encoding="utf-8")
+        self.assertIn(
+            "data.rebound && data.rebound.name === data.handler?.name", node,
+        )
+        # Every version on the card is behind that condition — none is printed
+        # unconditionally the way both used to be.
+        for part in node.split('<span className="version">')[:-1]:
+            self.assertTrue(
+                part.rstrip().endswith("{versioned ? ("),
+                f"an unconditional version survives: ...{part[-70:]!r}",
+            )
+
     def test_a_run_node_card_is_no_taller_than_a_definition_one(self) -> None:
         """The lane a node is placed in has a fixed height; the card does not.
 

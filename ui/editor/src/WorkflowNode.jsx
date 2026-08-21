@@ -24,6 +24,13 @@ export default function WorkflowNode({ id, data, selected }) {
   const inputs = data.inputs ?? [];
   const outputs = data.outputs ?? [];
   const rows = Math.max(inputs.length, outputs.length, 1);
+  // A version is small print nobody reads off a diagram, and it crowded the
+  // one line that says who does the work. The exception is a substitution
+  // between two builds of the same Agent: there the version is the only thing
+  // the arrow points at, and without it the card would read "claude → claude".
+  const versioned = Boolean(
+    data.rebound && data.rebound.name === data.handler?.name,
+  );
   return (
     <div
       className={`node node-${data.kind}${selected ? " selected" : ""}${
@@ -84,16 +91,18 @@ export default function WorkflowNode({ id, data, selected }) {
         <p className="handler">
           <span className={data.rebound ? "superseded" : undefined}>
             {data.handler.name}
-            {data.rebound ? null : (
+            {versioned ? (
               <span className="version"> {data.handler.version}</span>
-            )}
+            ) : null}
           </span>
           {data.rebound ? (
             <>
               <span className="rebound-arrow" aria-hidden="true"> → </span>
               <span className="rebound">
                 {data.rebound.name}
-                <span className="version"> {data.rebound.version}</span>
+                {versioned ? (
+                  <span className="version"> {data.rebound.version}</span>
+                ) : null}
               </span>
             </>
           ) : null}
