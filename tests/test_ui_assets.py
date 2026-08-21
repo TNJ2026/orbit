@@ -101,6 +101,10 @@ class CatalogTests(unittest.TestCase):
             "ops.agents", "ops.agents.empty", "ops.handlers", "ops.health",
             "ops.health.notReady", "ops.health.ready",
             "nav.runs", "runs.title", "runs.empty", "runs.orderHint",
+            # Renamed into the `authoring.job.modify.*` family, so one status
+            # line can be spelled by swapping a prefix rather than by a second
+            # vocabulary for the same five states.
+            "editor.revisionQueued", "editor.revisionRunning",
         }.isdisjoint(keys))
 
 
@@ -143,10 +147,18 @@ class SourceTests(unittest.TestCase):
 
     def test_dynamically_built_keys_resolve(self) -> None:
         known = set(catalog("en-US"))
+        # A key built from a variable is invisible to the source scan above,
+        # so every family that is spelled `${prefix}.${value}` has to be named
+        # here or it silently stops being checked at all.
+        statuses = ("queued", "running", "done", "failed", "cancelled")
+        stages = ("preparing", "generating", "validating", "publishing")
         for key in (
             "human.decision.approve", "human.decision.reject",
             "state.loading", "state.empty", "state.error", "state.stale",
             "state.pending", "state.retry",
+            *(f"authoring.job.{status}" for status in statuses),
+            *(f"authoring.job.modify.{status}" for status in statuses),
+            *(f"generate.progress.{stage}" for stage in stages),
         ):
             with self.subTest(key=key):
                 self.assertIn(key, known)
@@ -412,6 +424,24 @@ class StepListRenderingTests(unittest.TestCase):
         editor_css = (EDITOR_SOURCE / "app.css").read_text(encoding="utf-8")
         self.assertIn('unknown: "outcome unknown"', node)
         self.assertIn(".node-run-unknown", editor_css)
+
+    def test_one_panel_watches_an_authoring_job(self) -> None:
+        """The edit page had a second, weaker console of its own.
+
+        Two panels reading one job DTO drift: this one never showed the
+        instruction or the Agent, and printed the Runtime's `orbit-progress`
+        control lines as if they were output. Both surfaces mount the shared
+        progress panel now, and nothing here should grow a console again.
+        """
+
+        views = (ASSETS / "views" / "index.js").read_text(encoding="utf-8")
+        css = (ASSETS / "styles" / "views.css").read_text(encoding="utf-8")
+        self.assertNotIn("workflow-authoring-console", views)
+        self.assertNotIn("workflow-authoring-console", css)
+        # Two mounts of the one panel: the catalog page and the edit page.
+        self.assertEqual(2, views.count("workflowGenerationProgress("))
+        # The edit page asks for the revision's own wording.
+        self.assertIn('statusPrefix: "authoring.job.modify"', views)
 
     def test_the_definition_list_scrolls_inside_its_frame(self) -> None:
         """The tab bar must not scroll away with the list it switches.

@@ -1,11 +1,36 @@
 import { ApiError } from "../api.js";
 import { el } from "../components/dom.js";
 
-/** Render and own the polling lifecycle for one workflow generation job. */
-export function workflowGenerationProgress(initialJob, onSettled, context) {
+/** Render and own the polling lifecycle for one authoring job.
+ *
+ * Both surfaces that ask an Agent to write a workflow use this: the catalog
+ * page generating a new one, and the edit page revising one that exists. They
+ * run the same pipeline over the same mode-agnostic job DTO, so the only
+ * things that differ are what the operation is called and what is on offer
+ * once it settles — `options` carries exactly those and nothing else.
+ *
+ * The class names still say "generation" because the family is older than the
+ * second caller; the server's word for both is an authoring job, and a rename
+ * belongs in its own mechanical commit rather than smuggled into this one.
+ */
+export function workflowGenerationProgress(
+  initialJob, onSucceeded, context, options = {},
+) {
   const {
     api, i18n, reportError, defaultGenerationAgent, installCleanup,
   } = context;
+  const {
+    // `${statusPrefix}.${job.status}` — a prefix rather than five keys,
+    // because status is the one family the server can grow under us.
+    statusPrefix = "authoring.job",
+    progressTitleKey = "generate.progress.title",
+    promptLabelKey = "generate.instruction",
+    agentLabelKey = "generate.writtenBy",
+    // What the host offers once the job has settled. A node slot rather than
+    // more labels: the two callers differ in what the buttons *do*, and no
+    // amount of wording can express that.
+    renderOutcome = null,
+  } = options;
   const refreshIntervalMs = 3000;
   let job = initialJob;
   let after = 0;
@@ -42,7 +67,7 @@ export function workflowGenerationProgress(initialJob, onSettled, context) {
       : "";
   };
   updateProgress(progressStage);
-  const state = el("strong", { text: i18n.t(`authoring.job.${job.status}`) });
+  const state = el("strong", { text: i18n.t(`${statusPrefix}.${job.status}`) });
   const jobState = el("div", { class: `authoring-job-state ${job.status}` }, [
     el("span", { class: "live-dot", "aria-hidden": "true" }), state,
   ]);
@@ -57,10 +82,15 @@ export function workflowGenerationProgress(initialJob, onSettled, context) {
   const failure = el("div", {
     class: "banner error workflow-generation-failure", hidden: "hidden",
   });
-  const retry = el("button", {
-    type: "button", class: "button primary", hidden: "hidden",
-    text: i18n.t("generate.tryAgain"), onclick: () => onSettled(),
-  });
+  // Where the host puts whatever it offers once the job is over. Empty until
+  // then, because a job still running has no outcome to act on.
+  const outcome = el("div", { class: "workflow-generation-outcome" });
+  const settle = () => {
+    if (renderOutcome) {
+      const nodes = renderOutcome(job);
+      outcome.replaceChildren(...[nodes].flat().filter(Boolean));
+    }
+  };
   const cancelGeneration = el("button", {
     type: "button", class: "button workflow-generation-cancel",
     text: i18n.t("action.cancel"),
@@ -79,7 +109,10 @@ export function workflowGenerationProgress(initialJob, onSettled, context) {
         )).data;
         stopped = true;
         if (timer) clearTimeout(timer);
-        await onSettled();
+        state.textContent = i18n.t(`${statusPrefix}.${job.status}`);
+        jobState.className = `authoring-job-state ${job.status}`;
+        updateCancel();
+        settle();
       } catch (error) {
         event.currentTarget.disabled = false;
         reportError(error);
@@ -129,7 +162,7 @@ export function workflowGenerationProgress(initialJob, onSettled, context) {
     if (stopped) return;
     try {
       job = (await api.get(job.href)).data;
-      state.textContent = i18n.t(`authoring.job.${job.status}`);
+      state.textContent = i18n.t(`${statusPrefix}.${job.status}`);
       jobState.className = `authoring-job-state ${job.status}`;
       updateCancel();
       await pumpOutput();
@@ -139,14 +172,15 @@ export function workflowGenerationProgress(initialJob, onSettled, context) {
         updateProgress("publishing");
         progressItems.forEach((item) => { item.className = "workflow-generation-step completed"; });
         stopped = true;
-        await onSettled();
+        settle();
+        await onSucceeded(job);
       } else {
         stopped = true;
         updateProgress(progressStage, progressAttempt, progressMaximum, true);
         failure.textContent = job.error?.message
-          || i18n.t(`authoring.job.${job.status}`);
+          || i18n.t(`${statusPrefix}.${job.status}`);
         failure.hidden = false;
-        retry.hidden = false;
+        settle();
       }
     } catch (error) {
       if (!(error instanceof ApiError)) throw error;
@@ -163,22 +197,26 @@ export function workflowGenerationProgress(initialJob, onSettled, context) {
   });
 
   return el("section", { class: "workflow-generation-progress" }, [
+    // What is happening, before what was asked for: a reader arrives here to
+    // learn whether it is still working, and everything below is context for
+    // that answer. Cancel sits beside it because they are one thought.
+    el("header", { class: "workflow-generation-head" }, [jobState, cancelGeneration]),
     el("div", { class: "workflow-generation-request" }, [
       el("div", { class: "workflow-generation-prompt" }, [
-        el("div", { class: "field-label", text: i18n.t("generate.instruction") }),
+        el("div", { class: "field-label", text: i18n.t(promptLabelKey) }),
         el("div", { class: "workflow-generation-prompt-value", text: job.prompt }),
       ]),
       el("div", { class: "workflow-generation-agent" }, [
-        el("div", { class: "field-label", text: i18n.t("generate.writtenBy") }),
+        el("div", { class: "field-label", text: i18n.t(agentLabelKey) }),
         el("div", {
           class: "agent-choice-static mono",
           text: job.requested_agent || defaultGenerationAgent(),
         }),
       ]),
     ]),
-    el("section", { class: "workflow-generation-stages", "aria-label": i18n.t("generate.progress.title") }, [
+    el("section", { class: "workflow-generation-stages", "aria-label": i18n.t(progressTitleKey) }, [
       el("div", { class: "workflow-generation-stages-head" }, [
-        el("h3", { text: i18n.t("generate.progress.title") }),
+        el("h3", { text: i18n.t(progressTitleKey) }),
         progressDetail,
       ]),
       el("ol", { class: "workflow-generation-step-list" }, progressItems),
@@ -186,14 +224,11 @@ export function workflowGenerationProgress(initialJob, onSettled, context) {
     el("section", { class: "workflow-generation-output" }, [
       el("div", { class: "workflow-generation-output-head" }, [
         el("h3", { text: i18n.t("editor.agentConsole") }),
-        el("div", { class: "workflow-generation-output-actions" }, [
-          jobState, cancelGeneration,
-        ]),
       ]),
       empty,
       log,
       failure,
-      el("div", { class: "actions workflow-generation-failure-actions" }, [retry]),
     ]),
+    outcome,
   ]);
 }

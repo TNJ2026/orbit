@@ -1620,6 +1620,16 @@ export function createViews(context) {
           ? workflowGenerationProgress(activeGeneration, render, {
               api, i18n, reportError, defaultGenerationAgent,
               installCleanup: installViewCleanup,
+            }, {
+              // A generation that did not land leaves nothing to keep, so the
+              // only thing on offer is the form it came from. Success needs no
+              // entry here: `render` has already replaced the whole page.
+              renderOutcome: (job) => job.status === "done" ? null : el("div", {
+                class: "actions",
+              }, [el("button", {
+                type: "button", class: "button primary",
+                text: i18n.t("generate.tryAgain"), onclick: () => render(),
+              })]),
             })
           : form,
         ]),
@@ -2303,12 +2313,11 @@ export function createViews(context) {
               el("div", { class: "eyebrow workflow-edit-id", text: value.workflow_id }),
             ]),
             el("div", { class: "actions" }, [
-              el("span", {
-                class: "workflow-edit-status",
-              }, [
-                el("span", { text: i18n.t("editor.state.awaitingPrompt") }),
-                editingVersion,
-              ]),
+              // Which version is being edited, and nothing about how the work
+              // is going: the panel below owns that, and a header saying
+              // "awaiting an instruction" while the panel says the Agent is
+              // working was two answers to one question.
+              editingVersion,
               el("button", {
                 class: "button", id: "closeWorkflowEditor",
                 text: i18n.t("action.close"),
@@ -2487,7 +2496,7 @@ export function createViews(context) {
         findings.append(el("div", { class: "banner info", id: "revisionProgress" }, [
           el("span", { text: i18n.t(
             candidate.status === "queued"
-              ? "editor.revisionQueued" : "editor.revisionRunning",
+              ? "authoring.job.modify.queued" : "authoring.job.modify.running",
           ) }),
         ]));
       } else if (lastFailure && !candidate) {
@@ -2857,15 +2866,24 @@ export function createViews(context) {
    */
   function authoringFailureView(error) {
     if (!error) return [];
-    const codes = [...new Set(
-      (error.diagnostics || []).map((item) => item.code).filter(Boolean)
-    )];
     return [
       el("div", { class: "banner error", text: error.message }),
-      codes.length ? el("p", {
-        class: "muted mono authoring-failure-codes", text: codes.join(" · "),
-      }) : null,
-    ].filter(Boolean);
+      ...authoringFailureCodes(error),
+    ];
+  }
+
+  /* The codes on their own, for a surface that already shows the message.
+   *
+   * The progress panel prints `error.message` itself, so a caller there wants
+   * only the half it does not already have — two error banners saying the same
+   * sentence is worse than one. */
+  function authoringFailureCodes(error) {
+    const codes = [...new Set(
+      (error?.diagnostics || []).map((item) => item.code).filter(Boolean)
+    )];
+    return codes.length ? [el("p", {
+      class: "muted mono authoring-failure-codes", text: codes.join(" · "),
+    })] : [];
   }
 
   /* What the modification changed, as steps rather than counts.
@@ -2913,62 +2931,8 @@ export function createViews(context) {
     // Regenerate is the bigger hammer — it may redesign the whole flow — so it
     // stays out of sight until a plain modify has actually failed.
     let regenerateOffered = false;
-    let timer = null;
-    let collapsed = false;
-    let publishedRefreshDone = false;
-    // The Agent CLI's console. Created once and kept across redraws so the tail
-    // an operator is reading is never thrown away when the job's state changes.
-    const consoleLog = el("pre", {
-      class: "console-log workflow-authoring-console", role: "log", tabindex: "0",
-    });
-    const consoleView = el("section", { class: "workflow-authoring-output" }, [
-      el("h3", { class: "field-label", text: i18n.t("editor.agentConsole") }),
-      consoleLog,
-    ]);
-    let outputAfter = 0;
-    let outputStalled = false;
-
-    /** Append whatever the CLI has printed since the last chunk we showed. */
-    const pumpOutput = async () => {
-      if (outputStalled || !job || !job.output_href) return;
-      try {
-        for (let page = 0; page < 20; page += 1) {
-          const data = (await api.get(
-            `${job.output_href}?after=${outputAfter}`
-          )).data;
-          for (const chunk of data.chunks) {
-            consoleLog.append(el("span", {
-              class: `console-chunk ${chunk.stream}`, text: chunk.text,
-            }));
-            outputAfter = chunk.chunk_id;
-          }
-          if (!data.has_more) break;
-        }
-        if (consoleLog.childElementCount) consoleLog.scrollTop = consoleLog.scrollHeight;
-      } catch (error) {
-        // Reading a console needs the sensitive scope. Where the operator does
-        // not have it the panel simply carries no console — the job itself is
-        // still reported in full. Transport and server failures are temporary;
-        // the next job-status tick retries them.
-        outputStalled = error instanceof ApiError
-          && (error.status === 401 || error.status === 403);
-      }
-    };
-
-    const collapse = (refresh) => {
-      if (collapsed) return;
-      collapsed = true;
-      clearTimeout(timer);
-      wrap.classList.remove("open");
-      const finish = () => {
-        if (wrap.isConnected) wrap.remove();
-        if (refresh) onDone();
-      };
-      wrap.addEventListener("transitionend", (event) => {
-        if (event.target === wrap) finish();
-      }, { once: true });
-      setTimeout(finish, 340);
-    };
+    // The progress panel owns a timer; a redraw that swaps it out must stop it.
+    let stopProgress = null;
 
     const submit = async (mode) => {
       try {
@@ -2982,38 +2946,64 @@ export function createViews(context) {
           `workflow.${mode}:${workflow.workflow_id}:${Date.now()}`,
         )).data;
         draw();
-        watch();
       } catch (error) {
         reportError(error);
       }
     };
 
-    const draw = () => {
-      // Same layout language as the draft editor page: a state pill in the
-      // head, the instruction in an agent-editor-prompt section beneath it.
-      const statePill = el("span", {
-        class: `pill ${!job || ["queued", "running"].includes(job.status)
-          ? "waiting" : job.status === "done" ? "succeeded" : "failed"}`,
-        text: i18n.t(!job ? "editor.state.awaitingPrompt"
-          : `authoring.job.${job.status}`),
+    /* What is on offer once the Agent has stopped.
+     *
+     * The record above it stays either way. A settled job is gone from the
+     * `active_job` the page is built from, so nothing could fetch it back —
+     * what the Agent was asked, who ran it and what it printed exist only
+     * here, and throwing them away the moment it finishes would answer "what
+     * just changed?" with an empty form. */
+    const outcomeNodes = (settled) => settled.status === "done"
+      ? [
+        ...changeSummaryView(settled.result?.change_summary),
+        el("div", { class: "actions" }, [el("button", {
+          type: "button", class: "button primary", id: "modifyAnother",
+          text: i18n.t("editor.revision.another"),
+          // A full re-fetch: the workflow has a new version now, and the next
+          // instruction has to be written against that one.
+          onclick: () => onDone(),
+        })]),
+      ]
+      : [
+        // The panel already prints the Agent's message; this adds the half it
+        // does not have — which compiler rule was broken.
+        ...authoringFailureCodes(settled.error),
+        el("div", { class: "actions" }, [el("button", {
+          type: "button", class: "button", id: "retryWorkflowModify",
+          text: i18n.t("simplified.workflow.tryAgain"),
+          // Local, not a page redraw: `regenerateOffered` is the memory that a
+          // plain modify has already been tried, and a re-fetch would lose it.
+          onclick: () => { regenerateOffered = true; job = null; draw(); },
+        })]),
+      ];
+
+    const formPose = () => {
+      const writerField = generationAgentField(
+        "workflowModifyAgent", writerAgent, (value) => { writerAgent = value; },
+      );
+      const prompt = el("textarea", {
+        class: "mono workflow-modify-input", required: "required", maxlength: "4000",
+        placeholder: i18n.t("editor.agentPromptPlaceholder"),
+        text: promptText,
       });
-      const body = [];
-      const actions = el("div", { class: "actions" });
-      if (!job) {
-        const writerField = generationAgentField(
-          "workflowModifyAgent", writerAgent, (value) => { writerAgent = value; },
-        );
-        const prompt = el("textarea", {
-          class: "mono workflow-modify-input", required: "required", maxlength: "4000",
-          placeholder: i18n.t("editor.agentPromptPlaceholder"),
-          text: promptText,
-        });
-        // Focus lands in the prompt so a prefilled upgrade is one click from
-        // running and still editable in place.
-        setTimeout(() => prompt.focus(), 0);
+      // Focus lands in the prompt so a prefilled upgrade is one click from
+      // running and still editable in place.
+      setTimeout(() => prompt.focus(), 0);
+      const start = (mode) => () => {
+        if (!prompt.value.trim()) return;
+        promptText = prompt.value.trim();
+        submit(mode);
+      };
+      return [
+        writerField,
         // An "authored by" section over a titled prompt section whose textarea
         // carries a syntax hint.
-        const promptSection = el("section", { class: "workflow-modify-prompt" }, [
+        el("section", { class: "workflow-modify-prompt" }, [
           el("h3", { class: "field-label", text: i18n.t("editor.agentPromptTitle") }),
           el("p", { class: "muted", text: i18n.t("editor.agentPromptHint") }),
           el("div", { class: "workflow-modify-input-wrap" }, [
@@ -3022,105 +3012,53 @@ export function createViews(context) {
               class: "workflow-modify-syntax", text: i18n.t("editor.promptSyntaxHint"),
             }),
           ]),
-        ]);
-        body.push(writerField, promptSection);
-        if (regenerateOffered) body.push(el("p", {
+        ]),
+        regenerateOffered ? el("p", {
           class: "muted", text: i18n.t("simplified.workflow.regenerate.hint"),
-        }));
-        actions.append(...[
+        }) : null,
+        el("div", { class: "actions" }, [
           el("button", {
-            type: "button", class: "button primary", text: i18n.t("editor.agentRevise"),
-            onclick: () => {
-              if (!prompt.value.trim()) return;
-              promptText = prompt.value.trim();
-              submit("modify");
-            },
+            type: "button", class: "button primary",
+            text: i18n.t("editor.agentRevise"), onclick: start("modify"),
           }),
           regenerateOffered ? el("button", {
             type: "button", class: "button", id: "regenerateWorkflow",
-            text: i18n.t("simplified.workflow.regenerate"),
-            onclick: () => {
-              if (!prompt.value.trim()) return;
-              promptText = prompt.value.trim();
-              submit("regenerate");
-            },
+            text: i18n.t("simplified.workflow.regenerate"), onclick: start("regenerate"),
           }) : null,
-        ].filter(Boolean));
-      } else {
-        body.push(
-          ...changeSummaryView(job.result?.change_summary),
-          ...authoringFailureView(job.error),
-        );
-        const cancel = (job.allowed_commands || []).find(
-          (item) => item.command === "workflow.authoring.cancel",
-        );
-        if (cancel) actions.append(el("button", {
-          type: "button", class: "button", text: i18n.t("action.cancel"),
-          onclick: async () => {
-            job = (await api.execute(
-              cancel, {}, `workflow.authoring.cancel:${job.job_id}`,
-            )).data;
-            draw();
-          },
-        }));
-        else {
-          // A failed modify is where regenerate earns its place: the author has
-          // evidence that keeping the current structure did not work.
-          if (job.status === "failed") actions.append(el("button", {
-            type: "button", class: "button", id: "retryWorkflowModify",
-            text: i18n.t("simplified.workflow.tryAgain"),
-            onclick: () => {
-              regenerateOffered = true;
-              job = null;
-              draw();
-            },
-          }));
-          actions.append(el("button", {
-            type: "button", class: "button primary", text: i18n.t("action.close"),
-            onclick: () => collapse(job.status === "done"),
-          }));
-        }
-      }
-      // replaceChildren has no opinion about null the way el() does: it would
-      // render an absent banner as the literal word "null".
-      // The page header carries the title and the awaiting-state badge (per the
-      // design prototype), so the form leads straight with its own sections. A
-      // live job state pill only appears once a job is running or settled.
-      section.replaceChildren(...[
-        job ? el("div", { class: "workflow-editor-head" }, [statePill]) : null,
-        ...body.filter(Boolean),
-        // What the Agent printed, once there is a job and it has said something.
-        job && consoleLog.childElementCount ? consoleView : null,
-        actions,
-      ].filter(Boolean));
+        ].filter(Boolean)),
+      ].filter(Boolean);
     };
-    const watch = () => {
-      if (!job || !["queued", "running"].includes(job.status)) return;
-      timer = setTimeout(async () => {
-        // Leaving the edit page detaches the editor: stop spending requests on it.
-        if (!section.isConnected) return;
-        try {
-          job = (await api.get(job.href)).data;
-          // Pull the console before redrawing, so a tick that ends the job still
-          // paints the last thing the Agent said.
-          await pumpOutput();
-          draw();
-          if (job.status === "done" && !publishedRefreshDone && onPublished) {
-            publishedRefreshDone = true;
-            await onPublished();
-          }
-          watch();
-        } catch (error) {
-          reportError(error);
-        }
-      }, 800);
+
+    const draw = () => {
+      if (stopProgress) { stopProgress(); stopProgress = null; }
+      if (!job) {
+        section.replaceChildren(...formPose());
+        return;
+      }
+      // The same panel the catalog page uses to watch a generation: one job
+      // shape, one pipeline, one thing to read. What differs is the wording
+      // and what is offered at the end, and those are the arguments.
+      section.replaceChildren(workflowGenerationProgress(
+        job,
+        async (settled) => {
+          job = settled;
+          if (onPublished) await onPublished();
+        },
+        {
+          api, i18n, reportError, defaultGenerationAgent,
+          installCleanup: (stop) => { stopProgress = stop; installViewCleanup(stop); },
+        },
+        {
+          statusPrefix: "authoring.job.modify",
+          progressTitleKey: "editor.revision.progress.title",
+          promptLabelKey: "editor.revision.instruction",
+          agentLabelKey: "editor.revisedBy",
+          renderOutcome: outcomeNodes,
+        },
+      ));
     };
 
     draw();
-    watch();
-    // A job that settled before this panel opened is never polled, so its
-    // console is fetched once here rather than never.
-    if (job) pumpOutput().then(() => { if (section.isConnected) draw(); });
     // Two frames: the grid-row transition needs the zero-height pose committed
     // before the growing class lands, or the opening never animates.
     requestAnimationFrame(() => requestAnimationFrame(() => wrap.classList.add("open")));

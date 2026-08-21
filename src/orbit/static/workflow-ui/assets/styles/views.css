@@ -159,6 +159,14 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
 }
 .generate-spark { font-size: 18px; line-height: 1; }
 .workflow-generation-progress { display: grid; gap: 20px; }
+/* State first, and the way to stop it beside the state. */
+.workflow-generation-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+}
+/* What the host offers once the job is over. Holds a change summary as
+   readily as a button, so it is a stack rather than an action row. */
+.workflow-generation-outcome { display: grid; gap: 12px; }
+.workflow-generation-outcome > .actions { justify-content: flex-end; }
 .workflow-generation-request {
   display: grid; grid-template-columns: minmax(0, 1fr) minmax(180px, 260px);
   align-items: start; gap: 16px;
@@ -223,9 +231,6 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
   display: flex; align-items: center; justify-content: space-between; gap: 16px;
 }
 .workflow-generation-output-head h3 { margin: 0; font-size: 14px; }
-.workflow-generation-output-actions {
-  display: flex; align-items: center; justify-content: flex-end; gap: 10px;
-}
 .workflow-generation-output-empty { font-size: 12px; }
 .workflow-generation-console {
   width: 100%; max-width: 100%; min-width: 0; box-sizing: border-box;
@@ -234,7 +239,6 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
   white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
 }
 .workflow-generation-failure { margin-top: 2px; }
-.workflow-generation-failure-actions { justify-content: flex-end; }
 .simplified-workflow-generator-form > .authoring-job-state,
 .simplified-workflow-generation-problem { grid-column: 1 / -1; }
 .simplified-workflow-list-heading { margin-top: 44px; margin-bottom: 20px; }
@@ -730,9 +734,6 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
   padding: 12px 14px; background: var(--panel-2);
   border-top: 1px solid var(--line);
 }
-.workflow-editor-head {
-  display: flex; align-items: center; justify-content: space-between; gap: 12px;
-}
 .workflow-editor .actions { justify-content: flex-end; }
 /* Modify form: an authored-by field over a titled prompt section whose mono
    textarea carries a floating syntax hint. */
@@ -746,14 +747,6 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
 .workflow-modify-prompt .muted { margin: 0; font-size: 13px; color: var(--muted-2); }
 /* The Agent CLI's console while it writes: a terminal tail, so it keeps its
    newlines, scrolls inside its own box, and never stretches the form. */
-.workflow-authoring-output { display: grid; gap: 6px; min-width: 0; }
-.workflow-authoring-console {
-  margin: 0; max-height: 240px; min-width: 0; overflow: auto;
-  padding: 12px; background: var(--panel-2);
-  border: 1px solid var(--line); border-radius: var(--radius);
-  font-family: var(--mono); font-size: 12px; line-height: 1.55;
-  white-space: pre-wrap; overflow-wrap: anywhere;
-}
 .workflow-modify-input-wrap { position: relative; }
 .workflow-modify-input {
   width: 100%; min-height: 140px; resize: vertical; display: block;
@@ -784,10 +777,13 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
 .workflow-edit-heading { display: grid; gap: 4px; min-width: 0; }
 .workflow-edit-title { margin: 0; font-size: 24px; font-weight: 700; letter-spacing: -.01em; }
 .workflow-edit-id { overflow-wrap: anywhere; }
-.workflow-edit-status {
+/* Which version is being edited. It was wrapped in an amber warning badge
+   when it shared a box with "awaiting an instruction"; on its own it is a
+   neutral fact and should not read as something needing attention. */
+.workflow-editing-version {
   padding: 4px 10px; border-radius: var(--radius); font-size: 12px; font-weight: 600;
-  white-space: nowrap; background: var(--amber-soft); color: var(--amber);
-  border: 1px solid color-mix(in srgb, var(--amber) 32%, transparent);
+  white-space: nowrap; background: var(--panel-2); color: var(--muted);
+  border: 1px solid var(--line);
 }
 .workflow-edit-canvas { min-width: 0; overflow: auto; }
 /* On the edit page the form is the page, not a band laid over it: it inherits

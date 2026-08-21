@@ -840,6 +840,17 @@ class SimplifiedGenerationProgressTests(BrowserE2ETestCase):
         self.assertEqual("auto", bounds["overflowY"])
         self.assertEqual(0, bounds["scrollTop"])
 
+        # The reading order, pinned. A watcher arrives to learn whether it is
+        # still working; everything under that answer is context for it.
+        self.assertEqual(
+            ["workflow-generation-head", "workflow-generation-request",
+             "workflow-generation-stages", "workflow-generation-output",
+             "workflow-generation-outcome"],
+            page.locator(".workflow-generation-progress").evaluate(
+                "node => [...node.children].map(c => c.className.split(' ')[0])"
+            ),
+        )
+
     def test_failed_generation_keeps_context_and_offers_retry(self) -> None:
         page = self.open("en-US", "/ui/#/workflows")
         page.fill("#generateInstruction", "fail visibly")
@@ -970,6 +981,85 @@ class SimplifiedUpgradeTests(BrowserE2ETestCase):
             page.frame_locator(".workflow-graph-frame")
                 .locator(".react-flow").inner_text(),
         )
+
+    def test_a_modification_reads_top_to_bottom_as_one_account(self) -> None:
+        """State, what was asked, who ran it, what it said — in that order.
+
+        A running modification used to show none of the middle two: the
+        textarea was replaced by the job, and the instruction and the Agent
+        survived only in a closure. What it printed was there, with the
+        Runtime's own `orbit-progress` control lines printed alongside it.
+        """
+
+        page = self.open("en-US", "/ui/#/workflows")
+        self.card(page).locator(".upgrade-workflow").click()
+        page.wait_for_selector(".workflow-editor textarea")
+        page.get_by_role("button", name="Revise").click()
+
+        progress = page.locator(".workflow-editor .workflow-generation-progress")
+        progress.wait_for(timeout=30_000)
+        self.assertEqual(
+            ["workflow-generation-head", "workflow-generation-request",
+             "workflow-generation-stages", "workflow-generation-output",
+             "workflow-generation-outcome"],
+            progress.evaluate(
+                "node => [...node.children].map(c => c.className.split(' ')[0])"
+            ),
+        )
+        # The instruction and the Agent, read back rather than remembered.
+        self.assertIn(
+            "Upgrade this workflow",
+            page.locator(".workflow-generation-prompt-value").inner_text(),
+        )
+        self.assertTrue(page.locator(".workflow-generation-agent").is_visible())
+        self.assertEqual(4, page.locator(".workflow-generation-step").count())
+
+    def test_the_modify_console_never_shows_the_runtimes_own_markers(
+        self,
+    ) -> None:
+        """`\x1eorbit-progress:` drives the stepper; it is not Agent output.
+
+        The panel here printed every chunk verbatim, so the Runtime's own
+        control lines were dumped into the console as raw JSON.
+        """
+
+        page = self.open("en-US", "/ui/#/workflows")
+        self.card(page).locator(".upgrade-workflow").click()
+        page.wait_for_selector(".workflow-editor textarea")
+        page.get_by_role("button", name="Revise").click()
+        page.wait_for_selector("#modifyAnother", timeout=30_000)
+
+        console = page.locator(".workflow-generation-console").inner_text()
+        self.assertNotIn("orbit-progress", console)
+
+    def test_a_finished_modification_keeps_what_it_was_asked(self) -> None:
+        """A settled job is gone from every payload the page is built from.
+
+        So the account of what just changed exists only in this panel: throw
+        it away when the job finishes and the question "what did that do?" has
+        nowhere left to be answered.
+        """
+
+        page = self.open("en-US", "/ui/#/workflows")
+        self.card(page).locator(".upgrade-workflow").click()
+        page.wait_for_selector(".workflow-editor textarea")
+        page.get_by_role("button", name="Revise").click()
+        page.wait_for_selector("#modifyAnother", timeout=30_000)
+
+        self.assertIn(
+            "Upgrade this workflow",
+            page.locator(".workflow-generation-prompt-value").inner_text(),
+        )
+        self.assertTrue(page.locator(".workflow-editor .change-summary").is_visible())
+        # Still saying it revised, not that it generated something.
+        self.assertNotIn(
+            "Generat",
+            page.locator(".workflow-generation-head").inner_text(),
+        )
+
+        page.click("#modifyAnother")
+        page.wait_for_selector(".workflow-editor textarea")
+
 
 class SimplifiedRegenerateTests(BrowserE2ETestCase):
 
