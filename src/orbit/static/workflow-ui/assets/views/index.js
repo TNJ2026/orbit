@@ -399,9 +399,9 @@ export function createViews(context) {
       el("div", { class: "split" }, [
         el("div", {}, [
           // Named by what was asked for. The Workflow it ran stays beside the
-          // id: the title answers "what was this", the line under it answers
+          // id: the goal answers "what was this", the line under it answers
           // "what ran it", and a run with no goal falls back to the id alone.
-          el("h2", { text: runName(run) }),
+          ...goalTextBlock(run, "h2"),
           el("p", { class: "mono muted", text: run.goal
             ? `${run.workflow_id} · ${run.run_id}` : run.run_id }),
           // Who actually did the work, when that was not who the definition
@@ -1841,11 +1841,21 @@ export function createViews(context) {
     ]);
   }
 
-  /* The Goal names the run; a long paste folds at 120px and unfolds in
-   * place, so the card never grows taller than the reader asked for. */
-  function goalTextCard(run) {
+  /* The Goal as the reader wrote it: text, not a title.
+   *
+   * A goal is frequently a paragraph — the facts of an incident, the
+   * constraints on an answer — and a heading renders it as one long line
+   * with its newlines collapsed. So it keeps its line breaks, folds at 120px
+   * and unfolds in place, and the block never grows taller than the reader
+   * asked for.
+   *
+   * Shared by the history detail and the page a run is watched on, because
+   * it is the same goal: the run page drew it as a heading, and the same
+   * paste that read properly in history became a wall of text there.
+   */
+  function goalTextBlock(run, tag = "h1") {
     const clamp = el("div", { class: "goal-text-clamp" }, [
-      el("h1", { class: "goal-text", text: runName(run) }),
+      el(tag, { class: "goal-text", text: runName(run) }),
     ]);
     const label = el("span", { text: i18n.t("goal.showAll") });
     const toggle = el("button", {
@@ -1863,11 +1873,24 @@ export function createViews(context) {
         "stroke-linecap": "round", "stroke-linejoin": "round",
       }, [svgEl("path", { d: "M6 9l6 6 6-6" })]),
     ]);
-    // The toggle earns its place only when the text actually overflows.
-    requestAnimationFrame(() => {
+    // The toggle earns its place only when the text actually overflows —
+    // which cannot be answered until the block has been laid out, and one
+    // frame is not that moment: a block built before its page is attached
+    // measures 0 against 0 and hides a toggle the reader needs. A resize
+    // observer answers on first layout and again whenever the answer could
+    // have changed, which a narrowing window does by rewrapping the text.
+    const measure = new ResizeObserver(() => {
+      if (!clamp.isConnected) return;
       toggle.hidden = clamp.scrollHeight <= clamp.clientHeight;
     });
-    return el("section", { class: "goal-card goal-text-card" }, [clamp, toggle]);
+    measure.observe(clamp);
+    return [clamp, toggle];
+  }
+
+  function goalTextCard(run) {
+    return el(
+      "section", { class: "goal-card goal-text-card" }, goalTextBlock(run),
+    );
   }
 
   /* The run's facts as the engine reports them: identity lines, the final

@@ -1354,17 +1354,57 @@ class GoalHomeTests(BrowserE2ETestCase):
         self.assertIn("data", response, response)
         return workflow_id
 
-    def start(self, page, workflow_id: str) -> dict:
+    def start(self, page, workflow_id: str, goal: str = "") -> dict:
         return page.evaluate(
-            """(id) => fetch("/api/v1/langgraph-runs", {
+            """([id, goal]) => fetch("/api/v1/langgraph-runs", {
                  method: "POST",
                  headers: {
                    "content-type": "application/json",
-                   "idempotency-key": "start-" + id,
+                   "idempotency-key": "start-" + id + goal.length,
                  },
-                 body: JSON.stringify({workflow_id: id, input: {value: 1}}),
+                 body: JSON.stringify({
+                   workflow_id: id, input: {value: 1}, goal,
+                 }),
                }).then((r) => r.json()).then((b) => b.data.run)""",
-            workflow_id,
+            [workflow_id, goal],
+        )
+
+    def test_the_run_page_shows_the_goal_the_way_history_does(self) -> None:
+        """One goal, one presentation, wherever it is read.
+
+        A goal is frequently a paragraph. History rendered it as text — line
+        breaks kept, folded at 120px, unfoldable — while the page it is
+        watched on rendered it as a heading, which collapses the newlines and
+        never folds. The same paste read properly in one place and as a wall
+        of text in the other.
+        """
+
+        page = self.open("en-US")
+        page.wait_for_selector(".simplified-workspace-composer")
+        workflow_id = self.publish(page, self.runnable(human=False))
+        goal = "\n".join(f"line {index} of a long pasted goal" for index in range(30))
+        run = self.start(page, workflow_id, goal=goal)
+
+        page.goto(f"{self.base}/ui/#/runs/{quote(run['run_id'], safe='')}")
+        hero = page.locator(".simplified-run-hero")
+        hero.locator(".goal-text-clamp").wait_for()
+
+        # Folded, and the way out of the fold is offered — the measurement
+        # that decides this once ran before the block was in the document and
+        # compared 0 against 0, hiding the toggle on a goal that needed it.
+        toggle = hero.locator(".goal-expand-toggle")
+        toggle.wait_for()
+        self.assertTrue(toggle.is_visible())
+        clamped = hero.locator(".goal-text-clamp")
+        self.assertLess(
+            clamped.bounding_box()["height"],
+            hero.locator(".goal-text").bounding_box()["height"],
+        )
+
+        toggle.click()
+        self.assertEqual(
+            clamped.bounding_box()["height"],
+            hero.locator(".goal-text").bounding_box()["height"],
         )
 
     def test_a_finished_run_hands_the_composer_back(self) -> None:
