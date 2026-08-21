@@ -12,7 +12,7 @@ export function resumeActions(run, command, label = command.label) {
     return [{
       command,
       label,
-      prompt: "Resume value (JSON)",
+      nodeId: null,
       payload: { value: {} },
     }];
   }
@@ -22,7 +22,9 @@ export function resumeActions(run, command, label = command.label) {
     return {
       command,
       label: `${label}${suffix}`,
-      prompt: nodeId ? `Resume ${nodeId} value (JSON)` : "Resume value (JSON)",
+      // Reported rather than phrased: which node is a fact, and the sentence
+      // asking about it belongs to whichever surface does the asking.
+      nodeId: nodeId ?? null,
       payload: {
         interrupt_id: interrupt.id,
         value: humanResponseTemplate(interrupt),

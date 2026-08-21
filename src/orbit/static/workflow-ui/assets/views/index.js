@@ -6,6 +6,7 @@ import { semanticWorkflowDiff } from "../workflow-diff.js";
 import { resumeActions } from "../run-resume.js";
 import { workflowGenerationProgress } from "../workflow/generation-progress.js";
 import { embeddedGraph } from "../workflow/definition-views.js";
+import { askConfirm, askText } from "../components/dialog.js";
 
 export function createViews(context) {
   const { api, render, navigate, announce, reportError, commandButtons,
@@ -374,7 +375,14 @@ export function createViews(context) {
       for (const action of actions_) actions.push(el("button", {
         class: "button primary", text: action.label,
         onclick: async () => {
-          const raw = window.prompt(action.prompt, JSON.stringify(action.payload.value));
+          const raw = await askText(el, i18n, {
+            title: i18n.t("run.resume.title"),
+            label: action.nodeId
+              ? i18n.t("run.resume.labelNamed", { node: action.nodeId })
+              : i18n.t("run.resume.label"),
+            value: JSON.stringify(action.payload.value, null, 2),
+            confirmLabel: i18n.t("run.resume.submit"),
+          });
           if (raw === null) return;
           try {
             await api.execute(action.command, {
@@ -391,7 +399,13 @@ export function createViews(context) {
         // `confirmation` is the contract's word for *that* confirmation is
         // required, not the sentence to ask. Shown as the prompt, it asked
         // the operator to confirm the word "explicit".
-        if (!window.confirm(i18n.t("run.cancel.confirm"))) return;
+        const stop = await askConfirm(el, i18n, {
+          title: i18n.t("run.cancel.title"),
+          message: i18n.t("run.cancel.confirm"),
+          confirmLabel: i18n.t("run.cancel"),
+          danger: true,
+        });
+        if (!stop) return;
         try {
           await api.execute(cancel, {}, `cancel:${run.run_id}`);
           await render();

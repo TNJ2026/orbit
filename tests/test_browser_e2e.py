@@ -1482,13 +1482,54 @@ class GoalHomeTests(BrowserE2ETestCase):
         self.assertEqual("取消执行", state.locator("button.danger").inner_text())
         self.assertEqual("继续", state.locator("button.primary").first.inner_text())
 
-        asked = []
-        page.on("dialog", lambda dialog: (asked.append(dialog.message), dialog.dismiss()))
+        # The browser's own confirm would arrive as a `dialog` event and
+        # never reach the page; this one is the page.
+        native = []
+        page.on("dialog", lambda dialog: (native.append(dialog.message), dialog.dismiss()))
         state.locator("button.danger").click()
-        page.wait_for_timeout(400)
-        self.assertEqual(1, len(asked))
-        self.assertNotIn("explicit", asked[0])
-        self.assertIn("停止", asked[0])
+        asked = page.locator("dialog.app-dialog")
+        asked.wait_for()
+
+        self.assertEqual([], native)
+        text = asked.inner_text()
+        self.assertNotIn("explicit", text)
+        self.assertIn("停止", text)
+        # Declining leaves the run alone and takes the dialog away.
+        asked.get_by_role("button", name="取消", exact=True).click()
+        asked.wait_for(state="detached")
+        self.assertEqual(
+            "取消执行", state.locator("button.danger").inner_text(),
+        )
+
+    def test_answering_a_step_is_asked_in_the_page(self) -> None:
+        """Resume took a JSON value through the browser's prompt box.
+
+        A one-line platform input is a poor place to write JSON, and it
+        carried none of this UI's words: the field had no label a translation
+        could reach and the buttons were the operating system's.
+        """
+
+        page = self.open("zh-CN")
+        page.wait_for_selector(".simplified-workspace-composer")
+        workflow_id = self.publish(page, self.runnable(human=True))
+        run = self.start(page, workflow_id, goal="answering")
+        self.addCleanup(self.cancel, page, run)
+
+        page.goto(f"{self.base}/ui/#/runs/{quote(run['run_id'], safe='')}")
+        resume = page.locator(".simplified-run-state button.primary").first
+        resume.wait_for()
+        native = []
+        page.on("dialog", lambda dialog: (native.append(dialog.message), dialog.dismiss()))
+        resume.click()
+
+        dialog = page.locator("dialog.app-dialog")
+        dialog.wait_for()
+        self.assertEqual([], native)
+        # A labelled multi-line field, prefilled with the shape to edit.
+        field = dialog.locator("textarea")
+        self.assertTrue(field.is_visible())
+        self.assertIn("decision", field.input_value())
+        self.assertIn("的值（JSON）", dialog.inner_text())
 
     def test_a_run_still_in_flight_keeps_the_composer_locked(self) -> None:
         """The other half: `interrupted` is not over, and must still lock."""
