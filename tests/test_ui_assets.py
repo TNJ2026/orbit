@@ -413,6 +413,30 @@ class StepListRenderingTests(unittest.TestCase):
         self.assertIn('unknown: "outcome unknown"', node)
         self.assertIn(".node-run-unknown", editor_css)
 
+    def test_the_definition_list_scrolls_inside_its_frame(self) -> None:
+        """The tab bar must not scroll away with the list it switches.
+
+        `min-height` was a floor with no ceiling, so the definition tab grew
+        the framed box to whatever the list came to and the page scrolled
+        instead — carrying the tabs, the title and the close button off the
+        top. The frame is a size now, and the list moves within it.
+        """
+
+        css = (ASSETS / "styles" / "views.css").read_text(encoding="utf-8")
+        frame = css.split(".workflow-detail .workflow-tabs, .workflow-edit-page")[1]
+        declaration = frame.split("}")[0]
+        self.assertIn("height: 600px", declaration)
+        self.assertNotIn("min-height: 600px", declaration)
+        # The detail is inside a modal, which on a short viewport has no room
+        # for the full frame plus its head.
+        self.assertIn(
+            "height: min(600px, calc(100vh - var(--topbar-h, 64px) - 200px))", css,
+        )
+        listing = css.split(
+            ".workflow-detail .workflow-tab-content > .definition-list"
+        )[1]
+        self.assertIn("overflow-y: auto", listing.split("}")[0])
+
     def test_a_run_node_card_is_no_taller_than_a_definition_one(self) -> None:
         """The lane a node is placed in has a fixed height; the card does not.
 

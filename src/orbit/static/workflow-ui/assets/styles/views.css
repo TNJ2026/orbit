@@ -682,8 +682,21 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
    .run-tabs too but never inside .workflow-tabs / these ancestors, so it is
    untouched.) */
 .workflow-detail .workflow-tabs, .workflow-edit-page .workflow-tabs {
-  gap: 0; min-height: 600px; overflow: hidden;
+  /* A height, not a floor. `min-height` let the definition tab grow the box
+     to whatever the list came to — 1300px for a nine-node workflow — and the
+     page around it scrolled instead: the tab bar you switched with scrolled
+     away with everything else. The graph tab already lived inside exactly
+     this much, so the list gets the same box and scrolls within it. */
+  gap: 0; height: 600px; overflow: hidden;
   border: 1px solid var(--line-soft); border-radius: var(--radius); background: var(--panel);
+}
+/* The detail opens in a modal, so on a short viewport 600px plus the head
+   above it does not fit and the modal scrolls after all. The modal's own
+   height is knowable — the viewport, less the top bar it hangs under and the
+   two paddings between it and this box — so the frame gives that back rather
+   than insisting on a size the window has no room for. */
+.workflow-detail .workflow-tabs {
+  height: min(600px, calc(100vh - var(--topbar-h, 64px) - 200px));
 }
 .workflow-detail .run-tabs, .workflow-edit-page .run-tabs {
   gap: 0; border-bottom: 1px solid var(--line-soft); background: transparent;
@@ -697,8 +710,12 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
   background: transparent; color: var(--primary); border-bottom-color: var(--primary);
 }
 .workflow-detail .workflow-tab-content, .workflow-edit-page .workflow-tab-content { display: flex; flex-direction: column; flex: 1; min-height: 0; }
-/* The definition list reads as prose inside the frame; the graph is full-bleed. */
-.workflow-detail .workflow-tab-content > .definition-list, .workflow-edit-page .workflow-tab-content > .definition-list { padding: 18px 20px; }
+/* The definition list reads as prose inside the frame; the graph is full-bleed.
+   It is also the part that scrolls: the frame is a fixed size, so a long
+   definition moves inside it rather than moving the page. */
+.workflow-detail .workflow-tab-content > .definition-list, .workflow-edit-page .workflow-tab-content > .definition-list {
+  padding: 18px 20px; overflow-y: auto; min-height: 0;
+}
 .workflow-detail .workflow-graph-pane, .workflow-edit-page .workflow-graph-pane {
   flex: 1; min-height: 0;
 }
