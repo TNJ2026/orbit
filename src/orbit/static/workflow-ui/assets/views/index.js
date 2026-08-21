@@ -478,7 +478,7 @@ export function createViews(context) {
     const body = el("div", { class: "run-canvas-body" });
     const section = el("section", { class: "panel run-canvas" }, [
       el("div", { class: "panel-head" }, [
-        el("div", { class: "panel-title", text: i18n.t("simplified.steps.canvas") }),
+        el("div", { class: "panel-title", text: i18n.t("workflows.graph") }),
       ]),
       body,
     ]);
@@ -1976,7 +1976,7 @@ export function createViews(context) {
       : null;
     if (!url) return;
     body.append(
-      el("h2", { class: "goal-section-title", text: i18n.t("simplified.steps.canvas") }),
+      el("h2", { class: "goal-section-title", text: i18n.t("workflows.graph") }),
     );
     const pane = el("div", { class: "goal-canvas-body" });
     body.append(el("section", { class: "goal-card goal-canvas-card" }, [pane]));

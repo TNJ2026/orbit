@@ -84,10 +84,20 @@ class CatalogTests(unittest.TestCase):
             f"untranslated zh-CN entries: {sorted(shared - intentional)}",
         )
 
-    def test_replaced_ops_and_shell_terms_are_not_kept_as_dead_keys(self) -> None:
+    def test_replaced_keys_are_not_kept_as_dead_ones(self) -> None:
+        """A key nothing reads is a translation nobody maintains.
+
+        Nothing else notices one: the catalog check runs the other way, from
+        the source to the keys, so a key left behind by a rename is invisible
+        until somebody translates it again.
+        """
+
         keys = set(catalog("en-US"))
         self.assertTrue({
             "action.newRun", "newRun.workflow.hint",
+            # Merged into `workflows.graph`: the run page and the workflow
+            # page draw the same graph and had a word each for it.
+            "simplified.steps.canvas",
             "ops.agents", "ops.agents.empty", "ops.handlers", "ops.health",
             "ops.health.notReady", "ops.health.ready",
             "nav.runs", "runs.title", "runs.empty", "runs.orderHint",
