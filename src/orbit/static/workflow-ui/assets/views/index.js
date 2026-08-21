@@ -1299,6 +1299,13 @@ export function createViews(context) {
       (binding) => binding.status === "rebound",
     );
     if (!steps.length) return null;
+    // Named from the steps themselves, not from the engine's one-line summary
+    // of them. A substitution is decided per step, so a graph can land on two
+    // Agents — and reading the first name out of `"a@1, b@2"` reported one of
+    // them as the answer for all of it.
+    const agents = [...new Set(
+      steps.map((binding) => binding.rebound_to).filter(Boolean),
+    )].map((name) => name.replace(/^agent\./, ""));
     return el("div", { class: "banner info workflow-agent-binding" }, [
       el("div", { class: "eyebrow", text: i18n.t("workflows.agentBinding.title") }),
       el("p", {
@@ -1309,10 +1316,7 @@ export function createViews(context) {
           steps.length === 1
             ? "workflows.agentBinding.description.one"
             : "workflows.agentBinding.description",
-          {
-            agent: bound.replace(/^agent\./, "").replace(/@.*$/, ""),
-            count: i18n.number(steps.length),
-          },
+          { agent: i18n.list(agents), count: i18n.number(steps.length) },
         ),
       }),
     ]);

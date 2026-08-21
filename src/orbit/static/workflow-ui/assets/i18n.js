@@ -65,6 +65,23 @@ export class I18n {
     return new Intl.NumberFormat(this.locale).format(value);
   }
 
+  /** Several names as one phrase, punctuated the way the locale does it.
+   *
+   * `"a, b"` is not how Chinese lists things, and a separator hard-coded in
+   * one language reads as a typo in the other.
+   *
+   * `conjunction` rather than `unit`, which looks like the better fit for a
+   * list of identifiers and is not: zh-CN formats a unit list with no
+   * separator at all, so two Agent names come back as one made-up word.
+   */
+  list(values) {
+    const items = [...values].map(String);
+    if (typeof Intl.ListFormat !== "function") return items.join(", ");
+    return new Intl.ListFormat(this.locale, {
+      style: "long", type: "conjunction",
+    }).format(items);
+  }
+
   dateTime(value) {
     if (!value) return "";
     const parsed = new Date(value);
