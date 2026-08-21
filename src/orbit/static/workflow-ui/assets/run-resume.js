@@ -6,12 +6,12 @@ function humanResponseTemplate(interrupt) {
   };
 }
 
-export function resumeActions(run, command) {
+export function resumeActions(run, command, label = command.label) {
   const interrupts = Array.isArray(run?.interrupts) ? run.interrupts : [];
   if (interrupts.length === 0) {
     return [{
       command,
-      label: command.label,
+      label,
       prompt: "Resume value (JSON)",
       payload: { value: {} },
     }];
@@ -21,7 +21,7 @@ export function resumeActions(run, command) {
     const suffix = interrupts.length > 1 && nodeId ? ` · ${nodeId}` : "";
     return {
       command,
-      label: `${command.label}${suffix}`,
+      label: `${label}${suffix}`,
       prompt: nodeId ? `Resume ${nodeId} value (JSON)` : "Resume value (JSON)",
       payload: {
         interrupt_id: interrupt.id,

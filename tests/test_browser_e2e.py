@@ -1439,6 +1439,40 @@ class GoalHomeTests(BrowserE2ETestCase):
             hero.locator(".code-block").first.bounding_box()["y"],
         )
 
+    def test_the_run_controls_speak_the_readers_language(self) -> None:
+        """A Runtime names its commands for every client; this one is a person.
+
+        `Resume LangGraph workflow` says which engine and which surface,
+        which is right in an API contract and wrong on a button somebody
+        presses. And the cancel prompt asked them to confirm the word
+        `explicit` — the contract's term for *that* a confirmation is
+        required, rendered as the sentence asking for one.
+        """
+
+        page = self.open("zh-CN")
+        page.wait_for_selector(".simplified-workspace-composer")
+        workflow_id = self.publish(page, self.runnable(human=True))
+        # A goal of its own: the idempotency key is built from the workflow
+        # and the goal's length, so sharing both with another test replays
+        # that test's run rather than starting one.
+        run = self.start(page, workflow_id, goal="controls")
+        self.addCleanup(self.cancel, page, run)
+
+        page.goto(f"{self.base}/ui/#/runs/{quote(run['run_id'], safe='')}")
+        state = page.locator(".simplified-run-state")
+        state.locator("button.danger").wait_for()
+
+        self.assertEqual("取消执行", state.locator("button.danger").inner_text())
+        self.assertEqual("继续", state.locator("button.primary").first.inner_text())
+
+        asked = []
+        page.on("dialog", lambda dialog: (asked.append(dialog.message), dialog.dismiss()))
+        state.locator("button.danger").click()
+        page.wait_for_timeout(400)
+        self.assertEqual(1, len(asked))
+        self.assertNotIn("explicit", asked[0])
+        self.assertIn("停止", asked[0])
+
     def test_a_run_still_in_flight_keeps_the_composer_locked(self) -> None:
         """The other half: `interrupted` is not over, and must still lock."""
 

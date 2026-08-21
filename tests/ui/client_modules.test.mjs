@@ -359,3 +359,24 @@ test("the browser's language picks the initial locale", () => {
   assert.equal(preferredLocale(null, ["fr-FR"]), "en-US");
   assert.equal(preferredLocale("en-US", ["zh-CN"]), "en-US", "a stored choice wins");
 });
+
+test("resume actions take their label from the caller", () => {
+  const command = { command: "langgraph_run.resume", label: "Resume LangGraph workflow" };
+  const run = { interrupts: [{ id: "i1", value: { node_id: "review" } }] };
+
+  // The Runtime names a command for every client at once; this UI says it in
+  // the reader's language, and the node suffix is still appended to whatever
+  // it says.
+  const [action] = resumeActions(run, command, "继续");
+  assert.equal("继续", action.label);
+
+  const two = resumeActions(
+    { interrupts: [{ id: "a", value: { node_id: "one" } },
+                   { id: "b", value: { node_id: "two" } }] },
+    command, "继续",
+  );
+  assert.deepEqual(["继续 · one", "继续 · two"], two.map((item) => item.label));
+
+  // Omitted, it still falls back to the command's own label.
+  assert.equal(command.label, resumeActions({ interrupts: [] }, command)[0].label);
+});

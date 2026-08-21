@@ -366,7 +366,12 @@ export function createViews(context) {
     const cancel = commands.find((item) => item.command === "langgraph_run.cancel");
     const actions = [];
     if (resume) {
-      for (const action of resumeActions(run, resume)) actions.push(el("button", {
+      // The label is this UI's, not the command's. A Runtime names its
+      // commands for every client at once — "Resume LangGraph workflow" says
+      // which engine and which surface — and a person looking at their own
+      // run needs the verb, in their own language.
+      const actions_ = resumeActions(run, resume, i18n.t("run.resume"));
+      for (const action of actions_) actions.push(el("button", {
         class: "button primary", text: action.label,
         onclick: async () => {
           const raw = window.prompt(action.prompt, JSON.stringify(action.payload.value));
@@ -381,9 +386,12 @@ export function createViews(context) {
       }));
     }
     if (cancel) actions.push(el("button", {
-      class: "button danger", text: cancel.label,
+      class: "button danger", text: i18n.t("run.cancel"),
       onclick: async () => {
-        if (!window.confirm(cancel.confirmation || cancel.label)) return;
+        // `confirmation` is the contract's word for *that* confirmation is
+        // required, not the sentence to ask. Shown as the prompt, it asked
+        // the operator to confirm the word "explicit".
+        if (!window.confirm(i18n.t("run.cancel.confirm"))) return;
         try {
           await api.execute(cancel, {}, `cancel:${run.run_id}`);
           await render();
