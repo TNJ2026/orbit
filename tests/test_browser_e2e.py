@@ -448,16 +448,22 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
         self.assertIn(run_id, hero)
         self.assertNotIn("Prepare a concise report", hero)
 
-    def test_a_step_with_no_instruction_shows_no_instruction(self) -> None:
-        """These steps are transforms: nobody wrote them a prompt."""
+    def test_a_step_that_printed_nothing_offers_no_log_to_view(self) -> None:
+        """A fold that opens on "nothing yet" is a promise the row could keep.
 
-        run_id = self.start_run("steps-no-prompt")
+        These steps are transforms with no attempt journal, so they print
+        nothing and there is no log behind the summary. The goal detail
+        already withheld it; the run page offered it on every row.
+        """
+
+        run_id = self.start_run("steps-no-output")
         page = self.open("en-US", f"/ui/#/runs/{run_id}")
-        page.wait_for_selector(".simplified-step-output summary")
-        page.locator(".simplified-step-output summary").first.click()
-        page.wait_for_timeout(400)
+        page.wait_for_selector(".step-row")
+        page.wait_for_timeout(800)
 
-        self.assertEqual(0, page.locator(".simplified-step-prompt").count())
+        self.assertGreater(page.locator(".step-row").count(), 0)
+        self.assertEqual(0, page.locator(".simplified-step-output:visible").count())
+        self.assertEqual(0, page.locator(".simplified-step-prompt:visible").count())
 
     def test_the_run_page_shows_every_step_and_where_it_got_to(self) -> None:
         """The rows are the definition's, so what is left is on the page too."""
@@ -552,37 +558,37 @@ class SimplifiedGoalUITests(BrowserE2ETestCase):
         page.wait_for_selector(".step-row")
         self.assertEqual(0, page.locator(".run-branches").count())
 
-    def test_the_console_is_closed_until_asked_for(self) -> None:
-        """Each executed step owns a lazy, node-filtered output panel."""
+    def test_the_console_is_not_downloaded_to_find_out_it_exists(self) -> None:
+        """Withholding an empty fold costs a question per step. Keep it small.
+
+        Whether a step said anything can only be answered by asking, so every
+        executed row asks — and the answer is the same for one chunk as for
+        two hundred. The log itself is fetched when somebody opens it.
+        """
 
         run_id = self.start_run("console-view")
         page = self.open("en-US", f"/ui/#/runs/{run_id}")
-        page.wait_for_selector(".step-row .simplified-step-output")
+        page.wait_for_selector(".step-row")
 
         requested = []
         page.on("request", lambda request: (
             requested.append(request.url) if "/output" in request.url else None
         ))
-        panel = page.locator(".simplified-step-output").first
+        page.reload()
+        page.wait_for_selector(".step-row")
+        page.wait_for_timeout(800)
+
+        # These steps print nothing, so every ask is a probe and every probe
+        # is for one chunk.
+        self.assertTrue(requested)
+        for url in requested:
+            self.assertIn("limit=1&", url + "&")
+            self.assertIn("node_id=", url)
+        # And nothing was drawn, so no fold was offered.
+        self.assertEqual(0, page.locator(".simplified-step-output:visible").count())
         self.assertEqual(0, page.locator(
             ".simplified-run-hero .simplified-step-output"
         ).count())
-        page.wait_for_timeout(200)
-        panel.wait_for()
-        # Closed: the largest thing on the page has not been fetched.
-        self.assertEqual([], requested)
-
-        # Waiting on the response rather than on the text: this run prints
-        # nothing, so the panel's settled message is the same one it started
-        # with and no wait on it could tell the two apart.
-        with page.expect_response("**/output*") as answered:
-            panel.locator("summary").click()
-        self.assertEqual(200, answered.value.status)
-        self.assertIn("node_id=", answered.value.url)
-        # A Handler that printed nothing says so rather than staying blank.
-        self.assertIn(
-            "Nothing printed", page.inner_text(".simplified-step-output-body"),
-        )
 
     def test_refresh_interval_moves_to_the_topbar_and_settings_are_removed(self) -> None:
         page = self.open("en-US")

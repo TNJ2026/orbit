@@ -237,6 +237,7 @@
   "simplified.execution.lastOutput": "last printed {at}",
   "simplified.execution.leaseUntil": "lease expires {at} ({renewals} renewals)",
   "simplified.execution.human": "Human task",
+  "simplified.execution.prompt": "Show the prompt",
   "simplified.execution.output": "View run log",
   "simplified.execution.output.loading": "Loading output…",
   "simplified.execution.preparing": "Preparing the workflow",

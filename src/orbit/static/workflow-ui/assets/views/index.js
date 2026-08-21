@@ -542,8 +542,12 @@ export function createViews(context) {
         el("span", { class: `pill ${step.status}`,
           text: i18n.t(`simplified.steps.status.${step.status}`) }),
         step.status !== "not_reached"
+          // A step that printed nothing has no log to view, and a fold that
+          // opens on "nothing yet" is a promise the row could have kept to
+          // itself. The goal detail already withheld it; this row did not.
           ? runConsole(runId, {
             live, nodeId: step.node_id, prompt: step.prompt,
+            hideWhenEmpty: true,
           }) : null,
       ],
     ))));
@@ -622,8 +626,15 @@ export function createViews(context) {
     const state = showState
       ? el("span", { class: "muted", text: i18n.t("run.console.empty") }) : null;
     const setState = (text) => { if (state) state.textContent = text; };
+    // The fold says what is behind it. A step that printed nothing but was
+    // given an instruction still has something to read, and offering it as
+    // "view the run log" promises a log that does not exist.
+    const summary = el("summary", {
+      text: i18n.t(prompt ? "simplified.execution.prompt"
+        : "simplified.execution.output"),
+    });
     const details = el("details", { class: "simplified-step-output" }, [
-      el("summary", { text: i18n.t("simplified.execution.output") }),
+      summary,
       el("div", { class: "simplified-step-output-body" }, [
         // What this step was asked, above what it said back. A log without
         // the instruction that produced it is half a transcript: the reader
@@ -633,13 +644,21 @@ export function createViews(context) {
         state, log,
       ].filter(Boolean)),
     ]);
-    // A step that said nothing offers nothing to read: the fold stays out of
-    // the way until output exists, probing while the run is still live.
-    if (hideWhenEmpty) details.hidden = true;
+    // A step that said nothing and was asked nothing offers nothing to read:
+    // the fold stays out of the way until output exists, probing while the
+    // run is still live. An instruction is already something to read, so a
+    // step carrying one is never hidden.
+    if (hideWhenEmpty && !prompt) details.hidden = true;
     let after = 0;
     let timer = null;
     let loading = false;
     let stopped = false;
+    // Whether output has been seen, which is what the probe is asking. It
+    // used to ask `details.hidden` — the same question while the fold was
+    // hidden precisely until output arrived, and the wrong one once a step
+    // with an instruction started out visible: the probe returned at once
+    // and the summary went on offering a prompt over a step that had a log.
+    let seenOutput = false;
 
     /* Each stream is a titled card of its own, so stdout and stderr read as
      * sections rather than one undifferentiated scroll. */
@@ -698,14 +717,21 @@ export function createViews(context) {
      * banner nobody asked for.
      */
     const probe = async () => {
-      if (stopped || loading || !details.hidden) return;
+      if (stopped || loading || seenOutput) return;
       loading = true;
       try {
-        const response = await api.runOutput(runId, after, 200, nodeId);
+        // One chunk: this is asking *whether* the step said anything, and
+        // the answer is the same for one as for two hundred. Every executed
+        // step on the page asks it — that is what withholding an empty fold
+        // costs — so it must not be the whole log each time. What it draws
+        // is kept, and opening the fold carries on from `after`.
+        const response = await api.runOutput(runId, after, 1, nodeId);
         after = response.data.after;
         draw(response.data.chunks);
         if (log.childElementCount) {
+          seenOutput = true;
           details.hidden = false;
+          summary.textContent = i18n.t("simplified.execution.output");
           setState(i18n.t(
             live ? "run.console.following" : "run.console.finished",
           ));
@@ -716,7 +742,7 @@ export function createViews(context) {
         loading = false;
       }
     };
-    if (hideWhenEmpty) probe();
+    if (hideWhenEmpty || prompt) probe();
 
     details.addEventListener("toggle", () => {
       if (details.open) poll();

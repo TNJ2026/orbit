@@ -237,6 +237,7 @@
   "simplified.execution.lastOutput": "最近输出于{at}",
   "simplified.execution.leaseUntil": "租约{at}到期（已续期 {renewals} 次）",
   "simplified.execution.human": "人工任务",
+  "simplified.execution.prompt": "查看提示词",
   "simplified.execution.output": "查看运行日志",
   "simplified.execution.output.loading": "正在加载输出…",
   "simplified.execution.preparing": "正在准备 Workflow",
