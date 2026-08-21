@@ -2327,7 +2327,7 @@ export function createViews(context) {
           ]),
           // The revise panel is the editing surface — lead with it, above the
           // diagram, so the primary "change this workflow" action comes first.
-          modify ? workflowEditorPanel(modify, value, draw, refreshPublished) : null,
+          modify ? workflowEditorPanel(modify, value, draw) : null,
           canvas,
         ].filter(Boolean));
         drawDefinition(value);
@@ -2918,7 +2918,7 @@ export function createViews(context) {
 
   /* The revision editor is the lower band of the dedicated edit page. It stays
    * beside the graph it revises instead of becoming a second floating dialog. */
-  function workflowEditorPanel(modifyCommand, workflow, onDone, onPublished = null) {
+  function workflowEditorPanel(modifyCommand, workflow, onDone) {
     const upgrading = workflow.goal_readiness === "needs_upgrade";
     const title = i18n.t(upgrading ? "workflows.upgrade" : "editor.edit");
     const section = el("section", { class: "workflow-editor", "aria-label": title });
@@ -2962,10 +2962,11 @@ export function createViews(context) {
       ? [
         ...changeSummaryView(settled.result?.change_summary),
         el("div", { class: "actions" }, [el("button", {
-          type: "button", class: "button primary", id: "modifyAnother",
-          text: i18n.t("editor.revision.another"),
-          // A full re-fetch: the workflow has a new version now, and the next
-          // instruction has to be written against that one.
+          type: "button", class: "button primary", id: "confirmRevision",
+          text: i18n.t("editor.revision.confirm"),
+          // Everything at once, and only when asked: a full re-fetch brings
+          // the diagram, the version in the header and a fresh instruction
+          // box, all describing the version that now exists.
           onclick: () => onDone(),
         })]),
       ]
@@ -3040,10 +3041,10 @@ export function createViews(context) {
       // and what is offered at the end, and those are the arguments.
       section.replaceChildren(workflowGenerationProgress(
         job,
-        async (settled) => {
-          job = settled;
-          if (onPublished) await onPublished();
-        },
+        // Settling is not the moment to redraw anything: the reader is still
+        // looking at what changed, and swapping the diagram under them while
+        // they read it is the page moving on without them.
+        (settled) => { job = settled; },
         {
           api, i18n, reportError, defaultGenerationAgent,
           installCleanup: (stop) => { stopProgress = stop; installViewCleanup(stop); },

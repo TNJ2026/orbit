@@ -105,7 +105,7 @@
   "editor.rejectRevision": "Reject revision",
   "editor.reviewCandidate": "Review Agent revision",
   "editor.revisedBy": "Revised by",
-  "editor.revision.another": "Make another change",
+  "editor.revision.confirm": "OK",
   "editor.revision.instruction": "Your instruction",
   "editor.revision.progress.title": "Revision progress",
   "editor.revisionCancelled": "That revision was cancelled. Your workflow is unchanged.",

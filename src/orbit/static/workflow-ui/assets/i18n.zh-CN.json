@@ -105,7 +105,7 @@
   "editor.rejectRevision": "拒绝修订",
   "editor.reviewCandidate": "审核 Agent 修订",
   "editor.revisedBy": "由谁修改",
-  "editor.revision.another": "再改一次",
+  "editor.revision.confirm": "确定",
   "editor.revision.instruction": "你的修改要求",
   "editor.revision.progress.title": "修改进度",
   "editor.revisionCancelled": "该修订已取消。工作流未改动。",
