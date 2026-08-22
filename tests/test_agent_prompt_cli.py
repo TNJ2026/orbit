@@ -21,7 +21,8 @@ from orbit.workflow.catalogs.agent_discovery import (
     DiscoveredAgent, agent_manifest,
 )
 from orbit.workflow.domain.handlers import (
-    CancelDisposition, HandlerValidationError, UnknownExternalResultError,
+    CancelDisposition, HandlerValidationError, RecoveryDisposition,
+    UnknownExternalResultError,
 )
 from orbit.workflow.handlers.agent import (
     AGENT_COMPLETION_MARKER, AGENT_RESULT_PORT, AGENT_RESULT_TEXT_KEY,
@@ -506,3 +507,123 @@ class InvocationSpecTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WorkspaceNameTests(unittest.TestCase):
+    """A run id becomes one path segment under the workspace root.
+
+    It arrives as an identifier the Runtime minted, but the directory is where
+    an Agent is then let loose, so the name it is given has to be one segment
+    and no way out of the root.
+    """
+
+    def test_an_ordinary_run_id_keeps_its_shape(self) -> None:
+        from orbit.workflow.handlers.agent import _safe_name
+
+        self.assertEqual(
+            "langgraph_run_abc123", _safe_name("langgraph_run:abc123"),
+        )
+
+    def test_separators_and_traversal_cannot_survive(self) -> None:
+        from orbit.workflow.handlers.agent import _safe_name
+
+        for value in ("../../etc/passwd", "a/b", "a\\b", "..", ".", "..."):
+            with self.subTest(value=value):
+                name = _safe_name(value)
+                self.assertNotIn("/", name)
+                self.assertNotIn("\\", name)
+                self.assertFalse(name.startswith("."))
+                self.assertNotEqual("..", name)
+
+    def test_a_name_with_nothing_usable_left_still_names_something(self) -> None:
+        from orbit.workflow.handlers.agent import _safe_name
+
+        for value in ("", "...", "///"):
+            with self.subTest(value=value):
+                self.assertTrue(_safe_name(value))
+
+
+class CancelBeforeSpawnTests(unittest.TestCase):
+    """Cancelling an attempt that has not started a process yet.
+
+    The window is real: the Runtime can decide to stop an attempt between the
+    adapter being asked to execute and the CLI actually being spawned. A
+    request that arrived in that window has to be remembered, or the process
+    starts after the cancellation and runs to completion unwatched.
+    """
+
+    def client(self, body: str, **kwargs) -> TrustedPromptCliAgentClient:
+        cli = FakeCli(body)
+        self.addCleanup(cli.cleanup)
+        return TrustedPromptCliAgentClient(
+            (str(cli.path),), environment={"PATH": os.environ["PATH"]}, **kwargs,
+        )
+
+    def test_a_request_before_spawn_is_remembered_and_refuses_the_attempt(
+        self,
+    ) -> None:
+        client = self.client(
+            echoing_marker("print('answer'); print(MARKER)"), prompt_flag="-p",
+        )
+        reference = "agent:attempt-1"
+
+        acknowledgement = client.request_cancel(reference)
+        self.assertEqual(CancelDisposition.UNKNOWN, acknowledgement.disposition)
+        self.assertIn("before spawn", acknowledgement.message)
+
+        # The attempt that follows must not quietly succeed.
+        with self.assertRaises(UnknownExternalResultError):
+            client.execute(
+                AgentRequest({"prompt": "go"}, {}, "key"), context("attempt-1"),
+            )
+
+    def test_clearing_the_request_lets_the_next_attempt_run(self) -> None:
+        client = self.client(
+            echoing_marker("print('answer'); print(MARKER)"), prompt_flag="-p",
+        )
+        reference = "agent:attempt-1"
+        client.request_cancel(reference)
+        client.clear_cancel_request(reference)
+
+        response = client.execute(
+            AgentRequest({"prompt": "go"}, {}, "key"), context("attempt-1"),
+        )
+        self.assertEqual(
+            "answer", response.output[AGENT_RESULT_PORT][AGENT_RESULT_TEXT_KEY],
+        )
+
+
+class RecoveryTests(unittest.TestCase):
+    """What a restarted Runtime does about a process it may have left running."""
+
+    def client(self) -> TrustedPromptCliAgentClient:
+        cli = FakeCli("print('x')")
+        self.addCleanup(cli.cleanup)
+        return TrustedPromptCliAgentClient(
+            (str(cli.path),), environment={"PATH": os.environ["PATH"]},
+        )
+
+    def test_an_unreadable_reference_is_still_an_unknown_outcome(self) -> None:
+        """Never `not found`: the process may have acted before we lost it."""
+
+        # An empty reference never reaches here — `RecoveryResult` refuses to
+        # carry one — so the cases are the references that are readable and say
+        # nothing this adapter can act on.
+        for reference in ("not json", '{"kind": "other"}', "null",
+                          '{"kind": "local_process_v1", "pid": true, "identity": "x"}'):
+            with self.subTest(reference=reference):
+                result = self.client().recover(reference)
+                self.assertEqual(RecoveryDisposition.UNKNOWN, result.disposition)
+
+    def test_a_reference_naming_this_process_is_not_acted_on_blindly(self) -> None:
+        """A pid is reused; the identity is what says it is the same process."""
+
+        reference = json.dumps({
+            "kind": "local_process_v1", "pid": os.getpid(),
+            "identity": "proc:definitely-not-this-one",
+        })
+        result = self.client().recover(reference)
+        self.assertEqual(RecoveryDisposition.UNKNOWN, result.disposition)
+        self.assertEqual(reference, result.provider_request_id)
+        # Still here: the identity did not match, so nothing was signalled.
+        self.assertTrue(os.getpid())
