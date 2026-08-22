@@ -450,3 +450,90 @@ class DescendantTests(unittest.TestCase):
     def test_an_unreadable_process_table_claims_nothing(self) -> None:
         with patch.object(process, "snapshot_ppids", return_value={}):
             self.assertEqual([], process.descendant_pids(os.getpid()))
+
+
+class StartHookFailureTests(unittest.TestCase):
+    """`on_start` is where a caller records the pid it will have to recover.
+
+    If recording fails the caller cannot recover the process later, so the
+    process must not be left alive: nothing would be watching it and nothing
+    would know to look. This is the path `AgentHandler` takes when it cannot
+    persist a process identity.
+    """
+
+    def test_a_failing_start_hook_takes_the_process_with_it(self) -> None:
+        seen: list[int] = []
+
+        def record(handle):
+            seen.append(handle.pid)
+            raise RuntimeError("cannot persist the identity")
+
+        with self.assertRaisesRegex(RuntimeError, "cannot persist"):
+            process.run(
+                [PY, "-c", "import time; time.sleep(30)"],
+                on_start=record, timeout=10,
+            )
+
+        self.assertEqual(1, len(seen))
+        # Asserted by reaping rather than by `_pid_alive`: the child is killed
+        # but nobody has collected it, and `os.kill(pid, 0)` succeeds against a
+        # zombie — the check the module uses internally cannot tell the two
+        # apart, so a test written on it would pass whether or not the process
+        # was stopped.
+        state = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(seen[0])],
+            capture_output=True, text=True, check=False,
+        ).stdout.strip()
+        self.assertTrue(
+            state == "" or state.startswith("Z"),
+            f"the untracked process is still running: {state!r}",
+        )
+
+
+class EscapedDescendantTests(unittest.TestCase):
+    """A child that leaves the process group is signalled by pid instead.
+
+    An Agent CLI may `setsid`, and a group signal never reaches what has left
+    the group. Stopping the tree has to notice the escapees and take them
+    individually, or the Runtime reports a stopped attempt while its work
+    carries on.
+    """
+
+    def test_a_pid_of_zero_dispatches_nothing(self) -> None:
+        self.assertFalse(process.terminate_pid_tree(0))
+        self.assertFalse(process.kill_pid_tree(0))
+        self.assertFalse(process.stop_pid_tree(0, grace_seconds=0.1))
+
+    def test_an_escapee_is_signalled_even_though_the_group_missed_it(self) -> None:
+        # A root in a session of its own. `terminate_pid_tree` signals the
+        # whole process group, and a child started the ordinary way shares
+        # this process's group — rooting the tree there would TERM the test
+        # runner along with it, which is exactly what it did.
+        root = subprocess.Popen(
+            [PY, "-c", "import time; time.sleep(30)"], start_new_session=True,
+        )
+        self.addCleanup(lambda: root.poll() is None and root.kill())
+        escaped = subprocess.Popen(
+            [PY, "-c", "import os, time; os.setsid(); time.sleep(30)"],
+        )
+        self.addCleanup(lambda: escaped.poll() is None and escaped.kill())
+
+        with patch.object(process, "descendant_pids", return_value=[escaped.pid]):
+            process.stop_pid_tree(root.pid, grace_seconds=0.2)
+
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and escaped.poll() is None:
+            time.sleep(0.05)
+        self.assertIsNotNone(escaped.poll(), "the escapee was never signalled")
+
+    def test_an_escapee_that_is_already_gone_is_not_an_error(self) -> None:
+        root = subprocess.Popen(
+            [PY, "-c", "import time; time.sleep(30)"], start_new_session=True,
+        )
+        self.addCleanup(lambda: root.poll() is None and root.kill())
+        finished = subprocess.Popen([PY, "-c", "pass"])
+        finished.wait()
+
+        with patch.object(process, "descendant_pids", return_value=[finished.pid]):
+            # No raise: a pid that has been reaped is nothing to signal.
+            process.stop_pid_tree(root.pid, grace_seconds=0.1)

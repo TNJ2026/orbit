@@ -843,11 +843,14 @@ def run(
     can raise it.
     """
 
+    # Handed to the constructor rather than called after it. `ProcessHandle`
+    # already kills the tree when the hook raises — the caller could not record
+    # the process, so nothing would be watching it and nothing would know to
+    # look for it — and calling the hook out here instead skipped that and left
+    # the process running.
     handle = ProcessHandle(
         argv, cwd=cwd, env=env, stdin_text=stdin_text,
         max_output_bytes=max_output_bytes, redactor=redactor,
-        on_stdout=on_stdout, on_stderr=on_stderr,
+        on_stdout=on_stdout, on_stderr=on_stderr, on_start=on_start,
     )
-    if on_start is not None:
-        on_start(handle)
     return handle.wait(timeout=timeout, kill_grace_seconds=kill_grace_seconds)
