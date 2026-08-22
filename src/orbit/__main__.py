@@ -532,10 +532,22 @@ def _mcp(args) -> None:
     except MixedSchemaError as exc:
         raise SystemExit(f"error: {exc}") from None
 
+    # Ownership first, the way `orbit serve` takes it: the cleanup below
+    # releases the lock, so the lock has to exist by the time anything can
+    # fail into it. Taken the other way round, an Artifact store that failed
+    # for a reason other than OSError/ValueError raised UnboundLocalError from
+    # the handler and buried the fault that actually happened.
+    ownership = RuntimeOwnership(db_path)
+    try:
+        ownership.acquire()
+    except RuntimeOwnershipError as exc:
+        raise SystemExit(f"orbit mcp: {exc}") from None
+
     artifact_root = _artifact_root_path(args.artifact_root, db_path)
     try:
         artifact_backend = LocalCASBackend(artifact_root)
     except (OSError, ValueError) as exc:
+        ownership.release()
         raise SystemExit(
             f"orbit mcp: cannot initialize Artifact store at "
             f"{artifact_root}: {exc}"
@@ -543,12 +555,6 @@ def _mcp(args) -> None:
     except Exception:
         ownership.release()
         raise
-
-    ownership = RuntimeOwnership(db_path)
-    try:
-        ownership.acquire()
-    except RuntimeOwnershipError as exc:
-        raise SystemExit(f"orbit mcp: {exc}") from None
 
     try:
         app = create_app(
@@ -584,8 +590,15 @@ def _mcp(args) -> None:
     except KeyboardInterrupt:
         pass
     finally:
-        stragglers = composition.stop()
-        ownership.release()
+        # Nested, because stopping is the part that can fail: a composition
+        # that raises on the way down would otherwise carry the exception out
+        # past the release and leave the database owned. A CLI process exiting
+        # has the kernel to fall back on; an embedded caller, a test, or
+        # anything that catches this and keeps running does not.
+        try:
+            stragglers = composition.stop()
+        finally:
+            ownership.release()
         if stragglers:
             print(f"loops still running at exit: {stragglers}", file=sys.stderr)
 
