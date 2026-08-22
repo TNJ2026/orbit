@@ -205,6 +205,33 @@ class DelegationQueueTests(unittest.TestCase):
                 allowed_providers=(), max_delegations=1, max_wall_seconds=1,
                 expires_at=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
             )
+        with self.assertRaisesRegex(ValueError, "Workspace cannot change"):
+            self.queue.configure_execution_lease(
+                actor="session:1", lease_id="lease:1", workspace_id="workspace:other",
+                allowed_providers=("codex",), max_delegations=100,
+                max_wall_seconds=7200,
+                expires_at=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+            )
+        with self.assertRaisesRegex(ValueError, "allowlist cannot change"):
+            self.queue.configure_execution_lease(
+                actor="session:1", lease_id="lease:1", workspace_id="workspace:1",
+                allowed_providers=("codex", "new-provider"), max_delegations=100,
+                max_wall_seconds=7200,
+                expires_at=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+            )
+        with self.assertRaisesRegex(ValueError, "budgets cannot change"):
+            self.queue.configure_execution_lease(
+                actor="session:1", lease_id="lease:1", workspace_id="workspace:1",
+                allowed_providers=("codex",), max_delegations=101,
+                max_wall_seconds=7200,
+                expires_at=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+            )
+        with self.assertRaisesRegex(ValueError, "cannot exceed 24 hours"):
+            self.queue.configure_execution_lease(
+                actor="session:long", lease_id="lease:long", workspace_id="workspace:1",
+                allowed_providers=(), max_delegations=1, max_wall_seconds=1,
+                expires_at=(datetime.now(timezone.utc) + timedelta(hours=25)).isoformat(),
+            )
 
     def test_expired_execution_lease_refuses_new_work(self) -> None:
         with self.queue._connect() as db:
@@ -220,6 +247,57 @@ class DelegationQueueTests(unittest.TestCase):
         self.assertIn("execution lease expired", self.queue.get(
             "delegation:expired-execution", actor="session:1",
         )["error"])
+
+    def test_unknown_delegation_reconciliation_is_actor_scoped_and_idempotent(self) -> None:
+        self.queue.enqueue("delegation:unknown", actor="session:1", request={
+            "input": {"task": 1}, "config": {"provider": "codex"},
+        })
+        self.queue.claim(actor="session:1", worker_id="worker:1")
+        with self.queue._connect() as db:
+            db.execute(
+                "UPDATE harness_delegations SET lease_expires_at=? WHERE delegation_id=?",
+                ("2000-01-01T00:00:00.000000Z", "delegation:unknown"),
+            )
+            db.commit()
+        self.queue.get("delegation:unknown", actor="session:1")
+        preview = self.queue.prune(before="2999-01-01T00:00:00+00:00")
+        self.assertEqual(0, preview["delegations"])
+        self.assertEqual(
+            "unknown", self.queue.get("delegation:unknown", actor="session:1")["status"],
+        )
+        dispatch = build_mcp_dispatcher(
+            Path(self.temp.name) / "reconcile-runtime.db",
+            authorizer=Authorizer(lambda _actor: (READ_SCOPE, WRITE_SCOPE)),
+            delegation_queue=self.queue, tool_profile="harness",
+        )
+        response = dispatch({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "reconcile_delegation", "arguments": {
+                "delegation_id": "delegation:unknown",
+                "outcome": "confirmed_succeeded", "note": "verified commit abc",
+                "idempotency_key": "reconcile:1",
+            }},
+        }, "session:1")
+        first = response["result"]["structuredContent"]["reconciliation"]
+        repeated = self.queue.reconcile(
+            "delegation:unknown", actor="session:1",
+            outcome="confirmed_succeeded", note="verified commit abc",
+            idempotency_key="reconcile:1",
+        )
+        self.assertEqual(first, repeated)
+        with self.assertRaisesRegex(ValueError, "already reconciled differently"):
+            self.queue.reconcile(
+                "delegation:unknown", actor="session:1",
+                outcome="confirmed_failed", note="", idempotency_key="reconcile:2",
+            )
+        self.assertIsNone(self.queue.reconciliation(
+            "delegation:unknown", actor="session:2",
+        ))
+        self.assertEqual(1, self.queue.stats(actor="session:1")["reconciled"])
+        removed = self.queue.prune(before="2999-01-01T00:00:00+00:00")
+        self.assertEqual(1, removed["delegations"])
+        with self.assertRaises(LookupError):
+            self.queue.get("delegation:unknown", actor="session:1")
 
 
 class HarnessSubagentHandlerTests(unittest.TestCase):

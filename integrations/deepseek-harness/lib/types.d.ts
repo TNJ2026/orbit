@@ -46,6 +46,11 @@ export interface StepSummary {
         kind: 'reconciliation_required';
         delegation_id?: string;
     };
+    reconciliation?: {
+        outcome: 'confirmed_succeeded' | 'confirmed_failed';
+        note: string;
+        created_at: string;
+    };
     [key: string]: unknown;
 }
 export interface RunGraph {

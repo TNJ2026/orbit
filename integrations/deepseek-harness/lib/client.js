@@ -80,6 +80,8 @@ function OrbitRunCard({ node, cwd, sessionId }, remote) {
     const [detail, setDetail] = useState(null);
     const [error, setError] = useState('');
     const [answer, setAnswer] = useState('');
+    const [reconciliationNote, setReconciliationNote] = useState('');
+    const [copiedDelegation, setCopiedDelegation] = useState('');
     const triggerRef = useRef(null);
     const drawerRef = useRef(null);
     const closeRef = useRef(null);
@@ -139,7 +141,23 @@ function OrbitRunCard({ node, cwd, sessionId }, remote) {
                     .then(run => { setDetail({ ...detail, run }); setAnswer(''); })
                     .catch(reason => setError(String(reason)));
             } }, createElement('label', null, '需要人工输入', createElement('textarea', { value: answer, onChange: (event) => setAnswer(event.currentTarget.value) })), createElement('button', { type: 'submit' }, '继续运行')) : null, createElement('h3', null, '步骤'), ...detail.steps.map(step => createElement('section', { key: step.node_id, style: { borderTop: '1px solid #ddd', padding: '10px 0' } }, createElement('strong', null, String(step.label || step.node_id)), createElement('span', null, ` · ${step.status}`), step.resolution?.kind === 'reconciliation_required'
-        ? createElement('p', { role: 'status' }, `需要人工核对外部 Agent 结果；Orbit 不会自动重试${step.resolution.delegation_id ? `（${step.resolution.delegation_id}）` : ''}`) : null, step.prompt ? createElement('pre', null, String(step.prompt)) : null, createElement(StepOutput, { remote, workspace, sessionId: String(sessionId), runId: node.data.runId, nodeId: step.node_id, active: !node.data.terminal }))), createElement('h3', null, `执行图 (${String(Object.keys(detail.graph).length)} fields / ${String(detail.edges.length)} edges)`), createElement('pre', null, JSON.stringify(detail.graph, null, 2)), createElement('h3', null, `产物 (${String(detail.artifacts.length)})`), ...detail.artifacts.map(item => createElement(ArtifactItem, { key: item.artifact_id, remote, workspace, sessionId: String(sessionId), artifact: item })))) : null);
+        ? createElement('div', { role: 'status', style: { borderLeft: '4px solid #d97706', paddingLeft: 8 } }, createElement('p', null, '需要人工核对外部 Agent 结果；Orbit 不会自动重试'), step.resolution.delegation_id ? createElement('div', null, createElement('code', null, step.resolution.delegation_id), createElement('button', { type: 'button', onClick: () => {
+                void navigator.clipboard.writeText(step.resolution.delegation_id).then(() => setCopiedDelegation(step.resolution.delegation_id)).catch(reason => setError(String(reason)));
+            } }, copiedDelegation === step.resolution.delegation_id ? '已复制' : '复制 ID'), createElement('button', { type: 'button', onClick: () => {
+                const controller = new AbortController();
+                remote.orbit.getSteps(workspace, String(sessionId), node.data.runId, controller.signal)
+                    .then(steps => setDetail({ ...detail, steps }))
+                    .catch(reason => setError(String(reason)));
+            } }, '刷新核对状态')) : null) : null, step.reconciliation
+        ? createElement('p', null, `人工判定：${step.reconciliation.outcome === 'confirmed_succeeded' ? '确认成功' : '确认失败'}${step.reconciliation.note ? ` · ${step.reconciliation.note}` : ''}`)
+        : step.resolution?.delegation_id ? createElement('div', null, createElement('label', null, '核对说明', createElement('input', { value: reconciliationNote, onChange: (event) => setReconciliationNote(event.currentTarget.value) })), ...['confirmed_succeeded', 'confirmed_failed'].map(outcome => createElement('button', {
+            key: outcome, type: 'button', onClick: () => {
+                const controller = new AbortController();
+                remote.orbit.reconcileDelegation(workspace, String(sessionId), node.data.runId, step.resolution.delegation_id, outcome, reconciliationNote, controller.signal)
+                    .then(steps => { setDetail({ ...detail, steps }); setReconciliationNote(''); })
+                    .catch(reason => setError(String(reason)));
+            },
+        }, outcome === 'confirmed_succeeded' ? '确认外部执行成功' : '确认外部执行失败'))) : null, step.prompt ? createElement('pre', null, String(step.prompt)) : null, createElement(StepOutput, { remote, workspace, sessionId: String(sessionId), runId: node.data.runId, nodeId: step.node_id, active: !node.data.terminal }))), createElement('h3', null, `执行图 (${String(Object.keys(detail.graph).length)} fields / ${String(detail.edges.length)} edges)`), createElement('pre', null, JSON.stringify(detail.graph, null, 2)), createElement('h3', null, `产物 (${String(detail.artifacts.length)})`), ...detail.artifacts.map(item => createElement(ArtifactItem, { key: item.artifact_id, remote, workspace, sessionId: String(sessionId), artifact: item })))) : null);
 }
 function OrbitSettings({ useWorkspaces }, remote) {
     const workspace = useWorkspaces(state => state.items.find(item => item.workspaceId === state.recentWorkspaceId) || state.items[0]);

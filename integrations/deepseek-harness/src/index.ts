@@ -4,10 +4,9 @@ import { OrbitGateway } from './gateway.js'
 import { OrbitSessionBridge, type OrbitCursorStore } from './session-bridge.js'
 import type { Session } from '@deepseek-ai/dsh-session'
 import type { AgentRegistry } from '@deepseek-ai/dsh-agent'
-import type { SubagentRuntime, SubagentRun, SubagentResult } from '@deepseek-ai/dsh-subagent'
+import type { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import type { ArtifactContent, ArtifactSummary, DelegationDto, EdgeSummary, OrbitCommandRequest, OutputPage, RunDto, RunGraph, RuntimeSummary, StepSummary, WorkspaceRef } from './types.js'
-import { effectManifest, snapshotWorkspace } from './effects.js'
-import { delegationRefusal } from './delegation-policy.js'
+import { defaultDelegationExecutionPorts, executeDelegation } from './delegation-execution.js'
 
 declare module '@deepseek-ai/cordis' { interface Context { orbit: OrbitRemoteService } }
 
@@ -52,64 +51,18 @@ export class OrbitRemoteService extends TypertRemoteService {
   }
 
   private async executeDelegation(workspace: WorkspaceRef, sessionId: string, workerId: string, delegation: DelegationDto, parent: NonNullable<ReturnType<AgentRegistry['get']>>, subagents: SubagentRuntime, outerSignal: AbortSignal): Promise<void> {
-    const config = delegation.request.config
-    const provider = String(config.provider || '')
-    const effects = String(config.effects || 'read')
-    const refusal = delegationRefusal(workspace, delegation, subagents.list())
-    if (refusal !== undefined) {
-      await this.settleDelegation(workspace, sessionId, workerId, delegation.delegation_id, undefined, refusal)
-      return
-    }
-    const controller = new AbortController()
-    const abort = () => controller.abort()
-    outerSignal.addEventListener('abort', abort, { once: true })
-    const wallTimer = setTimeout(abort, Math.max(1, Number(config.max_wall_seconds || 1800)) * 1000)
-    let run: SubagentRun | undefined
-    let renewal: ReturnType<typeof setInterval> | undefined
-    const before = await snapshotWorkspace(workspace.canonicalPath)
-    try {
-      const task = delegation.request.input.task ?? delegation.request.input
-      try {
-        run = await subagents.start(provider, {
-          label: `Orbit ${delegation.delegation_id.slice(-8)}`,
-          prompt: [{ type: 'text', text: typeof task === 'string' ? task : JSON.stringify(task) }],
-          parent, signal: controller.signal,
-        })
-      } catch (error) {
-        await this.settleDelegation(workspace, sessionId, workerId, delegation.delegation_id, undefined, String(error))
-        return
-      }
-      renewal = setInterval(() => {
-        void this.gateway.call(workspace, sessionId, 'renew_delegation', {
+    await executeDelegation(workspace, delegation, parent, subagents, outerSignal, {
+      ...defaultDelegationExecutionPorts,
+      settle: async (result, error) => await this.settleDelegation(
+        workspace, sessionId, workerId, delegation.delegation_id, result, error,
+      ),
+      renew: async () => {
+        const value = await this.gateway.call(workspace, sessionId, 'renew_delegation', {
           delegation_id: delegation.delegation_id, worker_id: workerId, lease_seconds: 30,
-        }).then(value => {
-          const item = value as { delegation: DelegationDto }
-          if (item.delegation.cancel_requested) controller.abort()
-        }).catch(() => controller.abort())
-      }, 10_000)
-      let result: SubagentResult
-      try { result = await run.result }
-      catch { return }
-      const observedEffects = effectManifest(before, await snapshotWorkspace(workspace.canonicalPath))
-      if (effects === 'read' && (
-        observedEffects.changedFiles.length || observedEffects.createdFiles.length || observedEffects.deletedFiles.length
-      )) {
-        await this.settleDelegation(workspace, sessionId, workerId, delegation.delegation_id, undefined, 'read-only delegation modified the workspace')
-        return
-      }
-      if (result.stopReason === 'completed') {
-        await this.settleDelegation(workspace, sessionId, workerId, delegation.delegation_id, {
-          answer: result.structured ?? { output: result.output }, effects: observedEffects,
-        })
-      } else {
-        await this.settleDelegation(workspace, sessionId, workerId, delegation.delegation_id, undefined, result.diagnostic || `subagent stopped: ${String(result.stopReason)}`)
-      }
-    } finally {
-      if (renewal) clearInterval(renewal)
-      clearTimeout(wallTimer)
-      outerSignal.removeEventListener('abort', abort)
-      if (run) await run.dispose().catch(() => undefined)
-    }
+        }) as { delegation: DelegationDto }
+        return value.delegation
+      },
+    })
   }
 
   private async settleDelegation(workspace: WorkspaceRef, sessionId: string, workerId: string, delegationId: string, result?: unknown, error?: string): Promise<void> {
@@ -182,6 +135,20 @@ export class OrbitRemoteService extends TypertRemoteService {
     const release = await this.gateway.acquire(workspace)
     try { return await this.gateway.call(workspace, sessionId, 'read_artifact_content', { artifact_id: artifactId }) as ArtifactContent }
     finally { await release() }
+  }
+
+  @Remote('reconcileDelegation')
+  async reconcileDelegation(workspace: WorkspaceRef, sessionId: string, runId: string, delegationId: string, outcome: 'confirmed_succeeded' | 'confirmed_failed', note: string, signal: AbortSignal): Promise<StepSummary[]> {
+    signal.throwIfAborted()
+    const release = await this.gateway.acquire(workspace)
+    try {
+      await this.gateway.call(workspace, sessionId, 'reconcile_delegation', {
+        delegation_id: delegationId, outcome, note,
+        idempotency_key: crypto.randomUUID(),
+      })
+      const result = await this.gateway.call(workspace, sessionId, 'get_run_steps', { run_id: runId }) as { steps: StepSummary[] }
+      return result.steps
+    } finally { await release() }
   }
 
   private async readRunField<T>(workspace: WorkspaceRef, sessionId: string, runId: string, tool: string, field: string, signal: AbortSignal): Promise<T> {

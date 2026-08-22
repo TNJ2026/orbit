@@ -12,10 +12,10 @@ interface Entry {
     code: string;
     digest?: string;
 }
-interface Snapshot {
+export interface WorkspaceSnapshot {
     revision?: string;
     entries: Map<string, Entry>;
 }
-export declare function snapshotWorkspace(cwd: string): Promise<Snapshot | null>;
-export declare function effectManifest(before: Snapshot | null, after: Snapshot | null): WorkspaceEffects;
+export declare function snapshotWorkspace(cwd: string): Promise<WorkspaceSnapshot | null>;
+export declare function effectManifest(before: WorkspaceSnapshot | null, after: WorkspaceSnapshot | null): WorkspaceEffects;
 export {};

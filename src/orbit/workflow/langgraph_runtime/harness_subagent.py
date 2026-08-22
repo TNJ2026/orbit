@@ -84,6 +84,11 @@ class DelegationQueue:
                 "used_delegations INTEGER NOT NULL,max_wall_seconds INTEGER NOT NULL,"
                 "expires_at TEXT NOT NULL,updated_at TEXT NOT NULL)"
             )
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS harness_delegation_reconciliations("
+                "delegation_id TEXT PRIMARY KEY,actor TEXT NOT NULL,outcome TEXT NOT NULL,"
+                "note TEXT NOT NULL,idempotency_key TEXT NOT NULL UNIQUE,created_at TEXT NOT NULL)"
+            )
             db.commit()
 
     def _connect(self):
@@ -136,13 +141,16 @@ class DelegationQueue:
             raise ValueError("max_delegations must be between 1 and 10000")
         if not 1 <= max_wall_seconds <= 7200:
             raise ValueError("max_wall_seconds must be between 1 and 7200")
+        current = _now()
         try:
             expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
         except (TypeError, ValueError) as exc:
             raise ValueError("expires_at must be an ISO-8601 timestamp") from exc
-        if expiry.tzinfo is None or expiry <= _now():
+        if expiry.tzinfo is None or expiry <= current:
             raise ValueError("execution lease must expire in the future")
-        stamp = _stamp(_now())
+        if expiry > current + timedelta(hours=24):
+            raise ValueError("execution lease cannot exceed 24 hours")
+        stamp = _stamp(current)
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             prior = db.execute(
@@ -154,6 +162,16 @@ class DelegationQueue:
             ):
                 db.rollback()
                 raise ValueError("actor already has a different active execution lease")
+            if prior is not None and prior["lease_id"] == lease_id:
+                if prior["workspace_id"] != workspace_id:
+                    db.rollback(); raise ValueError("execution lease Workspace cannot change")
+                if tuple(json.loads(prior["allowed_providers_json"])) != providers:
+                    db.rollback(); raise ValueError("execution lease Provider allowlist cannot change")
+                if (
+                    int(prior["max_delegations"]) != max_delegations
+                    or int(prior["max_wall_seconds"]) != max_wall_seconds
+                ):
+                    db.rollback(); raise ValueError("execution lease budgets cannot change")
             used = 0 if prior is None or prior["lease_id"] != lease_id else int(prior["used_delegations"])
             db.execute(
                 "INSERT INTO harness_execution_leases VALUES (?,?,?,?,?,?,?,?,?)"
@@ -182,6 +200,110 @@ class DelegationQueue:
             "max_wall_seconds": int(row["max_wall_seconds"]),
             "expires_at": row["expires_at"],
         }
+
+    def reconcile(
+        self, delegation_id: str, *, actor: str, outcome: str, note: str,
+        idempotency_key: str,
+    ) -> Mapping[str, Any]:
+        if outcome not in {"confirmed_succeeded", "confirmed_failed"}:
+            raise ValueError("outcome must be confirmed_succeeded or confirmed_failed")
+        if not idempotency_key.strip():
+            raise ValueError("idempotency_key is required")
+        if len(note) > 4000:
+            raise ValueError("reconciliation note is too long")
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            existing = db.execute(
+                "SELECT * FROM harness_delegation_reconciliations"
+                " WHERE delegation_id=? OR idempotency_key=?",
+                (delegation_id, idempotency_key),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["delegation_id"] != delegation_id
+                    or existing["actor"] != actor or existing["outcome"] != outcome
+                    or existing["note"] != note
+                ):
+                    db.rollback()
+                    raise ValueError("delegation was already reconciled differently")
+                db.commit()
+                return dict(existing)
+            job = db.execute(
+                "SELECT status FROM harness_delegations"
+                " WHERE delegation_id=? AND actor=?", (delegation_id, actor),
+            ).fetchone()
+            if job is None:
+                db.rollback(); raise LookupError("delegation not found")
+            if job["status"] != "unknown":
+                db.rollback(); raise ValueError("only an unknown delegation can be reconciled")
+            created_at = _stamp(_now())
+            db.execute(
+                "INSERT INTO harness_delegation_reconciliations VALUES (?,?,?,?,?,?)",
+                (delegation_id, actor, outcome, note, idempotency_key, created_at),
+            )
+            db.commit()
+        return self.reconciliation(delegation_id, actor=actor)
+
+    def reconciliation(self, delegation_id: str, *, actor: str):
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM harness_delegation_reconciliations"
+                " WHERE delegation_id=? AND actor=?", (delegation_id, actor),
+            ).fetchone()
+        return None if row is None else dict(row)
+
+    def stats(self, *, actor: str) -> Mapping[str, Any]:
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT status,COUNT(*) AS count FROM harness_delegations"
+                " WHERE actor=? GROUP BY status", (actor,),
+            ).fetchall()
+            reconciled = db.execute(
+                "SELECT COUNT(*) FROM harness_delegation_reconciliations WHERE actor=?",
+                (actor,),
+            ).fetchone()[0]
+        return {
+            "actor": actor,
+            "by_status": {str(row["status"]): int(row["count"]) for row in rows},
+            "reconciled": int(reconciled),
+        }
+
+    def prune(self, *, before: str, limit: int = 100) -> Mapping[str, Any]:
+        if not 1 <= limit <= 1000:
+            raise ValueError("limit must be between 1 and 1000")
+        try:
+            cutoff = datetime.fromisoformat(before.replace("Z", "+00:00"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("before must be an ISO-8601 timestamp") from exc
+        if cutoff.tzinfo is None:
+            raise ValueError("before must include a timezone")
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            rows = db.execute(
+                "SELECT d.delegation_id FROM harness_delegations d"
+                " LEFT JOIN harness_delegation_reconciliations r"
+                " ON r.delegation_id=d.delegation_id"
+                " WHERE d.updated_at<? AND (d.status IN ('succeeded','failed','cancelled')"
+                " OR (d.status='unknown' AND r.delegation_id IS NOT NULL))"
+                " ORDER BY d.updated_at,d.delegation_id LIMIT ?",
+                (_stamp(cutoff), limit),
+            ).fetchall()
+            identifiers = [str(row["delegation_id"]) for row in rows]
+            for delegation_id in identifiers:
+                db.execute(
+                    "DELETE FROM harness_delegation_reconciliations WHERE delegation_id=?",
+                    (delegation_id,),
+                )
+                db.execute(
+                    "DELETE FROM harness_delegations WHERE delegation_id=?",
+                    (delegation_id,),
+                )
+            leases = db.execute(
+                "DELETE FROM harness_execution_leases WHERE expires_at<?",
+                (_stamp(cutoff),),
+            ).rowcount
+            db.commit()
+        return {"delegations": len(identifiers), "leases": int(leases)}
 
     def _admit(self, db, row, *, actor: str) -> str | None:
         if not self.require_execution_lease:

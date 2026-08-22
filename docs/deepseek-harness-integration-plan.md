@@ -318,6 +318,8 @@ type ExecutionLease = {
 Harness Host 在 Session Bridge 启动时通过 `configure_execution_lease`，以实时
 `ctx.subagents.list()` 固定 actor-scoped Provider 白名单、Workspace、委派次数、单次墙钟上限和过期时间。Orbit 将 Agent 节点请求提交到租约关联的 Delegation Queue；claim 在同一 SQLite 事务内完成策略校验并扣减委派次数。租约未配置或过期、Provider 不在白名单、节点墙钟预算越界或次数耗尽时，队列将该委派作为已知失败结算，不启动 Provider，也不执行降级 CLI。同一 `leaseId` 刷新会保留已消费次数；有效租约不能被另一个 ID 覆盖。
 
+有效 Lease 最长 24 小时；同一 ID 刷新时 Workspace、Provider allowlist 和预算必须完全一致，防止 refresh 变成扩权通道。Queue 提供 actor-scoped 状态统计和有界终态清理；未 reconciliation 的 `unknown` 永不由清理任务删除。
+
 ### 5.3 幂等委派
 
 每次节点尝试使用确定性委派 ID：
@@ -568,11 +570,15 @@ Orbit 正在等待确认
 - claim 在一个 `BEGIN IMMEDIATE` 事务中校验 Execution Lease 并扣减 `max_delegations`；未配置、过期、Provider 越权、墙钟越界和预算耗尽均在 Provider 启动前落为已知失败。
 - lease 过期不重新排队，直接落为 `unknown`；运行投影继续使用 `resolution.kind=reconciliation_required` 语义，不新增节点状态。
 - `get_run_steps` 在 Harness attempt 为 `unknown` 时返回结构化 `resolution: {kind: reconciliation_required, delegation_id}`；Drawer 明确提示人工核对且不会自动重试，不再依赖解析错误文本。
+- 人工可通过 `reconcile_delegation` 将外部证据记录为 `confirmed_succeeded` 或 `confirmed_failed`；结论按 actor 隔离并由 idempotency key 去重，只作为步骤的 `reconciliation` 审计旁路返回，原 attempt/run 继续保持 `unknown`，不会恢复或重跑。
+- Host Gateway 对 Run、Step、Edge、Output、Artifact、Delegation 等核心 MCP DTO 做运行时 codec 校验；TypeScript 类型断言不再是协议边界，畸形响应在进入 Session/UI 前失败。
 - Orbit cancel 会在 delegation 上设置 `cancel_requested`；Harness renewal 观察后 abort Provider 并执行其 `dispose()`。
 - `harness.subagent` 的 LangGraph binding 明确 `retry_safe=False`，挂 Retry Policy 的 Workflow 仍由编译器拒绝。
 
 - Host 在启动前从实时 `ctx.subagents.list()` 校验 Provider；不存在时以已知失败结算，不尝试 CLI fallback。
 - Codex、Claude Code 与 ACP 共用同一 Provider-neutral 启动契约；Host policy matrix 已覆盖已注册/未注册 Provider、读写模式、Workspace isolation mismatch 和并发越界，策略拒绝均发生在 `subagents.start()` 之前。
+- Host lifecycle 故障注入覆盖 Provider 启动前失败、发布后 result transport loss、Job Lease renewal loss、取消和正常完成：启动前失败只结算一次；发布后或续租丢失不结算，等待 Orbit 将 Lease 置为 `unknown`；所有已发布句柄最终只 `dispose()` 一次。
+- Gateway 进程 fixture 覆盖同 Workspace 并发 acquire 去重、协议版本不兼容、畸形 JSON 和非零退出；所有 pending RPC 在子进程退出时立即失败并携带退出码/信号，不等待请求超时。
 - `effects=write` 只有在 Host Workspace 实际标记为 `exclusive/worktree` 且与节点请求一致时才允许启动；当前 worker 强制 `max_concurrency=1`，不能满足的 Workflow 在 Handler validation 阶段失败。
 - Host 对 Git Workspace 做执行前后快照，输出 changed/created/deleted、base/final revision 和观察可信等级；已脏文件再次变化通过内容摘要识别。声明只读却产生文件变化时按策略失败。
 

@@ -56,7 +56,7 @@ HARNESS_TOOL_NAMES = frozenset({
     "start_run", "resume_run", "cancel_run", "list_artifacts",
     "read_artifact", "read_artifact_content", "get_artifact_lineage",
     "configure_execution_lease", "claim_delegation", "renew_delegation",
-    "complete_delegation",
+    "complete_delegation", "reconcile_delegation", "get_delegation_stats",
 })
 OBJECT_OUTPUT_SCHEMA = {"type": "object"}
 MCP_ARTIFACT_CONTENT_MAX_BYTES = 2 * 1024 * 1024
@@ -653,6 +653,45 @@ def build_mcp_dispatcher(
                     "required": ["delegation_id", "worker_id"],
                 },
             },
+            {
+                "name": "reconcile_delegation",
+                "description": (
+                    "Record a human verdict for an unknown Harness delegation. "
+                    "This never retries or rewrites the original attempt."
+                ),
+                "scope": WRITE_SCOPE,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "delegation_id": {"type": "string"},
+                        "outcome": {"type": "string", "enum": [
+                            "confirmed_succeeded", "confirmed_failed",
+                        ]},
+                        "note": {"type": "string", "maxLength": 4000},
+                        "idempotency_key": {"type": "string"},
+                    },
+                    "required": ["delegation_id", "outcome", "idempotency_key"],
+                },
+            },
+            {
+                "name": "get_delegation_stats",
+                "description": "Read actor-scoped Harness delegation counts.",
+                "scope": READ_SCOPE,
+                "inputSchema": {"type": "object", "properties": {}},
+            },
+            {
+                "name": "prune_delegations",
+                "description": "Delete bounded old terminal Harness delegations.",
+                "scope": OPS_WRITE_SCOPE,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "before": {"type": "string"},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 1000},
+                    },
+                    "required": ["before"],
+                },
+            },
         )
     tools = tuple(
         {**tool, "outputSchema": OBJECT_OUTPUT_SCHEMA}
@@ -707,6 +746,20 @@ def build_mcp_dispatcher(
                 worker_id=str(arguments["worker_id"]),
                 result=arguments.get("result"), error=arguments.get("error"),
             )}
+        if name == "reconcile_delegation":
+            return {"reconciliation": delegation_queue.reconcile(
+                str(arguments["delegation_id"]), actor=actor,
+                outcome=str(arguments["outcome"]),
+                note=str(arguments.get("note", "")),
+                idempotency_key=str(arguments["idempotency_key"]),
+            )}
+        if name == "get_delegation_stats":
+            return {"delegations": delegation_queue.stats(actor=actor)}
+        if name == "prune_delegations":
+            return delegation_queue.prune(
+                before=str(arguments["before"]),
+                limit=int(arguments.get("limit", 100)),
+            )
         if name == "inspect_run":
             return langgraph_run_dto(
                 langgraph_service.get(str(arguments["run_id"]), actor=actor),
@@ -715,7 +768,22 @@ def build_mcp_dispatcher(
         if name == "get_run_steps":
             run_id = str(arguments["run_id"])
             langgraph_service.get(run_id, actor=actor)
-            return {"steps": list(langgraph_service.steps(run_id, actor=actor))}
+            steps = list(langgraph_service.steps(run_id, actor=actor))
+            if delegation_queue is not None:
+                steps = [dict(step) for step in steps]
+                for step in steps:
+                    resolution = step.get("resolution")
+                    delegation_id = (
+                        resolution.get("delegation_id")
+                        if isinstance(resolution, Mapping) else None
+                    )
+                    if delegation_id:
+                        decision = delegation_queue.reconciliation(
+                            str(delegation_id), actor=actor,
+                        )
+                        if decision is not None:
+                            step["reconciliation"] = decision
+            return {"steps": steps}
         if name == "get_run_graph":
             run_id = str(arguments["run_id"])
             return {"graph": langgraph_service.graph(run_id, actor=actor)}

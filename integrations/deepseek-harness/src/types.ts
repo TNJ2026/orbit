@@ -2,7 +2,7 @@ export interface WorkspaceRef { id: string; canonicalPath: string; repositoryId?
 export interface RuntimeSummary { workspaceId: string; state: 'ready' | 'stopped'; capabilities: Record<string, unknown> }
 export interface OrbitCommandRequest { workspace: WorkspaceRef; sessionId: string; runId: string; command: 'langgraph_run.cancel' | 'langgraph_run.resume'; expectedVersion: number; idempotencyKey: string; value?: unknown; interruptId?: string }
 export type RunDto = Record<string, unknown> & { run_id: string; goal: string; workflow_id: string; workflow_version: number; status: string; revision: number; artifact_count: number; result?: unknown; error?: string | null; created_at: string; updated_at: string; interrupts: unknown[]; allowed_commands: Array<{ command: string; expected_version: number }> }
-export interface StepSummary { node_id: string; status: string; resolution?: { kind: 'reconciliation_required'; delegation_id?: string }; [key: string]: unknown }
+export interface StepSummary { node_id: string; status: string; resolution?: { kind: 'reconciliation_required'; delegation_id?: string }; reconciliation?: { outcome: 'confirmed_succeeded' | 'confirmed_failed'; note: string; created_at: string }; [key: string]: unknown }
 export interface RunGraph { [key: string]: unknown }
 export interface EdgeSummary { edge_id: string; source_node: string; target_node: string; status: string; [key: string]: unknown }
 export interface OutputChunk { chunk_id: number; node_id: string; attempt_id: string; stream: 'stdout' | 'stderr'; text: string; created_at: string }

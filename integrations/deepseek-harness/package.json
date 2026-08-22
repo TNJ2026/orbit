@@ -15,7 +15,7 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "cordis.patch.yml", "README.md", "lib/**/*.js", "lib/**/*.d.ts"
+    "cordis.patch.yml", "README.md", "CHANGELOG.md", "lib/**/*.js", "lib/**/*.d.ts"
   ],
   "dsh": {
     "bundle": {

@@ -35,8 +35,7 @@ var __esDecorate = (this && this.__esDecorate) || function (ctor, descriptorIn, 
 import { TypertRemoteService, Remote } from '@deepseek-ai/dsh-typert-protocol';
 import { OrbitGateway } from './gateway.js';
 import { OrbitSessionBridge } from './session-bridge.js';
-import { effectManifest, snapshotWorkspace } from './effects.js';
-import { delegationRefusal } from './delegation-policy.js';
+import { defaultDelegationExecutionPorts, executeDelegation } from './delegation-execution.js';
 let OrbitRemoteService = (() => {
     let _classSuper = TypertRemoteService;
     let _instanceExtraInitializers = [];
@@ -49,6 +48,7 @@ let OrbitRemoteService = (() => {
     let _listArtifacts_decorators;
     let _getArtifact_decorators;
     let _getArtifactContent_decorators;
+    let _reconcileDelegation_decorators;
     let _executeCommand_decorators;
     return class OrbitRemoteService extends _classSuper {
         static {
@@ -62,6 +62,7 @@ let OrbitRemoteService = (() => {
             _listArtifacts_decorators = [Remote('listArtifacts')];
             _getArtifact_decorators = [Remote('getArtifact')];
             _getArtifactContent_decorators = [Remote('getArtifactContent')];
+            _reconcileDelegation_decorators = [Remote('reconcileDelegation')];
             _executeCommand_decorators = [Remote('executeCommand')];
             __esDecorate(this, null, _getRuntime_decorators, { kind: "method", name: "getRuntime", static: false, private: false, access: { has: obj => "getRuntime" in obj, get: obj => obj.getRuntime }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _getRun_decorators, { kind: "method", name: "getRun", static: false, private: false, access: { has: obj => "getRun" in obj, get: obj => obj.getRun }, metadata: _metadata }, null, _instanceExtraInitializers);
@@ -72,6 +73,7 @@ let OrbitRemoteService = (() => {
             __esDecorate(this, null, _listArtifacts_decorators, { kind: "method", name: "listArtifacts", static: false, private: false, access: { has: obj => "listArtifacts" in obj, get: obj => obj.listArtifacts }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _getArtifact_decorators, { kind: "method", name: "getArtifact", static: false, private: false, access: { has: obj => "getArtifact" in obj, get: obj => obj.getArtifact }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _getArtifactContent_decorators, { kind: "method", name: "getArtifactContent", static: false, private: false, access: { has: obj => "getArtifactContent" in obj, get: obj => obj.getArtifactContent }, metadata: _metadata }, null, _instanceExtraInitializers);
+            __esDecorate(this, null, _reconcileDelegation_decorators, { kind: "method", name: "reconcileDelegation", static: false, private: false, access: { has: obj => "reconcileDelegation" in obj, get: obj => obj.reconcileDelegation }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _executeCommand_decorators, { kind: "method", name: "executeCommand", static: false, private: false, access: { has: obj => "executeCommand" in obj, get: obj => obj.executeCommand }, metadata: _metadata }, null, _instanceExtraInitializers);
             if (_metadata) Object.defineProperty(this, Symbol.metadata, { enumerable: true, configurable: true, writable: true, value: _metadata });
         }
@@ -128,72 +130,16 @@ let OrbitRemoteService = (() => {
             }
         }
         async executeDelegation(workspace, sessionId, workerId, delegation, parent, subagents, outerSignal) {
-            const config = delegation.request.config;
-            const provider = String(config.provider || '');
-            const effects = String(config.effects || 'read');
-            const refusal = delegationRefusal(workspace, delegation, subagents.list());
-            if (refusal !== undefined) {
-                await this.settleDelegation(workspace, sessionId, workerId, delegation.delegation_id, undefined, refusal);
-                return;
-            }
-            const controller = new AbortController();
-            const abort = () => controller.abort();
-            outerSignal.addEventListener('abort', abort, { once: true });
-            const wallTimer = setTimeout(abort, Math.max(1, Number(config.max_wall_seconds || 1800)) * 1000);
-            let run;
-            let renewal;
-            const before = await snapshotWorkspace(workspace.canonicalPath);
-            try {
-                const task = delegation.request.input.task ?? delegation.request.input;
-                try {
-                    run = await subagents.start(provider, {
-                        label: `Orbit ${delegation.delegation_id.slice(-8)}`,
-                        prompt: [{ type: 'text', text: typeof task === 'string' ? task : JSON.stringify(task) }],
-                        parent, signal: controller.signal,
-                    });
-                }
-                catch (error) {
-                    await this.settleDelegation(workspace, sessionId, workerId, delegation.delegation_id, undefined, String(error));
-                    return;
-                }
-                renewal = setInterval(() => {
-                    void this.gateway.call(workspace, sessionId, 'renew_delegation', {
+            await executeDelegation(workspace, delegation, parent, subagents, outerSignal, {
+                ...defaultDelegationExecutionPorts,
+                settle: async (result, error) => await this.settleDelegation(workspace, sessionId, workerId, delegation.delegation_id, result, error),
+                renew: async () => {
+                    const value = await this.gateway.call(workspace, sessionId, 'renew_delegation', {
                         delegation_id: delegation.delegation_id, worker_id: workerId, lease_seconds: 30,
-                    }).then(value => {
-                        const item = value;
-                        if (item.delegation.cancel_requested)
-                            controller.abort();
-                    }).catch(() => controller.abort());
-                }, 10_000);
-                let result;
-                try {
-                    result = await run.result;
-                }
-                catch {
-                    return;
-                }
-                const observedEffects = effectManifest(before, await snapshotWorkspace(workspace.canonicalPath));
-                if (effects === 'read' && (observedEffects.changedFiles.length || observedEffects.createdFiles.length || observedEffects.deletedFiles.length)) {
-                    await this.settleDelegation(workspace, sessionId, workerId, delegation.delegation_id, undefined, 'read-only delegation modified the workspace');
-                    return;
-                }
-                if (result.stopReason === 'completed') {
-                    await this.settleDelegation(workspace, sessionId, workerId, delegation.delegation_id, {
-                        answer: result.structured ?? { output: result.output }, effects: observedEffects,
                     });
-                }
-                else {
-                    await this.settleDelegation(workspace, sessionId, workerId, delegation.delegation_id, undefined, result.diagnostic || `subagent stopped: ${String(result.stopReason)}`);
-                }
-            }
-            finally {
-                if (renewal)
-                    clearInterval(renewal);
-                clearTimeout(wallTimer);
-                outerSignal.removeEventListener('abort', abort);
-                if (run)
-                    await run.dispose().catch(() => undefined);
-            }
+                    return value.delegation;
+                },
+            });
         }
         async settleDelegation(workspace, sessionId, workerId, delegationId, result, error) {
             await this.gateway.call(workspace, sessionId, 'complete_delegation', {
@@ -261,6 +207,21 @@ let OrbitRemoteService = (() => {
             const release = await this.gateway.acquire(workspace);
             try {
                 return await this.gateway.call(workspace, sessionId, 'read_artifact_content', { artifact_id: artifactId });
+            }
+            finally {
+                await release();
+            }
+        }
+        async reconcileDelegation(workspace, sessionId, runId, delegationId, outcome, note, signal) {
+            signal.throwIfAborted();
+            const release = await this.gateway.acquire(workspace);
+            try {
+                await this.gateway.call(workspace, sessionId, 'reconcile_delegation', {
+                    delegation_id: delegationId, outcome, note,
+                    idempotency_key: crypto.randomUUID(),
+                });
+                const result = await this.gateway.call(workspace, sessionId, 'get_run_steps', { run_id: runId });
+                return result.steps;
             }
             finally {
                 await release();

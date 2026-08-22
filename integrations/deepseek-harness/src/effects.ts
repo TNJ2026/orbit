@@ -18,7 +18,7 @@ export interface WorkspaceEffects {
 }
 
 interface Entry { code: string; digest?: string }
-interface Snapshot { revision?: string; entries: Map<string, Entry> }
+export interface WorkspaceSnapshot { revision?: string; entries: Map<string, Entry> }
 
 async function git(cwd: string, args: string[]): Promise<string> {
   const result = await run('git', ['-C', cwd, ...args], {
@@ -27,7 +27,7 @@ async function git(cwd: string, args: string[]): Promise<string> {
   return result.stdout
 }
 
-export async function snapshotWorkspace(cwd: string): Promise<Snapshot | null> {
+export async function snapshotWorkspace(cwd: string): Promise<WorkspaceSnapshot | null> {
   try {
     const [revision, status] = await Promise.all([
       git(cwd, ['rev-parse', '--verify', 'HEAD']),
@@ -56,7 +56,7 @@ export async function snapshotWorkspace(cwd: string): Promise<Snapshot | null> {
   } catch { return null }
 }
 
-export function effectManifest(before: Snapshot | null, after: Snapshot | null): WorkspaceEffects {
+export function effectManifest(before: WorkspaceSnapshot | null, after: WorkspaceSnapshot | null): WorkspaceEffects {
   if (!before || !after) return {
     changedFiles: [], createdFiles: [], deletedFiles: [], generatedArtifacts: [],
     commandCategories: [], observation: 'unavailable',

@@ -58,6 +58,7 @@ interface OrbitClient { orbit: {
   listArtifacts(workspace: WorkspaceRef, sessionId: string, runId: string, signal: AbortSignal): Promise<ArtifactSummary[]>
   getArtifactContent(workspace: WorkspaceRef, sessionId: string, artifactId: string, signal: AbortSignal): Promise<ArtifactContent>
   executeCommand(request: OrbitCommandRequest, signal: AbortSignal): Promise<RunDto>
+  reconcileDelegation(workspace: WorkspaceRef, sessionId: string, runId: string, delegationId: string, outcome: 'confirmed_succeeded' | 'confirmed_failed', note: string, signal: AbortSignal): Promise<StepSummary[]>
 } }
 
 function drawerStyle(): Record<string, string | number> { return { position: 'fixed', inset: '0 0 0 auto', width: 'min(720px, 92vw)', zIndex: 1000, overflow: 'auto', background: 'var(--background, #fff)', color: 'inherit', borderLeft: '1px solid #ddd', padding: 20, boxShadow: '-12px 0 30px #0002' } }
@@ -129,6 +130,8 @@ function OrbitRunCard({ node, cwd, sessionId }: ChatNodeViewProps<'orbit-run'>, 
   const [detail, setDetail] = useState<{ run: RunDto; steps: StepSummary[]; graph: RunGraph; edges: EdgeSummary[]; artifacts: ArtifactSummary[] } | null>(null)
   const [error, setError] = useState('')
   const [answer, setAnswer] = useState('')
+  const [reconciliationNote, setReconciliationNote] = useState('')
+  const [copiedDelegation, setCopiedDelegation] = useState('')
   const triggerRef = useRef<HTMLButtonElement>(null)
   const drawerRef = useRef<HTMLElement>(null)
   const closeRef = useRef<HTMLButtonElement>(null)
@@ -192,8 +195,33 @@ function OrbitRunCard({ node, cwd, sessionId }: ChatNodeViewProps<'orbit-run'>, 
         ...detail.steps.map(step => createElement('section', { key: step.node_id, style: { borderTop: '1px solid #ddd', padding: '10px 0' } },
           createElement('strong', null, String(step.label || step.node_id)), createElement('span', null, ` · ${step.status}`),
           step.resolution?.kind === 'reconciliation_required'
-            ? createElement('p', { role: 'status' },
-              `需要人工核对外部 Agent 结果；Orbit 不会自动重试${step.resolution.delegation_id ? `（${step.resolution.delegation_id}）` : ''}`,
+            ? createElement('div', { role: 'status', style: { borderLeft: '4px solid #d97706', paddingLeft: 8 } },
+              createElement('p', null, '需要人工核对外部 Agent 结果；Orbit 不会自动重试'),
+              step.resolution.delegation_id ? createElement('div', null,
+                createElement('code', null, step.resolution.delegation_id),
+                createElement('button', { type: 'button', onClick: () => {
+                  void navigator.clipboard.writeText(step.resolution!.delegation_id!).then(() => setCopiedDelegation(step.resolution!.delegation_id!)).catch(reason => setError(String(reason)))
+                } }, copiedDelegation === step.resolution.delegation_id ? '已复制' : '复制 ID'),
+                createElement('button', { type: 'button', onClick: () => {
+                  const controller = new AbortController()
+                  remote.orbit.getSteps(workspace, String(sessionId), node.data.runId, controller.signal)
+                    .then(steps => setDetail({ ...detail, steps }))
+                    .catch(reason => setError(String(reason)))
+                } }, '刷新核对状态'),
+              ) : null,
+            ) : null,
+          step.reconciliation
+            ? createElement('p', null, `人工判定：${step.reconciliation.outcome === 'confirmed_succeeded' ? '确认成功' : '确认失败'}${step.reconciliation.note ? ` · ${step.reconciliation.note}` : ''}`)
+            : step.resolution?.delegation_id ? createElement('div', null,
+              createElement('label', null, '核对说明', createElement('input', { value: reconciliationNote, onChange: (event: ChangeEvent<HTMLInputElement>) => setReconciliationNote(event.currentTarget.value) })),
+              ...(['confirmed_succeeded', 'confirmed_failed'] as const).map(outcome => createElement('button', {
+                key: outcome, type: 'button', onClick: () => {
+                  const controller = new AbortController()
+                  remote.orbit.reconcileDelegation(workspace, String(sessionId), node.data.runId, step.resolution!.delegation_id!, outcome, reconciliationNote, controller.signal)
+                    .then(steps => { setDetail({ ...detail, steps }); setReconciliationNote('') })
+                    .catch(reason => setError(String(reason)))
+                },
+              }, outcome === 'confirmed_succeeded' ? '确认外部执行成功' : '确认外部执行失败')),
             ) : null,
           step.prompt ? createElement('pre', null, String(step.prompt)) : null,
           createElement(StepOutput, { remote, workspace, sessionId: String(sessionId), runId: node.data.runId, nodeId: step.node_id, active: !node.data.terminal }),

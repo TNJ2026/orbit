@@ -2,13 +2,17 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { realpath } from 'node:fs/promises'
 import { createInterface } from 'node:readline'
 import type { WorkspaceRef, RunDto } from './types.js'
+import { decodeRun, decodeToolResult } from './codecs.js'
 
 interface Pending { resolve(value: unknown): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }
 interface Managed { child: ChildProcessWithoutNullStreams; pending: Map<number, Pending>; nextId: number; refs: number; capabilities: Record<string, unknown> }
 
 export class OrbitGateway {
   private readonly runtimes = new Map<string, Promise<Managed>>()
-  constructor(private readonly command = 'orbit') {}
+  constructor(
+    private readonly command = 'orbit',
+    private readonly commandPrefix: readonly string[] = [],
+  ) {}
 
   async acquire(workspace: WorkspaceRef): Promise<() => Promise<void>> {
     const runtime = await this.runtime(workspace)
@@ -29,11 +33,11 @@ export class OrbitGateway {
       name, arguments: args, _meta: { 'orbit/actor': actor },
     }) as { isError?: boolean; structuredContent?: unknown; content?: unknown }
     if (envelope.isError) throw new Error(JSON.stringify(envelope.structuredContent ?? envelope.content))
-    return envelope.structuredContent
+    return decodeToolResult(name, envelope.structuredContent)
   }
 
   async run(workspace: WorkspaceRef, sessionId: string, runId: string): Promise<RunDto> {
-    return await this.call(workspace, sessionId, 'inspect_run', { run_id: runId }) as RunDto
+    return decodeRun(await this.call(workspace, sessionId, 'inspect_run', { run_id: runId }))
   }
 
   private async runtime(workspace: WorkspaceRef): Promise<Managed> {
@@ -48,7 +52,7 @@ export class OrbitGateway {
   }
 
   private async start(cwd: string): Promise<Managed> {
-    const child = spawn(this.command, ['mcp', '--mcp-tool-profile', 'harness', '--actor', 'harness:gateway', '--actor-prefix', 'harness:session:'], { cwd, stdio: ['pipe', 'pipe', 'pipe'] })
+    const child = spawn(this.command, [...this.commandPrefix, 'mcp', '--mcp-tool-profile', 'harness', '--actor', 'harness:gateway', '--actor-prefix', 'harness:session:'], { cwd, stdio: ['pipe', 'pipe', 'pipe'] })
     const runtime: Managed = { child, pending: new Map(), nextId: 1, refs: 0, capabilities: {} }
     child.stderr.resume()
     createInterface({ input: child.stdout }).on('line', line => {
@@ -70,7 +74,9 @@ export class OrbitGateway {
       runtime.pending.clear()
     }
     child.once('error', error => rejectPending(error.message))
-    child.once('exit', () => rejectPending('Orbit Runtime exited'))
+    child.once('exit', (code, signal) => rejectPending(
+      `Orbit Runtime exited${code === null ? ` by ${signal || 'signal'}` : ` with code ${String(code)}`}`,
+    ))
     try {
       await this.rpc(runtime, 'initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'dsh-orbit', version: '0.1.0' } })
       runtime.capabilities = await this.callRaw(runtime, 'get_capabilities', {}) as Record<string, unknown>

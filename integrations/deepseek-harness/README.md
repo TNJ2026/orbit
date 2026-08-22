@@ -13,6 +13,29 @@ Install this directory into the target Harness Profile as a local package,
 then restart that Profile. Client code accesses the generated `orbit` Remote;
 it never receives the child process handle or Orbit loopback credentials.
 
+## Compatibility
+
+| Component | Supported range |
+| --- | --- |
+| Orbit integration protocol | `orbit-harness/1` |
+| Harness packages | `>=0.1.1-rc.2 <0.2.0` |
+| React | `^18.2.0` |
+| Node.js | current Harness-supported Node runtime |
+
+The Gateway refuses an incompatible Orbit integration protocol during startup.
+Runtime codecs also reject malformed core DTOs before they reach the Client.
+
+## Upgrade and rollback
+
+Before upgrading, stop the Harness Profile so it releases the Workspace Runtime
+ownership lock. Install the new bundle, rebuild the Profile, and restart it.
+Verify the Orbit Settings row reports connected and open one historical Run.
+
+To roll back, stop the Profile, reinstall the previous bundle version, rebuild,
+and restart. Delegation and reconciliation records are additive SQLite tables;
+rollback does not require deleting the Runtime database. Do not run old and new
+Profiles against the same Workspace database concurrently.
+
 ## Current boundary
 
 The Host exposes Runtime/Run inspection, Steps, Graph, Edges, cursor-based
@@ -40,6 +63,20 @@ delegation budget atomically before the worker starts a Provider. The worker
 then holds a separate renewable Job Lease. An expired Job Lease becomes an
 unknown external result and is never handed to a second provider automatically;
 an absent or expired Execution Lease is a known refusal before execution.
+An operator may append an idempotent `confirmed_succeeded` or
+`confirmed_failed` reconciliation to an unknown delegation from the Drawer.
+This is an audit verdict only: the original step remains unknown and is never
+resumed or retried.
+
+An active Execution Lease is immutable except for its expiry refresh: its
+Workspace, Provider allowlist, and budgets cannot be widened or retargeted, and
+no lease may exceed 24 hours. Actor-scoped statistics are available to the
+Harness profile. Operations may prune bounded old terminal jobs; unresolved
+unknown jobs are retained until a reconciliation exists.
+
+Core MCP responses cross runtime codecs before reaching Host or Client code.
+Malformed Run, Step, Output, Artifact, or Delegation payloads fail at the
+Gateway boundary instead of flowing through TypeScript assertions.
 
 Provider names are checked against the live Harness registry before start.
 Codex, Claude Code, and ACP pass through the same Provider-neutral policy gate;
