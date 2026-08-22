@@ -315,7 +315,8 @@ type ExecutionLease = {
 }
 ```
 
-Orbit 将 Agent 节点请求提交到租约关联的 Delegation Queue；Harness Worker 拉取后调用 `ctx.subagents`。租约过期、Provider 不在白名单或预算耗尽时，Harness 明确拒绝，不执行降级 CLI。
+Harness Host 在 Session Bridge 启动时通过 `configure_execution_lease`，以实时
+`ctx.subagents.list()` 固定 actor-scoped Provider 白名单、Workspace、委派次数、单次墙钟上限和过期时间。Orbit 将 Agent 节点请求提交到租约关联的 Delegation Queue；claim 在同一 SQLite 事务内完成策略校验并扣减委派次数。租约未配置或过期、Provider 不在白名单、节点墙钟预算越界或次数耗尽时，队列将该委派作为已知失败结算，不启动 Provider，也不执行降级 CLI。同一 `leaseId` 刷新会保留已消费次数；有效租约不能被另一个 ID 覆盖。
 
 ### 5.3 幂等委派
 
@@ -558,6 +559,24 @@ Orbit 正在等待确认
 - 没有 sensitive scope 时 UI 明确降级且不泄漏内容。
 
 ### P3：Harness Subagent 执行桥
+
+当前实现基线：
+
+- Orbit 在 MCP Runtime seal 前固定注册 `harness.subagent@1.0.0`；manifest 为 `action` Handler，Provider、墙钟预算和 Effect Manifest 位于 `config`。
+- durable Delegation Queue 使用确定性 delegation ID；重复请求只关联同一记录，不同 actor 无法 claim。
+- Harness Host 通过 `configure_execution_lease` 从实时 Provider Registry 固定 actor-scoped allowlist、Workspace 和预算；worker 再通过 `claim_delegation` / `renew_delegation` / `complete_delegation` 持有单次 Job Lease，并调用现有 `ctx.subagents.start(provider, ...)`，因此 Provider 新增/移除不改变 Orbit Registry。
+- claim 在一个 `BEGIN IMMEDIATE` 事务中校验 Execution Lease 并扣减 `max_delegations`；未配置、过期、Provider 越权、墙钟越界和预算耗尽均在 Provider 启动前落为已知失败。
+- lease 过期不重新排队，直接落为 `unknown`；运行投影继续使用 `resolution.kind=reconciliation_required` 语义，不新增节点状态。
+- `get_run_steps` 在 Harness attempt 为 `unknown` 时返回结构化 `resolution: {kind: reconciliation_required, delegation_id}`；Drawer 明确提示人工核对且不会自动重试，不再依赖解析错误文本。
+- Orbit cancel 会在 delegation 上设置 `cancel_requested`；Harness renewal 观察后 abort Provider 并执行其 `dispose()`。
+- `harness.subagent` 的 LangGraph binding 明确 `retry_safe=False`，挂 Retry Policy 的 Workflow 仍由编译器拒绝。
+
+- Host 在启动前从实时 `ctx.subagents.list()` 校验 Provider；不存在时以已知失败结算，不尝试 CLI fallback。
+- Codex、Claude Code 与 ACP 共用同一 Provider-neutral 启动契约；Host policy matrix 已覆盖已注册/未注册 Provider、读写模式、Workspace isolation mismatch 和并发越界，策略拒绝均发生在 `subagents.start()` 之前。
+- `effects=write` 只有在 Host Workspace 实际标记为 `exclusive/worktree` 且与节点请求一致时才允许启动；当前 worker 强制 `max_concurrency=1`，不能满足的 Workflow 在 Handler validation 阶段失败。
+- Host 对 Git Workspace 做执行前后快照，输出 changed/created/deleted、base/final revision 和观察可信等级；已脏文件再次变化通过内容摘要识别。声明只读却产生文件变化时按策略失败。
+
+仍需完成：由 Harness Workspace Service 实际创建/回收并行 worktree（当前只验证、不会伪造隔离）、Provider 内部 LLM 调用次数的统一计量，以及 Codex/Claude/ACP 真实安装组合的端到端进程故障注入。Provider-neutral 的策略矩阵已经自动化，但不能替代真实 CLI/ACP 进程测试。Harness 当前公开的 `SubagentStartRequest` 没有任意 cwd 或 max-call 参数，Workspace Registry 也只能登记已有目录；前两项不能靠插件字段或孤立创建 Git worktree 假装已生效。
 
 交付：
 

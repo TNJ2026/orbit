@@ -559,11 +559,22 @@ def _mcp(args) -> None:
         ownership.release()
         raise
 
+    from .web.app import HandlerRegistration
+    from .workflow.langgraph_runtime.harness_subagent import (
+        DelegationQueue, HARNESS_SUBAGENT_MANIFEST, HarnessSubagentHandler,
+    )
+
+    delegation_queue = DelegationQueue(Path(db_path).parent / "langgraph-runs.sqlite3")
+    handlers = list(builtin_handlers())
+    handlers.append(HandlerRegistration(
+        HARNESS_SUBAGENT_MANIFEST, HarnessSubagentHandler(delegation_queue),
+        "harness.subagent@1.0.0",
+    ))
     try:
         app = create_app(
             db_path,
             workflow_db_path=_workflow_db_path(args.db),
-            handlers=list(builtin_handlers()),
+            handlers=handlers,
             schemas=BUILTIN_SCHEMAS,
             artifact_backend=artifact_backend,
             discover_agents=not args.no_agent_discovery,
@@ -579,6 +590,7 @@ def _mcp(args) -> None:
             operator_actors=(args.actor,),
             langgraph_state_directory=Path(db_path).parent,
             mcp_tool_profile=args.mcp_tool_profile,
+            delegation_queue=delegation_queue,
         )
     except Exception:
         ownership.release()

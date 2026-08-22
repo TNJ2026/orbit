@@ -1,6 +1,10 @@
 export interface WorkspaceRef {
     id: string;
     canonicalPath: string;
+    repositoryId?: string;
+    worktreeId?: string;
+    baseRevision?: string;
+    isolationMode?: 'shared' | 'exclusive' | 'worktree' | 'snapshot';
 }
 export interface RuntimeSummary {
     workspaceId: string;
@@ -38,6 +42,10 @@ export type RunDto = Record<string, unknown> & {
 export interface StepSummary {
     node_id: string;
     status: string;
+    resolution?: {
+        kind: 'reconciliation_required';
+        delegation_id?: string;
+    };
     [key: string]: unknown;
 }
 export interface RunGraph {
@@ -72,6 +80,18 @@ export interface ArtifactContent {
     artifact: ArtifactSummary;
     encoding: 'base64';
     content: string;
+}
+export interface DelegationDto {
+    delegation_id: string;
+    status: string;
+    request: {
+        input: Record<string, unknown>;
+        config: Record<string, unknown>;
+    };
+    result?: unknown;
+    error?: string | null;
+    lease_expires_at?: string;
+    cancel_requested: boolean;
 }
 export interface RuntimeEventHint {
     position: number;

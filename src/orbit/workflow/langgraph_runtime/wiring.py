@@ -20,6 +20,7 @@ from ..data.secrets import assert_no_secret_values
 from ..handlers import AgentHandler, ToolHandler, TransformHandler
 from ..handlers.agent import AgentRequest
 from ..handlers.context import ScopedSecretResolver
+from .harness_subagent import HarnessSubagentHandler
 from ..persistence.workflow_versions import SQLiteWorkflowVersionStore
 from .artifacts import LangGraphArtifactStore
 from .console import AttemptConsole, AttemptConsoleSink
@@ -567,7 +568,7 @@ def _tool_adapter(
         request = SimpleNamespace(
             attempt_id=context.attempt_id, input=inputs, config=config,
             idempotency_key=context.attempt_id, deadline=deadline,
-            process_deadline=deadline,
+            process_deadline=deadline, actor=context.actor,
         )
         handler_context = SimpleNamespace(
             request=request,
@@ -640,6 +641,20 @@ def _tool_adapter(
         except Exception as exc:
             if consume_pruned(context.attempt_id):
                 return pruned_outcome(context)
+            if isinstance(implementation, HarnessSubagentHandler):
+                if isinstance(exc, UnknownExternalResultError):
+                    journal.settle(
+                        context.attempt_id, "unknown", error=type(exc).__name__,
+                    )
+                    delegation_id = exc.failure.provider_request_id or context.attempt_id
+                    raise LangGraphUnknownExternalResult(
+                        "reconciliation_required: Harness delegation "
+                        f"{delegation_id} outcome is unknown"
+                    ) from None
+                journal.settle(
+                    context.attempt_id, "failed", error=type(exc).__name__,
+                )
+                raise
             if manifest.execution_safety is ExecutionSafety.UNKNOWN_ON_LEASE_LOSS:
                 journal.settle(context.attempt_id, "unknown", error=type(exc).__name__)
                 raise LangGraphUnknownExternalResult(
@@ -733,7 +748,7 @@ def trusted_handlers(
                 cancel_attempts=cancel_attempts,
             ))
         elif (
-            isinstance(registration.implementation, ToolHandler)
+            isinstance(registration.implementation, (ToolHandler, HarnessSubagentHandler))
             and attempt_db_path is not None
         ):
             journal = _HandlerAttemptJournal(attempt_db_path)

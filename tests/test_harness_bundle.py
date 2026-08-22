@@ -56,6 +56,24 @@ class DeepSeekHarnessBundleTests(unittest.TestCase):
         self.assertIn("event.key === 'Escape'", client)
         self.assertIn("aria-modal", client)
         self.assertIn("查看原始输出", client)
+        self.assertIn("需要人工核对外部 Agent 结果", client)
+
+    def test_p3_delegation_worker_uses_native_subagent_runtime(self) -> None:
+        remote = (BUNDLE / "src" / "index.ts").read_text(encoding="utf-8")
+        manifest = json.loads((BUNDLE / "package.json").read_text(encoding="utf-8"))
+        self.assertIn("configure_execution_lease", remote)
+        self.assertIn("claim_delegation", remote)
+        self.assertIn("subagents.start", remote)
+        self.assertIn("renew_delegation", remote)
+        self.assertIn("cancel_requested", remote)
+        self.assertIn("@deepseek-ai/dsh-subagent", manifest["peerDependencies"])
+        effects = (BUNDLE / "src" / "effects.ts").read_text(encoding="utf-8")
+        self.assertIn("--porcelain=v1", effects)
+        self.assertIn("effectManifest", remote)
+        self.assertIn("delegationRefusal(workspace, delegation, subagents.list())", remote)
+        policy = (BUNDLE / "src" / "delegation-policy.ts").read_text(encoding="utf-8")
+        self.assertIn("registeredProviders.includes", policy)
+        self.assertIn("write delegation refused", policy)
 
 
 if __name__ == "__main__":

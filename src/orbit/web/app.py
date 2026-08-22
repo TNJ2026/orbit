@@ -368,6 +368,7 @@ def create_app(
     langgraph_state_directory: Path | str | None = None,
     run_retention_days: int | None = None,
     agent_workspace_root: Path | str | None = None,
+    delegation_queue: Any = None,
 ) -> Starlette:
     """Build the Runtime application.
 
@@ -858,6 +859,7 @@ def create_app(
         langgraph_service=langgraph_service,
         session_registry=mcp_sessions,
         tool_profile=mcp_tool_profile,
+        delegation_queue=delegation_queue,
     )
 
     routes: list[Route | Mount | WebSocketRoute] = [

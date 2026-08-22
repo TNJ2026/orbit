@@ -1439,8 +1439,10 @@ class LangGraphWorkflowService:
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT node_id, first_at, last_at, status AS latest FROM (
-                    SELECT node_id, status, updated_at,
+                SELECT node_id, first_at, last_at, status AS latest,
+                       error, handler_name, execution_ref FROM (
+                    SELECT node_id, status, error, handler_name, execution_ref,
+                           updated_at,
                            MIN(updated_at) OVER (PARTITION BY node_id) AS first_at,
                            MAX(updated_at) OVER (PARTITION BY node_id) AS last_at,
                            ROW_NUMBER() OVER (
@@ -1459,6 +1461,9 @@ class LangGraphWorkflowService:
                 # and was retried is running, not failed; one whose retry
                 # failed again is failed, not running.
                 "latest": str(row["latest"]),
+                "error": row["error"],
+                "handler_name": str(row["handler_name"]),
+                "execution_ref": row["execution_ref"],
             }
             for row in rows
         }
@@ -1582,6 +1587,15 @@ class LangGraphWorkflowService:
                 "runs": counts.get(node.id, 0),
                 "first_at": fact.get("first_at"),
                 "last_at": fact.get("last_at"),
+                "resolution": (
+                    {
+                        "kind": "reconciliation_required",
+                        "delegation_id": fact.get("execution_ref"),
+                    }
+                    if status == "unknown"
+                    and fact.get("handler_name") == "harness.subagent"
+                    else None
+                ),
             })
         return tuple(steps)
 

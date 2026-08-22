@@ -55,6 +55,8 @@ HARNESS_TOOL_NAMES = frozenset({
     "read_run_output",
     "start_run", "resume_run", "cancel_run", "list_artifacts",
     "read_artifact", "read_artifact_content", "get_artifact_lineage",
+    "configure_execution_lease", "claim_delegation", "renew_delegation",
+    "complete_delegation",
 })
 OBJECT_OUTPUT_SCHEMA = {"type": "object"}
 MCP_ARTIFACT_CONTENT_MAX_BYTES = 2 * 1024 * 1024
@@ -177,6 +179,7 @@ def build_mcp_dispatcher(
     langgraph_service=None,
     session_registry: McpSessionRegistry | None = None,
     tool_profile: str = "full",
+    delegation_queue=None,
 ) -> Callable[[Mapping[str, Any], str | None], dict[str, Any] | None]:
     """One JSON-RPC message in, at most one response out.
 
@@ -580,6 +583,77 @@ def build_mcp_dispatcher(
                 },
             },
         )
+    if delegation_queue is not None:
+        tools += (
+            {
+                "name": "configure_execution_lease",
+                "description": (
+                    "Pin the actor's Harness Provider allowlist and delegation "
+                    "budgets before leasing work."
+                ),
+                "scope": WRITE_SCOPE,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "lease_id": {"type": "string"},
+                        "workspace_id": {"type": "string"},
+                        "allowed_providers": {
+                            "type": "array", "items": {"type": "string"},
+                        },
+                        "max_delegations": {
+                            "type": "integer", "minimum": 1, "maximum": 10000,
+                        },
+                        "max_wall_seconds": {
+                            "type": "integer", "minimum": 1, "maximum": 7200,
+                        },
+                        "expires_at": {"type": "string"},
+                    },
+                    "required": [
+                        "lease_id", "workspace_id", "allowed_providers",
+                        "max_delegations", "max_wall_seconds", "expires_at",
+                    ],
+                },
+            },
+            {
+                "name": "claim_delegation",
+                "description": "Lease the oldest queued Harness subagent delegation.",
+                "scope": WRITE_SCOPE,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "worker_id": {"type": "string"},
+                        "lease_seconds": {"type": "integer", "minimum": 5, "maximum": 300},
+                    },
+                    "required": ["worker_id"],
+                },
+            },
+            {
+                "name": "renew_delegation",
+                "description": "Renew a Harness delegation lease and observe cancellation.",
+                "scope": WRITE_SCOPE,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "delegation_id": {"type": "string"}, "worker_id": {"type": "string"},
+                        "lease_seconds": {"type": "integer", "minimum": 5, "maximum": 300},
+                    },
+                    "required": ["delegation_id", "worker_id"],
+                },
+            },
+            {
+                "name": "complete_delegation",
+                "description": "Settle a leased Harness delegation exactly once.",
+                "scope": WRITE_SCOPE,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "delegation_id": {"type": "string"}, "worker_id": {"type": "string"},
+                        "result": {}, "error": {"type": "string"},
+                    },
+                    "required": ["delegation_id", "worker_id"],
+                },
+            },
+        )
     tools = tuple(
         {**tool, "outputSchema": OBJECT_OUTPUT_SCHEMA}
         for tool in tools
@@ -607,6 +681,32 @@ def build_mcp_dispatcher(
                     actor=actor,
                 )
             ]}
+        if name == "configure_execution_lease":
+            return {"execution_lease": delegation_queue.configure_execution_lease(
+                actor=actor, lease_id=str(arguments["lease_id"]),
+                workspace_id=str(arguments["workspace_id"]),
+                allowed_providers=arguments["allowed_providers"],
+                max_delegations=int(arguments["max_delegations"]),
+                max_wall_seconds=int(arguments["max_wall_seconds"]),
+                expires_at=str(arguments["expires_at"]),
+            )}
+        if name == "claim_delegation":
+            return {"delegation": delegation_queue.claim(
+                actor=actor, worker_id=str(arguments["worker_id"]),
+                lease_seconds=int(arguments.get("lease_seconds", 30)),
+            )}
+        if name == "renew_delegation":
+            return {"delegation": delegation_queue.renew(
+                str(arguments["delegation_id"]), actor=actor,
+                worker_id=str(arguments["worker_id"]),
+                lease_seconds=int(arguments.get("lease_seconds", 30)),
+            )}
+        if name == "complete_delegation":
+            return {"delegation": delegation_queue.complete(
+                str(arguments["delegation_id"]), actor=actor,
+                worker_id=str(arguments["worker_id"]),
+                result=arguments.get("result"), error=arguments.get("error"),
+            )}
         if name == "inspect_run":
             return langgraph_run_dto(
                 langgraph_service.get(str(arguments["run_id"]), actor=actor),

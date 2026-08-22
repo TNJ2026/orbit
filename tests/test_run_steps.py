@@ -173,6 +173,44 @@ class DerivedStatusTests(unittest.TestCase):
         self.assertEqual("succeeded", steps["beside"]["status"])
         self.assertEqual("waiting", steps["ask"]["status"])
 
+    def test_harness_unknown_step_exposes_structured_reconciliation(self) -> None:
+        delegated = engine_tests.node(
+            "delegate", inputs=("value",), outputs=("value",),
+        )
+        ir = engine_tests.workflow(
+            (delegated,), (), entry=("delegate",), terminals=("delegate",),
+            result=("delegate", "value"),
+        )
+        service = self.service(ir, [
+            engine_tests.binding(
+                "delegate", lambda values, config, context: dict(values),
+            ),
+        ])
+        run = service.start(
+            ir.workflow_id, {"value": "x"},
+            idempotency_key="harness-unknown", actor="local",
+        )
+        with service._connect() as connection:
+            connection.execute(
+                "INSERT INTO langgraph_handler_attempts"
+                "(attempt_id,run_id,node_id,status,output_json,error,updated_at,"
+                "handler_name,execution_ref,execution_owner)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (
+                    "attempt:harness", run.run_id, "delegate", "unknown", None,
+                    "UnknownExternalResultError", run.updated_at,
+                    "harness.subagent", "harness_delegation:abc", "worker:lost",
+                ),
+            )
+            connection.commit()
+
+        step = by_id(service.steps(run.run_id, actor="local"))["delegate"]
+        self.assertEqual("unknown", step["status"])
+        self.assertEqual({
+            "kind": "reconciliation_required",
+            "delegation_id": "harness_delegation:abc",
+        }, step["resolution"])
+
     def test_an_answered_parallel_interrupt_is_not_called_not_reached(self) -> None:
         fan = engine_tests.node(
             "fan", inputs=("value",), outputs=("value",), route_mode="parallel",

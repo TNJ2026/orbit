@@ -10,8 +10,12 @@ declare module '@deepseek-ai/cordis' {
 }
 export declare class OrbitRemoteService extends TypertRemoteService {
     private readonly gateway;
+    private readonly host;
     constructor(ctx: Context);
     bridgeSession(workspace: WorkspaceRef, session: Session, cursor: OrbitCursorStore, signal: AbortSignal, knownRuns?: Iterable<string>): Promise<void>;
+    private runDelegations;
+    private executeDelegation;
+    private settleDelegation;
     getRuntime(workspace: WorkspaceRef, signal: AbortSignal): Promise<RuntimeSummary>;
     getRun(workspace: WorkspaceRef, sessionId: string, runId: string, signal: AbortSignal): Promise<RunDto>;
     getSteps(workspace: WorkspaceRef, sessionId: string, runId: string, signal: AbortSignal): Promise<StepSummary[]>;
