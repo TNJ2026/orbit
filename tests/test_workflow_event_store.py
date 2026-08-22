@@ -17,7 +17,8 @@ import unittest
 from orbit.workflow.domain.envelopes import EventEnvelope
 from orbit.workflow.domain.ids import EntityId
 from orbit.workflow.domain.persistence import (
-    ConcurrencyConflictError, DuplicateEventIdError, EventSequenceError,
+    PERSISTENCE_ERROR_REGISTRY, ConcurrencyConflictError, DuplicateEventIdError,
+    EventSequenceError, PersistenceError,
 )
 from orbit.workflow.domain.serialization import freeze_json
 from orbit.workflow.domain.versions import AggregateVersion, Revision
@@ -160,6 +161,35 @@ class EventStoreTests(unittest.TestCase):
         self.assertEqual(1, len(self.store.read_stream(AGG)))
         self.assertEqual(2, len(self.store.read_run(RUN)))
         self.assertEqual(2, len(self.store.read_all()))
+
+
+class ErrorRegistryTests(unittest.TestCase):
+    """The mapping the README calls stable, pinned so that it is.
+
+    `PERSISTENCE_ERROR_REGISTRY` is the vocabulary a driver exception is
+    translated into before it reaches the Kernel. Nothing imports it — it is a
+    declaration, like the contract-stability table — so a rename would have
+    gone unnoticed by every test until the code it names was needed.
+    """
+
+    def test_every_code_maps_to_a_persistence_error(self) -> None:
+        self.assertTrue(PERSISTENCE_ERROR_REGISTRY)
+        for code, error in PERSISTENCE_ERROR_REGISTRY.items():
+            with self.subTest(code=code):
+                self.assertRegex(code, r"^[A-Z][A-Z_]*$")
+                self.assertTrue(issubclass(error, PersistenceError))
+
+    def test_the_codes_the_store_actually_raises_are_registered(self) -> None:
+        registered = set(PERSISTENCE_ERROR_REGISTRY.values())
+        for error in (
+            ConcurrencyConflictError, DuplicateEventIdError, EventSequenceError,
+        ):
+            with self.subTest(error=error.__name__):
+                self.assertIn(error, registered)
+
+    def test_no_two_codes_name_the_same_error(self) -> None:
+        values = list(PERSISTENCE_ERROR_REGISTRY.values())
+        self.assertEqual(len(values), len(set(values)))
 
 
 if __name__ == "__main__":
