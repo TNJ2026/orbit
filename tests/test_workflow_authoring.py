@@ -170,6 +170,31 @@ class AuthoringServiceTests(unittest.TestCase):
         self.assertIn("useful partial result", prompt)
         self.assertIn("explicit back_edge", prompt)
 
+    def test_prompt_carries_the_rules_that_were_learned_by_failing(self) -> None:
+        """Three constraints a document can satisfy the schema and still break on.
+
+        Each was found by hand-authoring a covering workflow against a live
+        Runtime: an n_of_m join with a port per branch is refused at start, a
+        deadline join whose branches all finish reaches no terminal, and an
+        edge whose ends disagree on any one of transport, visibility or
+        content types is refused. None of them is visible to DSL validation,
+        so a generator that does not know them produces workflows that
+        publish and then cannot run.
+        """
+
+        model = ScriptedModel([json.dumps(valid_document())])
+        service(model).generate("请把审批流程画出来")
+        prompt = model.prompts[0]
+
+        # The threshold counts edges on one port, not branches at the join.
+        self.assertIn("n_of_m counts the edges arriving at ONE input port", prompt)
+        self.assertIn("cannot satisfy threshold", prompt)
+        # A deadline join is for a branch that may never arrive.
+        self.assertIn("Use join mode deadline only when a branch may never arrive", prompt)
+        # All three fields, not just the transport.
+        self.assertIn("agree on transport, visibility and content types", prompt)
+        self.assertIn("never share a join input port", prompt)
+
     def test_prompt_says_how_to_tell_a_blocked_agent_from_a_finished_one(
         self,
     ) -> None:
