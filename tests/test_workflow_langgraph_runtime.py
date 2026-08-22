@@ -398,6 +398,56 @@ class LangGraphWorkflowCompilerValidationTests(unittest.TestCase):
                 ]),
             )
 
+    def test_every_outcome_route_selects_the_edge_family_it_names(self) -> None:
+        """All four, because only three of them were ever exercised.
+
+        `timeout` appeared in the vocabulary an outcome is checked against and
+        nowhere else in the engine or its tests — no shipped Handler produces
+        it, so nothing had ever selected an edge by it. A route a workflow can
+        author and the engine cannot honour is worse than one that does not
+        exist at all.
+        """
+
+        for route in ("success", "error", "timeout", "cancel"):
+            with self.subTest(route=route):
+                action = node(
+                    "action", inputs=("value",), outputs=("value",),
+                    route_mode="exclusive",
+                )
+                ends = tuple(
+                    node(name, inputs=("value",), kind="terminal", handler=False)
+                    for name in ("ok", "bad", "late", "stopped")
+                )
+                ir = workflow(
+                    (action, *ends),
+                    (
+                        edge("to_ok", "action", "ok"),
+                        edge("to_bad", "action", "bad", route="error"),
+                        edge("to_late", "action", "late", route="timeout"),
+                        edge("to_stopped", "action", "stopped", route="cancel"),
+                    ),
+                    entry=("action",),
+                    terminals=("ok", "bad", "late", "stopped"),
+                    result=("action", "value"),
+                )
+                registry = LangGraphHandlerRegistry([
+                    binding(
+                        "action",
+                        lambda values, config, context, route=route: HandlerOutcome(
+                            {"value": route}, route=route,
+                        ),
+                    )
+                ])
+
+                result = compile_workflow(ir, registry).invoke({"value": "x"})
+
+                expected = {
+                    "success": "ok", "error": "bad",
+                    "timeout": "late", "cancel": "stopped",
+                }[route]
+                self.assertEqual(route, result["node_routes"]["action"])
+                self.assertEqual(["action", expected], result["execution_order"])
+
     def test_explicit_error_outcome_selects_error_edge(self) -> None:
         action = node(
             "action", inputs=("value",), outputs=("value",), route_mode="exclusive"
