@@ -823,6 +823,103 @@ class WorkflowAuthoringApiTests(ApiTestCase):
             ).json()["data"]["capabilities"]
             self.assertFalse(caps["workflow_generation"]["available"])
 
+    def test_validate_compiles_a_draft_without_publishing_it(self) -> None:
+        """The endpoint an author leans on before committing to a version.
+
+        It compiles and answers, and it must change nothing: a draft that
+        validates is still a draft, and the catalog should not have heard of
+        it. Nothing had tested it at all.
+        """
+
+        import json as json_module
+
+        source = json_module.dumps(self.GENERATED)
+        with AsgiHarness(self.app) as client:
+            response = client.post(
+                "/api/v1/workflows/validate", actor="writer", key="val-1",
+                body={"source": source, "expected_version": 0},
+            )
+            self.assertEqual(200, response.status_code, response.text)
+            data = response.json()["data"]
+            self.assertEqual("workflow:prompted", data["workflow_id"])
+            self.assertEqual(0, data["latest_version"])
+            self.assertTrue(data["definition_hash"].startswith("sha256:"))
+            self.assertGreaterEqual(data["node_count"], 1)
+            self.assertEqual(
+                {"workflow.publish", "workflow.validate"},
+                {item["command"] for item in data["allowed_commands"]},
+            )
+
+            entries = client.get(
+                "/api/v1/workflows", actor="reader"
+            ).json()["data"]["workflows"]
+            self.assertNotIn(
+                "workflow:prompted", [item["workflow_id"] for item in entries]
+            )
+
+    def test_validate_reports_diagnostics_rather_than_a_bare_refusal(self) -> None:
+        """An author fixes what the compiler names; a refusal with none is a wall."""
+
+        import json as json_module
+
+        with AsgiHarness(self.app) as client:
+            response = client.post(
+                "/api/v1/workflows/validate", actor="writer", key="val-2",
+                body={"source": '{"dsl_version": "1.2"}', "expected_version": 0},
+            )
+            self.assertEqual(409, response.status_code)
+            payload = json_module.loads(response.json()["error"]["message"])
+            self.assertEqual("workflow source failed validation", payload["message"])
+            self.assertTrue(payload["diagnostics"])
+            self.assertTrue(all("code" in item for item in payload["diagnostics"]))
+
+    def test_validate_refuses_an_empty_or_absent_source(self) -> None:
+        """409 rather than 400: this boundary answers every ValueError alike.
+
+        A missing argument is a request error and a stale version is a state
+        error, and both arrive as `invalid_command` with a 409. Asserted as it
+        behaves rather than as it reads, so that changing the mapping is a
+        deliberate act with a test to update.
+        """
+
+        with AsgiHarness(self.app) as client:
+            for index, body in enumerate((
+                {"expected_version": 0},
+                {"source": "   ", "expected_version": 0},
+                {"source": 17, "expected_version": 0},
+            )):
+                with self.subTest(body=body):
+                    response = client.post(
+                        "/api/v1/workflows/validate", actor="writer",
+                        key=f"val-empty-{index}", body=body,
+                    )
+                    self.assertEqual(409, response.status_code)
+                    self.assertIn("source is required", response.json()["error"]["message"])
+
+    def test_validate_answers_a_stale_expected_version_with_the_conflict(self) -> None:
+        """Validating against a version that moved would approve a stale edit."""
+
+        import json as json_module
+
+        source = json_module.dumps(self.GENERATED)
+        with AsgiHarness(self.app) as client:
+            response = client.post(
+                "/api/v1/workflows/validate", actor="writer", key="val-stale",
+                body={"source": source, "expected_version": 3},
+            )
+            self.assertEqual(409, response.status_code)
+            self.assertIn("draft version conflict", response.json()["error"]["message"])
+
+    def test_validate_is_a_write_scope_operation(self) -> None:
+        import json as json_module
+
+        with AsgiHarness(self.app) as client:
+            response = client.post(
+                "/api/v1/workflows/validate", actor="reader", key="val-denied",
+                body={"source": json_module.dumps(self.GENERATED), "expected_version": 0},
+            )
+            self.assertEqual(403, response.status_code)
+
     def test_publish_rejects_a_source_that_names_a_different_workflow(self) -> None:
         import json as json_module
 
