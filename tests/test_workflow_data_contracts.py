@@ -11,6 +11,7 @@ from orbit.workflow.domain.data import (
     ArtifactVisibility, DataCommitManifest, DataOwnerKind, InputManifest,
     InputManifestItem, PortDataPolicy, PortTransport, SecretRef,
     StagedArtifactCommit, ValueCommit, ValueLink, ValueLinkType, ValueRecord,
+    DEFAULT_ARTIFACT_BYTES, MAX_ARTIFACT_BYTES, MAX_INLINE_VALUE_BYTES,
     derive_artifact_id, derive_value_id,
 )
 from orbit.workflow.data.secrets import SecretLeakDetected, assert_no_secret_values
@@ -222,3 +223,143 @@ class WorkflowDataContractTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PortDataPolicyTests(unittest.TestCase):
+    """What each transport may declare, and what it is given if it does not.
+
+    The three transports are not variations on one shape: an inline port
+    carries a value, an artifact port carries a reference to bytes held
+    elsewhere, and a secret port carries neither. Mixing their vocabularies is
+    the authoring mistake this refuses.
+    """
+
+    def test_inline_takes_a_default_ceiling_and_nothing_else(self) -> None:
+        policy = PortDataPolicy()
+        self.assertIs(PortTransport.INLINE, policy.transport)
+        self.assertEqual(MAX_INLINE_VALUE_BYTES, policy.max_size_bytes)
+        self.assertEqual((), policy.content_types)
+        self.assertIsNone(policy.visibility)
+
+    def test_inline_refuses_the_artifact_vocabulary(self) -> None:
+        for extra in (
+            {"content_types": ("text/plain",)},
+            {"visibility": ArtifactVisibility.RUN},
+        ):
+            with self.subTest(extra=extra):
+                with self.assertRaisesRegex(ValueError, "inline ports cannot"):
+                    PortDataPolicy(transport=PortTransport.INLINE, **extra)
+
+    def test_an_artifact_port_is_given_a_type_and_a_visibility(self) -> None:
+        policy = PortDataPolicy(transport=PortTransport.ARTIFACT_REF)
+        self.assertEqual(DEFAULT_ARTIFACT_BYTES, policy.max_size_bytes)
+        self.assertEqual(("application/octet-stream",), policy.content_types)
+        self.assertIs(ArtifactVisibility.RUN, policy.visibility)
+
+    def test_content_types_are_normalised_and_deduplicated(self) -> None:
+        policy = PortDataPolicy(
+            transport=PortTransport.ARTIFACT_REF,
+            content_types=(" TEXT/Markdown ", "text/markdown", "text/plain"),
+        )
+        self.assertEqual(("text/markdown", "text/plain"), policy.content_types)
+
+    def test_a_content_type_that_is_not_a_mime_type_is_refused(self) -> None:
+        for value in ("markdown", "text /plain", ""):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "normalized MIME types"):
+                    PortDataPolicy(
+                        transport=PortTransport.ARTIFACT_REF, content_types=(value,),
+                    )
+
+    def test_a_secret_port_declares_nothing_about_the_value(self) -> None:
+        policy = PortDataPolicy(transport=PortTransport.SECRET_REF)
+        self.assertEqual(0, policy.max_size_bytes)
+        self.assertEqual((), policy.content_types)
+        self.assertIsNone(policy.visibility)
+
+        for extra in (
+            {"max_size_bytes": 10},
+            {"content_types": ("text/plain",)},
+            {"visibility": ArtifactVisibility.RUN},
+        ):
+            with self.subTest(extra=extra):
+                with self.assertRaisesRegex(ValueError, "secret_ref ports cannot"):
+                    PortDataPolicy(transport=PortTransport.SECRET_REF, **extra)
+
+    def test_a_data_port_must_have_room_for_something(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must be positive"):
+            PortDataPolicy(transport=PortTransport.INLINE, max_size_bytes=0)
+
+    def test_a_size_over_the_transport_limit_is_refused(self) -> None:
+        with self.assertRaisesRegex(ValueError, "exceeds the transport hard limit"):
+            PortDataPolicy(
+                transport=PortTransport.INLINE,
+                max_size_bytes=MAX_INLINE_VALUE_BYTES + 1,
+            )
+        with self.assertRaisesRegex(ValueError, "exceeds the transport hard limit"):
+            PortDataPolicy(
+                transport=PortTransport.ARTIFACT_REF,
+                max_size_bytes=MAX_ARTIFACT_BYTES + 1,
+            )
+
+    def test_a_negative_or_boolean_size_is_not_a_size(self) -> None:
+        for value in (-1, True):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "non-negative integer"):
+                    PortDataPolicy(
+                        transport=PortTransport.INLINE, max_size_bytes=value,
+                    )
+
+    def test_the_transport_must_be_one_of_the_three(self) -> None:
+        with self.assertRaisesRegex(TypeError, "transport must be PortTransport"):
+            PortDataPolicy(transport="inline")
+
+
+class DerivedIdentityTests(unittest.TestCase):
+    """Value and Artifact ids are derived, so the same work names one thing.
+
+    An id that moved between two derivations of the same inputs would make
+    every idempotent retry produce a second record.
+    """
+
+    def test_the_same_inputs_derive_the_same_value_id(self) -> None:
+        owner = EntityId("attempt", "a" * 32)
+        self.assertEqual(
+            derive_value_id(owner, "result"), derive_value_id(owner, "result"),
+        )
+
+    def test_each_part_of_the_input_changes_the_id(self) -> None:
+        owner = EntityId("attempt", "a" * 32)
+        other = EntityId("attempt", "b" * 32)
+        base = derive_value_id(owner, "result")
+        self.assertNotEqual(base, derive_value_id(other, "result"))
+        self.assertNotEqual(base, derive_value_id(owner, "other"))
+        self.assertNotEqual(base, derive_value_id(owner, "result", 2))
+
+    def test_a_value_owner_must_be_a_run_node_run_or_attempt(self) -> None:
+        with self.assertRaisesRegex(ValueError, "expected run/node_run/attempt id"):
+            derive_value_id(EntityId("workflow", "a" * 32), "result")
+        with self.assertRaisesRegex(TypeError, "must be an EntityId"):
+            derive_value_id("attempt:aaa", "result")
+
+    def test_a_generation_counts_from_one(self) -> None:
+        owner = EntityId("attempt", "a" * 32)
+        for generation in (0, -1, True, 1.0):
+            with self.subTest(generation=generation):
+                with self.assertRaisesRegex(ValueError, "generation must be positive"):
+                    derive_value_id(owner, "result", generation)
+
+    def test_an_artifact_id_needs_a_port_and_a_logical_name(self) -> None:
+        owner = EntityId("attempt", "a" * 32)
+        self.assertNotEqual(
+            derive_artifact_id(owner, "result", "one"),
+            derive_artifact_id(owner, "result", "two"),
+        )
+        for port, name in (("", "one"), ("result", ""), ("  ", "one")):
+            with self.subTest(port=port, name=name):
+                with self.assertRaises(ValueError):
+                    derive_artifact_id(owner, port, name)
+
+    def test_an_artifact_owner_is_a_run_or_an_attempt(self) -> None:
+        with self.assertRaisesRegex(ValueError, "expected run/attempt id"):
+            derive_artifact_id(EntityId("node_run", "a" * 32), "result", "one")
