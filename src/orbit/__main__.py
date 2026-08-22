@@ -499,6 +499,16 @@ def _serve(args) -> None:
         flush=True,
     )
     _report_goal_readiness(workflow_db_path)
+    # Publish where this Runtime answers, so a client that did not start it can
+    # find it. A wildcard bind is not an address anyone can connect to, so the
+    # record names loopback — the interface a local client actually uses.
+    reachable = "127.0.0.1" if args.host in ("0.0.0.0", "::", "") else args.host
+    base_url = f"http://{reachable}:{args.port}"
+    ownership.publish(
+        transport="http",
+        base_url=base_url,
+        mcp_url=f"{base_url}/mcp",
+    )
     try:
         uvicorn.run(app, host=args.host, port=args.port, log_level="info")
     finally:
@@ -545,6 +555,10 @@ def _mcp(args) -> None:
         ownership.acquire()
     except RuntimeOwnershipError as exc:
         raise SystemExit(f"orbit mcp: {exc}") from None
+    # Discoverable, but deliberately without an endpoint: this Runtime speaks
+    # only to the process holding its stdio. Saying so keeps a client from
+    # reading "no base_url yet" as "still starting up" and waiting forever.
+    ownership.publish(transport="stdio")
 
     artifact_root = _artifact_root_path(args.artifact_root, db_path)
     try:
@@ -776,6 +790,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Trust per-call _meta orbit/actor values under this prefix",
     )
 
+    runtimes_cmd = sub.add_parser(
+        "runtimes",
+        help="Live Runtimes on this machine and where they answer",
+    )
+    runtimes_cmd.add_argument(
+        "--json", action="store_true",
+        help="Machine-readable output, for a client discovering a Runtime",
+    )
+    runtimes_cmd.add_argument(
+        "--root", default=None,
+        help="Directory to search (default: ~/.orbit)",
+    )
+
     agent_app_cmd = sub.add_parser(
         "agent-app", help="Host a manifest-declared local Agent App",
     )
@@ -857,6 +884,41 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _runtimes(args) -> None:
+    """List the Runtimes a client could connect to right now.
+
+    The discovery entry point for anything that did not start a Runtime
+    itself. `--json` is the contract a plugin host reads; the plain output is
+    for a person asking "is one up, and on what port".
+    """
+
+    from .platform.runtime_ownership import discover_runtimes
+
+    found = discover_runtimes(args.root)
+    if args.json:
+        print(json.dumps(
+            [
+                {
+                    "db_path": runtime.db_path,
+                    "pid": runtime.pid,
+                    **{
+                        key: value for key, value in runtime.facts.items()
+                        if key not in ("db_path", "pid")
+                    },
+                }
+                for runtime in found
+            ],
+            indent=2, sort_keys=True,
+        ))
+        return
+    if not found:
+        print("no Runtime is running")
+        return
+    for runtime in found:
+        where = runtime.base_url or f"({runtime.facts.get('transport', 'starting')})"
+        print(f"{where}\tpid {runtime.pid}\t{runtime.db_path}")
+
+
 def main() -> None:
     args = build_parser().parse_args()
 
@@ -878,6 +940,10 @@ def main() -> None:
 
     if args.command == "agent-app":
         _agent_app(args)
+        return
+
+    if args.command == "runtimes":
+        _runtimes(args)
         return
 
 

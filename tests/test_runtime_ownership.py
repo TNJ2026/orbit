@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import tempfile
 import types
@@ -8,7 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from orbit.platform.runtime_ownership import (
-    RuntimeOwnership, RuntimeOwnershipError,
+    RuntimeOwnership, RuntimeOwnershipError, discover_runtimes,
 )
 
 
@@ -110,3 +111,94 @@ class McpOwnershipCleanupTests(unittest.TestCase):
 
         self.assertIs(boom, caught.exception)
         self.assertEqual([1], released)
+
+
+class DiscoveryTests(unittest.TestCase):
+    """Finding a Runtime you did not start.
+
+    The property under test is that discovery reports only what is true *now*:
+    a record is worth acting on because its owner still holds the lock, not
+    because the file exists or the pid looks plausible.
+    """
+
+    def test_a_live_runtime_is_found_with_what_it_published(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            owner = RuntimeOwnership(Path(root) / "runtime.db").acquire()
+            owner.publish(transport="http", base_url="http://127.0.0.1:8848")
+            try:
+                found = discover_runtimes(root)
+                self.assertEqual(1, len(found))
+                self.assertEqual("http://127.0.0.1:8848", found[0].base_url)
+                self.assertEqual(str(owner.db_path), found[0].db_path)
+                self.assertEqual(os.getpid(), found[0].pid)
+            finally:
+                owner.release()
+
+    def test_a_crashed_owner_leaves_a_file_that_is_not_a_runtime(self) -> None:
+        """The case the pid cannot answer and the lock can."""
+
+        with tempfile.TemporaryDirectory() as root:
+            owner = RuntimeOwnership(Path(root) / "runtime.db").acquire()
+            owner.publish(base_url="http://127.0.0.1:8848")
+            owner.release()
+            self.assertTrue(owner.lock_path.exists())
+            self.assertEqual((), discover_runtimes(root))
+
+    def test_a_runtime_that_has_not_bound_yet_is_found_without_an_endpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            owner = RuntimeOwnership(Path(root) / "runtime.db").acquire()
+            try:
+                found = discover_runtimes(root)
+                self.assertEqual(1, len(found))
+                self.assertIsNone(found[0].base_url)
+            finally:
+                owner.release()
+
+    def test_a_stdio_runtime_owns_the_database_but_offers_no_endpoint(self) -> None:
+        """Discoverable so its ownership is visible; unconnectable on purpose."""
+
+        with tempfile.TemporaryDirectory() as root:
+            owner = RuntimeOwnership(Path(root) / "runtime.db").acquire()
+            owner.publish(transport="stdio")
+            try:
+                found = discover_runtimes(root)
+                self.assertIsNone(found[0].base_url)
+                self.assertEqual("stdio", found[0].facts["transport"])
+            finally:
+                owner.release()
+
+    def test_nested_project_databases_are_found_too(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            nested = Path(root) / "projects" / "some-checkout"
+            nested.mkdir(parents=True)
+            owner = RuntimeOwnership(nested / "runtime.db").acquire()
+            owner.publish(base_url="http://127.0.0.1:9000")
+            try:
+                self.assertEqual(
+                    ["http://127.0.0.1:9000"],
+                    [runtime.base_url for runtime in discover_runtimes(root)],
+                )
+            finally:
+                owner.release()
+
+    def test_publishing_without_the_lock_is_refused(self) -> None:
+        """A published endpoint is only trustworthy while its owner owns it."""
+
+        with tempfile.TemporaryDirectory() as root:
+            owner = RuntimeOwnership(Path(root) / "runtime.db")
+            with self.assertRaisesRegex(RuntimeOwnershipError, "without holding"):
+                owner.publish(base_url="http://127.0.0.1:8848")
+
+    def test_a_lock_holding_unreadable_content_is_skipped_not_fatal(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            owner = RuntimeOwnership(Path(root) / "runtime.db").acquire()
+            try:
+                owner.lock_path.write_text("not json", encoding="utf-8")
+                self.assertEqual((), discover_runtimes(root))
+            finally:
+                owner.release()
+
+    def test_a_root_with_nothing_in_it_reports_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            self.assertEqual((), discover_runtimes(root))
+        self.assertEqual((), discover_runtimes(Path(root) / "gone"))
