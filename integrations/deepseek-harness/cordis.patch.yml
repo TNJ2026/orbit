@@ -1,0 +1,12 @@
+# Single-workspace P0 profile bundle. The child inherits the Harness Host cwd,
+# so start Harness from the Orbit workspace this profile should control.
+- insert:
+    - id: mcp-orbit
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: orbit
+        transport: stdio
+        command: orbit
+        args: ['mcp', '--mcp-tool-profile', 'harness', '--actor', 'harness:profile']
+        toolCallTimeoutMs: 60000
+        failOnStartupError: true

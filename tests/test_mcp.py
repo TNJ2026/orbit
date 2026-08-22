@@ -72,7 +72,7 @@ class DiscoveryTests(ApiTestCase):
             names = {item["name"] for item in tools}
             self.assertEqual(
                 {
-                    "list_runs", "inspect_run", "start_run", "resume_run",
+                    "get_capabilities", "list_runs", "inspect_run", "start_run", "resume_run",
                     "recover_run", "cancel_run", "replay_langgraph_run",
                     "list_workflows", "list_artifacts", "read_artifact",
                     "get_artifact_lineage", "collect_artifacts",
@@ -84,9 +84,44 @@ class DiscoveryTests(ApiTestCase):
             )
             for item in tools:
                 self.assertIn("inputSchema", item)
+                self.assertEqual({"type": "object"}, item["outputSchema"])
                 # The scope is an internal authorisation detail, not part of
                 # the advertised tool contract.
                 self.assertNotIn("scope", item)
+
+    def test_harness_profile_excludes_authoring_and_ops_tools(self) -> None:
+        from orbit.web.app import create_app
+        from tests.test_api_v1 import SCHEMAS, transform_registration
+        from orbit.web.api_v1 import Authorizer, READ_SCOPE, WRITE_SCOPE
+
+        app = create_app(
+            self.db.parent / "harness-profile.db",
+            handlers=[transform_registration()], schemas=SCHEMAS,
+            authenticator=lambda request: request.headers.get("x-orbit-actor"),
+            authorizer=Authorizer(lambda _actor: [READ_SCOPE, WRITE_SCOPE]),
+            mcp_tool_profile="harness",
+            langgraph_state_directory=self.db.parent / "harness-langgraph",
+        )
+        with AsgiHarness(app) as client:
+            tools = rpc(client, "tools/list", actor="reader").json()["result"]["tools"]
+        self.assertEqual(
+            {
+                "get_capabilities", "list_workflows", "list_runs", "inspect_run",
+                "replay_langgraph_run", "start_run", "resume_run",
+                "cancel_run", "list_artifacts", "read_artifact",
+                "get_artifact_lineage",
+            },
+            {item["name"] for item in tools},
+        )
+
+    def test_capability_handshake_identifies_profile_and_protocol(self) -> None:
+        with AsgiHarness(self.app) as client:
+            payload = payload_of(tool(
+                client, "get_capabilities", {}, actor="reader",
+            ))
+        self.assertEqual("orbit-harness/1", payload["integration_protocol"])
+        self.assertEqual("full", payload["tool_profile"])
+        self.assertIn("langgraph_run/1", payload["event_schemas"])
 
 
 class ToolCallTests(ApiTestCase):
@@ -109,6 +144,50 @@ class ToolCallTests(ApiTestCase):
         with AsgiHarness(self.app) as client:
             started = self._start(client)
             self.assertTrue(started["run_id"].startswith("langgraph_run:"))
+
+    def test_start_exposes_goal_wait_and_the_public_run_projection(self) -> None:
+        with AsgiHarness(self.app) as client:
+            result = tool(
+                client, "start_run",
+                {
+                    "workflow_id": "workflow:linear",
+                    "input": {"value": 0},
+                    "goal": "check the login flow",
+                    "wait": False,
+                    "idempotency_key": "mcp-goal-wait",
+                },
+                actor="writer",
+            )
+            started = payload_of(result)
+            self.assertEqual(started, result["result"]["structuredContent"])
+            self.assertEqual("check the login flow", started["goal"])
+            self.assertEqual(
+                {
+                    "goal", "artifact_count", "workflow_id", "workflow_version",
+                    "template_id", "agent_binding", "status", "revision",
+                    "result", "interrupts", "error", "created_at", "updated_at",
+                    "allowed_commands", "run_id",
+                },
+                set(started),
+            )
+            self.assertNotIn("owner_actor", started)
+            self.assertIn(
+                "langgraph_run.cancel",
+                {item["command"] for item in started["allowed_commands"]},
+            )
+
+    def test_wait_must_be_boolean(self) -> None:
+        with AsgiHarness(self.app) as client:
+            result = tool(
+                client, "start_run",
+                {
+                    "workflow_id": "workflow:linear", "wait": "false",
+                    "idempotency_key": "bad-wait",
+                },
+                actor="writer",
+            )
+            self.assertTrue(result["result"]["isError"])
+            self.assertIn("wait must be", payload_of(result)["error"])
 
     def test_repeating_the_key_replays_instead_of_duplicating(self) -> None:
         with AsgiHarness(self.app) as client:
@@ -510,7 +589,7 @@ class StdioTransportTests(ApiTestCase):
 
         self.assertEqual(2, len(responses))
         self.assertEqual("orbit", responses[0]["result"]["serverInfo"]["name"])
-        self.assertEqual(17, len(responses[1]["result"]["tools"]))
+        self.assertEqual(18, len(responses[1]["result"]["tools"]))
 
     def test_a_notification_produces_no_line_at_all(self) -> None:
         """There is no 202 on this transport; silence is the whole answer."""

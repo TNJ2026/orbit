@@ -361,6 +361,7 @@ def create_app(
     structured_agents: Mapping[str, Any] | None = None,
     authoring_broker: Any = None,
     single_goal_mode: bool = True,
+    mcp_tool_profile: str = "full",
     workflow_db_path: Path | str | None = None,
     shutdown_request: Callable[[], None] | None = None,
     langgraph_service: Any = None,
@@ -856,6 +857,7 @@ def create_app(
         authoring_broker=authoring_broker,
         langgraph_service=langgraph_service,
         session_registry=mcp_sessions,
+        tool_profile=mcp_tool_profile,
     )
 
     routes: list[Route | Mount | WebSocketRoute] = [

@@ -369,6 +369,7 @@ def _serve(args) -> None:
     )
     from .web.schema_guard import MixedSchemaError, assert_runtime_schema
     from .workflow.artifacts import LocalCASBackend
+    from .platform.runtime_ownership import RuntimeOwnership, RuntimeOwnershipError
 
     project_root = resolve_project_root(getattr(args, "project_root", None))
 
@@ -395,10 +396,17 @@ def _serve(args) -> None:
     except MixedSchemaError as exc:
         raise SystemExit(f"error: {exc}") from None
 
+    ownership = RuntimeOwnership(db_path)
+    try:
+        ownership.acquire()
+    except RuntimeOwnershipError as exc:
+        raise SystemExit(f"orbit serve: {exc}") from None
+
     artifact_root = _artifact_root_path(args.artifact_root, db_path)
     try:
         artifact_backend = LocalCASBackend(artifact_root)
     except (OSError, ValueError) as exc:
+        ownership.release()
         raise SystemExit(
             f"orbit serve: cannot initialize Artifact store at "
             f"{artifact_root}: {exc}"
@@ -467,10 +475,13 @@ def _serve(args) -> None:
             langgraph_state_directory=langgraph_state_directory,
             agent_workspace_root=args.agent_workspace,
             structured_agents=structured_agents,
+            mcp_tool_profile=args.mcp_tool_profile,
         )
     except MixedSchemaError as exc:
+        ownership.release()
         raise SystemExit(f"error: {exc}") from None
     except (ValueError, ImportError) as exc:
+        ownership.release()
         # A misspelled --structured-agent, a name that collides with a
         # discovered CLI, or the optional dependency not installed. All are
         # things the operator typed, so they get an error at the prompt rather
@@ -488,7 +499,10 @@ def _serve(args) -> None:
         flush=True,
     )
     _report_goal_readiness(workflow_db_path)
-    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    try:
+        uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    finally:
+        ownership.release()
 
 
 def _mcp(args) -> None:
@@ -510,6 +524,7 @@ def _mcp(args) -> None:
     from .web.mcp import serve_stdio
     from .web.schema_guard import MixedSchemaError, assert_runtime_schema
     from .workflow.artifacts import LocalCASBackend
+    from .platform.runtime_ownership import RuntimeOwnership, RuntimeOwnershipError
 
     db_path = _runtime_db_path(args.db)
     try:
@@ -525,37 +540,52 @@ def _mcp(args) -> None:
             f"orbit mcp: cannot initialize Artifact store at "
             f"{artifact_root}: {exc}"
         ) from None
+    except Exception:
+        ownership.release()
+        raise
 
-    app = create_app(
-        db_path,
-        workflow_db_path=_workflow_db_path(args.db),
-        handlers=list(builtin_handlers()),
-        schemas=BUILTIN_SCHEMAS,
-        artifact_backend=artifact_backend,
-        discover_agents=not args.no_agent_discovery,
-        serve_ui=False,
-        # There is no connection to authenticate. The person who started this
-        # process is the caller, and on a local runtime that is `local` —
-        # the same actor loopback would have resolved to.
-        authorizer=local_authorizer(),
-        unlimited_actors=(LOCAL_ACTOR,),
-        token_exempt_actors=(LOCAL_ACTOR,),
-        operator_actors=(LOCAL_ACTOR,),
-        langgraph_state_directory=Path(db_path).parent,
-    )
-    composition = app.state.runtime
-    # Started by hand because no ASGI server will run the lifespan here.
-    composition.start()
-    print(
-        f"orbit MCP on stdio (db: {db_path}, engine: langgraph)",
-        file=sys.stderr, flush=True,
-    )
+    ownership = RuntimeOwnership(db_path)
     try:
-        serve_stdio(app.state.mcp_dispatch, LOCAL_ACTOR)
+        ownership.acquire()
+    except RuntimeOwnershipError as exc:
+        raise SystemExit(f"orbit mcp: {exc}") from None
+
+    try:
+        app = create_app(
+            db_path,
+            workflow_db_path=_workflow_db_path(args.db),
+            handlers=list(builtin_handlers()),
+            schemas=BUILTIN_SCHEMAS,
+            artifact_backend=artifact_backend,
+            discover_agents=not args.no_agent_discovery,
+            serve_ui=False,
+            # There is no connection to authenticate. The person who started this
+            # process is the caller, and on a local runtime that is `local` —
+            # the same actor loopback would have resolved to.
+            authorizer=local_authorizer(args.actor),
+            unlimited_actors=(args.actor,),
+            token_exempt_actors=(args.actor,),
+            operator_actors=(args.actor,),
+            langgraph_state_directory=Path(db_path).parent,
+            mcp_tool_profile=args.mcp_tool_profile,
+        )
+    except Exception:
+        ownership.release()
+        raise
+    composition = app.state.runtime
+    try:
+        # Started by hand because no ASGI server will run the lifespan here.
+        composition.start()
+        print(
+            f"orbit MCP on stdio (db: {db_path}, engine: langgraph)",
+            file=sys.stderr, flush=True,
+        )
+        serve_stdio(app.state.mcp_dispatch, args.actor)
     except KeyboardInterrupt:
         pass
     finally:
         stragglers = composition.stop()
+        ownership.release()
         if stragglers:
             print(f"loops still running at exit: {stragglers}", file=sys.stderr)
 
@@ -669,6 +699,10 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     serve_cmd.add_argument(
+        "--mcp-tool-profile", choices=("full", "harness"), default="full",
+        help="MCP tool surface to advertise (default: full)",
+    )
+    serve_cmd.add_argument(
         ACKNOWLEDGE_FLAG,
         action="store_true",
         help=(
@@ -695,6 +729,14 @@ def build_parser() -> argparse.ArgumentParser:
     mcp_cmd.add_argument(
         "--no-agent-discovery", action="store_true",
         help="Skip probing for installed Agent CLIs at startup",
+    )
+    mcp_cmd.add_argument(
+        "--mcp-tool-profile", choices=("full", "harness"), default="full",
+        help="MCP tool surface to advertise (default: full)",
+    )
+    mcp_cmd.add_argument(
+        "--actor", default="local",
+        help="Owner actor for stdio calls (default: local)",
     )
 
     agent_app_cmd = sub.add_parser(

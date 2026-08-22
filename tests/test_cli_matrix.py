@@ -92,7 +92,8 @@ class CliMatrixTestCase(unittest.TestCase):
 class HelpTests(unittest.TestCase):
     def test_every_command_has_help(self) -> None:
         for args in (
-            ("--help",), ("serve", "--help"), ("workflow", "--help"),
+            ("--help",), ("serve", "--help"), ("mcp", "--help"),
+            ("workflow", "--help"),
             ("workflow", "validate", "--help"), ("workflow", "publish", "--help"),
             ("run", "--help"), ("run", "list", "--help"),
             ("run", "inspect", "--help"),
@@ -101,6 +102,13 @@ class HelpTests(unittest.TestCase):
                 result = cli(*args)
                 self.assertEqual(0, result.returncode, result.stderr)
                 self.assertTrue(result.stdout.strip())
+
+    def test_runtime_commands_advertise_mcp_tool_profiles(self) -> None:
+        for command in ("serve", "mcp"):
+            with self.subTest(command=command):
+                result = cli(command, "--help")
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertIn("--mcp-tool-profile {full,harness}", result.stdout)
 
     def test_version_prints_and_exits(self) -> None:
         result = cli("--version")

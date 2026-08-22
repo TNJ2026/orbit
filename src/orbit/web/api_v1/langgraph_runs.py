@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Mapping
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -15,56 +15,7 @@ from ...workflow.api.dto import (
 from .common import (
     OPS_WRITE_SCOPE, READ_SCOPE, SENSITIVE_SCOPE, WRITE_SCOPE, error,
 )
-
-
-def _dto(run, *, can_write: bool) -> dict[str, Any]:
-    commands = []
-    if can_write and run.status == "interrupted":
-        commands.append({
-            "command": "langgraph_run.resume",
-            "label": "Resume LangGraph workflow",
-            "method": "POST",
-            "href": f"/api/v1/langgraph-runs/{run.run_id}/resume",
-            "target_aggregate_id": run.run_id,
-            "expected_version": run.revision,
-            "payload_schema": "langgraph-run-resume/1.0",
-        })
-    if can_write and run.status in {"running", "waiting", "interrupted"}:
-        commands.append({
-            "command": "langgraph_run.cancel",
-            "label": "Cancel LangGraph workflow",
-            "method": "POST",
-            "href": f"/api/v1/langgraph-runs/{run.run_id}/cancel",
-            "target_aggregate_id": run.run_id,
-            "expected_version": run.revision,
-            "payload_schema": "langgraph-run-cancel/1.0",
-            "confirmation": "explicit",
-        })
-    return {
-        "run_id": run.run_id,
-        # What the person asked for, when they said it in words. The catalog
-        # binds it into an input as well, per workflow; this is the copy that
-        # is theirs rather than the graph's.
-        "goal": run.goal,
-        # Zero for a run read on its own; the list counts them in one query
-        # rather than making the client ask per row.
-        "artifact_count": run.artifact_count,
-        "workflow_id": run.workflow_id,
-        "workflow_version": run.workflow_version,
-        "template_id": run.template_id,
-        # Which Agent actually carried out this run's Agent steps, when that
-        # was not the one its definition names. Recorded when the run started,
-        # so it keeps saying who ran it after the current binding moves on.
-        "agent_binding": run.agent_binding,
-        "status": run.status,
-        "revision": run.revision,
-        "result": run.result,
-        "interrupts": list(run.interrupts),
-        "error": run.error,
-        "created_at": run.created_at,
-        "updated_at": run.updated_at,
-        "allowed_commands": commands,
-    }
+from ..run_projection import langgraph_run_dto
 
 
 CURSOR_KIND = "langgraph-runs-v1"
@@ -102,7 +53,7 @@ def build_routes(ctx, service) -> list[Route]:
             "run_id": runs[-1].run_id,
         }) if len(runs) == limit else None
         return JSONResponse(envelope(
-            {"runs": [_dto(run, can_write=can_write) for run in runs]},
+            {"runs": [langgraph_run_dto(run, can_write=can_write) for run in runs]},
             next_cursor=next_cursor,
         ))
 
@@ -118,7 +69,7 @@ def build_routes(ctx, service) -> list[Route]:
         except LookupError as exc:
             return error("not_found", str(exc), 404)
         return JSONResponse(envelope(
-            _dto(run, can_write=ctx.guard.allows(actor, WRITE_SCOPE)),
+            langgraph_run_dto(run, can_write=ctx.guard.allows(actor, WRITE_SCOPE)),
             projection_version=run.revision,
         ))
 
@@ -287,7 +238,7 @@ def build_routes(ctx, service) -> list[Route]:
                 )
             except LookupError as exc:
                 raise ValueError(str(exc)) from None
-            return {"run": _dto(run, can_write=True)}
+            return {"run": langgraph_run_dto(run, can_write=True)}
 
         return await ctx.mutate(
             request, WRITE_SCOPE, "langgraph_run.start", command
@@ -310,7 +261,7 @@ def build_routes(ctx, service) -> list[Route]:
                 )
             except LookupError as exc:
                 raise ValueError(str(exc)) from None
-            return {"run": _dto(run, can_write=True)}
+            return {"run": langgraph_run_dto(run, can_write=True)}
 
         return await ctx.mutate(
             request, WRITE_SCOPE, "langgraph_run.resume", command
@@ -324,7 +275,7 @@ def build_routes(ctx, service) -> list[Route]:
                 run = service.recover(run_id)
             except LookupError as exc:
                 raise ValueError(str(exc)) from None
-            return {"run": _dto(run, can_write=True)}
+            return {"run": langgraph_run_dto(run, can_write=True)}
 
         return await ctx.mutate(
             request, OPS_WRITE_SCOPE, "langgraph_run.recover", command
@@ -345,7 +296,7 @@ def build_routes(ctx, service) -> list[Route]:
                 )
             except LookupError as exc:
                 raise ValueError(str(exc)) from None
-            return {"run": _dto(run, can_write=True)}
+            return {"run": langgraph_run_dto(run, can_write=True)}
 
         return await ctx.mutate(
             request, WRITE_SCOPE, "langgraph_run.cancel", command

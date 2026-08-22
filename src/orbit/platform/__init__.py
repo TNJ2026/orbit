@@ -23,6 +23,7 @@ from .projects import (
     upsert_project,
     warn_about_legacy_database,
 )
+from .runtime_ownership import RuntimeOwnership, RuntimeOwnershipError
 
 __all__ = [
     "DEFAULT_PROJECT_INDEX_PATH",
@@ -40,4 +41,6 @@ __all__ = [
     "server_url",
     "upsert_project",
     "warn_about_legacy_database",
+    "RuntimeOwnership",
+    "RuntimeOwnershipError",
 ]

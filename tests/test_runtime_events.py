@@ -102,9 +102,11 @@ class RuntimeEventTests(unittest.TestCase):
             poll_seconds=0.01, heartbeat_seconds=0.05,
         ))
 
-    def start(self, key: str, workflow_id: str = "workflow:linear"):
+    def start(
+        self, key: str, workflow_id: str = "workflow:linear", actor: str = "local",
+    ):
         return self.engine.start(
-            workflow_id, {"value": 1}, idempotency_key=key, actor="local",
+            workflow_id, {"value": 1}, idempotency_key=key, actor=actor,
         )
 
     def run_scenario(self, coroutine) -> None:
@@ -159,6 +161,12 @@ class RuntimeEventTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.engine.events_after(0, limit=0)
 
+    def test_events_after_can_be_scoped_to_the_run_owner(self) -> None:
+        mine = self.start("mine", actor="local")
+        self.start("theirs", actor="other")
+        visible = self.engine.events_after(0, actor="local")
+        self.assertEqual({mine.run_id}, {item["run_id"] for item in visible})
+
     # -- the socket ------------------------------------------------------
 
     def test_new_connection_starts_at_head_then_receives_new_events(self) -> None:
@@ -180,6 +188,20 @@ class RuntimeEventTests(unittest.TestCase):
                     [item["event_type"] for item in events],
                 )
                 self.assertEqual(2, events[0]["schema_version"])
+
+        self.run_scenario(scenario)
+
+    def test_socket_never_delivers_another_actors_run_metadata(self) -> None:
+        app = self.build()
+
+        async def scenario() -> None:
+            async with Socket(app) as socket:
+                await socket.next()
+                await socket.frame()
+                self.start("other-live", actor="other")
+                mine = self.start("mine-live", actor="local")
+                events = await socket.events(2)
+                self.assertEqual({mine.run_id}, {item["run_id"] for item in events})
 
         self.run_scenario(scenario)
 

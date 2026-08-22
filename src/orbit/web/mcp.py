@@ -21,6 +21,7 @@ import threading
 import time
 from typing import Any, Callable, Mapping
 
+from orbit import __version__
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
@@ -33,6 +34,7 @@ from ..workflow.catalogs import InMemorySchemaCatalog
 from .api_v1 import (
     OPS_READ_SCOPE, OPS_WRITE_SCOPE, READ_SCOPE, WRITE_SCOPE, Authorizer,
 )
+from .run_projection import langgraph_run_dto
 
 PROTOCOL_VERSION = "2025-06-18"
 SERVER_INFO = {"name": "orbit", "version": "1.0"}
@@ -45,6 +47,13 @@ PARSE_ERROR = -32700
 NOT_AUTHORIZED = -32001
 
 MCP_SESSION_PRESENCE_SECONDS = 60.0
+MCP_TOOL_PROFILES = frozenset({"full", "harness"})
+HARNESS_TOOL_NAMES = frozenset({
+    "get_capabilities", "list_workflows", "list_runs", "inspect_run", "replay_langgraph_run",
+    "start_run", "resume_run", "cancel_run", "list_artifacts",
+    "read_artifact", "get_artifact_lineage",
+})
+OBJECT_OUTPUT_SCHEMA = {"type": "object"}
 
 
 class McpSessionRegistry:
@@ -138,12 +147,13 @@ def _failure(request_id: Any, code: int, message: str) -> dict[str, Any]:
 
 
 def _content(payload: Any, *, is_error: bool = False) -> dict[str, Any]:
-    """MCP tool results are text content; JSON keeps them machine-readable."""
+    """Return modern structured content and the legacy JSON text together."""
 
     return {
         "content": [
             {"type": "text", "text": json.dumps(payload, ensure_ascii=False, sort_keys=True)}
         ],
+        "structuredContent": payload,
         "isError": is_error,
     }
 
@@ -162,6 +172,7 @@ def build_mcp_dispatcher(
     authoring_broker=None,
     langgraph_service=None,
     session_registry: McpSessionRegistry | None = None,
+    tool_profile: str = "full",
 ) -> Callable[[Mapping[str, Any], str | None], dict[str, Any] | None]:
     """One JSON-RPC message in, at most one response out.
 
@@ -170,6 +181,10 @@ def build_mcp_dispatcher(
     of the tools, the scopes or the idempotency rules — those live here, once.
     """
 
+    if tool_profile not in MCP_TOOL_PROFILES:
+        raise ValueError(
+            f"unknown MCP tool profile {tool_profile!r}; expected full or harness"
+        )
     path = Path(db_path)
     workflow_path = Path(workflow_db_path or db_path)
     workflow_reads = WorkflowCatalogReadModelService(
@@ -195,6 +210,12 @@ def build_mcp_dispatcher(
     sessions = session_registry or McpSessionRegistry()
 
     tools = (
+        {
+            "name": "get_capabilities",
+            "description": "Report Orbit and integration protocol capabilities.",
+            "scope": READ_SCOPE,
+            "inputSchema": {"type": "object", "properties": {}},
+        },
         # -- discovery ----------------------------------------------------
         # `start_run` needs a workflow_id, and until now nothing over MCP could
         # produce one: an agent had to be told out of band what it was allowed
@@ -387,6 +408,8 @@ def build_mcp_dispatcher(
                         "workflow_id": {"type": "string"},
                         "workflow_version": {"type": "integer"},
                         "input": {"type": "object"},
+                        "goal": {"type": "string", "maxLength": 4000},
+                        "wait": {"type": "boolean", "default": True},
                         "idempotency_key": {"type": "string"},
                     },
                     "required": ["workflow_id", "idempotency_key"],
@@ -480,26 +503,27 @@ def build_mcp_dispatcher(
                 },
             },
         )
+    tools = tuple(
+        {**tool, "outputSchema": OBJECT_OUTPUT_SCHEMA}
+        for tool in tools
+        if tool_profile == "full" or tool["name"] in HARNESS_TOOL_NAMES
+    )
     by_name = {tool["name"]: tool for tool in tools}
 
-    def langgraph_run_dto(run) -> dict[str, Any]:
-        return {
-            "run_id": run.run_id,
-            "workflow_id": run.workflow_id,
-            "workflow_version": run.workflow_version,
-            "status": run.status,
-            "revision": run.revision,
-            "result": run.result,
-            "interrupts": list(run.interrupts),
-            "error": run.error,
-            "created_at": run.created_at,
-            "updated_at": run.updated_at,
-        }
-
     def call(name: str, arguments: Mapping[str, Any], actor: str) -> Any:
+        if name == "get_capabilities":
+            return {
+                "orbit_version": __version__,
+                "integration_protocol": "orbit-harness/1",
+                "mcp_protocol": PROTOCOL_VERSION,
+                "event_schemas": ["langgraph_run/1", "langgraph_node/1"],
+                "tool_profile": tool_profile,
+            }
         if name == "list_runs":
             return {"runs": [
-                langgraph_run_dto(run)
+                langgraph_run_dto(
+                    run, can_write=guard.allows(actor, WRITE_SCOPE),
+                )
                 for run in langgraph_service.list_runs(
                     status=arguments.get("status") or None,
                     limit=min(200, max(1, int(arguments.get("limit", 20)))),
@@ -508,23 +532,34 @@ def build_mcp_dispatcher(
             ]}
         if name == "inspect_run":
             return langgraph_run_dto(
-                langgraph_service.get(str(arguments["run_id"]), actor=actor)
+                langgraph_service.get(str(arguments["run_id"]), actor=actor),
+                can_write=guard.allows(actor, WRITE_SCOPE),
             )
         if name == "start_run":
-            return langgraph_run_dto(langgraph_service.start(
-                str(arguments["workflow_id"]), arguments.get("input") or {},
-                workflow_version=arguments.get("workflow_version"),
-                idempotency_key=str(arguments["idempotency_key"]),
-                actor=actor,
-            ))
+            wait = arguments.get("wait")
+            if wait is not None and not isinstance(wait, bool):
+                raise ValueError("wait must be true or false")
+            return langgraph_run_dto(
+                langgraph_service.start(
+                    str(arguments["workflow_id"]), arguments.get("input") or {},
+                    workflow_version=arguments.get("workflow_version"),
+                    idempotency_key=str(arguments["idempotency_key"]),
+                    actor=actor, goal=str(arguments.get("goal") or ""),
+                    wait=True if wait is None else wait,
+                ),
+                can_write=True,
+            )
         if name == "resume_run":
-            return langgraph_run_dto(langgraph_service.resume(
-                str(arguments["run_id"]), arguments.get("value"),
-                expected_revision=int(arguments["expected_version"]),
-                idempotency_key=str(arguments["idempotency_key"]),
-                interrupt_id=arguments.get("interrupt_id"),
-                actor=actor,
-            ))
+            return langgraph_run_dto(
+                langgraph_service.resume(
+                    str(arguments["run_id"]), arguments.get("value"),
+                    expected_revision=int(arguments["expected_version"]),
+                    idempotency_key=str(arguments["idempotency_key"]),
+                    interrupt_id=arguments.get("interrupt_id"),
+                    actor=actor,
+                ),
+                can_write=True,
+            )
         if name == "replay_langgraph_run":
             return {"steps": list(langgraph_service.replay(
                 str(arguments["run_id"]),
@@ -533,15 +568,19 @@ def build_mcp_dispatcher(
             ))}
         if name == "recover_run":
             return langgraph_run_dto(
-                langgraph_service.recover(str(arguments["run_id"]))
+                langgraph_service.recover(str(arguments["run_id"])),
+                can_write=True,
             )
         if name == "cancel_run":
-            return langgraph_run_dto(langgraph_service.cancel(
-                str(arguments["run_id"]),
-                expected_revision=int(arguments["expected_version"]),
-                idempotency_key=str(arguments["idempotency_key"]),
-                actor=actor,
-            ))
+            return langgraph_run_dto(
+                langgraph_service.cancel(
+                    str(arguments["run_id"]),
+                    expected_revision=int(arguments["expected_version"]),
+                    idempotency_key=str(arguments["idempotency_key"]),
+                    actor=actor,
+                ),
+                can_write=True,
+            )
         if name == "list_artifacts":
             if getattr(langgraph_service, "artifacts", None) is None:
                 raise LookupError("LangGraph Artifact store is unavailable")

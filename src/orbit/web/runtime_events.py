@@ -160,6 +160,7 @@ def runtime_event_routes(
             while True:
                 records = await asyncio.to_thread(
                     engine.events_after, position, limit=MAX_BATCH_SIZE,
+                    actor=actor,
                 )
                 if records:
                     for event in records:
