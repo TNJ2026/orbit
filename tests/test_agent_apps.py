@@ -8,6 +8,7 @@ import unittest
 from unittest import mock
 
 from orbit.__main__ import _runtime_db_path
+from orbit.agent_apps import host as host_module
 from orbit.agent_apps.host import AgentAppHost, AgentAppHostError
 from orbit.agent_apps.event_bridge import AgentAppEventBridge, EventInbox
 from orbit.agent_apps.manifest import ManifestError, load_manifest
@@ -410,3 +411,84 @@ class EventBridgeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HostHelperTests(unittest.TestCase):
+    """The small decisions the host makes before it starts anything.
+
+    Each is a fallback for an environment that answers differently, so a run
+    that works walks past all of them.
+    """
+
+    def manifest(self, scope: str) -> object:
+        import types
+
+        return types.SimpleNamespace(scope=scope)
+
+    def test_a_global_app_shares_one_scope_whatever_the_workspace(self) -> None:
+        key = host_module._scope_key(self.manifest("global"), None)
+        self.assertEqual("global", key)
+        self.assertEqual(
+            key, host_module._scope_key(self.manifest("global"), Path("/somewhere")),
+        )
+
+    def test_a_workspace_app_keys_on_the_workspace(self) -> None:
+        first = host_module._scope_key(self.manifest("workspace"), Path("/a"))
+        second = host_module._scope_key(self.manifest("workspace"), Path("/b"))
+        self.assertNotEqual(first, second)
+        self.assertEqual(
+            first, host_module._scope_key(self.manifest("workspace"), Path("/a")),
+        )
+        # Hashed, so a path never becomes a directory name of its own.
+        self.assertRegex(first, r"^[0-9a-f]{16}$")
+
+    def test_a_workspace_app_without_a_workspace_is_refused(self) -> None:
+        with self.assertRaisesRegex(AgentAppHostError, "requires a workspace"):
+            host_module._scope_key(self.manifest("workspace"), None)
+
+    def test_the_state_root_follows_the_environment_when_set(self) -> None:
+        with mock.patch.dict(
+            "os.environ", {"AGENT_APP_STATE_DIR": "~/elsewhere"}, clear=False,
+        ):
+            self.assertEqual(
+                Path("~/elsewhere").expanduser(), host_module.default_state_root(),
+            )
+
+    def test_the_state_root_has_a_default(self) -> None:
+        import os
+
+        environment = {k: v for k, v in os.environ.items() if k != "AGENT_APP_STATE_DIR"}
+        with mock.patch.dict("os.environ", environment, clear=True):
+            self.assertTrue(str(host_module.default_state_root()).endswith("agent-apps"))
+
+    def test_a_process_check_is_false_for_nothing_and_true_for_this_one(self) -> None:
+        import os
+
+        for pid in (0, -1):
+            with self.subTest(pid=pid):
+                self.assertFalse(host_module._process_exists(pid))
+        self.assertTrue(host_module._process_exists(os.getpid()))
+
+    def test_health_is_false_when_nothing_answers(self) -> None:
+        """A closed port, not a slow one: the check must not hang the host."""
+
+        self.assertFalse(
+            host_module._health_check("http://127.0.0.1:9/health", timeout=0.5),
+        )
+
+    def test_health_reads_the_status_and_not_the_body(self) -> None:
+        import contextlib
+        import types
+
+        def answer(status):
+            @contextlib.contextmanager
+            def opener(request, timeout=None):
+                yield types.SimpleNamespace(status=status)
+            return opener
+
+        for status, expected in ((200, True), (302, True), (404, False), (500, False)):
+            with self.subTest(status=status):
+                with mock.patch.object(host_module, "urlopen", answer(status)):
+                    self.assertEqual(
+                        expected, host_module._health_check("http://example/health"),
+                    )
