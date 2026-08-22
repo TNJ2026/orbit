@@ -23,8 +23,8 @@ from ..graph.conditions import ConditionEvaluationError
 from ..domain.serialization import canonical_json, definition_hash, to_primitive
 from ..domain.ir_schema import workflow_ir_from_primitive
 from .compiler import (
-    LangGraphCompileError, LangGraphHandlerRegistry,
-    LangGraphJoinDeadlineExceeded,
+    LangGraphCompileError, LangGraphCompletionUnsatisfied,
+    LangGraphHandlerRegistry, LangGraphJoinDeadlineExceeded,
     LangGraphRetryRequested, LangGraphUnknownExternalResult, compile_workflow,
     edge_is_selected, outgoing_edges,
 )
@@ -2014,7 +2014,7 @@ class LangGraphWorkflowService:
             ).fetchone()[0])
 
     def events_after(
-        self, position: int, *, limit: int = 200,
+        self, position: int, *, limit: int = 200, actor: str | None = None,
     ) -> tuple[Mapping[str, Any], ...]:
         """Events after `position`, oldest first, bounded.
 
@@ -2026,12 +2026,18 @@ class LangGraphWorkflowService:
         if isinstance(limit, bool) or not 1 <= limit <= 500:
             raise ValueError("limit must be between 1 and 500")
         with self._connect() as connection:
+            ownership = "" if actor is None else " AND r.owner_actor=?"
+            parameters = (
+                (int(position), limit) if actor is None
+                else (int(position), actor, limit)
+            )
             rows = connection.execute(
-                "SELECT position,run_id,event_type,revision,occurred_at,"
-                "node_id,attempt_id"
-                " FROM langgraph_run_events WHERE position > ?"
-                " ORDER BY position LIMIT ?",
-                (int(position), limit),
+                "SELECT e.position,e.run_id,e.event_type,e.revision,e.occurred_at,"
+                "e.node_id,e.attempt_id FROM langgraph_run_events e"
+                " JOIN langgraph_runs r ON r.run_id=e.run_id"
+                " WHERE e.position > ?" + ownership +
+                " ORDER BY e.position LIMIT ?",
+                parameters,
             ).fetchall()
         return tuple(dict(row) for row in rows)
 
@@ -2240,6 +2246,17 @@ class LangGraphWorkflowService:
         except LangGraphUnknownExternalResult as exc:
             return self._settle(
                 run_id, "unknown", error=f"{type(exc).__name__}: {exc}"
+            )
+        except LangGraphCompletionUnsatisfied as exc:
+            # An outcome, not a crash. The run exists and it did not finish;
+            # answering with it is the whole of what a caller can be told.
+            # Re-raising sent this past a command boundary that maps only
+            # ValueError, so the reply was an empty HTTP 500 for a run sitting
+            # in the database with the reason written on it — and mapping it to
+            # ValueError instead would be worse, because that boundary drops
+            # the idempotency receipt and the same key would start a second run.
+            return self._settle(
+                run_id, "failed", error=f"{type(exc).__name__}: {exc}"
             )
         except LangGraphRetryRequested as exc:
             return self._schedule_retry(run_id, exc)
