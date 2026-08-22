@@ -21,7 +21,6 @@ from typing import Any, Callable, Mapping, Sequence
 from starlette.requests import Request
 from starlette.routing import Route
 
-from ...workflow.api.artifact_read_models import PREVIEW_LIMIT_BYTES
 from ...workflow.api.routes import RateLimiter
 
 from . import drafts, langgraph_runs, ops, workflows
@@ -33,7 +32,7 @@ from .context import ApiContext
 
 __all__ = [
     "OPS_READ_SCOPE", "OPS_WRITE_SCOPE", "READ_SCOPE", "SENSITIVE_SCOPE",
-    "WRITE_SCOPE", "PREVIEW_LIMIT_BYTES",
+    "WRITE_SCOPE",
     "ApiContext", "Authorizer", "authoring_timeout_seconds", "build_api_v1",
     "error",
 ]

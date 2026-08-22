@@ -9,10 +9,12 @@ orbit.server or orbit.store.
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 from orbit.platform import process
 
@@ -350,3 +352,101 @@ class BoundaryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProcessIdentityTests(unittest.TestCase):
+    """The token that stops a recovered pid being signalled after reuse.
+
+    A pid is reused; the identity is what tells a recovering Runtime that the
+    process answering to it is not the one it started. Every branch here is a
+    fallback for a host that answers differently, so none of them is reached
+    by a run that works.
+    """
+
+    def test_a_non_positive_pid_has_no_identity(self) -> None:
+        for pid in (0, -1):
+            with self.subTest(pid=pid):
+                self.assertIsNone(process.process_identity(pid))
+
+    def test_this_process_has_one(self) -> None:
+        token = process.process_identity(os.getpid())
+        self.assertIsNotNone(token)
+        self.assertRegex(token, r"^(proc|ps|win):")
+
+    def test_the_same_pid_answers_the_same_token_twice(self) -> None:
+        """A token that moved on its own would refuse every recovery."""
+
+        self.assertEqual(
+            process.process_identity(os.getpid()),
+            process.process_identity(os.getpid()),
+        )
+
+    def test_a_pid_that_is_gone_has_no_identity(self) -> None:
+        finished = subprocess.Popen([sys.executable, "-c", "pass"])
+        finished.wait()
+        # A reaped pid may be reissued, so this asserts the shape of the
+        # answer rather than that the pid is certainly free.
+        token = process.process_identity(finished.pid)
+        self.assertTrue(token is None or token.startswith(("proc:", "ps:")))
+
+    def test_a_host_with_no_ps_and_no_procfs_says_it_does_not_know(self) -> None:
+        with patch.object(process.subprocess, "run", side_effect=FileNotFoundError):
+            self.assertIsNone(process.process_identity(os.getpid()))
+
+    def test_a_refusing_ps_says_it_does_not_know(self) -> None:
+        empty = subprocess.CompletedProcess([], returncode=1, stdout="", stderr="")
+        with patch.object(process.subprocess, "run", return_value=empty):
+            self.assertIsNone(process.process_identity(os.getpid()))
+
+
+class PpidSnapshotTests(unittest.TestCase):
+    """Reading the process table, and surviving a host that will not answer."""
+
+    def test_the_snapshot_contains_this_process_and_its_parent(self) -> None:
+        mapping = process.snapshot_ppids()
+        self.assertIn(os.getpid(), mapping)
+        self.assertEqual(os.getppid(), mapping[os.getpid()])
+
+    def test_a_backend_that_fails_falls_through_to_the_next(self) -> None:
+        with patch.object(process, "_ppids_ps", return_value=None), \
+             patch.object(process, "_ppids_procfs", return_value=None), \
+             patch.object(process, "_ppids_windows", return_value=None):
+            self.assertEqual({}, process.snapshot_ppids())
+
+    def test_unparsable_rows_are_skipped_not_fatal(self) -> None:
+        noisy = subprocess.CompletedProcess(
+            [], returncode=0,
+            stdout="  10   1\nheader row here\nnot-a-number 2\n  11   10\n",
+            stderr="",
+        )
+        with patch.object(process.subprocess, "run", return_value=noisy):
+            self.assertEqual({10: 1, 11: 10}, process._ppids_ps())
+
+    def test_a_missing_ps_binary_is_not_an_error(self) -> None:
+        with patch.object(process.subprocess, "run", side_effect=FileNotFoundError):
+            self.assertIsNone(process._ppids_ps())
+
+
+class DescendantTests(unittest.TestCase):
+    def test_pid_zero_claims_nothing(self) -> None:
+        """On macOS pid 0 parents launchd, so a root of 0 would claim the host."""
+
+        for pid in (0, -5):
+            with self.subTest(pid=pid):
+                self.assertEqual([], process.descendant_pids(pid))
+
+    def test_descendants_are_found_through_intermediate_parents(self) -> None:
+        tree = {100: 1, 200: 100, 300: 200, 400: 1, 500: 400}
+        with patch.object(process, "snapshot_ppids", return_value=tree):
+            self.assertEqual({200, 300}, set(process.descendant_pids(100)))
+            self.assertEqual([], process.descendant_pids(300))
+
+    def test_a_cycle_in_the_table_does_not_spin(self) -> None:
+        """The table is a snapshot of a moving system; it can disagree."""
+
+        with patch.object(process, "snapshot_ppids", return_value={2: 3, 3: 2, 4: 2}):
+            self.assertEqual({3, 4}, set(process.descendant_pids(2)))
+
+    def test_an_unreadable_process_table_claims_nothing(self) -> None:
+        with patch.object(process, "snapshot_ppids", return_value={}):
+            self.assertEqual([], process.descendant_pids(os.getpid()))
