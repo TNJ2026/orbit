@@ -4,7 +4,6 @@ from .registry import (
     ExecutionRegistry, HandlerContractMismatchError, HandlerNotAvailableError,
     RegisteredHandler,
 )
-from .executor import HandlerExecutor
 from .usage import InMemoryUsageReporter, NoopUsageReporter, PersistentBudgetUsageReporter, UsageConflictError
 from .agent import AgentHandler, AgentClientPort, FakeAgentClient, TrustedCliAgentClient
 from .fake import FakeHandler
@@ -13,7 +12,7 @@ from .transform import TransformHandler
 
 __all__ = [
     "ExecutionRegistry", "HandlerContractMismatchError",
-    "HandlerNotAvailableError", "RegisteredHandler", "HandlerExecutor",
+    "HandlerNotAvailableError", "RegisteredHandler",
     "InMemoryUsageReporter", "NoopUsageReporter", "PersistentBudgetUsageReporter", "UsageConflictError",
     "AgentClientPort", "AgentHandler", "FakeAgentClient", "FakeHandler",
     "RegisteredTool", "ToolAdapter", "ToolHandler", "ToolManifest", "ToolRegistry",
