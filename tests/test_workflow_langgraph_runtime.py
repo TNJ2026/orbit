@@ -2838,6 +2838,45 @@ class LangGraphWorkflowServiceTests(unittest.TestCase):
             checkpoint_db_path=Path(directory) / "langgraph-checkpoints.sqlite3",
         )
 
+    def test_a_run_that_cannot_satisfy_completion_is_answered_not_raised(
+        self,
+    ) -> None:
+        """The run exists and it failed; that is the answer to give back.
+
+        The completion check raises, and the drive loop settled the run and
+        re-raised — past a command boundary that only maps ValueError, so the
+        caller got HTTP 500 with an empty body for a run that was sitting in
+        the database with the reason written on it. Not a ValueError either:
+        that boundary deletes the idempotency receipt on one, and the run has
+        already been created, so the same key would start a second one.
+        """
+
+        ir = workflow(
+            (node("only", inputs=("value",), outputs=("value",)),),
+            (),
+            entry=("only",),
+            terminals=("only",),
+            result=("only", "value"),
+            policies=(IRPolicy(
+                "complete", "completion", {"required_terminal_count": 2},
+            ),),
+        )
+        registry = LangGraphHandlerRegistry([
+            binding("only", lambda values, config, context: dict(values)),
+        ])
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            service = self.service(
+                directory, self.publish(directory, ir), registry,
+            )
+            run = service.start(
+                ir.workflow_id, {"value": "x"},
+                idempotency_key="unsatisfiable-completion",
+            )
+
+        self.assertEqual("failed", run.status)
+        self.assertIn("LangGraphCompletionUnsatisfied", run.error)
+        self.assertIn("reached 1", run.error)
+
     def test_each_loop_generation_gets_its_own_retry_budget(self) -> None:
         """`max_attempts` is what one attempt at a node may spend, per visit.
 
