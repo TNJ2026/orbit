@@ -8,6 +8,7 @@ write, an unauthorized call, and a version conflict. Each is a test here.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 import unittest
 
 from orbit.web.mcp import McpSessionRegistry
@@ -73,8 +74,11 @@ class DiscoveryTests(ApiTestCase):
             self.assertEqual(
                 {
                     "get_capabilities", "list_runs", "inspect_run", "start_run", "resume_run",
+                    "list_runtime_events", "get_run_steps", "get_run_graph",
+                    "get_run_edges", "read_run_output",
                     "recover_run", "cancel_run", "replay_langgraph_run",
                     "list_workflows", "list_artifacts", "read_artifact",
+                    "read_artifact_content",
                     "get_artifact_lineage", "collect_artifacts",
                     "generate_workflow", "get_authoring_job",
                     "claim_authoring_request", "wait_authoring_request",
@@ -107,8 +111,11 @@ class DiscoveryTests(ApiTestCase):
         self.assertEqual(
             {
                 "get_capabilities", "list_workflows", "list_runs", "inspect_run",
+                "list_runtime_events", "get_run_steps", "get_run_graph",
+                "get_run_edges", "read_run_output",
                 "replay_langgraph_run", "start_run", "resume_run",
                 "cancel_run", "list_artifacts", "read_artifact",
+                "read_artifact_content",
                 "get_artifact_lineage",
             },
             {item["name"] for item in tools},
@@ -302,6 +309,42 @@ class DiscoveryAndResultTests(ApiTestCase):
             self.assertEqual("completed", payload["status"])
             self.assertEqual([], payload["interrupts"])
 
+    def test_harness_can_incrementally_read_its_events_and_steps(self) -> None:
+        with AsgiHarness(self.app) as client:
+            started = payload_of(tool(
+                client, "start_run",
+                {"workflow_id": "workflow:linear", "input": {"value": 0},
+                 "idempotency_key": "mcp-events-1"}, actor="author",
+            ))
+            events = payload_of(tool(
+                client, "list_runtime_events",
+                {"after_position": 0}, actor="author",
+            ))
+            steps = payload_of(tool(
+                client, "get_run_steps", {"run_id": started["run_id"]},
+                actor="author",
+            ))
+            graph = payload_of(tool(
+                client, "get_run_graph", {"run_id": started["run_id"]},
+                actor="author",
+            ))
+            edges = payload_of(tool(
+                client, "get_run_edges", {"run_id": started["run_id"]},
+                actor="author",
+            ))
+            output = payload_of(tool(
+                client, "read_run_output",
+                {"run_id": started["run_id"], "after": 0}, actor="author",
+            ))
+
+        self.assertTrue(events["events"])
+        self.assertEqual(events["events"][-1]["position"], events["next_position"])
+        self.assertTrue(steps["steps"])
+        self.assertIn("nodes", graph["graph"])
+        self.assertTrue(edges["edges"])
+        self.assertEqual(0, output["after"])
+        self.assertFalse(output["has_more"])
+
     def test_artifacts_are_listable_and_scoped_to_a_run(self) -> None:
         with AsgiHarness(self.app) as client:
             payload = payload_of(
@@ -321,6 +364,39 @@ class DiscoveryAndResultTests(ApiTestCase):
 
             self.assertTrue(result["result"]["isError"])
             self.assertIn("error", payload_of(result))
+
+    def test_artifact_content_is_bounded_and_base64_encoded(self) -> None:
+        from orbit.workflow.domain.data import PortTransport
+
+        store = self.app.state.langgraph_service.artifacts
+        policy = SimpleNamespace(
+            transport=PortTransport.ARTIFACT_REF,
+            content_types=("text/plain",), max_size_bytes=100,
+        )
+        port = SimpleNamespace(id="document", schema_id="text/1", data_policy=policy)
+        access = store.access(
+            run_id="run:artifact-content", node_id="write", attempt_id="attempt:1",
+            output_ports=(port,), inputs={}, actor="reader",
+        )
+        artifact_id = access.write(
+            name="document", content=b"hello", content_type="text/plain",
+            filename="hello.txt",
+        )
+        store.commit(access.produced_artifact_ids)
+
+        with AsgiHarness(self.app) as client:
+            content = payload_of(tool(
+                client, "read_artifact_content", {"artifact_id": artifact_id},
+                actor="reader",
+            ))
+            too_small = tool(
+                client, "read_artifact_content",
+                {"artifact_id": artifact_id, "max_bytes": 4}, actor="reader",
+            )
+
+        self.assertEqual("base64", content["encoding"])
+        self.assertEqual("aGVsbG8=", content["content"])
+        self.assertTrue(too_small["result"]["isError"])
 
 
 class AuthoringToolTests(ApiTestCase):
@@ -568,7 +644,7 @@ class StdioTransportTests(ApiTestCase):
     session.
     """
 
-    def run_stdio(self, *messages, actor="writer"):
+    def run_stdio(self, *messages, actor="writer", actor_prefix=None):
         import io
 
         from orbit.web.mcp import serve_stdio
@@ -578,6 +654,7 @@ class StdioTransportTests(ApiTestCase):
             self.app.state.mcp_dispatch, actor,
             stdin=io.StringIO("".join(f"{item}\n" for item in messages)),
             stdout=sink,
+            actor_prefix=actor_prefix,
         )
         return [json.loads(line) for line in sink.getvalue().splitlines()]
 
@@ -589,7 +666,7 @@ class StdioTransportTests(ApiTestCase):
 
         self.assertEqual(2, len(responses))
         self.assertEqual("orbit", responses[0]["result"]["serverInfo"]["name"])
-        self.assertEqual(18, len(responses[1]["result"]["tools"]))
+        self.assertEqual(24, len(responses[1]["result"]["tools"]))
 
     def test_a_notification_produces_no_line_at_all(self) -> None:
         """There is no 202 on this transport; silence is the whole answer."""
@@ -632,6 +709,24 @@ class StdioTransportTests(ApiTestCase):
             actor="reader",
         )
 
+        self.assertEqual(-32001, responses[0]["error"]["code"])
+
+    def test_trusted_stdio_metadata_can_select_a_scoped_actor(self) -> None:
+        responses = self.run_stdio(
+            '{"jsonrpc":"2.0","id":1,"method":"tools/call",'
+            '"params":{"name":"list_runs","arguments":{},"_meta":'
+            '{"orbit/actor":"reader"}}}',
+            actor="writer", actor_prefix="reader",
+        )
+        self.assertNotIn("error", responses[0])
+
+    def test_stdio_metadata_cannot_escape_its_actor_prefix(self) -> None:
+        responses = self.run_stdio(
+            '{"jsonrpc":"2.0","id":1,"method":"tools/call",'
+            '"params":{"name":"list_runs","arguments":{},"_meta":'
+            '{"orbit/actor":"local"}}}',
+            actor_prefix="harness:session:",
+        )
         self.assertEqual(-32001, responses[0]["error"]["code"])
 
 

@@ -15,20 +15,47 @@ class DeepSeekHarnessBundleTests(unittest.TestCase):
     def test_manifest_declares_the_profile_patch(self) -> None:
         manifest = json.loads((BUNDLE / "package.json").read_text(encoding="utf-8"))
         self.assertEqual("./cordis.patch.yml", manifest["dsh"]["bundle"]["patch"])
-        self.assertIn("@deepseek-ai/dsh-mcp-client", manifest["peerDependencies"])
+        self.assertEqual("lib/index.js", manifest["main"])
+        self.assertNotIn("private", manifest)
+        self.assertIn("@deepseek-ai/dsh-typert-protocol", manifest["peerDependencies"])
 
-    def test_patch_starts_the_minimal_profile_under_a_distinct_actor(self) -> None:
+    def test_patch_registers_the_host_gateway(self) -> None:
         patch = yaml.safe_load((BUNDLE / "cordis.patch.yml").read_text(encoding="utf-8"))
         plugin = patch[0]["insert"][0]
-        self.assertEqual("@deepseek-ai/dsh-mcp-client", plugin["name"])
-        config = plugin["config"]
-        self.assertEqual("stdio", config["transport"])
-        self.assertEqual("orbit", config["command"])
-        self.assertEqual(
-            ["mcp", "--mcp-tool-profile", "harness", "--actor", "harness:profile"],
-            config["args"],
-        )
-        self.assertTrue(config["failOnStartupError"])
+        self.assertEqual("@orbit-runtime/dsh-orbit", plugin["name"])
+        self.assertEqual("orbit", plugin["id"])
+
+    def test_host_sources_include_gateway_and_remote_contract(self) -> None:
+        gateway = (BUNDLE / "src" / "gateway.ts").read_text(encoding="utf-8")
+        remote = (BUNDLE / "src" / "index.ts").read_text(encoding="utf-8")
+        self.assertIn("--actor-prefix', 'harness:session:", gateway)
+        self.assertIn("@Remote('getRuntime')", remote)
+        self.assertIn("@Remote('executeCommand')", remote)
+        self.assertIn("@Remote('getGraph')", remote)
+        self.assertIn("@Remote('readOutput')", remote)
+        self.assertIn("@Remote('listArtifacts')", remote)
+        self.assertIn("@Remote('getArtifactContent')", remote)
+        self.assertIn("allowed_commands.find", remote)
+
+    def test_p1_bridge_and_run_card_sources_are_shipped(self) -> None:
+        manifest = json.loads((BUNDLE / "package.json").read_text(encoding="utf-8"))
+        self.assertIn("lib/**/*.js", manifest["files"])
+        bridge = (BUNDLE / "src" / "session-bridge.ts").read_text(encoding="utf-8")
+        reducer = (BUNDLE / "src" / "run-card.ts").read_text(encoding="utf-8")
+        self.assertIn("list_runtime_events", bridge)
+        self.assertIn("sourcePosition", bridge)
+        self.assertIn("previous.sourcePosition >= event.sourcePosition", reducer)
+
+    def test_p2_detail_human_command_and_settings_are_wired(self) -> None:
+        client = (BUNDLE / "src" / "client.ts").read_text(encoding="utf-8")
+        self.assertIn("role: 'dialog'", client)
+        self.assertIn("remote.orbit.readOutput", client)
+        self.assertIn("langgraph_run.resume", client)
+        self.assertIn("settings.general.item", client)
+        self.assertIn("sessionStorage", client)
+        self.assertIn("event.key === 'Escape'", client)
+        self.assertIn("aria-modal", client)
+        self.assertIn("查看原始输出", client)
 
 
 if __name__ == "__main__":

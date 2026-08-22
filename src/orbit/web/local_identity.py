@@ -36,11 +36,16 @@ def loopback_authenticator(request: Request) -> str | None:
     return LOCAL_ACTOR
 
 
-def local_authorizer(trusted_actor: str = LOCAL_ACTOR) -> Authorizer:
+def local_authorizer(
+    trusted_actor: str = LOCAL_ACTOR, *, trusted_prefix: str | None = None,
+) -> Authorizer:
     if not trusted_actor.strip():
         raise ValueError("trusted actor cannot be empty")
 
     def scopes_for(actor: str) -> Sequence[str]:
-        return LOCAL_SCOPES if actor == trusted_actor else ()
+        trusted = actor == trusted_actor or (
+            trusted_prefix is not None and actor.startswith(trusted_prefix)
+        )
+        return LOCAL_SCOPES if trusted else ()
 
     return Authorizer(scopes_for)

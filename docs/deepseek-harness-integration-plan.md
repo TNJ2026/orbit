@@ -112,7 +112,7 @@ integrations/deepseek-harness/
 - 新增数据库级 Runtime ownership：对规范化数据库路径建立跨进程所有权锁、实例身份和 stale-owner 接管规则。Gateway 进程内引用计数不等于该保证；第二个 Harness 实例或用户手工执行 `orbit serve` 也必须经过同一约束。
 - 浏览器客户端不得直接访问 `127.0.0.1:8848`，统一经过 Host Remote API。
 
-Orbit 当前 `create_app()` 默认启用 `single_goal_mode`，并按 `owner_actor` 拒绝同一 actor 的第二个活跃 Run。Harness 接入不能使用与 Orbit UI 共用的 Workspace actor。P0 单 Workspace Bundle 已选用独立的 `harness:profile` actor，因此不会占用 Orbit UI 的 `local` slot；完整 Gateway 采用 Session-scoped actor，Execution Lease 阶段再升级为 Lease-scoped actor。其他备选方案保留如下：
+Orbit 当前 `create_app()` 默认启用 `single_goal_mode`，并按 `owner_actor` 拒绝同一 actor 的第二个活跃 Run。Harness 接入不能使用与 Orbit UI 共用的 Workspace actor。Host Gateway 通过受信任 stdio metadata 为每个 Session 使用 `harness:session:*` actor；Execution Lease 阶段再升级为 Lease-scoped actor。其他备选方案保留如下：
 
 - 为每个 Harness Session 或 Execution Lease 签发独立 scoped actor；或
 - 为 Harness 管理的 Runtime 显式关闭 `single_goal_mode`，由 Harness Lease/预算控制并发；或
@@ -146,7 +146,7 @@ Session-scoped actor 仍会串行同一 Session 中的多个 Run；若产品要�
 5. 提供最小 `harness` 工具 profile，只公开运行期工具，不默认暴露运维和 Workflow 编写工具。
 6. 加入针对 Harness MCP Client 的互操作测试和 60 秒超时测试。
 
-P0 已提供 `get_capabilities` 握手，返回 Orbit 版本、`orbit-harness/1` 集成协议、MCP 协议、事件 schema 和当前工具 profile。`harness` profile 只包含能力发现、Workflow/Run/Artifact 运行期工具。仓库内 `integrations/deepseek-harness` 是可安装的单 Workspace Profile Bundle；它是互操作基线，不承担动态 Workspace 路由。
+P0 已提供 `get_capabilities` 握手，返回 Orbit 版本、`orbit-harness/1` 集成协议、MCP 协议、事件 schema 和当前工具 profile。`harness` profile 只包含能力发现、Workflow/Run/Artifact 运行期工具。仓库内 `integrations/deepseek-harness` 是可构建的 Host Profile Bundle，按规范化 Workspace 复用 Runtime，并以 Session actor 路由调用。
 
 `goal` 是 Run Card 和 Orbit 历史列表的主显示文本；缺失时现有 UI 会回退显示 `run_id`，所以它与 `wait`、公共 DTO 对齐都属于 P0 阻断项。
 
@@ -178,7 +178,7 @@ interface OrbitRemote {
 
 ### 4.3 Session Event
 
-`OrbitSessionBridge` 订阅 Orbit `/events`（WebSocket）。原始事件只是重读提示，不直接写入 Harness；Bridge 读取权威 DTO、节流后写入三个事件族：
+`OrbitSessionBridge` 在 HTTP Runtime 上可订阅 `/events`（WebSocket）；Host Gateway 管理的 stdio Runtime 使用等价的 `list_runtime_events` 增量 MCP 工具。两者读取同一 actor-scoped 事件表和 position，不建立第二事实源。原始事件只是重读提示，不直接写入 Harness；Bridge 读取权威 DTO、节流后写入三个事件族：
 
 Orbit 的事件流已经同时携带 Run 级和节点级事件——`langgraph_run.{status}` 与 `langgraph_node.{outcome}`（后者带 `node_id` 和 `attempt_id`），二者在同一条流里按发生顺序排列。这是 Checkpoint 的 `currentSteps` 无需轮询即可保持新鲜的机制，也是节流窗口的输入来源：一个 Run 在节点密集推进时会产生远多于状态变化的提示，合并策略针对的正是这一段。
 
@@ -483,9 +483,9 @@ Orbit 正在等待确认
 
 当前仓库内基线（`codex/deepseek-harness-p0`）：
 
-- 已完成：MCP `goal` / `wait`、公共 Run DTO、`structuredContent` / `outputSchema`、`harness` profile、能力握手、actor 级事件过滤、跨进程数据库 OS ownership lock、独立 Harness actor、单 Workspace Profile Bundle。
+- 已完成：MCP `goal` / `wait`、公共 Run DTO、`structuredContent` / `outputSchema`、`harness` profile、能力握手、actor 级事件过滤、跨进程数据库 OS ownership lock、Session actor 路由、Workspace Gateway、Host Remote 与 Profile Bundle。
 - 已完成测试：MCP/HTTP 契约、profile、actor 事件隔离、ownership 互斥与 CLI surface。
-- 尚待 Harness 仓库实现：动态 Workspace `OrbitGateway`、Supervisor、类型化 Remote、Bundle 安装/卸载冒烟和真实 MCP Client 互操作门禁。
+- 已验证：独立 TypeScript build、npm pack、真实 `orbit mcp` capability handshake、Gateway 子进程端到端调用。合入 Harness 主仓后仍需运行 Typert 生成阶段和该仓的 Loader 安装/卸载门禁。
 
 交付：
 
@@ -509,6 +509,13 @@ Orbit 正在等待确认
 
 ### P1：会话原生集成
 
+当前实现基线：
+
+- `list_runtime_events` 与 `get_run_steps` 已进入 `harness` MCP profile，事件在查询层按 Session actor 隔离。
+- `OrbitSessionBridge` 按 position 续读、按 Run 合并 500ms 窗口、终态立即写入，并仅持久化展示安全的快照字段。
+- Bridge 在首次观察到任意 Run（包括只观察到终态）时先补 `orbit/run-started`，保证 Conversation assembler 始终具有唯一 start。
+- Web Client 已提供 `orbit-run` Conversation Node definition、`sourcePosition` 幂等 reducer 和基础 Run Card renderer；详情能力在 P2 基线上继续增强。
+
 交付：
 
 - OrbitSessionBridge。
@@ -524,6 +531,16 @@ Orbit 正在等待确认
 - Cancel 始终通过最新 `allowed_commands[]` 执行。
 
 ### P2：详情、人工介入与设置
+
+当前实现基线：
+
+- Harness MCP profile 已投影 Run Graph、Edges、Steps 和 sensitive-scope 的游标输出；Host Remote 同时提供 Artifact 元数据读取。
+- Run Card 已可打开右侧原生 Drawer，按 Step 展示指令、状态和该节点输出，并展示 Graph、Edge 与 Artifact 摘要。
+- Resume 表单只在最新 Run DTO advertise `langgraph_run.resume` 时出现；Host 执行前仍会重新读取 `allowed_commands[]` 和 revision。
+- General Settings 已提供按最近 Workspace 探测的 Orbit Runtime 连接状态。
+- Artifact 内容通过 Host Remote 做 2 MiB 上限的 base64 代理，Client 不接触 Orbit loopback 地址；超限明确降级而不截断文件。
+- 原始输出按 Step 展开后才从该节点 cursor 读取；运行中续读，折叠或卸载立即停止轮询，并按 `chunk_id` 去重排序。
+- Drawer 以 Session/Run 键恢复刷新前的打开状态，支持 Escape、Tab 焦点环和关闭后焦点归还。
 
 交付：
 
@@ -679,7 +696,7 @@ provider_name
 以下决策应在相应阶段实现前固化为 ADR 或协议文档。actor/single-goal 和数据库 ownership 的 P0 方案已经选定：
 
 1. 集成代码长期放在 Orbit 仓库还是独立 npm 仓库。
-2. **已定：** 静态 Bundle 使用 `harness:profile`；Gateway 使用 Session-scoped actor；P3 Lease 支持后使用 Lease-scoped actor。不与 UI 共用 actor，也不全局关闭 `single_goal_mode`。
+2. **已定：** Gateway 使用 Session-scoped actor；P3 Lease 支持后使用 Lease-scoped actor。不与 UI 共用 actor，也不全局关闭 `single_goal_mode`。
 3. **已定：** CLI `serve` / `mcp` 对规范化数据库路径取得 OS ownership lock；活进程不可 steal，进程退出由内核释放，手工启动遵循同一规则。非 CLI embedder 必须显式使用同一 ownership helper。
 4. Orbit → Harness Delegation Queue 使用长轮询、WebSocket、MCP 还是独立本地 IPC。
 5. Harness Session Event 的字段大小和更新频率上限。

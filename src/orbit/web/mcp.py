@@ -14,6 +14,7 @@ key is rejected rather than silently retried into a duplicate run.
 from __future__ import annotations
 
 import asyncio
+import base64
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -32,7 +33,7 @@ from ..workflow.application.authoring_job_service import (
 )
 from ..workflow.catalogs import InMemorySchemaCatalog
 from .api_v1 import (
-    OPS_READ_SCOPE, OPS_WRITE_SCOPE, READ_SCOPE, WRITE_SCOPE, Authorizer,
+    OPS_READ_SCOPE, OPS_WRITE_SCOPE, READ_SCOPE, SENSITIVE_SCOPE, WRITE_SCOPE, Authorizer,
 )
 from .run_projection import langgraph_run_dto
 
@@ -50,10 +51,13 @@ MCP_SESSION_PRESENCE_SECONDS = 60.0
 MCP_TOOL_PROFILES = frozenset({"full", "harness"})
 HARNESS_TOOL_NAMES = frozenset({
     "get_capabilities", "list_workflows", "list_runs", "inspect_run", "replay_langgraph_run",
+    "list_runtime_events", "get_run_steps", "get_run_graph", "get_run_edges",
+    "read_run_output",
     "start_run", "resume_run", "cancel_run", "list_artifacts",
-    "read_artifact", "get_artifact_lineage",
+    "read_artifact", "read_artifact_content", "get_artifact_lineage",
 })
 OBJECT_OUTPUT_SCHEMA = {"type": "object"}
+MCP_ARTIFACT_CONTENT_MAX_BYTES = 2 * 1024 * 1024
 
 
 class McpSessionRegistry:
@@ -382,6 +386,63 @@ def build_mcp_dispatcher(
                 },
             },
             {
+                "name": "get_run_steps",
+                "description": "Read the derived step summaries for one Run.",
+                "scope": READ_SCOPE,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"run_id": {"type": "string"}},
+                    "required": ["run_id"],
+                },
+            },
+            {
+                "name": "get_run_graph",
+                "description": "Read the immutable graph snapshot executed by one Run.",
+                "scope": READ_SCOPE,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"run_id": {"type": "string"}},
+                    "required": ["run_id"],
+                },
+            },
+            {
+                "name": "get_run_edges",
+                "description": "Read the derived edge decisions for one Run.",
+                "scope": READ_SCOPE,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"run_id": {"type": "string"}},
+                    "required": ["run_id"],
+                },
+            },
+            {
+                "name": "read_run_output",
+                "description": "Follow sensitive Handler console output after a chunk cursor.",
+                "scope": SENSITIVE_SCOPE,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "run_id": {"type": "string"},
+                        "after": {"type": "integer", "minimum": 0},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 500},
+                        "node_id": {"type": "string"},
+                    },
+                    "required": ["run_id"],
+                },
+            },
+            {
+                "name": "list_runtime_events",
+                "description": "Read actor-scoped Runtime event hints after a position.",
+                "scope": READ_SCOPE,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "after_position": {"type": "integer", "minimum": 0},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+                    },
+                },
+            },
+            {
                 "name": "replay_langgraph_run",
                 "description": (
                     "Re-derive a LangGraph run's state from what was recorded, "
@@ -482,6 +543,22 @@ def build_mcp_dispatcher(
                 },
             },
             {
+                "name": "read_artifact_content",
+                "description": "Read one small committed Artifact as bounded base64 content.",
+                "scope": READ_SCOPE,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "artifact_id": {"type": "string"},
+                        "max_bytes": {
+                            "type": "integer", "minimum": 1,
+                            "maximum": MCP_ARTIFACT_CONTENT_MAX_BYTES,
+                        },
+                    },
+                    "required": ["artifact_id"],
+                },
+            },
+            {
                 "name": "get_artifact_lineage",
                 "description": "Read upstream and downstream LangGraph Artifact lineage.",
                 "scope": READ_SCOPE,
@@ -535,6 +612,45 @@ def build_mcp_dispatcher(
                 langgraph_service.get(str(arguments["run_id"]), actor=actor),
                 can_write=guard.allows(actor, WRITE_SCOPE),
             )
+        if name == "get_run_steps":
+            run_id = str(arguments["run_id"])
+            langgraph_service.get(run_id, actor=actor)
+            return {"steps": list(langgraph_service.steps(run_id, actor=actor))}
+        if name == "get_run_graph":
+            run_id = str(arguments["run_id"])
+            return {"graph": langgraph_service.graph(run_id, actor=actor)}
+        if name == "get_run_edges":
+            run_id = str(arguments["run_id"])
+            return {"edges": list(langgraph_service.edges(run_id, actor=actor))}
+        if name == "read_run_output":
+            run_id = str(arguments["run_id"])
+            langgraph_service.get(run_id, actor=actor)
+            after = int(arguments.get("after", 0))
+            console = getattr(langgraph_service, "console", None)
+            if console is None:
+                chunks, position, has_more = [], after, False
+            else:
+                chunks, position, has_more = console.read(
+                    run_id, after_chunk_id=after,
+                    limit=min(500, max(1, int(arguments.get("limit", 200)))),
+                    node_id=arguments.get("node_id") or None,
+                )
+            return {"chunks": chunks, "after": position, "has_more": has_more}
+        if name == "list_runtime_events":
+            supplied = arguments.get("after_position")
+            position = (
+                langgraph_service.events_head() if supplied is None
+                else int(supplied)
+            )
+            events = langgraph_service.events_after(
+                position,
+                limit=min(200, max(1, int(arguments.get("limit", 200)))),
+                actor=actor,
+            )
+            return {
+                "events": list(events),
+                "next_position": events[-1]["position"] if events else position,
+            }
         if name == "start_run":
             wait = arguments.get("wait")
             if wait is not None and not isinstance(wait, bool):
@@ -595,6 +711,27 @@ def build_mcp_dispatcher(
             return langgraph_service.artifacts.get(
                 str(arguments["artifact_id"]), actor=actor,
             )
+        if name == "read_artifact_content":
+            if getattr(langgraph_service, "artifacts", None) is None:
+                raise LookupError("LangGraph Artifact store is unavailable")
+            artifact_id = str(arguments["artifact_id"])
+            metadata = langgraph_service.artifacts.get(artifact_id, actor=actor)
+            limit = min(
+                MCP_ARTIFACT_CONTENT_MAX_BYTES,
+                max(1, int(arguments.get(
+                    "max_bytes", MCP_ARTIFACT_CONTENT_MAX_BYTES,
+                ))),
+            )
+            if int(metadata["size_bytes"]) > limit:
+                raise ValueError(
+                    f"Artifact is too large for MCP content proxy ({metadata['size_bytes']} > {limit})"
+                )
+            content = langgraph_service.artifacts.read(artifact_id, actor=actor)
+            return {
+                "artifact": metadata,
+                "encoding": "base64",
+                "content": base64.b64encode(content).decode("ascii"),
+            }
         if name == "get_artifact_lineage":
             if getattr(langgraph_service, "artifacts", None) is None:
                 raise LookupError("LangGraph Artifact store is unavailable")
@@ -807,6 +944,7 @@ def serve_stdio(
     *,
     stdin=None,
     stdout=None,
+    actor_prefix: str | None = None,
 ) -> None:
     """Carry the same JSON-RPC over stdin/stdout until the client hangs up.
 
@@ -826,7 +964,7 @@ def serve_stdio(
     sink = sys.stdout if stdout is None else stdout
 
     try:
-        _pump(dispatch, actor, source, sink)
+        _pump(dispatch, actor, source, sink, actor_prefix=actor_prefix)
     except BrokenPipeError:
         # The client closed the pipe. That is how an MCP session ends, not a
         # fault to report — and reporting it would mean writing to the pipe
@@ -834,7 +972,30 @@ def serve_stdio(
         return
 
 
-def _pump(dispatch, actor, source, sink) -> None:
+def _stdio_actor(message, default: str, prefix: str | None) -> str:
+    if prefix is None:
+        return default
+    params = message.get("params")
+    meta = params.get("_meta") if isinstance(params, Mapping) else None
+    candidate = meta.get("orbit/actor") if isinstance(meta, Mapping) else None
+    if candidate is None:
+        return default
+    if (
+        not isinstance(candidate, str) or not candidate.startswith(prefix)
+        or len(candidate) > 256 or not candidate.strip()
+    ):
+        raise ValueError("stdio actor is outside the configured prefix")
+    return candidate
+
+
+def _pump(dispatch, actor, source, sink, *, actor_prefix=None) -> None:
+    def routed(message):
+        try:
+            message_actor = _stdio_actor(message, actor, actor_prefix)
+        except ValueError as exc:
+            return _failure(message.get("id"), NOT_AUTHORIZED, str(exc))
+        return dispatch(message, message_actor)
+
     for line in source:
         line = line.strip()
         if not line:
@@ -848,7 +1009,7 @@ def _pump(dispatch, actor, source, sink) -> None:
             responses = [
                 response for item in message
                 if isinstance(item, Mapping)
-                and (response := dispatch(item, actor)) is not None
+                and (response := routed(item)) is not None
             ]
             if responses:
                 _emit(sink, responses)
@@ -856,7 +1017,7 @@ def _pump(dispatch, actor, source, sink) -> None:
         if not isinstance(message, Mapping) or message.get("jsonrpc") != "2.0":
             _emit(sink, _failure(None, INVALID_REQUEST, "expected a JSON-RPC 2.0 message"))
             continue
-        response = dispatch(message, actor)
+        response = routed(message)
         if response is not None:
             # A notification gets no line at all: on this transport silence is
             # the whole of "no response", there being no 202 to send.

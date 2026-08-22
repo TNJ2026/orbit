@@ -526,6 +526,9 @@ def _mcp(args) -> None:
     from .workflow.artifacts import LocalCASBackend
     from .platform.runtime_ownership import RuntimeOwnership, RuntimeOwnershipError
 
+    actor_prefix = getattr(args, "actor_prefix", None)
+    if actor_prefix is not None and not actor_prefix.strip():
+        raise SystemExit("orbit mcp: --actor-prefix cannot be empty")
     db_path = _runtime_db_path(args.db)
     try:
         assert_runtime_schema(db_path)
@@ -568,7 +571,9 @@ def _mcp(args) -> None:
             # There is no connection to authenticate. The person who started this
             # process is the caller, and on a local runtime that is `local` —
             # the same actor loopback would have resolved to.
-            authorizer=local_authorizer(args.actor),
+            authorizer=local_authorizer(
+                args.actor, trusted_prefix=actor_prefix,
+            ),
             unlimited_actors=(args.actor,),
             token_exempt_actors=(args.actor,),
             operator_actors=(args.actor,),
@@ -586,7 +591,10 @@ def _mcp(args) -> None:
             f"orbit MCP on stdio (db: {db_path}, engine: langgraph)",
             file=sys.stderr, flush=True,
         )
-        serve_stdio(app.state.mcp_dispatch, args.actor)
+        serve_stdio(
+            app.state.mcp_dispatch, args.actor,
+            actor_prefix=actor_prefix,
+        )
     except KeyboardInterrupt:
         pass
     finally:
@@ -750,6 +758,10 @@ def build_parser() -> argparse.ArgumentParser:
     mcp_cmd.add_argument(
         "--actor", default="local",
         help="Owner actor for stdio calls (default: local)",
+    )
+    mcp_cmd.add_argument(
+        "--actor-prefix", default=None,
+        help="Trust per-call _meta orbit/actor values under this prefix",
     )
 
     agent_app_cmd = sub.add_parser(

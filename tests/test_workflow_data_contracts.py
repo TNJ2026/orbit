@@ -221,10 +221,6 @@ class WorkflowDataContractTests(unittest.TestCase):
         self.assertEqual("$.transport", caught.exception.json_path)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class PortDataPolicyTests(unittest.TestCase):
     """What each transport may declare, and what it is given if it does not.
 
@@ -363,3 +359,7 @@ class DerivedIdentityTests(unittest.TestCase):
     def test_an_artifact_owner_is_a_run_or_an_attempt(self) -> None:
         with self.assertRaisesRegex(ValueError, "expected run/attempt id"):
             derive_artifact_id(EntityId("node_run", "a" * 32), "result", "one")
+
+
+if __name__ == "__main__":
+    unittest.main()
