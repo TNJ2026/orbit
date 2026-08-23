@@ -51,11 +51,14 @@ window.__ModuleLoader__.load({
 		}
 		const overlayStyle = {
 			position: "fixed",
-			inset: 0,
+			inset: "0 0 0 auto",
+			width: "min(1100px, 70vw)",
 			zIndex: 1200,
 			display: "flex",
 			flexDirection: "column",
-			background: "var(--background, #fff)"
+			background: "var(--background, #fff)",
+			borderLeft: "1px solid #8884",
+			boxShadow: "-12px 0 30px #0003"
 		};
 		const barStyle = {
 			display: "flex",
@@ -90,7 +93,6 @@ window.__ModuleLoader__.load({
 			}, [loaded, url]);
 			return (0, react.createElement)("section", {
 				role: "dialog",
-				"aria-modal": true,
 				"aria-label": "Orbit Runtime",
 				style: overlayStyle
 			}, (0, react.createElement)("div", { style: barStyle }, (0, react.createElement)("strong", null, "Orbit Runtime"), (0, react.createElement)("span", { style: {

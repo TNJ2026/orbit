@@ -39,9 +39,14 @@ function writeOpen(sessionId: string, open: boolean): void {
   window.dispatchEvent(new CustomEvent(openEvent, { detail: { sessionId } }))
 }
 
+/* A drawer, not a takeover. The conversation stays readable beside it, which
+   is the point of showing Orbit here rather than in a tab — and is why the
+   panel does not claim to be modal: nothing behind it is inert. */
 const overlayStyle = {
-  position: 'fixed' as const, inset: 0, zIndex: 1200, display: 'flex',
-  flexDirection: 'column' as const, background: 'var(--background, #fff)',
+  position: 'fixed' as const, inset: '0 0 0 auto', width: 'min(1100px, 70vw)',
+  zIndex: 1200, display: 'flex', flexDirection: 'column' as const,
+  background: 'var(--background, #fff)', borderLeft: '1px solid #8884',
+  boxShadow: '-12px 0 30px #0003',
 }
 const barStyle = {
   display: 'flex', alignItems: 'center', justifyContent: 'space-between',
@@ -69,7 +74,7 @@ function OrbitPanel({ sessionId, url, onClose }: PanelProps) {
     return () => clearTimeout(timer)
   }, [loaded, url])
   return createElement('section', {
-    role: 'dialog', 'aria-modal': true, 'aria-label': 'Orbit Runtime', style: overlayStyle,
+    role: 'dialog', 'aria-label': 'Orbit Runtime', style: overlayStyle,
   },
     createElement('div', { style: barStyle },
       createElement('strong', null, 'Orbit Runtime'),
