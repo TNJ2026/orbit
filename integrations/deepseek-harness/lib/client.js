@@ -829,11 +829,13 @@ window.__ModuleLoader__.load({
 					}
 					return [{
 						name: "orbit",
-						description: t("togglePanel")
+						description: t("togglePanel"),
+						value: "panel"
 					}, {
 						name: LIST_COMMAND,
 						description: t("askWhatRuns"),
-						hint: t("askWhatRunsHint")
+						hint: t("askWhatRunsHint"),
+						value: "open"
 					}].filter((item) => item.name.includes(typed.toLowerCase()));
 				},
 				onPick: (pick) => {
@@ -843,7 +845,11 @@ window.__ModuleLoader__.load({
 						name: pick.candidate.name,
 						id: value.slice(4)
 					}) };
-					return { claim: claim() };
+					if (value === "open") return {
+						text: `/${LIST_COMMAND} `,
+						continue: true
+					};
+					if (value === "panel") return { claim: claim() };
 				},
 				matchSpace: (_session, token) => token === "/orbit" ? { claim: claim() } : void 0,
 				matchEnter: async (_session, line) => /^\/orbit(?:\s|$)/u.test(line.trim()) ? { claim: claim() } : void 0

@@ -77,8 +77,8 @@ function registerOrbitSlashSource(ctx: ClientContext, t: Translate): void {
         }))
       }
       return [
-        { name: 'orbit', description: t('togglePanel') },
-        { name: LIST_COMMAND, description: t('askWhatRuns'), hint: t('askWhatRunsHint') },
+        { name: 'orbit', description: t('togglePanel'), value: 'panel' },
+        { name: LIST_COMMAND, description: t('askWhatRuns'), hint: t('askWhatRunsHint'), value: 'open' },
       ].filter(item => item.name.includes(typed.toLowerCase()))
     },
     onPick: (pick: { candidate: { name: string; value?: string; description?: string } }) => {
@@ -87,7 +87,15 @@ function registerOrbitSlashSource(ctx: ClientContext, t: Translate): void {
       if (value?.startsWith('run:')) {
         return { text: t('runPrefix', { name: pick.candidate.name, id: value.slice(4) }) }
       }
-      return { claim: claim() }
+      // The opener writes its own token back and keeps the menu up, so the next
+      // query is the search.
+      if (value === 'open') return { text: `/${LIST_COMMAND} `, continue: true }
+      if (value === 'panel') return { claim: claim() }
+      // No default. The opener shipped without a payload and fell through to
+      // the panel's claim, so the command appeared to do nothing while quietly
+      // folding the panel — a candidate this does not recognise should do
+      // nothing visibly rather than something else silently.
+      return undefined
     },
     // Longest token first: `/orbit-workflows` starts with `/orbit`, and the
     // shorter claim would swallow it and then refuse its own name as an

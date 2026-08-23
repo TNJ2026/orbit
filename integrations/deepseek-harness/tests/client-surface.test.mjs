@@ -129,3 +129,17 @@ test('picking a Workflow writes a request, it does not start one', () => {
   const pick = code.slice(code.indexOf('onPick:'), code.indexOf('matchSpace:'))
   assert.equal(/start_run|runCommand|getPanelState/.test(pick), false, 'the menu grew a launcher')
 })
+
+test('every menu candidate is told apart by its own payload, not by falling through', () => {
+  // The opener shipped without a `value`, so picking it fell to the last branch
+  // and claimed `/orbit` — the command appeared to do nothing while quietly
+  // folding the panel. Each candidate carries what onPick dispatches on.
+  const candidates = code.slice(code.indexOf('candidates:'), code.indexOf('onPick:'))
+  const named = [...candidates.matchAll(/\{ name: (?:'[a-z]+'|LIST_COMMAND)[^}]*\}/g)].map(([hit]) => hit)
+  assert.ok(named.length >= 2, 'the command candidates were not found')
+  for (const entry of named) assert.match(entry, /value:/, `${entry} has no payload to dispatch on`)
+})
+
+test('picking the opener reopens the menu instead of settling', () => {
+  assert.match(code, /text: `\/\$\{LIST_COMMAND\} `, continue: true/)
+})
