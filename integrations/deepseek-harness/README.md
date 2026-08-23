@@ -23,8 +23,9 @@ Install this directory into the target Harness Web Profile with one command:
 `dsh plugin --profile web add /absolute/path/to/orbit/integrations/deepseek-harness`
 
 Then restart that Profile. Remove it with
-`dsh plugin --profile web remove @orbit-runtime/dsh-orbit`. Client code accesses the generated `orbit` Remote;
-it never receives the child process handle or Orbit loopback credentials.
+`dsh plugin --profile web remove @orbit-runtime/dsh-orbit`. Client code uses the
+bundle's same-origin Host API; it never receives the Runtime endpoint, child
+process handle, actor header, or Orbit loopback credentials.
 
 Maintainers can verify install, Host/Web startup, HTTP readiness and clean
 removal in an isolated temporary Profile with `npm run smoke:profile`. Set
@@ -69,13 +70,23 @@ output, bounded Artifact content, and command execution. Commands are accepted
 only after the Host re-reads the Run and matches the requested command and
 revision against Orbit's current `allowed_commands[]`.
 
-The Client contributes an `orbit-run` Conversation Node, a right-side Run
+The Client contributes `/orbit <goal>` through Harness's native slash-trigger
+pipeline, which opens a Workflow picker
+before starting anything. The picker lists only published, ready Workflows and
+the Host revalidates the exact Workflow/version before calling `start_run` with
+`wait: false`. Its pending and completed presentation uses Harness's durable
+`command/run` / `command/done` lifecycle. The browser also retains the active
+picker request in session storage so a refresh restores the dialog without
+introducing unknown third-party Session event types.
+
+The Client also contributes an `orbit-run` Conversation Node, a right-side Run
 detail drawer with lazy cursor-followed step output, bounded Artifact preview,
 refresh restoration and keyboard/focus handling, a guarded Human Resume form, and an
 Orbit Runtime row in General Settings. The row reports Orbit/integration/MCP
 versions and the active tool profile, supports an explicit reconnect probe, and
-shows a copyable independent-Runtime start command when disconnected. Browser code reaches Orbit only through
-the generated Host Remote; it never connects to loopback directly.
+shows a copyable independent-Runtime start command when disconnected. Browser
+code reaches Orbit only through `/plugins/dsh-orbit/api` on the Harness origin;
+it never connects to Orbit loopback directly.
 
 The native `Orbit` settings section is the product workspace: actor-scoped Run
 history with the full detail Drawer, Workflow Catalog plus asynchronous Agent

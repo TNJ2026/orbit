@@ -37,6 +37,7 @@ import { OrbitGateway } from './gateway.js';
 import { OrbitSessionBridge, restoredBridgeState, sessionCanBridge } from './session-bridge.js';
 import { OrbitToolBridge } from './orbit-tools.js';
 import { artifactImageInput } from './artifact-import.js';
+import { ORBIT_COMMAND, ORBIT_SELECTION_PENDING_TEXT, orbitGoal } from './orbit-command.js';
 let OrbitRemoteService = (() => {
     let _classSuper = TypertRemoteService;
     let _instanceExtraInitializers = [];
@@ -44,6 +45,8 @@ let OrbitRemoteService = (() => {
     let _getDiagnostics_decorators;
     let _listWorkflows_decorators;
     let _listRuns_decorators;
+    let _startWorkflowSelection_decorators;
+    let _cancelWorkflowSelection_decorators;
     let _generateWorkflow_decorators;
     let _modifyWorkflow_decorators;
     let _getAuthoringJob_decorators;
@@ -65,6 +68,8 @@ let OrbitRemoteService = (() => {
             _getDiagnostics_decorators = [Remote('getDiagnostics')];
             _listWorkflows_decorators = [Remote('listWorkflows')];
             _listRuns_decorators = [Remote('listRuns')];
+            _startWorkflowSelection_decorators = [Remote('startWorkflowSelection')];
+            _cancelWorkflowSelection_decorators = [Remote('cancelWorkflowSelection')];
             _generateWorkflow_decorators = [Remote('generateWorkflow')];
             _modifyWorkflow_decorators = [Remote('modifyWorkflow')];
             _getAuthoringJob_decorators = [Remote('getAuthoringJob')];
@@ -83,6 +88,8 @@ let OrbitRemoteService = (() => {
             __esDecorate(this, null, _getDiagnostics_decorators, { kind: "method", name: "getDiagnostics", static: false, private: false, access: { has: obj => "getDiagnostics" in obj, get: obj => obj.getDiagnostics }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _listWorkflows_decorators, { kind: "method", name: "listWorkflows", static: false, private: false, access: { has: obj => "listWorkflows" in obj, get: obj => obj.listWorkflows }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _listRuns_decorators, { kind: "method", name: "listRuns", static: false, private: false, access: { has: obj => "listRuns" in obj, get: obj => obj.listRuns }, metadata: _metadata }, null, _instanceExtraInitializers);
+            __esDecorate(this, null, _startWorkflowSelection_decorators, { kind: "method", name: "startWorkflowSelection", static: false, private: false, access: { has: obj => "startWorkflowSelection" in obj, get: obj => obj.startWorkflowSelection }, metadata: _metadata }, null, _instanceExtraInitializers);
+            __esDecorate(this, null, _cancelWorkflowSelection_decorators, { kind: "method", name: "cancelWorkflowSelection", static: false, private: false, access: { has: obj => "cancelWorkflowSelection" in obj, get: obj => obj.cancelWorkflowSelection }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _generateWorkflow_decorators, { kind: "method", name: "generateWorkflow", static: false, private: false, access: { has: obj => "generateWorkflow" in obj, get: obj => obj.generateWorkflow }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _modifyWorkflow_decorators, { kind: "method", name: "modifyWorkflow", static: false, private: false, access: { has: obj => "modifyWorkflow" in obj, get: obj => obj.modifyWorkflow }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _getAuthoringJob_decorators, { kind: "method", name: "getAuthoringJob", static: false, private: false, access: { has: obj => "getAuthoringJob" in obj, get: obj => obj.getAuthoringJob }, metadata: _metadata }, null, _instanceExtraInitializers);
@@ -110,6 +117,7 @@ let OrbitRemoteService = (() => {
             this.hostSessions = ctx.get('sessions');
             this.attachments = ctx.get('attachments');
             new OrbitToolBridge(ctx, this.gateway).register();
+            this.registerWebApi(ctx);
             for (const session of this.hostSessions.list())
                 this.startSessionBridge(ctx, session);
             ctx.on('session/created', session => { this.startSessionBridge(ctx, session); }, { global: true });
@@ -119,6 +127,79 @@ let OrbitRemoteService = (() => {
                     controller.abort();
                 this.bridges.clear();
             }, 'orbit: stop Session Bridges');
+        }
+        registerWebApi(ctx) {
+            let registered = false;
+            const mount = () => {
+                if (registered)
+                    return;
+                const webServer = (ctx.get('webServer') ?? ctx.get('httpServer'));
+                if (!webServer)
+                    return;
+                registered = true;
+                ctx.effect(() => webServer.register({
+                    kind: 'exact', path: '/plugins/dsh-orbit/api',
+                    handler: async (req, res) => {
+                        if (req.method !== 'POST') {
+                            res.writeHead(405, { allow: 'POST' });
+                            res.end();
+                            return;
+                        }
+                        const controller = new AbortController();
+                        req.once('aborted', () => controller.abort(new Error('Orbit client request aborted')));
+                        try {
+                            const chunks = [];
+                            let size = 0;
+                            for await (const chunk of req) {
+                                const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+                                size += buffer.length;
+                                if (size > 256 * 1024)
+                                    throw new Error('Orbit client request exceeds 256 KiB');
+                                chunks.push(buffer);
+                            }
+                            const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+                            if (typeof body.action !== 'string' || !Array.isArray(body.args))
+                                throw new Error('Orbit client request requires action and args');
+                            const result = await this.dispatchWebApi(body.action, body.args, controller.signal);
+                            res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+                            res.end(JSON.stringify({ result: result === undefined ? null : result }));
+                        }
+                        catch (error) {
+                            res.writeHead(400, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+                            res.end(JSON.stringify({ error: String(error) }));
+                        }
+                    },
+                }), 'orbit: browser Host API');
+            };
+            mount();
+            ctx.on('internal/service', name => { if (name === 'webServer' || name === 'httpServer')
+                mount(); });
+        }
+        async dispatchWebApi(action, args, signal) {
+            switch (action) {
+                case 'getRuntime': return await this.getRuntime(args[0], signal);
+                case 'getDiagnostics': return await this.getDiagnostics(args[0], String(args[1]), signal);
+                case 'listWorkflows': return await this.listWorkflows(args[0], String(args[1]), signal);
+                case 'listRuns': return await this.listRuns(args[0], String(args[1]), args[2] === undefined ? undefined : String(args[2]), signal);
+                case 'beginWorkflowSelection': return this.beginWorkflowSelection(String(args[0]), String(args[1]), signal);
+                case 'getPendingWorkflowSelection': return this.getPendingWorkflowSelection(String(args[0]), signal);
+                case 'startWorkflowSelection': return await this.startWorkflowSelection(args[0], String(args[1]), String(args[2]), String(args[3]), Number(args[4]), args[5], signal);
+                case 'cancelWorkflowSelection': return await this.cancelWorkflowSelection(String(args[0]), String(args[1]), signal);
+                case 'generateWorkflow': return await this.generateWorkflow(args[0], String(args[1]), String(args[2]), signal);
+                case 'modifyWorkflow': return await this.modifyWorkflow(args[0], String(args[1]), String(args[2]), String(args[3]), Boolean(args[4]), signal);
+                case 'getAuthoringJob': return await this.getAuthoringJob(args[0], String(args[1]), String(args[2]), signal);
+                case 'getRun': return await this.getRun(args[0], String(args[1]), String(args[2]), signal);
+                case 'getSteps': return await this.getSteps(args[0], String(args[1]), String(args[2]), signal);
+                case 'getGraph': return await this.getGraph(args[0], String(args[1]), String(args[2]), signal);
+                case 'getEdges': return await this.getEdges(args[0], String(args[1]), String(args[2]), signal);
+                case 'readOutput': return await this.readOutput(args[0], String(args[1]), String(args[2]), Number(args[3]), args[4] === undefined ? undefined : String(args[4]), signal);
+                case 'listArtifacts': return await this.listArtifacts(args[0], String(args[1]), args[2] === undefined ? undefined : String(args[2]), signal);
+                case 'getArtifactContent': return await this.getArtifactContent(args[0], String(args[1]), String(args[2]), signal);
+                case 'importArtifact': return await this.importArtifact(args[0], String(args[1]), String(args[2]), signal);
+                case 'executeCommand': return await this.executeCommand(args[0], signal);
+                case 'reconcileDelegation': return await this.reconcileDelegation(args[0], String(args[1]), String(args[2]), String(args[3]), args[4], String(args[5]), signal);
+                default: throw new Error(`Unknown Orbit client action: ${action}`);
+            }
         }
         startSessionBridge(ctx, session) {
             const sessionId = String(session.id);
@@ -229,6 +310,59 @@ let OrbitRemoteService = (() => {
             return await this.readListField(workspace, sessionId, 'list_runs', 'runs', {
                 limit: 100, ...(status ? { status } : {}),
             }, signal);
+        }
+        async startWorkflowSelection(workspace, sessionId, selectionId, workflowId, workflowVersion, input, signal) {
+            signal.throwIfAborted();
+            if (input === null || typeof input !== 'object' || Array.isArray(input))
+                throw new Error('Workflow input must be a JSON object');
+            const session = this.selectionSession(sessionId, selectionId);
+            const workflows = await this.readListField(workspace, sessionId, 'list_workflows', 'workflows', { ready_only: true }, signal);
+            const workflow = workflows.find(item => item.workflow_id === workflowId && item.latest_version === workflowVersion);
+            if (!workflow)
+                throw new Error('Selected Workflow/version is not published and ready in this Workspace');
+            const goal = this.selectionGoal(session, selectionId);
+            const run = await this.gateway.call(workspace, sessionId, 'start_run', {
+                workflow_id: workflowId, workflow_version: workflowVersion, input, goal,
+                wait: false, idempotency_key: crypto.randomUUID(),
+            });
+            this.settleSelection(session, selectionId, `Started ${workflowId}@${String(workflowVersion)} as Run ${run.run_id}`);
+            return run;
+        }
+        beginWorkflowSelection(sessionId, rawGoal, signal) {
+            signal.throwIfAborted();
+            const session = this.hostSessions.list().find(item => String(item.id) === sessionId);
+            if (!session?.header.cwd)
+                throw new Error('Orbit requires a live Harness Session with a Workspace');
+            const goal = orbitGoal(rawGoal);
+            if (!goal || goal.length > 4000)
+                throw new Error('Orbit goal must be 1-4000 characters');
+            const selectionId = `orbit-${crypto.randomUUID()}`;
+            session.append.bind(session)('command/run', {
+                commandId: selectionId, name: ORBIT_COMMAND, args: ` ${goal}`, source: { kind: 'user' },
+            });
+            return { selectionId };
+        }
+        getPendingWorkflowSelection(sessionId, signal) {
+            signal.throwIfAborted();
+            const session = this.hostSessions.list().find(item => String(item.id) === sessionId);
+            if (!session)
+                return null;
+            const settled = new Set(session.events.filter(event => event.type === 'command/done')
+                .map(event => String(event.data.commandId)));
+            const requested = [...session.events].reverse().find(event => event.type === 'command/run'
+                && event.data.name === ORBIT_COMMAND
+                && !settled.has(String(event.data.commandId)));
+            if (!requested)
+                return null;
+            return {
+                selectionId: String(requested.data.commandId),
+                goal: orbitGoal(String(requested.data.args || '')),
+            };
+        }
+        async cancelWorkflowSelection(sessionId, selectionId, signal) {
+            signal.throwIfAborted();
+            const session = this.selectionSession(sessionId, selectionId);
+            this.settleSelection(session, selectionId, 'Orbit Workflow selection cancelled.');
         }
         async generateWorkflow(workspace, sessionId, prompt, signal) {
             signal.throwIfAborted();
@@ -349,6 +483,32 @@ let OrbitRemoteService = (() => {
             finally {
                 await release();
             }
+        }
+        selectionSession(sessionId, selectionId) {
+            const session = this.hostSessions.list().find(item => String(item.id) === sessionId);
+            if (!session)
+                throw new Error('Orbit Workflow selection requires a live Harness Session');
+            this.selectionGoal(session, selectionId);
+            const settled = session.events.some(event => event.type === 'command/done'
+                && String(event.data.commandId) === selectionId
+                && String(event.data.text || '') !== ORBIT_SELECTION_PENDING_TEXT);
+            if (settled)
+                throw new Error('Orbit Workflow selection is already settled');
+            return session;
+        }
+        selectionGoal(session, selectionId) {
+            const requested = [...session.events].reverse().find(event => (event.type === 'command/run'
+                && String(event.data.commandId) === selectionId
+                && event.data.name === 'orbit'));
+            if (!requested)
+                throw new Error('Orbit Workflow selection request was not found in this Session');
+            const goal = String(requested.data.args || '').trim();
+            if (!goal)
+                throw new Error('Orbit Workflow selection requires a non-empty goal');
+            return goal;
+        }
+        settleSelection(session, selectionId, text) {
+            session.append.bind(session)('command/done', { commandId: selectionId, kind: 'success', text });
         }
         async executeCommand(request, signal) {
             signal.throwIfAborted();

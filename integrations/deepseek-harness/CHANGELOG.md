@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Added `/orbit <goal>` with a native searchable Workflow picker, JSON input,
+  keyboard/focus handling, ready-version revalidation, and refresh-safe Harness
+  command lifecycle persistence.
+- Added a same-origin bounded Host API for browser UI calls, keeping Runtime
+  endpoints and actor credentials out of Client code.
 - Changed the Host Gateway to discover an independently started `orbit serve`
   Runtime and communicate over HTTP MCP; it no longer owns a Runtime process.
 - Removed Harness Subagent execution from Session Bridge startup. CLI Agent

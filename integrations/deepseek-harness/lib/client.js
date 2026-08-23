@@ -5,6 +5,7 @@ window.__ModuleLoader__.load({
 		var exports = module.exports;
 		Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
 		let react = require("react");
+		//#endregion
 		//#region lib/client.js
 		const orbitRunDefinition = {
 			kind: "orbit-run",
@@ -63,6 +64,161 @@ window.__ModuleLoader__.load({
 				}
 			}
 		};
+		async function orbitHostCall(action, args, signal) {
+			const response = await fetch("/plugins/dsh-orbit/api", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					action,
+					args
+				}),
+				signal
+			});
+			const payload = await response.json();
+			if (!response.ok || payload.error) throw new Error(payload.error || `Orbit Host API failed with HTTP ${String(response.status)}`);
+			return payload.result;
+		}
+		function orbitHttpClient() {
+			return { orbit: {
+				getRuntime: (workspace, signal) => orbitHostCall("getRuntime", [workspace], signal),
+				getDiagnostics: (workspace, sessionId, signal) => orbitHostCall("getDiagnostics", [workspace, sessionId], signal),
+				listWorkflows: (workspace, sessionId, signal) => orbitHostCall("listWorkflows", [workspace, sessionId], signal),
+				listRuns: (workspace, sessionId, status, signal) => orbitHostCall("listRuns", [
+					workspace,
+					sessionId,
+					status
+				], signal),
+				beginWorkflowSelection: (sessionId, goal, signal) => orbitHostCall("beginWorkflowSelection", [sessionId, goal], signal),
+				getPendingWorkflowSelection: (sessionId, signal) => orbitHostCall("getPendingWorkflowSelection", [sessionId], signal),
+				startWorkflowSelection: (workspace, sessionId, selectionId, workflowId, workflowVersion, input, signal) => orbitHostCall("startWorkflowSelection", [
+					workspace,
+					sessionId,
+					selectionId,
+					workflowId,
+					workflowVersion,
+					input
+				], signal),
+				cancelWorkflowSelection: (sessionId, selectionId, signal) => orbitHostCall("cancelWorkflowSelection", [sessionId, selectionId], signal),
+				generateWorkflow: (workspace, sessionId, prompt, signal) => orbitHostCall("generateWorkflow", [
+					workspace,
+					sessionId,
+					prompt
+				], signal),
+				modifyWorkflow: (workspace, sessionId, workflowId, prompt, regenerate, signal) => orbitHostCall("modifyWorkflow", [
+					workspace,
+					sessionId,
+					workflowId,
+					prompt,
+					regenerate
+				], signal),
+				getAuthoringJob: (workspace, sessionId, jobId, signal) => orbitHostCall("getAuthoringJob", [
+					workspace,
+					sessionId,
+					jobId
+				], signal),
+				getRun: (workspace, sessionId, runId, signal) => orbitHostCall("getRun", [
+					workspace,
+					sessionId,
+					runId
+				], signal),
+				getSteps: (workspace, sessionId, runId, signal) => orbitHostCall("getSteps", [
+					workspace,
+					sessionId,
+					runId
+				], signal),
+				getGraph: (workspace, sessionId, runId, signal) => orbitHostCall("getGraph", [
+					workspace,
+					sessionId,
+					runId
+				], signal),
+				getEdges: (workspace, sessionId, runId, signal) => orbitHostCall("getEdges", [
+					workspace,
+					sessionId,
+					runId
+				], signal),
+				readOutput: (workspace, sessionId, runId, after, nodeId, signal) => orbitHostCall("readOutput", [
+					workspace,
+					sessionId,
+					runId,
+					after,
+					nodeId
+				], signal),
+				listArtifacts: (workspace, sessionId, runId, signal) => orbitHostCall("listArtifacts", [
+					workspace,
+					sessionId,
+					runId
+				], signal),
+				getArtifactContent: (workspace, sessionId, artifactId, signal) => orbitHostCall("getArtifactContent", [
+					workspace,
+					sessionId,
+					artifactId
+				], signal),
+				importArtifact: (workspace, sessionId, artifactId, signal) => orbitHostCall("importArtifact", [
+					workspace,
+					sessionId,
+					artifactId
+				], signal),
+				executeCommand: (request, signal) => orbitHostCall("executeCommand", [request], signal),
+				reconcileDelegation: (workspace, sessionId, runId, delegationId, outcome, note, signal) => orbitHostCall("reconcileDelegation", [
+					workspace,
+					sessionId,
+					runId,
+					delegationId,
+					outcome,
+					note
+				], signal)
+			} };
+		}
+		const pickerEvent = "orbit:workflow-picker";
+		const pickerKey = (sessionId) => `orbit.workflow-picker.${sessionId}`;
+		function readPickerRequest(sessionId) {
+			try {
+				const value = sessionStorage.getItem(pickerKey(sessionId));
+				return value ? JSON.parse(value) : null;
+			} catch {
+				return null;
+			}
+		}
+		function writePickerRequest(sessionId, request) {
+			if (request) sessionStorage.setItem(pickerKey(sessionId), JSON.stringify(request));
+			else sessionStorage.removeItem(pickerKey(sessionId));
+			window.dispatchEvent(new CustomEvent(pickerEvent, { detail: { sessionId } }));
+		}
+		function registerOrbitSlashSource(ctx, remote) {
+			const inputTriggers = ctx.get("inputTriggers");
+			if (!inputTriggers) throw new Error("Orbit /orbit UI requires the Harness inputTriggers service");
+			const claim = (sessionId) => ({
+				token: "/orbit ",
+				hint: "<goal>",
+				submit: async (args) => {
+					const goal = args.trim();
+					if (!goal) return {
+						kind: "error",
+						text: "Usage: /orbit <goal>"
+					};
+					const controller = new AbortController();
+					writePickerRequest(sessionId, {
+						selectionId: (await remote.orbit.beginWorkflowSelection(sessionId, goal, controller.signal)).selectionId,
+						goal
+					});
+					return { kind: "success" };
+				}
+			});
+			ctx.effect(() => inputTriggers.registerSource({
+				trigger: "/",
+				name: "orbit",
+				order: -10,
+				showGroupTitle: false,
+				candidates: async (_session, request) => "orbit".includes(request.query.toLowerCase()) ? [{
+					name: "orbit",
+					description: "choose and start an Orbit Workflow for a goal",
+					hint: "<goal>"
+				}] : [],
+				onPick: (pick) => ({ claim: claim(String(pick.session.sessionId)) }),
+				matchSpace: (session, token) => token === "/orbit" ? { claim: claim(String(session.sessionId)) } : void 0,
+				matchEnter: async (session, line) => /^\/orbit(?:\s|$)/u.test(line.trim()) ? { claim: claim(String(session.sessionId)) } : void 0
+			}), "orbit: slash Workflow picker");
+		}
 		function drawerStyle() {
 			return {
 				position: "fixed",
@@ -85,6 +241,198 @@ window.__ModuleLoader__.load({
 				after: Math.max(previous.after, next.after),
 				has_more: next.has_more
 			};
+		}
+		function workflowPickerStyle() {
+			return {
+				position: "fixed",
+				inset: 0,
+				zIndex: 1100,
+				display: "grid",
+				placeItems: "center",
+				background: "#0008",
+				padding: 20
+			};
+		}
+		function OrbitCommandView({ node, request, sessionId, useSessions, remote }) {
+			const cwd = useSessions((state) => state.byId[sessionId]?.cwd);
+			const goal = request?.goal || node?.args?.trim() || "";
+			const selectionId = request?.selectionId || String(node?.commandId || "");
+			const pending = request !== void 0 || node?.outcome === null || node?.outcome?.text === "Choose an Orbit Workflow to continue.";
+			const [open, setOpen] = (0, react.useState)(pending);
+			const [workflows, setWorkflows] = (0, react.useState)([]);
+			const [selectedId, setSelectedId] = (0, react.useState)("");
+			const [query, setQuery] = (0, react.useState)("");
+			const [inputText, setInputText] = (0, react.useState)("{}");
+			const [loading, setLoading] = (0, react.useState)(false);
+			const [error, setError] = (0, react.useState)("");
+			const dialogRef = (0, react.useRef)(null);
+			const triggerRef = (0, react.useRef)(null);
+			const closeRef = (0, react.useRef)(null);
+			const workspace = {
+				id: `cwd:${cwd || ""}`,
+				canonicalPath: cwd || ""
+			};
+			(0, react.useEffect)(() => {
+				if (!open || !pending || !cwd) return;
+				const controller = new AbortController();
+				setLoading(true);
+				setError("");
+				remote.orbit.listWorkflows(workspace, String(sessionId), controller.signal).then((items) => {
+					setWorkflows(items);
+					setSelectedId((current) => current || items[0]?.workflow_id || "");
+				}).catch((reason) => {
+					if (!controller.signal.aborted) setError(String(reason));
+				}).finally(() => {
+					if (!controller.signal.aborted) setLoading(false);
+				});
+				return () => controller.abort();
+			}, [
+				open,
+				pending,
+				cwd,
+				sessionId
+			]);
+			(0, react.useEffect)(() => {
+				if (!open) return;
+				closeRef.current?.focus();
+				const escape = (event) => {
+					if (event.key === "Escape") setOpen(false);
+				};
+				document.addEventListener("keydown", escape);
+				return () => {
+					document.removeEventListener("keydown", escape);
+					triggerRef.current?.focus();
+				};
+			}, [open]);
+			const filtered = workflows.filter((item) => `${item.name} ${item.description} ${item.workflow_id}`.toLowerCase().includes(query.toLowerCase()));
+			const selected = workflows.find((item) => item.workflow_id === selectedId);
+			const start = () => {
+				if (!selected || !cwd) return;
+				let input;
+				try {
+					const parsed = JSON.parse(inputText);
+					if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("输入必须是 JSON 对象");
+					input = parsed;
+				} catch (reason) {
+					setError(`输入 JSON 无效：${String(reason)}`);
+					return;
+				}
+				const controller = new AbortController();
+				setLoading(true);
+				setError("");
+				remote.orbit.startWorkflowSelection(workspace, String(sessionId), selectionId, selected.workflow_id, selected.latest_version, input, controller.signal).then(() => {
+					writePickerRequest(String(sessionId), null);
+					setOpen(false);
+				}).catch((reason) => setError(String(reason))).finally(() => setLoading(false));
+			};
+			const cancel = () => {
+				const controller = new AbortController();
+				remote.orbit.cancelWorkflowSelection(String(sessionId), selectionId, controller.signal).then(() => {
+					writePickerRequest(String(sessionId), null);
+					setOpen(false);
+				}).catch((reason) => setError(String(reason)));
+			};
+			return (0, react.createElement)("section", { "data-orbit-selection-id": selectionId }, (0, react.createElement)("strong", null, goal), (0, react.createElement)("span", null, pending ? " · 等待选择 Workflow" : ` · ${node?.outcome?.text || (node?.outcome?.kind === "success" ? "已完成" : "失败")}`), pending ? (0, react.createElement)("button", {
+				ref: triggerRef,
+				type: "button",
+				disabled: !cwd,
+				onClick: () => setOpen(true)
+			}, "选择 Workflow") : null, open && pending ? (0, react.createElement)("div", { style: workflowPickerStyle() }, (0, react.createElement)("aside", {
+				ref: dialogRef,
+				role: "dialog",
+				"aria-modal": true,
+				"aria-label": "选择 Orbit Workflow",
+				style: {
+					width: "min(760px, 94vw)",
+					maxHeight: "86vh",
+					overflow: "auto",
+					background: "var(--background, #fff)",
+					color: "inherit",
+					borderRadius: 12,
+					padding: 20,
+					boxShadow: "0 24px 80px #0008"
+				},
+				onKeyDown: (event) => {
+					if (event.key !== "Tab" || !dialogRef.current) return;
+					const focusable = [...dialogRef.current.querySelectorAll("button:not([disabled]),textarea,input,select,[tabindex]:not([tabindex=\"-1\"])")];
+					if (!focusable.length) return;
+					const first = focusable[0], last = focusable[focusable.length - 1];
+					if (event.shiftKey && document.activeElement === first) {
+						event.preventDefault();
+						last.focus();
+					} else if (!event.shiftKey && document.activeElement === last) {
+						event.preventDefault();
+						first.focus();
+					}
+				}
+			}, (0, react.createElement)("button", {
+				ref: closeRef,
+				type: "button",
+				onClick: () => setOpen(false),
+				style: { float: "right" }
+			}, "关闭"), (0, react.createElement)("h2", null, "选择 Orbit Workflow"), (0, react.createElement)("p", null, goal), (0, react.createElement)("input", {
+				type: "search",
+				value: query,
+				placeholder: "搜索 Workflow",
+				"aria-label": "搜索 Workflow",
+				onChange: (event) => setQuery(event.currentTarget.value)
+			}), loading ? (0, react.createElement)("p", null, "加载中…") : null, error ? (0, react.createElement)("p", { role: "alert" }, error) : null, !loading && filtered.length === 0 ? (0, react.createElement)("p", null, "没有可用的已发布 Workflow。可前往设置 → Orbit → Workflow 创建。") : null, ...filtered.map((item) => (0, react.createElement)("label", {
+				key: item.workflow_id,
+				style: {
+					display: "block",
+					borderTop: "1px solid #ddd",
+					padding: "12px 0"
+				}
+			}, (0, react.createElement)("input", {
+				type: "radio",
+				name: `orbit-workflow-${selectionId}`,
+				checked: selectedId === item.workflow_id,
+				onChange: () => setSelectedId(item.workflow_id)
+			}), (0, react.createElement)("strong", null, ` ${item.name}`), (0, react.createElement)("code", null, ` ${item.workflow_id}@${String(item.latest_version)}`), (0, react.createElement)("p", null, item.description || item.readiness_reason || "无描述"))), selected ? (0, react.createElement)("label", null, "Workflow 输入（JSON 对象）", (0, react.createElement)("textarea", {
+				value: inputText,
+				rows: 6,
+				onChange: (event) => setInputText(event.currentTarget.value)
+			})) : null, (0, react.createElement)("div", null, (0, react.createElement)("button", {
+				type: "button",
+				disabled: !selected || loading,
+				onClick: start
+			}, "启动 Workflow"), (0, react.createElement)("button", {
+				type: "button",
+				disabled: loading,
+				onClick: cancel
+			}, "取消请求")))) : null);
+		}
+		function OrbitInputOverlay({ sessionId, useSessions }, remote) {
+			const [request, setRequest] = (0, react.useState)(() => readPickerRequest(String(sessionId)));
+			(0, react.useEffect)(() => {
+				if (request) return;
+				const controller = new AbortController();
+				remote.orbit.getPendingWorkflowSelection(String(sessionId), controller.signal).then((recovered) => {
+					if (!recovered || controller.signal.aborted) return;
+					writePickerRequest(String(sessionId), recovered);
+					setRequest(recovered);
+				}).catch(() => {});
+				return () => controller.abort();
+			}, [request, sessionId]);
+			(0, react.useEffect)(() => {
+				const refresh = (event) => {
+					const detail = event.detail;
+					if (!detail?.sessionId || detail.sessionId === String(sessionId)) setRequest(readPickerRequest(String(sessionId)));
+				};
+				window.addEventListener(pickerEvent, refresh);
+				window.addEventListener("storage", refresh);
+				return () => {
+					window.removeEventListener(pickerEvent, refresh);
+					window.removeEventListener("storage", refresh);
+				};
+			}, [sessionId]);
+			if (!request) return null;
+			return (0, react.createElement)(OrbitCommandView, {
+				request,
+				sessionId,
+				useSessions,
+				remote
+			});
 		}
 		function StepOutput({ remote, workspace, sessionId, runId, nodeId, active }) {
 			const [expanded, setExpanded] = (0, react.useState)(false);
@@ -576,16 +924,29 @@ window.__ModuleLoader__.load({
 		}
 		const inject = [
 			"conversationEvents",
-			"remote",
-			"slots"
+			"slots",
+			"inputTriggers"
 		];
 		function apply(ctx) {
 			ctx.conversationEvents.register(orbitRunDefinition);
-			const remote = ctx.remote;
+			const remote = orbitHttpClient();
+			registerOrbitSlashSource(ctx, remote);
 			ctx.slots.inject("conversation.chat.node", () => ctx.slots.register({
 				name: "conversation.chat.node",
 				key: "orbit-run"
 			}, (props) => OrbitRunCard(props, remote)));
+			ctx.slots.inject("conversation.chat.commandview", () => ctx.slots.register({
+				name: "conversation.chat.commandview",
+				key: "orbit"
+			}, (props) => (0, react.createElement)(OrbitCommandView, {
+				...props,
+				remote
+			})));
+			ctx.slots.inject("conversation.input.overlay", () => ctx.slots.register({
+				name: "conversation.input.overlay",
+				id: "orbit-workflow-picker",
+				order: 100
+			}, (props) => OrbitInputOverlay(props, remote)));
 			ctx.slots.inject("settings.general.item", () => ctx.slots.register({
 				name: "settings.general.item",
 				id: "orbit-runtime",

@@ -480,6 +480,7 @@ Orbit 正在等待确认
 
 当前实现基线：
 
+- `/orbit <goal>` 注册到 Harness 原生 slash-trigger pipeline；Host 以原生 `command/run` / `command/done` 生命周期记录请求和收口，客户端用 Session Storage 恢复当前浏览器中的未完成弹窗。浏览器只调用同源 Host API，Host 在启动前重新校验 ready Workflow 及其版本，并从命令事件取得 Goal。
 - Harness 注册原生 `Orbit` Settings Section，提供 actor-scoped Run 历史、Workflow Catalog、Artifact Catalog 和诊断页；历史详情沿用右侧 Drawer 交互，读取 Steps、逐节点输出、Graph、Edges 和 Artifact。
 - Workflow 页面通过新增的 `generate_workflow` / `modify_workflow` / `get_authoring_job` Harness MCP 工具启动并轮询 Orbit 自有 Authoring Job；DSL 生成、编译、发布与 Handler 校验仍由 Runtime 完成。
 - 图片 Artifact 可通过 Host Remote 显式导入 Harness `AttachmentStore`；类型、base64 和 Attachment admission 在写入前校验。当前 Harness Attachment API 只接受 PNG/JPEG/WebP/GIF，其他 Artifact 明确保留在 Orbit，不伪装为 Attachment/Deliverable。
@@ -497,6 +498,7 @@ Orbit 正在等待确认
 验收：
 
 - 用户无需离开 Harness 即可浏览当前 Session 的 Run、Workflow 和 Artifact，并从历史打开完整 Run Drawer。
+- 用户输入 `/orbit <goal>` 后必须先选择一个已发布且 ready 的 Workflow；刷新页面后未完成选择仍可恢复，选择或取消后由原生命令生命周期收口。
 - 新建、修改和重新生成 Workflow 均只创建一个可恢复 Authoring Job，UI 轮询终态并展示编译诊断。
 - Artifact 导入不会绕过 Harness 图片 admission；不支持的媒体类型得到明确错误。
 - 诊断包不含 Runtime MCP URL、actor header、原始输出、Artifact 内容或凭据。

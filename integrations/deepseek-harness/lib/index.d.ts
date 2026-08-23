@@ -16,6 +16,8 @@ export declare class OrbitRemoteService extends TypertRemoteService {
     private readonly hostSessions;
     private readonly attachments;
     constructor(ctx: Context);
+    private registerWebApi;
+    private dispatchWebApi;
     private startSessionBridge;
     private stopSessionBridge;
     private runSessionBridge;
@@ -24,6 +26,10 @@ export declare class OrbitRemoteService extends TypertRemoteService {
     getDiagnostics(workspace: WorkspaceRef, sessionId: string, signal: AbortSignal): Promise<IntegrationDiagnostics>;
     listWorkflows(workspace: WorkspaceRef, sessionId: string, signal: AbortSignal): Promise<WorkflowSummary[]>;
     listRuns(workspace: WorkspaceRef, sessionId: string, status: string | undefined, signal: AbortSignal): Promise<RunDto[]>;
+    startWorkflowSelection(workspace: WorkspaceRef, sessionId: string, selectionId: string, workflowId: string, workflowVersion: number, input: Record<string, unknown>, signal: AbortSignal): Promise<RunDto>;
+    private beginWorkflowSelection;
+    private getPendingWorkflowSelection;
+    cancelWorkflowSelection(sessionId: string, selectionId: string, signal: AbortSignal): Promise<void>;
     generateWorkflow(workspace: WorkspaceRef, sessionId: string, prompt: string, signal: AbortSignal): Promise<AuthoringJob>;
     modifyWorkflow(workspace: WorkspaceRef, sessionId: string, workflowId: string, prompt: string, regenerate: boolean, signal: AbortSignal): Promise<AuthoringJob>;
     getAuthoringJob(workspace: WorkspaceRef, sessionId: string, jobId: string, signal: AbortSignal): Promise<AuthoringJob>;
@@ -39,6 +45,9 @@ export declare class OrbitRemoteService extends TypertRemoteService {
     reconcileDelegation(workspace: WorkspaceRef, sessionId: string, runId: string, delegationId: string, outcome: 'confirmed_succeeded' | 'confirmed_failed', note: string, signal: AbortSignal): Promise<StepSummary[]>;
     private readRunField;
     private readListField;
+    private selectionSession;
+    private selectionGoal;
+    private settleSelection;
     executeCommand(request: OrbitCommandRequest, signal: AbortSignal): Promise<RunDto>;
 }
 export default OrbitRemoteService;
