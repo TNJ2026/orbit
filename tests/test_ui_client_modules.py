@@ -20,14 +20,12 @@ SUITE = ROOT / "tests" / "ui" / "client_modules.test.mjs"
 # The editor's canvas-to-DSL mapping. It has no dependencies of its own — that
 # is why it is a plain module rather than part of the React app — so it runs
 # under node with nothing installed, unlike the rest of the editor.
-EDITOR_SUITES = (
-    ROOT / "ui" / "editor" / "src" / "dsl-graph.test.mjs",
-    ROOT / "ui" / "editor" / "src" / "api.test.mjs",
-    ROOT / "ui" / "editor" / "src" / "expressions.test.mjs",
-    ROOT / "ui" / "editor" / "src" / "document.test.mjs",
-    ROOT / "ui" / "editor" / "src" / "layout-store.test.mjs",
-    ROOT / "ui" / "editor" / "src" / "config-form.test.mjs",
-)
+# Discovered rather than listed. The listed form outlived the editor it
+# described: four of its six files went when the editor became a viewer, and
+# one missing file skipped the whole suite — so the modules that were still
+# here, and the one that arrived after the list was written, stopped being run
+# by anything and nothing said so.
+EDITOR_SUITES = tuple(sorted((ROOT / "ui" / "editor" / "src").glob("*.test.mjs")))
 NODE = shutil.which("node")
 
 

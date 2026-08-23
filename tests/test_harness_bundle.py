@@ -43,34 +43,37 @@ class DeepSeekHarnessBundleTests(unittest.TestCase):
         self.assertIn("@Remote('getArtifactContent')", remote)
         self.assertIn("allowed_commands.find", remote)
 
-    def test_p1_bridge_and_run_card_sources_are_shipped(self) -> None:
+    def test_the_bridge_still_records_runs_after_the_views_went_away(self) -> None:
+        """The Run Card is gone; the record it was drawn from is not.
+
+        Session events outlived the views because they are the durable account
+        of what ran, not a projection kept for one renderer.
+        """
+
         manifest = json.loads((BUNDLE / "package.json").read_text(encoding="utf-8"))
         self.assertIn("lib/**/*.js", manifest["files"])
         bridge = (BUNDLE / "src" / "session-bridge.ts").read_text(encoding="utf-8")
-        reducer = (BUNDLE / "src" / "run-card.ts").read_text(encoding="utf-8")
         self.assertIn("list_runtime_events", bridge)
         self.assertIn("sourcePosition", bridge)
-        self.assertIn("previous.sourcePosition >= event.sourcePosition", reducer)
+        self.assertIn("orbit/run-started", (BUNDLE / "src" / "types.ts").read_text(encoding="utf-8"))
+        self.assertFalse((BUNDLE / "src" / "run-card.ts").exists())
 
-    def test_p2_detail_human_command_and_settings_are_wired(self) -> None:
+    def test_the_client_only_shows_the_way_out(self) -> None:
+        """One argument-free command, and nothing that renders.
+
+        Orbit's own Runtime UI is the single place a Run is read or driven, so
+        anything here that draws is a second interface competing with the first.
+        """
+
         client = (BUNDLE / "src" / "client.ts").read_text(encoding="utf-8")
-        self.assertIn("role: 'dialog'", client)
-        self.assertIn("remote.orbit.readOutput", client)
-        self.assertIn("langgraph_run.resume", client)
-        self.assertIn("settings.general.item", client)
-        self.assertIn("capabilities.orbit_version", client)
-        self.assertIn("capabilities.integration_protocol", client)
-        self.assertIn("复制启动命令", client)
-        self.assertIn("刷新连接", client)
-        self.assertIn("sessionStorage", client)
-        self.assertIn("event.key === 'Escape'", client)
-        self.assertIn("aria-modal", client)
-        self.assertIn("查看原始输出", client)
-        self.assertIn("需要人工核对外部 Agent 结果", client)
-        self.assertIn("确认外部执行成功", client)
-        self.assertIn("复制 ID", client)
-        self.assertIn("刷新核对状态", client)
-        self.assertIn("@Remote('reconcileDelegation')", (BUNDLE / "src" / "index.ts").read_text(encoding="utf-8"))
+        self.assertIn("getRuntimeUi", client)
+        self.assertIn("window.open(", client)
+        self.assertIn("takes no argument", client)
+        for rendered in ("react", "createElement", "aria-modal", "role: 'dialog'", "settings.section"):
+            self.assertNotIn(rendered, client)
+        remote = (BUNDLE / "src" / "index.ts").read_text(encoding="utf-8")
+        self.assertIn("@Remote('getRuntimeUi')", remote)
+        self.assertIn("@Remote('reconcileDelegation')", remote)
 
     def test_agent_tools_use_independent_runtime_mcp(self) -> None:
         remote = (BUNDLE / "src" / "index.ts").read_text(encoding="utf-8")
@@ -91,30 +94,30 @@ class DeepSeekHarnessBundleTests(unittest.TestCase):
         for removed in ("effects.ts", "delegation-execution.ts", "delegation-policy.ts"):
             self.assertFalse((BUNDLE / "src" / removed).exists())
 
-    def test_p4_workspace_catalog_authoring_import_and_diagnostics_are_wired(self) -> None:
+    def test_the_host_surface_outlived_the_views_that_called_it(self) -> None:
+        """Catalog, authoring, import and diagnostics are still reachable.
+
+        They were reached through panels that no longer exist, which says
+        nothing about whether the operations should: a caller with the Host API
+        can still perform every one of them.
+        """
+
         remote = (BUNDLE / "src" / "index.ts").read_text(encoding="utf-8")
-        client = (BUNDLE / "src" / "client.ts").read_text(encoding="utf-8")
         gateway = (BUNDLE / "src" / "gateway.ts").read_text(encoding="utf-8")
         for method in (
             "listWorkflows", "listRuns", "generateWorkflow", "modifyWorkflow",
-            "getAuthoringJob", "importArtifact", "getDiagnostics",
+            "getAuthoringJob", "importArtifact", "getDiagnostics", "getRuntimeUi",
         ):
             self.assertIn(f"@Remote('{method}')", remote)
-        self.assertIn("settings.section", client)
-        self.assertIn("Workflow Catalog", client)
-        self.assertIn("Run 历史", client)
-        self.assertIn("导入 Attachment", client)
-        self.assertIn("下载诊断包", client)
         self.assertIn("diagnostics()", gateway)
-        self.assertIn("startWorkflowSelection", remote)
-        self.assertIn("cancelWorkflowSelection", remote)
-        self.assertIn("beginWorkflowSelection", remote)
-        self.assertIn("getPendingWorkflowSelection", remote)
-        self.assertIn("registerOrbitSlashSource", client)
-        self.assertIn("OrbitCommandView", client)
-        self.assertIn("conversation.chat.commandview", client)
-        self.assertIn("选择 Orbit Workflow", client)
-        self.assertTrue((BUNDLE / "src" / "orbit-command.ts").exists())
+        # The Workflow picker's server half went with the picker: nothing can
+        # produce the command event it read.
+        for gone in (
+            "startWorkflowSelection", "cancelWorkflowSelection",
+            "beginWorkflowSelection", "getPendingWorkflowSelection",
+        ):
+            self.assertNotIn(gone, remote)
+        self.assertFalse((BUNDLE / "src" / "orbit-command.ts").exists())
 
         built_client = (BUNDLE / "lib" / "client.js").read_text(encoding="utf-8")
         self.assertIn("window.__ModuleLoader__.load({", built_client)

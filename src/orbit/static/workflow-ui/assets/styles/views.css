@@ -639,7 +639,14 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
 .goal-step-row .simplified-step-output-body { padding: 6px 0 0 11px; }
 /* The diagram card is a fixed-height dotted canvas; the frame brings its own
    panning and zooming, the card only the surface it sits on. */
-.goal-canvas-card { height: 600px; padding: 0; overflow: hidden; }
+/* Same reasoning as the tabbed frame below: 600px is what the diagram wants,
+   not what every window has. A short viewport — or this UI embedded in a panel
+   — gets back what it actually has rather than scrolling the page to reach one
+   card. */
+.goal-canvas-card {
+  height: min(600px, calc(100vh - var(--topbar-h, 64px) - 200px));
+  padding: 0; overflow: hidden;
+}
 .goal-canvas-body {
   display: flex; width: 100%; height: 100%;
   background: var(--bg) radial-gradient(circle, var(--line-soft) 1px, transparent 1px);
@@ -699,7 +706,7 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
    height is knowable — the viewport, less the top bar it hangs under and the
    two paddings between it and this box — so the frame gives that back rather
    than insisting on a size the window has no room for. */
-.workflow-detail .workflow-tabs {
+.workflow-detail .workflow-tabs, .workflow-edit-page .workflow-tabs {
   height: min(600px, calc(100vh - var(--topbar-h, 64px) - 200px));
 }
 .workflow-detail .run-tabs, .workflow-edit-page .run-tabs {

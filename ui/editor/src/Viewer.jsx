@@ -12,6 +12,11 @@ import WorkflowNode from "./WorkflowNode.jsx";
 const nodeTypes = { workflow: WorkflowNode };
 const edgeTypes = { workflow: WorkflowEdge };
 const FIT_VIEW = { padding: 0.2, maxZoom: 1 };
+/* React Flow's default floor is 0.5, which a six-deep graph reaches before it
+   is anywhere near inside a narrow frame — so "fit view" stopped half way and
+   showed the middle, on the button as well as on load. The floor has to be
+   below whatever the widest graph needs, or fitting is not fitting. */
+const MIN_ZOOM = 0.05;
 
 /**
  * One Workflow graph, drawn and nothing else.
@@ -72,6 +77,7 @@ export default function Viewer() {
         colorMode={theme ?? "system"}
         fitView
         fitViewOptions={FIT_VIEW}
+        minZoom={MIN_ZOOM}
         // Panning and zooming are how a graph is read, so they stay. Every
         // other interaction is off at the canvas as well as per element: a
         // viewer that could be talked into showing something other than what
