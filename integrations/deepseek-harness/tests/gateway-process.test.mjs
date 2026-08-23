@@ -79,7 +79,7 @@ test('a missing Workspace Runtime gives an actionable start command', async () =
   const path = await realpath(await mkdtemp(join(tmpdir(), 'orbit-gateway-missing-')))
   await writeFile(join(path, 'runtime.json'), '[]')
   const gateway = new OrbitGateway(process.execPath, [fixture])
-  await assert.rejects(gateway.acquire({ id: 'missing', canonicalPath: path }), /No independent Orbit Runtime.*orbit serve --project-root/)
+  await assert.rejects(gateway.acquire({ id: 'missing', canonicalPath: path }), /No independent Orbit Runtime.*orbit serve --port 0 --project-root/)
 })
 
 test('an empty or malformed Session id never becomes an actor header', async t => {

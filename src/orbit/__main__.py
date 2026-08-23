@@ -495,12 +495,25 @@ def _serve(args) -> None:
         # than a Runtime that starts and refuses the first generation.
         raise SystemExit(f"error: {exc}") from None
 
+    # Bound here rather than by the server, because with `--port 0` the kernel
+    # chooses and nothing below — the banner, the project record, the ownership
+    # record a client discovers this Runtime by — can say where it answers until
+    # the choice has been made. Asking the server to bind and then guessing the
+    # number would be a guess that is wrong exactly when it matters.
+    config = uvicorn.Config(app, host=args.host, port=args.port, log_level="info")
+    try:
+        listener = config.bind_socket()
+    except SystemExit:
+        ownership.release()
+        raise
+    port = listener.getsockname()[1]
+
     upsert_project(
         project_root=project_root, db_path=db_path,
-        host=args.host, port=args.port,
+        host=args.host, port=port,
     )
     print(
-        f"orbit Runtime listening on http://{args.host}:{args.port}/ui/ "
+        f"orbit Runtime listening on http://{args.host}:{port}/ui/ "
         f"(health: /health/ready, engine: langgraph) "
         f"(db: {db_path}, artifacts: {artifact_backend.root})",
         flush=True,
@@ -510,7 +523,7 @@ def _serve(args) -> None:
     # find it. A wildcard bind is not an address anyone can connect to, so the
     # record names loopback — the interface a local client actually uses.
     reachable = "127.0.0.1" if args.host in ("0.0.0.0", "::", "") else args.host
-    base_url = f"http://{reachable}:{args.port}"
+    base_url = f"http://{reachable}:{port}"
     ownership.publish(
         transport="http",
         project_root=str(project_root),
@@ -518,8 +531,9 @@ def _serve(args) -> None:
         mcp_url=f"{base_url}/mcp",
     )
     try:
-        uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+        uvicorn.Server(config).run(sockets=[listener])
     finally:
+        listener.close()
         ownership.release()
 
 
@@ -689,7 +703,15 @@ def build_parser() -> argparse.ArgumentParser:
         "serve", help="Start the Runtime: API, UI and background loops"
     )
     serve_cmd.add_argument("--host", default="127.0.0.1", help="Bind address (default: 127.0.0.1)")
-    serve_cmd.add_argument("--port", type=int, default=8848, help="Port (default: 8848)")
+    serve_cmd.add_argument(
+        "--port", type=int, default=8848,
+        help=(
+            "Port (default: 8848). Use 0 to let the kernel pick a free one — "
+            "the number it chose is published in the Runtime's ownership "
+            "record, so `orbit runtimes` and any client that discovers this "
+            "Runtime still find it."
+        ),
+    )
     serve_cmd.add_argument(
         "--project-root", default=None,
         help="Project directory used for Runtime state (default: current directory)",

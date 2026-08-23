@@ -202,3 +202,61 @@ class DiscoveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             self.assertEqual((), discover_runtimes(root))
         self.assertEqual((), discover_runtimes(Path(root) / "gone"))
+
+
+class EphemeralPortTests(unittest.TestCase):
+    """`--port 0`: the kernel chooses, and the record still says where.
+
+    A Runtime per Workspace means a port per Workspace, and a person should not
+    have to keep a ledger of which is free. That only works if the number the
+    kernel picked reaches the record clients discover this Runtime by — which
+    means binding before announcing, not announcing and hoping.
+    """
+
+    def test_the_chosen_port_is_published_and_answers(self) -> None:
+        import subprocess
+        import sys
+        import time
+        import urllib.request
+
+        with tempfile.TemporaryDirectory() as root:
+            home = Path(root) / "home"
+            home.mkdir()
+            server = subprocess.Popen(
+                [
+                    sys.executable, "-m", "orbit", "serve", "--port", "0",
+                    "--db", str(Path(root) / "runtime.db"),
+                    "--project-root", str(Path(root)),
+                    "--no-agent-discovery",
+                ],
+                cwd=str(root), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True,
+                # Its own session: the teardown below signals this process, and
+                # sharing a group with the test runner would end the run.
+                start_new_session=True,
+                env={
+                    "HOME": str(home), "PATH": os.environ.get("PATH", ""),
+                    "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
+                },
+            )
+            self.addCleanup(server.wait)
+            self.addCleanup(server.terminate)
+
+            for _ in range(200):
+                if server.poll() is not None:
+                    self.fail(f"server exited early:\n{server.stdout.read()}")
+                found = discover_runtimes(root)
+                if found and found[0].base_url:
+                    break
+                time.sleep(0.1)
+            else:
+                self.fail("no Runtime published an address")
+
+            runtime = discover_runtimes(root)[0]
+            port = int(str(runtime.base_url).rsplit(":", 1)[1])
+            self.assertNotEqual(0, port, "the record kept the request, not the answer")
+            self.assertGreater(port, 1023)
+            with urllib.request.urlopen(
+                f"{runtime.base_url}/health/ready", timeout=5
+            ) as response:
+                self.assertEqual(200, response.status)

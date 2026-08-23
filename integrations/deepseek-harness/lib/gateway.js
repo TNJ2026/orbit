@@ -140,8 +140,11 @@ export class OrbitGateway {
         if (!Array.isArray(entries))
             throw new Error('Orbit Runtime discovery must return an array');
         const matches = entries.filter(entry => entry.project_root === workspaceRoot && entry.mcp_url);
+        // `--port 0` rather than the default: a Runtime per Workspace means a port
+        // per Workspace, and the instruction a person follows should not collide
+        // with the Runtime they already have.
         if (matches.length === 0)
-            throw new Error(`No independent Orbit Runtime is serving Workspace ${workspaceRoot}; start it with orbit serve --project-root ${workspaceRoot}`);
+            throw new Error(`No independent Orbit Runtime is serving Workspace ${workspaceRoot}; start it with orbit serve --port 0 --project-root ${workspaceRoot} --mcp-tool-profile harness`);
         if (matches.length > 1)
             throw new Error(`Multiple Orbit Runtimes claim Workspace ${workspaceRoot}`);
         if (matches[0].transport !== 'http')

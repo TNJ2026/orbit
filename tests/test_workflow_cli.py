@@ -113,10 +113,10 @@ class WorkflowCliTests(unittest.TestCase):
         with (
             patch("orbit.web.app.create_app") as create_app,
             patch("orbit.__main__.upsert_project"),
-            patch("orbit.__main__.uvicorn.run"),
+            patch("orbit.__main__.uvicorn.Server"),
         ):
             output = self.run_cli(
-                "serve", "--db", str(self.db),
+                "serve", "--port", "0", "--db", str(self.db),
                 "--artifact-root", str(artifact_root),
                 "--no-agent-discovery",
             )
@@ -132,10 +132,10 @@ class WorkflowCliTests(unittest.TestCase):
         with (
             patch("orbit.web.app.create_app") as create_app,
             patch("orbit.__main__.upsert_project"),
-            patch("orbit.__main__.uvicorn.run"),
+            patch("orbit.__main__.uvicorn.Server"),
         ):
             self.run_cli(
-                "serve", "--db", str(self.db), "--no-agent-discovery",
+                "serve", "--port", "0", "--db", str(self.db), "--no-agent-discovery",
             )
 
         backend = create_app.call_args.kwargs["artifact_backend"]
@@ -145,10 +145,10 @@ class WorkflowCliTests(unittest.TestCase):
         with (
             patch("orbit.web.app.create_app") as create_app,
             patch("orbit.__main__.upsert_project"),
-            patch("orbit.__main__.uvicorn.run"),
+            patch("orbit.__main__.uvicorn.Server"),
         ):
             self.run_cli(
-                "serve", "--db", str(self.db), "--no-agent-discovery",
+                "serve", "--port", "0", "--db", str(self.db), "--no-agent-discovery",
             )
 
         self.assertEqual(
@@ -171,7 +171,7 @@ class WorkflowCliTests(unittest.TestCase):
             SystemExit, "cannot initialize Artifact store"
         ):
             self.run_cli(
-                "serve", "--db", str(self.db),
+                "serve", "--port", "0", "--db", str(self.db),
                 "--artifact-root", str(invalid_root),
                 "--no-agent-discovery",
             )
@@ -185,7 +185,7 @@ class WorkflowCliTests(unittest.TestCase):
 
         with self.assertRaisesRegex(SystemExit, "legacy engine tables"):
             self.run_cli(
-                "serve", "--db", str(self.db),
+                "serve", "--port", "0", "--db", str(self.db),
                 "--artifact-root", str(artifact_root),
                 "--no-agent-discovery",
             )
@@ -347,10 +347,10 @@ class WorkflowInventoryCliTests(unittest.TestCase):
         with (
             patch("orbit.web.app.create_app"),
             patch("orbit.__main__.upsert_project"),
-            patch("orbit.__main__.uvicorn.run"),
+            patch("orbit.__main__.uvicorn.Server"),
         ):
             output = self.run_cli(
-                "serve", "--db", str(self.db), "--no-agent-discovery",
+                "serve", "--port", "0", "--db", str(self.db), "--no-agent-discovery",
             )
 
         self.assertIn("goal readiness:", output)
@@ -363,14 +363,14 @@ class WorkflowInventoryCliTests(unittest.TestCase):
         with (
             patch("orbit.web.app.create_app"),
             patch("orbit.__main__.upsert_project"),
-            patch("orbit.__main__.uvicorn.run") as run,
+            patch("orbit.__main__.uvicorn.Server") as run,
             patch(
                 "orbit.__main__._goal_readiness_buckets",
                 side_effect=RuntimeError("projection is rebuilding"),
             ),
         ):
             output = self.run_cli(
-                "serve", "--db", str(self.db),
+                "serve", "--port", "0", "--db", str(self.db),
                 "--no-agent-discovery",
             )
 
