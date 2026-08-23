@@ -1069,6 +1069,10 @@ def build_mcp_dispatcher(
                         "input_mode": item["input_mode"],
                         "inputs": item["inputs"],
                         "goal_binding": item["goal_binding"],
+                        # How big a thing this is, which is what a reader sizes
+                        # up a workflow by. One integer, not the graph it
+                        # counts.
+                        "node_count": item["summary"]["node_count"],
                     }
                     for item in items
                 ]

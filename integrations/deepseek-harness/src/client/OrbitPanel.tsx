@@ -307,14 +307,13 @@ export function OrbitPanel({ t, useSessions }: OrbitPanelProps) {
               key={item.workflow_id}
               onClick={() => setSelectedFlow(item.workflow_id)}
             >
-              <div className={styles.flowId}>
-                {item.workflow_id.replace(/^workflow:/u, '')}
-              </div>
+              {/* Name and size, as Orbit's own card reads: the id is how a
+                  machine addresses this, and it is a line above the only thing
+                  a person is choosing by. Both are on the detail page. */}
               <div className={styles.flowName}>{item.name || item.workflow_id}</div>
               <div className={styles.flowMeta}>
-                <span>v{String(item.latest_version)}</span>
-                {Array.isArray(item.inputs)
-                  ? <span>{t('inputCount', { total: item.inputs.length })}</span> : null}
+                {item.node_count === undefined
+                  ? null : <span>{t('stepCount', { total: item.node_count })}</span>}
               </div>
             </button>
           )) : <p className={styles.empty}>{t('emptyWorkflows')}</p>

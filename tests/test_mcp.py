@@ -359,6 +359,9 @@ class DiscoveryAndResultTests(ApiTestCase):
             )
             self.assertIn("goal_readiness", entry)
             self.assertIn("inputs", entry)
+            # How big a thing this is: one integer, so a listing can size a
+            # workflow up without asking for the graph that would say it.
+            self.assertEqual(4, entry["node_count"])
             # The graph and the handler bindings stay out: an agent choosing
             # what to run does not read a page of JSON to do it.
             self.assertNotIn("graph", entry)

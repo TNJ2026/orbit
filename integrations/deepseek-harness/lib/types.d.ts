@@ -21,6 +21,7 @@ export interface WorkflowSummary {
     input_mode?: string;
     inputs?: unknown[];
     goal_binding?: unknown;
+    node_count?: number;
 }
 /** One published step, as a reader meets it: what it does and who runs it. */
 export interface WorkflowNode {

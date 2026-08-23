@@ -229,15 +229,6 @@
    and the half a person checks — the name below is what they read. */
 .flowRow { padding: 9px 12px; border-bottom: 1px solid var(--dsw-alias-line-normal, rgb(128 128 128 / 28%)); }
 .flowRow:last-child { border-bottom: 0; }
-.flowId {
-  color: var(--dsw-alias-label-tertiary, GrayText);
-  font-size: 10px;
-  letter-spacing: .4px;
-  text-transform: uppercase;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .flowName { font-size: 12.5px; font-weight: 600; line-height: 1.45; }
 .flowMeta { display: flex; gap: 10px; color: var(--dsw-alias-label-tertiary, GrayText); font-size: 11px; }
 
