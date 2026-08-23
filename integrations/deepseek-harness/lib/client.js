@@ -8,7 +8,7 @@ window.__ModuleLoader__.load({
 		let _deepseek_ai_dsh_client_ui_primitives = require("@deepseek-ai/dsh-client-ui-primitives");
 		let react_jsx_runtime = require("react/jsx-runtime");
 		//#region \0dsh-css:/Users/cxd/develop/orbit/integrations/deepseek-harness/src/client/OrbitPanel.module.css.mjs
-		const css = ".JeOz9W_panel{border:1px solid var(--dsw-alias-line-normal,#80808047);background:var(--dsw-alias-bg-layer-1,Canvas);color:var(--dsw-alias-label-primary);pointer-events:auto;border-radius:12px;flex-direction:column;display:flex;position:absolute;overflow:hidden;box-shadow:0 12px 40px #0000002e}.JeOz9W_bar{border-bottom:1px solid var(--dsw-alias-line-normal,#80808047);background:var(--dsw-alias-bg-module,Canvas);cursor:grab;user-select:none;align-items:center;gap:8px;padding:8px 10px 8px 12px;display:flex}.JeOz9W_bar:active{cursor:grabbing}.JeOz9W_title{font-size:13px;font-weight:600}.JeOz9W_count{color:var(--dsw-alias-label-tertiary);flex:1;font-size:12px}.JeOz9W_body{flex:1;min-height:0;overflow-y:auto}.JeOz9W_row{border-bottom:1px solid var(--dsw-alias-line-normal,#80808047);grid-template-columns:8px 1fr auto;align-items:start;gap:8px;padding:10px 12px;display:grid}.JeOz9W_row:last-child{border-bottom:0}.JeOz9W_dot{border-radius:50%;width:8px;height:8px;margin-top:5px}.JeOz9W_live{background:var(--dsw-alias-state-business-primary)}.JeOz9W_done{background:var(--dsw-alias-state-success)}.JeOz9W_failed{background:var(--dsw-alias-state-danger)}.JeOz9W_unknown{background:var(--dsw-alias-state-warning,var(--dsw-alias-label-tertiary))}.JeOz9W_goal{-webkit-line-clamp:2;-webkit-box-orient:vertical;font-size:13px;line-height:1.4;display:-webkit-box;overflow:hidden}.JeOz9W_meta{color:var(--dsw-alias-label-tertiary);font-size:11px}.JeOz9W_status{color:var(--dsw-alias-label-secondary);white-space:nowrap;font-size:11px}.JeOz9W_empty,.JeOz9W_error{color:var(--dsw-alias-label-tertiary);text-align:center;padding:20px 14px;font-size:12px}.JeOz9W_error{color:var(--dsw-alias-state-error-primary);text-align:left}.JeOz9W_badge{border:1px solid var(--dsw-alias-line-normal,#80808047);background:var(--dsw-alias-bg-layer-1,Canvas);color:var(--dsw-alias-label-secondary);cursor:pointer;pointer-events:auto;border-radius:999px;align-items:center;gap:6px;padding:6px 12px;font-size:12px;display:flex;position:absolute;box-shadow:0 6px 20px #00000024}.JeOz9W_badge:hover{color:var(--dsw-alias-label-primary)}.JeOz9W_resize{cursor:nwse-resize;width:14px;height:14px;position:absolute;inset:auto 0 0 auto}.JeOz9W_stepRow{padding:4px 12px 4px 22px;font-size:12px}.JeOz9W_attention{border-left:2px solid var(--dsw-alias-state-warning,var(--dsw-alias-label-tertiary));color:var(--dsw-alias-label-secondary);margin:4px 0;padding:6px 8px;font-size:11px}.JeOz9W_output{background:var(--dsw-alias-bg-module-platform,var(--dsw-alias-bg-module,Canvas));max-height:220px;color:var(--dsw-alias-label-secondary);white-space:pre-wrap;overflow-wrap:anywhere;border-radius:6px;margin:4px 0 8px;padding:8px;font-size:11px;line-height:1.5;overflow:auto}.JeOz9W_actions{flex-wrap:wrap;align-items:center;gap:6px;margin:6px 0 8px;display:flex}.JeOz9W_actions input{border:1px solid var(--dsw-alias-line-normal,#80808047);background:var(--dsw-alias-bg-layer-1,Canvas);min-width:0;color:var(--dsw-alias-label-primary);border-radius:6px;flex:140px;padding:4px 8px;font-size:11px}.JeOz9W_iconButton{color:var(--dsw-alias-label-tertiary);cursor:pointer;background:0 0;border:0;border-radius:4px;justify-content:center;align-items:center;padding:2px;display:inline-flex}.JeOz9W_iconButton:hover{color:var(--dsw-alias-label-primary)}.JeOz9W_fullscreen{z-index:1300;background:var(--dsw-alias-bg-layer-1,Canvas);pointer-events:auto;flex-direction:column;display:flex;position:fixed;inset:0}.JeOz9W_fullscreenBar{border-bottom:1px solid var(--dsw-alias-line-normal,#80808047);background:var(--dsw-alias-bg-module,Canvas);align-items:center;gap:8px;padding:8px 12px;display:flex}.JeOz9W_fullscreenFrame{border:0;flex:1;width:100%}";
+		const css = ".JeOz9W_panel{border:1px solid var(--dsw-alias-line-normal,#80808047);background:var(--dsw-alias-bg-layer-1,Canvas);color:var(--dsw-alias-label-primary);pointer-events:auto;border-radius:12px;flex-direction:column;display:flex;position:absolute;overflow:hidden;box-shadow:0 12px 40px #0000002e}.JeOz9W_bar{border-bottom:1px solid var(--dsw-alias-line-normal,#80808047);background:var(--dsw-alias-bg-module,Canvas);cursor:grab;user-select:none;align-items:center;gap:8px;padding:8px 10px 8px 12px;display:flex}.JeOz9W_bar:active{cursor:grabbing}.JeOz9W_title{font-size:13px;font-weight:600}.JeOz9W_count{color:var(--dsw-alias-label-tertiary);flex:1;font-size:12px}.JeOz9W_body{flex:1;min-height:0;overflow-y:auto}.JeOz9W_row{border-bottom:1px solid var(--dsw-alias-line-normal,#80808047);grid-template-columns:8px 1fr auto;align-items:start;gap:8px;padding:10px 12px;display:grid}.JeOz9W_row:last-child{border-bottom:0}.JeOz9W_dot{border-radius:50%;width:8px;height:8px;margin-top:5px}.JeOz9W_live{background:var(--dsw-alias-state-business-primary)}.JeOz9W_done{background:var(--dsw-alias-state-success)}.JeOz9W_failed{background:var(--dsw-alias-state-danger)}.JeOz9W_unknown{background:var(--dsw-alias-state-warning,var(--dsw-alias-label-tertiary))}.JeOz9W_goal{-webkit-line-clamp:2;-webkit-box-orient:vertical;font-size:13px;line-height:1.4;display:-webkit-box;overflow:hidden}.JeOz9W_meta{color:var(--dsw-alias-label-tertiary);font-size:11px}.JeOz9W_status{color:var(--dsw-alias-label-secondary);white-space:nowrap;font-size:11px}.JeOz9W_empty,.JeOz9W_error{color:var(--dsw-alias-label-tertiary);text-align:center;padding:20px 14px;font-size:12px}.JeOz9W_error{color:var(--dsw-alias-state-error-primary);text-align:left}.JeOz9W_badge{border:1px solid var(--dsw-alias-line-normal,#80808047);background:var(--dsw-alias-bg-layer-1,Canvas);color:var(--dsw-alias-label-secondary);cursor:pointer;pointer-events:auto;border-radius:999px;align-items:center;gap:6px;padding:6px 12px;font-size:12px;display:flex;position:absolute;box-shadow:0 6px 20px #00000024}.JeOz9W_badge:hover{color:var(--dsw-alias-label-primary)}.JeOz9W_resize{cursor:nwse-resize;width:14px;height:14px;position:absolute;inset:auto 0 0 auto}.JeOz9W_stepRow{padding:4px 12px 4px 22px;font-size:12px}.JeOz9W_attention{border-left:2px solid var(--dsw-alias-state-warning,var(--dsw-alias-label-tertiary));color:var(--dsw-alias-label-secondary);margin:4px 0;padding:6px 8px;font-size:11px}.JeOz9W_output{background:var(--dsw-alias-bg-module-platform,var(--dsw-alias-bg-module,Canvas));max-height:220px;color:var(--dsw-alias-label-secondary);white-space:pre-wrap;overflow-wrap:anywhere;border-radius:6px;margin:4px 0 8px;padding:8px;font-size:11px;line-height:1.5;overflow:auto}.JeOz9W_actions{flex-wrap:wrap;align-items:center;gap:6px;margin:6px 0 8px;display:flex}.JeOz9W_actions input{border:1px solid var(--dsw-alias-line-normal,#80808047);background:var(--dsw-alias-bg-layer-1,Canvas);min-width:0;color:var(--dsw-alias-label-primary);border-radius:6px;flex:140px;padding:4px 8px;font-size:11px}.JeOz9W_iconButton{color:var(--dsw-alias-label-tertiary);cursor:pointer;background:0 0;border:0;border-radius:4px;justify-content:center;align-items:center;padding:2px;display:inline-flex}.JeOz9W_iconButton:hover{color:var(--dsw-alias-label-primary)}";
 		const tagId = "@orbit-runtime/dsh-orbit/OrbitPanel.module.css";
 		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId) + "]") === null) {
 			const tag = document.createElement("style");
@@ -29,9 +29,6 @@ window.__ModuleLoader__.load({
 			"empty": "JeOz9W_empty",
 			"error": "JeOz9W_error",
 			"failed": "JeOz9W_failed",
-			"fullscreen": "JeOz9W_fullscreen",
-			"fullscreenBar": "JeOz9W_fullscreenBar",
-			"fullscreenFrame": "JeOz9W_fullscreenFrame",
 			"goal": "JeOz9W_goal",
 			"iconButton": "JeOz9W_iconButton",
 			"live": "JeOz9W_live",
@@ -490,7 +487,6 @@ window.__ModuleLoader__.load({
 			const [rows, setRows] = (0, react.useState)(null);
 			const [uiUrl, setUiUrl] = (0, react.useState)("");
 			const [error, setError] = (0, react.useState)("");
-			const [fullscreen, setFullscreen] = (0, react.useState)(false);
 			const bounds = useBounds();
 			const drag = (0, react.useRef)(null);
 			const update = (0, react.useCallback)((next) => {
@@ -574,36 +570,6 @@ window.__ModuleLoader__.load({
 				drag.current = null;
 				storeLayout(layout);
 			};
-			if (fullscreen && uiUrl) return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("section", {
-				className: OrbitPanel_module_css_default.fullscreen,
-				role: "dialog",
-				"aria-label": t("title"),
-				children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-					className: OrbitPanel_module_css_default.fullscreenBar,
-					children: [
-						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("strong", {
-							className: OrbitPanel_module_css_default.title,
-							children: t("title")
-						}),
-						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-							className: OrbitPanel_module_css_default.count,
-							children: uiUrl
-						}),
-						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-							type: "button",
-							className: OrbitPanel_module_css_default.iconButton,
-							onClick: () => setFullscreen(false),
-							"aria-label": t("exitFullscreen"),
-							title: t("exitFullscreen"),
-							children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconCloseOutline16, { size: 16 })
-						})
-					]
-				}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("iframe", {
-					className: OrbitPanel_module_css_default.fullscreenFrame,
-					src: uiUrl,
-					title: t("title")
-				})]
-			});
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("section", {
 				className: OrbitPanel_module_css_default.panel,
 				style: {
@@ -629,13 +595,14 @@ window.__ModuleLoader__.load({
 								className: OrbitPanel_module_css_default.count,
 								children: counts.live ? t("liveCount", counts) : t("idleCount", counts)
 							}),
-							uiUrl ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-								type: "button",
+							uiUrl ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("a", {
 								className: OrbitPanel_module_css_default.iconButton,
-								onClick: () => setFullscreen(true),
-								"aria-label": t("fullscreen"),
-								title: t("fullscreen"),
-								children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconFullscreenOutline16, { size: 14 })
+								href: uiUrl,
+								target: "_blank",
+								rel: "noopener",
+								"aria-label": t("openRuntime"),
+								title: t("openRuntime"),
+								children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconShareOutline16, { size: 14 })
 							}) : null,
 							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
 								type: "button",
@@ -705,8 +672,7 @@ window.__ModuleLoader__.load({
 			title: "Orbit",
 			expand: "Show Orbit runs",
 			collapse: "Hide Orbit runs",
-			fullscreen: "Open Orbit full screen",
-			exitFullscreen: "Close",
+			openRuntime: "Open Orbit in a new tab",
 			dock: "Dock to the side",
 			float: "Detach",
 			empty: "No runs in this Workspace yet.",
@@ -730,8 +696,7 @@ window.__ModuleLoader__.load({
 			title: "Orbit",
 			expand: "显示 Orbit 运行",
 			collapse: "收起 Orbit 运行",
-			fullscreen: "全屏打开 Orbit",
-			exitFullscreen: "关闭",
+			openRuntime: "在新标签页打开 Orbit",
 			dock: "停靠到侧边",
 			float: "浮动",
 			empty: "这个 Workspace 还没有运行记录。",

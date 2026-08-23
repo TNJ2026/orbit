@@ -91,8 +91,11 @@ test('bar controls are glyphs, not buttons with a surface of their own', async (
   assert.match(rule, /border:\s*0/)
 })
 
-test('the deep surfaces are reachable, shown at the size they were drawn for', () => {
-  // The panel does not redraw them; it hands the window to Orbit's own page.
-  assert.match(code, /className=\{styles\.fullscreenFrame\}/)
-  assert.match(code, /src=\{uiUrl\}/)
+test('the deep surfaces are reachable, in Orbit rather than redrawn here', () => {
+  // An anchor, not a scripted open: the browser's own new-tab behaviour is the
+  // behaviour a person expects from something that leaves the page, and a
+  // pop-up blocker never gets to decide whether the press counted.
+  assert.match(code, /href=\{uiUrl\}/)
+  assert.match(code, /target="_blank"/)
+  assert.match(code, /rel="noopener"/)
 })
