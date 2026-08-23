@@ -64,8 +64,13 @@ function registerOrbitSlashSource(ctx: ClientContext, t: Translate): void {
     trigger: '/', name: 'orbit', order: -10, showGroupTitle: false,
     candidates: async (_session: unknown, request: { query: string }) => {
       const typed = request.query
-      if (typed.startsWith(`${LIST_COMMAND} `) || typed === LIST_COMMAND) {
-        const search = typed.slice(LIST_COMMAND.length)
+      // Prefix, not prefix-plus-space. A space is the pipeline's own
+      // adjudication moment and ends the token, so requiring one meant the
+      // picker only appeared once the space was deleted again — and anything
+      // typed after the name matched neither branch, which is why it never
+      // filtered.
+      if (typed.startsWith(LIST_COMMAND)) {
+        const search = typed.slice(LIST_COMMAND.length).replace(/^\s+/u, '')
         const hits = matchWorkflows(search)
         if (!hits.length) return [{ name: t('noMatch'), value: 'none' }]
         return hits.map(item => ({
@@ -89,7 +94,9 @@ function registerOrbitSlashSource(ctx: ClientContext, t: Translate): void {
       }
       // The opener writes its own token back and keeps the menu up, so the next
       // query is the search.
-      if (value === 'open') return { text: `/${LIST_COMMAND} `, continue: true }
+      // Written without a trailing space for the same reason: the space would
+      // close the menu the pick just opened.
+      if (value === 'open') return { text: `/${LIST_COMMAND}`, continue: true }
       if (value === 'panel') return { claim: claim() }
       // No default. The opener shipped without a payload and fell through to
       // the panel's claim, so the command appeared to do nothing while quietly

@@ -117,7 +117,7 @@ test('the top level of the menu is commands, the Workflows sit behind one', () =
   // Listing them beside the commands buried the native ones under however many
   // a Workspace happened to have, and made picking from `/` mean "paste a name".
   const candidates = code.slice(code.indexOf('candidates:'), code.indexOf('onPick:'))
-  const gate = candidates.indexOf('startsWith(`${LIST_COMMAND} `)')
+  const gate = candidates.indexOf('startsWith(LIST_COMMAND)')
   assert.ok(gate > 0, 'the picker is not gated behind the command')
   assert.ok(gate < candidates.indexOf("{ name: 'orbit',"), 'the gate comes first')
 })
@@ -140,6 +140,17 @@ test('every menu candidate is told apart by its own payload, not by falling thro
   for (const entry of named) assert.match(entry, /value:/, `${entry} has no payload to dispatch on`)
 })
 
-test('picking the opener reopens the menu instead of settling', () => {
-  assert.match(code, /text: `\/\$\{LIST_COMMAND\} `, continue: true/)
+test('picking the opener reopens the menu, and leaves no space to close it', () => {
+  // A space is the pipeline's adjudication moment and ends the trigger token,
+  // so a trailing one closed the menu the pick had just opened.
+  assert.match(code, /text: `\/\$\{LIST_COMMAND\}`, continue: true/)
+})
+
+test('the search is whatever follows the command name', () => {
+  // Gating on `name + ' '` meant the picker appeared only while the space was
+  // absent and filtered on nothing when it was present.
+  const candidates = code.slice(code.indexOf('candidates:'), code.indexOf('onPick:'))
+  assert.match(candidates, /typed\.startsWith\(LIST_COMMAND\)/)
+  assert.equal(/startsWith\(`\$\{LIST_COMMAND\} `\)/.test(candidates), false)
+  assert.match(candidates, /replace\(\/\^\\s\+\/u, ''\)/)
 })

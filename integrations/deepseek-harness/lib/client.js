@@ -815,8 +815,8 @@ window.__ModuleLoader__.load({
 				showGroupTitle: false,
 				candidates: async (_session, request) => {
 					const typed = request.query;
-					if (typed.startsWith(`${LIST_COMMAND} `) || typed === LIST_COMMAND) {
-						const hits = matchWorkflows(typed.slice(15));
+					if (typed.startsWith(LIST_COMMAND)) {
+						const hits = matchWorkflows(typed.slice(15).replace(/^\s+/u, ""));
 						if (!hits.length) return [{
 							name: t("noMatch"),
 							value: "none"
@@ -846,7 +846,7 @@ window.__ModuleLoader__.load({
 						id: value.slice(4)
 					}) };
 					if (value === "open") return {
-						text: `/${LIST_COMMAND} `,
+						text: `/${LIST_COMMAND}`,
 						continue: true
 					};
 					if (value === "panel") return { claim: claim() };
