@@ -27,6 +27,10 @@ export const en = {
   working: 'Working…',
   runnable: 'Runnable workflows',
   runnableHint: 'Ask the Agent to run one — it has the tools.',
+  togglePanel: 'Show or hide the Orbit panel',
+  menuSection: 'Orbit workflows',
+  menuHint: 'inserts a request for the Agent',
+  runPrefix: 'Run "{name}": ',
 } as const
 
 export const zh = {
@@ -54,6 +58,10 @@ export const zh = {
   working: '处理中…',
   runnable: '可运行的工作流',
   runnableHint: '让 agent 跑其中一个即可——它有对应的工具。',
+  togglePanel: '显示或收起 Orbit 面板',
+  menuSection: 'Orbit 工作流',
+  menuHint: '插入一句给 agent 的请求',
+  runPrefix: '用「{name}」跑：',
 } as const
 
 export type OrbitLocaleKey = keyof typeof en

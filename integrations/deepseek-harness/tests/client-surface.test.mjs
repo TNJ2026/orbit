@@ -108,3 +108,11 @@ test('the catalog names Workflows and does not offer to start one', () => {
   assert.equal(/onClick/.test(section), false, 'the catalog grew an action')
   assert.equal(/runCommand|start_run|startRun/.test(section), false)
 })
+
+test('picking a Workflow from the menu writes a request, it does not start one', () => {
+  // The Run has to be the Agent's or it cannot report on it afterwards, so the
+  // menu spares a person remembering a name and stops there.
+  assert.match(code, /text: t\('runPrefix'/)
+  const pick = code.slice(code.indexOf('onPick:'), code.indexOf('matchSpace:'))
+  assert.equal(/start_run|runCommand|getPanelState/.test(pick), false, 'the menu grew a launcher')
+})

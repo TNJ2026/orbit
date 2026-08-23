@@ -107,10 +107,17 @@ Neither of you has to remember what exists. The bundle names the ready
 Workflows of every bridged Workspace in the model's context — with the inputs
 each one needs, which is the mistake it exists to prevent — so the Agent can
 answer "which of these did you mean" instead of asking what Orbit is. The panel
-lists the same catalog below the Runs, for the person doing the asking. The
-list is read from a cache the prompt already keeps, so a panel polling every
-two seconds costs nothing extra, and a Runtime that is down leaves the last
-answer standing rather than emptying the context.
+lists the same catalog below the Runs, for the person doing the asking, and
+the `/` menu offers it while they type.
+
+Picking one there writes a sentence into the draft — `Run "Sales CSV report": `
+— rather than starting anything. The Run has to be the Agent's or it cannot
+report on it afterwards, so the menu's job is to spare you remembering a name,
+not to become a second way to launch work.
+
+All three read one cache, filled by the panel's own poll, so nothing asks twice
+for something that changes when a Workflow is published; a Runtime that is down
+leaves the last answer standing rather than emptying the context.
 
 The panel deliberately has no start button. Harness is a place where work is
 described to an Agent, and a Run the panel started itself would be a Run the
