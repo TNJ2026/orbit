@@ -1,6 +1,6 @@
 export interface WorkspaceRef { id: string; canonicalPath: string; repositoryId?: string; worktreeId?: string; baseRevision?: string; isolationMode?: 'shared' | 'exclusive' | 'worktree' | 'snapshot' }
 export interface RuntimeSummary { workspaceId: string; state: 'ready' | 'stopped'; capabilities: Record<string, unknown> }
-export interface WorkflowSummary { workflow_id: string; name: string; description: string; latest_version: number; goal_readiness: string; readiness_reason?: string | null; input_mode?: string; inputs?: unknown[]; goal_binding?: unknown; node_count?: number }
+export interface WorkflowSummary { workflow_id: string; name: string; description: string; latest_version: number; goal_readiness: string; readiness_reason?: string | null; input_mode?: string; inputs?: unknown[]; goal_binding?: unknown; node_count?: number; node_kinds?: Record<string, number> }
 /** One published step, as a reader meets it: what it does and who runs it. */
 export interface WorkflowNode {
   node_id: string; label: string; kind: string

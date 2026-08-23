@@ -8,7 +8,7 @@ window.__ModuleLoader__.load({
 		let _deepseek_ai_dsh_client_ui_primitives = require("@deepseek-ai/dsh-client-ui-primitives");
 		let react_jsx_runtime = require("react/jsx-runtime");
 		//#region \0dsh-css:/Users/cxd/develop/orbit/integrations/deepseek-harness/src/client/OrbitPanel.module.css.mjs
-		const css = ".JeOz9W_panel{border:1px solid var(--dsw-alias-line-normal,#80808047);background:var(--dsw-alias-bg-layer-1,Canvas);color:var(--dsw-alias-label-primary);pointer-events:auto;border-radius:12px;flex-direction:column;display:flex;position:absolute;overflow:hidden;box-shadow:0 12px 40px #0000002e}.JeOz9W_bar{border-bottom:1px solid var(--dsw-alias-line-normal,#80808047);background:var(--dsw-alias-bg-module,Canvas);cursor:grab;user-select:none;align-items:center;gap:8px;padding:8px 10px 8px 12px;display:flex}.JeOz9W_bar:active{cursor:grabbing}.JeOz9W_title{font-size:13px;font-weight:600}.JeOz9W_count{color:var(--dsw-alias-label-tertiary);flex:1;font-size:12px}.JeOz9W_body{flex:1;min-height:0;overflow-y:auto}.JeOz9W_row{border-bottom:1px solid var(--dsw-alias-line-normal,#80808047);grid-template-columns:8px 1fr auto;align-items:start;gap:8px;padding:10px 12px;display:grid}.JeOz9W_row:last-child{border-bottom:0}.JeOz9W_dot{border-radius:50%;width:8px;height:8px;margin-top:5px}.JeOz9W_live{background:var(--dsw-alias-state-business-primary)}.JeOz9W_done{background:var(--dsw-alias-state-success)}.JeOz9W_failed{background:var(--dsw-alias-state-danger)}.JeOz9W_unknown{background:var(--dsw-alias-state-warning,var(--dsw-alias-label-tertiary))}.JeOz9W_goal{-webkit-line-clamp:2;-webkit-box-orient:vertical;font-size:13px;line-height:1.4;display:-webkit-box;overflow:hidden}.JeOz9W_meta{color:var(--dsw-alias-label-tertiary);font-size:11px}.JeOz9W_status{color:var(--dsw-alias-label-secondary,GrayText);white-space:nowrap;margin-left:8px;font-size:11px}.JeOz9W_empty,.JeOz9W_error{color:var(--dsw-alias-label-tertiary);text-align:center;padding:20px 14px;font-size:12px}.JeOz9W_error{color:var(--dsw-alias-state-error-primary);text-align:left}.JeOz9W_badge{border:1px solid var(--dsw-alias-line-normal,#80808047);background:var(--dsw-alias-bg-layer-1,Canvas);color:var(--dsw-alias-label-secondary);cursor:pointer;pointer-events:auto;border-radius:999px;align-items:center;gap:6px;padding:6px 12px;font-size:12px;display:flex;position:absolute;box-shadow:0 6px 20px #00000024}.JeOz9W_badge:hover{color:var(--dsw-alias-label-primary)}.JeOz9W_resize{cursor:nwse-resize;width:14px;height:14px;position:absolute;inset:auto 0 0 auto}.JeOz9W_stepRow{padding:4px 12px 4px 22px;font-size:12px}.JeOz9W_attention{border-left:2px solid var(--dsw-alias-state-warning,var(--dsw-alias-label-tertiary));color:var(--dsw-alias-label-secondary);margin:4px 0;padding:6px 8px;font-size:11px}.JeOz9W_output{background:var(--dsw-alias-bg-module-platform,var(--dsw-alias-bg-module,Canvas));max-height:220px;color:var(--dsw-alias-label-secondary);white-space:pre-wrap;overflow-wrap:anywhere;border-radius:6px;margin:4px 0 8px;padding:8px;font-size:11px;line-height:1.5;overflow:auto}.JeOz9W_actions{flex-wrap:wrap;align-items:center;gap:6px;margin:6px 0 8px;display:flex}.JeOz9W_actions input{border:1px solid var(--dsw-alias-line-normal,#80808047);background:var(--dsw-alias-bg-layer-1,Canvas);min-width:0;color:var(--dsw-alias-label-primary);border-radius:6px;flex:140px;padding:4px 8px;font-size:11px}.JeOz9W_iconButton{color:var(--dsw-alias-label-tertiary);cursor:pointer;background:0 0;border:0;border-radius:4px;justify-content:center;align-items:center;padding:2px;display:inline-flex}.JeOz9W_iconButton:hover{color:var(--dsw-alias-label-primary)}.JeOz9W_catalogRow{justify-content:space-between;align-items:baseline;gap:8px;padding:4px 0 4px 12px;display:flex}.JeOz9W_catalogRow>*{text-overflow:ellipsis;white-space:nowrap;min-width:0;overflow:hidden}.JeOz9W_catalogRow>span{flex:auto}.JeOz9W_catalogRow>code{flex:0 auto}.JeOz9W_tabs{border-bottom:1px solid var(--dsw-alias-line-normal,#80808047);background:var(--dsw-alias-bg-module,Canvas);flex:none;gap:2px;padding:6px 8px 0;display:flex}.JeOz9W_tab{color:var(--dsw-alias-label-tertiary,GrayText);cursor:pointer;background:0 0;border:0;border-bottom:2px solid #0000;flex:1 1 0;padding:6px 4px 8px;font-size:12px}.JeOz9W_tab:hover{color:var(--dsw-alias-label-primary,CanvasText)}.JeOz9W_tabActive{color:var(--dsw-alias-label-primary,CanvasText);border-bottom-color:var(--dsw-alias-state-business-primary,Highlight);font-weight:600}.JeOz9W_head{padding:12px 12px 2px}.JeOz9W_headTitle{font-size:13px;font-weight:650}.JeOz9W_headSub{color:var(--dsw-alias-label-tertiary,GrayText);font-size:11px;line-height:1.5}.JeOz9W_headAside{float:right;color:var(--dsw-alias-label-tertiary,GrayText);align-items:center;gap:5px;font-size:11px;display:flex}.JeOz9W_agentRow{align-items:center;gap:10px;padding:8px 12px;display:flex}.JeOz9W_avatar{letter-spacing:.5px;text-transform:uppercase;border-radius:7px;flex:none;place-items:center;width:28px;height:28px;font-size:10px;font-weight:700;display:grid}.JeOz9W_agentName{font-size:12px;font-weight:600}.JeOz9W_agentVersion{color:var(--dsw-alias-label-tertiary,GrayText);font-family:ui-monospace,monospace;font-size:11px}.JeOz9W_flowRow{border-bottom:1px solid var(--dsw-alias-line-normal,#80808047);padding:9px 12px}.JeOz9W_flowRow:last-child{border-bottom:0}.JeOz9W_flowName{font-size:12.5px;font-weight:600;line-height:1.45}.JeOz9W_flowMeta{color:var(--dsw-alias-label-tertiary,GrayText);gap:10px;font-size:11px;display:flex}.JeOz9W_listRow{border:0;border-bottom:1px solid var(--dsw-alias-line-normal,#80808047);width:100%;color:inherit;text-align:left;cursor:pointer;background:0 0;align-items:flex-start;gap:9px;padding:9px 12px;display:flex}.JeOz9W_listRow:last-child{border-bottom:0}.JeOz9W_listRow:hover{background:var(--dsw-alias-bg-module,Canvas)}.JeOz9W_listDot{flex:none;margin-top:4px}.JeOz9W_listMain{flex:auto;gap:1px;min-width:0;display:grid}.JeOz9W_listGoal{-webkit-line-clamp:2;-webkit-box-orient:vertical;font-size:12.5px;line-height:1.4;display:-webkit-box;overflow:hidden}.JeOz9W_back{color:var(--dsw-alias-label-tertiary,GrayText);cursor:pointer;background:0 0;border:0;padding:8px 12px 4px;font-size:11px;display:block}.JeOz9W_back:hover{color:var(--dsw-alias-label-primary,CanvasText)}.JeOz9W_detailHead{align-items:baseline;gap:8px;padding:0 12px;display:flex}.JeOz9W_detailGoal{font-size:13px;font-weight:650;line-height:1.4}.JeOz9W_detailMeta{border-bottom:1px solid var(--dsw-alias-line-normal,#80808047);color:var(--dsw-alias-label-tertiary,GrayText);padding:2px 12px 8px;font-size:11px}.JeOz9W_flowButton{width:100%;color:inherit;text-align:left;cursor:pointer;background:0 0;border-top:0;border-left:0;border-right:0;display:block}.JeOz9W_flowButton:hover{background:var(--dsw-alias-bg-module,Canvas)}.JeOz9W_prose{color:var(--dsw-alias-label-secondary,GrayText);margin:0;padding:8px 12px;font-size:12px;line-height:1.55}.JeOz9W_facts{grid-template-columns:auto 1fr;gap:3px 10px;margin:0;padding:4px 12px 10px;font-size:11.5px;display:grid}.JeOz9W_facts dt{color:var(--dsw-alias-label-tertiary,GrayText)}.JeOz9W_facts dd{margin:0}.JeOz9W_outLink{padding:0 12px 10px;font-size:11.5px;display:block}.JeOz9W_sectionLabel{border-top:1px solid var(--dsw-alias-line-normal,#80808047);color:var(--dsw-alias-label-tertiary,GrayText);padding:8px 12px 4px;font-size:11px}.JeOz9W_defnRow{border-bottom:1px solid var(--dsw-alias-line-normal,#80808047);border-left:2px solid #0000;padding:8px 12px 9px}.JeOz9W_defnRow:last-child{border-bottom:0}.JeOz9W_kind_action{border-left-color:var(--dsw-alias-state-business-primary,#5078ffb3)}.JeOz9W_kind_human{border-left-color:var(--dsw-alias-state-warning,#d29628b3)}.JeOz9W_kind_decision{border-left-color:var(--dsw-alias-label-tertiary,GrayText)}.JeOz9W_defnHead{align-items:baseline;gap:6px;min-width:0;display:flex}.JeOz9W_defnName{text-overflow:ellipsis;white-space:nowrap;flex:0 auto;min-width:0;font-size:12.5px;font-weight:600;overflow:hidden}.JeOz9W_defnKind{color:var(--dsw-alias-label-tertiary,GrayText);letter-spacing:.04em;text-transform:uppercase;flex:none;font-size:10px}.JeOz9W_defnHandler{text-overflow:ellipsis;white-space:nowrap;min-width:0;color:var(--dsw-alias-label-tertiary,GrayText);flex:0 auto;margin-left:auto;font-family:ui-monospace,monospace;font-size:11px;overflow:hidden}.JeOz9W_defnPrompt,.JeOz9W_defnNoPrompt{color:var(--dsw-alias-label-secondary,GrayText);-webkit-line-clamp:3;-webkit-box-orient:vertical;margin:3px 0 0;font-size:11.5px;line-height:1.5;display:-webkit-box;overflow:hidden}.JeOz9W_defnNoPrompt{color:var(--dsw-alias-label-tertiary,GrayText);font-style:italic}";
+		const css = ".JeOz9W_panel{border:1px solid var(--dsw-alias-line-normal,#80808047);background:var(--dsw-alias-bg-layer-1,Canvas);color:var(--dsw-alias-label-primary);pointer-events:auto;border-radius:12px;flex-direction:column;display:flex;position:absolute;overflow:hidden;box-shadow:0 12px 40px #0000002e}.JeOz9W_bar{border-bottom:1px solid var(--dsw-alias-line-normal,#80808047);background:var(--dsw-alias-bg-module,Canvas);cursor:grab;user-select:none;align-items:center;gap:8px;padding:8px 10px 8px 12px;display:flex}.JeOz9W_bar:active{cursor:grabbing}.JeOz9W_title{font-size:13px;font-weight:600}.JeOz9W_count{color:var(--dsw-alias-label-tertiary);flex:1;font-size:12px}.JeOz9W_body{flex:1;min-height:0;overflow-y:auto}.JeOz9W_row{border-bottom:1px solid var(--dsw-alias-line-normal,#80808047);grid-template-columns:8px 1fr auto;align-items:start;gap:8px;padding:10px 12px;display:grid}.JeOz9W_row:last-child{border-bottom:0}.JeOz9W_dot{border-radius:50%;width:8px;height:8px;margin-top:5px}.JeOz9W_live{background:var(--dsw-alias-state-business-primary)}.JeOz9W_done{background:var(--dsw-alias-state-success)}.JeOz9W_failed{background:var(--dsw-alias-state-danger)}.JeOz9W_unknown{background:var(--dsw-alias-state-warning,var(--dsw-alias-label-tertiary))}.JeOz9W_goal{-webkit-line-clamp:2;-webkit-box-orient:vertical;font-size:13px;line-height:1.4;display:-webkit-box;overflow:hidden}.JeOz9W_meta{color:var(--dsw-alias-label-tertiary);font-size:11px}.JeOz9W_status{color:var(--dsw-alias-label-secondary,GrayText);white-space:nowrap;margin-left:8px;font-size:11px}.JeOz9W_empty,.JeOz9W_error{color:var(--dsw-alias-label-tertiary);text-align:center;padding:20px 14px;font-size:12px}.JeOz9W_error{color:var(--dsw-alias-state-error-primary);text-align:left}.JeOz9W_badge{border:1px solid var(--dsw-alias-line-normal,#80808047);background:var(--dsw-alias-bg-layer-1,Canvas);color:var(--dsw-alias-label-secondary);cursor:pointer;pointer-events:auto;border-radius:999px;align-items:center;gap:6px;padding:6px 12px;font-size:12px;display:flex;position:absolute;box-shadow:0 6px 20px #00000024}.JeOz9W_badge:hover{color:var(--dsw-alias-label-primary)}.JeOz9W_resize{cursor:nwse-resize;width:14px;height:14px;position:absolute;inset:auto 0 0 auto}.JeOz9W_stepRow{padding:4px 12px 4px 22px;font-size:12px}.JeOz9W_attention{border-left:2px solid var(--dsw-alias-state-warning,var(--dsw-alias-label-tertiary));color:var(--dsw-alias-label-secondary);margin:4px 0;padding:6px 8px;font-size:11px}.JeOz9W_output{background:var(--dsw-alias-bg-module-platform,var(--dsw-alias-bg-module,Canvas));max-height:220px;color:var(--dsw-alias-label-secondary);white-space:pre-wrap;overflow-wrap:anywhere;border-radius:6px;margin:4px 0 8px;padding:8px;font-size:11px;line-height:1.5;overflow:auto}.JeOz9W_actions{flex-wrap:wrap;align-items:center;gap:6px;margin:6px 0 8px;display:flex}.JeOz9W_actions input{border:1px solid var(--dsw-alias-line-normal,#80808047);background:var(--dsw-alias-bg-layer-1,Canvas);min-width:0;color:var(--dsw-alias-label-primary);border-radius:6px;flex:140px;padding:4px 8px;font-size:11px}.JeOz9W_iconButton{color:var(--dsw-alias-label-tertiary);cursor:pointer;background:0 0;border:0;border-radius:4px;justify-content:center;align-items:center;padding:2px;display:inline-flex}.JeOz9W_iconButton:hover{color:var(--dsw-alias-label-primary)}.JeOz9W_catalogRow{justify-content:space-between;align-items:baseline;gap:8px;padding:4px 0 4px 12px;display:flex}.JeOz9W_catalogRow>*{text-overflow:ellipsis;white-space:nowrap;min-width:0;overflow:hidden}.JeOz9W_catalogRow>span{flex:auto}.JeOz9W_catalogRow>code{flex:0 auto}.JeOz9W_tabs{border-bottom:1px solid var(--dsw-alias-line-normal,#80808047);background:var(--dsw-alias-bg-module,Canvas);flex:none;gap:2px;padding:6px 8px 0;display:flex}.JeOz9W_tab{color:var(--dsw-alias-label-tertiary,GrayText);cursor:pointer;background:0 0;border:0;border-bottom:2px solid #0000;flex:1 1 0;padding:6px 4px 8px;font-size:12px}.JeOz9W_tab:hover{color:var(--dsw-alias-label-primary,CanvasText)}.JeOz9W_tabActive{color:var(--dsw-alias-label-primary,CanvasText);border-bottom-color:var(--dsw-alias-state-business-primary,Highlight);font-weight:600}.JeOz9W_head{padding:12px 12px 2px}.JeOz9W_headTitle{font-size:13px;font-weight:650}.JeOz9W_headSub{color:var(--dsw-alias-label-tertiary,GrayText);font-size:11px;line-height:1.5}.JeOz9W_headAside{float:right;color:var(--dsw-alias-label-tertiary,GrayText);align-items:center;gap:5px;font-size:11px;display:flex}.JeOz9W_agentRow{align-items:center;gap:10px;padding:8px 12px;display:flex}.JeOz9W_avatar{letter-spacing:.5px;text-transform:uppercase;border-radius:7px;flex:none;place-items:center;width:28px;height:28px;font-size:10px;font-weight:700;display:grid}.JeOz9W_agentName{font-size:12px;font-weight:600}.JeOz9W_agentVersion{color:var(--dsw-alias-label-tertiary,GrayText);font-family:ui-monospace,monospace;font-size:11px}.JeOz9W_flowRow{border-bottom:1px solid var(--dsw-alias-line-normal,#80808047);padding:9px 12px}.JeOz9W_flowRow:last-child{border-bottom:0}.JeOz9W_flowName{font-size:12.5px;font-weight:600;line-height:1.45}.JeOz9W_listRow{border:0;border-bottom:1px solid var(--dsw-alias-line-normal,#80808047);width:100%;color:inherit;text-align:left;cursor:pointer;background:0 0;align-items:flex-start;gap:9px;padding:9px 12px;display:flex}.JeOz9W_listRow:last-child{border-bottom:0}.JeOz9W_listRow:hover{background:var(--dsw-alias-bg-module,Canvas)}.JeOz9W_listDot{flex:none;margin-top:4px}.JeOz9W_listMain{flex:auto;gap:1px;min-width:0;display:grid}.JeOz9W_listGoal{-webkit-line-clamp:2;-webkit-box-orient:vertical;font-size:12.5px;line-height:1.4;display:-webkit-box;overflow:hidden}.JeOz9W_back{color:var(--dsw-alias-label-tertiary,GrayText);cursor:pointer;background:0 0;border:0;padding:8px 12px 4px;font-size:11px;display:block}.JeOz9W_back:hover{color:var(--dsw-alias-label-primary,CanvasText)}.JeOz9W_detailHead{align-items:baseline;gap:8px;padding:0 12px;display:flex}.JeOz9W_detailGoal{font-size:13px;font-weight:650;line-height:1.4}.JeOz9W_detailMeta{border-bottom:1px solid var(--dsw-alias-line-normal,#80808047);color:var(--dsw-alias-label-tertiary,GrayText);padding:2px 12px 8px;font-size:11px}.JeOz9W_flowButton{width:100%;color:inherit;text-align:left;cursor:pointer;background:0 0;border-top:0;border-left:0;border-right:0;display:block}.JeOz9W_flowButton:hover{background:var(--dsw-alias-bg-module,Canvas)}.JeOz9W_prose{color:var(--dsw-alias-label-secondary,GrayText);margin:0;padding:8px 12px;font-size:12px;line-height:1.55}.JeOz9W_facts{grid-template-columns:auto 1fr;gap:3px 10px;margin:0;padding:4px 12px 10px;font-size:11.5px;display:grid}.JeOz9W_facts dt{color:var(--dsw-alias-label-tertiary,GrayText)}.JeOz9W_facts dd{margin:0}.JeOz9W_outLink{padding:0 12px 10px;font-size:11.5px;display:block}.JeOz9W_sectionLabel{border-top:1px solid var(--dsw-alias-line-normal,#80808047);color:var(--dsw-alias-label-tertiary,GrayText);padding:8px 12px 4px;font-size:11px}.JeOz9W_defnRow{border-bottom:1px solid var(--dsw-alias-line-normal,#80808047);border-left:2px solid #0000;padding:8px 12px 9px}.JeOz9W_defnRow:last-child{border-bottom:0}.JeOz9W_kind_action{border-left-color:var(--dsw-alias-state-business-primary,#5078ffb3)}.JeOz9W_kind_human{border-left-color:var(--dsw-alias-state-warning,#d29628b3)}.JeOz9W_kind_decision{border-left-color:var(--dsw-alias-label-tertiary,GrayText)}.JeOz9W_defnHead{align-items:baseline;gap:6px;min-width:0;display:flex}.JeOz9W_defnName{text-overflow:ellipsis;white-space:nowrap;flex:0 auto;min-width:0;font-size:12.5px;font-weight:600;overflow:hidden}.JeOz9W_defnKind{color:var(--dsw-alias-label-tertiary,GrayText);letter-spacing:.04em;text-transform:uppercase;flex:none;font-size:10px}.JeOz9W_defnHandler{text-overflow:ellipsis;white-space:nowrap;min-width:0;color:var(--dsw-alias-label-tertiary,GrayText);flex:0 auto;margin-left:auto;font-family:ui-monospace,monospace;font-size:11px;overflow:hidden}.JeOz9W_defnPrompt,.JeOz9W_defnNoPrompt{color:var(--dsw-alias-label-secondary,GrayText);-webkit-line-clamp:3;-webkit-box-orient:vertical;margin:3px 0 0;font-size:11.5px;line-height:1.5;display:-webkit-box;overflow:hidden}.JeOz9W_defnNoPrompt{color:var(--dsw-alias-label-tertiary,GrayText);font-style:italic}.JeOz9W_shape{align-items:center;margin-top:5px;display:flex}.JeOz9W_shapeNode{border:1px solid var(--dsw-alias-line-normal,#80808057);width:17px;height:17px;color:var(--dsw-alias-state-business-primary,#5078ffe6);border-radius:50%;flex:0 0 17px;place-items:center;font-family:ui-monospace,monospace;font-size:8.5px;font-weight:700;line-height:1;display:grid;position:relative}.JeOz9W_shapeNode+.JeOz9W_shapeNode{margin-left:9px}.JeOz9W_shapeNode+.JeOz9W_shapeNode:before{content:\"\";border-top:1px solid var(--dsw-alias-line-normal,#80808057);width:9px;position:absolute;top:50%;right:100%}.JeOz9W_node_human{color:var(--dsw-alias-state-warning,#c88c28f2)}.JeOz9W_node_terminal{color:var(--dsw-alias-state-success,#3ca05af2)}.JeOz9W_node_decision{color:var(--dsw-alias-label-secondary,GrayText)}.JeOz9W_node_more{color:var(--dsw-alias-label-tertiary,GrayText);font-size:8px}";
 		const tagId = "@orbit-runtime/dsh-orbit/OrbitPanel.module.css";
 		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId) + "]") === null) {
 			const tag = document.createElement("style");
@@ -47,7 +47,6 @@ window.__ModuleLoader__.load({
 			"facts": "JeOz9W_facts",
 			"failed": "JeOz9W_failed",
 			"flowButton": "JeOz9W_flowButton",
-			"flowMeta": "JeOz9W_flowMeta",
 			"flowName": "JeOz9W_flowName",
 			"flowRow": "JeOz9W_flowRow",
 			"goal": "JeOz9W_goal",
@@ -65,6 +64,10 @@ window.__ModuleLoader__.load({
 			"listRow": "JeOz9W_listRow",
 			"live": "JeOz9W_live",
 			"meta": "JeOz9W_meta",
+			"node_decision": "JeOz9W_node_decision",
+			"node_human": "JeOz9W_node_human",
+			"node_more": "JeOz9W_node_more",
+			"node_terminal": "JeOz9W_node_terminal",
 			"outLink": "JeOz9W_outLink",
 			"output": "JeOz9W_output",
 			"panel": "JeOz9W_panel",
@@ -72,6 +75,8 @@ window.__ModuleLoader__.load({
 			"resize": "JeOz9W_resize",
 			"row": "JeOz9W_row",
 			"sectionLabel": "JeOz9W_sectionLabel",
+			"shape": "JeOz9W_shape",
+			"shapeNode": "JeOz9W_shapeNode",
 			"status": "JeOz9W_status",
 			"stepRow": "JeOz9W_stepRow",
 			"tab": "JeOz9W_tab",
@@ -734,6 +739,51 @@ window.__ModuleLoader__.load({
 				]
 			});
 		}
+		/** The letter a step wears in the chain, as Orbit's own card assigns it. */
+		function glyph(kind) {
+			if (kind === "terminal") return "✓";
+			if (kind === "human") return "H";
+			if (kind === "decision") return "?";
+			return kind.slice(0, 1).toUpperCase();
+		}
+		const SHAPE_LIMIT = 5;
+		const SHAPE_ORDER = {
+			action: 0,
+			human: 1,
+			decision: 2,
+			join: 3,
+			terminal: 5
+		};
+		const shapeRank = (kind) => SHAPE_ORDER[kind] ?? 4;
+		/**
+		* A workflow's shape: its first steps as a connected chain, then how many more.
+		*
+		* Grouped by kind rather than laid out in graph order, which is what the
+		* listing knows — a tally of kinds costs one small object, and the order would
+		* cost the graph. It reads as "three actions, a decision, an end", which is
+		* the size and character a reader is choosing by; the real order is one click
+		* away on the detail page, where the steps are listed as they happen.
+		*/
+		function WorkflowShape({ kinds, total }) {
+			const shown = [];
+			const ranked = Object.entries(kinds).sort(([left], [right]) => shapeRank(left) - shapeRank(right));
+			for (const [kind, count] of ranked) {
+				for (let index = 0; index < count && shown.length < SHAPE_LIMIT; index += 1) shown.push(kind);
+				if (shown.length === SHAPE_LIMIT) break;
+			}
+			if (!shown.length) return null;
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+				className: OrbitPanel_module_css_default.shape,
+				"aria-hidden": "true",
+				children: [shown.map((kind, index) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+					className: `${OrbitPanel_module_css_default.shapeNode} ${OrbitPanel_module_css_default[`node_${kind}`] ?? ""}`,
+					children: glyph(kind)
+				}, index)), total > shown.length ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
+					className: `${OrbitPanel_module_css_default.shapeNode} ${OrbitPanel_module_css_default.node_more}`,
+					children: ["+", total - shown.length]
+				}) : null]
+			});
+		}
 		function OrbitPanel({ t, useSessions }) {
 			const sessionId = useSessions((state) => state.current);
 			const [layout, setLayout] = (0, react.useState)(() => {
@@ -976,9 +1026,9 @@ window.__ModuleLoader__.load({
 								children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 									className: OrbitPanel_module_css_default.flowName,
 									children: item.name || item.workflow_id
-								}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
-									className: OrbitPanel_module_css_default.flowMeta,
-									children: item.node_count === void 0 ? null : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: t("stepCount", { total: item.node_count }) })
+								}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)(WorkflowShape, {
+									kinds: item.node_kinds ?? {},
+									total: item.node_count ?? 0
 								})]
 							}, item.workflow_id)) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
 								className: OrbitPanel_module_css_default.empty,
@@ -1057,7 +1107,6 @@ window.__ModuleLoader__.load({
 			readyNo: "Not yet",
 			factRuns: "Runs ({total})",
 			neverRun: "This workflow has never run here.",
-			stepCount: "{total} steps",
 			factSteps: "Steps ({total})",
 			stepsLoading: "Reading the definition…",
 			noPrompt: "This step was authored without a prompt.",
@@ -1115,7 +1164,6 @@ window.__ModuleLoader__.load({
 			readyNo: "还不能",
 			factRuns: "运行记录（{total}）",
 			neverRun: "这个工作流还没有在这里跑过。",
-			stepCount: "{total} 个步骤",
 			factSteps: "步骤（{total}）",
 			stepsLoading: "正在读取定义…",
 			noPrompt: "这一步没有写提示词。",

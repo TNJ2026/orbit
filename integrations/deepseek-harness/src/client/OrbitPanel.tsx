@@ -75,6 +75,58 @@ function PageHead({ title, sub, aside }: { title: string; sub: string; aside?: R
   )
 }
 
+/** The letter a step wears in the chain, as Orbit's own card assigns it. */
+function glyph(kind: string): string {
+  if (kind === 'terminal') return '✓'
+  if (kind === 'human') return 'H'
+  if (kind === 'decision') return '?'
+  return kind.slice(0, 1).toUpperCase()
+}
+
+const SHAPE_LIMIT = 5
+/* Where each kind sits in the chain. The tally arrives in whatever order the
+   nodes were authored in, and a chain drawn from that order can open with a
+   terminal — a picture that reads left to right saying the workflow ends
+   first. Ranking them puts the work up front and the ends at the end. */
+const SHAPE_ORDER: Record<string, number> = {
+  action: 0, human: 1, decision: 2, join: 3, terminal: 5,
+}
+const shapeRank = (kind: string): number => SHAPE_ORDER[kind] ?? 4
+
+/**
+ * A workflow's shape: its first steps as a connected chain, then how many more.
+ *
+ * Grouped by kind rather than laid out in graph order, which is what the
+ * listing knows — a tally of kinds costs one small object, and the order would
+ * cost the graph. It reads as "three actions, a decision, an end", which is
+ * the size and character a reader is choosing by; the real order is one click
+ * away on the detail page, where the steps are listed as they happen.
+ */
+function WorkflowShape({ kinds, total }: { kinds: Record<string, number>; total: number }) {
+  const shown: string[] = []
+  const ranked = Object.entries(kinds)
+    .sort(([left], [right]) => shapeRank(left) - shapeRank(right))
+  for (const [kind, count] of ranked) {
+    for (let index = 0; index < count && shown.length < SHAPE_LIMIT; index += 1) {
+      shown.push(kind)
+    }
+    if (shown.length === SHAPE_LIMIT) break
+  }
+  if (!shown.length) return null
+  return (
+    <div className={styles.shape} aria-hidden="true">
+      {shown.map((kind, index) => (
+        <span key={index} className={`${styles.shapeNode} ${styles[`node_${kind}`] ?? ''}`}>
+          {glyph(kind)}
+        </span>
+      ))}
+      {total > shown.length
+        ? <span className={`${styles.shapeNode} ${styles.node_more}`}>+{total - shown.length}</span>
+        : null}
+    </div>
+  )
+}
+
 export interface OrbitPanelProps {
   t: Translate
   /** `shell.overlay` is root-scoped: it hands over the session *store*, never
@@ -307,14 +359,13 @@ export function OrbitPanel({ t, useSessions }: OrbitPanelProps) {
               key={item.workflow_id}
               onClick={() => setSelectedFlow(item.workflow_id)}
             >
-              {/* Name and size, as Orbit's own card reads: the id is how a
+              {/* Name and shape, as Orbit's own card reads: the id is how a
                   machine addresses this, and it is a line above the only thing
                   a person is choosing by. Both are on the detail page. */}
               <div className={styles.flowName}>{item.name || item.workflow_id}</div>
-              <div className={styles.flowMeta}>
-                {item.node_count === undefined
-                  ? null : <span>{t('stepCount', { total: item.node_count })}</span>}
-              </div>
+              <WorkflowShape
+                kinds={item.node_kinds ?? {}} total={item.node_count ?? 0}
+              />
             </button>
           )) : <p className={styles.empty}>{t('emptyWorkflows')}</p>
         ) : null}

@@ -235,6 +235,20 @@ test('a Workflow lists its steps and links out for the graph', async () => {
   }
 })
 
+test('the listing draws a workflow from the tally it was sent', async () => {
+  // A shape per row must not become a request per row: the listing already
+  // carries node_count and node_kinds, and reaching for the definition here
+  // would turn one poll into fifteen calls that the detail page makes anyway.
+  // The last occurrence of each: the first is the page heading, which comes
+  // above all four list bodies.
+  const list = code.slice(
+    code.lastIndexOf("tab === 'workflows'"), code.lastIndexOf("tab === 'agents'"),
+  )
+  assert.ok(list.length > 200, 'the workflows list body was not found')
+  assert.match(list, /node_kinds/)
+  assert.equal(/getWorkflowDefinition|getGraph/.test(list), false)
+})
+
 test('a definition is read once, not polled', async () => {
   // It changes only when somebody republishes it. A poll would re-ask a
   // settled question at the cadence of one that is not.
