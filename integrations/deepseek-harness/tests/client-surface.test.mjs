@@ -42,8 +42,7 @@ test('every Host call is one the panel can name a reason for', async () => {
   // membership test.
   const used = dispatchable.filter(action => new RegExp(`'${action}'`).test(code))
   assert.deepEqual(used.sort(), [
-    'getPanelState', 'getRunDetail', 'getStepOutput', 'listRunnable',
-    'reconcileStep', 'runCommand',
+    'getPanelState', 'getRunDetail', 'getStepOutput', 'reconcileStep', 'runCommand',
   ])
 })
 
@@ -123,12 +122,17 @@ test('the slash menu carries commands, not a catalogue', () => {
   assert.match(candidates, /'orbit-workflows'/)
 })
 
-test('listing answers in place, and the longer command is matched first', () => {
-  // `/orbit-workflows` starts with `/orbit`; matching the shorter claim first
-  // would swallow it and then refuse its own name as an argument.
-  assert.match(code, /renderRunnable\(workflows/)
+test('asking for the Workflows goes through the Agent and its tool', () => {
+  // A command result cannot be referred to afterwards; a turn can. The
+  // instruction names the tool so the numbers come from it rather than from a
+  // catalog that may be minutes old.
+  assert.match(code, /text: t\('listRequest'\)/)
+  assert.match(sources[names.indexOf('locales.ts')], /orbit_list_workflows/)
+  const pick = code.slice(code.indexOf('onPick:'), code.indexOf('matchSpace:'))
+  assert.equal(/start_run|runCommand|listRunnable/.test(pick), false, 'the menu grew a launcher')
+})
+
+test('the longer command is matched before the one it starts with', () => {
   const order = code.indexOf("token === '/orbit-workflows'")
   assert.ok(order > 0 && order < code.indexOf("token === '/orbit'"))
-  const pick = code.slice(code.indexOf('onPick:'), code.indexOf('matchSpace:'))
-  assert.equal(/start_run|runCommand/.test(pick), false, 'the menu grew a launcher')
 })

@@ -16,9 +16,7 @@ import type {} from '@deepseek-ai/dsh-client-locale/client'
 // Type-only: `shell.overlay` is declared by ui-layout; ctx.slots.inject owns
 // the runtime wait for that declaration.
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
-import type { WorkflowSummary } from '../types.js'
 import { OrbitPanel } from './OrbitPanel.tsx'
-import { renderRunnable } from './orbit-model.ts'
 import { ORBIT_LOCALE_NAMESPACE, en, zh, type OrbitLocaleKey } from './locales.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -30,31 +28,17 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 
 interface InputTriggerRegistry { registerSource(source: Record<string, unknown>): () => void }
 
-async function hostCall<T>(action: string, args: unknown[], signal: AbortSignal): Promise<T> {
-  const response = await fetch('/plugins/dsh-orbit/api', {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ action, args }), signal,
-  })
-  const payload = await response.json() as { result?: T; error?: string }
-  if (!response.ok || payload.error) throw new Error(payload.error || `HTTP ${String(response.status)}`)
-  return payload.result as T
-}
-
-/** The Session a command was typed in, however the host spells it. */
-function currentSessionId(actx: { sessionId?: string }): string | undefined {
-  return typeof actx.sessionId === 'string' ? actx.sessionId : undefined
-}
-type SubmitResult = { kind: 'success'; text?: string } | { kind: 'error'; text: string }
-
 type Translate = (key: OrbitLocaleKey, values?: Record<string, string | number>) => string
+type SubmitResult = { kind: 'success' } | { kind: 'error'; text: string }
 
 /**
- * Two commands: fold the panel, and list what can be run.
+ * Two commands: fold the panel, and ask for the Workflows.
  *
- * Both answer in place, which is what picking from `/` should do. The listing
- * is the Host's, not the Agent's — instant, and free of the model — with the
- * cost stated where it lands: the Agent does not see this output, so a
- * follow-up like "run the second one" needs a name rather than an ordinal.
+ * The second writes an instruction into the draft — call the tool, lay out the
+ * answer — rather than listing anything itself. Going through the Agent costs a
+ * turn and buys the only thing a command result cannot have: the listing is in
+ * the conversation, so "run the second one" has something to count, and the
+ * numbers come from the tool rather than from a catalog that may be minutes old.
  *
  * An earlier version listed the Workflows themselves as menu entries. The `/`
  * menu is for commands, where picking one makes something happen; filling it
@@ -72,18 +56,6 @@ function registerOrbitSlashSource(ctx: ClientContext, t: Translate): void {
       return { kind: 'success' }
     },
   })
-  const listClaim = (sessionId: string) => ({
-    token: '/orbit-workflows',
-    submit: async (args: string): Promise<SubmitResult> => {
-      if (args.trim()) return { kind: 'error', text: '/orbit-workflows takes no argument' }
-      try {
-        const workflows = await hostCall<readonly WorkflowSummary[]>(
-          'listRunnable', [sessionId], new AbortController().signal,
-        )
-        return { kind: 'success', text: renderRunnable(workflows, t('noRunnable')) }
-      } catch (reason) { return { kind: 'error', text: String(reason) } }
-    },
-  })
   ctx.effect(() => inputTriggers.registerSource({
     trigger: '/', name: 'orbit', order: -10, showGroupTitle: false,
     candidates: async (_session: unknown, request: { query: string }) => {
@@ -93,20 +65,18 @@ function registerOrbitSlashSource(ctx: ClientContext, t: Translate): void {
         { name: 'orbit-workflows', description: t('askWhatRuns'), value: 'list' },
       ].filter(item => item.name.includes(query))
     },
-    onPick: (pick: { candidate: { value?: string }; session: { sessionId: string } }) =>
-      pick.candidate.value === 'list'
-        ? { claim: listClaim(String(pick.session.sessionId)) }
-        : { claim: claim() },
+    onPick: (pick: { candidate: { value?: string } }) =>
+      pick.candidate.value === 'list' ? { text: t('listRequest') } : { claim: claim() },
     // Longest token first: `/orbit-workflows` starts with `/orbit`, and the
-    // shorter claim would swallow it and then refuse its own argument.
-    matchSpace: (session: { sessionId: string }, token: string) =>
-      token === '/orbit-workflows' ? { claim: listClaim(String(session.sessionId)) }
+    // shorter claim would swallow it and then refuse its own name as an
+    // argument. Typed in full it resolves to the same instruction the menu
+    // writes, so the two ways of reaching it agree.
+    matchSpace: (_session: unknown, token: string) =>
+      token === '/orbit-workflows' ? { text: t('listRequest') }
         : token === '/orbit' ? { claim: claim() } : undefined,
-    matchEnter: async (session: { sessionId: string }, line: string) => {
+    matchEnter: async (_session: unknown, line: string) => {
       const text = line.trim()
-      if (/^\/orbit-workflows(?:\s|$)/u.test(text)) {
-        return { claim: listClaim(String(session.sessionId)) }
-      }
+      if (/^\/orbit-workflows(?:\s|$)/u.test(text)) return { text: t('listRequest') }
       return /^\/orbit(?:\s|$)/u.test(text) ? { claim: claim() } : undefined
     },
   }), 'orbit: slash command folding the panel')

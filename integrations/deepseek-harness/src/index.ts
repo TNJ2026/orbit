@@ -138,7 +138,6 @@ export class OrbitRemoteService extends TypertRemoteService {
     switch (action) {
       case 'getRuntime': return await this.getRuntime(args[0] as WorkspaceRef, signal)
       case 'getRuntimeUi': return await this.getRuntimeUi(String(args[0]), signal)
-      case 'listRunnable': return await this.listRunnable(String(args[0]), signal)
       case 'getPanelState': return await this.getPanelState(String(args[0]), signal)
       case 'getRunDetail': return await this.getRunDetail(String(args[0]), String(args[1]), signal)
       case 'getStepOutput': return await this.getStepOutput(String(args[0]), String(args[1]), String(args[2]), Number(args[3]), signal)
@@ -417,24 +416,6 @@ export class OrbitRemoteService extends TypertRemoteService {
       return await this.gateway.call(scope, sessionId, 'get_run_steps', {
         run_id: runId,
       }) as { steps: StepSummary[] }
-    } finally { await release() }
-  }
-
-  /**
-   * The runnable Workflows, for a person who just asked.
-   *
-   * Refreshed before answering rather than served stale: a command is pressed
-   * because someone wants to know now, and the reason the prompt contribution
-   * cannot wait — assembly is synchronous — does not apply here.
-   */
-  @Remote('listRunnable')
-  async listRunnable(sessionId: string, signal: AbortSignal): Promise<readonly WorkflowSummary[]> {
-    signal.throwIfAborted()
-    const scope = await this.sessionWorkspace(sessionId)
-    const release = await this.gateway.acquire(scope)
-    try {
-      await this.refreshCatalog(scope)
-      return this.catalog.list(scope.canonicalPath)
     } finally { await release() }
   }
 

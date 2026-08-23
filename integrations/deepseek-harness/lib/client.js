@@ -226,20 +226,6 @@ window.__ModuleLoader__.load({
 		function commandRevision(row, command) {
 			return row.commands.find((item) => item.command === command)?.expected_version;
 		}
-		/** The runnable Workflows as one command-result block a person reads.
-		*
-		* Names first and ids second: the id is what `orbit_start_run` needs, but the
-		* name is what someone recognises, and a list that leads with identifiers reads
-		* like a database dump of something they were about to choose from.
-		*/
-		function renderRunnable(workflows, empty) {
-			if (!workflows.length) return empty;
-			return workflows.map((item) => {
-				const inputs = Array.isArray(item.inputs) ? item.inputs.map((input) => input.id).filter((id) => typeof id === "string") : [];
-				const needs = inputs.length ? `  · input: ${inputs.join(", ")}` : "";
-				return `${item.name || item.workflow_id}\n  ${item.workflow_id}@${String(item.latest_version)}${needs}`;
-			}).join("\n");
-		}
 		//#endregion
 		//#region src/client/OrbitRunRow.tsx
 		/** One Run in the panel, and what opening it shows. */
@@ -457,7 +443,7 @@ window.__ModuleLoader__.load({
 		//#endregion
 		//#region src/client/OrbitPanel.tsx
 		/** The resident Orbit panel: what is running, and a way into Orbit itself. */
-		async function hostCall$1(action, args, signal) {
+		async function hostCall(action, args, signal) {
 			const response = await fetch("/plugins/dsh-orbit/api", {
 				method: "POST",
 				headers: { "content-type": "application/json" },
@@ -527,7 +513,7 @@ window.__ModuleLoader__.load({
 				const controller = new AbortController();
 				const tick = async () => {
 					try {
-						const state = await hostCall$1("getPanelState", [sessionId], controller.signal);
+						const state = await hostCall("getPanelState", [sessionId], controller.signal);
 						if (controller.signal.aborted) return;
 						const next = orderRows(state.runs.map(toRow));
 						setRows(next);
@@ -676,7 +662,7 @@ window.__ModuleLoader__.load({
 								]
 							}) : null,
 							sessionId ? rows?.map((row) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(OrbitRunRow, {
-								call: hostCall$1,
+								call: hostCall,
 								t,
 								sessionId,
 								run: row
@@ -738,7 +724,7 @@ window.__ModuleLoader__.load({
 			runnableHint: "Ask the Agent to run one — it has the tools.",
 			togglePanel: "Show or hide the Orbit panel",
 			askWhatRuns: "List the workflows that can run here",
-			noRunnable: "No workflow in this Workspace can start a goal yet."
+			listRequest: "Call orbit_list_workflows and lay out the workflows that can run in this Workspace, with the input each one needs."
 		};
 		const zh = {
 			title: "Orbit",
@@ -767,31 +753,18 @@ window.__ModuleLoader__.load({
 			runnableHint: "让 agent 跑其中一个即可——它有对应的工具。",
 			togglePanel: "显示或收起 Orbit 面板",
 			askWhatRuns: "列出这里可运行的工作流",
-			noRunnable: "这个 Workspace 还没有可以启动目标的工作流。"
+			listRequest: "调用 orbit_list_workflows，列出这个 Workspace 可运行的工作流，并注明每个需要的输入。"
 		};
 		//#endregion
 		//#region src/client/index.tsx
-		async function hostCall(action, args, signal) {
-			const response = await fetch("/plugins/dsh-orbit/api", {
-				method: "POST",
-				headers: { "content-type": "application/json" },
-				body: JSON.stringify({
-					action,
-					args
-				}),
-				signal
-			});
-			const payload = await response.json();
-			if (!response.ok || payload.error) throw new Error(payload.error || `HTTP ${String(response.status)}`);
-			return payload.result;
-		}
 		/**
-		* Two commands: fold the panel, and list what can be run.
+		* Two commands: fold the panel, and ask for the Workflows.
 		*
-		* Both answer in place, which is what picking from `/` should do. The listing
-		* is the Host's, not the Agent's — instant, and free of the model — with the
-		* cost stated where it lands: the Agent does not see this output, so a
-		* follow-up like "run the second one" needs a name rather than an ordinal.
+		* The second writes an instruction into the draft — call the tool, lay out the
+		* answer — rather than listing anything itself. Going through the Agent costs a
+		* turn and buys the only thing a command result cannot have: the listing is in
+		* the conversation, so "run the second one" has something to count, and the
+		* numbers come from the tool rather than from a catalog that may be minutes old.
 		*
 		* An earlier version listed the Workflows themselves as menu entries. The `/`
 		* menu is for commands, where picking one makes something happen; filling it
@@ -812,26 +785,6 @@ window.__ModuleLoader__.load({
 					return { kind: "success" };
 				}
 			});
-			const listClaim = (sessionId) => ({
-				token: "/orbit-workflows",
-				submit: async (args) => {
-					if (args.trim()) return {
-						kind: "error",
-						text: "/orbit-workflows takes no argument"
-					};
-					try {
-						return {
-							kind: "success",
-							text: renderRunnable(await hostCall("listRunnable", [sessionId], new AbortController().signal), t("noRunnable"))
-						};
-					} catch (reason) {
-						return {
-							kind: "error",
-							text: String(reason)
-						};
-					}
-				}
-			});
 			ctx.effect(() => inputTriggers.registerSource({
 				trigger: "/",
 				name: "orbit",
@@ -848,11 +801,11 @@ window.__ModuleLoader__.load({
 						value: "list"
 					}].filter((item) => item.name.includes(query));
 				},
-				onPick: (pick) => pick.candidate.value === "list" ? { claim: listClaim(String(pick.session.sessionId)) } : { claim: claim() },
-				matchSpace: (session, token) => token === "/orbit-workflows" ? { claim: listClaim(String(session.sessionId)) } : token === "/orbit" ? { claim: claim() } : void 0,
-				matchEnter: async (session, line) => {
+				onPick: (pick) => pick.candidate.value === "list" ? { text: t("listRequest") } : { claim: claim() },
+				matchSpace: (_session, token) => token === "/orbit-workflows" ? { text: t("listRequest") } : token === "/orbit" ? { claim: claim() } : void 0,
+				matchEnter: async (_session, line) => {
 					const text = line.trim();
-					if (/^\/orbit-workflows(?:\s|$)/u.test(text)) return { claim: listClaim(String(session.sessionId)) };
+					if (/^\/orbit-workflows(?:\s|$)/u.test(text)) return { text: t("listRequest") };
 					return /^\/orbit(?:\s|$)/u.test(text) ? { claim: claim() } : void 0;
 				}
 			}), "orbit: slash command folding the panel");
