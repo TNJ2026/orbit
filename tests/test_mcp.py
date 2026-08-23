@@ -169,6 +169,29 @@ class ToolCallTests(ApiTestCase):
 
         self.assertEqual(1, len(everything), "a run another actor started is still in the Workspace")
 
+    def test_a_run_listed_for_the_Workspace_can_also_be_read(self) -> None:
+        """The pair that has to agree.
+
+        Widening the list without the reads makes every row a trap: a surface
+        shows a Run and then answers "not found" when someone opens it.
+        """
+
+        with AsgiHarness(self.app) as client:
+            started = self._start(client, key="theirs")
+            run_id = started["run_id"]
+            listed = payload_of(
+                tool(client, "list_runs", {"owner": "workspace"}, actor="reader")
+            )["runs"]
+            self.assertEqual([run_id], [run["run_id"] for run in listed])
+
+            for name in ("inspect_run", "get_run_steps", "get_run_edges", "get_run_graph"):
+                refused = tool(client, name, {"run_id": run_id}, actor="reader")
+                self.assertTrue(refused["result"]["isError"], name)
+                opened = tool(
+                    client, name, {"run_id": run_id, "owner": "workspace"}, actor="reader",
+                )
+                self.assertFalse(opened["result"]["isError"], name)
+
     def test_an_unknown_owner_is_refused_rather_than_guessed(self) -> None:
         with AsgiHarness(self.app) as client:
             result = tool(client, "list_runs", {"owner": "everyone"}, actor="reader")

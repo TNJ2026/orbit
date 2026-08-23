@@ -166,6 +166,21 @@ def _content(payload: Any, *, is_error: bool = False) -> dict[str, Any]:
     }
 
 
+def reading_actor(arguments, caller: str) -> str | None:
+    """Whose runs a read may see: the caller's, or the Workspace's.
+
+    Reads only. A write carries `actor` as both the scope and the record of who
+    acted, so widening it there would file somebody else's cancellation under
+    this caller's name — and a delegation read keeps the caller for the same
+    reason, since whose ruling it was is the point of recording one.
+    """
+
+    owner = arguments.get("owner", "caller")
+    if owner not in ("caller", "workspace"):
+        raise ValueError("owner must be caller or workspace")
+    return None if owner == "workspace" else caller
+
+
 def build_mcp_dispatcher(
     db_path: Path | str,
     *,
@@ -429,7 +444,8 @@ def build_mcp_dispatcher(
                 "scope": READ_SCOPE,
                 "inputSchema": {
                     "type": "object",
-                    "properties": {"run_id": {"type": "string"}},
+                    "properties": {"run_id": {"type": "string"},
+                        "owner": {"type": "string", "enum": ["caller", "workspace"]}},
                     "required": ["run_id"],
                 },
             },
@@ -439,7 +455,8 @@ def build_mcp_dispatcher(
                 "scope": READ_SCOPE,
                 "inputSchema": {
                     "type": "object",
-                    "properties": {"run_id": {"type": "string"}},
+                    "properties": {"run_id": {"type": "string"},
+                        "owner": {"type": "string", "enum": ["caller", "workspace"]}},
                     "required": ["run_id"],
                 },
             },
@@ -449,7 +466,8 @@ def build_mcp_dispatcher(
                 "scope": READ_SCOPE,
                 "inputSchema": {
                     "type": "object",
-                    "properties": {"run_id": {"type": "string"}},
+                    "properties": {"run_id": {"type": "string"},
+                        "owner": {"type": "string", "enum": ["caller", "workspace"]}},
                     "required": ["run_id"],
                 },
             },
@@ -459,7 +477,8 @@ def build_mcp_dispatcher(
                 "scope": READ_SCOPE,
                 "inputSchema": {
                     "type": "object",
-                    "properties": {"run_id": {"type": "string"}},
+                    "properties": {"run_id": {"type": "string"},
+                        "owner": {"type": "string", "enum": ["caller", "workspace"]}},
                     "required": ["run_id"],
                 },
             },
@@ -471,6 +490,7 @@ def build_mcp_dispatcher(
                     "type": "object",
                     "properties": {
                         "run_id": {"type": "string"},
+                        "owner": {"type": "string", "enum": ["caller", "workspace"]},
                         "after": {"type": "integer", "minimum": 0},
                         "limit": {"type": "integer", "minimum": 1, "maximum": 500},
                         "node_id": {"type": "string"},
@@ -755,9 +775,7 @@ def build_mcp_dispatcher(
                 "tool_profile": tool_profile,
             }
         if name == "list_runs":
-            owner = arguments.get("owner", "caller")
-            if owner not in ("caller", "workspace"):
-                raise ValueError("owner must be caller or workspace")
+            owner = reading_actor(arguments, actor)
             # Not a widening of scope: every actor reaching this transport is
             # the same local operator, and the Runtime's own UI already shows
             # all of it. What the default protects is an Agent's account of its
@@ -769,7 +787,7 @@ def build_mcp_dispatcher(
                 for run in langgraph_service.list_runs(
                     status=arguments.get("status") or None,
                     limit=min(200, max(1, int(arguments.get("limit", 20)))),
-                    actor=None if owner == "workspace" else actor,
+                    actor=owner,
                 )
             ]}
         if name == "configure_execution_lease":
@@ -814,13 +832,13 @@ def build_mcp_dispatcher(
             )
         if name == "inspect_run":
             return langgraph_run_dto(
-                langgraph_service.get(str(arguments["run_id"]), actor=actor),
+                langgraph_service.get(str(arguments["run_id"]), actor=reading_actor(arguments, actor)),
                 can_write=guard.allows(actor, WRITE_SCOPE),
             )
         if name == "get_run_steps":
             run_id = str(arguments["run_id"])
-            langgraph_service.get(run_id, actor=actor)
-            steps = list(langgraph_service.steps(run_id, actor=actor))
+            langgraph_service.get(run_id, actor=reading_actor(arguments, actor))
+            steps = list(langgraph_service.steps(run_id, actor=reading_actor(arguments, actor)))
             if delegation_queue is not None:
                 steps = [dict(step) for step in steps]
                 for step in steps:
@@ -838,13 +856,13 @@ def build_mcp_dispatcher(
             return {"steps": steps}
         if name == "get_run_graph":
             run_id = str(arguments["run_id"])
-            return {"graph": langgraph_service.graph(run_id, actor=actor)}
+            return {"graph": langgraph_service.graph(run_id, actor=reading_actor(arguments, actor))}
         if name == "get_run_edges":
             run_id = str(arguments["run_id"])
-            return {"edges": list(langgraph_service.edges(run_id, actor=actor))}
+            return {"edges": list(langgraph_service.edges(run_id, actor=reading_actor(arguments, actor)))}
         if name == "read_run_output":
             run_id = str(arguments["run_id"])
-            langgraph_service.get(run_id, actor=actor)
+            langgraph_service.get(run_id, actor=reading_actor(arguments, actor))
             after = int(arguments.get("after", 0))
             console = getattr(langgraph_service, "console", None)
             if console is None:

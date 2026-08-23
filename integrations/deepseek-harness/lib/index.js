@@ -468,7 +468,7 @@ let OrbitRemoteService = (() => {
             const release = await this.gateway.acquire(scope);
             try {
                 return await this.gateway.call(scope, sessionId, 'get_run_steps', {
-                    run_id: runId,
+                    run_id: runId, owner: 'workspace',
                 });
             }
             finally {
@@ -481,7 +481,7 @@ let OrbitRemoteService = (() => {
             const release = await this.gateway.acquire(scope);
             try {
                 return await this.gateway.call(scope, sessionId, 'read_run_output', {
-                    run_id: runId, after, node_id: nodeId,
+                    run_id: runId, after, node_id: nodeId, owner: 'workspace',
                 });
             }
             finally {
@@ -501,7 +501,17 @@ let OrbitRemoteService = (() => {
             const scope = await this.sessionWorkspace(sessionId);
             const release = await this.gateway.acquire(scope);
             try {
-                const run = await this.gateway.run(scope, sessionId, runId);
+                // Deliberately the caller's scope, unlike the reads above: a write also
+                // records who acted, so acting on a Run started elsewhere would file it
+                // under this Session. Orbit answers "not found" for one it does not own,
+                // which is true and useless here — the panel showed the Run, so the
+                // reader knows it exists.
+                const run = await this.gateway.run(scope, sessionId, runId).catch((reason) => {
+                    if (/not found/i.test(String(reason))) {
+                        throw new Error('This Run was started elsewhere; act on it where it began, or in Orbit');
+                    }
+                    throw reason;
+                });
                 const advertised = advertisedAt(run, command, expectedRevision);
                 if (advertised === undefined) {
                     throw new Error(`Orbit no longer offers ${command} at revision ${String(expectedRevision)}`);

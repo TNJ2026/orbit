@@ -188,3 +188,15 @@ test('the Agent mark is derived, not a palette that would drift from Orbit\'s', 
   assert.equal(/\.avatar\s*\{[^}]*background:\s*(?!none)[^v}]/.test(css), false,
     'the mark carries a fixed colour')
 })
+
+test('what the panel lists, it can open', async () => {
+  // Widening the list without the reads made every History row a trap: the
+  // panel showed a Run and then answered "not found" when it was expanded.
+  const host = await readFile(join(here, '..', 'src', 'index.ts'), 'utf8')
+  const reads = ['list_runs', 'get_run_steps', 'read_run_output']
+  for (const call of reads) {
+    const at = host.indexOf(`'${call}'`)
+    assert.ok(at > 0, `${call} is not called`)
+    assert.match(host.slice(at, at + 200), /owner: 'workspace'/, `${call} reads a narrower scope than the list`)
+  }
+})
