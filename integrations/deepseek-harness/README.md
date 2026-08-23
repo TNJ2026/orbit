@@ -108,15 +108,12 @@ Workflows of every bridged Workspace in the model's context — with the inputs
 each one needs, which is the mistake it exists to prevent — so the Agent can
 answer "which of these did you mean" instead of asking what Orbit is. The panel
 lists the same catalog below the Runs, for the person doing the asking, and
-the `/` menu offers it while they type.
+`/orbit-workflows` puts the question to the Agent — which answers from the
+context it already carries, in the conversation, where "run the second one" can
+follow it and be understood.
 
-Picking one there writes a sentence into the draft — `Run "Sales CSV report": `
-— rather than starting anything. The Run has to be the Agent's or it cannot
-report on it afterwards, so the menu's job is to spare you remembering a name,
-not to become a second way to launch work.
-
-All three read one cache, filled by the panel's own poll, so nothing asks twice
-for something that changes when a Workflow is published; a Runtime that is down
+Both read one cache filled by the panel's own poll, so nothing asks twice for
+something that changes when a Workflow is published; a Runtime that is down
 leaves the last answer standing rather than emptying the context.
 
 The panel deliberately has no start button. Harness is a place where work is

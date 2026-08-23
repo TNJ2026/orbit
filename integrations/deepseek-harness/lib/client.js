@@ -440,21 +440,6 @@ window.__ModuleLoader__.load({
 				]
 			});
 		}
-		let known = [];
-		function rememberWorkflows(workflows) {
-			known = workflows;
-		}
-		/**
-		* The Workflows worth offering for what has been typed so far.
-		*
-		* Matched on the name and the id together: a person reaching for one of these
-		* knows it by whichever of the two they last saw, and the menu should not make
-		* them guess which.
-		*/
-		function matchWorkflows(query) {
-			const needle = query.trim().toLowerCase();
-			return (needle ? known.filter((item) => `${item.name} ${item.workflow_id}`.toLowerCase().includes(needle)) : known).slice(0, 10);
-		}
 		//#endregion
 		//#region src/client/OrbitPanel.tsx
 		/** The resident Orbit panel: what is running, and a way into Orbit itself. */
@@ -535,7 +520,6 @@ window.__ModuleLoader__.load({
 						setUiUrl(state.uiUrl);
 						setError("");
 						setWorkflows(state.workflows ?? []);
-						rememberWorkflows(state.workflows ?? []);
 						timer = setTimeout(() => {
 							tick();
 						}, layout.collapsed ? ORBIT_IDLE_MS : nextInterval(next));
@@ -739,9 +723,8 @@ window.__ModuleLoader__.load({
 			runnable: "Runnable workflows",
 			runnableHint: "Ask the Agent to run one — it has the tools.",
 			togglePanel: "Show or hide the Orbit panel",
-			menuSection: "Orbit workflows",
-			menuHint: "inserts a request for the Agent",
-			runPrefix: "Run \"{name}\": "
+			askWhatRuns: "List the workflows that can run here",
+			listRequest: "Which Orbit workflows can run in this Workspace, and what input does each need?"
 		};
 		const zh = {
 			title: "Orbit",
@@ -769,20 +752,23 @@ window.__ModuleLoader__.load({
 			runnable: "可运行的工作流",
 			runnableHint: "让 agent 跑其中一个即可——它有对应的工具。",
 			togglePanel: "显示或收起 Orbit 面板",
-			menuSection: "Orbit 工作流",
-			menuHint: "插入一句给 agent 的请求",
-			runPrefix: "用「{name}」跑："
+			askWhatRuns: "列出这里可运行的工作流",
+			listRequest: "这个 Workspace 里有哪些 Orbit 工作流可以跑？各自需要什么输入？"
 		};
 		//#endregion
 		//#region src/client/index.tsx
 		/**
-		* `/orbit` folds the panel, and the same menu offers the Workflows that can be
-		* run here.
+		* Two commands: fold the panel, and ask what can be run.
 		*
-		* Picking a Workflow writes a sentence into the draft rather than starting
-		* anything. That is the whole point: the Run has to be the Agent's, or it
-		* cannot report on it afterwards — so the menu's job is to spare a person
-		* remembering a name, not to become a second way to launch work.
+		* The second writes its question into the draft for the person to send, rather
+		* than answering in place. The Agent already carries the Workspace's Workflows
+		* in its context, so the answer arrives in the conversation — where it can be
+		* followed by "run the second one" and be understood.
+		*
+		* An earlier version listed the Workflows themselves as menu entries. The `/`
+		* menu is for commands, where picking one makes something happen; filling it
+		* with data made picking mean "paste a name", and buried the native commands
+		* under however many Workflows a Workspace happened to have.
 		*/
 		function registerOrbitSlashSource(ctx, t) {
 			const inputTriggers = ctx.get("inputTriggers");
@@ -805,20 +791,16 @@ window.__ModuleLoader__.load({
 				showGroupTitle: false,
 				candidates: async (_session, request) => {
 					const query = request.query.toLowerCase();
-					const own = "orbit".includes(query) ? [{
+					return [{
 						name: "orbit",
 						description: t("togglePanel")
-					}] : [];
-					const flows = matchWorkflows(request.query).map((item) => ({
-						name: item.name || item.workflow_id,
-						description: `${item.workflow_id}@${String(item.latest_version)}`,
-						hint: t("menuHint"),
-						section: t("menuSection"),
-						value: item.workflow_id
-					}));
-					return [...own, ...flows];
+					}, {
+						name: "orbit-workflows",
+						description: t("askWhatRuns"),
+						value: "list"
+					}].filter((item) => item.name.includes(query));
 				},
-				onPick: (pick) => pick.candidate.value === void 0 ? { claim: claim() } : { text: t("runPrefix", { name: pick.candidate.name }) },
+				onPick: (pick) => pick.candidate.value === "list" ? { text: t("listRequest") } : { claim: claim() },
 				matchSpace: (_session, token) => token === "/orbit" ? { claim: claim() } : void 0,
 				matchEnter: async (_session, line) => /^\/orbit(?:\s|$)/u.test(line.trim()) ? { claim: claim() } : void 0
 			}), "orbit: slash command folding the panel");

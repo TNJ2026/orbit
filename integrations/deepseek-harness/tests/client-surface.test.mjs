@@ -37,6 +37,9 @@ test('every Host call is one the panel can name a reason for', async () => {
   const host = await readFile(join(here, '..', 'src', 'index.ts'), 'utf8')
   const dispatchable = [...host.matchAll(/case '([A-Za-z]+)':/g)].map(([, name]) => name)
   assert.ok(dispatchable.length > 10, 'the Host dispatch table was not found')
+  // A copy key that happens to share a Host action's name would read as a call
+  // here; they are kept distinct rather than excused, so this stays a plain
+  // membership test.
   const used = dispatchable.filter(action => new RegExp(`'${action}'`).test(code))
   assert.deepEqual(used.sort(), [
     'getPanelState', 'getRunDetail', 'getStepOutput', 'reconcileStep', 'runCommand',
@@ -109,10 +112,19 @@ test('the catalog names Workflows and does not offer to start one', () => {
   assert.equal(/runCommand|start_run|startRun/.test(section), false)
 })
 
-test('picking a Workflow from the menu writes a request, it does not start one', () => {
-  // The Run has to be the Agent's or it cannot report on it afterwards, so the
-  // menu spares a person remembering a name and stops there.
-  assert.match(code, /text: t\('runPrefix'/)
+test('the slash menu carries commands, not a catalogue', () => {
+  // Picking from `/` should make something happen. Listing the Workflows there
+  // made picking mean "paste a name", and buried the native commands under
+  // however many Workflows a Workspace happened to have.
+  const candidates = code.slice(code.indexOf('candidates:'), code.indexOf('onPick:'))
+  assert.equal(/matchWorkflows|workflow_id|latest_version/.test(candidates), false)
+  assert.match(candidates, /'orbit-workflows'/)
+})
+
+test('asking what can run is a question for the Agent, not an answer in place', () => {
+  // The Agent already carries the catalog in its context, so the answer lands
+  // in the conversation — where "run the second one" can follow it.
+  assert.match(code, /text: t\('listRequest'\)/)
   const pick = code.slice(code.indexOf('onPick:'), code.indexOf('matchSpace:'))
   assert.equal(/start_run|runCommand|getPanelState/.test(pick), false, 'the menu grew a launcher')
 })

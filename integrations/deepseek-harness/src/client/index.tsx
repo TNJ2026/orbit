@@ -17,7 +17,6 @@ import type {} from '@deepseek-ai/dsh-client-locale/client'
 // the runtime wait for that declaration.
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import { OrbitPanel } from './OrbitPanel.tsx'
-import { matchWorkflows } from './catalog-store.ts'
 import { ORBIT_LOCALE_NAMESPACE, en, zh, type OrbitLocaleKey } from './locales.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -33,13 +32,17 @@ type SubmitResult = { kind: 'success' } | { kind: 'error'; text: string }
 type Translate = (key: OrbitLocaleKey, values?: Record<string, string | number>) => string
 
 /**
- * `/orbit` folds the panel, and the same menu offers the Workflows that can be
- * run here.
+ * Two commands: fold the panel, and ask what can be run.
  *
- * Picking a Workflow writes a sentence into the draft rather than starting
- * anything. That is the whole point: the Run has to be the Agent's, or it
- * cannot report on it afterwards — so the menu's job is to spare a person
- * remembering a name, not to become a second way to launch work.
+ * The second writes its question into the draft for the person to send, rather
+ * than answering in place. The Agent already carries the Workspace's Workflows
+ * in its context, so the answer arrives in the conversation — where it can be
+ * followed by "run the second one" and be understood.
+ *
+ * An earlier version listed the Workflows themselves as menu entries. The `/`
+ * menu is for commands, where picking one makes something happen; filling it
+ * with data made picking mean "paste a name", and buried the native commands
+ * under however many Workflows a Workspace happened to have.
  */
 function registerOrbitSlashSource(ctx: ClientContext, t: Translate): void {
   const inputTriggers = ctx.get('inputTriggers') as unknown as InputTriggerRegistry | undefined
@@ -56,24 +59,15 @@ function registerOrbitSlashSource(ctx: ClientContext, t: Translate): void {
     trigger: '/', name: 'orbit', order: -10, showGroupTitle: false,
     candidates: async (_session: unknown, request: { query: string }) => {
       const query = request.query.toLowerCase()
-      const own = 'orbit'.includes(query)
-        ? [{ name: 'orbit', description: t('togglePanel') }]
-        : []
-      // `value` is the source's own opaque payload — it is how onPick tells a
-      // Workflow apart from the command without re-matching on the label.
-      const flows = matchWorkflows(request.query).map(item => ({
-        name: item.name || item.workflow_id,
-        description: `${item.workflow_id}@${String(item.latest_version)}`,
-        hint: t('menuHint'),
-        section: t('menuSection'),
-        value: item.workflow_id,
-      }))
-      return [...own, ...flows]
+      return [
+        { name: 'orbit', description: t('togglePanel') },
+        { name: 'orbit-workflows', description: t('askWhatRuns'), value: 'list' },
+      ].filter(item => item.name.includes(query))
     },
-    onPick: (pick: { candidate: { name: string; value?: string } }) =>
-      pick.candidate.value === undefined
-        ? { claim: claim() }
-        : { text: t('runPrefix', { name: pick.candidate.name }) },
+    onPick: (pick: { candidate: { value?: string } }) =>
+      pick.candidate.value === 'list'
+        ? { text: t('listRequest') }
+        : { claim: claim() },
     matchSpace: (_session: unknown, token: string) => token === '/orbit' ? { claim: claim() } : undefined,
     matchEnter: async (_session: unknown, line: string) =>
       /^\/orbit(?:\s|$)/u.test(line.trim()) ? { claim: claim() } : undefined,
