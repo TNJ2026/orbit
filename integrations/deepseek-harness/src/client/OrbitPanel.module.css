@@ -93,3 +93,29 @@
   height: 14px;
   cursor: nwse-resize;
 }
+
+/* Disclosure rows: the shell primitive brings the chrome, these bring the
+   spacing that makes a list of Runs readable at panel width. */
+.stepRow { padding: 4px 12px 4px 22px; font-size: 12px; }
+
+.attention {
+  margin: 4px 0;
+  padding: 6px 8px;
+  border-left: 2px solid var(--dsw-alias-state-warning, var(--dsw-alias-label-tertiary));
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11px;
+}
+
+.output {
+  margin: 4px 0 8px;
+  padding: 8px;
+  max-height: 220px;
+  overflow: auto;
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-module-platform, var(--dsw-alias-bg-module));
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

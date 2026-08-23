@@ -43,6 +43,8 @@ let OrbitRemoteService = (() => {
     let _getRuntime_decorators;
     let _getRuntimeUi_decorators;
     let _getPanelState_decorators;
+    let _getRunDetail_decorators;
+    let _getStepOutput_decorators;
     let _getDiagnostics_decorators;
     let _listWorkflows_decorators;
     let _listRuns_decorators;
@@ -66,6 +68,8 @@ let OrbitRemoteService = (() => {
             _getRuntime_decorators = [Remote('getRuntime')];
             _getRuntimeUi_decorators = [Remote('getRuntimeUi')];
             _getPanelState_decorators = [Remote('getPanelState')];
+            _getRunDetail_decorators = [Remote('getRunDetail')];
+            _getStepOutput_decorators = [Remote('getStepOutput')];
             _getDiagnostics_decorators = [Remote('getDiagnostics')];
             _listWorkflows_decorators = [Remote('listWorkflows')];
             _listRuns_decorators = [Remote('listRuns')];
@@ -86,6 +90,8 @@ let OrbitRemoteService = (() => {
             __esDecorate(this, null, _getRuntime_decorators, { kind: "method", name: "getRuntime", static: false, private: false, access: { has: obj => "getRuntime" in obj, get: obj => obj.getRuntime }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _getRuntimeUi_decorators, { kind: "method", name: "getRuntimeUi", static: false, private: false, access: { has: obj => "getRuntimeUi" in obj, get: obj => obj.getRuntimeUi }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _getPanelState_decorators, { kind: "method", name: "getPanelState", static: false, private: false, access: { has: obj => "getPanelState" in obj, get: obj => obj.getPanelState }, metadata: _metadata }, null, _instanceExtraInitializers);
+            __esDecorate(this, null, _getRunDetail_decorators, { kind: "method", name: "getRunDetail", static: false, private: false, access: { has: obj => "getRunDetail" in obj, get: obj => obj.getRunDetail }, metadata: _metadata }, null, _instanceExtraInitializers);
+            __esDecorate(this, null, _getStepOutput_decorators, { kind: "method", name: "getStepOutput", static: false, private: false, access: { has: obj => "getStepOutput" in obj, get: obj => obj.getStepOutput }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _getDiagnostics_decorators, { kind: "method", name: "getDiagnostics", static: false, private: false, access: { has: obj => "getDiagnostics" in obj, get: obj => obj.getDiagnostics }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _listWorkflows_decorators, { kind: "method", name: "listWorkflows", static: false, private: false, access: { has: obj => "listWorkflows" in obj, get: obj => obj.listWorkflows }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _listRuns_decorators, { kind: "method", name: "listRuns", static: false, private: false, access: { has: obj => "listRuns" in obj, get: obj => obj.listRuns }, metadata: _metadata }, null, _instanceExtraInitializers);
@@ -183,6 +189,8 @@ let OrbitRemoteService = (() => {
                 case 'getRuntime': return await this.getRuntime(args[0], signal);
                 case 'getRuntimeUi': return await this.getRuntimeUi(String(args[0]), signal);
                 case 'getPanelState': return await this.getPanelState(String(args[0]), signal);
+                case 'getRunDetail': return await this.getRunDetail(String(args[0]), String(args[1]), signal);
+                case 'getStepOutput': return await this.getStepOutput(String(args[0]), String(args[1]), String(args[2]), Number(args[3]), signal);
                 case 'getDiagnostics': return await this.getDiagnostics(args[0], String(args[1]), signal);
                 case 'listWorkflows': return await this.listWorkflows(args[0], String(args[1]), signal);
                 case 'listRuns': return await this.listRuns(args[0], String(args[1]), args[2] === undefined ? undefined : String(args[2]), signal);
@@ -357,6 +365,38 @@ let OrbitRemoteService = (() => {
                     limit: 50,
                 });
                 return { runs: result.runs, uiUrl: await this.gateway.uiUrl(scope) };
+            }
+            finally {
+                await release();
+            }
+        }
+        /**
+         * The steps of one Run, for a panel row the reader opened.
+         *
+         * Session-scoped like the panel's poll: a Run id is not a capability, so the
+         * Workspace it is read in comes from the Session rather than from the caller.
+         */
+        async getRunDetail(sessionId, runId, signal) {
+            signal.throwIfAborted();
+            const scope = await this.sessionWorkspace(sessionId);
+            const release = await this.gateway.acquire(scope);
+            try {
+                return await this.gateway.call(scope, sessionId, 'get_run_steps', {
+                    run_id: runId,
+                });
+            }
+            finally {
+                await release();
+            }
+        }
+        async getStepOutput(sessionId, runId, nodeId, after, signal) {
+            signal.throwIfAborted();
+            const scope = await this.sessionWorkspace(sessionId);
+            const release = await this.gateway.acquire(scope);
+            try {
+                return await this.gateway.call(scope, sessionId, 'read_run_output', {
+                    run_id: runId, after, node_id: nodeId,
+                });
             }
             finally {
                 await release();

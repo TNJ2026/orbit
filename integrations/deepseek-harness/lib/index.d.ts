@@ -59,6 +59,16 @@ export declare class OrbitRemoteService extends TypertRemoteService {
         runs: RunDto[];
         uiUrl: string;
     }>;
+    /**
+     * The steps of one Run, for a panel row the reader opened.
+     *
+     * Session-scoped like the panel's poll: a Run id is not a capability, so the
+     * Workspace it is read in comes from the Session rather than from the caller.
+     */
+    getRunDetail(sessionId: string, runId: string, signal: AbortSignal): Promise<{
+        steps: StepSummary[];
+    }>;
+    getStepOutput(sessionId: string, runId: string, nodeId: string, after: number, signal: AbortSignal): Promise<OutputPage>;
     getDiagnostics(workspace: WorkspaceRef, sessionId: string, signal: AbortSignal): Promise<IntegrationDiagnostics>;
     listWorkflows(workspace: WorkspaceRef, sessionId: string, signal: AbortSignal): Promise<WorkflowSummary[]>;
     listRuns(workspace: WorkspaceRef, sessionId: string, status: string | undefined, signal: AbortSignal): Promise<RunDto[]>;

@@ -7,8 +7,9 @@ import {
   DEFAULT_PANEL_LAYOUT, PANEL_STORAGE_KEY, dragPanel, placePanel, readLayout,
   resizePanel, type PanelBounds, type PanelLayout,
 } from './panel-geometry.ts'
-import { nextInterval, orderRows, summarise, toRow, type OrbitRunRow } from './orbit-model.ts'
+import { nextInterval, orderRows, summarise, toRow, type OrbitRunRow as RunRowData } from './orbit-model.ts'
 import type { OrbitLocaleKey } from './locales.ts'
+import { OrbitRunRow } from './OrbitRunRow.tsx'
 
 type Translate = (key: OrbitLocaleKey, values?: Record<string, string | number>) => string
 
@@ -39,20 +40,13 @@ function useBounds(): PanelBounds {
   return bounds
 }
 
-function statusClass(row: OrbitRunRow): string {
-  if (row.live) return styles.live
-  if (row.status === 'completed') return styles.done
-  if (row.status === 'unknown') return styles.unknown
-  return styles.failed
-}
-
 export interface OrbitPanelProps { t: Translate; sessionId?: string }
 
 export function OrbitPanel({ t, sessionId }: OrbitPanelProps) {
   const [layout, setLayout] = useState<PanelLayout>(() => {
     try { return readLayout(localStorage.getItem(PANEL_STORAGE_KEY)) } catch { return DEFAULT_PANEL_LAYOUT }
   })
-  const [rows, setRows] = useState<OrbitRunRow[] | null>(null)
+  const [rows, setRows] = useState<RunRowData[] | null>(null)
   const [uiUrl, setUiUrl] = useState('')
   const [error, setError] = useState('')
   const bounds = useBounds()
@@ -154,16 +148,9 @@ export function OrbitPanel({ t, sessionId }: OrbitPanelProps) {
         {error ? <p className={styles.error}>{error}</p> : null}
         {!error && rows === null ? <p className={styles.empty}>{t('loading')}</p> : null}
         {!error && rows?.length === 0 ? <p className={styles.empty}>{t('empty')}</p> : null}
-        {rows?.map(row => (
-          <article className={styles.row} key={row.runId}>
-            <span className={`${styles.dot} ${statusClass(row)}`} />
-            <div>
-              <div className={styles.goal}>{row.goal}</div>
-              <div className={styles.meta}>{row.workflow}</div>
-            </div>
-            <span className={styles.status}>{row.status}</span>
-          </article>
-        ))}
+        {sessionId ? rows?.map(row => (
+          <OrbitRunRow key={row.runId} call={hostCall} t={t} sessionId={sessionId} run={row} />
+        )) : null}
       </div>
       <div
         className={styles.resize}

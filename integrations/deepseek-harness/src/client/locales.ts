@@ -16,6 +16,8 @@ export const en = {
   idleCount: '{total} runs',
   status: 'Status',
   refresh: 'Refresh',
+  noOutput: 'No output from this step.',
+  needsPerson: 'Waiting for a person to confirm what the external Agent did.',
 } as const
 
 export const zh = {
@@ -32,6 +34,8 @@ export const zh = {
   idleCount: '{total} 个运行',
   status: '状态',
   refresh: '刷新',
+  noOutput: '这个步骤没有输出。',
+  needsPerson: '等待人工确认外部 Agent 的执行结果。',
 } as const
 
 export type OrbitLocaleKey = keyof typeof en

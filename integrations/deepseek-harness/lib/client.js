@@ -5,9 +5,10 @@ window.__ModuleLoader__.load({
 		var exports = module.exports;
 		Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
 		let react = require("react");
+		let _deepseek_ai_dsh_client_ui_primitives = require("@deepseek-ai/dsh-client-ui-primitives");
 		let react_jsx_runtime = require("react/jsx-runtime");
 		//#region \0dsh-css:/Users/cxd/develop/orbit/integrations/deepseek-harness/src/client/OrbitPanel.module.css.mjs
-		const css = ".JeOz9W_panel{border:1px solid var(--dsw-alias-line-normal);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);pointer-events:auto;border-radius:12px;flex-direction:column;display:flex;position:absolute;overflow:hidden;box-shadow:0 12px 40px #0000002e}.JeOz9W_bar{border-bottom:1px solid var(--dsw-alias-line-normal);background:var(--dsw-alias-bg-module);cursor:grab;user-select:none;align-items:center;gap:8px;padding:8px 10px 8px 12px;display:flex}.JeOz9W_bar:active{cursor:grabbing}.JeOz9W_title{font-size:13px;font-weight:600}.JeOz9W_count{color:var(--dsw-alias-label-tertiary);flex:1;font-size:12px}.JeOz9W_body{flex:1;min-height:0;overflow-y:auto}.JeOz9W_row{border-bottom:1px solid var(--dsw-alias-line-normal);grid-template-columns:8px 1fr auto;align-items:start;gap:8px;padding:10px 12px;display:grid}.JeOz9W_row:last-child{border-bottom:0}.JeOz9W_dot{border-radius:50%;width:8px;height:8px;margin-top:5px}.JeOz9W_live{background:var(--dsw-alias-state-business-primary)}.JeOz9W_done{background:var(--dsw-alias-state-success)}.JeOz9W_failed{background:var(--dsw-alias-state-danger)}.JeOz9W_unknown{background:var(--dsw-alias-state-warning,var(--dsw-alias-label-tertiary))}.JeOz9W_goal{-webkit-line-clamp:2;-webkit-box-orient:vertical;font-size:13px;line-height:1.4;display:-webkit-box;overflow:hidden}.JeOz9W_meta{color:var(--dsw-alias-label-tertiary);font-size:11px}.JeOz9W_status{color:var(--dsw-alias-label-secondary);white-space:nowrap;font-size:11px}.JeOz9W_empty,.JeOz9W_error{color:var(--dsw-alias-label-tertiary);text-align:center;padding:20px 14px;font-size:12px}.JeOz9W_error{color:var(--dsw-alias-state-error-primary);text-align:left}.JeOz9W_badge{border:1px solid var(--dsw-alias-line-normal);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-secondary);cursor:pointer;pointer-events:auto;border-radius:999px;align-items:center;gap:6px;padding:6px 12px;font-size:12px;display:flex;position:absolute;box-shadow:0 6px 20px #00000024}.JeOz9W_badge:hover{color:var(--dsw-alias-label-primary)}.JeOz9W_resize{cursor:nwse-resize;width:14px;height:14px;position:absolute;inset:auto 0 0 auto}";
+		const css = ".JeOz9W_panel{border:1px solid var(--dsw-alias-line-normal);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);pointer-events:auto;border-radius:12px;flex-direction:column;display:flex;position:absolute;overflow:hidden;box-shadow:0 12px 40px #0000002e}.JeOz9W_bar{border-bottom:1px solid var(--dsw-alias-line-normal);background:var(--dsw-alias-bg-module);cursor:grab;user-select:none;align-items:center;gap:8px;padding:8px 10px 8px 12px;display:flex}.JeOz9W_bar:active{cursor:grabbing}.JeOz9W_title{font-size:13px;font-weight:600}.JeOz9W_count{color:var(--dsw-alias-label-tertiary);flex:1;font-size:12px}.JeOz9W_body{flex:1;min-height:0;overflow-y:auto}.JeOz9W_row{border-bottom:1px solid var(--dsw-alias-line-normal);grid-template-columns:8px 1fr auto;align-items:start;gap:8px;padding:10px 12px;display:grid}.JeOz9W_row:last-child{border-bottom:0}.JeOz9W_dot{border-radius:50%;width:8px;height:8px;margin-top:5px}.JeOz9W_live{background:var(--dsw-alias-state-business-primary)}.JeOz9W_done{background:var(--dsw-alias-state-success)}.JeOz9W_failed{background:var(--dsw-alias-state-danger)}.JeOz9W_unknown{background:var(--dsw-alias-state-warning,var(--dsw-alias-label-tertiary))}.JeOz9W_goal{-webkit-line-clamp:2;-webkit-box-orient:vertical;font-size:13px;line-height:1.4;display:-webkit-box;overflow:hidden}.JeOz9W_meta{color:var(--dsw-alias-label-tertiary);font-size:11px}.JeOz9W_status{color:var(--dsw-alias-label-secondary);white-space:nowrap;font-size:11px}.JeOz9W_empty,.JeOz9W_error{color:var(--dsw-alias-label-tertiary);text-align:center;padding:20px 14px;font-size:12px}.JeOz9W_error{color:var(--dsw-alias-state-error-primary);text-align:left}.JeOz9W_badge{border:1px solid var(--dsw-alias-line-normal);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-secondary);cursor:pointer;pointer-events:auto;border-radius:999px;align-items:center;gap:6px;padding:6px 12px;font-size:12px;display:flex;position:absolute;box-shadow:0 6px 20px #00000024}.JeOz9W_badge:hover{color:var(--dsw-alias-label-primary)}.JeOz9W_resize{cursor:nwse-resize;width:14px;height:14px;position:absolute;inset:auto 0 0 auto}.JeOz9W_stepRow{padding:4px 12px 4px 22px;font-size:12px}.JeOz9W_attention{border-left:2px solid var(--dsw-alias-state-warning,var(--dsw-alias-label-tertiary));color:var(--dsw-alias-label-secondary);margin:4px 0;padding:6px 8px;font-size:11px}.JeOz9W_output{background:var(--dsw-alias-bg-module-platform,var(--dsw-alias-bg-module));max-height:220px;color:var(--dsw-alias-label-secondary);white-space:pre-wrap;overflow-wrap:anywhere;border-radius:6px;margin:4px 0 8px;padding:8px;font-size:11px;line-height:1.5;overflow:auto}";
 		const tagId = "@orbit-runtime/dsh-orbit/OrbitPanel.module.css";
 		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId) + "]") === null) {
 			const tag = document.createElement("style");
@@ -17,6 +18,7 @@ window.__ModuleLoader__.load({
 			document.head.appendChild(tag);
 		}
 		var OrbitPanel_module_css_default = {
+			"attention": "JeOz9W_attention",
 			"badge": "JeOz9W_badge",
 			"bar": "JeOz9W_bar",
 			"body": "JeOz9W_body",
@@ -29,10 +31,12 @@ window.__ModuleLoader__.load({
 			"goal": "JeOz9W_goal",
 			"live": "JeOz9W_live",
 			"meta": "JeOz9W_meta",
+			"output": "JeOz9W_output",
 			"panel": "JeOz9W_panel",
 			"resize": "JeOz9W_resize",
 			"row": "JeOz9W_row",
 			"status": "JeOz9W_status",
+			"stepRow": "JeOz9W_stepRow",
 			"title": "JeOz9W_title",
 			"unknown": "JeOz9W_unknown"
 		};
@@ -174,6 +178,187 @@ window.__ModuleLoader__.load({
 				total: rows.length
 			};
 		}
+		/** The four states the shell's StateDot draws, from an Orbit status.
+		*
+		* `unknown` is amber rather than red on purpose: it is the outcome nobody has
+		* ruled on yet, and colouring it as a failure would answer a question the
+		* Runtime deliberately left open.
+		*/
+		function dotState(status) {
+			if (status === "completed") return "done";
+			if (status === "unknown") return "warning";
+			if (status === "failed" || status === "cancelled") return "error";
+			return "ongoing";
+		}
+		function toStepRow(step) {
+			const label = typeof step.label === "string" && step.label ? step.label : step.node_id;
+			return {
+				nodeId: step.node_id,
+				label,
+				status: step.status,
+				needsPerson: step.resolution?.kind === "reconciliation_required" && step.reconciliation === void 0
+			};
+		}
+		/** Join an output page into displayable text, oldest chunk first. */
+		function outputText(chunks) {
+			return [...chunks].sort((a, b) => a.chunk_id - b.chunk_id).map((chunk) => chunk.text).join("");
+		}
+		/** Merge a new page into what is already shown without duplicating a chunk. */
+		function mergeChunks(previous, next) {
+			const byId = new Map(previous.map((chunk) => [chunk.chunk_id, chunk]));
+			for (const chunk of next) byId.set(chunk.chunk_id, chunk);
+			return [...byId.values()].sort((a, b) => a.chunk_id - b.chunk_id);
+		}
+		//#endregion
+		//#region src/client/OrbitRunRow.tsx
+		/** One Run in the panel, and what opening it shows. */
+		function StepDisclosure({ call, t, sessionId, runId, step, live }) {
+			const [open, setOpen] = (0, react.useState)(false);
+			const [chunks, setChunks] = (0, react.useState)([]);
+			const [error, setError] = (0, react.useState)("");
+			(0, react.useEffect)(() => {
+				if (!open) return;
+				const controller = new AbortController();
+				let timer;
+				let after = 0;
+				const tick = async () => {
+					try {
+						const page = await call("getStepOutput", [
+							sessionId,
+							runId,
+							step.nodeId,
+							after
+						], controller.signal);
+						if (controller.signal.aborted) return;
+						after = page.after;
+						setChunks((current) => mergeChunks(current, page.chunks));
+						if (live || page.has_more) timer = setTimeout(() => {
+							tick();
+						}, 2e3);
+					} catch (reason) {
+						if (!controller.signal.aborted) setError(String(reason));
+					}
+				};
+				tick();
+				return () => {
+					controller.abort();
+					if (timer !== void 0) clearTimeout(timer);
+				};
+			}, [
+				open,
+				live,
+				sessionId,
+				runId,
+				step.nodeId,
+				call
+			]);
+			const text = outputText(chunks);
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(_deepseek_ai_dsh_client_ui_primitives.DisclosureRow, {
+				icon: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.StateDot, {
+					state: step.needsPerson ? "warning" : dotState(step.status),
+					size: 8
+				}),
+				title: step.label,
+				open,
+				expandable: true,
+				expandOnRowClick: true,
+				onToggle: () => setOpen((value) => !value),
+				collapsedContent: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+					className: OrbitPanel_module_css_default.status,
+					children: step.status
+				}),
+				rowClassName: OrbitPanel_module_css_default.stepRow,
+				children: [
+					step.needsPerson ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
+						className: OrbitPanel_module_css_default.attention,
+						children: t("needsPerson")
+					}) : null,
+					error ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
+						className: OrbitPanel_module_css_default.error,
+						children: error
+					}) : null,
+					text ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("pre", {
+						className: OrbitPanel_module_css_default.output,
+						children: text
+					}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
+						className: OrbitPanel_module_css_default.empty,
+						children: t("noOutput")
+					})
+				]
+			});
+		}
+		function OrbitRunRow({ call, t, sessionId, run }) {
+			const [open, setOpen] = (0, react.useState)(false);
+			const [steps, setSteps] = (0, react.useState)(null);
+			const [error, setError] = (0, react.useState)("");
+			const load = (0, react.useCallback)((signal) => {
+				call("getRunDetail", [sessionId, run.runId], signal).then((detail) => {
+					if (!signal.aborted) {
+						setSteps(detail.steps);
+						setError("");
+					}
+				}).catch((reason) => {
+					if (!signal.aborted) setError(String(reason));
+				});
+			}, [
+				call,
+				sessionId,
+				run.runId
+			]);
+			(0, react.useEffect)(() => {
+				if (!open) return;
+				const controller = new AbortController();
+				load(controller.signal);
+				const timer = run.live ? setInterval(() => load(controller.signal), 3e3) : void 0;
+				return () => {
+					controller.abort();
+					if (timer !== void 0) clearInterval(timer);
+				};
+			}, [
+				open,
+				run.live,
+				load
+			]);
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(_deepseek_ai_dsh_client_ui_primitives.DisclosureRow, {
+				icon: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.StateDot, {
+					state: dotState(run.status),
+					size: 10
+				}),
+				title: run.goal,
+				open,
+				expandable: true,
+				expandOnRowClick: true,
+				previewChevron: true,
+				onToggle: () => setOpen((value) => !value),
+				collapsedContent: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+					className: OrbitPanel_module_css_default.status,
+					children: run.status
+				}),
+				rowClassName: OrbitPanel_module_css_default.row,
+				children: [
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+						className: OrbitPanel_module_css_default.meta,
+						children: run.workflow
+					}),
+					error ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
+						className: OrbitPanel_module_css_default.error,
+						children: error
+					}) : null,
+					!error && steps === null ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
+						className: OrbitPanel_module_css_default.empty,
+						children: t("loading")
+					}) : null,
+					steps?.map((step) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(StepDisclosure, {
+						call,
+						t,
+						sessionId,
+						runId: run.runId,
+						step: toStepRow(step),
+						live: run.live
+					}, step.node_id))
+				]
+			});
+		}
 		//#endregion
 		//#region src/client/OrbitPanel.tsx
 		/** The resident Orbit panel: what is running, and a way into Orbit itself. */
@@ -210,12 +395,6 @@ window.__ModuleLoader__.load({
 				return () => window.removeEventListener("resize", measure);
 			}, []);
 			return bounds;
-		}
-		function statusClass(row) {
-			if (row.live) return OrbitPanel_module_css_default.live;
-			if (row.status === "completed") return OrbitPanel_module_css_default.done;
-			if (row.status === "unknown") return OrbitPanel_module_css_default.unknown;
-			return OrbitPanel_module_css_default.failed;
 		}
 		function OrbitPanel({ t, sessionId }) {
 			const [layout, setLayout] = (0, react.useState)(() => {
@@ -372,23 +551,12 @@ window.__ModuleLoader__.load({
 								className: OrbitPanel_module_css_default.empty,
 								children: t("empty")
 							}) : null,
-							rows?.map((row) => /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("article", {
-								className: OrbitPanel_module_css_default.row,
-								children: [
-									/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { className: `${OrbitPanel_module_css_default.dot} ${statusClass(row)}` }),
-									/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
-										className: OrbitPanel_module_css_default.goal,
-										children: row.goal
-									}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
-										className: OrbitPanel_module_css_default.meta,
-										children: row.workflow
-									})] }),
-									/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-										className: OrbitPanel_module_css_default.status,
-										children: row.status
-									})
-								]
-							}, row.runId))
+							sessionId ? rows?.map((row) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(OrbitRunRow, {
+								call: hostCall,
+								t,
+								sessionId,
+								run: row
+							}, row.runId)) : null
 						]
 					}),
 					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
@@ -432,7 +600,9 @@ window.__ModuleLoader__.load({
 			liveCount: "{live} running of {total}",
 			idleCount: "{total} runs",
 			status: "Status",
-			refresh: "Refresh"
+			refresh: "Refresh",
+			noOutput: "No output from this step.",
+			needsPerson: "Waiting for a person to confirm what the external Agent did."
 		};
 		const zh = {
 			title: "Orbit",
@@ -447,7 +617,9 @@ window.__ModuleLoader__.load({
 			liveCount: "{total} 个运行中有 {live} 个进行中",
 			idleCount: "{total} 个运行",
 			status: "状态",
-			refresh: "刷新"
+			refresh: "刷新",
+			noOutput: "这个步骤没有输出。",
+			needsPerson: "等待人工确认外部 Agent 的执行结果。"
 		};
 		//#endregion
 		//#region src/client/index.tsx

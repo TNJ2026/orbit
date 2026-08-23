@@ -5,7 +5,7 @@
  * how to stop asking when none is. React only renders the answer.
  */
 
-import type { RunDto } from '../types.js'
+import type { OutputChunk, RunDto, StepSummary } from '../types.js'
 
 /** Cadence while a Run is moving. */
 export const ORBIT_POLL_MS = 2_000
@@ -63,4 +63,51 @@ export function orderRows(rows: readonly OrbitRunRow[]): OrbitRunRow[] {
 /** A one-line count for the collapsed badge. */
 export function summarise(rows: readonly OrbitRunRow[]): { live: number; total: number } {
   return { live: rows.filter(row => row.live).length, total: rows.length }
+}
+
+/** The four states the shell's StateDot draws, from an Orbit status.
+ *
+ * `unknown` is amber rather than red on purpose: it is the outcome nobody has
+ * ruled on yet, and colouring it as a failure would answer a question the
+ * Runtime deliberately left open.
+ */
+export function dotState(status: string): 'done' | 'warning' | 'ongoing' | 'error' {
+  if (status === 'completed') return 'done'
+  if (status === 'unknown') return 'warning'
+  if (status === 'failed' || status === 'cancelled') return 'error'
+  return 'ongoing'
+}
+
+export interface OrbitStepRow {
+  readonly nodeId: string
+  readonly label: string
+  readonly status: string
+  readonly needsPerson: boolean
+}
+
+export function toStepRow(step: StepSummary): OrbitStepRow {
+  const label = typeof step.label === 'string' && step.label ? step.label : step.node_id
+  return {
+    nodeId: step.node_id,
+    label,
+    status: step.status,
+    // The one step state a panel must not render as ordinary progress: the
+    // Runtime is waiting for a person, and nothing moves until one answers.
+    needsPerson: step.resolution?.kind === 'reconciliation_required'
+      && step.reconciliation === undefined,
+  }
+}
+
+/** Join an output page into displayable text, oldest chunk first. */
+export function outputText(chunks: readonly OutputChunk[]): string {
+  return [...chunks].sort((a, b) => a.chunk_id - b.chunk_id).map(chunk => chunk.text).join('')
+}
+
+/** Merge a new page into what is already shown without duplicating a chunk. */
+export function mergeChunks(
+  previous: readonly OutputChunk[], next: readonly OutputChunk[],
+): OutputChunk[] {
+  const byId = new Map(previous.map(chunk => [chunk.chunk_id, chunk]))
+  for (const chunk of next) byId.set(chunk.chunk_id, chunk)
+  return [...byId.values()].sort((a, b) => a.chunk_id - b.chunk_id)
 }

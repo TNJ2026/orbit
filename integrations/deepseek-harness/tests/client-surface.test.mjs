@@ -29,9 +29,16 @@ test('the deep surfaces stay in Orbit', () => {
   }
 })
 
-test('every Host call is one the panel can name a reason for', () => {
-  const actions = [...code.matchAll(/hostCall<[^>]*>\(\s*'([A-Za-z]+)'/g)].map(([, name]) => name)
-  assert.deepEqual([...new Set(actions)].sort(), ['getPanelState'])
+test('every Host call is one the panel can name a reason for', async () => {
+  // Matched against the Host's own dispatch table rather than against a call
+  // spelling. The first version of this looked for `hostCall(` and passed
+  // vacuously the moment a row component received that function under another
+  // name — a guard that reads the caller can always be renamed out of.
+  const host = await readFile(join(here, '..', 'src', 'index.ts'), 'utf8')
+  const dispatchable = [...host.matchAll(/case '([A-Za-z]+)':/g)].map(([, name]) => name)
+  assert.ok(dispatchable.length > 10, 'the Host dispatch table was not found')
+  const used = dispatchable.filter(action => new RegExp(`'${action}'`).test(code))
+  assert.deepEqual(used.sort(), ['getPanelState', 'getRunDetail', 'getStepOutput'])
 })
 
 test('/orbit folds the resident panel rather than opening another', () => {
