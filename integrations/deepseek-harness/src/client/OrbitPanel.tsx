@@ -1,7 +1,7 @@
 /** The resident Orbit panel: what is running, and a way into Orbit itself. */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { IconCloseOutline16, IconShareOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconCloseOutline16, IconShareOutline16, StateDot } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { AgentSummary, RunDto, WorkflowSummary } from '../types.js'
 import styles from './OrbitPanel.module.css'
 import {
@@ -42,6 +42,36 @@ function useBounds(): PanelBounds {
     return () => window.removeEventListener('resize', measure)
   }, [])
   return bounds
+}
+
+/** Two letters and a colour, derived so the same Agent always looks the same.
+ *
+ * Orbit gives each Agent a coloured mark; this reproduces the idea without
+ * shipping a palette that would drift from it. The hue is the name's own, and
+ * the colours stay inside the shell's theme by being expressed as one.
+ */
+function agentMark(name: string): { initials: string; style: React.CSSProperties } {
+  const bare = name.replace(/^agent\./u, '')
+  let hash = 0
+  for (const ch of bare) hash = (hash * 31 + ch.codePointAt(0)!) % 360
+  return {
+    initials: bare.slice(0, 2),
+    style: {
+      background: `color-mix(in oklab, hsl(${String(hash)} 70% 55%) 22%, transparent)`,
+      color: `hsl(${String(hash)} 70% 45%)`,
+    },
+  }
+}
+
+/** One page's heading, the line under it, and anything it counts. */
+function PageHead({ title, sub, aside }: { title: string; sub: string; aside?: React.ReactNode }) {
+  return (
+    <div className={styles.head}>
+      {aside === undefined ? null : <span className={styles.headAside}>{aside}</span>}
+      <div className={styles.headTitle}>{title}</div>
+      <div className={styles.headSub}>{sub}</div>
+    </div>
+  )
 }
 
 export interface OrbitPanelProps {
@@ -220,6 +250,22 @@ export function OrbitPanel({ t, useSessions }: OrbitPanelProps) {
         {error ? <p className={styles.error}>{error}</p> : null}
         {!error && rows === null ? <p className={styles.empty}>{t('loading')}</p> : null}
 
+        {!error && tab === 'goal' ? (
+          <PageHead title={t('headGoal')} sub={t('subGoal')} />
+        ) : null}
+        {!error && tab === 'history' ? (
+          <PageHead title={t('headHistory')} sub={t('subHistory')} />
+        ) : null}
+        {!error && tab === 'workflows' ? (
+          <PageHead title={t('headWorkflows')} sub={t('subWorkflows')} />
+        ) : null}
+        {!error && tab === 'agents' ? (
+          <PageHead
+            title={t('headAgents')} sub={t('subAgents')}
+            aside={<><StateDot state="done" size={7} />{t('onlineCount', { total: agents.length })}</>}
+          />
+        ) : null}
+
         {!error && rows !== null && tab === 'goal' ? (
           live.length ? live.map(row => (
             <OrbitRunRow key={row.runId} call={hostCall} t={t} sessionId={sessionId ?? ''} run={row} />
@@ -234,20 +280,33 @@ export function OrbitPanel({ t, useSessions }: OrbitPanelProps) {
 
         {!error && tab === 'workflows' ? (
           workflows.length ? workflows.map(item => (
-            <div className={styles.catalogRow} key={item.workflow_id}>
-              <span>{item.name || item.workflow_id}</span>
-              <code className={styles.meta}>{item.workflow_id}@{String(item.latest_version)}</code>
+            <div className={styles.flowRow} key={item.workflow_id}>
+              <div className={styles.flowId}>
+                {item.workflow_id.replace(/^workflow:/u, '')}
+              </div>
+              <div className={styles.flowName}>{item.name || item.workflow_id}</div>
+              <div className={styles.flowMeta}>
+                <span>v{String(item.latest_version)}</span>
+                {Array.isArray(item.inputs)
+                  ? <span>{t('inputCount', { total: item.inputs.length })}</span> : null}
+              </div>
             </div>
           )) : <p className={styles.empty}>{t('emptyWorkflows')}</p>
         ) : null}
 
         {!error && tab === 'agents' ? (
-          agents.length ? agents.map(item => (
-            <div className={styles.catalogRow} key={item.name}>
-              <span>{item.name.replace(/^agent\./u, '')}</span>
-              <code className={styles.meta}>{item.version}</code>
-            </div>
-          )) : <p className={styles.empty}>{t('emptyAgents')}</p>
+          agents.length ? agents.map(item => {
+            const mark = agentMark(item.name)
+            return (
+              <div className={styles.agentRow} key={item.name}>
+                <span className={styles.avatar} style={mark.style} aria-hidden>{mark.initials}</span>
+                <span>
+                  <div className={styles.agentName}>{item.name.replace(/^agent\./u, '')}</div>
+                  <div className={styles.agentVersion}>{item.version}</div>
+                </span>
+              </div>
+            )
+          }) : <p className={styles.empty}>{t('emptyAgents')}</p>
         ) : null}
       </div>
       <div

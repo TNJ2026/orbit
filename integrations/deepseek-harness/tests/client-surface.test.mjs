@@ -169,3 +169,22 @@ test('the sentence leaves a gap for the Workflow rather than naming it', async (
   assert.equal((copy.match(/runTail:/g) ?? []).length, 2)
   assert.equal(/runHead: '[^']*\{name\}/.test(copy), false, 'the head interpolates a name again')
 })
+
+test('each page opens with a heading and a line saying what it lists', () => {
+  // Orbit's pages do, and a page is legible before its first row loads only if
+  // this one does too.
+  for (const page of ['Goal', 'Workflows', 'History', 'Agents']) {
+    assert.ok(code.includes(`t('head${page}')`), `${page} has no heading`)
+    assert.ok(code.includes(`t('sub${page}')`), `${page} says nothing about itself`)
+  }
+})
+
+test('the Agent mark is derived, not a palette that would drift from Orbit\'s', async () => {
+  // The same Agent must look the same on every open; shipping colours of our
+  // own would be a second palette to keep in step with the Runtime's.
+  assert.match(code, /function agentMark/)
+  assert.match(code, /codePointAt/)
+  const css = await readFile(join(clientDir, 'OrbitPanel.module.css'), 'utf8')
+  assert.equal(/\.avatar\s*\{[^}]*background:\s*(?!none)[^v}]/.test(css), false,
+    'the mark carries a fixed colour')
+})

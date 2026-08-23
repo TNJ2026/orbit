@@ -8,7 +8,7 @@ window.__ModuleLoader__.load({
 		let _deepseek_ai_dsh_client_ui_primitives = require("@deepseek-ai/dsh-client-ui-primitives");
 		let react_jsx_runtime = require("react/jsx-runtime");
 		//#region \0dsh-css:/Users/cxd/develop/orbit/integrations/deepseek-harness/src/client/OrbitPanel.module.css.mjs
-		const css = ".JeOz9W_panel{border:1px solid var(--dsw-alias-line-normal,#80808047);background:var(--dsw-alias-bg-layer-1,Canvas);color:var(--dsw-alias-label-primary);pointer-events:auto;border-radius:12px;flex-direction:column;display:flex;position:absolute;overflow:hidden;box-shadow:0 12px 40px #0000002e}.JeOz9W_bar{border-bottom:1px solid var(--dsw-alias-line-normal,#80808047);background:var(--dsw-alias-bg-module,Canvas);cursor:grab;user-select:none;align-items:center;gap:8px;padding:8px 10px 8px 12px;display:flex}.JeOz9W_bar:active{cursor:grabbing}.JeOz9W_title{font-size:13px;font-weight:600}.JeOz9W_count{color:var(--dsw-alias-label-tertiary);flex:1;font-size:12px}.JeOz9W_body{flex:1;min-height:0;overflow-y:auto}.JeOz9W_row{border-bottom:1px solid var(--dsw-alias-line-normal,#80808047);grid-template-columns:8px 1fr auto;align-items:start;gap:8px;padding:10px 12px;display:grid}.JeOz9W_row:last-child{border-bottom:0}.JeOz9W_dot{border-radius:50%;width:8px;height:8px;margin-top:5px}.JeOz9W_live{background:var(--dsw-alias-state-business-primary)}.JeOz9W_done{background:var(--dsw-alias-state-success)}.JeOz9W_failed{background:var(--dsw-alias-state-danger)}.JeOz9W_unknown{background:var(--dsw-alias-state-warning,var(--dsw-alias-label-tertiary))}.JeOz9W_goal{-webkit-line-clamp:2;-webkit-box-orient:vertical;font-size:13px;line-height:1.4;display:-webkit-box;overflow:hidden}.JeOz9W_meta{color:var(--dsw-alias-label-tertiary);font-size:11px}.JeOz9W_status{color:var(--dsw-alias-label-secondary);white-space:nowrap;font-size:11px}.JeOz9W_empty,.JeOz9W_error{color:var(--dsw-alias-label-tertiary);text-align:center;padding:20px 14px;font-size:12px}.JeOz9W_error{color:var(--dsw-alias-state-error-primary);text-align:left}.JeOz9W_badge{border:1px solid var(--dsw-alias-line-normal,#80808047);background:var(--dsw-alias-bg-layer-1,Canvas);color:var(--dsw-alias-label-secondary);cursor:pointer;pointer-events:auto;border-radius:999px;align-items:center;gap:6px;padding:6px 12px;font-size:12px;display:flex;position:absolute;box-shadow:0 6px 20px #00000024}.JeOz9W_badge:hover{color:var(--dsw-alias-label-primary)}.JeOz9W_resize{cursor:nwse-resize;width:14px;height:14px;position:absolute;inset:auto 0 0 auto}.JeOz9W_stepRow{padding:4px 12px 4px 22px;font-size:12px}.JeOz9W_attention{border-left:2px solid var(--dsw-alias-state-warning,var(--dsw-alias-label-tertiary));color:var(--dsw-alias-label-secondary);margin:4px 0;padding:6px 8px;font-size:11px}.JeOz9W_output{background:var(--dsw-alias-bg-module-platform,var(--dsw-alias-bg-module,Canvas));max-height:220px;color:var(--dsw-alias-label-secondary);white-space:pre-wrap;overflow-wrap:anywhere;border-radius:6px;margin:4px 0 8px;padding:8px;font-size:11px;line-height:1.5;overflow:auto}.JeOz9W_actions{flex-wrap:wrap;align-items:center;gap:6px;margin:6px 0 8px;display:flex}.JeOz9W_actions input{border:1px solid var(--dsw-alias-line-normal,#80808047);background:var(--dsw-alias-bg-layer-1,Canvas);min-width:0;color:var(--dsw-alias-label-primary);border-radius:6px;flex:140px;padding:4px 8px;font-size:11px}.JeOz9W_iconButton{color:var(--dsw-alias-label-tertiary);cursor:pointer;background:0 0;border:0;border-radius:4px;justify-content:center;align-items:center;padding:2px;display:inline-flex}.JeOz9W_iconButton:hover{color:var(--dsw-alias-label-primary)}.JeOz9W_catalogRow{justify-content:space-between;align-items:baseline;gap:8px;padding:4px 0 4px 12px;display:flex}.JeOz9W_catalogRow>*{text-overflow:ellipsis;white-space:nowrap;min-width:0;overflow:hidden}.JeOz9W_catalogRow>span{flex:auto}.JeOz9W_catalogRow>code{flex:0 auto}.JeOz9W_tabs{border-bottom:1px solid var(--dsw-alias-line-normal,#80808047);background:var(--dsw-alias-bg-module,Canvas);flex:none;gap:2px;padding:6px 8px 0;display:flex}.JeOz9W_tab{color:var(--dsw-alias-label-tertiary,GrayText);cursor:pointer;background:0 0;border:0;border-bottom:2px solid #0000;flex:1 1 0;padding:6px 4px 8px;font-size:12px}.JeOz9W_tab:hover{color:var(--dsw-alias-label-primary,CanvasText)}.JeOz9W_tabActive{color:var(--dsw-alias-label-primary,CanvasText);border-bottom-color:var(--dsw-alias-state-business-primary,Highlight);font-weight:600}";
+		const css = ".JeOz9W_panel{border:1px solid var(--dsw-alias-line-normal,#80808047);background:var(--dsw-alias-bg-layer-1,Canvas);color:var(--dsw-alias-label-primary);pointer-events:auto;border-radius:12px;flex-direction:column;display:flex;position:absolute;overflow:hidden;box-shadow:0 12px 40px #0000002e}.JeOz9W_bar{border-bottom:1px solid var(--dsw-alias-line-normal,#80808047);background:var(--dsw-alias-bg-module,Canvas);cursor:grab;user-select:none;align-items:center;gap:8px;padding:8px 10px 8px 12px;display:flex}.JeOz9W_bar:active{cursor:grabbing}.JeOz9W_title{font-size:13px;font-weight:600}.JeOz9W_count{color:var(--dsw-alias-label-tertiary);flex:1;font-size:12px}.JeOz9W_body{flex:1;min-height:0;overflow-y:auto}.JeOz9W_row{border-bottom:1px solid var(--dsw-alias-line-normal,#80808047);grid-template-columns:8px 1fr auto;align-items:start;gap:8px;padding:10px 12px;display:grid}.JeOz9W_row:last-child{border-bottom:0}.JeOz9W_dot{border-radius:50%;width:8px;height:8px;margin-top:5px}.JeOz9W_live{background:var(--dsw-alias-state-business-primary)}.JeOz9W_done{background:var(--dsw-alias-state-success)}.JeOz9W_failed{background:var(--dsw-alias-state-danger)}.JeOz9W_unknown{background:var(--dsw-alias-state-warning,var(--dsw-alias-label-tertiary))}.JeOz9W_goal{-webkit-line-clamp:2;-webkit-box-orient:vertical;font-size:13px;line-height:1.4;display:-webkit-box;overflow:hidden}.JeOz9W_meta{color:var(--dsw-alias-label-tertiary);font-size:11px}.JeOz9W_status{color:var(--dsw-alias-label-secondary);white-space:nowrap;font-size:11px}.JeOz9W_empty,.JeOz9W_error{color:var(--dsw-alias-label-tertiary);text-align:center;padding:20px 14px;font-size:12px}.JeOz9W_error{color:var(--dsw-alias-state-error-primary);text-align:left}.JeOz9W_badge{border:1px solid var(--dsw-alias-line-normal,#80808047);background:var(--dsw-alias-bg-layer-1,Canvas);color:var(--dsw-alias-label-secondary);cursor:pointer;pointer-events:auto;border-radius:999px;align-items:center;gap:6px;padding:6px 12px;font-size:12px;display:flex;position:absolute;box-shadow:0 6px 20px #00000024}.JeOz9W_badge:hover{color:var(--dsw-alias-label-primary)}.JeOz9W_resize{cursor:nwse-resize;width:14px;height:14px;position:absolute;inset:auto 0 0 auto}.JeOz9W_stepRow{padding:4px 12px 4px 22px;font-size:12px}.JeOz9W_attention{border-left:2px solid var(--dsw-alias-state-warning,var(--dsw-alias-label-tertiary));color:var(--dsw-alias-label-secondary);margin:4px 0;padding:6px 8px;font-size:11px}.JeOz9W_output{background:var(--dsw-alias-bg-module-platform,var(--dsw-alias-bg-module,Canvas));max-height:220px;color:var(--dsw-alias-label-secondary);white-space:pre-wrap;overflow-wrap:anywhere;border-radius:6px;margin:4px 0 8px;padding:8px;font-size:11px;line-height:1.5;overflow:auto}.JeOz9W_actions{flex-wrap:wrap;align-items:center;gap:6px;margin:6px 0 8px;display:flex}.JeOz9W_actions input{border:1px solid var(--dsw-alias-line-normal,#80808047);background:var(--dsw-alias-bg-layer-1,Canvas);min-width:0;color:var(--dsw-alias-label-primary);border-radius:6px;flex:140px;padding:4px 8px;font-size:11px}.JeOz9W_iconButton{color:var(--dsw-alias-label-tertiary);cursor:pointer;background:0 0;border:0;border-radius:4px;justify-content:center;align-items:center;padding:2px;display:inline-flex}.JeOz9W_iconButton:hover{color:var(--dsw-alias-label-primary)}.JeOz9W_catalogRow{justify-content:space-between;align-items:baseline;gap:8px;padding:4px 0 4px 12px;display:flex}.JeOz9W_catalogRow>*{text-overflow:ellipsis;white-space:nowrap;min-width:0;overflow:hidden}.JeOz9W_catalogRow>span{flex:auto}.JeOz9W_catalogRow>code{flex:0 auto}.JeOz9W_tabs{border-bottom:1px solid var(--dsw-alias-line-normal,#80808047);background:var(--dsw-alias-bg-module,Canvas);flex:none;gap:2px;padding:6px 8px 0;display:flex}.JeOz9W_tab{color:var(--dsw-alias-label-tertiary,GrayText);cursor:pointer;background:0 0;border:0;border-bottom:2px solid #0000;flex:1 1 0;padding:6px 4px 8px;font-size:12px}.JeOz9W_tab:hover{color:var(--dsw-alias-label-primary,CanvasText)}.JeOz9W_tabActive{color:var(--dsw-alias-label-primary,CanvasText);border-bottom-color:var(--dsw-alias-state-business-primary,Highlight);font-weight:600}.JeOz9W_head{padding:12px 12px 2px}.JeOz9W_headTitle{font-size:13px;font-weight:650}.JeOz9W_headSub{color:var(--dsw-alias-label-tertiary,GrayText);font-size:11px;line-height:1.5}.JeOz9W_headAside{float:right;color:var(--dsw-alias-label-tertiary,GrayText);align-items:center;gap:5px;font-size:11px;display:flex}.JeOz9W_agentRow{align-items:center;gap:10px;padding:8px 12px;display:flex}.JeOz9W_avatar{letter-spacing:.5px;text-transform:uppercase;border-radius:7px;flex:none;place-items:center;width:28px;height:28px;font-size:10px;font-weight:700;display:grid}.JeOz9W_agentName{font-size:12px;font-weight:600}.JeOz9W_agentVersion{color:var(--dsw-alias-label-tertiary,GrayText);font-family:ui-monospace,monospace;font-size:11px}.JeOz9W_flowRow{border-bottom:1px solid var(--dsw-alias-line-normal,#80808047);padding:9px 12px}.JeOz9W_flowRow:last-child{border-bottom:0}.JeOz9W_flowId{color:var(--dsw-alias-label-tertiary,GrayText);letter-spacing:.4px;text-transform:uppercase;text-overflow:ellipsis;white-space:nowrap;font-size:10px;overflow:hidden}.JeOz9W_flowName{font-size:12.5px;font-weight:600;line-height:1.45}.JeOz9W_flowMeta{color:var(--dsw-alias-label-tertiary,GrayText);gap:10px;font-size:11px;display:flex}";
 		const tagId = "@orbit-runtime/dsh-orbit/OrbitPanel.module.css";
 		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId) + "]") === null) {
 			const tag = document.createElement("style");
@@ -19,7 +19,11 @@ window.__ModuleLoader__.load({
 		}
 		var OrbitPanel_module_css_default = {
 			"actions": "JeOz9W_actions",
+			"agentName": "JeOz9W_agentName",
+			"agentRow": "JeOz9W_agentRow",
+			"agentVersion": "JeOz9W_agentVersion",
 			"attention": "JeOz9W_attention",
+			"avatar": "JeOz9W_avatar",
 			"badge": "JeOz9W_badge",
 			"bar": "JeOz9W_bar",
 			"body": "JeOz9W_body",
@@ -30,7 +34,15 @@ window.__ModuleLoader__.load({
 			"empty": "JeOz9W_empty",
 			"error": "JeOz9W_error",
 			"failed": "JeOz9W_failed",
+			"flowId": "JeOz9W_flowId",
+			"flowMeta": "JeOz9W_flowMeta",
+			"flowName": "JeOz9W_flowName",
+			"flowRow": "JeOz9W_flowRow",
 			"goal": "JeOz9W_goal",
+			"head": "JeOz9W_head",
+			"headAside": "JeOz9W_headAside",
+			"headSub": "JeOz9W_headSub",
+			"headTitle": "JeOz9W_headTitle",
 			"iconButton": "JeOz9W_iconButton",
 			"live": "JeOz9W_live",
 			"meta": "JeOz9W_meta",
@@ -479,6 +491,44 @@ window.__ModuleLoader__.load({
 			}, []);
 			return bounds;
 		}
+		/** Two letters and a colour, derived so the same Agent always looks the same.
+		*
+		* Orbit gives each Agent a coloured mark; this reproduces the idea without
+		* shipping a palette that would drift from it. The hue is the name's own, and
+		* the colours stay inside the shell's theme by being expressed as one.
+		*/
+		function agentMark(name) {
+			const bare = name.replace(/^agent\./u, "");
+			let hash = 0;
+			for (const ch of bare) hash = (hash * 31 + ch.codePointAt(0)) % 360;
+			return {
+				initials: bare.slice(0, 2),
+				style: {
+					background: `color-mix(in oklab, hsl(${String(hash)} 70% 55%) 22%, transparent)`,
+					color: `hsl(${String(hash)} 70% 45%)`
+				}
+			};
+		}
+		/** One page's heading, the line under it, and anything it counts. */
+		function PageHead({ title, sub, aside }) {
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+				className: OrbitPanel_module_css_default.head,
+				children: [
+					aside === void 0 ? null : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+						className: OrbitPanel_module_css_default.headAside,
+						children: aside
+					}),
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+						className: OrbitPanel_module_css_default.headTitle,
+						children: title
+					}),
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+						className: OrbitPanel_module_css_default.headSub,
+						children: sub
+					})
+				]
+			});
+		}
 		function OrbitPanel({ t, useSessions }) {
 			const sessionId = useSessions((state) => state.current);
 			const [layout, setLayout] = (0, react.useState)(() => {
@@ -655,6 +705,26 @@ window.__ModuleLoader__.load({
 								className: OrbitPanel_module_css_default.empty,
 								children: t("loading")
 							}) : null,
+							!error && tab === "goal" ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)(PageHead, {
+								title: t("headGoal"),
+								sub: t("subGoal")
+							}) : null,
+							!error && tab === "history" ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)(PageHead, {
+								title: t("headHistory"),
+								sub: t("subHistory")
+							}) : null,
+							!error && tab === "workflows" ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)(PageHead, {
+								title: t("headWorkflows"),
+								sub: t("subWorkflows")
+							}) : null,
+							!error && tab === "agents" ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)(PageHead, {
+								title: t("headAgents"),
+								sub: t("subAgents"),
+								aside: /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.StateDot, {
+									state: "done",
+									size: 7
+								}), t("onlineCount", { total: agents.length })] })
+							}) : null,
 							!error && rows !== null && tab === "goal" ? live.length ? live.map((row) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(OrbitRunRow, {
 								call: hostCall$1,
 								t,
@@ -674,26 +744,43 @@ window.__ModuleLoader__.load({
 								children: t("emptyHistory")
 							}) : null,
 							!error && tab === "workflows" ? workflows.length ? workflows.map((item) => /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-								className: OrbitPanel_module_css_default.catalogRow,
-								children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: item.name || item.workflow_id }), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("code", {
-									className: OrbitPanel_module_css_default.meta,
-									children: [
-										item.workflow_id,
-										"@",
-										String(item.latest_version)
-									]
-								})]
+								className: OrbitPanel_module_css_default.flowRow,
+								children: [
+									/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+										className: OrbitPanel_module_css_default.flowId,
+										children: item.workflow_id.replace(/^workflow:/u, "")
+									}),
+									/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+										className: OrbitPanel_module_css_default.flowName,
+										children: item.name || item.workflow_id
+									}),
+									/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+										className: OrbitPanel_module_css_default.flowMeta,
+										children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", { children: ["v", String(item.latest_version)] }), Array.isArray(item.inputs) ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: t("inputCount", { total: item.inputs.length }) }) : null]
+									})
+								]
 							}, item.workflow_id)) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
 								className: OrbitPanel_module_css_default.empty,
 								children: t("emptyWorkflows")
 							}) : null,
-							!error && tab === "agents" ? agents.length ? agents.map((item) => /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-								className: OrbitPanel_module_css_default.catalogRow,
-								children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: item.name.replace(/^agent\./u, "") }), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("code", {
-									className: OrbitPanel_module_css_default.meta,
-									children: item.version
-								})]
-							}, item.name)) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
+							!error && tab === "agents" ? agents.length ? agents.map((item) => {
+								const mark = agentMark(item.name);
+								return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+									className: OrbitPanel_module_css_default.agentRow,
+									children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+										className: OrbitPanel_module_css_default.avatar,
+										style: mark.style,
+										"aria-hidden": true,
+										children: mark.initials
+									}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+										className: OrbitPanel_module_css_default.agentName,
+										children: item.name.replace(/^agent\./u, "")
+									}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+										className: OrbitPanel_module_css_default.agentVersion,
+										children: item.version
+									})] })]
+								}, item.name);
+							}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
 								className: OrbitPanel_module_css_default.empty,
 								children: t("emptyAgents")
 							}) : null
@@ -754,6 +841,16 @@ window.__ModuleLoader__.load({
 			tabWorkflows: "Workflows",
 			tabHistory: "History",
 			tabAgents: "Agents",
+			headGoal: "Running now",
+			subGoal: "Goals this Workspace is working on",
+			headWorkflows: "Published workflows",
+			subWorkflows: "Available from the goal selector, and reusable",
+			headHistory: "Finished runs",
+			subHistory: "What this Workspace has already done",
+			headAgents: "Registered agents",
+			subAgents: "Every Agent handler registered with this Runtime",
+			onlineCount: "Online: {total}",
+			inputCount: "{total} inputs",
 			emptyGoal: "Nothing is running here.",
 			emptyWorkflows: "No workflow here can start a goal yet.",
 			emptyHistory: "No run has finished here yet.",
@@ -790,6 +887,16 @@ window.__ModuleLoader__.load({
 			tabWorkflows: "工作流",
 			tabHistory: "历史",
 			tabAgents: "Agents",
+			headGoal: "正在执行",
+			subGoal: "这个 Workspace 正在推进的目标",
+			headWorkflows: "已发布的工作流",
+			subWorkflows: "可从目标选择器启动，也可复用",
+			headHistory: "已结束的运行",
+			subHistory: "这个 Workspace 已经做过的事",
+			headAgents: "已注册的 Agent",
+			subAgents: "这个 Runtime 注册的每一个 Agent handler",
+			onlineCount: "在线：{total}",
+			inputCount: "{total} 个输入",
 			emptyGoal: "这里没有正在执行的目标。",
 			emptyWorkflows: "这个 Workspace 还没有能启动目标的工作流。",
 			emptyHistory: "这里还没有结束的运行。",
