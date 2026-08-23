@@ -724,7 +724,7 @@ window.__ModuleLoader__.load({
 			runnableHint: "Ask the Agent to run one — it has the tools.",
 			togglePanel: "Show or hide the Orbit panel",
 			askWhatRuns: "List the workflows that can run here",
-			openInOrbit: "Opens this workflow in Orbit, where the goal is written."
+			runPrefix: "Run with {name}: "
 		};
 		const zh = {
 			title: "Orbit",
@@ -753,7 +753,7 @@ window.__ModuleLoader__.load({
 			runnableHint: "让 agent 跑其中一个即可——它有对应的工具。",
 			togglePanel: "显示或收起 Orbit 面板",
 			askWhatRuns: "列出这里可运行的工作流",
-			openInOrbit: "在 Orbit 中打开这个工作流，目标在那里填写。"
+			runPrefix: "用{name}执行："
 		};
 		//#endregion
 		//#region src/client/index.tsx
@@ -805,11 +805,10 @@ window.__ModuleLoader__.load({
 		/**
 		* `/orbit-workflows` opens the shell's own popup — the one `/model` uses.
 		*
-		* Selecting opens the Workflow in Orbit rather than starting it. A popupSelect
-		* is one list and one pick: it has nowhere to put the goal these Workflows
-		* declare an input for, and starting without one is refused by the Runtime
-		* (`missing workflow input 'prompt'`). Orbit's own page is where that sentence
-		* gets written.
+		* Selecting writes the request into the draft for the person to finish. A
+		* popupSelect is one list and one pick, with nowhere to put the goal these
+		* Workflows declare an input for — and the Run has to be the Agent's, or it
+		* cannot report on it afterwards.
 		*/
 		function registerWorkflowPopup(ctx, t) {
 			const commandUi = ctx.get("commandUi");
@@ -827,9 +826,11 @@ window.__ModuleLoader__.load({
 							detail: `${item.workflow_id}@${String(item.latest_version)}`
 						}));
 					},
-					onSelect: async (option, session) => {
-						const base = await hostCall("getRuntimeUi", [session.sessionId], new AbortController().signal);
-						window.open(`${base}#/workflows/${encodeURIComponent(option.id)}`, "_blank", "noopener");
+					onSelect: (option, session) => {
+						const conversation = ctx.get("conversation");
+						const actx = ctx.get("sessions")?.scope(session.sessionId);
+						if (!conversation || actx === void 0) return;
+						conversation.input.for(actx).setDraft(t("runPrefix", { name: option.label }));
 					}
 				}
 			}), "orbit: workflow popup");

@@ -60,6 +60,8 @@ function registerOrbitSlashSource(ctx: ClientContext, t: Translate): void {
 
 interface SelectOption { readonly id: string; readonly label: string; readonly detail?: string }
 interface SessionContext { readonly sessionId: string }
+interface Conversation { readonly input: { for(actx: unknown): { setDraft(text: string): void } } }
+interface Sessions { scope(id: string): unknown }
 interface CommandUi {
   register(contribution: {
     name: string
@@ -86,11 +88,10 @@ async function hostCall<T>(action: string, args: unknown[], signal: AbortSignal)
 /**
  * `/orbit-workflows` opens the shell's own popup — the one `/model` uses.
  *
- * Selecting opens the Workflow in Orbit rather than starting it. A popupSelect
- * is one list and one pick: it has nowhere to put the goal these Workflows
- * declare an input for, and starting without one is refused by the Runtime
- * (`missing workflow input 'prompt'`). Orbit's own page is where that sentence
- * gets written.
+ * Selecting writes the request into the draft for the person to finish. A
+ * popupSelect is one list and one pick, with nowhere to put the goal these
+ * Workflows declare an input for — and the Run has to be the Agent's, or it
+ * cannot report on it afterwards.
  */
 function registerWorkflowPopup(ctx: ClientContext, t: Translate): void {
   const commandUi = ctx.get('commandUi') as unknown as CommandUi | undefined
@@ -113,9 +114,15 @@ function registerWorkflowPopup(ctx: ClientContext, t: Translate): void {
           detail: `${item.workflow_id}@${String(item.latest_version)}`,
         }))
       },
-      onSelect: async (option, session) => {
-        const base = await hostCall<string>('getRuntimeUi', [session.sessionId], new AbortController().signal)
-        window.open(`${base}#/workflows/${encodeURIComponent(option.id)}`, '_blank', 'noopener')
+      // Writes the request and stops. Starting here would be a Run the Agent
+      // knows nothing about — unable to report on it or take the next step from
+      // it — and a popupSelect has nowhere to put the goal anyway.
+      onSelect: (option, session) => {
+        const conversation = ctx.get('conversation') as unknown as Conversation | undefined
+        const sessions = ctx.get('sessions') as unknown as Sessions | undefined
+        const actx = sessions?.scope(session.sessionId)
+        if (!conversation || actx === undefined) return
+        conversation.input.for(actx).setDraft(t('runPrefix', { name: option.label }))
       },
     },
   }), 'orbit: workflow popup')

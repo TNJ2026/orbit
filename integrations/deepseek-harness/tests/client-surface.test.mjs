@@ -42,8 +42,7 @@ test('every Host call is one the panel can name a reason for', async () => {
   // membership test.
   const used = dispatchable.filter(action => new RegExp(`'${action}'`).test(code))
   assert.deepEqual(used.sort(), [
-    'getPanelState', 'getRunDetail', 'getRuntimeUi', 'getStepOutput',
-    'reconcileStep', 'runCommand',
+    'getPanelState', 'getRunDetail', 'getStepOutput', 'reconcileStep', 'runCommand',
   ])
 })
 
@@ -118,14 +117,14 @@ test('the Workflow list is the shell\'s own popup, not one built here', () => {
   assert.match(code, /options: async \(session, signal\)/)
 })
 
-test('selecting a Workflow opens it in Orbit rather than starting it', () => {
-  // A popupSelect is one list and one pick, with nowhere to put the goal these
-  // Workflows declare an input for; starting without it is refused by the
-  // Runtime. Orbit's own page is where that sentence gets written.
-  const select = code.slice(code.indexOf('onSelect: async'), code.indexOf('}, \'orbit: workflow popup\''))
-  assert.match(select, /getRuntimeUi/)
-  assert.match(select, /window\.open\(/)
-  assert.equal(/start_run|runCommand/.test(select), false, 'the popup grew a launcher')
+test('selecting a Workflow writes the request, it does not start one', () => {
+  // The Run has to be the Agent's or it cannot report on it afterwards — and a
+  // popupSelect has nowhere to put the goal these Workflows declare an input
+  // for, so the sentence is left for the person to finish.
+  const select = code.slice(code.indexOf('onSelect: (option, session)'), code.indexOf("}, 'orbit: workflow popup'"))
+  assert.match(select, /conversation\.input\.for\(actx\)\.setDraft/)
+  assert.match(select, /t\('runPrefix'/)
+  assert.equal(/start_run|runCommand|window\.open/.test(select), false, 'the popup grew a launcher')
 })
 
 test('/orbit still only folds the panel', () => {

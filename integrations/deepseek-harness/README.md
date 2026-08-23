@@ -108,12 +108,13 @@ Workflows of every bridged Workspace in the model's context — with the inputs
 each one needs, which is the mistake it exists to prevent — so the Agent can
 answer "which of these did you mean" instead of asking what Orbit is. The panel
 lists the same catalog below the Runs, for the person doing the asking, and
-`/orbit-workflows` opens the shell's own popup — the one `/model` uses, with
-its search box and empty state — and selecting a Workflow opens it in Orbit.
+`/orbit-workflows` opens the shell's own popup — the one `/model` uses, with its
+search box and empty state — and selecting a Workflow writes `用<名称>执行：`
+into the draft for you to finish.
 
-Not starting it: a popupSelect is one list and one pick, with nowhere to put the
-goal these Workflows declare an input for, and starting without it is refused by
-the Runtime. Orbit's page is where that sentence gets written.
+Not starting it: the Run has to be the Agent's, or it cannot report on it
+afterwards or take the next step from it. A popupSelect is also one list and one
+pick, with nowhere to put the goal every Workflow here declares an input for.
 
 Both read one cache filled by the panel's own poll, so nothing asks twice for
 something that changes when a Workflow is published; a Runtime that is down
