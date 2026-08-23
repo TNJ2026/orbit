@@ -162,20 +162,26 @@ function OrbitRunCard({ node, cwd, sessionId }, remote) {
 function OrbitSettings({ useWorkspaces }, remote) {
     const workspace = useWorkspaces(state => state.items.find(item => item.workspaceId === state.recentWorkspaceId) || state.items[0]);
     const [status, setStatus] = useState('未连接');
+    const [runtime, setRuntime] = useState(null);
+    const [refresh, setRefresh] = useState(0);
+    const startCommand = 'orbit serve --project-root . --mcp-tool-profile harness';
     useEffect(() => {
         if (!workspace) {
+            setRuntime(null);
             setStatus('未选择 Workspace');
             return;
         }
         const controller = new AbortController();
+        setRuntime(null);
         setStatus('连接中…');
         remote.orbit.getRuntime({ id: String(workspace.workspaceId), canonicalPath: workspace.path }, controller.signal)
-            .then(runtime => setStatus(runtime.state === 'ready' ? '已连接' : '已停止'))
+            .then(value => { setRuntime(value); setStatus(value.state === 'ready' ? '已连接' : '已停止'); })
             .catch(reason => { if (!controller.signal.aborted)
             setStatus(`连接失败：${String(reason)}`); });
         return () => controller.abort();
-    }, [workspace?.workspaceId, workspace?.path]);
-    return createElement('section', null, createElement('strong', null, 'Orbit Runtime'), createElement('p', null, `${workspace?.title || 'Workspace'} · ${status}`), createElement('small', null, '连接独立 Orbit Runtime，并使用当前 Harness Session 隔离 MCP 运行身份。'));
+    }, [workspace?.workspaceId, workspace?.path, refresh]);
+    const capabilities = runtime?.capabilities || {};
+    return createElement('section', null, createElement('strong', null, 'Orbit Runtime'), createElement('p', null, `${workspace?.title || 'Workspace'} · ${status}`), runtime ? createElement('dl', null, createElement('dt', null, 'Orbit 版本'), createElement('dd', null, String(capabilities.orbit_version || '未知')), createElement('dt', null, '集成协议'), createElement('dd', null, String(capabilities.integration_protocol || '未知')), createElement('dt', null, 'MCP 协议'), createElement('dd', null, String(capabilities.mcp_protocol || '未知')), createElement('dt', null, '工具 Profile'), createElement('dd', null, String(capabilities.tool_profile || '未知'))) : null, createElement('div', null, createElement('button', { type: 'button', onClick: () => setRefresh(value => value + 1) }, '刷新连接'), createElement('button', { type: 'button', onClick: () => { void navigator.clipboard?.writeText(startCommand); } }, '复制启动命令')), !runtime && workspace ? createElement('code', null, startCommand) : null, createElement('small', null, '连接独立 Orbit Runtime，并使用当前 Harness Session 隔离 MCP 运行身份。'));
 }
 export const inject = ['conversationEvents', 'slots'];
 export function apply(ctx) {

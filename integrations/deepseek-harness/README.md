@@ -72,7 +72,9 @@ revision against Orbit's current `allowed_commands[]`.
 The Client contributes an `orbit-run` Conversation Node, a right-side Run
 detail drawer with lazy cursor-followed step output, bounded Artifact preview,
 refresh restoration and keyboard/focus handling, a guarded Human Resume form, and an
-Orbit Runtime row in General Settings. Browser code reaches Orbit only through
+Orbit Runtime row in General Settings. The row reports Orbit/integration/MCP
+versions and the active tool profile, supports an explicit reconnect probe, and
+shows a copyable independent-Runtime start command when disconnected. Browser code reaches Orbit only through
 the generated Host Remote; it never connects to loopback directly.
 
 The Host automatically attaches one Bridge to every live root Session with a
