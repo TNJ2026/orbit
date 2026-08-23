@@ -1,6 +1,7 @@
 /** The resident Orbit panel: what is running, and a way into Orbit itself. */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { IconCloseOutline16, IconFullscreenOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { RunDto } from '../types.js'
 import styles from './OrbitPanel.module.css'
 import {
@@ -60,6 +61,7 @@ export function OrbitPanel({ t, useSessions }: OrbitPanelProps) {
   const [rows, setRows] = useState<RunRowData[] | null>(null)
   const [uiUrl, setUiUrl] = useState('')
   const [error, setError] = useState('')
+  const [fullscreen, setFullscreen] = useState(false)
   const bounds = useBounds()
   const drag = useRef<{ x: number; y: number } | null>(null)
 
@@ -143,6 +145,27 @@ export function OrbitPanel({ t, useSessions }: OrbitPanelProps) {
   }
   const onPointerUp = () => { drag.current = null; storeLayout(layout) }
 
+  if (fullscreen && uiUrl) {
+    return (
+      <section className={styles.fullscreen} role="dialog" aria-label={t('title')}>
+        <div className={styles.fullscreenBar}>
+          <strong className={styles.title}>{t('title')}</strong>
+          <span className={styles.count}>{uiUrl}</span>
+          <button
+            type="button"
+            className={styles.iconButton}
+            onClick={() => setFullscreen(false)}
+            aria-label={t('exitFullscreen')}
+            title={t('exitFullscreen')}
+          >
+            <IconCloseOutline16 size={16} />
+          </button>
+        </div>
+        <iframe className={styles.fullscreenFrame} src={uiUrl} title={t('title')} />
+      </section>
+    )
+  }
+
   return (
     <section
       className={styles.panel}
@@ -160,9 +183,25 @@ export function OrbitPanel({ t, useSessions }: OrbitPanelProps) {
         <span className={styles.count}>
           {counts.live ? t('liveCount', counts) : t('idleCount', counts)}
         </span>
-        {uiUrl ? <a href={uiUrl} target="_blank" rel="noopener">{t('openRuntime')}</a> : null}
-        <button type="button" onClick={() => update({ ...layout, collapsed: true })} aria-label={t('collapse')}>
-          ×
+        {uiUrl ? (
+          <button
+            type="button"
+            className={styles.iconButton}
+            onClick={() => setFullscreen(true)}
+            aria-label={t('fullscreen')}
+            title={t('fullscreen')}
+          >
+            <IconFullscreenOutline16 size={14} />
+          </button>
+        ) : null}
+        <button
+          type="button"
+          className={styles.iconButton}
+          onClick={() => update({ ...layout, collapsed: true })}
+          aria-label={t('collapse')}
+          title={t('collapse')}
+        >
+          <IconCloseOutline16 size={14} />
         </button>
       </div>
       <div className={styles.body}>

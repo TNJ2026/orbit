@@ -77,9 +77,9 @@ The panel can be docked to the side or detached and dragged, and remembers
 which between browser sessions.
 
 It deliberately stops there. Graphs, Artifacts and Workflow authoring are drawn
-by Orbit's own Runtime UI, which the panel links to — a second drawing of them
-here would be a second answer to the same question, and the bundle carries a
-test that fails if one starts to appear. Colours come from the shell's
+by Orbit's own Runtime UI, which the panel opens full screen rather than
+redrawing — a second drawing of them here would be a second answer to the same
+question, and the bundle carries a test that fails if one starts to appear. Colours come from the shell's
 `--dsw-alias-*` tokens, so the panel follows the Harness theme rather than
 holding an opinion about it.
 

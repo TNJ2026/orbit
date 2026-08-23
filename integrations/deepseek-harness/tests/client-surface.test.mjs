@@ -70,3 +70,16 @@ test('a drag begun on the bar does not swallow the controls in it', () => {
   // so a press that started on the close button never became a click.
   assert.match(code, /event\.target !== event\.currentTarget/)
 })
+
+test('bar controls are glyphs, not buttons with a surface of their own', async () => {
+  const css = await readFile(join(clientDir, 'OrbitPanel.module.css'), 'utf8')
+  const rule = css.slice(css.indexOf('.iconButton {'), css.indexOf('}', css.indexOf('.iconButton {')))
+  assert.match(rule, /background:\s*none/)
+  assert.match(rule, /border:\s*0/)
+})
+
+test('the deep surfaces are reachable, shown at the size they were drawn for', () => {
+  // The panel does not redraw them; it hands the window to Orbit's own page.
+  assert.match(code, /className=\{styles\.fullscreenFrame\}/)
+  assert.match(code, /src=\{uiUrl\}/)
+})
