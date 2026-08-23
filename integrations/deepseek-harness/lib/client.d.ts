@@ -1,9 +1,11 @@
 /**
- * The only thing this bundle puts in front of a person: a way to leave.
+ * `/orbit` opens Orbit's own Runtime UI inside the Harness window.
  *
- * `/orbit` takes no argument and renders nothing. Orbit's own Runtime UI is
- * where Runs are read and driven, so the command's whole job is to open it —
- * anything more would be a second interface competing with the first.
+ * The panel holds an iframe and nothing else. Every earlier version of this
+ * module drew Orbit's data itself — a Run drawer, a Workflow picker, a
+ * settings page — and each was a second account of something Orbit already
+ * renders. Showing Orbit's own page instead means there is one interface, and
+ * this module's whole job is deciding when it is visible.
  *
  * @module @orbit-runtime/dsh-orbit/client
  */

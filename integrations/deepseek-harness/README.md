@@ -72,10 +72,13 @@ revision against Orbit's current `allowed_commands[]`.
 
 This bundle contributes one thing to the Harness interface: `/orbit`, which
 takes no argument and opens Orbit's own Runtime UI for the Session's Workspace
-in a new tab. The address comes from what the Runtime published about itself,
-so a Runtime on another port or host stays reachable. Everything else a person
-does with a Run happens in that UI; Harness gets the Agent tools below, the
-Host API, and durable `orbit/run-*` Session events.
+in a panel over the Harness window. The panel holds a frame and nothing else —
+Orbit renders its own Runs, Workflows and Artifacts, and a second drawing of
+them here would be a second answer to the same question. The address comes from
+what the Runtime published about itself, so a Runtime on another port or host
+stays reachable, and a frame the Host's policy refuses offers that address as a
+link instead of staying blank. Harness also gets the Agent tools below, the Host
+API, and durable `orbit/run-*` Session events.
 
 The Host API at `/plugins/dsh-orbit/api` on the Harness origin remains available
 for a caller that wants Run inspection, Steps, Graph, Edges, cursor-based output,

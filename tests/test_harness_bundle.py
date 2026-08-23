@@ -58,19 +58,20 @@ class DeepSeekHarnessBundleTests(unittest.TestCase):
         self.assertIn("orbit/run-started", (BUNDLE / "src" / "types.ts").read_text(encoding="utf-8"))
         self.assertFalse((BUNDLE / "src" / "run-card.ts").exists())
 
-    def test_the_client_only_shows_the_way_out(self) -> None:
-        """One argument-free command, and nothing that renders.
+    def test_the_client_shows_orbits_page_and_never_redraws_it(self) -> None:
+        """One argument-free command, and a frame around Orbit's own UI.
 
-        Orbit's own Runtime UI is the single place a Run is read or driven, so
-        anything here that draws is a second interface competing with the first.
+        Every earlier version of this module drew Orbit's data itself. The
+        panel exists so there is one interface rather than two, which holds
+        only as long as nothing here reads what that interface already shows.
         """
 
         client = (BUNDLE / "src" / "client.ts").read_text(encoding="utf-8")
         self.assertIn("getRuntimeUi", client)
-        self.assertIn("window.open(", client)
+        self.assertIn("createElement('iframe'", client)
         self.assertIn("takes no argument", client)
-        for rendered in ("react", "createElement", "aria-modal", "role: 'dialog'", "settings.section"):
-            self.assertNotIn(rendered, client)
+        for redrawn in ("listRuns", "getSteps", "listArtifacts", "executeCommand"):
+            self.assertNotIn(redrawn, client)
         remote = (BUNDLE / "src" / "index.ts").read_text(encoding="utf-8")
         self.assertIn("@Remote('getRuntimeUi')", remote)
         self.assertIn("@Remote('reconcileDelegation')", remote)
