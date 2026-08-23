@@ -48,6 +48,17 @@ export declare class OrbitRemoteService extends TypertRemoteService {
     bridgeSession(workspace: WorkspaceRef, session: Session, cursor: OrbitCursorStore, signal: AbortSignal, knownRuns?: Iterable<string>): Promise<void>;
     getRuntime(workspace: WorkspaceRef, signal: AbortSignal): Promise<RuntimeSummary>;
     getRuntimeUi(sessionId: string, signal: AbortSignal): Promise<string>;
+    /**
+     * Everything the resident panel draws, in one round trip.
+     *
+     * It takes a Session and derives the Workspace, so a poller that runs every
+     * couple of seconds carries no claim the Host has to check — and the panel
+     * never has to know what a Workspace is.
+     */
+    getPanelState(sessionId: string, signal: AbortSignal): Promise<{
+        runs: RunDto[];
+        uiUrl: string;
+    }>;
     getDiagnostics(workspace: WorkspaceRef, sessionId: string, signal: AbortSignal): Promise<IntegrationDiagnostics>;
     listWorkflows(workspace: WorkspaceRef, sessionId: string, signal: AbortSignal): Promise<WorkflowSummary[]>;
     listRuns(workspace: WorkspaceRef, sessionId: string, status: string | undefined, signal: AbortSignal): Promise<RunDto[]>;

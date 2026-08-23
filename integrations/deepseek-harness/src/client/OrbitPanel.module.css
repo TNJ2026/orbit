@@ -1,0 +1,95 @@
+/* Every colour is a Harness alias token: the panel is a Harness surface that
+   happens to be about Orbit, so it follows the shell's theme rather than
+   carrying an opinion of its own. */
+
+.panel {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--dsw-alias-line-normal);
+  border-radius: 12px;
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-primary);
+  box-shadow: 0 12px 40px rgb(0 0 0 / 18%);
+  pointer-events: auto;
+}
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px 8px 12px;
+  border-bottom: 1px solid var(--dsw-alias-line-normal);
+  background: var(--dsw-alias-bg-module);
+  cursor: grab;
+  user-select: none;
+}
+.bar:active { cursor: grabbing; }
+
+.title { font-weight: 600; font-size: 13px; }
+.count { flex: 1; color: var(--dsw-alias-label-tertiary); font-size: 12px; }
+
+.body { flex: 1; min-height: 0; overflow-y: auto; }
+
+.row {
+  display: grid;
+  grid-template-columns: 8px 1fr auto;
+  align-items: start;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--dsw-alias-line-normal);
+}
+.row:last-child { border-bottom: 0; }
+
+.dot { width: 8px; height: 8px; margin-top: 5px; border-radius: 50%; }
+.live { background: var(--dsw-alias-state-business-primary); }
+.done { background: var(--dsw-alias-state-success); }
+.failed { background: var(--dsw-alias-state-danger); }
+.unknown { background: var(--dsw-alias-state-warning, var(--dsw-alias-label-tertiary)); }
+
+.goal {
+  font-size: 13px;
+  line-height: 1.4;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.meta { color: var(--dsw-alias-label-tertiary); font-size: 11px; }
+.status { color: var(--dsw-alias-label-secondary); font-size: 11px; white-space: nowrap; }
+
+.empty, .error {
+  padding: 20px 14px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  text-align: center;
+}
+.error { color: var(--dsw-alias-state-error-primary); text-align: left; }
+
+/* Collapsed, the panel is a single control that says whether anything is
+   running. It stays out of the way without going away. */
+.badge {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid var(--dsw-alias-line-normal);
+  border-radius: 999px;
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-secondary);
+  box-shadow: 0 6px 20px rgb(0 0 0 / 14%);
+  font-size: 12px;
+  cursor: pointer;
+  pointer-events: auto;
+}
+.badge:hover { color: var(--dsw-alias-label-primary); }
+
+.resize {
+  position: absolute;
+  inset: auto 0 0 auto;
+  width: 14px;
+  height: 14px;
+  cursor: nwse-resize;
+}

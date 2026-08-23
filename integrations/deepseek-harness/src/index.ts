@@ -84,6 +84,7 @@ export class OrbitRemoteService extends TypertRemoteService {
     switch (action) {
       case 'getRuntime': return await this.getRuntime(args[0] as WorkspaceRef, signal)
       case 'getRuntimeUi': return await this.getRuntimeUi(String(args[0]), signal)
+      case 'getPanelState': return await this.getPanelState(String(args[0]), signal)
       case 'getDiagnostics': return await this.getDiagnostics(args[0] as WorkspaceRef, String(args[1]), signal)
       case 'listWorkflows': return await this.listWorkflows(args[0] as WorkspaceRef, String(args[1]), signal)
       case 'listRuns': return await this.listRuns(args[0] as WorkspaceRef, String(args[1]), args[2] === undefined ? undefined : String(args[2]), signal)
@@ -233,6 +234,28 @@ export class OrbitRemoteService extends TypertRemoteService {
     const release = await this.gateway.acquire(scope)
     try { return await this.gateway.uiUrl(scope) }
     finally { await release() }
+  }
+
+  /**
+   * Everything the resident panel draws, in one round trip.
+   *
+   * It takes a Session and derives the Workspace, so a poller that runs every
+   * couple of seconds carries no claim the Host has to check — and the panel
+   * never has to know what a Workspace is.
+   */
+  @Remote('getPanelState')
+  async getPanelState(sessionId: string, signal: AbortSignal): Promise<{
+    runs: RunDto[]; uiUrl: string
+  }> {
+    signal.throwIfAborted()
+    const scope = await this.sessionWorkspace(sessionId)
+    const release = await this.gateway.acquire(scope)
+    try {
+      const result = await this.gateway.call(scope, sessionId, 'list_runs', {
+        limit: 50,
+      }) as { runs: RunDto[] }
+      return { runs: result.runs, uiUrl: await this.gateway.uiUrl(scope) }
+    } finally { await release() }
   }
 
   @Remote('getDiagnostics')

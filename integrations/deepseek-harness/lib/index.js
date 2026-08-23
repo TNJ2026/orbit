@@ -42,6 +42,7 @@ let OrbitRemoteService = (() => {
     let _instanceExtraInitializers = [];
     let _getRuntime_decorators;
     let _getRuntimeUi_decorators;
+    let _getPanelState_decorators;
     let _getDiagnostics_decorators;
     let _listWorkflows_decorators;
     let _listRuns_decorators;
@@ -64,6 +65,7 @@ let OrbitRemoteService = (() => {
             const _metadata = typeof Symbol === "function" && Symbol.metadata ? Object.create(_classSuper[Symbol.metadata] ?? null) : void 0;
             _getRuntime_decorators = [Remote('getRuntime')];
             _getRuntimeUi_decorators = [Remote('getRuntimeUi')];
+            _getPanelState_decorators = [Remote('getPanelState')];
             _getDiagnostics_decorators = [Remote('getDiagnostics')];
             _listWorkflows_decorators = [Remote('listWorkflows')];
             _listRuns_decorators = [Remote('listRuns')];
@@ -83,6 +85,7 @@ let OrbitRemoteService = (() => {
             _executeCommand_decorators = [Remote('executeCommand')];
             __esDecorate(this, null, _getRuntime_decorators, { kind: "method", name: "getRuntime", static: false, private: false, access: { has: obj => "getRuntime" in obj, get: obj => obj.getRuntime }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _getRuntimeUi_decorators, { kind: "method", name: "getRuntimeUi", static: false, private: false, access: { has: obj => "getRuntimeUi" in obj, get: obj => obj.getRuntimeUi }, metadata: _metadata }, null, _instanceExtraInitializers);
+            __esDecorate(this, null, _getPanelState_decorators, { kind: "method", name: "getPanelState", static: false, private: false, access: { has: obj => "getPanelState" in obj, get: obj => obj.getPanelState }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _getDiagnostics_decorators, { kind: "method", name: "getDiagnostics", static: false, private: false, access: { has: obj => "getDiagnostics" in obj, get: obj => obj.getDiagnostics }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _listWorkflows_decorators, { kind: "method", name: "listWorkflows", static: false, private: false, access: { has: obj => "listWorkflows" in obj, get: obj => obj.listWorkflows }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _listRuns_decorators, { kind: "method", name: "listRuns", static: false, private: false, access: { has: obj => "listRuns" in obj, get: obj => obj.listRuns }, metadata: _metadata }, null, _instanceExtraInitializers);
@@ -179,6 +182,7 @@ let OrbitRemoteService = (() => {
             switch (action) {
                 case 'getRuntime': return await this.getRuntime(args[0], signal);
                 case 'getRuntimeUi': return await this.getRuntimeUi(String(args[0]), signal);
+                case 'getPanelState': return await this.getPanelState(String(args[0]), signal);
                 case 'getDiagnostics': return await this.getDiagnostics(args[0], String(args[1]), signal);
                 case 'listWorkflows': return await this.listWorkflows(args[0], String(args[1]), signal);
                 case 'listRuns': return await this.listRuns(args[0], String(args[1]), args[2] === undefined ? undefined : String(args[2]), signal);
@@ -332,6 +336,27 @@ let OrbitRemoteService = (() => {
             const release = await this.gateway.acquire(scope);
             try {
                 return await this.gateway.uiUrl(scope);
+            }
+            finally {
+                await release();
+            }
+        }
+        /**
+         * Everything the resident panel draws, in one round trip.
+         *
+         * It takes a Session and derives the Workspace, so a poller that runs every
+         * couple of seconds carries no claim the Host has to check — and the panel
+         * never has to know what a Workspace is.
+         */
+        async getPanelState(sessionId, signal) {
+            signal.throwIfAborted();
+            const scope = await this.sessionWorkspace(sessionId);
+            const release = await this.gateway.acquire(scope);
+            try {
+                const result = await this.gateway.call(scope, sessionId, 'list_runs', {
+                    limit: 50,
+                });
+                return { runs: result.runs, uiUrl: await this.gateway.uiUrl(scope) };
             }
             finally {
                 await release();

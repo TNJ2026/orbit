@@ -55,13 +55,18 @@ async function stop(child) {
 }
 
 try {
-  // The browser module exists to contribute one argument-free slash command
-  // and nothing else. Its size is the cheapest signal that no interface has
-  // grown back inside it: a rendered surface would not fit.
+  // The browser module must register under the package name and reach the
+  // platform through the loader's module table. A bundled copy of a Harness
+  // client package would run as a second instance of a service the shell
+  // already owns — which fails only in the browser, long after the host half
+  // has loaded fine.
   const clientBundle = await readFile(resolve(bundle, 'lib/client.js'), 'utf8')
   assert.match(clientBundle, /window\.__ModuleLoader__\.load\(\{/)
   assert.match(clientBundle, /id:\s*["']@orbit-runtime\/dsh-orbit["']/)
-  assert.ok(clientBundle.length < 16_384, `client bundle grew to ${String(clientBundle.length)} bytes`)
+  assert.match(clientBundle, /require\("react"\)/)
+  assert.doesNotMatch(clientBundle, /@deepseek-ai\/dsh-client-(runtime|ui-slots|ui-primitives|locale)['"]?\s*[:=]/)
+  // Module CSS is injected by the factory, not shipped as a second asset.
+  assert.match(clientBundle, /data-plugin-css/)
 
   await run(['plugin', '--profile', 'web', 'add', installSpec])
   const installed = await run(['--profile', 'web', '--dump-config'])

@@ -1,8 +1,22 @@
 {
   "compilerOptions": {
-    "target": "ES2022", "module": "NodeNext", "moduleResolution": "NodeNext",
-    "strict": true, "declaration": true, "rootDir": "src", "outDir": "lib", "types": ["node"],
-    "experimentalDecorators": false, "skipLibCheck": true
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "declaration": true,
+    "rootDir": "src",
+    "outDir": "lib",
+    "types": [
+      "node"
+    ],
+    "experimentalDecorators": false,
+    "skipLibCheck": true
   },
-  "include": ["src"]
+  "include": [
+    "src"
+  ],
+  "exclude": [
+    "src/client"
+  ]
 }

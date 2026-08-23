@@ -70,15 +70,22 @@ output, bounded Artifact content, and command execution. Commands are accepted
 only after the Host re-reads the Run and matches the requested command and
 revision against Orbit's current `allowed_commands[]`.
 
-This bundle contributes one thing to the Harness interface: `/orbit`, which
-takes no argument and opens Orbit's own Runtime UI for the Session's Workspace
-in a panel over the Harness window. The panel holds a frame and nothing else —
-Orbit renders its own Runs, Workflows and Artifacts, and a second drawing of
-them here would be a second answer to the same question. The address comes from
-what the Runtime published about itself, so a Runtime on another port or host
-stays reachable, and a frame the Host's policy refuses offers that address as a
-link instead of staying blank. Harness also gets the Agent tools below, the Host
-API, and durable `orbit/run-*` Session events.
+This bundle contributes a resident Orbit panel to the Harness shell overlay. It
+folds down to a badge that says whether anything is running and opens to a list
+of this Workspace's Runs; `/orbit` takes no argument and folds it either way.
+The panel can be docked to the side or detached and dragged, and remembers
+which between browser sessions.
+
+It deliberately stops there. Graphs, Artifacts and Workflow authoring are drawn
+by Orbit's own Runtime UI, which the panel links to — a second drawing of them
+here would be a second answer to the same question, and the bundle carries a
+test that fails if one starts to appear. Colours come from the shell's
+`--dsw-alias-*` tokens, so the panel follows the Harness theme rather than
+holding an opinion about it.
+
+Polling follows the work: every couple of seconds while a Run is moving, every
+fifteen while none is, and one round trip per tick that carries only a Session
+id — the Host derives the Workspace itself.
 
 The Host API at `/plugins/dsh-orbit/api` on the Harness origin remains available
 for a caller that wants Run inspection, Steps, Graph, Edges, cursor-based output,

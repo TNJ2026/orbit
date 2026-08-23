@@ -58,22 +58,23 @@ class DeepSeekHarnessBundleTests(unittest.TestCase):
         self.assertIn("orbit/run-started", (BUNDLE / "src" / "types.ts").read_text(encoding="utf-8"))
         self.assertFalse((BUNDLE / "src" / "run-card.ts").exists())
 
-    def test_the_client_shows_orbits_page_and_never_redraws_it(self) -> None:
-        """One argument-free command, and a frame around Orbit's own UI.
+    def test_the_panel_stops_where_orbits_own_UI_begins(self) -> None:
+        """A resident panel of Runs, and a link out for everything deeper.
 
-        Every earlier version of this module drew Orbit's data itself. The
-        panel exists so there is one interface rather than two, which holds
-        only as long as nothing here reads what that interface already shows.
+        The boundary is the whole reason this is not the 685-line duplicate it
+        replaced: graphs, Artifacts and Workflow authoring are drawn by Orbit,
+        and reading their data here is how a panel becomes a second Orbit.
         """
 
-        client = (BUNDLE / "src" / "client.ts").read_text(encoding="utf-8")
-        self.assertIn("getRuntimeUi", client)
-        self.assertIn("createElement('iframe'", client)
-        self.assertIn("takes no argument", client)
-        for redrawn in ("listRuns", "getSteps", "listArtifacts", "executeCommand"):
-            self.assertNotIn(redrawn, client)
+        client = (BUNDLE / "src" / "client").glob("*.ts*")
+        code = "\n".join(path.read_text(encoding="utf-8") for path in client)
+        self.assertIn("shell.overlay", code)
+        self.assertIn("getPanelState", code)
+        self.assertIn("--dsw-alias-", (BUNDLE / "src" / "client" / "OrbitPanel.module.css").read_text(encoding="utf-8"))
+        for elsewhere in ("getGraph", "listArtifacts", "generateWorkflow", "getAuthoringJob"):
+            self.assertNotIn(elsewhere, code)
         remote = (BUNDLE / "src" / "index.ts").read_text(encoding="utf-8")
-        self.assertIn("@Remote('getRuntimeUi')", remote)
+        self.assertIn("@Remote('getPanelState')", remote)
         self.assertIn("@Remote('reconcileDelegation')", remote)
 
     def test_agent_tools_use_independent_runtime_mcp(self) -> None:
