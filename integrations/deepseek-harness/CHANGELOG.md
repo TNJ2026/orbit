@@ -7,6 +7,9 @@
   command lifecycle persistence.
 - Added a same-origin bounded Host API for browser UI calls, keeping Runtime
   endpoints and actor credentials out of Client code.
+- Propagated the Host-resolved Harness Workspace id, canonical path and optional
+  isolation metadata to Orbit MCP calls; `/orbit` now rejects stale or forged
+  browser Workspace identities before starting a Run.
 - Changed the Host Gateway to discover an independently started `orbit serve`
   Runtime and communicate over HTTP MCP; it no longer owns a Runtime process.
 - Removed Harness Subagent execution from Session Bridge startup. CLI Agent

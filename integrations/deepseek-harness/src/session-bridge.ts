@@ -25,6 +25,45 @@ export function sessionCanBridge(header: { cwd?: string; delegationDepth?: numbe
   return Boolean(header.cwd) && (header.delegationDepth ?? 0) === 0
 }
 
+export interface BridgeRetryOptions {
+  /**
+   * The Session's durable events, read afresh for every attempt.
+   *
+   * Never hoist this into a value. A Run an earlier attempt already announced
+   * is durably recorded here, and that record is the only thing standing
+   * between a transient failure and a second announcement of the same Run.
+   */
+  events: () => readonly StoredOrbitEvent[]
+  attempt: (knownRuns: Set<string>) => Promise<void>
+  onWaiting: (message: string) => void
+  signal: AbortSignal
+  retryDelayMs?: number
+}
+
+export function bridgeDelay(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise<void>(resolve => {
+    const timer = setTimeout(resolve, ms)
+    signal.addEventListener('abort', () => { clearTimeout(timer); resolve() }, { once: true })
+  })
+}
+
+/** Keep attempting a Session Bridge until it finishes or the caller gives up. */
+export async function bridgeWithRetry(options: BridgeRetryOptions): Promise<void> {
+  let lastError = ''
+  while (!options.signal.aborted) {
+    try {
+      await options.attempt(restoredBridgeState(options.events()).knownRuns)
+      return
+    } catch (error) {
+      if (options.signal.aborted) return
+      const message = String(error)
+      if (message !== lastError) options.onWaiting(message)
+      lastError = message
+      await bridgeDelay(options.retryDelayMs ?? 2_000, options.signal)
+    }
+  }
+}
+
 const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'unknown'])
 
 export class OrbitSessionBridge {

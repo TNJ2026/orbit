@@ -192,3 +192,17 @@ export interface OrbitRunEnded {
     updatedAt: string;
 }
 export type OrbitSessionEvent = OrbitRunStarted | OrbitRunCheckpoint | OrbitRunEnded;
+/**
+ * The Session event shapes this integration appends.
+ *
+ * Declared beside the shapes themselves rather than in a UI module: the Bridge
+ * records these whether or not anything renders them, and a record's type
+ * should not depend on the existence of a view.
+ */
+declare module '@deepseek-ai/dsh-session/types' {
+    interface SessionEventMap {
+        'orbit/run-started': Omit<OrbitRunStarted, 'type'>;
+        'orbit/run-checkpoint': Omit<OrbitRunCheckpoint, 'type'>;
+        'orbit/run-ended': Omit<OrbitRunEnded, 'type'>;
+    }
+}

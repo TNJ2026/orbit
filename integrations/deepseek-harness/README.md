@@ -70,35 +70,25 @@ output, bounded Artifact content, and command execution. Commands are accepted
 only after the Host re-reads the Run and matches the requested command and
 revision against Orbit's current `allowed_commands[]`.
 
-The Client contributes `/orbit <goal>` through Harness's native slash-trigger
-pipeline, which opens a Workflow picker
-before starting anything. The picker lists only published, ready Workflows and
-the Host revalidates the exact Workflow/version before calling `start_run` with
-`wait: false`. Its pending and completed presentation uses Harness's durable
-`command/run` / `command/done` lifecycle. The browser also retains the active
-picker request in session storage so a refresh restores the dialog without
-introducing unknown third-party Session event types.
+This bundle contributes no user interface. Orbit's own Runtime UI is the only
+place a person reads or drives a Run; Harness gets the Agent tools below, the
+Host API, and durable `orbit/run-*` Session events.
 
-The Client also contributes an `orbit-run` Conversation Node, a right-side Run
-detail drawer with lazy cursor-followed step output, bounded Artifact preview,
-refresh restoration and keyboard/focus handling, a guarded Human Resume form, and an
-Orbit Runtime row in General Settings. The row reports Orbit/integration/MCP
-versions and the active tool profile, supports an explicit reconnect probe, and
-shows a copyable independent-Runtime start command when disconnected. Browser
-code reaches Orbit only through `/plugins/dsh-orbit/api` on the Harness origin;
-it never connects to Orbit loopback directly.
+The Host API at `/plugins/dsh-orbit/api` on the Harness origin remains available
+for a caller that wants Run inspection, Steps, Graph, Edges, cursor-based output,
+bounded Artifact content, and Attachment import. Every call carries a Workspace,
+and the Host trusts none of them: each is checked against the Session it claims
+to belong to, or against the Workspace registry, before any Gateway call. It
+never lets a caller reach Orbit loopback directly.
 
-The native `Orbit` settings section is the product workspace: actor-scoped Run
-history with the full detail Drawer, Workflow Catalog plus asynchronous Agent
-generation/modification, Artifact Catalog, and diagnostics. Image Artifacts can
-be explicitly imported into Harness Attachment storage after both Orbit's 2 MiB
-proxy bound and Harness image admission pass. The current Harness Attachment
-contract supports PNG, JPEG, WebP and GIF; other media stays in Orbit.
+Image Artifacts can be imported into Harness Attachment storage after both
+Orbit's 2 MiB proxy bound and Harness image admission pass. The current Harness
+Attachment contract supports PNG, JPEG, WebP and GIF; other media stays in Orbit.
 
-The downloadable diagnostics document contains only Workspace/Session ids,
-protocol capabilities, aggregate counts, Gateway counters and Bridge state. It
-does not contain the MCP endpoint, actor header, raw output, Artifact bytes,
-task prompts or credentials.
+The diagnostics document contains only Workspace/Session ids, protocol
+capabilities, aggregate counts, Gateway counters and Bridge state. It does not
+contain the MCP endpoint, actor header, raw output, Artifact bytes, task prompts
+or credentials.
 
 The Host automatically attaches one Bridge to every live root Session with a
 `cwd`, including Sessions restored during startup. The Bridge derives its
@@ -129,6 +119,13 @@ revision. The Host derives Workspace and Session from `ToolRunContext`, creates
 idempotency keys, and re-reads `allowed_commands[]` before cancel or resume.
 `orbit_start_run` always sends `wait: false`; Run progress is projected by the
 Session Bridge rather than holding a Harness tool call open.
+
+Every MCP tool call also carries an `orbit/workspace` metadata object derived
+by the Host from the Harness Workspace registry: its stable Workspace id and
+canonical path, plus isolation metadata when available. A Host API caller
+supplies a Workspace too, and it is verified against the Session before use, so
+Orbit Runtime discovery and execution follow the Harness Workspace rather than a
+caller-constructed `cwd:` identity.
 
 The Orbit CLI takes a non-blocking ownership lock for the runtime database and
 publishes its Workspace and MCP endpoint in that ownership record. Harness

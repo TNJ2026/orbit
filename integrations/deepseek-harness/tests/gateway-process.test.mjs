@@ -12,7 +12,7 @@ const fixture = fileURLToPath(new URL('./fixtures/orbit-mcp-fixture.mjs', import
 
 async function target(mode, handler) {
   const path = await realpath(await mkdtemp(join(tmpdir(), `orbit-gateway-${mode}-`)))
-  let calls = 0, lastActor
+  let calls = 0, lastActor, lastMessage
   const server = createServer((request, response) => {
     let body = ''
     request.setEncoding('utf8'); request.on('data', chunk => { body += chunk })
@@ -20,6 +20,7 @@ async function target(mode, handler) {
       calls++
       lastActor = request.headers['x-orbit-actor']
       const message = JSON.parse(body)
+      lastMessage = message
       const result = handler(message)
       response.writeHead(200, { 'content-type': 'application/json' })
       response.end(JSON.stringify({ jsonrpc: '2.0', id: message.id, result }))
@@ -30,7 +31,7 @@ async function target(mode, handler) {
   await writeFile(join(path, 'runtime.json'), JSON.stringify([{
     project_root: path, transport: 'http', mcp_url: `http://127.0.0.1:${String(address.port)}/mcp`,
   }]))
-  return { workspace: { id: `workspace:${mode}`, canonicalPath: path }, server, calls: () => calls, lastActor: () => lastActor }
+  return { workspace: { id: `workspace:${mode}`, canonicalPath: path }, server, calls: () => calls, lastActor: () => lastActor, lastMessage: () => lastMessage }
 }
 
 function mcp(protocol = 'orbit-harness/1') {
@@ -57,6 +58,9 @@ test('concurrent sessions reuse one discovered Runtime without owning its lifecy
   assert.equal((await gateway.call(runtime.workspace, 'one', 'inspect_run', {})).run_id, 'run:1')
   assert.equal(runtime.calls(), 3)
   assert.equal(runtime.lastActor(), 'harness:session:one')
+  assert.deepEqual(runtime.lastMessage().params._meta['orbit/workspace'], {
+    id: 'workspace:compatible', canonicalPath: runtime.workspace.canonicalPath,
+  })
   assert.equal(gateway.diagnostics().discoveryAttempts, 1)
   assert.equal(gateway.diagnostics().rpcCalls, 3)
   assert.equal(gateway.diagnostics().transportFailures, 0)

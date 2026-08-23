@@ -1,14 +1,13 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { TypertRemoteService, Remote } from '@deepseek-ai/dsh-typert-protocol'
 import { OrbitGateway } from './gateway.js'
-import { OrbitSessionBridge, restoredBridgeState, sessionCanBridge, type OrbitCursorStore } from './session-bridge.js'
+import { OrbitSessionBridge, bridgeWithRetry, restoredBridgeState, sessionCanBridge, type OrbitCursorStore, type StoredOrbitEvent } from './session-bridge.js'
 import { OrbitToolBridge } from './orbit-tools.js'
 import type { Session, SessionStore } from '@deepseek-ai/dsh-session'
 import type { WorkspaceRegistry } from '@deepseek-ai/dsh-workspace'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { artifactImageInput } from './artifact-import.js'
-import { ORBIT_COMMAND, ORBIT_SELECTION_PENDING_TEXT, orbitGoal } from './orbit-command.js'
 import type { ArtifactContent, ArtifactSummary, AuthoringJob, EdgeSummary, ImportedArtifact, IntegrationDiagnostics, OrbitCommandRequest, OutputPage, RunDto, RunGraph, RuntimeSummary, StepSummary, WorkflowSummary, WorkspaceRef } from './types.js'
 
 declare module '@deepseek-ai/cordis' { interface Context { orbit: OrbitRemoteService } }
@@ -24,10 +23,12 @@ export class OrbitRemoteService extends TypertRemoteService {
   private readonly bridgeDiagnostics = new Map<string, { state: string; cursorPosition: number; lastError?: string; updatedAt: string }>()
   private readonly hostSessions: SessionStore
   private readonly attachments: AttachmentStore
+  private readonly workspaceRegistry: WorkspaceRegistry
   constructor(ctx: Context) {
     super(ctx, 'orbit')
     this.hostSessions = ctx.get('sessions') as unknown as SessionStore
     this.attachments = ctx.get('attachments') as unknown as AttachmentStore
+    this.workspaceRegistry = ctx.get('workspaceRegistry') as unknown as WorkspaceRegistry
     new OrbitToolBridge(ctx, this.gateway).register()
     this.registerWebApi(ctx)
     for (const session of this.hostSessions.list()) this.startSessionBridge(ctx, session)
@@ -57,7 +58,10 @@ export class OrbitRemoteService extends TypertRemoteService {
             for await (const chunk of req) {
               const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
               size += buffer.length
-              if (size > 256 * 1024) throw new Error('Orbit client request exceeds 256 KiB')
+              if (size > 256 * 1024) {
+                req.destroy()
+                throw new Error('Orbit client request exceeds 256 KiB')
+              }
               chunks.push(buffer)
             }
             const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { action?: unknown; args?: unknown }
@@ -82,10 +86,6 @@ export class OrbitRemoteService extends TypertRemoteService {
       case 'getDiagnostics': return await this.getDiagnostics(args[0] as WorkspaceRef, String(args[1]), signal)
       case 'listWorkflows': return await this.listWorkflows(args[0] as WorkspaceRef, String(args[1]), signal)
       case 'listRuns': return await this.listRuns(args[0] as WorkspaceRef, String(args[1]), args[2] === undefined ? undefined : String(args[2]), signal)
-      case 'beginWorkflowSelection': return this.beginWorkflowSelection(String(args[0]), String(args[1]), signal)
-      case 'getPendingWorkflowSelection': return this.getPendingWorkflowSelection(String(args[0]), signal)
-      case 'startWorkflowSelection': return await this.startWorkflowSelection(args[0] as WorkspaceRef, String(args[1]), String(args[2]), String(args[3]), Number(args[4]), args[5] as Record<string, unknown>, signal)
-      case 'cancelWorkflowSelection': return await this.cancelWorkflowSelection(String(args[0]), String(args[1]), signal)
       case 'generateWorkflow': return await this.generateWorkflow(args[0] as WorkspaceRef, String(args[1]), String(args[2]), signal)
       case 'modifyWorkflow': return await this.modifyWorkflow(args[0] as WorkspaceRef, String(args[1]), String(args[2]), String(args[3]), Boolean(args[4]), signal)
       case 'getAuthoringJob': return await this.getAuthoringJob(args[0] as WorkspaceRef, String(args[1]), String(args[2]), signal)
@@ -101,6 +101,41 @@ export class OrbitRemoteService extends TypertRemoteService {
       case 'reconcileDelegation': return await this.reconcileDelegation(args[0] as WorkspaceRef, String(args[1]), String(args[2]), String(args[3]), args[4] as 'confirmed_succeeded' | 'confirmed_failed', String(args[5]), signal)
       default: throw new Error(`Unknown Orbit client action: ${action}`)
     }
+  }
+
+  /**
+   * Turn a caller-supplied Workspace into one this Host vouches for.
+   *
+   * The browser sends a Workspace with every call, and a browser is not an
+   * authority on which directory a Session belongs to: the Session is. A
+   * mismatch is refused rather than quietly corrected, because the two
+   * disagreeing at all means the caller is describing a Session it is not in.
+   */
+  private async verified(claimed: WorkspaceRef, sessionId: string): Promise<WorkspaceRef> {
+    const actual = await this.workspaceForSession(this.liveSession(sessionId))
+    if (claimed.id !== actual.id || claimed.canonicalPath !== actual.canonicalPath) {
+      throw new Error('Orbit request Workspace does not match the Harness Session')
+    }
+    return actual
+  }
+
+  /**
+   * The same guarantee for the Settings panel, which has a Workspace but no
+   * Session. Its authority is the Workspace registry: a path nobody registered
+   * is not somewhere this Host will go looking for a Runtime.
+   */
+  private async registered(claimed: WorkspaceRef): Promise<WorkspaceRef> {
+    const found = await this.workspaceRegistry.resolveByPath(claimed.canonicalPath)
+    if (!found || String(found.id) !== claimed.id || found.path !== claimed.canonicalPath) {
+      throw new Error('Orbit request names a Workspace this Harness has not registered')
+    }
+    return { id: String(found.id), canonicalPath: found.path }
+  }
+
+  private liveSession(sessionId: string): Session {
+    const session = this.hostSessions.list().find(item => String(item.id) === sessionId)
+    if (!session) throw new Error('Orbit requires a live Harness Session')
+    return session
   }
 
   private startSessionBridge(ctx: Context, session: Session): void {
@@ -119,8 +154,10 @@ export class OrbitRemoteService extends TypertRemoteService {
   private stopSessionBridge(sessionId: string): void {
     this.bridges.get(sessionId)?.abort()
     this.bridges.delete(sessionId)
-    const previous = this.bridgeDiagnostics.get(sessionId)
-    this.bridgeDiagnostics.set(sessionId, { state: 'stopped', cursorPosition: previous?.cursorPosition || 0, updatedAt: new Date().toISOString() })
+    // Only a disposed Session stops a Bridge, and nothing can ask a disposed
+    // Session for its diagnostics. Keeping the entry would grow this map by one
+    // for every Session the Host ever opened.
+    this.bridgeDiagnostics.delete(sessionId)
   }
 
   private async runSessionBridge(ctx: Context, session: Session, cwd: string, signal: AbortSignal): Promise<void> {
@@ -130,9 +167,7 @@ export class OrbitRemoteService extends TypertRemoteService {
       id: registered ? String(registered.id) : `cwd:${cwd}`,
       canonicalPath: registered?.path ?? cwd,
     }
-    const restored = restoredBridgeState(session.events)
-    const knownRuns = restored.knownRuns
-    let cursorPosition = restored.position
+    let cursorPosition = restoredBridgeState(session.events).position
     const cursor: OrbitCursorStore = {
       load: () => cursorPosition || undefined,
       save: (_workspaceId, _sessionId, position) => {
@@ -142,25 +177,19 @@ export class OrbitRemoteService extends TypertRemoteService {
         })
       },
     }
-    let lastError = ''
-    while (!signal.aborted) {
-      try {
+    await bridgeWithRetry({
+      events: () => session.events as readonly StoredOrbitEvent[],
+      attempt: async knownRuns => {
         await this.bridgeSession(workspace, session, cursor, signal, knownRuns)
-        return
-      } catch (error) {
-        if (signal.aborted) return
-        const message = String(error)
+      },
+      onWaiting: message => {
         this.bridgeDiagnostics.set(String(session.id), {
           state: 'waiting', cursorPosition, lastError: message, updatedAt: new Date().toISOString(),
         })
-        if (message !== lastError) ctx.logger.warn(`Orbit bridge for Session ${String(session.id)} is waiting: ${message}`)
-        lastError = message
-        await new Promise<void>(resolve => {
-          const timer = setTimeout(resolve, 2_000)
-          signal.addEventListener('abort', () => { clearTimeout(timer); resolve() }, { once: true })
-        })
-      }
-    }
+        ctx.logger.warn(`Orbit bridge for Session ${String(session.id)} is waiting: ${message}`)
+      },
+      signal,
+    })
   }
 
   async bridgeSession(workspace: WorkspaceRef, session: Session, cursor: OrbitCursorStore, signal: AbortSignal, knownRuns: Iterable<string> = []): Promise<void> {
@@ -178,10 +207,11 @@ export class OrbitRemoteService extends TypertRemoteService {
   @Remote('getRuntime')
   async getRuntime(workspace: WorkspaceRef, signal: AbortSignal): Promise<RuntimeSummary> {
     signal.throwIfAborted()
-    const release = await this.gateway.acquire(workspace)
+    const scope = await this.registered(workspace)
+    const release = await this.gateway.acquire(scope)
     try {
-      const capabilities = await this.gateway.call(workspace, 'probe', 'get_capabilities', {}) as Record<string, unknown>
-      return { workspaceId: workspace.id, state: 'ready', capabilities }
+      const capabilities = await this.gateway.call(scope, 'probe', 'get_capabilities', {}) as Record<string, unknown>
+      return { workspaceId: scope.id, state: 'ready', capabilities }
     } finally { await release() }
   }
 
@@ -207,64 +237,22 @@ export class OrbitRemoteService extends TypertRemoteService {
     }, signal)
   }
 
-  @Remote('startWorkflowSelection')
-  async startWorkflowSelection(workspace: WorkspaceRef, sessionId: string, selectionId: string, workflowId: string, workflowVersion: number, input: Record<string, unknown>, signal: AbortSignal): Promise<RunDto> {
-    signal.throwIfAborted()
-    if (input === null || typeof input !== 'object' || Array.isArray(input)) throw new Error('Workflow input must be a JSON object')
-    const session = this.selectionSession(sessionId, selectionId)
-    const workflows = await this.readListField<WorkflowSummary>(workspace, sessionId, 'list_workflows', 'workflows', { ready_only: true }, signal)
-    const workflow = workflows.find(item => item.workflow_id === workflowId && item.latest_version === workflowVersion)
-    if (!workflow) throw new Error('Selected Workflow/version is not published and ready in this Workspace')
-    const goal = this.selectionGoal(session, selectionId)
-    const run = await this.gateway.call(workspace, sessionId, 'start_run', {
-      workflow_id: workflowId, workflow_version: workflowVersion, input, goal,
-      wait: false, idempotency_key: crypto.randomUUID(),
-    }) as RunDto
-    this.settleSelection(session, selectionId, `Started ${workflowId}@${String(workflowVersion)} as Run ${run.run_id}`)
-    return run
-  }
-
-  private beginWorkflowSelection(sessionId: string, rawGoal: string, signal: AbortSignal): { selectionId: string } {
-    signal.throwIfAborted()
-    const session = this.hostSessions.list().find(item => String(item.id) === sessionId)
-    if (!session?.header.cwd) throw new Error('Orbit requires a live Harness Session with a Workspace')
-    const goal = orbitGoal(rawGoal)
-    if (!goal || goal.length > 4000) throw new Error('Orbit goal must be 1-4000 characters')
-    const selectionId = `orbit-${crypto.randomUUID()}`
-    session.append.bind(session)('command/run', {
-      commandId: selectionId, name: ORBIT_COMMAND, args: ` ${goal}`, source: { kind: 'user' },
-    } as never)
-    return { selectionId }
-  }
-
-  private getPendingWorkflowSelection(sessionId: string, signal: AbortSignal): { selectionId: string; goal: string } | null {
-    signal.throwIfAborted()
-    const session = this.hostSessions.list().find(item => String(item.id) === sessionId)
-    if (!session) return null
-    const settled = new Set(session.events.filter(event => event.type === 'command/done')
-      .map(event => String((event.data as { commandId?: unknown }).commandId)))
-    const requested = [...session.events].reverse().find(event => event.type === 'command/run'
-      && (event.data as { name?: unknown }).name === ORBIT_COMMAND
-      && !settled.has(String((event.data as { commandId?: unknown }).commandId)))
-    if (!requested) return null
+  private async workspaceForSession(session: Session): Promise<WorkspaceRef> {
+    const cwd = session.header.cwd
+    if (!cwd) throw new Error('Orbit requires the Harness Session to have a Workspace cwd')
+    const registered = await this.workspaceRegistry.resolveByPath(cwd)
     return {
-      selectionId: String((requested.data as { commandId?: unknown }).commandId),
-      goal: orbitGoal(String((requested.data as { args?: unknown }).args || '')),
+      id: registered ? String(registered.id) : `cwd:${cwd}`,
+      canonicalPath: registered?.path ?? cwd,
     }
-  }
-
-  @Remote('cancelWorkflowSelection')
-  async cancelWorkflowSelection(sessionId: string, selectionId: string, signal: AbortSignal): Promise<void> {
-    signal.throwIfAborted()
-    const session = this.selectionSession(sessionId, selectionId)
-    this.settleSelection(session, selectionId, 'Orbit Workflow selection cancelled.')
   }
 
   @Remote('generateWorkflow')
   async generateWorkflow(workspace: WorkspaceRef, sessionId: string, prompt: string, signal: AbortSignal): Promise<AuthoringJob> {
     signal.throwIfAborted()
     if (!prompt.trim() || prompt.length > 20_000) throw new Error('Workflow prompt must be 1-20000 characters')
-    return await this.gateway.call(workspace, sessionId, 'generate_workflow', {
+    const scope = await this.verified(workspace, sessionId)
+    return await this.gateway.call(scope, sessionId, 'generate_workflow', {
       prompt: prompt.trim(), display_language: 'zh-CN', idempotency_key: crypto.randomUUID(),
     }) as AuthoringJob
   }
@@ -274,7 +262,8 @@ export class OrbitRemoteService extends TypertRemoteService {
     signal.throwIfAborted()
     if (!workflowId.trim()) throw new Error('Workflow id is required')
     if (!prompt.trim() || prompt.length > 20_000) throw new Error('Workflow prompt must be 1-20000 characters')
-    return await this.gateway.call(workspace, sessionId, 'modify_workflow', {
+    const scope = await this.verified(workspace, sessionId)
+    return await this.gateway.call(scope, sessionId, 'modify_workflow', {
       workflow_id: workflowId, prompt: prompt.trim(), mode: regenerate ? 'regenerate' : 'modify',
       display_language: 'zh-CN', idempotency_key: crypto.randomUUID(),
     }) as AuthoringJob
@@ -283,14 +272,16 @@ export class OrbitRemoteService extends TypertRemoteService {
   @Remote('getAuthoringJob')
   async getAuthoringJob(workspace: WorkspaceRef, sessionId: string, jobId: string, signal: AbortSignal): Promise<AuthoringJob> {
     signal.throwIfAborted()
-    return await this.gateway.call(workspace, sessionId, 'get_authoring_job', { job_id: jobId }) as AuthoringJob
+    const scope = await this.verified(workspace, sessionId)
+    return await this.gateway.call(scope, sessionId, 'get_authoring_job', { job_id: jobId }) as AuthoringJob
   }
 
   @Remote('getRun')
   async getRun(workspace: WorkspaceRef, sessionId: string, runId: string, signal: AbortSignal): Promise<RunDto> {
     signal.throwIfAborted()
-    const release = await this.gateway.acquire(workspace)
-    try { return await this.gateway.run(workspace, sessionId, runId) }
+    const scope = await this.verified(workspace, sessionId)
+    const release = await this.gateway.acquire(scope)
+    try { return await this.gateway.run(scope, sessionId, runId) }
     finally { await release() }
   }
 
@@ -312,9 +303,10 @@ export class OrbitRemoteService extends TypertRemoteService {
   @Remote('readOutput')
   async readOutput(workspace: WorkspaceRef, sessionId: string, runId: string, after: number, nodeId: string | undefined, signal: AbortSignal): Promise<OutputPage> {
     signal.throwIfAborted()
-    const release = await this.gateway.acquire(workspace)
+    const scope = await this.verified(workspace, sessionId)
+    const release = await this.gateway.acquire(scope)
     try {
-      return await this.gateway.call(workspace, sessionId, 'read_run_output', {
+      return await this.gateway.call(scope, sessionId, 'read_run_output', {
         run_id: runId, after, ...(nodeId ? { node_id: nodeId } : {}),
       }) as OutputPage
     } finally { await release() }
@@ -330,16 +322,18 @@ export class OrbitRemoteService extends TypertRemoteService {
   @Remote('getArtifact')
   async getArtifact(workspace: WorkspaceRef, sessionId: string, artifactId: string, signal: AbortSignal): Promise<ArtifactSummary> {
     signal.throwIfAborted()
-    const release = await this.gateway.acquire(workspace)
-    try { return await this.gateway.call(workspace, sessionId, 'read_artifact', { artifact_id: artifactId }) as ArtifactSummary }
+    const scope = await this.verified(workspace, sessionId)
+    const release = await this.gateway.acquire(scope)
+    try { return await this.gateway.call(scope, sessionId, 'read_artifact', { artifact_id: artifactId }) as ArtifactSummary }
     finally { await release() }
   }
 
   @Remote('getArtifactContent')
   async getArtifactContent(workspace: WorkspaceRef, sessionId: string, artifactId: string, signal: AbortSignal): Promise<ArtifactContent> {
     signal.throwIfAborted()
-    const release = await this.gateway.acquire(workspace)
-    try { return await this.gateway.call(workspace, sessionId, 'read_artifact_content', { artifact_id: artifactId }) as ArtifactContent }
+    const scope = await this.verified(workspace, sessionId)
+    const release = await this.gateway.acquire(scope)
+    try { return await this.gateway.call(scope, sessionId, 'read_artifact_content', { artifact_id: artifactId }) as ArtifactContent }
     finally { await release() }
   }
 
@@ -352,72 +346,49 @@ export class OrbitRemoteService extends TypertRemoteService {
   @Remote('reconcileDelegation')
   async reconcileDelegation(workspace: WorkspaceRef, sessionId: string, runId: string, delegationId: string, outcome: 'confirmed_succeeded' | 'confirmed_failed', note: string, signal: AbortSignal): Promise<StepSummary[]> {
     signal.throwIfAborted()
-    const release = await this.gateway.acquire(workspace)
+    const scope = await this.verified(workspace, sessionId)
+    const release = await this.gateway.acquire(scope)
     try {
-      await this.gateway.call(workspace, sessionId, 'reconcile_delegation', {
+      await this.gateway.call(scope, sessionId, 'reconcile_delegation', {
         delegation_id: delegationId, outcome, note,
         idempotency_key: crypto.randomUUID(),
       })
-      const result = await this.gateway.call(workspace, sessionId, 'get_run_steps', { run_id: runId }) as { steps: StepSummary[] }
+      const result = await this.gateway.call(scope, sessionId, 'get_run_steps', { run_id: runId }) as { steps: StepSummary[] }
       return result.steps
     } finally { await release() }
   }
 
   private async readRunField<T>(workspace: WorkspaceRef, sessionId: string, runId: string, tool: string, field: string, signal: AbortSignal): Promise<T> {
     signal.throwIfAborted()
-    const release = await this.gateway.acquire(workspace)
+    const scope = await this.verified(workspace, sessionId)
+    const release = await this.gateway.acquire(scope)
     try {
-      const result = await this.gateway.call(workspace, sessionId, tool, { run_id: runId }) as Record<string, unknown>
+      const result = await this.gateway.call(scope, sessionId, tool, { run_id: runId }) as Record<string, unknown>
       return result[field] as T
     } finally { await release() }
   }
 
   private async readListField<T>(workspace: WorkspaceRef, sessionId: string, tool: string, field: string, arguments_: object, signal: AbortSignal): Promise<T[]> {
     signal.throwIfAborted()
-    const release = await this.gateway.acquire(workspace)
+    const scope = await this.verified(workspace, sessionId)
+    const release = await this.gateway.acquire(scope)
     try {
-      const result = await this.gateway.call(workspace, sessionId, tool, arguments_) as Record<string, unknown>
+      const result = await this.gateway.call(scope, sessionId, tool, arguments_) as Record<string, unknown>
       return result[field] as T[]
     } finally { await release() }
-  }
-
-  private selectionSession(sessionId: string, selectionId: string): Session {
-    const session = this.hostSessions.list().find(item => String(item.id) === sessionId)
-    if (!session) throw new Error('Orbit Workflow selection requires a live Harness Session')
-    this.selectionGoal(session, selectionId)
-    const settled = session.events.some(event => event.type === 'command/done'
-      && String((event.data as { commandId?: unknown }).commandId) === selectionId
-      && String((event.data as { text?: unknown }).text || '') !== ORBIT_SELECTION_PENDING_TEXT)
-    if (settled) throw new Error('Orbit Workflow selection is already settled')
-    return session
-  }
-
-  private selectionGoal(session: Session, selectionId: string): string {
-    const requested = [...session.events].reverse().find(event => (
-      event.type === 'command/run'
-      && String((event.data as { commandId?: unknown }).commandId) === selectionId
-      && (event.data as { name?: unknown }).name === 'orbit'
-    ))
-    if (!requested) throw new Error('Orbit Workflow selection request was not found in this Session')
-    const goal = String((requested.data as { args?: unknown }).args || '').trim()
-    if (!goal) throw new Error('Orbit Workflow selection requires a non-empty goal')
-    return goal
-  }
-
-  private settleSelection(session: Session, selectionId: string, text: string): void {
-    session.append.bind(session)('command/done', { commandId: selectionId, kind: 'success', text } as never)
   }
 
   @Remote('executeCommand')
   async executeCommand(request: OrbitCommandRequest, signal: AbortSignal): Promise<RunDto> {
     signal.throwIfAborted()
-    const release = await this.gateway.acquire(request.workspace)
+    const scope = await this.verified(request.workspace, request.sessionId)
+    const release = await this.gateway.acquire(scope)
     try {
-      const run = await this.gateway.run(request.workspace, request.sessionId, request.runId)
+      const run = await this.gateway.run(scope, request.sessionId, request.runId)
       const advertised = run.allowed_commands.find(item => item.command === request.command && item.expected_version === request.expectedVersion)
       if (advertised === undefined) throw new Error('Orbit command is no longer advertised at this revision')
       const tool = request.command === 'langgraph_run.cancel' ? 'cancel_run' : 'resume_run'
-      return await this.gateway.call(request.workspace, request.sessionId, tool, {
+      return await this.gateway.call(scope, request.sessionId, tool, {
         run_id: request.runId, expected_version: request.expectedVersion,
         idempotency_key: request.idempotencyKey, value: request.value,
         interrupt_id: request.interruptId,

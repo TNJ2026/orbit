@@ -23,33 +23,44 @@ export class OrbitGateway {
         return { ...this.telemetry, connectedWorkspaces: this.runtimes.size };
     }
     async acquire(workspace) {
-        const runtime = await this.runtime(workspace);
-        runtime.refs++;
-        let released = false;
-        return async () => {
-            if (released)
-                return;
-            released = true;
-            runtime.refs--;
-            // Harness owns only this reference, never the independent Runtime.
-        };
+        // Connects and validates, then hands back a no-op release. Harness owns no
+        // part of the Runtime's lifecycle, so there is nothing for a release to
+        // reclaim — the call exists so a caller fails early, at acquire, rather
+        // than midway through a sequence of reads.
+        await this.runtime(workspace);
+        return async () => { };
     }
     async call(workspace, sessionId, name, args) {
         if (!/^[A-Za-z0-9:_-]{1,180}$/.test(sessionId))
             throw new Error('invalid Harness session id');
-        const runtime = await this.runtime(workspace);
+        // Resolved once, before anything can fail. A removed Workspace directory is
+        // a plausible cause of the transport failure handled below, and resolving it
+        // again down there would replace that diagnosis with an ENOENT and skip the
+        // cache invalidation the failure was supposed to trigger.
+        const key = await realpath(workspace.canonicalPath);
+        const runtime = await this.runtimeFor(key);
         const actor = `harness:session:${sessionId}`;
         let envelope;
         try {
             envelope = await this.rpc(runtime, 'tools/call', {
-                name, arguments: args, _meta: { 'orbit/actor': actor },
+                name, arguments: args, _meta: {
+                    'orbit/actor': actor,
+                    'orbit/workspace': {
+                        id: workspace.id,
+                        canonicalPath: key,
+                        ...(workspace.repositoryId ? { repositoryId: workspace.repositoryId } : {}),
+                        ...(workspace.worktreeId ? { worktreeId: workspace.worktreeId } : {}),
+                        ...(workspace.baseRevision ? { baseRevision: workspace.baseRevision } : {}),
+                        ...(workspace.isolationMode ? { isolationMode: workspace.isolationMode } : {}),
+                    },
+                },
             });
         }
         catch (error) {
             if (error instanceof OrbitTransportError) {
                 this.telemetry.transportFailures++;
                 this.telemetry.lastTransportError = error.message;
-                this.runtimes.delete(await realpath(workspace.canonicalPath));
+                this.runtimes.delete(key);
             }
             throw error;
         }
@@ -61,7 +72,9 @@ export class OrbitGateway {
         return decodeRun(await this.call(workspace, sessionId, 'inspect_run', { run_id: runId }));
     }
     async runtime(workspace) {
-        const key = await realpath(workspace.canonicalPath);
+        return await this.runtimeFor(await realpath(workspace.canonicalPath));
+    }
+    async runtimeFor(key) {
         let promise = this.runtimes.get(key);
         if (promise === undefined) {
             promise = this.connect(key);
@@ -72,7 +85,7 @@ export class OrbitGateway {
     }
     async connect(workspaceRoot) {
         const discovered = await this.discover(workspaceRoot);
-        const runtime = { mcpUrl: discovered.mcp_url, nextId: 1, refs: 0, capabilities: {} };
+        const runtime = { mcpUrl: discovered.mcp_url, nextId: 1, capabilities: {} };
         await this.rpc(runtime, 'initialize', {
             protocolVersion: '2025-06-18', capabilities: {},
             clientInfo: { name: 'dsh-orbit', version: '0.1.0' },

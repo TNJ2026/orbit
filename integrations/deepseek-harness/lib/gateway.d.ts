@@ -22,6 +22,7 @@ export declare class OrbitGateway {
     call(workspace: WorkspaceRef, sessionId: string, name: string, args: object): Promise<unknown>;
     run(workspace: WorkspaceRef, sessionId: string, runId: string): Promise<RunDto>;
     private runtime;
+    private runtimeFor;
     private connect;
     private discover;
     private rpc;

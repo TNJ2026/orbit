@@ -481,6 +481,7 @@ Orbit 正在等待确认
 当前实现基线：
 
 - `/orbit <goal>` 注册到 Harness 原生 slash-trigger pipeline；Host 以原生 `command/run` / `command/done` 生命周期记录请求和收口，客户端用 Session Storage 恢复当前浏览器中的未完成弹窗。浏览器只调用同源 Host API，Host 在启动前重新校验 ready Workflow 及其版本，并从命令事件取得 Goal。
+- Host 从 Session cwd 反查 Harness WorkspaceRegistry，把稳定 Workspace ID、canonical path 及可用的隔离元数据放进每次 MCP `tools/call` 的 `orbit/workspace` metadata；`/orbit` 启动时再次核对客户端回传值与 Session 权威 Workspace，浏览器不能选择另一个目录。
 - Harness 注册原生 `Orbit` Settings Section，提供 actor-scoped Run 历史、Workflow Catalog、Artifact Catalog 和诊断页；历史详情沿用右侧 Drawer 交互，读取 Steps、逐节点输出、Graph、Edges 和 Artifact。
 - Workflow 页面通过新增的 `generate_workflow` / `modify_workflow` / `get_authoring_job` Harness MCP 工具启动并轮询 Orbit 自有 Authoring Job；DSL 生成、编译、发布与 Handler 校验仍由 Runtime 完成。
 - 图片 Artifact 可通过 Host Remote 显式导入 Harness `AttachmentStore`；类型、base64 和 Attachment admission 在写入前校验。当前 Harness Attachment API 只接受 PNG/JPEG/WebP/GIF，其他 Artifact 明确保留在 Orbit，不伪装为 Attachment/Deliverable。

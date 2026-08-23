@@ -17,6 +17,31 @@ export function restoredBridgeState(events) {
 export function sessionCanBridge(header) {
     return Boolean(header.cwd) && (header.delegationDepth ?? 0) === 0;
 }
+export function bridgeDelay(ms, signal) {
+    return new Promise(resolve => {
+        const timer = setTimeout(resolve, ms);
+        signal.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true });
+    });
+}
+/** Keep attempting a Session Bridge until it finishes or the caller gives up. */
+export async function bridgeWithRetry(options) {
+    let lastError = '';
+    while (!options.signal.aborted) {
+        try {
+            await options.attempt(restoredBridgeState(options.events()).knownRuns);
+            return;
+        }
+        catch (error) {
+            if (options.signal.aborted)
+                return;
+            const message = String(error);
+            if (message !== lastError)
+                options.onWaiting(message);
+            lastError = message;
+            await bridgeDelay(options.retryDelayMs ?? 2_000, options.signal);
+        }
+    }
+}
 const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'unknown']);
 export class OrbitSessionBridge {
     gateway;

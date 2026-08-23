@@ -55,9 +55,11 @@ async function stop(child) {
 }
 
 try {
-  const clientBundle = await readFile(resolve(bundle, 'lib/client.js'), 'utf8')
-  assert.match(clientBundle, /window\.__ModuleLoader__\.load\(\{/)
-  assert.match(clientBundle, /id:\s*["']@orbit-runtime\/dsh-orbit["']/)
+  // Host-only bundle: it contributes tools and Session events, and no browser
+  // module. A client entry reappearing here means UI came back with it.
+  const manifest = JSON.parse(await readFile(resolve(bundle, 'package.json'), 'utf8'))
+  assert.equal(manifest.dsh.client, undefined)
+  assert.equal(manifest.exports['./client'], undefined)
 
   await run(['plugin', '--profile', 'web', 'add', installSpec])
   const installed = await run(['--profile', 'web', '--dump-config'])

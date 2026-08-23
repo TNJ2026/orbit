@@ -34,10 +34,9 @@ var __esDecorate = (this && this.__esDecorate) || function (ctor, descriptorIn, 
 };
 import { TypertRemoteService, Remote } from '@deepseek-ai/dsh-typert-protocol';
 import { OrbitGateway } from './gateway.js';
-import { OrbitSessionBridge, restoredBridgeState, sessionCanBridge } from './session-bridge.js';
+import { OrbitSessionBridge, bridgeWithRetry, restoredBridgeState, sessionCanBridge } from './session-bridge.js';
 import { OrbitToolBridge } from './orbit-tools.js';
 import { artifactImageInput } from './artifact-import.js';
-import { ORBIT_COMMAND, ORBIT_SELECTION_PENDING_TEXT, orbitGoal } from './orbit-command.js';
 let OrbitRemoteService = (() => {
     let _classSuper = TypertRemoteService;
     let _instanceExtraInitializers = [];
@@ -45,8 +44,6 @@ let OrbitRemoteService = (() => {
     let _getDiagnostics_decorators;
     let _listWorkflows_decorators;
     let _listRuns_decorators;
-    let _startWorkflowSelection_decorators;
-    let _cancelWorkflowSelection_decorators;
     let _generateWorkflow_decorators;
     let _modifyWorkflow_decorators;
     let _getAuthoringJob_decorators;
@@ -68,8 +65,6 @@ let OrbitRemoteService = (() => {
             _getDiagnostics_decorators = [Remote('getDiagnostics')];
             _listWorkflows_decorators = [Remote('listWorkflows')];
             _listRuns_decorators = [Remote('listRuns')];
-            _startWorkflowSelection_decorators = [Remote('startWorkflowSelection')];
-            _cancelWorkflowSelection_decorators = [Remote('cancelWorkflowSelection')];
             _generateWorkflow_decorators = [Remote('generateWorkflow')];
             _modifyWorkflow_decorators = [Remote('modifyWorkflow')];
             _getAuthoringJob_decorators = [Remote('getAuthoringJob')];
@@ -88,8 +83,6 @@ let OrbitRemoteService = (() => {
             __esDecorate(this, null, _getDiagnostics_decorators, { kind: "method", name: "getDiagnostics", static: false, private: false, access: { has: obj => "getDiagnostics" in obj, get: obj => obj.getDiagnostics }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _listWorkflows_decorators, { kind: "method", name: "listWorkflows", static: false, private: false, access: { has: obj => "listWorkflows" in obj, get: obj => obj.listWorkflows }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _listRuns_decorators, { kind: "method", name: "listRuns", static: false, private: false, access: { has: obj => "listRuns" in obj, get: obj => obj.listRuns }, metadata: _metadata }, null, _instanceExtraInitializers);
-            __esDecorate(this, null, _startWorkflowSelection_decorators, { kind: "method", name: "startWorkflowSelection", static: false, private: false, access: { has: obj => "startWorkflowSelection" in obj, get: obj => obj.startWorkflowSelection }, metadata: _metadata }, null, _instanceExtraInitializers);
-            __esDecorate(this, null, _cancelWorkflowSelection_decorators, { kind: "method", name: "cancelWorkflowSelection", static: false, private: false, access: { has: obj => "cancelWorkflowSelection" in obj, get: obj => obj.cancelWorkflowSelection }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _generateWorkflow_decorators, { kind: "method", name: "generateWorkflow", static: false, private: false, access: { has: obj => "generateWorkflow" in obj, get: obj => obj.generateWorkflow }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _modifyWorkflow_decorators, { kind: "method", name: "modifyWorkflow", static: false, private: false, access: { has: obj => "modifyWorkflow" in obj, get: obj => obj.modifyWorkflow }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _getAuthoringJob_decorators, { kind: "method", name: "getAuthoringJob", static: false, private: false, access: { has: obj => "getAuthoringJob" in obj, get: obj => obj.getAuthoringJob }, metadata: _metadata }, null, _instanceExtraInitializers);
@@ -112,10 +105,12 @@ let OrbitRemoteService = (() => {
         bridgeDiagnostics = new Map();
         hostSessions;
         attachments;
+        workspaceRegistry;
         constructor(ctx) {
             super(ctx, 'orbit');
             this.hostSessions = ctx.get('sessions');
             this.attachments = ctx.get('attachments');
+            this.workspaceRegistry = ctx.get('workspaceRegistry');
             new OrbitToolBridge(ctx, this.gateway).register();
             this.registerWebApi(ctx);
             for (const session of this.hostSessions.list())
@@ -153,8 +148,10 @@ let OrbitRemoteService = (() => {
                             for await (const chunk of req) {
                                 const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
                                 size += buffer.length;
-                                if (size > 256 * 1024)
+                                if (size > 256 * 1024) {
+                                    req.destroy();
                                     throw new Error('Orbit client request exceeds 256 KiB');
+                                }
                                 chunks.push(buffer);
                             }
                             const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
@@ -181,10 +178,6 @@ let OrbitRemoteService = (() => {
                 case 'getDiagnostics': return await this.getDiagnostics(args[0], String(args[1]), signal);
                 case 'listWorkflows': return await this.listWorkflows(args[0], String(args[1]), signal);
                 case 'listRuns': return await this.listRuns(args[0], String(args[1]), args[2] === undefined ? undefined : String(args[2]), signal);
-                case 'beginWorkflowSelection': return this.beginWorkflowSelection(String(args[0]), String(args[1]), signal);
-                case 'getPendingWorkflowSelection': return this.getPendingWorkflowSelection(String(args[0]), signal);
-                case 'startWorkflowSelection': return await this.startWorkflowSelection(args[0], String(args[1]), String(args[2]), String(args[3]), Number(args[4]), args[5], signal);
-                case 'cancelWorkflowSelection': return await this.cancelWorkflowSelection(String(args[0]), String(args[1]), signal);
                 case 'generateWorkflow': return await this.generateWorkflow(args[0], String(args[1]), String(args[2]), signal);
                 case 'modifyWorkflow': return await this.modifyWorkflow(args[0], String(args[1]), String(args[2]), String(args[3]), Boolean(args[4]), signal);
                 case 'getAuthoringJob': return await this.getAuthoringJob(args[0], String(args[1]), String(args[2]), signal);
@@ -200,6 +193,39 @@ let OrbitRemoteService = (() => {
                 case 'reconcileDelegation': return await this.reconcileDelegation(args[0], String(args[1]), String(args[2]), String(args[3]), args[4], String(args[5]), signal);
                 default: throw new Error(`Unknown Orbit client action: ${action}`);
             }
+        }
+        /**
+         * Turn a caller-supplied Workspace into one this Host vouches for.
+         *
+         * The browser sends a Workspace with every call, and a browser is not an
+         * authority on which directory a Session belongs to: the Session is. A
+         * mismatch is refused rather than quietly corrected, because the two
+         * disagreeing at all means the caller is describing a Session it is not in.
+         */
+        async verified(claimed, sessionId) {
+            const actual = await this.workspaceForSession(this.liveSession(sessionId));
+            if (claimed.id !== actual.id || claimed.canonicalPath !== actual.canonicalPath) {
+                throw new Error('Orbit request Workspace does not match the Harness Session');
+            }
+            return actual;
+        }
+        /**
+         * The same guarantee for the Settings panel, which has a Workspace but no
+         * Session. Its authority is the Workspace registry: a path nobody registered
+         * is not somewhere this Host will go looking for a Runtime.
+         */
+        async registered(claimed) {
+            const found = await this.workspaceRegistry.resolveByPath(claimed.canonicalPath);
+            if (!found || String(found.id) !== claimed.id || found.path !== claimed.canonicalPath) {
+                throw new Error('Orbit request names a Workspace this Harness has not registered');
+            }
+            return { id: String(found.id), canonicalPath: found.path };
+        }
+        liveSession(sessionId) {
+            const session = this.hostSessions.list().find(item => String(item.id) === sessionId);
+            if (!session)
+                throw new Error('Orbit requires a live Harness Session');
+            return session;
         }
         startSessionBridge(ctx, session) {
             const sessionId = String(session.id);
@@ -219,8 +245,10 @@ let OrbitRemoteService = (() => {
         stopSessionBridge(sessionId) {
             this.bridges.get(sessionId)?.abort();
             this.bridges.delete(sessionId);
-            const previous = this.bridgeDiagnostics.get(sessionId);
-            this.bridgeDiagnostics.set(sessionId, { state: 'stopped', cursorPosition: previous?.cursorPosition || 0, updatedAt: new Date().toISOString() });
+            // Only a disposed Session stops a Bridge, and nothing can ask a disposed
+            // Session for its diagnostics. Keeping the entry would grow this map by one
+            // for every Session the Host ever opened.
+            this.bridgeDiagnostics.delete(sessionId);
         }
         async runSessionBridge(ctx, session, cwd, signal) {
             const registry = ctx.workspaceRegistry;
@@ -229,9 +257,7 @@ let OrbitRemoteService = (() => {
                 id: registered ? String(registered.id) : `cwd:${cwd}`,
                 canonicalPath: registered?.path ?? cwd,
             };
-            const restored = restoredBridgeState(session.events);
-            const knownRuns = restored.knownRuns;
-            let cursorPosition = restored.position;
+            let cursorPosition = restoredBridgeState(session.events).position;
             const cursor = {
                 load: () => cursorPosition || undefined,
                 save: (_workspaceId, _sessionId, position) => {
@@ -241,28 +267,19 @@ let OrbitRemoteService = (() => {
                     });
                 },
             };
-            let lastError = '';
-            while (!signal.aborted) {
-                try {
+            await bridgeWithRetry({
+                events: () => session.events,
+                attempt: async (knownRuns) => {
                     await this.bridgeSession(workspace, session, cursor, signal, knownRuns);
-                    return;
-                }
-                catch (error) {
-                    if (signal.aborted)
-                        return;
-                    const message = String(error);
+                },
+                onWaiting: message => {
                     this.bridgeDiagnostics.set(String(session.id), {
                         state: 'waiting', cursorPosition, lastError: message, updatedAt: new Date().toISOString(),
                     });
-                    if (message !== lastError)
-                        ctx.logger.warn(`Orbit bridge for Session ${String(session.id)} is waiting: ${message}`);
-                    lastError = message;
-                    await new Promise(resolve => {
-                        const timer = setTimeout(resolve, 2_000);
-                        signal.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true });
-                    });
-                }
-            }
+                    ctx.logger.warn(`Orbit bridge for Session ${String(session.id)} is waiting: ${message}`);
+                },
+                signal,
+            });
         }
         async bridgeSession(workspace, session, cursor, signal, knownRuns = []) {
             const bridge = new OrbitSessionBridge(this.gateway, cursor);
@@ -286,10 +303,11 @@ let OrbitRemoteService = (() => {
         }
         async getRuntime(workspace, signal) {
             signal.throwIfAborted();
-            const release = await this.gateway.acquire(workspace);
+            const scope = await this.registered(workspace);
+            const release = await this.gateway.acquire(scope);
             try {
-                const capabilities = await this.gateway.call(workspace, 'probe', 'get_capabilities', {});
-                return { workspaceId: workspace.id, state: 'ready', capabilities };
+                const capabilities = await this.gateway.call(scope, 'probe', 'get_capabilities', {});
+                return { workspaceId: scope.id, state: 'ready', capabilities };
             }
             finally {
                 await release();
@@ -311,64 +329,22 @@ let OrbitRemoteService = (() => {
                 limit: 100, ...(status ? { status } : {}),
             }, signal);
         }
-        async startWorkflowSelection(workspace, sessionId, selectionId, workflowId, workflowVersion, input, signal) {
-            signal.throwIfAborted();
-            if (input === null || typeof input !== 'object' || Array.isArray(input))
-                throw new Error('Workflow input must be a JSON object');
-            const session = this.selectionSession(sessionId, selectionId);
-            const workflows = await this.readListField(workspace, sessionId, 'list_workflows', 'workflows', { ready_only: true }, signal);
-            const workflow = workflows.find(item => item.workflow_id === workflowId && item.latest_version === workflowVersion);
-            if (!workflow)
-                throw new Error('Selected Workflow/version is not published and ready in this Workspace');
-            const goal = this.selectionGoal(session, selectionId);
-            const run = await this.gateway.call(workspace, sessionId, 'start_run', {
-                workflow_id: workflowId, workflow_version: workflowVersion, input, goal,
-                wait: false, idempotency_key: crypto.randomUUID(),
-            });
-            this.settleSelection(session, selectionId, `Started ${workflowId}@${String(workflowVersion)} as Run ${run.run_id}`);
-            return run;
-        }
-        beginWorkflowSelection(sessionId, rawGoal, signal) {
-            signal.throwIfAborted();
-            const session = this.hostSessions.list().find(item => String(item.id) === sessionId);
-            if (!session?.header.cwd)
-                throw new Error('Orbit requires a live Harness Session with a Workspace');
-            const goal = orbitGoal(rawGoal);
-            if (!goal || goal.length > 4000)
-                throw new Error('Orbit goal must be 1-4000 characters');
-            const selectionId = `orbit-${crypto.randomUUID()}`;
-            session.append.bind(session)('command/run', {
-                commandId: selectionId, name: ORBIT_COMMAND, args: ` ${goal}`, source: { kind: 'user' },
-            });
-            return { selectionId };
-        }
-        getPendingWorkflowSelection(sessionId, signal) {
-            signal.throwIfAborted();
-            const session = this.hostSessions.list().find(item => String(item.id) === sessionId);
-            if (!session)
-                return null;
-            const settled = new Set(session.events.filter(event => event.type === 'command/done')
-                .map(event => String(event.data.commandId)));
-            const requested = [...session.events].reverse().find(event => event.type === 'command/run'
-                && event.data.name === ORBIT_COMMAND
-                && !settled.has(String(event.data.commandId)));
-            if (!requested)
-                return null;
+        async workspaceForSession(session) {
+            const cwd = session.header.cwd;
+            if (!cwd)
+                throw new Error('Orbit requires the Harness Session to have a Workspace cwd');
+            const registered = await this.workspaceRegistry.resolveByPath(cwd);
             return {
-                selectionId: String(requested.data.commandId),
-                goal: orbitGoal(String(requested.data.args || '')),
+                id: registered ? String(registered.id) : `cwd:${cwd}`,
+                canonicalPath: registered?.path ?? cwd,
             };
-        }
-        async cancelWorkflowSelection(sessionId, selectionId, signal) {
-            signal.throwIfAborted();
-            const session = this.selectionSession(sessionId, selectionId);
-            this.settleSelection(session, selectionId, 'Orbit Workflow selection cancelled.');
         }
         async generateWorkflow(workspace, sessionId, prompt, signal) {
             signal.throwIfAborted();
             if (!prompt.trim() || prompt.length > 20_000)
                 throw new Error('Workflow prompt must be 1-20000 characters');
-            return await this.gateway.call(workspace, sessionId, 'generate_workflow', {
+            const scope = await this.verified(workspace, sessionId);
+            return await this.gateway.call(scope, sessionId, 'generate_workflow', {
                 prompt: prompt.trim(), display_language: 'zh-CN', idempotency_key: crypto.randomUUID(),
             });
         }
@@ -378,20 +354,23 @@ let OrbitRemoteService = (() => {
                 throw new Error('Workflow id is required');
             if (!prompt.trim() || prompt.length > 20_000)
                 throw new Error('Workflow prompt must be 1-20000 characters');
-            return await this.gateway.call(workspace, sessionId, 'modify_workflow', {
+            const scope = await this.verified(workspace, sessionId);
+            return await this.gateway.call(scope, sessionId, 'modify_workflow', {
                 workflow_id: workflowId, prompt: prompt.trim(), mode: regenerate ? 'regenerate' : 'modify',
                 display_language: 'zh-CN', idempotency_key: crypto.randomUUID(),
             });
         }
         async getAuthoringJob(workspace, sessionId, jobId, signal) {
             signal.throwIfAborted();
-            return await this.gateway.call(workspace, sessionId, 'get_authoring_job', { job_id: jobId });
+            const scope = await this.verified(workspace, sessionId);
+            return await this.gateway.call(scope, sessionId, 'get_authoring_job', { job_id: jobId });
         }
         async getRun(workspace, sessionId, runId, signal) {
             signal.throwIfAborted();
-            const release = await this.gateway.acquire(workspace);
+            const scope = await this.verified(workspace, sessionId);
+            const release = await this.gateway.acquire(scope);
             try {
-                return await this.gateway.run(workspace, sessionId, runId);
+                return await this.gateway.run(scope, sessionId, runId);
             }
             finally {
                 await release();
@@ -408,9 +387,10 @@ let OrbitRemoteService = (() => {
         }
         async readOutput(workspace, sessionId, runId, after, nodeId, signal) {
             signal.throwIfAborted();
-            const release = await this.gateway.acquire(workspace);
+            const scope = await this.verified(workspace, sessionId);
+            const release = await this.gateway.acquire(scope);
             try {
-                return await this.gateway.call(workspace, sessionId, 'read_run_output', {
+                return await this.gateway.call(scope, sessionId, 'read_run_output', {
                     run_id: runId, after, ...(nodeId ? { node_id: nodeId } : {}),
                 });
             }
@@ -425,9 +405,10 @@ let OrbitRemoteService = (() => {
         }
         async getArtifact(workspace, sessionId, artifactId, signal) {
             signal.throwIfAborted();
-            const release = await this.gateway.acquire(workspace);
+            const scope = await this.verified(workspace, sessionId);
+            const release = await this.gateway.acquire(scope);
             try {
-                return await this.gateway.call(workspace, sessionId, 'read_artifact', { artifact_id: artifactId });
+                return await this.gateway.call(scope, sessionId, 'read_artifact', { artifact_id: artifactId });
             }
             finally {
                 await release();
@@ -435,9 +416,10 @@ let OrbitRemoteService = (() => {
         }
         async getArtifactContent(workspace, sessionId, artifactId, signal) {
             signal.throwIfAborted();
-            const release = await this.gateway.acquire(workspace);
+            const scope = await this.verified(workspace, sessionId);
+            const release = await this.gateway.acquire(scope);
             try {
-                return await this.gateway.call(workspace, sessionId, 'read_artifact_content', { artifact_id: artifactId });
+                return await this.gateway.call(scope, sessionId, 'read_artifact_content', { artifact_id: artifactId });
             }
             finally {
                 await release();
@@ -449,13 +431,14 @@ let OrbitRemoteService = (() => {
         }
         async reconcileDelegation(workspace, sessionId, runId, delegationId, outcome, note, signal) {
             signal.throwIfAborted();
-            const release = await this.gateway.acquire(workspace);
+            const scope = await this.verified(workspace, sessionId);
+            const release = await this.gateway.acquire(scope);
             try {
-                await this.gateway.call(workspace, sessionId, 'reconcile_delegation', {
+                await this.gateway.call(scope, sessionId, 'reconcile_delegation', {
                     delegation_id: delegationId, outcome, note,
                     idempotency_key: crypto.randomUUID(),
                 });
-                const result = await this.gateway.call(workspace, sessionId, 'get_run_steps', { run_id: runId });
+                const result = await this.gateway.call(scope, sessionId, 'get_run_steps', { run_id: runId });
                 return result.steps;
             }
             finally {
@@ -464,9 +447,10 @@ let OrbitRemoteService = (() => {
         }
         async readRunField(workspace, sessionId, runId, tool, field, signal) {
             signal.throwIfAborted();
-            const release = await this.gateway.acquire(workspace);
+            const scope = await this.verified(workspace, sessionId);
+            const release = await this.gateway.acquire(scope);
             try {
-                const result = await this.gateway.call(workspace, sessionId, tool, { run_id: runId });
+                const result = await this.gateway.call(scope, sessionId, tool, { run_id: runId });
                 return result[field];
             }
             finally {
@@ -475,51 +459,27 @@ let OrbitRemoteService = (() => {
         }
         async readListField(workspace, sessionId, tool, field, arguments_, signal) {
             signal.throwIfAborted();
-            const release = await this.gateway.acquire(workspace);
+            const scope = await this.verified(workspace, sessionId);
+            const release = await this.gateway.acquire(scope);
             try {
-                const result = await this.gateway.call(workspace, sessionId, tool, arguments_);
+                const result = await this.gateway.call(scope, sessionId, tool, arguments_);
                 return result[field];
             }
             finally {
                 await release();
             }
         }
-        selectionSession(sessionId, selectionId) {
-            const session = this.hostSessions.list().find(item => String(item.id) === sessionId);
-            if (!session)
-                throw new Error('Orbit Workflow selection requires a live Harness Session');
-            this.selectionGoal(session, selectionId);
-            const settled = session.events.some(event => event.type === 'command/done'
-                && String(event.data.commandId) === selectionId
-                && String(event.data.text || '') !== ORBIT_SELECTION_PENDING_TEXT);
-            if (settled)
-                throw new Error('Orbit Workflow selection is already settled');
-            return session;
-        }
-        selectionGoal(session, selectionId) {
-            const requested = [...session.events].reverse().find(event => (event.type === 'command/run'
-                && String(event.data.commandId) === selectionId
-                && event.data.name === 'orbit'));
-            if (!requested)
-                throw new Error('Orbit Workflow selection request was not found in this Session');
-            const goal = String(requested.data.args || '').trim();
-            if (!goal)
-                throw new Error('Orbit Workflow selection requires a non-empty goal');
-            return goal;
-        }
-        settleSelection(session, selectionId, text) {
-            session.append.bind(session)('command/done', { commandId: selectionId, kind: 'success', text });
-        }
         async executeCommand(request, signal) {
             signal.throwIfAborted();
-            const release = await this.gateway.acquire(request.workspace);
+            const scope = await this.verified(request.workspace, request.sessionId);
+            const release = await this.gateway.acquire(scope);
             try {
-                const run = await this.gateway.run(request.workspace, request.sessionId, request.runId);
+                const run = await this.gateway.run(scope, request.sessionId, request.runId);
                 const advertised = run.allowed_commands.find(item => item.command === request.command && item.expected_version === request.expectedVersion);
                 if (advertised === undefined)
                     throw new Error('Orbit command is no longer advertised at this revision');
                 const tool = request.command === 'langgraph_run.cancel' ? 'cancel_run' : 'resume_run';
-                return await this.gateway.call(request.workspace, request.sessionId, tool, {
+                return await this.gateway.call(scope, request.sessionId, tool, {
                     run_id: request.runId, expected_version: request.expectedVersion,
                     idempotency_key: request.idempotencyKey, value: request.value,
                     interrupt_id: request.interruptId,

@@ -19,6 +19,23 @@ export declare function sessionCanBridge(header: {
     cwd?: string;
     delegationDepth?: number;
 }): boolean;
+export interface BridgeRetryOptions {
+    /**
+     * The Session's durable events, read afresh for every attempt.
+     *
+     * Never hoist this into a value. A Run an earlier attempt already announced
+     * is durably recorded here, and that record is the only thing standing
+     * between a transient failure and a second announcement of the same Run.
+     */
+    events: () => readonly StoredOrbitEvent[];
+    attempt: (knownRuns: Set<string>) => Promise<void>;
+    onWaiting: (message: string) => void;
+    signal: AbortSignal;
+    retryDelayMs?: number;
+}
+export declare function bridgeDelay(ms: number, signal: AbortSignal): Promise<void>;
+/** Keep attempting a Session Bridge until it finishes or the caller gives up. */
+export declare function bridgeWithRetry(options: BridgeRetryOptions): Promise<void>;
 export declare class OrbitSessionBridge {
     private readonly gateway;
     private readonly cursor;
