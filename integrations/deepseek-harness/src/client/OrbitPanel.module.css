@@ -364,20 +364,20 @@
    24px, which here would leave no room for the name it belongs to. */
 .shape { display: flex; align-items: center; margin-top: 5px; }
 .shapeNode {
-  position: relative; flex: 0 0 17px;
-  width: 17px; height: 17px; display: grid; place-items: center;
+  position: relative; flex: 0 0 15px;
+  width: 15px; height: 15px; display: grid; place-items: center;
   border: 1px solid var(--dsw-alias-line-normal, rgb(128 128 128 / 34%));
   border-radius: 50%;
   color: var(--dsw-alias-state-business-primary, rgb(80 120 255 / 90%));
-  font-family: ui-monospace, monospace; font-size: 8.5px; font-weight: 700;
+  font-family: ui-monospace, monospace; font-size: 7.5px; font-weight: 700;
   line-height: 1;
 }
-.shapeNode + .shapeNode { margin-left: 9px; }
+.shapeNode + .shapeNode { margin-left: 8px; }
 .shapeNode + .shapeNode::before {
-  content: ""; position: absolute; right: 100%; top: 50%; width: 9px;
+  content: ""; position: absolute; right: 100%; top: 50%; width: 8px;
   border-top: 1px solid var(--dsw-alias-line-normal, rgb(128 128 128 / 34%));
 }
 .node_human { color: var(--dsw-alias-state-warning, rgb(200 140 40 / 95%)); }
 .node_terminal { color: var(--dsw-alias-state-success, rgb(60 160 90 / 95%)); }
 .node_decision { color: var(--dsw-alias-label-secondary, GrayText); }
-.node_more { color: var(--dsw-alias-label-tertiary, GrayText); font-size: 8px; }
+.node_more { color: var(--dsw-alias-label-tertiary, GrayText); font-size: 7px; }
