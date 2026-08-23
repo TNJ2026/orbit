@@ -10,7 +10,10 @@ import test from 'node:test'
 import { OrbitGateway } from '../lib/gateway.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
-const orbit = resolve(here, '../../../.venv/bin/orbit')
+const orbit = process.env.ORBIT_BIN || resolve(
+  here,
+  process.platform === 'win32' ? '../../../.venv/Scripts/orbit.exe' : '../../../.venv/bin/orbit',
+)
 
 async function freePort() {
   const server = createServer()

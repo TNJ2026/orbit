@@ -42,6 +42,11 @@ the exact release artifact, set `DSH_BUNDLE_SPEC` to an absolute `.tgz` path.
 | React | `^18.2.0` |
 | Node.js | `>=22` (verified with Harness bundled Node.js 26) |
 
+The Runtime ownership, scoped identity, real HTTP MCP process E2E, TypeScript
+build and package surface run in CI on Linux, macOS and Windows. The Profile
+install/start/remove smoke additionally requires a locally installed `dsh`
+launcher and is exposed as the maintainer command above.
+
 The Gateway refuses an incompatible Orbit integration protocol during startup.
 Runtime codecs also reject malformed core DTOs before they reach the Client.
 When an MCP transport fails, the cached endpoint is discarded; the next Bridge
