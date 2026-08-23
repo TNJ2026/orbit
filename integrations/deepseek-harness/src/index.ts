@@ -8,6 +8,7 @@ import type { WorkspaceRegistry } from '@deepseek-ai/dsh-workspace'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { artifactImageInput } from './artifact-import.js'
+import { advertisedAt, commandTool, type OrbitRunCommand } from './commands.js'
 import type { ArtifactContent, ArtifactSummary, AuthoringJob, EdgeSummary, ImportedArtifact, IntegrationDiagnostics, OrbitCommandRequest, OutputPage, RunDto, RunGraph, RuntimeSummary, StepSummary, WorkflowSummary, WorkspaceRef } from './types.js'
 
 declare module '@deepseek-ai/cordis' { interface Context { orbit: OrbitRemoteService } }
@@ -87,6 +88,8 @@ export class OrbitRemoteService extends TypertRemoteService {
       case 'getPanelState': return await this.getPanelState(String(args[0]), signal)
       case 'getRunDetail': return await this.getRunDetail(String(args[0]), String(args[1]), signal)
       case 'getStepOutput': return await this.getStepOutput(String(args[0]), String(args[1]), String(args[2]), Number(args[3]), signal)
+      case 'runCommand': return await this.runCommand(String(args[0]), String(args[1]), args[2] as 'langgraph_run.cancel' | 'langgraph_run.resume', Number(args[3]), args[4], args[5] === undefined ? undefined : String(args[5]), signal)
+      case 'reconcileStep': return await this.reconcileStep(String(args[0]), String(args[1]), String(args[2]), args[3] as 'confirmed_succeeded' | 'confirmed_failed', String(args[4]), signal)
       case 'getDiagnostics': return await this.getDiagnostics(args[0] as WorkspaceRef, String(args[1]), signal)
       case 'listWorkflows': return await this.listWorkflows(args[0] as WorkspaceRef, String(args[1]), signal)
       case 'listRuns': return await this.listRuns(args[0] as WorkspaceRef, String(args[1]), args[2] === undefined ? undefined : String(args[2]), signal)
@@ -294,6 +297,62 @@ export class OrbitRemoteService extends TypertRemoteService {
     } finally { await release() }
   }
 
+  /**
+   * Cancel or resume a Run from the panel.
+   *
+   * `expectedRevision` is what the panel had on screen, and it must still be
+   * what Orbit advertises. Re-reading here would make the call succeed against
+   * a Run that changed under the reader — the refusal is the point: whoever
+   * pressed the button was looking at something else.
+   */
+  @Remote('runCommand')
+  async runCommand(
+    sessionId: string, runId: string,
+    command: OrbitRunCommand,
+    expectedRevision: number, value: unknown, interruptId: string | undefined,
+    signal: AbortSignal,
+  ): Promise<RunDto> {
+    signal.throwIfAborted()
+    const scope = await this.sessionWorkspace(sessionId)
+    const release = await this.gateway.acquire(scope)
+    try {
+      const run = await this.gateway.run(scope, sessionId, runId)
+      const advertised = advertisedAt(run, command, expectedRevision)
+      if (advertised === undefined) {
+        throw new Error(`Orbit no longer offers ${command} at revision ${String(expectedRevision)}`)
+      }
+      return await this.gateway.call(
+        scope, sessionId, commandTool(command),
+        {
+          run_id: runId, expected_version: advertised.expected_version,
+          idempotency_key: crypto.randomUUID(),
+          ...(value === undefined ? {} : { value }),
+          ...(interruptId === undefined ? {} : { interrupt_id: interruptId }),
+        },
+      ) as RunDto
+    } finally { await release() }
+  }
+
+  /** Record a person's ruling on what an external Agent actually did. */
+  @Remote('reconcileStep')
+  async reconcileStep(
+    sessionId: string, runId: string, delegationId: string,
+    outcome: 'confirmed_succeeded' | 'confirmed_failed', note: string, signal: AbortSignal,
+  ): Promise<{ steps: StepSummary[] }> {
+    signal.throwIfAborted()
+    const scope = await this.sessionWorkspace(sessionId)
+    const release = await this.gateway.acquire(scope)
+    try {
+      await this.gateway.call(scope, sessionId, 'reconcile_delegation', {
+        delegation_id: delegationId, outcome, note,
+        idempotency_key: crypto.randomUUID(),
+      })
+      return await this.gateway.call(scope, sessionId, 'get_run_steps', {
+        run_id: runId,
+      }) as { steps: StepSummary[] }
+    } finally { await release() }
+  }
+
   @Remote('getDiagnostics')
   async getDiagnostics(workspace: WorkspaceRef, sessionId: string, signal: AbortSignal): Promise<IntegrationDiagnostics> {
     const runtime = await this.getRuntime(workspace, signal)
@@ -464,9 +523,9 @@ export class OrbitRemoteService extends TypertRemoteService {
     const release = await this.gateway.acquire(scope)
     try {
       const run = await this.gateway.run(scope, request.sessionId, request.runId)
-      const advertised = run.allowed_commands.find(item => item.command === request.command && item.expected_version === request.expectedVersion)
+      const advertised = advertisedAt(run, request.command, request.expectedVersion)
       if (advertised === undefined) throw new Error('Orbit command is no longer advertised at this revision')
-      const tool = request.command === 'langgraph_run.cancel' ? 'cancel_run' : 'resume_run'
+      const tool = commandTool(request.command)
       return await this.gateway.call(scope, request.sessionId, tool, {
         run_id: request.runId, expected_version: request.expectedVersion,
         idempotency_key: request.idempotencyKey, value: request.value,

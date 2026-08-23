@@ -41,7 +41,14 @@ class DeepSeekHarnessBundleTests(unittest.TestCase):
         self.assertIn("@Remote('readOutput')", remote)
         self.assertIn("@Remote('listArtifacts')", remote)
         self.assertIn("@Remote('getArtifactContent')", remote)
-        self.assertIn("allowed_commands.find", remote)
+        # The property, not its old address: every mutation re-reads the Run
+        # and matches the command against what Orbit advertises at the exact
+        # revision the caller was reading. It now lives in one shared helper
+        # rather than being spelled twice.
+        commands = (BUNDLE / "src" / "commands.ts").read_text(encoding="utf-8")
+        self.assertIn("allowed_commands.find", commands)
+        self.assertIn("item.expected_version === expectedRevision", commands)
+        self.assertEqual(2, remote.count("advertisedAt("))
 
     def test_the_bridge_still_records_runs_after_the_views_went_away(self) -> None:
         """The Run Card is gone; the record it was drawn from is not.

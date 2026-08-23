@@ -38,7 +38,9 @@ test('every Host call is one the panel can name a reason for', async () => {
   const dispatchable = [...host.matchAll(/case '([A-Za-z]+)':/g)].map(([, name]) => name)
   assert.ok(dispatchable.length > 10, 'the Host dispatch table was not found')
   const used = dispatchable.filter(action => new RegExp(`'${action}'`).test(code))
-  assert.deepEqual(used.sort(), ['getPanelState', 'getRunDetail', 'getStepOutput'])
+  assert.deepEqual(used.sort(), [
+    'getPanelState', 'getRunDetail', 'getStepOutput', 'reconcileStep', 'runCommand',
+  ])
 })
 
 test('/orbit folds the resident panel rather than opening another', () => {

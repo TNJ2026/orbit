@@ -23,6 +23,8 @@ export interface OrbitRunRow {
   readonly revision: number
   readonly artifactCount: number
   readonly updatedAt: string
+  /** What Orbit says may be done to this Run right now, at this revision. */
+  readonly commands: readonly { command: string; expected_version: number }[]
 }
 
 export function isLive(status: string): boolean {
@@ -39,6 +41,7 @@ export function toRow(run: RunDto): OrbitRunRow {
     revision: run.revision,
     artifactCount: run.artifact_count,
     updatedAt: run.updated_at,
+    commands: run.allowed_commands,
   }
 }
 
@@ -83,6 +86,7 @@ export interface OrbitStepRow {
   readonly label: string
   readonly status: string
   readonly needsPerson: boolean
+  readonly delegationId?: string
 }
 
 export function toStepRow(step: StepSummary): OrbitStepRow {
@@ -95,6 +99,7 @@ export function toStepRow(step: StepSummary): OrbitStepRow {
     // Runtime is waiting for a person, and nothing moves until one answers.
     needsPerson: step.resolution?.kind === 'reconciliation_required'
       && step.reconciliation === undefined,
+    ...(step.resolution?.delegation_id ? { delegationId: step.resolution.delegation_id } : {}),
   }
 }
 
@@ -110,4 +115,15 @@ export function mergeChunks(
   const byId = new Map(previous.map(chunk => [chunk.chunk_id, chunk]))
   for (const chunk of next) byId.set(chunk.chunk_id, chunk)
   return [...byId.values()].sort((a, b) => a.chunk_id - b.chunk_id)
+}
+
+/** The revision a command may be issued at, or undefined if it may not be.
+ *
+ * Read from what the Run advertises rather than from what the panel last drew:
+ * a button offered for a command Orbit has since withdrawn is a button that
+ * fails, and one offered at a stale revision is worse — it succeeds against a
+ * Run the reader was not looking at.
+ */
+export function commandRevision(row: OrbitRunRow, command: string): number | undefined {
+  return row.commands.find(item => item.command === command)?.expected_version
 }

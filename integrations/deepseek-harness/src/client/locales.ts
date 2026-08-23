@@ -18,6 +18,13 @@ export const en = {
   refresh: 'Refresh',
   noOutput: 'No output from this step.',
   needsPerson: 'Waiting for a person to confirm what the external Agent did.',
+  cancel: 'Cancel run',
+  resume: 'Continue',
+  answer: 'What should it use?',
+  confirmSucceeded: 'It succeeded',
+  confirmFailed: 'It failed',
+  note: 'What you checked',
+  working: 'Working…',
 } as const
 
 export const zh = {
@@ -36,6 +43,13 @@ export const zh = {
   refresh: '刷新',
   noOutput: '这个步骤没有输出。',
   needsPerson: '等待人工确认外部 Agent 的执行结果。',
+  cancel: '取消运行',
+  resume: '继续',
+  answer: '要用什么值继续？',
+  confirmSucceeded: '确认执行成功',
+  confirmFailed: '确认执行失败',
+  note: '你核对了什么',
+  working: '处理中…',
 } as const
 
 export type OrbitLocaleKey = keyof typeof en

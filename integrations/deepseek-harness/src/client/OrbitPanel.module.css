@@ -119,3 +119,10 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+.actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 6px 0 8px; }
+.actions input {
+  flex: 1 1 140px; min-width: 0; padding: 4px 8px; font-size: 11px;
+  border: 1px solid var(--dsw-alias-line-normal); border-radius: 6px;
+  background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary);
+}

@@ -2,6 +2,7 @@ import type { Context } from '@deepseek-ai/cordis';
 import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol';
 import { type OrbitCursorStore } from './session-bridge.js';
 import type { Session } from '@deepseek-ai/dsh-session';
+import { type OrbitRunCommand } from './commands.js';
 import type { ArtifactContent, ArtifactSummary, AuthoringJob, EdgeSummary, ImportedArtifact, IntegrationDiagnostics, OrbitCommandRequest, OutputPage, RunDto, RunGraph, RuntimeSummary, StepSummary, WorkflowSummary, WorkspaceRef } from './types.js';
 declare module '@deepseek-ai/cordis' {
     interface Context {
@@ -69,6 +70,19 @@ export declare class OrbitRemoteService extends TypertRemoteService {
         steps: StepSummary[];
     }>;
     getStepOutput(sessionId: string, runId: string, nodeId: string, after: number, signal: AbortSignal): Promise<OutputPage>;
+    /**
+     * Cancel or resume a Run from the panel.
+     *
+     * `expectedRevision` is what the panel had on screen, and it must still be
+     * what Orbit advertises. Re-reading here would make the call succeed against
+     * a Run that changed under the reader — the refusal is the point: whoever
+     * pressed the button was looking at something else.
+     */
+    runCommand(sessionId: string, runId: string, command: OrbitRunCommand, expectedRevision: number, value: unknown, interruptId: string | undefined, signal: AbortSignal): Promise<RunDto>;
+    /** Record a person's ruling on what an external Agent actually did. */
+    reconcileStep(sessionId: string, runId: string, delegationId: string, outcome: 'confirmed_succeeded' | 'confirmed_failed', note: string, signal: AbortSignal): Promise<{
+        steps: StepSummary[];
+    }>;
     getDiagnostics(workspace: WorkspaceRef, sessionId: string, signal: AbortSignal): Promise<IntegrationDiagnostics>;
     listWorkflows(workspace: WorkspaceRef, sessionId: string, signal: AbortSignal): Promise<WorkflowSummary[]>;
     listRuns(workspace: WorkspaceRef, sessionId: string, status: string | undefined, signal: AbortSignal): Promise<RunDto[]>;

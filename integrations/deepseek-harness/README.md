@@ -83,9 +83,19 @@ test that fails if one starts to appear. Colours come from the shell's
 `--dsw-alias-*` tokens, so the panel follows the Harness theme rather than
 holding an opinion about it.
 
+Opening a Run shows its steps; opening a step shows that step's output. Nothing
+below the first level is fetched until a row is expanded, and following stops
+when there is nothing left to follow.
+
+A Run can be cancelled, an interrupted one continued, and a step waiting on a
+person ruled on, all from the panel. Every mutation carries the revision the
+panel was displaying and is refused if Orbit has moved past it — a button that
+quietly acted on a newer Run than the one being read would be worse than one
+that fails.
+
 Polling follows the work: every couple of seconds while a Run is moving, every
 fifteen while none is, and one round trip per tick that carries only a Session
-id — the Host derives the Workspace itself.
+id — the Host derives the Workspace itself, for reads and writes alike.
 
 The Host API at `/plugins/dsh-orbit/api` on the Harness origin remains available
 for a caller that wants Run inspection, Steps, Graph, Edges, cursor-based output,

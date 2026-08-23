@@ -8,7 +8,7 @@ window.__ModuleLoader__.load({
 		let _deepseek_ai_dsh_client_ui_primitives = require("@deepseek-ai/dsh-client-ui-primitives");
 		let react_jsx_runtime = require("react/jsx-runtime");
 		//#region \0dsh-css:/Users/cxd/develop/orbit/integrations/deepseek-harness/src/client/OrbitPanel.module.css.mjs
-		const css = ".JeOz9W_panel{border:1px solid var(--dsw-alias-line-normal);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);pointer-events:auto;border-radius:12px;flex-direction:column;display:flex;position:absolute;overflow:hidden;box-shadow:0 12px 40px #0000002e}.JeOz9W_bar{border-bottom:1px solid var(--dsw-alias-line-normal);background:var(--dsw-alias-bg-module);cursor:grab;user-select:none;align-items:center;gap:8px;padding:8px 10px 8px 12px;display:flex}.JeOz9W_bar:active{cursor:grabbing}.JeOz9W_title{font-size:13px;font-weight:600}.JeOz9W_count{color:var(--dsw-alias-label-tertiary);flex:1;font-size:12px}.JeOz9W_body{flex:1;min-height:0;overflow-y:auto}.JeOz9W_row{border-bottom:1px solid var(--dsw-alias-line-normal);grid-template-columns:8px 1fr auto;align-items:start;gap:8px;padding:10px 12px;display:grid}.JeOz9W_row:last-child{border-bottom:0}.JeOz9W_dot{border-radius:50%;width:8px;height:8px;margin-top:5px}.JeOz9W_live{background:var(--dsw-alias-state-business-primary)}.JeOz9W_done{background:var(--dsw-alias-state-success)}.JeOz9W_failed{background:var(--dsw-alias-state-danger)}.JeOz9W_unknown{background:var(--dsw-alias-state-warning,var(--dsw-alias-label-tertiary))}.JeOz9W_goal{-webkit-line-clamp:2;-webkit-box-orient:vertical;font-size:13px;line-height:1.4;display:-webkit-box;overflow:hidden}.JeOz9W_meta{color:var(--dsw-alias-label-tertiary);font-size:11px}.JeOz9W_status{color:var(--dsw-alias-label-secondary);white-space:nowrap;font-size:11px}.JeOz9W_empty,.JeOz9W_error{color:var(--dsw-alias-label-tertiary);text-align:center;padding:20px 14px;font-size:12px}.JeOz9W_error{color:var(--dsw-alias-state-error-primary);text-align:left}.JeOz9W_badge{border:1px solid var(--dsw-alias-line-normal);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-secondary);cursor:pointer;pointer-events:auto;border-radius:999px;align-items:center;gap:6px;padding:6px 12px;font-size:12px;display:flex;position:absolute;box-shadow:0 6px 20px #00000024}.JeOz9W_badge:hover{color:var(--dsw-alias-label-primary)}.JeOz9W_resize{cursor:nwse-resize;width:14px;height:14px;position:absolute;inset:auto 0 0 auto}.JeOz9W_stepRow{padding:4px 12px 4px 22px;font-size:12px}.JeOz9W_attention{border-left:2px solid var(--dsw-alias-state-warning,var(--dsw-alias-label-tertiary));color:var(--dsw-alias-label-secondary);margin:4px 0;padding:6px 8px;font-size:11px}.JeOz9W_output{background:var(--dsw-alias-bg-module-platform,var(--dsw-alias-bg-module));max-height:220px;color:var(--dsw-alias-label-secondary);white-space:pre-wrap;overflow-wrap:anywhere;border-radius:6px;margin:4px 0 8px;padding:8px;font-size:11px;line-height:1.5;overflow:auto}";
+		const css = ".JeOz9W_panel{border:1px solid var(--dsw-alias-line-normal);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);pointer-events:auto;border-radius:12px;flex-direction:column;display:flex;position:absolute;overflow:hidden;box-shadow:0 12px 40px #0000002e}.JeOz9W_bar{border-bottom:1px solid var(--dsw-alias-line-normal);background:var(--dsw-alias-bg-module);cursor:grab;user-select:none;align-items:center;gap:8px;padding:8px 10px 8px 12px;display:flex}.JeOz9W_bar:active{cursor:grabbing}.JeOz9W_title{font-size:13px;font-weight:600}.JeOz9W_count{color:var(--dsw-alias-label-tertiary);flex:1;font-size:12px}.JeOz9W_body{flex:1;min-height:0;overflow-y:auto}.JeOz9W_row{border-bottom:1px solid var(--dsw-alias-line-normal);grid-template-columns:8px 1fr auto;align-items:start;gap:8px;padding:10px 12px;display:grid}.JeOz9W_row:last-child{border-bottom:0}.JeOz9W_dot{border-radius:50%;width:8px;height:8px;margin-top:5px}.JeOz9W_live{background:var(--dsw-alias-state-business-primary)}.JeOz9W_done{background:var(--dsw-alias-state-success)}.JeOz9W_failed{background:var(--dsw-alias-state-danger)}.JeOz9W_unknown{background:var(--dsw-alias-state-warning,var(--dsw-alias-label-tertiary))}.JeOz9W_goal{-webkit-line-clamp:2;-webkit-box-orient:vertical;font-size:13px;line-height:1.4;display:-webkit-box;overflow:hidden}.JeOz9W_meta{color:var(--dsw-alias-label-tertiary);font-size:11px}.JeOz9W_status{color:var(--dsw-alias-label-secondary);white-space:nowrap;font-size:11px}.JeOz9W_empty,.JeOz9W_error{color:var(--dsw-alias-label-tertiary);text-align:center;padding:20px 14px;font-size:12px}.JeOz9W_error{color:var(--dsw-alias-state-error-primary);text-align:left}.JeOz9W_badge{border:1px solid var(--dsw-alias-line-normal);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-secondary);cursor:pointer;pointer-events:auto;border-radius:999px;align-items:center;gap:6px;padding:6px 12px;font-size:12px;display:flex;position:absolute;box-shadow:0 6px 20px #00000024}.JeOz9W_badge:hover{color:var(--dsw-alias-label-primary)}.JeOz9W_resize{cursor:nwse-resize;width:14px;height:14px;position:absolute;inset:auto 0 0 auto}.JeOz9W_stepRow{padding:4px 12px 4px 22px;font-size:12px}.JeOz9W_attention{border-left:2px solid var(--dsw-alias-state-warning,var(--dsw-alias-label-tertiary));color:var(--dsw-alias-label-secondary);margin:4px 0;padding:6px 8px;font-size:11px}.JeOz9W_output{background:var(--dsw-alias-bg-module-platform,var(--dsw-alias-bg-module));max-height:220px;color:var(--dsw-alias-label-secondary);white-space:pre-wrap;overflow-wrap:anywhere;border-radius:6px;margin:4px 0 8px;padding:8px;font-size:11px;line-height:1.5;overflow:auto}.JeOz9W_actions{flex-wrap:wrap;align-items:center;gap:6px;margin:6px 0 8px;display:flex}.JeOz9W_actions input{border:1px solid var(--dsw-alias-line-normal);background:var(--dsw-alias-bg-layer-1);min-width:0;color:var(--dsw-alias-label-primary);border-radius:6px;flex:140px;padding:4px 8px;font-size:11px}";
 		const tagId = "@orbit-runtime/dsh-orbit/OrbitPanel.module.css";
 		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId) + "]") === null) {
 			const tag = document.createElement("style");
@@ -18,6 +18,7 @@ window.__ModuleLoader__.load({
 			document.head.appendChild(tag);
 		}
 		var OrbitPanel_module_css_default = {
+			"actions": "JeOz9W_actions",
 			"attention": "JeOz9W_attention",
 			"badge": "JeOz9W_badge",
 			"bar": "JeOz9W_bar",
@@ -152,7 +153,8 @@ window.__ModuleLoader__.load({
 				live: isLive(run.status),
 				revision: run.revision,
 				artifactCount: run.artifact_count,
-				updatedAt: run.updated_at
+				updatedAt: run.updated_at,
+				commands: run.allowed_commands
 			};
 		}
 		/** How soon to ask again, given what the last answer contained. */
@@ -196,7 +198,8 @@ window.__ModuleLoader__.load({
 				nodeId: step.node_id,
 				label,
 				status: step.status,
-				needsPerson: step.resolution?.kind === "reconciliation_required" && step.reconciliation === void 0
+				needsPerson: step.resolution?.kind === "reconciliation_required" && step.reconciliation === void 0,
+				...step.resolution?.delegation_id ? { delegationId: step.resolution.delegation_id } : {}
 			};
 		}
 		/** Join an output page into displayable text, oldest chunk first. */
@@ -209,11 +212,23 @@ window.__ModuleLoader__.load({
 			for (const chunk of next) byId.set(chunk.chunk_id, chunk);
 			return [...byId.values()].sort((a, b) => a.chunk_id - b.chunk_id);
 		}
+		/** The revision a command may be issued at, or undefined if it may not be.
+		*
+		* Read from what the Run advertises rather than from what the panel last drew:
+		* a button offered for a command Orbit has since withdrawn is a button that
+		* fails, and one offered at a stale revision is worse — it succeeds against a
+		* Run the reader was not looking at.
+		*/
+		function commandRevision(row, command) {
+			return row.commands.find((item) => item.command === command)?.expected_version;
+		}
 		//#endregion
 		//#region src/client/OrbitRunRow.tsx
 		/** One Run in the panel, and what opening it shows. */
-		function StepDisclosure({ call, t, sessionId, runId, step, live }) {
+		function StepDisclosure({ call, t, sessionId, runId, step, live, onSettled }) {
 			const [open, setOpen] = (0, react.useState)(false);
+			const [note, setNote] = (0, react.useState)("");
+			const [busy, setBusy] = (0, react.useState)(false);
 			const [chunks, setChunks] = (0, react.useState)([]);
 			const [error, setError] = (0, react.useState)("");
 			(0, react.useEffect)(() => {
@@ -269,10 +284,35 @@ window.__ModuleLoader__.load({
 				}),
 				rowClassName: OrbitPanel_module_css_default.stepRow,
 				children: [
-					step.needsPerson ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
+					step.needsPerson ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
 						className: OrbitPanel_module_css_default.attention,
 						children: t("needsPerson")
-					}) : null,
+					}), step.delegationId ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+						className: OrbitPanel_module_css_default.actions,
+						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("input", {
+							value: note,
+							placeholder: t("note"),
+							onChange: (event) => setNote(event.currentTarget.value)
+						}), ["confirmed_succeeded", "confirmed_failed"].map((outcome) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+							size: "sm",
+							variant: outcome === "confirmed_succeeded" ? "primary" : "outline",
+							disabled: busy,
+							onClick: () => {
+								setBusy(true);
+								call("reconcileStep", [
+									sessionId,
+									runId,
+									step.delegationId,
+									outcome,
+									note
+								], new AbortController().signal).then((detail) => {
+									setNote("");
+									onSettled(detail.steps);
+								}).catch((reason) => setError(String(reason))).finally(() => setBusy(false));
+							},
+							children: busy ? t("working") : t(outcome === "confirmed_succeeded" ? "confirmSucceeded" : "confirmFailed")
+						}, outcome))]
+					}) : null] }) : null,
 					error ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
 						className: OrbitPanel_module_css_default.error,
 						children: error
@@ -291,6 +331,22 @@ window.__ModuleLoader__.load({
 			const [open, setOpen] = (0, react.useState)(false);
 			const [steps, setSteps] = (0, react.useState)(null);
 			const [error, setError] = (0, react.useState)("");
+			const [answer, setAnswer] = (0, react.useState)("");
+			const [busy, setBusy] = (0, react.useState)(false);
+			const cancelAt = commandRevision(run, "langgraph_run.cancel");
+			const resumeAt = commandRevision(run, "langgraph_run.resume");
+			const act = (command, revision, value) => {
+				setBusy(true);
+				setError("");
+				call("runCommand", [
+					sessionId,
+					run.runId,
+					command,
+					revision,
+					value,
+					void 0
+				], new AbortController().signal).then(() => setAnswer("")).catch((reason) => setError(String(reason))).finally(() => setBusy(false));
+			};
 			const load = (0, react.useCallback)((signal) => {
 				call("getRunDetail", [sessionId, run.runId], signal).then((detail) => {
 					if (!signal.aborted) {
@@ -340,6 +396,26 @@ window.__ModuleLoader__.load({
 						className: OrbitPanel_module_css_default.meta,
 						children: run.workflow
 					}),
+					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+						className: OrbitPanel_module_css_default.actions,
+						children: [cancelAt !== void 0 ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+							size: "sm",
+							variant: "outline",
+							disabled: busy,
+							onClick: () => act("langgraph_run.cancel", cancelAt, void 0),
+							children: busy ? t("working") : t("cancel")
+						}) : null, resumeAt !== void 0 ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("input", {
+							value: answer,
+							placeholder: t("answer"),
+							onChange: (event) => setAnswer(event.currentTarget.value)
+						}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+							size: "sm",
+							variant: "primary",
+							disabled: busy,
+							onClick: () => act("langgraph_run.resume", resumeAt, answer),
+							children: busy ? t("working") : t("resume")
+						})] }) : null]
+					}),
 					error ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
 						className: OrbitPanel_module_css_default.error,
 						children: error
@@ -354,7 +430,8 @@ window.__ModuleLoader__.load({
 						sessionId,
 						runId: run.runId,
 						step: toStepRow(step),
-						live: run.live
+						live: run.live,
+						onSettled: setSteps
 					}, step.node_id))
 				]
 			});
@@ -602,7 +679,14 @@ window.__ModuleLoader__.load({
 			status: "Status",
 			refresh: "Refresh",
 			noOutput: "No output from this step.",
-			needsPerson: "Waiting for a person to confirm what the external Agent did."
+			needsPerson: "Waiting for a person to confirm what the external Agent did.",
+			cancel: "Cancel run",
+			resume: "Continue",
+			answer: "What should it use?",
+			confirmSucceeded: "It succeeded",
+			confirmFailed: "It failed",
+			note: "What you checked",
+			working: "Working…"
 		};
 		const zh = {
 			title: "Orbit",
@@ -619,7 +703,14 @@ window.__ModuleLoader__.load({
 			status: "状态",
 			refresh: "刷新",
 			noOutput: "这个步骤没有输出。",
-			needsPerson: "等待人工确认外部 Agent 的执行结果。"
+			needsPerson: "等待人工确认外部 Agent 的执行结果。",
+			cancel: "取消运行",
+			resume: "继续",
+			answer: "要用什么值继续？",
+			confirmSucceeded: "确认执行成功",
+			confirmFailed: "确认执行失败",
+			note: "你核对了什么",
+			working: "处理中…"
 		};
 		//#endregion
 		//#region src/client/index.tsx

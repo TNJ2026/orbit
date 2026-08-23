@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
-  ORBIT_IDLE_MS, ORBIT_POLL_MS, dotState, isLive, mergeChunks, nextInterval,
+  ORBIT_IDLE_MS, ORBIT_POLL_MS, commandRevision, dotState, isLive, mergeChunks, nextInterval,
   orderRows, outputText, summarise, toRow, toStepRow,
 } from '../src/client/orbit-model.ts'
 
@@ -83,4 +83,23 @@ test('output pages merge without duplicating or reordering a chunk', () => {
   assert.deepEqual(merged.map(c => c.chunk_id), [1, 2, 3])
   assert.equal(outputText(merged), '1;2;3;')
   assert.equal(outputText(page([3, 1, 2])), '1;2;3;', 'a page out of order still reads in order')
+})
+
+test('a command is offered only at the revision Orbit advertises it for', () => {
+  const row = toRow(run({
+    revision: 7,
+    allowed_commands: [{ command: 'langgraph_run.cancel', expected_version: 7 }],
+  }))
+  assert.equal(commandRevision(row, 'langgraph_run.cancel'), 7)
+  assert.equal(commandRevision(row, 'langgraph_run.resume'), undefined,
+    'a command Orbit did not advertise has no revision to act at')
+  assert.equal(commandRevision(toRow(run()), 'langgraph_run.cancel'), undefined)
+})
+
+test('a step carries the delegation a person would be ruling on', () => {
+  assert.equal(toStepRow({
+    node_id: 'n', status: 'unknown',
+    resolution: { kind: 'reconciliation_required', delegation_id: 'deleg-1' },
+  }).delegationId, 'deleg-1')
+  assert.equal(toStepRow({ node_id: 'n', status: 'running' }).delegationId, undefined)
 })
