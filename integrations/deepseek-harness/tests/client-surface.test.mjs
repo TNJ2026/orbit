@@ -42,7 +42,8 @@ test('every Host call is one the panel can name a reason for', async () => {
   // membership test.
   const used = dispatchable.filter(action => new RegExp(`'${action}'`).test(code))
   assert.deepEqual(used.sort(), [
-    'getPanelState', 'getRunDetail', 'getStepOutput', 'reconcileStep', 'runCommand',
+    'getPanelState', 'getRunDetail', 'getStepOutput', 'listRunnable',
+    'reconcileStep', 'runCommand',
   ])
 })
 
@@ -65,7 +66,8 @@ test('the panel reads its Session from the store the slot actually hands over', 
   // A `sessionId` prop typechecks, arrives undefined forever, and leaves the
   // panel permanently empty — which is exactly how it shipped once.
   assert.match(code, /useSessions\(state => state\.current\)/)
-  assert.equal(/sessionId\?: string\s*\}/.test(code), false, 'a prop the slot never sends is back')
+  const panel = sources[names.indexOf('OrbitPanel.tsx')]
+  assert.equal(/sessionId\?: string\s*\}/.test(panel), false, 'a prop the slot never sends is back')
 })
 
 test('the title area drags, and only its controls do not', () => {
@@ -121,10 +123,12 @@ test('the slash menu carries commands, not a catalogue', () => {
   assert.match(candidates, /'orbit-workflows'/)
 })
 
-test('asking what can run is a question for the Agent, not an answer in place', () => {
-  // The Agent already carries the catalog in its context, so the answer lands
-  // in the conversation — where "run the second one" can follow it.
-  assert.match(code, /text: t\('listRequest'\)/)
+test('listing answers in place, and the longer command is matched first', () => {
+  // `/orbit-workflows` starts with `/orbit`; matching the shorter claim first
+  // would swallow it and then refuse its own name as an argument.
+  assert.match(code, /renderRunnable\(workflows/)
+  const order = code.indexOf("token === '/orbit-workflows'")
+  assert.ok(order > 0 && order < code.indexOf("token === '/orbit'"))
   const pick = code.slice(code.indexOf('onPick:'), code.indexOf('matchSpace:'))
-  assert.equal(/start_run|runCommand|getPanelState/.test(pick), false, 'the menu grew a launcher')
+  assert.equal(/start_run|runCommand/.test(pick), false, 'the menu grew a launcher')
 })

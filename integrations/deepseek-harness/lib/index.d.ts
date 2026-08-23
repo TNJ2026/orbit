@@ -107,6 +107,14 @@ export declare class OrbitRemoteService extends TypertRemoteService {
     reconcileStep(sessionId: string, runId: string, delegationId: string, outcome: 'confirmed_succeeded' | 'confirmed_failed', note: string, signal: AbortSignal): Promise<{
         steps: StepSummary[];
     }>;
+    /**
+     * The runnable Workflows, for a person who just asked.
+     *
+     * Refreshed before answering rather than served stale: a command is pressed
+     * because someone wants to know now, and the reason the prompt contribution
+     * cannot wait — assembly is synchronous — does not apply here.
+     */
+    listRunnable(sessionId: string, signal: AbortSignal): Promise<readonly WorkflowSummary[]>;
     getDiagnostics(workspace: WorkspaceRef, sessionId: string, signal: AbortSignal): Promise<IntegrationDiagnostics>;
     listWorkflows(workspace: WorkspaceRef, sessionId: string, signal: AbortSignal): Promise<WorkflowSummary[]>;
     listRuns(workspace: WorkspaceRef, sessionId: string, status: string | undefined, signal: AbortSignal): Promise<RunDto[]>;

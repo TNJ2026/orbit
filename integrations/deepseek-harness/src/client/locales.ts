@@ -29,7 +29,7 @@ export const en = {
   runnableHint: 'Ask the Agent to run one — it has the tools.',
   togglePanel: 'Show or hide the Orbit panel',
   askWhatRuns: 'List the workflows that can run here',
-  listRequest: 'Which Orbit workflows can run in this Workspace, and what input does each need?',
+  noRunnable: 'No workflow in this Workspace can start a goal yet.',
 } as const
 
 export const zh = {
@@ -59,7 +59,7 @@ export const zh = {
   runnableHint: '让 agent 跑其中一个即可——它有对应的工具。',
   togglePanel: '显示或收起 Orbit 面板',
   askWhatRuns: '列出这里可运行的工作流',
-  listRequest: '这个 Workspace 里有哪些 Orbit 工作流可以跑？各自需要什么输入？',
+  noRunnable: '这个 Workspace 还没有可以启动目标的工作流。',
 } as const
 
 export type OrbitLocaleKey = keyof typeof en

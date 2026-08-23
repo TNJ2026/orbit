@@ -3,7 +3,7 @@ import test from 'node:test'
 
 import {
   ORBIT_IDLE_MS, ORBIT_POLL_MS, commandRevision, dotState, isLive, mergeChunks, nextInterval,
-  orderRows, outputText, summarise, toRow, toStepRow,
+  orderRows, outputText, renderRunnable, summarise, toRow, toStepRow,
 } from '../src/client/orbit-model.ts'
 
 const run = (over = {}) => ({
@@ -102,4 +102,27 @@ test('a step carries the delegation a person would be ruling on', () => {
     resolution: { kind: 'reconciliation_required', delegation_id: 'deleg-1' },
   }).delegationId, 'deleg-1')
   assert.equal(toStepRow({ node_id: 'n', status: 'running' }).delegationId, undefined)
+})
+
+test('an empty catalog says so instead of showing an empty block', () => {
+  assert.equal(renderRunnable([], '还没有'), '还没有')
+})
+
+test('a listing leads with the name and follows with what a call needs', () => {
+  const text = renderRunnable([{
+    workflow_id: 'workflow:sales', name: 'Sales CSV report', latest_version: 3,
+    goal_readiness: 'ready', description: '', inputs: [{ id: 'prompt' }],
+  }], 'empty')
+  const [first, second] = text.split('\n')
+  assert.equal(first, 'Sales CSV report', 'the name is what someone recognises')
+  assert.match(second, /workflow:sales@3/)
+  assert.match(second, /input: prompt/)
+})
+
+test('a workflow with no declared inputs says nothing about them', () => {
+  const text = renderRunnable([{
+    workflow_id: 'workflow:x', name: 'X', latest_version: 1,
+    goal_readiness: 'ready', description: '',
+  }], 'empty')
+  assert.equal(/input:/.test(text), false)
 })

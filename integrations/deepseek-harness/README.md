@@ -108,9 +108,13 @@ Workflows of every bridged Workspace in the model's context — with the inputs
 each one needs, which is the mistake it exists to prevent — so the Agent can
 answer "which of these did you mean" instead of asking what Orbit is. The panel
 lists the same catalog below the Runs, for the person doing the asking, and
-`/orbit-workflows` puts the question to the Agent — which answers from the
-context it already carries, in the conversation, where "run the second one" can
-follow it and be understood.
+`/orbit-workflows` lists them in place, from the Host, refreshed as it answers.
+
+That listing is not the Agent's, so it cannot be referred to afterwards by
+position — "run the second one" needs a name. The Agent has
+`orbit_list_workflows` for when the listing should be part of the conversation,
+and carries the same catalog in its context for the turns where nobody thought
+to ask.
 
 Both read one cache filled by the panel's own poll, so nothing asks twice for
 something that changes when a Workflow is published; a Runtime that is down

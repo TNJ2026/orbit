@@ -5,7 +5,7 @@
  * how to stop asking when none is. React only renders the answer.
  */
 
-import type { OutputChunk, RunDto, StepSummary } from '../types.js'
+import type { OutputChunk, RunDto, StepSummary, WorkflowSummary } from '../types.js'
 
 /** Cadence while a Run is moving. */
 export const ORBIT_POLL_MS = 2_000
@@ -126,4 +126,27 @@ export function mergeChunks(
  */
 export function commandRevision(row: OrbitRunRow, command: string): number | undefined {
   return row.commands.find(item => item.command === command)?.expected_version
+}
+
+/** The runnable Workflows as one command-result block a person reads.
+ *
+ * Names first and ids second: the id is what `orbit_start_run` needs, but the
+ * name is what someone recognises, and a list that leads with identifiers reads
+ * like a database dump of something they were about to choose from.
+ */
+export function renderRunnable(
+  workflows: readonly WorkflowSummary[], empty: string,
+): string {
+  if (!workflows.length) return empty
+  return workflows
+    .map(item => {
+      const inputs = Array.isArray(item.inputs)
+        ? item.inputs
+          .map(input => (input as { id?: unknown }).id)
+          .filter((id): id is string => typeof id === 'string')
+        : []
+      const needs = inputs.length ? `  · input: ${inputs.join(', ')}` : ''
+      return `${item.name || item.workflow_id}\n  ${item.workflow_id}@${String(item.latest_version)}${needs}`
+    })
+    .join('\n')
 }

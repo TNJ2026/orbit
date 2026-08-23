@@ -49,6 +49,7 @@ let OrbitRemoteService = (() => {
     let _getStepOutput_decorators;
     let _runCommand_decorators;
     let _reconcileStep_decorators;
+    let _listRunnable_decorators;
     let _getDiagnostics_decorators;
     let _listWorkflows_decorators;
     let _listRuns_decorators;
@@ -76,6 +77,7 @@ let OrbitRemoteService = (() => {
             _getStepOutput_decorators = [Remote('getStepOutput')];
             _runCommand_decorators = [Remote('runCommand')];
             _reconcileStep_decorators = [Remote('reconcileStep')];
+            _listRunnable_decorators = [Remote('listRunnable')];
             _getDiagnostics_decorators = [Remote('getDiagnostics')];
             _listWorkflows_decorators = [Remote('listWorkflows')];
             _listRuns_decorators = [Remote('listRuns')];
@@ -100,6 +102,7 @@ let OrbitRemoteService = (() => {
             __esDecorate(this, null, _getStepOutput_decorators, { kind: "method", name: "getStepOutput", static: false, private: false, access: { has: obj => "getStepOutput" in obj, get: obj => obj.getStepOutput }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _runCommand_decorators, { kind: "method", name: "runCommand", static: false, private: false, access: { has: obj => "runCommand" in obj, get: obj => obj.runCommand }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _reconcileStep_decorators, { kind: "method", name: "reconcileStep", static: false, private: false, access: { has: obj => "reconcileStep" in obj, get: obj => obj.reconcileStep }, metadata: _metadata }, null, _instanceExtraInitializers);
+            __esDecorate(this, null, _listRunnable_decorators, { kind: "method", name: "listRunnable", static: false, private: false, access: { has: obj => "listRunnable" in obj, get: obj => obj.listRunnable }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _getDiagnostics_decorators, { kind: "method", name: "getDiagnostics", static: false, private: false, access: { has: obj => "getDiagnostics" in obj, get: obj => obj.getDiagnostics }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _listWorkflows_decorators, { kind: "method", name: "listWorkflows", static: false, private: false, access: { has: obj => "listWorkflows" in obj, get: obj => obj.listWorkflows }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _listRuns_decorators, { kind: "method", name: "listRuns", static: false, private: false, access: { has: obj => "listRuns" in obj, get: obj => obj.listRuns }, metadata: _metadata }, null, _instanceExtraInitializers);
@@ -184,7 +187,7 @@ let OrbitRemoteService = (() => {
          * checked.
          */
         refreshCatalog(scope) {
-            void this.gateway.call(scope, 'catalog', 'list_workflows', { ready_only: true })
+            return this.gateway.call(scope, 'catalog', 'list_workflows', { ready_only: true })
                 .then(result => {
                 this.catalog.remember(scope.canonicalPath, result.workflows);
             })
@@ -243,6 +246,7 @@ let OrbitRemoteService = (() => {
             switch (action) {
                 case 'getRuntime': return await this.getRuntime(args[0], signal);
                 case 'getRuntimeUi': return await this.getRuntimeUi(String(args[0]), signal);
+                case 'listRunnable': return await this.listRunnable(String(args[0]), signal);
                 case 'getPanelState': return await this.getPanelState(String(args[0]), signal);
                 case 'getRunDetail': return await this.getRunDetail(String(args[0]), String(args[1]), signal);
                 case 'getStepOutput': return await this.getStepOutput(String(args[0]), String(args[1]), String(args[2]), Number(args[3]), signal);
@@ -515,6 +519,25 @@ let OrbitRemoteService = (() => {
                 return await this.gateway.call(scope, sessionId, 'get_run_steps', {
                     run_id: runId,
                 });
+            }
+            finally {
+                await release();
+            }
+        }
+        /**
+         * The runnable Workflows, for a person who just asked.
+         *
+         * Refreshed before answering rather than served stale: a command is pressed
+         * because someone wants to know now, and the reason the prompt contribution
+         * cannot wait — assembly is synchronous — does not apply here.
+         */
+        async listRunnable(sessionId, signal) {
+            signal.throwIfAborted();
+            const scope = await this.sessionWorkspace(sessionId);
+            const release = await this.gateway.acquire(scope);
+            try {
+                await this.refreshCatalog(scope);
+                return this.catalog.list(scope.canonicalPath);
             }
             finally {
                 await release();
