@@ -42,7 +42,8 @@ test('every Host call is one the panel can name a reason for', async () => {
   // membership test.
   const used = dispatchable.filter(action => new RegExp(`'${action}'`).test(code))
   assert.deepEqual(used.sort(), [
-    'getPanelState', 'getRunDetail', 'getStepOutput', 'reconcileStep', 'runCommand',
+    'getPanelState', 'getRunDetail', 'getStepOutput', 'getWorkflowDefinition',
+    'reconcileStep', 'runCommand',
   ])
 })
 
@@ -219,16 +220,26 @@ test('changing page clears every detail it was showing', () => {
   assert.match(handler, /setSelectedFlow\(null\)/)
 })
 
-test('a Workflow opens into the panel, and links out for its graph', async () => {
-  // Its graph and definition are drawn by Orbit in a frame built for them; a
-  // smaller second drawing here would answer a question already answered.
+test('a Workflow lists its steps and links out for the graph', async () => {
+  // The steps are listed, not drawn: a list answers "what happens and who does
+  // it" in the width a panel has, and the picture stays with Orbit, which has
+  // a frame built for it.
   const detail = await readFile(join(clientDir, 'OrbitWorkflowDetail.tsx'), 'utf8')
   assert.match(detail, /openThisInOrbit/)
   assert.match(detail, /#\/workflows\//)
-  for (const drawn of ['getGraph', 'getEdges', 'graph', 'definition']) {
-    assert.equal(new RegExp(`\\b${drawn}\\b`).test(detail.replace(/^\s*\*.*$/gm, '')), false,
+  assert.match(detail, /getWorkflowDefinition/)
+  const body = detail.replace(/^\s*\*.*$/gm, '')
+  for (const drawn of ['getGraph', 'getEdges', 'edges', 'layout']) {
+    assert.equal(new RegExp(`\\b${drawn}\\b`).test(body), false,
       `${drawn} is being drawn here`)
   }
+})
+
+test('a definition is read once, not polled', async () => {
+  // It changes only when somebody republishes it. A poll would re-ask a
+  // settled question at the cadence of one that is not.
+  const detail = await readFile(join(clientDir, 'OrbitWorkflowDetail.tsx'), 'utf8')
+  assert.equal(/setInterval|setTimeout/.test(detail), false)
 })
 
 test('a Workflow detail says why it cannot start a goal, not just that it cannot', () => {

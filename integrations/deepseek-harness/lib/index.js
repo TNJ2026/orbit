@@ -46,6 +46,7 @@ let OrbitRemoteService = (() => {
     let _getRuntimeUi_decorators;
     let _getPanelState_decorators;
     let _getRunDetail_decorators;
+    let _getWorkflowDefinition_decorators;
     let _getStepOutput_decorators;
     let _runCommand_decorators;
     let _reconcileStep_decorators;
@@ -73,6 +74,7 @@ let OrbitRemoteService = (() => {
             _getRuntimeUi_decorators = [Remote('getRuntimeUi')];
             _getPanelState_decorators = [Remote('getPanelState')];
             _getRunDetail_decorators = [Remote('getRunDetail')];
+            _getWorkflowDefinition_decorators = [Remote('getWorkflowDefinition')];
             _getStepOutput_decorators = [Remote('getStepOutput')];
             _runCommand_decorators = [Remote('runCommand')];
             _reconcileStep_decorators = [Remote('reconcileStep')];
@@ -97,6 +99,7 @@ let OrbitRemoteService = (() => {
             __esDecorate(this, null, _getRuntimeUi_decorators, { kind: "method", name: "getRuntimeUi", static: false, private: false, access: { has: obj => "getRuntimeUi" in obj, get: obj => obj.getRuntimeUi }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _getPanelState_decorators, { kind: "method", name: "getPanelState", static: false, private: false, access: { has: obj => "getPanelState" in obj, get: obj => obj.getPanelState }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _getRunDetail_decorators, { kind: "method", name: "getRunDetail", static: false, private: false, access: { has: obj => "getRunDetail" in obj, get: obj => obj.getRunDetail }, metadata: _metadata }, null, _instanceExtraInitializers);
+            __esDecorate(this, null, _getWorkflowDefinition_decorators, { kind: "method", name: "getWorkflowDefinition", static: false, private: false, access: { has: obj => "getWorkflowDefinition" in obj, get: obj => obj.getWorkflowDefinition }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _getStepOutput_decorators, { kind: "method", name: "getStepOutput", static: false, private: false, access: { has: obj => "getStepOutput" in obj, get: obj => obj.getStepOutput }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _runCommand_decorators, { kind: "method", name: "runCommand", static: false, private: false, access: { has: obj => "runCommand" in obj, get: obj => obj.runCommand }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _reconcileStep_decorators, { kind: "method", name: "reconcileStep", static: false, private: false, access: { has: obj => "reconcileStep" in obj, get: obj => obj.reconcileStep }, metadata: _metadata }, null, _instanceExtraInitializers);
@@ -248,6 +251,7 @@ let OrbitRemoteService = (() => {
                 case 'getRuntimeUi': return await this.getRuntimeUi(String(args[0]), signal);
                 case 'getPanelState': return await this.getPanelState(String(args[0]), signal);
                 case 'getRunDetail': return await this.getRunDetail(String(args[0]), String(args[1]), signal);
+                case 'getWorkflowDefinition': return await this.getWorkflowDefinition(String(args[0]), String(args[1]), signal);
                 case 'getStepOutput': return await this.getStepOutput(String(args[0]), String(args[1]), String(args[2]), Number(args[3]), signal);
                 case 'runCommand': return await this.runCommand(String(args[0]), String(args[1]), args[2], Number(args[3]), args[4], args[5] === undefined ? undefined : String(args[5]), signal);
                 case 'reconcileStep': return await this.reconcileStep(String(args[0]), String(args[1]), String(args[2]), args[3], String(args[4]), signal);
@@ -469,6 +473,25 @@ let OrbitRemoteService = (() => {
             try {
                 return await this.gateway.call(scope, sessionId, 'get_run_steps', {
                     run_id: runId, owner: 'workspace',
+                });
+            }
+            finally {
+                await release();
+            }
+        }
+        /**
+         * The steps one Workflow is published with — read on demand, never polled.
+         *
+         * A definition changes only when someone republishes it, so this is fetched
+         * when a reader opens a Workflow and not again.
+         */
+        async getWorkflowDefinition(sessionId, workflowId, signal) {
+            signal.throwIfAborted();
+            const scope = await this.sessionWorkspace(sessionId);
+            const release = await this.gateway.acquire(scope);
+            try {
+                return await this.gateway.call(scope, sessionId, 'get_workflow_definition', {
+                    workflow_id: workflowId,
                 });
             }
             finally {

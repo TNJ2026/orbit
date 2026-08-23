@@ -50,7 +50,8 @@ NOT_AUTHORIZED = -32001
 MCP_SESSION_PRESENCE_SECONDS = 60.0
 MCP_TOOL_PROFILES = frozenset({"full", "harness"})
 HARNESS_TOOL_NAMES = frozenset({
-    "get_capabilities", "list_workflows", "list_agents", "list_runs", "inspect_run",
+    "get_capabilities", "list_workflows", "get_workflow_definition", "list_agents",
+    "list_runs", "inspect_run",
     "replay_langgraph_run",
     "generate_workflow", "modify_workflow", "get_authoring_job",
     "list_runtime_events", "get_run_steps", "get_run_graph", "get_run_edges",
@@ -262,6 +263,20 @@ def build_mcp_dispatcher(
                         "description": "Keep only workflows a goal can start.",
                     },
                 },
+            },
+        },
+        {
+            "name": "get_workflow_definition",
+            "description": (
+                "The published steps of one workflow, in the order a reader "
+                "meets them: what each does, which Agent runs it, and the "
+                "prompt it was authored with."
+            ),
+            "scope": READ_SCOPE,
+            "inputSchema": {
+                "type": "object",
+                "properties": {"workflow_id": {"type": "string"}},
+                "required": ["workflow_id"],
             },
         },
         {
@@ -983,6 +998,34 @@ def build_mcp_dispatcher(
                 limit=min(200, max(1, int(arguments.get("limit", 100))))
             )
             return {"collected_artifact_ids": list(collected)}
+        if name == "get_workflow_definition":
+            detail = workflow_reads.detail(str(arguments["workflow_id"]))
+            graph = detail.get("graph") or {}
+            layout = {
+                spot["node_id"]: spot
+                for spot in (graph.get("layout") or {}).get("positions") or ()
+            }
+            configs = {
+                node["id"]: node.get("config") or {}
+                for node in (detail.get("definition") or {}).get("nodes") or ()
+            }
+            # Read in the order the diagram lays them out, which is the order a
+            # person meets the steps — not the order the IR happens to store.
+            def place(node):
+                spot = layout.get(node["node_id"]) or {}
+                return (spot.get("depth", 0), spot.get("lane", 0), node["node_id"])
+            return {"nodes": [
+                {
+                    "node_id": node["node_id"],
+                    "label": node.get("label") or node["node_id"],
+                    "kind": node["kind"],
+                    "handler": node.get("handler_name"),
+                    "prompt": str(
+                        configs.get(node["node_id"], {}).get("prompt") or ""
+                    ),
+                }
+                for node in sorted(graph.get("nodes") or (), key=place)
+            ]}
         if name == "list_agents":
             # Identity only, like the HTTP catalog it mirrors: no config
             # schema, no secrets, nothing a caller could assemble into a

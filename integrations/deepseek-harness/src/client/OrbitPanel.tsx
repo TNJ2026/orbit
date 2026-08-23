@@ -260,9 +260,10 @@ export function OrbitPanel({ t, useSessions }: OrbitPanelProps) {
             call={hostCall} t={t} sessionId={sessionId} run={chosen}
             onBack={() => setSelected(null)}
           />
-        ) : chosenFlow !== undefined ? (
+        ) : chosenFlow !== undefined && sessionId !== undefined ? (
           <OrbitWorkflowDetail
-            t={t} workflow={chosenFlow} runs={rows ?? []} uiUrl={uiUrl}
+            call={hostCall} t={t} sessionId={sessionId}
+            workflow={chosenFlow} runs={rows ?? []} uiUrl={uiUrl}
             onBack={() => setSelectedFlow(null)}
             onOpenRun={runId => setSelected(runId)}
           />

@@ -1,6 +1,11 @@
 export interface WorkspaceRef { id: string; canonicalPath: string; repositoryId?: string; worktreeId?: string; baseRevision?: string; isolationMode?: 'shared' | 'exclusive' | 'worktree' | 'snapshot' }
 export interface RuntimeSummary { workspaceId: string; state: 'ready' | 'stopped'; capabilities: Record<string, unknown> }
 export interface WorkflowSummary { workflow_id: string; name: string; description: string; latest_version: number; goal_readiness: string; readiness_reason?: string | null; input_mode?: string; inputs?: unknown[]; goal_binding?: unknown }
+/** One published step, as a reader meets it: what it does and who runs it. */
+export interface WorkflowNode {
+  node_id: string; label: string; kind: string
+  handler: string | null; prompt: string
+}
 export interface AuthoringJob { job_id: string; type: string; workflow_id?: string | null; prompt: string; status: 'queued' | 'running' | 'done' | 'failed' | 'cancelled'; requested_agent?: string | null; attempts?: number | null; result?: unknown; error?: { code: string; message: string; diagnostics?: unknown[] } | null; created_at: string; updated_at: string }
 export interface OrbitCommandRequest { workspace: WorkspaceRef; sessionId: string; runId: string; command: 'langgraph_run.cancel' | 'langgraph_run.resume'; expectedVersion: number; idempotencyKey: string; value?: unknown; interruptId?: string }
 export type RunDto = Record<string, unknown> & { run_id: string; goal: string; workflow_id: string; workflow_version: number; status: string; revision: number; artifact_count: number; result?: unknown; error?: string | null; created_at: string; updated_at: string; interrupts: unknown[]; allowed_commands: Array<{ command: string; expected_version: number }> }

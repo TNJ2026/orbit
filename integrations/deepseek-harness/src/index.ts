@@ -11,7 +11,7 @@ import { artifactImageInput } from './artifact-import.js'
 import { advertisedAt, commandTool, type OrbitRunCommand } from './commands.js'
 import { WorkflowCatalog } from './workflow-catalog.js'
 import type { AgentSummary } from './types.js'
-import type { ArtifactContent, ArtifactSummary, AuthoringJob, EdgeSummary, ImportedArtifact, IntegrationDiagnostics, OrbitCommandRequest, OutputPage, RunDto, RunGraph, RuntimeSummary, StepSummary, WorkflowSummary, WorkspaceRef } from './types.js'
+import type { ArtifactContent, ArtifactSummary, AuthoringJob, EdgeSummary, ImportedArtifact, IntegrationDiagnostics, OrbitCommandRequest, OutputPage, RunDto, RunGraph, RuntimeSummary, StepSummary, WorkflowNode, WorkflowSummary, WorkspaceRef } from './types.js'
 
 declare module '@deepseek-ai/cordis' { interface Context { orbit: OrbitRemoteService } }
 
@@ -144,6 +144,7 @@ export class OrbitRemoteService extends TypertRemoteService {
       case 'getRuntimeUi': return await this.getRuntimeUi(String(args[0]), signal)
       case 'getPanelState': return await this.getPanelState(String(args[0]), signal)
       case 'getRunDetail': return await this.getRunDetail(String(args[0]), String(args[1]), signal)
+      case 'getWorkflowDefinition': return await this.getWorkflowDefinition(String(args[0]), String(args[1]), signal)
       case 'getStepOutput': return await this.getStepOutput(String(args[0]), String(args[1]), String(args[2]), Number(args[3]), signal)
       case 'runCommand': return await this.runCommand(String(args[0]), String(args[1]), args[2] as 'langgraph_run.cancel' | 'langgraph_run.resume', Number(args[3]), args[4], args[5] === undefined ? undefined : String(args[5]), signal)
       case 'reconcileStep': return await this.reconcileStep(String(args[0]), String(args[1]), String(args[2]), args[3] as 'confirmed_succeeded' | 'confirmed_failed', String(args[4]), signal)
@@ -365,6 +366,26 @@ export class OrbitRemoteService extends TypertRemoteService {
       return await this.gateway.call(scope, sessionId, 'get_run_steps', {
         run_id: runId, owner: 'workspace',
       }) as { steps: StepSummary[] }
+    } finally { await release() }
+  }
+
+  /**
+   * The steps one Workflow is published with — read on demand, never polled.
+   *
+   * A definition changes only when someone republishes it, so this is fetched
+   * when a reader opens a Workflow and not again.
+   */
+  @Remote('getWorkflowDefinition')
+  async getWorkflowDefinition(
+    sessionId: string, workflowId: string, signal: AbortSignal,
+  ): Promise<{ nodes: WorkflowNode[] }> {
+    signal.throwIfAborted()
+    const scope = await this.sessionWorkspace(sessionId)
+    const release = await this.gateway.acquire(scope)
+    try {
+      return await this.gateway.call(scope, sessionId, 'get_workflow_definition', {
+        workflow_id: workflowId,
+      }) as { nodes: WorkflowNode[] }
     } finally { await release() }
   }
 

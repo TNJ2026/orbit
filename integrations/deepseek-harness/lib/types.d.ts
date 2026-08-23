@@ -22,6 +22,14 @@ export interface WorkflowSummary {
     inputs?: unknown[];
     goal_binding?: unknown;
 }
+/** One published step, as a reader meets it: what it does and who runs it. */
+export interface WorkflowNode {
+    node_id: string;
+    label: string;
+    kind: string;
+    handler: string | null;
+    prompt: string;
+}
 export interface AuthoringJob {
     job_id: string;
     type: string;

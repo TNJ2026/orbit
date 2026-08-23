@@ -77,7 +77,8 @@ class DiscoveryTests(ApiTestCase):
                     "list_runtime_events", "get_run_steps", "get_run_graph",
                     "get_run_edges", "read_run_output",
                     "recover_run", "cancel_run", "replay_langgraph_run",
-                    "list_workflows", "list_agents", "list_artifacts", "read_artifact",
+                    "list_workflows", "get_workflow_definition", "list_agents",
+                    "list_artifacts", "read_artifact",
                     "read_artifact_content",
                     "get_artifact_lineage", "collect_artifacts",
                     "generate_workflow", "modify_workflow", "get_authoring_job",
@@ -110,7 +111,8 @@ class DiscoveryTests(ApiTestCase):
             tools = rpc(client, "tools/list", actor="reader").json()["result"]["tools"]
         self.assertEqual(
             {
-                "get_capabilities", "list_workflows", "list_agents", "list_runs", "inspect_run",
+                "get_capabilities", "list_workflows", "get_workflow_definition",
+                "list_agents", "list_runs", "inspect_run",
                 "generate_workflow", "modify_workflow", "get_authoring_job",
                 "list_runtime_events", "get_run_steps", "get_run_graph",
                 "get_run_edges", "read_run_output",
@@ -361,6 +363,92 @@ class DiscoveryAndResultTests(ApiTestCase):
             # what to run does not read a page of JSON to do it.
             self.assertNotIn("graph", entry)
             self.assertNotIn("definition", entry)
+
+    def publish_reversed_workflow(self) -> None:
+        """A workflow authored bottom-up: terminal first, entry last.
+
+        Nothing stops an author — or a generating Agent — from writing the
+        nodes in any order, and the store keeps the order it was given. A
+        reader meeting the steps in that order meets the end before the
+        beginning, which is what the definition tool is here to prevent.
+        """
+
+        from orbit.workflow.dsl import compile_source
+        from orbit.workflow.catalogs import (
+            InMemoryHandlerCatalog, InMemorySchemaCatalog,
+        )
+        from orbit.workflow.persistence.workflow_versions import SQLiteWorkflowVersionStore
+        from tests.test_api_v1 import SCHEMAS, transform_registration
+
+        dsl = {
+            "dsl_version": "1.2",
+            "metadata": {"id": "reversed", "name": "Written bottom-up"},
+            "nodes": [
+                {
+                    "id": "done", "kind": "terminal",
+                    "inputs": [{"id": "value", "schema_id": "example://integer/1.0"}],
+                },
+                {
+                    "id": "second", "kind": "action",
+                    "inputs": [{"id": "value", "schema_id": "example://integer/1.0"}],
+                    "outputs": [{"id": "value", "schema_id": "example://integer/1.0"}],
+                    "handler": {"name": "transform", "version": "1.0.0"},
+                },
+                {
+                    "id": "first", "kind": "action",
+                    "inputs": [{"id": "value", "schema_id": "example://integer/1.0"}],
+                    "outputs": [{"id": "value", "schema_id": "example://integer/1.0"}],
+                    "handler": {"name": "transform", "version": "1.0.0"},
+                },
+            ],
+            "edges": [
+                {
+                    "id": "a", "from": {"node": "first", "port": "value"},
+                    "to": {"node": "second", "port": "value"},
+                },
+                {
+                    "id": "b", "from": {"node": "second", "port": "value"},
+                    "to": {"node": "done", "port": "value"},
+                },
+            ],
+            "entry": ["first"], "terminals": ["done"],
+        }
+        registration = transform_registration()
+        compiled = compile_source(
+            json.dumps(dsl), InMemoryHandlerCatalog([registration.manifest]),
+            InMemorySchemaCatalog(SCHEMAS), source_format="json",
+        )
+        SQLiteWorkflowVersionStore(self.db).publish(
+            compiled, expected_latest_version=0, source_format="json",
+            source_text=json.dumps(dsl), actor="mcp-test",
+        )
+
+    def test_a_workflow_reads_as_its_steps_in_the_order_they_happen(self) -> None:
+        """What `list_workflows` deliberately leaves out, asked for one at a time."""
+
+        self.publish_reversed_workflow()
+        with AsgiHarness(self.app) as client:
+            payload = payload_of(tool(
+                client, "get_workflow_definition",
+                {"workflow_id": "workflow:reversed"}, actor="reader",
+            ))
+
+        self.assertEqual(
+            [("first", "action"), ("second", "action"), ("done", "terminal")],
+            [(node["node_id"], node["kind"]) for node in payload["nodes"]],
+        )
+        self.assertEqual("transform", payload["nodes"][0]["handler"])
+        # A step that runs nothing says so rather than naming a handler it
+        # does not have.
+        self.assertIsNone(payload["nodes"][2]["handler"])
+
+    def test_a_missing_workflow_is_an_error_not_an_empty_definition(self) -> None:
+        with AsgiHarness(self.app) as client:
+            body = tool(
+                client, "get_workflow_definition",
+                {"workflow_id": "workflow:not-here"}, actor="reader",
+            )
+        self.assertTrue(body["result"]["isError"])
 
     def test_ready_only_filters_to_what_a_goal_can_start(self) -> None:
         with AsgiHarness(self.app) as client:
@@ -758,7 +846,7 @@ class StdioTransportTests(ApiTestCase):
 
         self.assertEqual(2, len(responses))
         self.assertEqual("orbit", responses[0]["result"]["serverInfo"]["name"])
-        self.assertEqual(26, len(responses[1]["result"]["tools"]))
+        self.assertEqual(27, len(responses[1]["result"]["tools"]))
 
     def test_a_notification_produces_no_line_at_all(self) -> None:
         """There is no 202 on this transport; silence is the whole answer."""

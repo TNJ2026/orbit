@@ -330,3 +330,42 @@
   color: var(--dsw-alias-label-tertiary, GrayText);
   font-size: 11px;
 }
+
+/* A published step, listed rather than drawn. The accent stripe carries the
+   kind at a glance so the chip is confirmation, not the only signal. */
+.defnRow {
+  padding: 8px 12px 9px;
+  border-bottom: 1px solid var(--dsw-alias-line-normal, rgb(128 128 128 / 28%));
+  border-left: 2px solid transparent;
+}
+.defnRow:last-child { border-bottom: 0; }
+.kind_action { border-left-color: var(--dsw-alias-state-business-primary, rgb(80 120 255 / 70%)); }
+.kind_human { border-left-color: var(--dsw-alias-state-warning, rgb(210 150 40 / 70%)); }
+.kind_decision { border-left-color: var(--dsw-alias-label-tertiary, GrayText); }
+.defnHead { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.defnName {
+  flex: 0 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 12.5px; font-weight: 600;
+}
+.defnKind {
+  flex: 0 0 auto;
+  color: var(--dsw-alias-label-tertiary, GrayText);
+  font-size: 10px; letter-spacing: .04em; text-transform: uppercase;
+}
+.defnHandler {
+  flex: 0 1 auto; min-width: 0; margin-left: auto;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--dsw-alias-label-tertiary, GrayText);
+  font-family: ui-monospace, monospace; font-size: 11px;
+}
+/* Bounded rather than scrollable: a prompt is read to recognise the step, and a
+   scroller inside a list row is a trap for a wheel meant for the list. */
+.defnPrompt, .defnNoPrompt {
+  margin: 3px 0 0;
+  color: var(--dsw-alias-label-secondary, GrayText);
+  font-size: 11.5px; line-height: 1.5;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3;
+  overflow: hidden;
+}
+.defnNoPrompt { color: var(--dsw-alias-label-tertiary, GrayText); font-style: italic; }

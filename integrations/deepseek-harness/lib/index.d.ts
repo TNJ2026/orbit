@@ -4,7 +4,7 @@ import { type OrbitCursorStore } from './session-bridge.js';
 import type { Session } from '@deepseek-ai/dsh-session';
 import { type OrbitRunCommand } from './commands.js';
 import type { AgentSummary } from './types.js';
-import type { ArtifactContent, ArtifactSummary, AuthoringJob, EdgeSummary, ImportedArtifact, IntegrationDiagnostics, OrbitCommandRequest, OutputPage, RunDto, RunGraph, RuntimeSummary, StepSummary, WorkflowSummary, WorkspaceRef } from './types.js';
+import type { ArtifactContent, ArtifactSummary, AuthoringJob, EdgeSummary, ImportedArtifact, IntegrationDiagnostics, OrbitCommandRequest, OutputPage, RunDto, RunGraph, RuntimeSummary, StepSummary, WorkflowNode, WorkflowSummary, WorkspaceRef } from './types.js';
 declare module '@deepseek-ai/cordis' {
     interface Context {
         orbit: OrbitRemoteService;
@@ -97,6 +97,15 @@ export declare class OrbitRemoteService extends TypertRemoteService {
      */
     getRunDetail(sessionId: string, runId: string, signal: AbortSignal): Promise<{
         steps: StepSummary[];
+    }>;
+    /**
+     * The steps one Workflow is published with — read on demand, never polled.
+     *
+     * A definition changes only when someone republishes it, so this is fetched
+     * when a reader opens a Workflow and not again.
+     */
+    getWorkflowDefinition(sessionId: string, workflowId: string, signal: AbortSignal): Promise<{
+        nodes: WorkflowNode[];
     }>;
     getStepOutput(sessionId: string, runId: string, nodeId: string, after: number, signal: AbortSignal): Promise<OutputPage>;
     /**
