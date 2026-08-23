@@ -109,8 +109,12 @@ each one needs, which is the mistake it exists to prevent — so the Agent can
 answer "which of these did you mean" instead of asking what Orbit is. The panel
 lists the same catalog below the Runs, for the person doing the asking, and
 `/orbit-workflows` opens the shell's own popup — the one `/model` uses, with its
-search box and empty state — and selecting a Workflow writes `用<名称>执行：`
-into the draft for you to finish.
+search box and empty state — and selecting a Workflow drops it into the draft as
+a reference chip: `用 [覆盖 A：分支与条件] 执行：`, for you to finish.
+
+The chip has two faces. You see the name; the model receives
+`workflow:cov-branch（覆盖 A：分支与条件）`, so it never has to resolve a name
+back to an id or guess between two that read alike.
 
 Not starting it: the Run has to be the Agent's, or it cannot report on it
 afterwards or take the next step from it. A popupSelect is also one list and one

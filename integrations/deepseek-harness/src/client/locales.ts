@@ -29,7 +29,8 @@ export const en = {
   runnableHint: 'Ask the Agent to run one — it has the tools.',
   togglePanel: 'Show or hide the Orbit panel',
   askWhatRuns: 'List the workflows that can run here',
-  runPrefix: 'Run with "{name}": ',
+  runHead: 'Run with ',
+  runTail: ': ',
 
 } as const
 
@@ -60,7 +61,8 @@ export const zh = {
   runnableHint: '让 agent 跑其中一个即可——它有对应的工具。',
   togglePanel: '显示或收起 Orbit 面板',
   askWhatRuns: '列出这里可运行的工作流',
-  runPrefix: '用「{name}」执行：',
+  runHead: '用 ',
+  runTail: ' 执行：',
 
 } as const
 

@@ -122,9 +122,27 @@ test('selecting a Workflow writes the request, it does not start one', () => {
   // popupSelect has nowhere to put the goal these Workflows declare an input
   // for, so the sentence is left for the person to finish.
   const select = code.slice(code.indexOf('onSelect: (option, session)'), code.indexOf("}, 'orbit: workflow popup'"))
-  assert.match(select, /conversation\.input\.for\(actx\)\.setDraft/)
-  assert.match(select, /t\('runPrefix'/)
+  assert.match(select, /insertReference/)
   assert.equal(/start_run|runCommand|window\.open/.test(select), false, 'the popup grew a launcher')
+})
+
+test('a reference that cannot be inserted falls back to a readable sentence', () => {
+  // insertReference is span-CAS'd and refuses silently; a sentence with a hole
+  // where the Workflow should be is worse than a plain one.
+  const select = code.slice(code.indexOf('onSelect: (option, session)'), code.indexOf("}, 'orbit: workflow popup'"))
+  assert.match(select, /if \(!inserted\)/)
+  assert.match(select, /「\$\{option\.label\}」/)
+})
+
+test('the source that owns the reference can project and serialise it', () => {
+  // Required of any source producing insert outcomes, and unforgiving: a throw
+  // blocks the send rather than degrading to the clipboard text, so both
+  // projections must answer for an id they have never seen.
+  assert.match(code, /codec: \{/)
+  assert.match(code, /clipboardText: \(ref: string\)/)
+  assert.match(code, /serialize: async \(ref: string\)/)
+  const codec = code.slice(code.indexOf('codec: {'), code.indexOf("}, 'orbit: slash command"))
+  assert.equal((codec.match(/\?\? ref|=== undefined \? ref/g) ?? []).length, 2, 'an unknown id must still resolve')
 })
 
 test('/orbit still only folds the panel', () => {
@@ -133,14 +151,11 @@ test('/orbit still only folds the panel', () => {
   assert.equal(/workflow/i.test(source), false, 'the trigger source is carrying Workflows again')
 })
 
-test('the Workflow name is delimited in the request it writes', async () => {
-  // Several names carry a full-width colon of their own, which ran straight
-  // into the one ending the sentence: `用覆盖 A：分支与条件执行：` reads as one
-  // run-on where the name stops being findable.
+test('the sentence leaves a gap for the Workflow rather than naming it', async () => {
+  // The chip is the name now: a reference replaces a span, so the copy is the
+  // two halves around it and never interpolates one.
   const copy = await readFile(join(clientDir, 'locales.ts'), 'utf8')
-  const lines = [...copy.matchAll(/runPrefix: '([^']*)'/g)].map(([, value]) => value)
-  assert.equal(lines.length, 2, 'both dictionaries must carry it')
-  for (const line of lines) {
-    assert.match(line, /[「"]\{name\}[」"]/, `${line} leaves the name undelimited`)
-  }
+  assert.equal((copy.match(/runHead:/g) ?? []).length, 2, 'both dictionaries must carry it')
+  assert.equal((copy.match(/runTail:/g) ?? []).length, 2)
+  assert.equal(/runHead: '[^']*\{name\}/.test(copy), false, 'the head interpolates a name again')
 })

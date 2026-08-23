@@ -724,7 +724,8 @@ window.__ModuleLoader__.load({
 			runnableHint: "Ask the Agent to run one — it has the tools.",
 			togglePanel: "Show or hide the Orbit panel",
 			askWhatRuns: "List the workflows that can run here",
-			runPrefix: "Run with \"{name}\": "
+			runHead: "Run with ",
+			runTail: ": "
 		};
 		const zh = {
 			title: "Orbit",
@@ -753,7 +754,8 @@ window.__ModuleLoader__.load({
 			runnableHint: "让 agent 跑其中一个即可——它有对应的工具。",
 			togglePanel: "显示或收起 Orbit 面板",
 			askWhatRuns: "列出这里可运行的工作流",
-			runPrefix: "用「{name}」执行："
+			runHead: "用 ",
+			runTail: " 执行："
 		};
 		//#endregion
 		//#region src/client/index.tsx
@@ -785,9 +787,24 @@ window.__ModuleLoader__.load({
 				}] : [],
 				onPick: () => ({ claim: claim() }),
 				matchSpace: (_session, token) => token === `/${PANEL_COMMAND}` ? { claim: claim() } : void 0,
-				matchEnter: async (_session, line) => new RegExp(`^/${PANEL_COMMAND}(?:\\s|$)`, "u").test(line.trim()) ? { claim: claim() } : void 0
+				matchEnter: async (_session, line) => new RegExp(`^/${PANEL_COMMAND}(?:\\s|$)`, "u").test(line.trim()) ? { claim: claim() } : void 0,
+				codec: {
+					clipboardText: (ref) => `「${namesById.get(ref) ?? ref}」`,
+					serialize: async (ref) => {
+						const name = namesById.get(ref);
+						return name === void 0 ? ref : `${ref}（${name}）`;
+					}
+				}
 			}), "orbit: slash command folding the panel");
 		}
+		/**
+		* Names for the ids a reference carries, learned when the popup lists them.
+		*
+		* The codec is handed a `ref` and nothing else, and a `ref` is the id — which
+		* is the right thing to send the model and the wrong thing to show a person.
+		* Remembering the pair at list time is what lets the chip be both.
+		*/
+		const namesById = /* @__PURE__ */ new Map();
 		async function hostCall(action, args, signal) {
 			const response = await fetch("/plugins/dsh-orbit/api", {
 				method: "POST",
@@ -820,17 +837,33 @@ window.__ModuleLoader__.load({
 				ui: {
 					kind: "popupSelect",
 					options: async (session, signal) => {
-						return ((await hostCall("getPanelState", [session.sessionId], signal)).workflows ?? []).map((item) => ({
-							id: item.workflow_id,
-							label: item.name || item.workflow_id,
-							detail: `${item.workflow_id}@${String(item.latest_version)}`
-						}));
+						return ((await hostCall("getPanelState", [session.sessionId], signal)).workflows ?? []).map((item) => {
+							const label = item.name || item.workflow_id;
+							namesById.set(item.workflow_id, label);
+							return {
+								id: item.workflow_id,
+								label,
+								detail: `${item.workflow_id}@${String(item.latest_version)}`
+							};
+						});
 					},
 					onSelect: (option, session) => {
 						const conversation = ctx.get("conversation");
 						const actx = ctx.get("sessions")?.scope(session.sessionId);
 						if (!conversation || actx === void 0) return;
-						conversation.input.for(actx).setDraft(t("runPrefix", { name: option.label }));
+						const input = conversation.input.for(actx);
+						const head = t("runHead");
+						input.setDraft(`${head}${t("runTail")}`);
+						if (!input.insertReference({
+							source: "orbit",
+							ref: option.id,
+							label: option.label,
+							clipboardText: `「${option.label}」`
+						}, {
+							start: head.length,
+							end: head.length,
+							draftRev: input.state.getSnapshot().draftRev
+						})) input.setDraft(`${head}「${option.label}」${t("runTail")}`);
 					}
 				}
 			}), "orbit: workflow popup");

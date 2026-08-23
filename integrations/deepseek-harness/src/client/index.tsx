@@ -55,13 +55,41 @@ function registerOrbitSlashSource(ctx: ClientContext, t: Translate): void {
       token === `/${PANEL_COMMAND}` ? { claim: claim() } : undefined,
     matchEnter: async (_session: unknown, line: string) =>
       new RegExp(`^/${PANEL_COMMAND}(?:\\s|$)`, 'u').test(line.trim()) ? { claim: claim() } : undefined,
+    // Required of any source that produces insert outcomes. A throw here blocks
+    // the send rather than degrading to the clipboard text, so both projections
+    // answer for an id they have never seen.
+    codec: {
+      clipboardText: (ref: string) => `「${namesById.get(ref) ?? ref}」`,
+      serialize: async (ref: string) => {
+        const name = namesById.get(ref)
+        return name === undefined ? ref : `${ref}（${name}）`
+      },
+    },
   }), 'orbit: slash command folding the panel')
 }
 
 interface SelectOption { readonly id: string; readonly label: string; readonly detail?: string }
 interface SessionContext { readonly sessionId: string }
-interface Conversation { readonly input: { for(actx: unknown): { setDraft(text: string): void } } }
+interface ReferenceInsert {
+  readonly source: string; readonly ref: string
+  readonly label: string; readonly clipboardText: string
+}
+interface SessionInput {
+  setDraft(text: string): void
+  insertReference(ref: ReferenceInsert, span: { start: number; end: number; draftRev: number }): boolean
+  readonly state: { getSnapshot(): { draft: string; draftRev: number } }
+}
+interface Conversation { readonly input: { for(actx: unknown): SessionInput } }
 interface Sessions { scope(id: string): unknown }
+
+/**
+ * Names for the ids a reference carries, learned when the popup lists them.
+ *
+ * The codec is handed a `ref` and nothing else, and a `ref` is the id — which
+ * is the right thing to send the model and the wrong thing to show a person.
+ * Remembering the pair at list time is what lets the chip be both.
+ */
+const namesById = new Map<string, string>()
 interface CommandUi {
   register(contribution: {
     name: string
@@ -108,11 +136,15 @@ function registerWorkflowPopup(ctx: ClientContext, t: Translate): void {
         const state = await hostCall<{ workflows: readonly {
           workflow_id: string; name: string; latest_version: number
         }[] }>('getPanelState', [session.sessionId], signal)
-        return (state.workflows ?? []).map(item => ({
-          id: item.workflow_id,
-          label: item.name || item.workflow_id,
-          detail: `${item.workflow_id}@${String(item.latest_version)}`,
-        }))
+        return (state.workflows ?? []).map(item => {
+          const label = item.name || item.workflow_id
+          namesById.set(item.workflow_id, label)
+          return {
+            id: item.workflow_id,
+            label,
+            detail: `${item.workflow_id}@${String(item.latest_version)}`,
+          }
+        })
       },
       // Writes the request and stops. Starting here would be a Run the Agent
       // knows nothing about — unable to report on it or take the next step from
@@ -122,7 +154,18 @@ function registerWorkflowPopup(ctx: ClientContext, t: Translate): void {
         const sessions = ctx.get('sessions') as unknown as Sessions | undefined
         const actx = sessions?.scope(session.sessionId)
         if (!conversation || actx === undefined) return
-        conversation.input.for(actx).setDraft(t('runPrefix', { name: option.label }))
+        const input = conversation.input.for(actx)
+        const head = t('runHead')
+        // The sentence first, then the Workflow into the gap it left. A
+        // reference replaces a span, so there has to be a span to replace.
+        input.setDraft(`${head}${t('runTail')}`)
+        const inserted = input.insertReference({
+          source: 'orbit', ref: option.id, label: option.label,
+          clipboardText: `「${option.label}」`,
+        }, { start: head.length, end: head.length, draftRev: input.state.getSnapshot().draftRev })
+        // A refused CAS is silent by contract, and a sentence with a hole in it
+        // is worse than a plain one.
+        if (!inserted) input.setDraft(`${head}「${option.label}」${t('runTail')}`)
       },
     },
   }), 'orbit: workflow popup')
