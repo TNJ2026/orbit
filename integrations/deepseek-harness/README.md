@@ -97,6 +97,22 @@ Polling follows the work: every couple of seconds while a Run is moving, every
 fifteen while none is, and one round trip per tick that carries only a Session
 id — the Host derives the Workspace itself, for reads and writes alike.
 
+## Starting a Run
+
+By saying so. The Agent has `orbit_list_workflows` and `orbit_start_run`, so
+"run the CSV cleaner over today's export" is the whole interface; the Run
+appears in the panel a moment later.
+
+The panel deliberately has no start button. Harness is a place where work is
+described to an Agent, and a Run the panel started itself would be a Run the
+Agent knows nothing about — it could not tell you how it went, or take the
+next step from it. Starting through the Agent keeps the Run in the
+conversation that asked for it.
+
+Authoring is elsewhere for a different reason: writing or revising a Workflow
+means reading the generated DSL, its compile diagnostics and its diagram, and
+that is Orbit's own UI, one press away from the panel's title bar.
+
 The Host API at `/plugins/dsh-orbit/api` on the Harness origin remains available
 for a caller that wants Run inspection, Steps, Graph, Edges, cursor-based output,
 bounded Artifact content, and Attachment import. Every call carries a Workspace,
