@@ -13,7 +13,7 @@ import {
   type OrbitRunRow as RunRowData,
 } from './orbit-model.ts'
 import type { OrbitLocaleKey } from './locales.ts'
-import { OrbitRunRow } from './OrbitRunRow.tsx'
+import { OrbitRunDetail, OrbitRunListRow } from './OrbitRunRow.tsx'
 
 type Translate = (key: OrbitLocaleKey, values?: Record<string, string | number>) => string
 
@@ -94,6 +94,10 @@ export function OrbitPanel({ t, useSessions }: OrbitPanelProps) {
   const [agents, setAgents] = useState<readonly AgentSummary[]>([])
   // The Runtime's own four: what is running, what could, what did, and who by.
   const [tab, setTab] = useState<'goal' | 'workflows' | 'history' | 'agents'>('goal')
+  // One Run at a time, filling the panel. Selection is cleared by changing page
+  // rather than surviving it: a detail left behind a tab is a place a reader
+  // returns to without meaning to.
+  const [selected, setSelected] = useState<string | null>(null)
   const [error, setError] = useState('')
   const bounds = useBounds()
   const drag = useRef<{ x: number; y: number } | null>(null)
@@ -151,6 +155,7 @@ export function OrbitPanel({ t, useSessions }: OrbitPanelProps) {
   const counts = summarise(rows ?? [])
   // Split once: the Runtime's own pages read as "what is happening" and "what
   // happened", and a Run belongs to exactly one of them.
+  const chosen = (rows ?? []).find(row => row.runId === selected)
   const live = (rows ?? []).filter(row => row.live)
   const settled = (rows ?? []).filter(row => !row.live)
   const box = placePanel(layout, bounds)
@@ -240,13 +245,19 @@ export function OrbitPanel({ t, useSessions }: OrbitPanelProps) {
             type="button"
             className={key === tab ? `${styles.tab} ${styles.tabActive}` : styles.tab}
             aria-pressed={key === tab}
-            onClick={() => setTab(key)}
+            onClick={() => { setSelected(null); setTab(key) }}
           >
             {t(label)}
           </button>
         ))}
       </nav>
       <div className={styles.body}>
+        {chosen !== undefined && sessionId !== undefined ? (
+          <OrbitRunDetail
+            call={hostCall} t={t} sessionId={sessionId} run={chosen}
+            onBack={() => setSelected(null)}
+          />
+        ) : <>
         {error ? <p className={styles.error}>{error}</p> : null}
         {!error && rows === null ? <p className={styles.empty}>{t('loading')}</p> : null}
 
@@ -268,13 +279,13 @@ export function OrbitPanel({ t, useSessions }: OrbitPanelProps) {
 
         {!error && rows !== null && tab === 'goal' ? (
           live.length ? live.map(row => (
-            <OrbitRunRow key={row.runId} call={hostCall} t={t} sessionId={sessionId ?? ''} run={row} />
+            <OrbitRunListRow key={row.runId} t={t} run={row} onOpen={() => setSelected(row.runId)} />
           )) : <p className={styles.empty}>{t('emptyGoal')}</p>
         ) : null}
 
         {!error && rows !== null && tab === 'history' ? (
           settled.length ? settled.map(row => (
-            <OrbitRunRow key={row.runId} call={hostCall} t={t} sessionId={sessionId ?? ''} run={row} />
+            <OrbitRunListRow key={row.runId} t={t} run={row} onOpen={() => setSelected(row.runId)} />
           )) : <p className={styles.empty}>{t('emptyHistory')}</p>
         ) : null}
 
@@ -308,6 +319,7 @@ export function OrbitPanel({ t, useSessions }: OrbitPanelProps) {
             )
           }) : <p className={styles.empty}>{t('emptyAgents')}</p>
         ) : null}
+        </>}
       </div>
       <div
         className={styles.resize}

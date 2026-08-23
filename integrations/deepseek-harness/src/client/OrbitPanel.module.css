@@ -57,7 +57,14 @@
   -webkit-line-clamp: 2;
 }
 .meta { color: var(--dsw-alias-label-tertiary); font-size: 11px; }
-.status { color: var(--dsw-alias-label-secondary); font-size: 11px; white-space: nowrap; }
+.status {
+  /* A short step title left its status touching it: the disclosure lays the two
+     out as neighbours and neither brought its own gap. */
+  margin-left: 8px;
+  color: var(--dsw-alias-label-secondary, GrayText);
+  font-size: 11px;
+  white-space: nowrap;
+}
 
 .empty, .error {
   padding: 20px 14px;
@@ -233,3 +240,52 @@
 }
 .flowName { font-size: 12.5px; font-weight: 600; line-height: 1.45; }
 .flowMeta { display: flex; gap: 10px; color: var(--dsw-alias-label-tertiary, GrayText); font-size: 11px; }
+
+/* A Run in a list is a control: the whole row opens it, so the whole row is the
+   button rather than a link hiding inside one. */
+.listRow {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  width: 100%;
+  padding: 9px 12px;
+  border: 0;
+  border-bottom: 1px solid var(--dsw-alias-line-normal, rgb(128 128 128 / 28%));
+  background: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.listRow:last-child { border-bottom: 0; }
+.listRow:hover { background: var(--dsw-alias-bg-module, Canvas); }
+.listDot { margin-top: 4px; flex: 0 0 auto; }
+.listMain { flex: 1 1 auto; min-width: 0; display: grid; gap: 1px; }
+.listGoal {
+  font-size: 12.5px;
+  line-height: 1.4;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+/* Detail owns the body: the way back is a control at its top, not a row the
+   reader has to find again in a list that is no longer there. */
+.back {
+  display: block;
+  padding: 8px 12px 4px;
+  border: 0;
+  background: none;
+  color: var(--dsw-alias-label-tertiary, GrayText);
+  font-size: 11px;
+  cursor: pointer;
+}
+.back:hover { color: var(--dsw-alias-label-primary, CanvasText); }
+.detailHead { display: flex; align-items: baseline; gap: 8px; padding: 0 12px; }
+.detailGoal { font-size: 13px; font-weight: 650; line-height: 1.4; }
+.detailMeta {
+  padding: 2px 12px 8px;
+  border-bottom: 1px solid var(--dsw-alias-line-normal, rgb(128 128 128 / 28%));
+  color: var(--dsw-alias-label-tertiary, GrayText);
+  font-size: 11px;
+}

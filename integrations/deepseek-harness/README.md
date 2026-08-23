@@ -85,7 +85,10 @@ question, and the bundle carries a test that fails if one starts to appear. Colo
 `--dsw-alias-*` tokens, so the panel follows the Harness theme rather than
 holding an opinion about it.
 
-Opening a Run shows its steps; opening a step shows that step's output. Nothing
+Opening a Run gives it the whole panel — the way back is a control at the top —
+and opening a step shows that step's output. A Run's detail does not fit beside
+its siblings at panel width: expanding one inline pushed the rest of the list
+out, which is the same as losing it. Nothing
 below the first level is fetched until a row is expanded, and following stops
 when there is nothing left to follow.
 

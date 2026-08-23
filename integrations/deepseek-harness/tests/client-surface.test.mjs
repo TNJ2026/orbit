@@ -200,3 +200,18 @@ test('what the panel lists, it can open', async () => {
     assert.match(host.slice(at, at + 200), /owner: 'workspace'/, `${call} reads a narrower scope than the list`)
   }
 })
+
+test('a Run opens into the panel rather than inside the list', () => {
+  // A 400px panel cannot show a Run's steps beside its siblings: expanding one
+  // inline pushed the rest of the list out, which is the same as losing it.
+  assert.match(code, /OrbitRunListRow/)
+  assert.match(code, /OrbitRunDetail/)
+  const detail = code.slice(code.indexOf('export function OrbitRunDetail'))
+  assert.match(detail, /onBack/, 'detail with no way back')
+  assert.equal(/<DisclosureRow[\s\S]{0,400}OrbitRunDetail/.test(code), false)
+})
+
+test('changing page clears the Run it was showing', () => {
+  // A detail left behind a tab is a place a reader returns to without meaning to.
+  assert.match(code, /setSelected\(null\); setTab\(key\)/)
+})

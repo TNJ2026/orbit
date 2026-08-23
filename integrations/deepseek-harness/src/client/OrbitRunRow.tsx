@@ -1,4 +1,9 @@
-/** One Run in the panel, and what opening it shows. */
+/** A Run as a row in a list, and the same Run as the panel's whole body.
+ *
+ * Two components rather than one disclosure, because a Run's detail does not
+ * fit beside its siblings: opening one inline pushed the rest of the list out
+ * of a 400px panel, which is the same as losing it.
+ */
 
 import { useCallback, useEffect, useState } from 'react'
 import { Button, DisclosureRow, StateDot } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -98,12 +103,29 @@ function StepDisclosure({ call, t, sessionId, runId, step, live, onSettled }: St
   )
 }
 
-export interface OrbitRunRowProps {
-  call: HostCall; t: Translate; sessionId: string; run: RunRowData
+/** A Run in a list: what it was for, and how it went. */
+export function OrbitRunListRow(
+  { t, run, onOpen }: { t: Translate; run: RunRowData; onOpen: () => void },
+) {
+  return (
+    <button type="button" className={styles.listRow} onClick={onOpen}>
+      <StateDot state={dotState(run.status)} size={9} className={styles.listDot} />
+      <span className={styles.listMain}>
+        <span className={styles.listGoal}>{run.goal}</span>
+        <span className={styles.meta}>{run.workflow}</span>
+      </span>
+      <span className={styles.status}>{run.status}</span>
+    </button>
+  )
 }
 
-export function OrbitRunRow({ call, t, sessionId, run }: OrbitRunRowProps) {
-  const [open, setOpen] = useState(false)
+export interface OrbitRunRowProps {
+  call: HostCall; t: Translate; sessionId: string; run: RunRowData
+  onBack: () => void
+}
+
+export function OrbitRunDetail({ call, t, sessionId, run, onBack }: OrbitRunRowProps) {
+  const open = true
   const [steps, setSteps] = useState<StepSummary[] | null>(null)
   const [error, setError] = useState('')
   const [answer, setAnswer] = useState('')
@@ -135,18 +157,13 @@ export function OrbitRunRow({ call, t, sessionId, run }: OrbitRunRowProps) {
     return () => { controller.abort(); if (timer !== undefined) clearInterval(timer) }
   }, [open, run.live, load])
   return (
-    <DisclosureRow
-      icon={<StateDot state={dotState(run.status)} size={10} />}
-      title={run.goal}
-      open={open}
-      expandable
-      expandOnRowClick
-      previewChevron
-      onToggle={() => setOpen(value => !value)}
-      collapsedContent={<span className={styles.status}>{run.status}</span>}
-      rowClassName={styles.row}
-    >
-      <div className={styles.meta}>{run.workflow}</div>
+    <div>
+      <button type="button" className={styles.back} onClick={onBack}>{t('back')}</button>
+      <div className={styles.detailHead}>
+        <StateDot state={dotState(run.status)} size={9} />
+        <span className={styles.detailGoal}>{run.goal}</span>
+      </div>
+      <div className={styles.detailMeta}>{run.workflow} · {run.status}</div>
       <div className={styles.actions}>
         {cancelAt !== undefined ? (
           <Button size="sm" variant="outline" disabled={busy} onClick={() => act('langgraph_run.cancel', cancelAt, undefined)}>
@@ -171,6 +188,6 @@ export function OrbitRunRow({ call, t, sessionId, run }: OrbitRunRowProps) {
           step={toStepRow(step)} live={run.live} onSettled={setSteps}
         />
       ))}
-    </DisclosureRow>
+    </div>
   )
 }
