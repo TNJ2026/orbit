@@ -71,8 +71,10 @@ only after the Host re-reads the Run and matches the requested command and
 revision against Orbit's current `allowed_commands[]`.
 
 This bundle contributes a resident Orbit panel to the Harness shell overlay. It
-folds down to a badge that says whether anything is running and opens to a list
-of this Workspace's Runs; `/orbit` takes no argument and folds it either way.
+folds down to a badge that says whether anything is running and opens to the
+Runtime's own four pages — Goal, Workflows, History, Agents: what is running,
+what could, what did, and who by. `/orbit` takes no argument and folds it either
+way.
 The panel can be docked to the side or detached and dragged, and remembers
 which between browser sessions.
 

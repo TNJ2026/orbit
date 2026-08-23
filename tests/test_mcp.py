@@ -77,7 +77,7 @@ class DiscoveryTests(ApiTestCase):
                     "list_runtime_events", "get_run_steps", "get_run_graph",
                     "get_run_edges", "read_run_output",
                     "recover_run", "cancel_run", "replay_langgraph_run",
-                    "list_workflows", "list_artifacts", "read_artifact",
+                    "list_workflows", "list_agents", "list_artifacts", "read_artifact",
                     "read_artifact_content",
                     "get_artifact_lineage", "collect_artifacts",
                     "generate_workflow", "modify_workflow", "get_authoring_job",
@@ -110,7 +110,7 @@ class DiscoveryTests(ApiTestCase):
             tools = rpc(client, "tools/list", actor="reader").json()["result"]["tools"]
         self.assertEqual(
             {
-                "get_capabilities", "list_workflows", "list_runs", "inspect_run",
+                "get_capabilities", "list_workflows", "list_agents", "list_runs", "inspect_run",
                 "generate_workflow", "modify_workflow", "get_authoring_job",
                 "list_runtime_events", "get_run_steps", "get_run_graph",
                 "get_run_edges", "read_run_output",
@@ -141,6 +141,30 @@ class ToolCallTests(ApiTestCase):
             actor="writer",
         )
         return payload_of(result)
+
+    def test_list_agents_reports_identity_and_nothing_a_caller_could_run(self) -> None:
+        """The Agents surface, mirroring the HTTP catalog it stands in for.
+
+        Identity only. A caller that could read a Handler's config schema or its
+        required secrets from here would be reading the makings of a command
+        this Runtime exists to keep it from composing.
+        """
+
+        with AsgiHarness(self.app) as client:
+            payload = payload_of(tool(client, "list_agents", {}, actor="reader"))
+
+        self.assertIn("agents", payload)
+        for agent in payload["agents"]:
+            self.assertTrue(agent["name"].startswith("agent."))
+            self.assertEqual({"name", "version", "node_kinds"}, set(agent))
+
+    def test_list_agents_answers_none_rather_than_refusing_without_a_registry(self) -> None:
+        """An unsealed registry is a startup state, not a caller's problem."""
+
+        with AsgiHarness(self.app) as client:
+            payload = payload_of(tool(client, "list_agents", {}, actor="reader"))
+
+        self.assertEqual([], payload["agents"])
 
     def test_read_only_tool_works_for_a_reader(self) -> None:
         with AsgiHarness(self.app) as client:
@@ -677,7 +701,7 @@ class StdioTransportTests(ApiTestCase):
 
         self.assertEqual(2, len(responses))
         self.assertEqual("orbit", responses[0]["result"]["serverInfo"]["name"])
-        self.assertEqual(25, len(responses[1]["result"]["tools"]))
+        self.assertEqual(26, len(responses[1]["result"]["tools"]))
 
     def test_a_notification_produces_no_line_at_all(self) -> None:
         """There is no 202 on this transport; silence is the whole answer."""

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { IconCloseOutline16, IconShareOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { RunDto, WorkflowSummary } from '../types.js'
+import type { AgentSummary, RunDto, WorkflowSummary } from '../types.js'
 import styles from './OrbitPanel.module.css'
 import {
   DEFAULT_PANEL_LAYOUT, PANEL_STORAGE_KEY, dragPanel, placePanel, readLayout,
@@ -61,6 +61,9 @@ export function OrbitPanel({ t, useSessions }: OrbitPanelProps) {
   const [rows, setRows] = useState<RunRowData[] | null>(null)
   const [uiUrl, setUiUrl] = useState('')
   const [workflows, setWorkflows] = useState<readonly WorkflowSummary[]>([])
+  const [agents, setAgents] = useState<readonly AgentSummary[]>([])
+  // The Runtime's own four: what is running, what could, what did, and who by.
+  const [tab, setTab] = useState<'goal' | 'workflows' | 'history' | 'agents'>('goal')
   const [error, setError] = useState('')
   const bounds = useBounds()
   const drag = useRef<{ x: number; y: number } | null>(null)
@@ -92,14 +95,15 @@ export function OrbitPanel({ t, useSessions }: OrbitPanelProps) {
     const tick = async () => {
       try {
         const state = await hostCall<{
-          runs: RunDto[]; uiUrl: string; workflows: readonly WorkflowSummary[]
+          runs: RunDto[]; uiUrl: string
+          workflows: readonly WorkflowSummary[]; agents: readonly AgentSummary[]
         }>(
           'getPanelState', [sessionId], controller.signal,
         )
         if (controller.signal.aborted) return
         const next = orderRows(state.runs.map(toRow))
         setRows(next); setUiUrl(state.uiUrl); setError('')
-        setWorkflows(state.workflows ?? [])
+        setWorkflows(state.workflows ?? []); setAgents(state.agents ?? [])
         timer = setTimeout(
           () => { void tick() },
           layout.collapsed ? ORBIT_IDLE_MS : nextInterval(next),
@@ -115,6 +119,10 @@ export function OrbitPanel({ t, useSessions }: OrbitPanelProps) {
   }, [sessionId, layout.collapsed])
 
   const counts = summarise(rows ?? [])
+  // Split once: the Runtime's own pages read as "what is happening" and "what
+  // happened", and a Run belongs to exactly one of them.
+  const live = (rows ?? []).filter(row => row.live)
+  const settled = (rows ?? []).filter(row => !row.live)
   const box = placePanel(layout, bounds)
 
   if (layout.collapsed) {
@@ -192,29 +200,55 @@ export function OrbitPanel({ t, useSessions }: OrbitPanelProps) {
           <IconCloseOutline16 size={14} />
         </button>
       </div>
+      <nav className={styles.tabs} aria-label={t('title')}>
+        {([
+          ['goal', 'tabGoal'], ['workflows', 'tabWorkflows'],
+          ['history', 'tabHistory'], ['agents', 'tabAgents'],
+        ] as const).map(([key, label]) => (
+          <button
+            key={key}
+            type="button"
+            className={key === tab ? `${styles.tab} ${styles.tabActive}` : styles.tab}
+            aria-pressed={key === tab}
+            onClick={() => setTab(key)}
+          >
+            {t(label)}
+          </button>
+        ))}
+      </nav>
       <div className={styles.body}>
         {error ? <p className={styles.error}>{error}</p> : null}
         {!error && rows === null ? <p className={styles.empty}>{t('loading')}</p> : null}
-        {!error && rows?.length === 0 ? <p className={styles.empty}>{t('empty')}</p> : null}
-        {workflows.length ? (
-          /* What can be asked for, beside what is already happening. There is
-             no start button on purpose: a Run the panel began itself would be
-             one the Agent knows nothing about. Naming them is enough — the
-             person types the name, the Agent does the rest. */
-          <details className={styles.catalog}>
-            <summary>{t('runnable', { total: workflows.length })} · {workflows.length}</summary>
-            <p className={styles.meta}>{t('runnableHint')}</p>
-            {workflows.map(item => (
-              <div className={styles.catalogRow} key={item.workflow_id}>
-                <span>{item.name || item.workflow_id}</span>
-                <code className={styles.meta}>{item.workflow_id}@{String(item.latest_version)}</code>
-              </div>
-            ))}
-          </details>
+
+        {!error && rows !== null && tab === 'goal' ? (
+          live.length ? live.map(row => (
+            <OrbitRunRow key={row.runId} call={hostCall} t={t} sessionId={sessionId ?? ''} run={row} />
+          )) : <p className={styles.empty}>{t('emptyGoal')}</p>
         ) : null}
-        {sessionId ? rows?.map(row => (
-          <OrbitRunRow key={row.runId} call={hostCall} t={t} sessionId={sessionId} run={row} />
-        )) : null}
+
+        {!error && rows !== null && tab === 'history' ? (
+          settled.length ? settled.map(row => (
+            <OrbitRunRow key={row.runId} call={hostCall} t={t} sessionId={sessionId ?? ''} run={row} />
+          )) : <p className={styles.empty}>{t('emptyHistory')}</p>
+        ) : null}
+
+        {!error && tab === 'workflows' ? (
+          workflows.length ? workflows.map(item => (
+            <div className={styles.catalogRow} key={item.workflow_id}>
+              <span>{item.name || item.workflow_id}</span>
+              <code className={styles.meta}>{item.workflow_id}@{String(item.latest_version)}</code>
+            </div>
+          )) : <p className={styles.empty}>{t('emptyWorkflows')}</p>
+        ) : null}
+
+        {!error && tab === 'agents' ? (
+          agents.length ? agents.map(item => (
+            <div className={styles.catalogRow} key={item.name}>
+              <span>{item.name.replace(/^agent\./u, '')}</span>
+              <code className={styles.meta}>{item.version}</code>
+            </div>
+          )) : <p className={styles.empty}>{t('emptyAgents')}</p>
+        ) : null}
       </div>
       <div
         className={styles.resize}

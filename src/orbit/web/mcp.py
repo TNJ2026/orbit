@@ -50,7 +50,8 @@ NOT_AUTHORIZED = -32001
 MCP_SESSION_PRESENCE_SECONDS = 60.0
 MCP_TOOL_PROFILES = frozenset({"full", "harness"})
 HARNESS_TOOL_NAMES = frozenset({
-    "get_capabilities", "list_workflows", "list_runs", "inspect_run", "replay_langgraph_run",
+    "get_capabilities", "list_workflows", "list_agents", "list_runs", "inspect_run",
+    "replay_langgraph_run",
     "generate_workflow", "modify_workflow", "get_authoring_job",
     "list_runtime_events", "get_run_steps", "get_run_graph", "get_run_edges",
     "read_run_output",
@@ -179,6 +180,7 @@ def build_mcp_dispatcher(
     authoring_broker=None,
     langgraph_service=None,
     session_registry: McpSessionRegistry | None = None,
+    execution_registry=None,
     tool_profile: str = "full",
     delegation_queue=None,
 ) -> Callable[[Mapping[str, Any], str | None], dict[str, Any] | None]:
@@ -246,6 +248,16 @@ def build_mcp_dispatcher(
                     },
                 },
             },
+        },
+        {
+            "name": "list_agents",
+            "description": (
+                "Agent handlers this Runtime registered at startup, with the "
+                "node kinds each may run. The set is sealed when the Runtime "
+                "starts, so it does not change while one is up."
+            ),
+            "scope": READ_SCOPE,
+            "inputSchema": {"type": "object", "properties": {}},
         },
         # -- authoring ----------------------------------------------------
         # Generation is a job, not a call: it runs an Agent CLI and compiles
@@ -934,6 +946,28 @@ def build_mcp_dispatcher(
                 limit=min(200, max(1, int(arguments.get("limit", 100))))
             )
             return {"collected_artifact_ids": list(collected)}
+        if name == "list_agents":
+            # Identity only, like the HTTP catalog it mirrors: no config
+            # schema, no secrets, nothing a caller could assemble into a
+            # command. A Runtime with no registry answers with none rather
+            # than refusing — an unsealed registry is a startup state, not an
+            # error the caller can act on.
+            registered = (
+                execution_registry.entries()
+                if execution_registry is not None and execution_registry.sealed
+                else ()
+            )
+            return {
+                "agents": [
+                    {
+                        "name": entry.manifest.name,
+                        "version": entry.manifest.version,
+                        "node_kinds": list(entry.manifest.node_kinds),
+                    }
+                    for entry in registered
+                    if entry.manifest.name.startswith("agent.")
+                ],
+            }
         if name == "list_workflows":
             items = workflow_reads.list()
             if arguments.get("ready_only"):

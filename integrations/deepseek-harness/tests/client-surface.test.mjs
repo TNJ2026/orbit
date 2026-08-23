@@ -97,13 +97,23 @@ test('the deep surfaces are reachable, in Orbit rather than redrawn here', () =>
   assert.match(code, /rel="noopener"/)
 })
 
-test('the catalog names Workflows and does not offer to start one', () => {
+test('the panel carries the Runtime\'s own four pages, in its order', () => {
+  // Goal, Workflows, History, Agents — what is running, what could, what did,
+  // and who by. Reading them off Orbit rather than inventing a fifth keeps one
+  // vocabulary between the two surfaces.
+  const strip = code.slice(code.indexOf('styles.tabs'), code.indexOf('styles.body'))
+  assert.deepEqual(
+    [...strip.matchAll(/'(goal|workflows|history|agents)'/g)].map(([, name]) => name),
+    ['goal', 'workflows', 'history', 'agents'],
+  )
+})
+
+test('the Workflows and Agents pages name things and offer no action', () => {
   // Naming them answers "what can I ask for". Starting one here would answer a
   // different question wrongly: the Agent would not know the Run exists.
-  assert.match(code, /styles\.catalog/)
-  const section = code.slice(code.indexOf('styles.catalog'), code.indexOf('</details>'))
-  assert.equal(/onClick/.test(section), false, 'the catalog grew an action')
-  assert.equal(/runCommand|start_run|startRun/.test(section), false)
+  const listing = code.slice(code.indexOf("tab === 'workflows'"), code.indexOf('styles.resize'))
+  assert.equal(/onClick/.test(listing), false, 'a listing grew an action')
+  assert.equal(/runCommand|start_run/.test(listing), false)
 })
 
 

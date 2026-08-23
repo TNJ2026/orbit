@@ -10,6 +10,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { artifactImageInput } from './artifact-import.js'
 import { advertisedAt, commandTool, type OrbitRunCommand } from './commands.js'
 import { WorkflowCatalog } from './workflow-catalog.js'
+import type { AgentSummary } from './types.js'
 import type { ArtifactContent, ArtifactSummary, AuthoringJob, EdgeSummary, ImportedArtifact, IntegrationDiagnostics, OrbitCommandRequest, OutputPage, RunDto, RunGraph, RuntimeSummary, StepSummary, WorkflowSummary, WorkspaceRef } from './types.js'
 
 declare module '@deepseek-ai/cordis' { interface Context { orbit: OrbitRemoteService } }
@@ -22,6 +23,9 @@ export class OrbitRemoteService extends TypertRemoteService {
   static inject = ['sessions', 'workspaceRegistry', 'tools', 'attachments', 'systemPrompt']
   private readonly gateway = new OrbitGateway()
   private readonly catalog = new WorkflowCatalog()
+  /** Agent handlers per Workspace. The Runtime seals its registry at startup,
+   *  so one read answers for as long as that Runtime is up. */
+  private readonly agentsByWorkspace = new Map<string, readonly AgentSummary[]>()
   private readonly bridges = new Map<string, AbortController>()
   /** One entry per live Bridge: the Workspaces worth knowing the Workflows of. */
   private readonly bridgedWorkspaces = new Map<string, WorkspaceRef>()
@@ -229,6 +233,7 @@ export class OrbitRemoteService extends TypertRemoteService {
     // for every Session the Host ever opened.
     this.bridgeDiagnostics.delete(sessionId)
     this.bridgedWorkspaces.delete(sessionId)
+    this.agentsByWorkspace.clear()
   }
 
   private async runSessionBridge(ctx: Context, session: Session, cwd: string, signal: AbortSignal): Promise<void> {
@@ -308,7 +313,8 @@ export class OrbitRemoteService extends TypertRemoteService {
    */
   @Remote('getPanelState')
   async getPanelState(sessionId: string, signal: AbortSignal): Promise<{
-    runs: RunDto[]; uiUrl: string; workflows: readonly WorkflowSummary[]
+    runs: RunDto[]; uiUrl: string
+    workflows: readonly WorkflowSummary[]; agents: readonly AgentSummary[]
   }> {
     signal.throwIfAborted()
     const scope = await this.sessionWorkspace(sessionId)
@@ -321,10 +327,20 @@ export class OrbitRemoteService extends TypertRemoteService {
       // a poll running every two seconds should not ask twice for something
       // that changes when someone publishes a Workflow.
       if (this.catalog.stale(scope.canonicalPath)) this.refreshCatalog(scope)
+      if (!this.agentsByWorkspace.has(scope.canonicalPath)) {
+        // Read once and kept: a sealed registry cannot change under us, and a
+        // poll every two seconds should not keep asking a question whose answer
+        // is fixed for the life of the Runtime.
+        const listed = await this.gateway.call(scope, sessionId, 'list_agents', {}) as {
+          agents: AgentSummary[]
+        }
+        this.agentsByWorkspace.set(scope.canonicalPath, listed.agents)
+      }
       return {
         runs: result.runs,
         uiUrl: await this.gateway.uiUrl(scope),
         workflows: this.catalog.list(scope.canonicalPath),
+        agents: this.agentsByWorkspace.get(scope.canonicalPath) ?? [],
       }
     } finally { await release() }
   }

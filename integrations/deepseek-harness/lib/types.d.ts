@@ -81,6 +81,11 @@ export interface StepSummary {
     };
     [key: string]: unknown;
 }
+export interface AgentSummary {
+    name: string;
+    version: string;
+    node_kinds: string[];
+}
 export interface RunGraph {
     [key: string]: unknown;
 }

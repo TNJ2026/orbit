@@ -3,6 +3,7 @@ import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol';
 import { type OrbitCursorStore } from './session-bridge.js';
 import type { Session } from '@deepseek-ai/dsh-session';
 import { type OrbitRunCommand } from './commands.js';
+import type { AgentSummary } from './types.js';
 import type { ArtifactContent, ArtifactSummary, AuthoringJob, EdgeSummary, ImportedArtifact, IntegrationDiagnostics, OrbitCommandRequest, OutputPage, RunDto, RunGraph, RuntimeSummary, StepSummary, WorkflowSummary, WorkspaceRef } from './types.js';
 declare module '@deepseek-ai/cordis' {
     interface Context {
@@ -13,6 +14,9 @@ export declare class OrbitRemoteService extends TypertRemoteService {
     static inject: string[];
     private readonly gateway;
     private readonly catalog;
+    /** Agent handlers per Workspace. The Runtime seals its registry at startup,
+     *  so one read answers for as long as that Runtime is up. */
+    private readonly agentsByWorkspace;
     private readonly bridges;
     /** One entry per live Bridge: the Workspaces worth knowing the Workflows of. */
     private readonly bridgedWorkspaces;
@@ -83,6 +87,7 @@ export declare class OrbitRemoteService extends TypertRemoteService {
         runs: RunDto[];
         uiUrl: string;
         workflows: readonly WorkflowSummary[];
+        agents: readonly AgentSummary[];
     }>;
     /**
      * The steps of one Run, for a panel row the reader opened.

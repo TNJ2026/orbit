@@ -142,14 +142,6 @@
 }
 .iconButton:hover { color: var(--dsw-alias-label-primary); }
 
-/* What can be run, kept below what is running: the panel is read top-down and
-   the answer to "what is happening" outranks "what could". */
-.catalog {
-  border-top: 1px solid var(--dsw-alias-line-normal, rgb(128 128 128 / 28%));
-  padding: 8px 12px;
-  font-size: 12px;
-}
-.catalog summary { cursor: pointer; color: var(--dsw-alias-label-secondary); }
 .catalogRow {
   display: flex;
   align-items: baseline;
@@ -157,4 +149,40 @@
   gap: 8px;
   padding: 4px 0 4px 12px;
 }
-.catalogRow span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Both halves shrink. Only the name had an ellipsis, so a long id ran under
+   the panel's own edge and was cut without a mark to say so. */
+.catalogRow > * {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.catalogRow > span { flex: 1 1 auto; }
+.catalogRow > code { flex: 0 1 auto; }
+
+/* The Runtime's own four pages, in its own order: the tab strip sits under the
+   title and above the list, which is where Orbit puts it too. */
+.tabs {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 2px;
+  padding: 6px 8px 0;
+  border-bottom: 1px solid var(--dsw-alias-line-normal, rgb(128 128 128 / 28%));
+  background: var(--dsw-alias-bg-module, Canvas);
+}
+.tab {
+  flex: 1 1 0;
+  padding: 6px 4px 8px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--dsw-alias-label-tertiary, GrayText);
+  font-size: 12px;
+  cursor: pointer;
+}
+.tab:hover { color: var(--dsw-alias-label-primary, CanvasText); }
+.tabActive {
+  color: var(--dsw-alias-label-primary, CanvasText);
+  border-bottom-color: var(--dsw-alias-state-business-primary, Highlight);
+  font-weight: 600;
+}

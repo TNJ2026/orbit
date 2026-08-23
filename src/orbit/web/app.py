@@ -858,6 +858,7 @@ def create_app(
         authoring_broker=authoring_broker,
         langgraph_service=langgraph_service,
         session_registry=mcp_sessions,
+        execution_registry=composition.handler_registry,
         tool_profile=mcp_tool_profile,
         delegation_queue=delegation_queue,
     )

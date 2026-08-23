@@ -122,6 +122,9 @@ let OrbitRemoteService = (() => {
         static inject = ['sessions', 'workspaceRegistry', 'tools', 'attachments', 'systemPrompt'];
         gateway = (__runInitializers(this, _instanceExtraInitializers), new OrbitGateway());
         catalog = new WorkflowCatalog();
+        /** Agent handlers per Workspace. The Runtime seals its registry at startup,
+         *  so one read answers for as long as that Runtime is up. */
+        agentsByWorkspace = new Map();
         bridges = new Map();
         /** One entry per live Bridge: the Workspaces worth knowing the Workflows of. */
         bridgedWorkspaces = new Map();
@@ -332,6 +335,7 @@ let OrbitRemoteService = (() => {
             // for every Session the Host ever opened.
             this.bridgeDiagnostics.delete(sessionId);
             this.bridgedWorkspaces.delete(sessionId);
+            this.agentsByWorkspace.clear();
         }
         async runSessionBridge(ctx, session, cwd, signal) {
             const registry = ctx.workspaceRegistry;
@@ -431,10 +435,18 @@ let OrbitRemoteService = (() => {
                 // that changes when someone publishes a Workflow.
                 if (this.catalog.stale(scope.canonicalPath))
                     this.refreshCatalog(scope);
+                if (!this.agentsByWorkspace.has(scope.canonicalPath)) {
+                    // Read once and kept: a sealed registry cannot change under us, and a
+                    // poll every two seconds should not keep asking a question whose answer
+                    // is fixed for the life of the Runtime.
+                    const listed = await this.gateway.call(scope, sessionId, 'list_agents', {});
+                    this.agentsByWorkspace.set(scope.canonicalPath, listed.agents);
+                }
                 return {
                     runs: result.runs,
                     uiUrl: await this.gateway.uiUrl(scope),
                     workflows: this.catalog.list(scope.canonicalPath),
+                    agents: this.agentsByWorkspace.get(scope.canonicalPath) ?? [],
                 };
             }
             finally {
