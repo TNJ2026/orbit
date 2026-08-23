@@ -25,6 +25,8 @@ export const en = {
   confirmFailed: 'It failed',
   note: 'What you checked',
   working: 'Working…',
+  runnable: 'Runnable workflows',
+  runnableHint: 'Ask the Agent to run one — it has the tools.',
 } as const
 
 export const zh = {
@@ -50,6 +52,8 @@ export const zh = {
   confirmFailed: '确认执行失败',
   note: '你核对了什么',
   working: '处理中…',
+  runnable: '可运行的工作流',
+  runnableHint: '让 agent 跑其中一个即可——它有对应的工具。',
 } as const
 
 export type OrbitLocaleKey = keyof typeof en

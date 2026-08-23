@@ -103,6 +103,15 @@ By saying so. The Agent has `orbit_list_workflows` and `orbit_start_run`, so
 "run the CSV cleaner over today's export" is the whole interface; the Run
 appears in the panel a moment later.
 
+Neither of you has to remember what exists. The bundle names the ready
+Workflows of every bridged Workspace in the model's context — with the inputs
+each one needs, which is the mistake it exists to prevent — so the Agent can
+answer "which of these did you mean" instead of asking what Orbit is. The panel
+lists the same catalog below the Runs, for the person doing the asking. The
+list is read from a cache the prompt already keeps, so a panel polling every
+two seconds costs nothing extra, and a Runtime that is down leaves the last
+answer standing rather than emptying the context.
+
 The panel deliberately has no start button. Harness is a place where work is
 described to an Agent, and a Run the panel started itself would be a Run the
 Agent knows nothing about — it could not tell you how it went, or take the

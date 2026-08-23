@@ -99,3 +99,12 @@ test('the deep surfaces are reachable, in Orbit rather than redrawn here', () =>
   assert.match(code, /target="_blank"/)
   assert.match(code, /rel="noopener"/)
 })
+
+test('the catalog names Workflows and does not offer to start one', () => {
+  // Naming them answers "what can I ask for". Starting one here would answer a
+  // different question wrongly: the Agent would not know the Run exists.
+  assert.match(code, /styles\.catalog/)
+  const section = code.slice(code.indexOf('styles.catalog'), code.indexOf('</details>'))
+  assert.equal(/onClick/.test(section), false, 'the catalog grew an action')
+  assert.equal(/runCommand|start_run|startRun/.test(section), false)
+})

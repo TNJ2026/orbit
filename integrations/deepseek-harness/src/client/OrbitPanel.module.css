@@ -141,3 +141,20 @@
   cursor: pointer;
 }
 .iconButton:hover { color: var(--dsw-alias-label-primary); }
+
+/* What can be run, kept below what is running: the panel is read top-down and
+   the answer to "what is happening" outranks "what could". */
+.catalog {
+  border-top: 1px solid var(--dsw-alias-line-normal, rgb(128 128 128 / 28%));
+  padding: 8px 12px;
+  font-size: 12px;
+}
+.catalog summary { cursor: pointer; color: var(--dsw-alias-label-secondary); }
+.catalogRow {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 0 4px 12px;
+}
+.catalogRow span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

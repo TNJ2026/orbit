@@ -38,6 +38,7 @@ import { OrbitSessionBridge, bridgeWithRetry, restoredBridgeState, sessionCanBri
 import { OrbitToolBridge } from './orbit-tools.js';
 import { artifactImageInput } from './artifact-import.js';
 import { advertisedAt, commandTool } from './commands.js';
+import { WorkflowCatalog } from './workflow-catalog.js';
 let OrbitRemoteService = (() => {
     let _classSuper = TypertRemoteService;
     let _instanceExtraInitializers = [];
@@ -118,9 +119,12 @@ let OrbitRemoteService = (() => {
             __esDecorate(this, null, _executeCommand_decorators, { kind: "method", name: "executeCommand", static: false, private: false, access: { has: obj => "executeCommand" in obj, get: obj => obj.executeCommand }, metadata: _metadata }, null, _instanceExtraInitializers);
             if (_metadata) Object.defineProperty(this, Symbol.metadata, { enumerable: true, configurable: true, writable: true, value: _metadata });
         }
-        static inject = ['sessions', 'workspaceRegistry', 'tools', 'attachments'];
+        static inject = ['sessions', 'workspaceRegistry', 'tools', 'attachments', 'systemPrompt'];
         gateway = (__runInitializers(this, _instanceExtraInitializers), new OrbitGateway());
+        catalog = new WorkflowCatalog();
         bridges = new Map();
+        /** One entry per live Bridge: the Workspaces worth knowing the Workflows of. */
+        bridgedWorkspaces = new Map();
         bridgeDiagnostics = new Map();
         hostSessions;
         attachments;
@@ -132,6 +136,7 @@ let OrbitRemoteService = (() => {
             this.workspaceRegistry = ctx.get('workspaceRegistry');
             new OrbitToolBridge(ctx, this.gateway).register();
             this.registerWebApi(ctx);
+            this.tellTheModelWhatCanRun(ctx);
             for (const session of this.hostSessions.list())
                 this.startSessionBridge(ctx, session);
             ctx.on('session/created', session => { this.startSessionBridge(ctx, session); }, { global: true });
@@ -141,6 +146,49 @@ let OrbitRemoteService = (() => {
                     controller.abort();
                 this.bridges.clear();
             }, 'orbit: stop Session Bridges');
+        }
+        /**
+         * Name the runnable Workflows in the model's context, so it does not have to
+         * ask before it can tell whether Orbit is relevant to what was just said.
+         *
+         * The contribution is read synchronously at every assembly, so it can only
+         * ever report what has already been fetched: a stale entry answers now and
+         * refreshes for next time. The alternative — blocking assembly on a Runtime
+         * that may not be running — would make a missing Orbit everyone's problem.
+         */
+        tellTheModelWhatCanRun(ctx) {
+            const systemPrompt = ctx.get('systemPrompt');
+            if (!systemPrompt)
+                return;
+            ctx.effect(() => systemPrompt.context({
+                name: 'orbit-workflows',
+                // After the tool guidance it belongs with: this says which Workflows the
+                // tools above can be pointed at.
+                order: 190,
+                text: () => {
+                    for (const workspace of this.bridgedWorkspaces.values()) {
+                        if (this.catalog.stale(workspace.canonicalPath))
+                            this.refreshCatalog(workspace);
+                    }
+                    return this.catalog.render();
+                },
+            }), 'orbit: runnable Workflows in the model context');
+        }
+        /**
+         * Read a Workspace's Workflows into the catalog; a failure leaves the last
+         * answer standing.
+         *
+         * The parameter is a `scope` and not a `workspace` because that is what it
+         * is: every caller derived it from a Session. The name is also what the
+         * bundle's guard reads, so calling it anything else is how this stops being
+         * checked.
+         */
+        refreshCatalog(scope) {
+            void this.gateway.call(scope, 'catalog', 'list_workflows', { ready_only: true })
+                .then(result => {
+                this.catalog.remember(scope.canonicalPath, result.workflows);
+            })
+                .catch(() => { });
         }
         registerWebApi(ctx) {
             let registered = false;
@@ -283,6 +331,7 @@ let OrbitRemoteService = (() => {
             // Session for its diagnostics. Keeping the entry would grow this map by one
             // for every Session the Host ever opened.
             this.bridgeDiagnostics.delete(sessionId);
+            this.bridgedWorkspaces.delete(sessionId);
         }
         async runSessionBridge(ctx, session, cwd, signal) {
             const registry = ctx.workspaceRegistry;
@@ -291,6 +340,10 @@ let OrbitRemoteService = (() => {
                 id: registered ? String(registered.id) : `cwd:${cwd}`,
                 canonicalPath: registered?.path ?? cwd,
             };
+            this.bridgedWorkspaces.set(String(session.id), workspace);
+            // Warm it before the first turn asks: a Bridge starts when the Session is
+            // created, and the person types afterwards.
+            this.refreshCatalog(workspace);
             let cursorPosition = restoredBridgeState(session.events).position;
             const cursor = {
                 load: () => cursorPosition || undefined,
@@ -373,7 +426,16 @@ let OrbitRemoteService = (() => {
                 const result = await this.gateway.call(scope, sessionId, 'list_runs', {
                     limit: 50,
                 });
-                return { runs: result.runs, uiUrl: await this.gateway.uiUrl(scope) };
+                // The catalog the model is told about, read rather than fetched again:
+                // a poll running every two seconds should not ask twice for something
+                // that changes when someone publishes a Workflow.
+                if (this.catalog.stale(scope.canonicalPath))
+                    this.refreshCatalog(scope);
+                return {
+                    runs: result.runs,
+                    uiUrl: await this.gateway.uiUrl(scope),
+                    workflows: this.catalog.list(scope.canonicalPath),
+                };
             }
             finally {
                 await release();

@@ -12,12 +12,35 @@ declare module '@deepseek-ai/cordis' {
 export declare class OrbitRemoteService extends TypertRemoteService {
     static inject: string[];
     private readonly gateway;
+    private readonly catalog;
     private readonly bridges;
+    /** One entry per live Bridge: the Workspaces worth knowing the Workflows of. */
+    private readonly bridgedWorkspaces;
     private readonly bridgeDiagnostics;
     private readonly hostSessions;
     private readonly attachments;
     private readonly workspaceRegistry;
     constructor(ctx: Context);
+    /**
+     * Name the runnable Workflows in the model's context, so it does not have to
+     * ask before it can tell whether Orbit is relevant to what was just said.
+     *
+     * The contribution is read synchronously at every assembly, so it can only
+     * ever report what has already been fetched: a stale entry answers now and
+     * refreshes for next time. The alternative — blocking assembly on a Runtime
+     * that may not be running — would make a missing Orbit everyone's problem.
+     */
+    private tellTheModelWhatCanRun;
+    /**
+     * Read a Workspace's Workflows into the catalog; a failure leaves the last
+     * answer standing.
+     *
+     * The parameter is a `scope` and not a `workspace` because that is what it
+     * is: every caller derived it from a Session. The name is also what the
+     * bundle's guard reads, so calling it anything else is how this stops being
+     * checked.
+     */
+    private refreshCatalog;
     private registerWebApi;
     private dispatchWebApi;
     /**
@@ -59,6 +82,7 @@ export declare class OrbitRemoteService extends TypertRemoteService {
     getPanelState(sessionId: string, signal: AbortSignal): Promise<{
         runs: RunDto[];
         uiUrl: string;
+        workflows: readonly WorkflowSummary[];
     }>;
     /**
      * The steps of one Run, for a panel row the reader opened.

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { IconCloseOutline16, IconShareOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { RunDto } from '../types.js'
+import type { RunDto, WorkflowSummary } from '../types.js'
 import styles from './OrbitPanel.module.css'
 import {
   DEFAULT_PANEL_LAYOUT, PANEL_STORAGE_KEY, dragPanel, placePanel, readLayout,
@@ -60,6 +60,7 @@ export function OrbitPanel({ t, useSessions }: OrbitPanelProps) {
   })
   const [rows, setRows] = useState<RunRowData[] | null>(null)
   const [uiUrl, setUiUrl] = useState('')
+  const [workflows, setWorkflows] = useState<readonly WorkflowSummary[]>([])
   const [error, setError] = useState('')
   const bounds = useBounds()
   const drag = useRef<{ x: number; y: number } | null>(null)
@@ -90,12 +91,14 @@ export function OrbitPanel({ t, useSessions }: OrbitPanelProps) {
     const controller = new AbortController()
     const tick = async () => {
       try {
-        const state = await hostCall<{ runs: RunDto[]; uiUrl: string }>(
+        const state = await hostCall<{
+          runs: RunDto[]; uiUrl: string; workflows: readonly WorkflowSummary[]
+        }>(
           'getPanelState', [sessionId], controller.signal,
         )
         if (controller.signal.aborted) return
         const next = orderRows(state.runs.map(toRow))
-        setRows(next); setUiUrl(state.uiUrl); setError('')
+        setRows(next); setUiUrl(state.uiUrl); setWorkflows(state.workflows ?? []); setError('')
         timer = setTimeout(
           () => { void tick() },
           layout.collapsed ? ORBIT_IDLE_MS : nextInterval(next),
@@ -192,6 +195,22 @@ export function OrbitPanel({ t, useSessions }: OrbitPanelProps) {
         {error ? <p className={styles.error}>{error}</p> : null}
         {!error && rows === null ? <p className={styles.empty}>{t('loading')}</p> : null}
         {!error && rows?.length === 0 ? <p className={styles.empty}>{t('empty')}</p> : null}
+        {workflows.length ? (
+          /* What can be asked for, beside what is already happening. There is
+             no start button on purpose: a Run the panel began itself would be
+             one the Agent knows nothing about. Naming them is enough — the
+             person types the name, the Agent does the rest. */
+          <details className={styles.catalog}>
+            <summary>{t('runnable', { total: workflows.length })} · {workflows.length}</summary>
+            <p className={styles.meta}>{t('runnableHint')}</p>
+            {workflows.map(item => (
+              <div className={styles.catalogRow} key={item.workflow_id}>
+                <span>{item.name || item.workflow_id}</span>
+                <code className={styles.meta}>{item.workflow_id}@{String(item.latest_version)}</code>
+              </div>
+            ))}
+          </details>
+        ) : null}
         {sessionId ? rows?.map(row => (
           <OrbitRunRow key={row.runId} call={hostCall} t={t} sessionId={sessionId} run={row} />
         )) : null}
