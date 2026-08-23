@@ -130,10 +130,12 @@ export function OrbitPanel({ t, useSessions }: OrbitPanelProps) {
   }
 
   const onPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
-    // Only the bar itself starts a drag. Capturing the pointer from a press on
-    // a child redirected every following event to the bar, so the close button
-    // and the link were pressed and never clicked.
-    if (event.target !== event.currentTarget) return
+    // The whole title area drags, including the text in it — requiring the bar's
+    // own background meant the obvious place to grab was the one place that did
+    // nothing. Only real controls are excluded, because capturing the pointer
+    // from a press on one redirects every following event to the bar and the
+    // control is pressed but never clicked.
+    if ((event.target as Element).closest('button, a, input')) return
     drag.current = { x: event.clientX, y: event.clientY }
     event.currentTarget.setPointerCapture(event.pointerId)
   }

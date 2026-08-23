@@ -65,10 +65,23 @@ test('the panel reads its Session from the store the slot actually hands over', 
   assert.equal(/sessionId\?: string\s*\}/.test(code), false, 'a prop the slot never sends is back')
 })
 
-test('a drag begun on the bar does not swallow the controls in it', () => {
-  // setPointerCapture redirects every following pointer event to the captor,
-  // so a press that started on the close button never became a click.
-  assert.match(code, /event\.target !== event\.currentTarget/)
+test('the title area drags, and only its controls do not', () => {
+  // setPointerCapture redirects every following pointer event to the captor, so
+  // a press that started on a control never becomes a click. Excluding controls
+  // is enough; excluding everything but the bar's own background — the first
+  // attempt — left the title text, the obvious handle, inert.
+  assert.match(code, /closest\('button, a, input'\)/)
+  assert.equal(/event\.target !== event\.currentTarget/.test(code), false)
+})
+
+test('every border names a colour that survives an unfamiliar theme', async () => {
+  // An undefined custom property invalidates the whole declaration, not just
+  // its colour: a divider written without a fallback is simply not drawn.
+  const css = await readFile(join(clientDir, 'OrbitPanel.module.css'), 'utf8')
+  const bare = [...css.matchAll(/var\(--dsw-alias-[a-z0-9-]+\)/g)]
+    .map(([hit]) => hit)
+    .filter(hit => /line|bg-/.test(hit))
+  assert.deepEqual(bare, [], 'a surface or border token needs a fallback')
 })
 
 test('bar controls are glyphs, not buttons with a surface of their own', async () => {
