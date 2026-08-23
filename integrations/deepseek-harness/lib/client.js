@@ -175,7 +175,7 @@ function OrbitSettings({ useWorkspaces }, remote) {
             setStatus(`连接失败：${String(reason)}`); });
         return () => controller.abort();
     }, [workspace?.workspaceId, workspace?.path]);
-    return createElement('section', null, createElement('strong', null, 'Orbit Runtime'), createElement('p', null, `${workspace?.title || 'Workspace'} · ${status}`), createElement('small', null, 'Runtime 按 Workspace 自动启动，并使用当前 Harness Session 隔离运行身份。'));
+    return createElement('section', null, createElement('strong', null, 'Orbit Runtime'), createElement('p', null, `${workspace?.title || 'Workspace'} · ${status}`), createElement('small', null, '连接独立 Orbit Runtime，并使用当前 Harness Session 隔离 MCP 运行身份。'));
 }
 export const inject = ['conversationEvents', 'slots'];
 export function apply(ctx) {

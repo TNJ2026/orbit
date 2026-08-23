@@ -46,16 +46,6 @@ function decodeStep(value, index) {
     }
     return item;
 }
-function decodeDelegation(value) {
-    const item = object(value, 'delegation');
-    string(item.delegation_id, 'delegation.delegation_id');
-    string(item.status, 'delegation.status');
-    boolean(item.cancel_requested, 'delegation.cancel_requested');
-    const request = object(item.request, 'delegation.request');
-    object(request.input, 'delegation.request.input');
-    object(request.config, 'delegation.request.config');
-    return item;
-}
 export function decodeToolResult(name, value) {
     if (['inspect_run', 'start_run', 'resume_run', 'cancel_run'].includes(name))
         return decodeRun(value);
@@ -96,8 +86,6 @@ export function decodeToolResult(name, value) {
         string(item.content, 'artifact_content.content');
         return item;
     }
-    if (['claim_delegation', 'renew_delegation', 'complete_delegation'].includes(name))
-        return { ...item, delegation: item.delegation === null ? null : decodeDelegation(item.delegation) };
     if (name === 'list_runtime_events') {
         array(item.events, 'events');
         number(item.next_position, 'next_position');

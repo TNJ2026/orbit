@@ -1,75 +1,91 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { TypertRemoteService, Remote } from '@deepseek-ai/dsh-typert-protocol'
 import { OrbitGateway } from './gateway.js'
-import { OrbitSessionBridge, type OrbitCursorStore } from './session-bridge.js'
-import type { Session } from '@deepseek-ai/dsh-session'
-import type { AgentRegistry } from '@deepseek-ai/dsh-agent'
-import type { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
-import type { ArtifactContent, ArtifactSummary, DelegationDto, EdgeSummary, OrbitCommandRequest, OutputPage, RunDto, RunGraph, RuntimeSummary, StepSummary, WorkspaceRef } from './types.js'
-import { defaultDelegationExecutionPorts, executeDelegation } from './delegation-execution.js'
+import { OrbitSessionBridge, restoredBridgeState, sessionCanBridge, type OrbitCursorStore } from './session-bridge.js'
+import { OrbitToolBridge } from './orbit-tools.js'
+import type { Session, SessionStore } from '@deepseek-ai/dsh-session'
+import type { WorkspaceRegistry } from '@deepseek-ai/dsh-workspace'
+import type { ArtifactContent, ArtifactSummary, EdgeSummary, OrbitCommandRequest, OutputPage, RunDto, RunGraph, RuntimeSummary, StepSummary, WorkspaceRef } from './types.js'
 
 declare module '@deepseek-ai/cordis' { interface Context { orbit: OrbitRemoteService } }
 
 export class OrbitRemoteService extends TypertRemoteService {
+  static inject = ['sessions', 'workspaceRegistry', 'tools']
   private readonly gateway = new OrbitGateway()
-  private readonly host: Context
-  constructor(ctx: Context) { super(ctx, 'orbit'); this.host = ctx }
-
-  async bridgeSession(workspace: WorkspaceRef, session: Session, cursor: OrbitCursorStore, signal: AbortSignal, knownRuns: Iterable<string> = []): Promise<void> {
-    const bridge = new OrbitSessionBridge(this.gateway, cursor)
-    await Promise.all([bridge.run(workspace, String(session.id), {
-      append: event => {
-        if (event.type === 'orbit/run-started') { const { type: _type, ...data } = event; session.append('orbit/run-started', data) }
-        else if (event.type === 'orbit/run-checkpoint') { const { type: _type, ...data } = event; session.append('orbit/run-checkpoint', data) }
-        else { const { type: _type, ...data } = event; session.append('orbit/run-ended', data) }
-      },
-    }, signal, knownRuns), this.runDelegations(workspace, session, signal)])
+  private readonly bridges = new Map<string, AbortController>()
+  private readonly hostSessions: SessionStore
+  constructor(ctx: Context) {
+    super(ctx, 'orbit')
+    this.hostSessions = ctx.get('sessions') as unknown as SessionStore
+    new OrbitToolBridge(ctx, this.gateway).register()
+    for (const session of this.hostSessions.list()) this.startSessionBridge(ctx, session)
+    ctx.on('session/created', session => { this.startSessionBridge(ctx, session) }, { global: true })
+    ctx.on('session/disposed', session => { this.stopSessionBridge(String(session.id)) }, { global: true })
+    ctx.effect(() => () => {
+      for (const controller of this.bridges.values()) controller.abort()
+      this.bridges.clear()
+    }, 'orbit: stop Session Bridges')
   }
 
-  private async runDelegations(workspace: WorkspaceRef, session: Session, signal: AbortSignal): Promise<void> {
-    const agents = this.host.get('agents') as AgentRegistry | undefined
-    const subagents = this.host.get('subagents') as SubagentRuntime | undefined
-    if (!agents || !subagents) return
+  private startSessionBridge(ctx: Context, session: Session): void {
     const sessionId = String(session.id)
-    const allowedProviders = subagents.list()
-    await this.gateway.call(workspace, sessionId, 'configure_execution_lease', {
-      lease_id: `orbit:${sessionId}:${workspace.id}`,
-      workspace_id: workspace.id,
-      allowed_providers: allowedProviders,
-      max_delegations: 100,
-      max_wall_seconds: 7200,
-      expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+    if (this.bridges.has(sessionId) || !sessionCanBridge(session.header)) return
+    const cwd = session.header.cwd
+    if (!cwd) return
+    const controller = new AbortController()
+    this.bridges.set(sessionId, controller)
+    void this.runSessionBridge(ctx, session, cwd, controller.signal).finally(() => {
+      if (this.bridges.get(sessionId) === controller) this.bridges.delete(sessionId)
     })
-    const workerId = `orbit:${String(session.id)}:${crypto.randomUUID()}`
+  }
+
+  private stopSessionBridge(sessionId: string): void {
+    this.bridges.get(sessionId)?.abort()
+    this.bridges.delete(sessionId)
+  }
+
+  private async runSessionBridge(ctx: Context, session: Session, cwd: string, signal: AbortSignal): Promise<void> {
+    const registry = ctx.workspaceRegistry as WorkspaceRegistry
+    const registered = await registry.resolveByPath(cwd)
+    const workspace: WorkspaceRef = {
+      id: registered ? String(registered.id) : `cwd:${cwd}`,
+      canonicalPath: registered?.path ?? cwd,
+    }
+    const restored = restoredBridgeState(session.events)
+    const knownRuns = restored.knownRuns
+    let cursorPosition = restored.position
+    const cursor: OrbitCursorStore = {
+      load: () => cursorPosition || undefined,
+      save: (_workspaceId, _sessionId, position) => { cursorPosition = position },
+    }
+    let lastError = ''
     while (!signal.aborted) {
-      const parent = agents.get(session.id)
-      if (!parent) { await new Promise(resolve => setTimeout(resolve, 250)); continue }
-      const claimed = await this.gateway.call(workspace, sessionId, 'claim_delegation', { worker_id: workerId, lease_seconds: 30 }) as { delegation: DelegationDto | null }
-      if (!claimed.delegation) { await new Promise(resolve => setTimeout(resolve, 250)); continue }
-      await this.executeDelegation(workspace, sessionId, workerId, claimed.delegation, parent, subagents, signal)
+      try {
+        await this.bridgeSession(workspace, session, cursor, signal, knownRuns)
+        return
+      } catch (error) {
+        if (signal.aborted) return
+        const message = String(error)
+        if (message !== lastError) ctx.logger.warn(`Orbit bridge for Session ${String(session.id)} is waiting: ${message}`)
+        lastError = message
+        await new Promise<void>(resolve => {
+          const timer = setTimeout(resolve, 2_000)
+          signal.addEventListener('abort', () => { clearTimeout(timer); resolve() }, { once: true })
+        })
+      }
     }
   }
 
-  private async executeDelegation(workspace: WorkspaceRef, sessionId: string, workerId: string, delegation: DelegationDto, parent: NonNullable<ReturnType<AgentRegistry['get']>>, subagents: SubagentRuntime, outerSignal: AbortSignal): Promise<void> {
-    await executeDelegation(workspace, delegation, parent, subagents, outerSignal, {
-      ...defaultDelegationExecutionPorts,
-      settle: async (result, error) => await this.settleDelegation(
-        workspace, sessionId, workerId, delegation.delegation_id, result, error,
-      ),
-      renew: async () => {
-        const value = await this.gateway.call(workspace, sessionId, 'renew_delegation', {
-          delegation_id: delegation.delegation_id, worker_id: workerId, lease_seconds: 30,
-        }) as { delegation: DelegationDto }
-        return value.delegation
+  async bridgeSession(workspace: WorkspaceRef, session: Session, cursor: OrbitCursorStore, signal: AbortSignal, knownRuns: Iterable<string> = []): Promise<void> {
+    const bridge = new OrbitSessionBridge(this.gateway, cursor)
+    await bridge.run(workspace, String(session.id), {
+      append: async event => {
+        if (event.type === 'orbit/run-started') { const { type: _type, ...data } = event; session.append('orbit/run-started', data) }
+        else if (event.type === 'orbit/run-checkpoint') { const { type: _type, ...data } = event; session.append('orbit/run-checkpoint', data) }
+        else { const { type: _type, ...data } = event; session.append('orbit/run-ended', data) }
+        await this.hostSessions.flush(session)
       },
-    })
-  }
-
-  private async settleDelegation(workspace: WorkspaceRef, sessionId: string, workerId: string, delegationId: string, result?: unknown, error?: string): Promise<void> {
-    await this.gateway.call(workspace, sessionId, 'complete_delegation', {
-      delegation_id: delegationId, worker_id: workerId,
-      ...(error === undefined ? { result } : { error }),
-    })
+    }, signal, knownRuns)
   }
 
   @Remote('getRuntime')

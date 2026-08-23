@@ -34,8 +34,8 @@ var __esDecorate = (this && this.__esDecorate) || function (ctor, descriptorIn, 
 };
 import { TypertRemoteService, Remote } from '@deepseek-ai/dsh-typert-protocol';
 import { OrbitGateway } from './gateway.js';
-import { OrbitSessionBridge } from './session-bridge.js';
-import { defaultDelegationExecutionPorts, executeDelegation } from './delegation-execution.js';
+import { OrbitSessionBridge, restoredBridgeState, sessionCanBridge } from './session-bridge.js';
+import { OrbitToolBridge } from './orbit-tools.js';
 let OrbitRemoteService = (() => {
     let _classSuper = TypertRemoteService;
     let _instanceExtraInitializers = [];
@@ -77,75 +77,95 @@ let OrbitRemoteService = (() => {
             __esDecorate(this, null, _executeCommand_decorators, { kind: "method", name: "executeCommand", static: false, private: false, access: { has: obj => "executeCommand" in obj, get: obj => obj.executeCommand }, metadata: _metadata }, null, _instanceExtraInitializers);
             if (_metadata) Object.defineProperty(this, Symbol.metadata, { enumerable: true, configurable: true, writable: true, value: _metadata });
         }
+        static inject = ['sessions', 'workspaceRegistry', 'tools'];
         gateway = (__runInitializers(this, _instanceExtraInitializers), new OrbitGateway());
-        host;
-        constructor(ctx) { super(ctx, 'orbit'); this.host = ctx; }
-        async bridgeSession(workspace, session, cursor, signal, knownRuns = []) {
-            const bridge = new OrbitSessionBridge(this.gateway, cursor);
-            await Promise.all([bridge.run(workspace, String(session.id), {
-                    append: event => {
-                        if (event.type === 'orbit/run-started') {
-                            const { type: _type, ...data } = event;
-                            session.append('orbit/run-started', data);
-                        }
-                        else if (event.type === 'orbit/run-checkpoint') {
-                            const { type: _type, ...data } = event;
-                            session.append('orbit/run-checkpoint', data);
-                        }
-                        else {
-                            const { type: _type, ...data } = event;
-                            session.append('orbit/run-ended', data);
-                        }
-                    },
-                }, signal, knownRuns), this.runDelegations(workspace, session, signal)]);
+        bridges = new Map();
+        hostSessions;
+        constructor(ctx) {
+            super(ctx, 'orbit');
+            this.hostSessions = ctx.get('sessions');
+            new OrbitToolBridge(ctx, this.gateway).register();
+            for (const session of this.hostSessions.list())
+                this.startSessionBridge(ctx, session);
+            ctx.on('session/created', session => { this.startSessionBridge(ctx, session); }, { global: true });
+            ctx.on('session/disposed', session => { this.stopSessionBridge(String(session.id)); }, { global: true });
+            ctx.effect(() => () => {
+                for (const controller of this.bridges.values())
+                    controller.abort();
+                this.bridges.clear();
+            }, 'orbit: stop Session Bridges');
         }
-        async runDelegations(workspace, session, signal) {
-            const agents = this.host.get('agents');
-            const subagents = this.host.get('subagents');
-            if (!agents || !subagents)
-                return;
+        startSessionBridge(ctx, session) {
             const sessionId = String(session.id);
-            const allowedProviders = subagents.list();
-            await this.gateway.call(workspace, sessionId, 'configure_execution_lease', {
-                lease_id: `orbit:${sessionId}:${workspace.id}`,
-                workspace_id: workspace.id,
-                allowed_providers: allowedProviders,
-                max_delegations: 100,
-                max_wall_seconds: 7200,
-                expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+            if (this.bridges.has(sessionId) || !sessionCanBridge(session.header))
+                return;
+            const cwd = session.header.cwd;
+            if (!cwd)
+                return;
+            const controller = new AbortController();
+            this.bridges.set(sessionId, controller);
+            void this.runSessionBridge(ctx, session, cwd, controller.signal).finally(() => {
+                if (this.bridges.get(sessionId) === controller)
+                    this.bridges.delete(sessionId);
             });
-            const workerId = `orbit:${String(session.id)}:${crypto.randomUUID()}`;
+        }
+        stopSessionBridge(sessionId) {
+            this.bridges.get(sessionId)?.abort();
+            this.bridges.delete(sessionId);
+        }
+        async runSessionBridge(ctx, session, cwd, signal) {
+            const registry = ctx.workspaceRegistry;
+            const registered = await registry.resolveByPath(cwd);
+            const workspace = {
+                id: registered ? String(registered.id) : `cwd:${cwd}`,
+                canonicalPath: registered?.path ?? cwd,
+            };
+            const restored = restoredBridgeState(session.events);
+            const knownRuns = restored.knownRuns;
+            let cursorPosition = restored.position;
+            const cursor = {
+                load: () => cursorPosition || undefined,
+                save: (_workspaceId, _sessionId, position) => { cursorPosition = position; },
+            };
+            let lastError = '';
             while (!signal.aborted) {
-                const parent = agents.get(session.id);
-                if (!parent) {
-                    await new Promise(resolve => setTimeout(resolve, 250));
-                    continue;
+                try {
+                    await this.bridgeSession(workspace, session, cursor, signal, knownRuns);
+                    return;
                 }
-                const claimed = await this.gateway.call(workspace, sessionId, 'claim_delegation', { worker_id: workerId, lease_seconds: 30 });
-                if (!claimed.delegation) {
-                    await new Promise(resolve => setTimeout(resolve, 250));
-                    continue;
+                catch (error) {
+                    if (signal.aborted)
+                        return;
+                    const message = String(error);
+                    if (message !== lastError)
+                        ctx.logger.warn(`Orbit bridge for Session ${String(session.id)} is waiting: ${message}`);
+                    lastError = message;
+                    await new Promise(resolve => {
+                        const timer = setTimeout(resolve, 2_000);
+                        signal.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true });
+                    });
                 }
-                await this.executeDelegation(workspace, sessionId, workerId, claimed.delegation, parent, subagents, signal);
             }
         }
-        async executeDelegation(workspace, sessionId, workerId, delegation, parent, subagents, outerSignal) {
-            await executeDelegation(workspace, delegation, parent, subagents, outerSignal, {
-                ...defaultDelegationExecutionPorts,
-                settle: async (result, error) => await this.settleDelegation(workspace, sessionId, workerId, delegation.delegation_id, result, error),
-                renew: async () => {
-                    const value = await this.gateway.call(workspace, sessionId, 'renew_delegation', {
-                        delegation_id: delegation.delegation_id, worker_id: workerId, lease_seconds: 30,
-                    });
-                    return value.delegation;
+        async bridgeSession(workspace, session, cursor, signal, knownRuns = []) {
+            const bridge = new OrbitSessionBridge(this.gateway, cursor);
+            await bridge.run(workspace, String(session.id), {
+                append: async (event) => {
+                    if (event.type === 'orbit/run-started') {
+                        const { type: _type, ...data } = event;
+                        session.append('orbit/run-started', data);
+                    }
+                    else if (event.type === 'orbit/run-checkpoint') {
+                        const { type: _type, ...data } = event;
+                        session.append('orbit/run-checkpoint', data);
+                    }
+                    else {
+                        const { type: _type, ...data } = event;
+                        session.append('orbit/run-ended', data);
+                    }
+                    await this.hostSessions.flush(session);
                 },
-            });
-        }
-        async settleDelegation(workspace, sessionId, workerId, delegationId, result, error) {
-            await this.gateway.call(workspace, sessionId, 'complete_delegation', {
-                delegation_id: delegationId, worker_id: workerId,
-                ...(error === undefined ? { result } : { error }),
-            });
+            }, signal, knownRuns);
         }
         async getRuntime(workspace, signal) {
             signal.throwIfAborted();

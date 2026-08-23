@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+- Changed the Host Gateway to discover an independently started `orbit serve`
+  Runtime and communicate over HTTP MCP; it no longer owns a Runtime process.
+- Removed Harness Subagent execution from Session Bridge startup. CLI Agent
+  execution and credentials now stay entirely inside Orbit Runtime.
+- Automatically attach and recover Session Bridges for live root Sessions,
+  deriving the Runtime cursor from durable Session events.
+- Added loopback-only, prefix-restricted HTTP MCP Session actors so independent
+  Runtime event streams remain isolated between Harness Sessions.
+- Added six Workspace-aware native Harness tools backed by Orbit MCP. Their
+  execution derives Session routing in Host code and owns idempotency and
+  advertised-command revision checks.
+- Added a real-process independent Runtime E2E gate and endpoint rediscovery
+- Added cross-platform `ORBIT_RUNTIME_ROOT` discovery for custom Runtime database locations
+  after transport loss or Runtime restart.
+- Removed the cancelled Harness Subagent executor, provider policy, Git effect
+  observer, related tests/codecs, and direct Agent/Subagent peer dependencies.
+
 ## 0.1.0
 
 - Added the Workspace-scoped Orbit stdio Gateway and Harness MCP profile.

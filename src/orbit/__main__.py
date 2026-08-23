@@ -366,6 +366,7 @@ def _serve(args) -> None:
     from .web.builtin_handlers import BUILTIN_SCHEMAS, builtin_handlers
     from .web.local_identity import (
         LOCAL_ACTOR, local_authorizer, loopback_authenticator,
+        loopback_scoped_mcp_authenticator,
     )
     from .web.schema_guard import MixedSchemaError, assert_runtime_schema
     from .workflow.artifacts import LocalCASBackend
@@ -451,6 +452,12 @@ def _serve(args) -> None:
         os.kill(os.getpid(), signal.SIGINT)
 
     try:
+        harness_actor_prefix = "harness:session:" if args.mcp_tool_profile == "harness" else None
+        authenticator = loopback_authenticator if harness_actor_prefix is None else (
+            lambda request: loopback_scoped_mcp_authenticator(
+                request, trusted_prefix=harness_actor_prefix,
+            )
+        )
         app = create_app(
             db_path,
             workflow_db_path=workflow_db_path,
@@ -459,8 +466,8 @@ def _serve(args) -> None:
             artifact_backend=artifact_backend,
             discover_agents=not args.no_agent_discovery,
             serve_ui=True,
-            authenticator=loopback_authenticator,
-            authorizer=local_authorizer(),
+            authenticator=authenticator,
+            authorizer=local_authorizer(trusted_prefix=harness_actor_prefix),
             # One operator, one machine: the rate limit would only ever throttle
             # this person's own browser, which polls several endpoints per tick.
             unlimited_actors=(LOCAL_ACTOR,),
@@ -506,6 +513,7 @@ def _serve(args) -> None:
     base_url = f"http://{reachable}:{args.port}"
     ownership.publish(
         transport="http",
+        project_root=str(project_root),
         base_url=base_url,
         mcp_url=f"{base_url}/mcp",
     )

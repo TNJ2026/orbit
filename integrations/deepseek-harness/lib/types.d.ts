@@ -86,18 +86,6 @@ export interface ArtifactContent {
     encoding: 'base64';
     content: string;
 }
-export interface DelegationDto {
-    delegation_id: string;
-    status: string;
-    request: {
-        input: Record<string, unknown>;
-        config: Record<string, unknown>;
-    };
-    result?: unknown;
-    error?: string | null;
-    lease_expires_at?: string;
-    cancel_requested: boolean;
-}
 export interface RuntimeEventHint {
     position: number;
     run_id: string;

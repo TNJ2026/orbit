@@ -2,9 +2,9 @@
 
 | 属性 | 值 |
 | --- | --- |
-| 状态 | Draft |
-| 日期 | 2026-08-21 |
-| Orbit 范围 | Runtime、MCP/HTTP、事件、Workflow UI、Agent Handler |
+| 状态 | Implementing（独立 Runtime 架构） |
+| 日期 | 2026-08-22 |
+| Orbit 范围 | 独立 Runtime、MCP/HTTP、事件、Workflow UI、CLI Agent Handler |
 | Harness 基线 | `deepseek-ai/deepseek-harness@b150a551b8d465e31e418e1b2eaf5e79bbb7d28e`（`0.1.1-rc.2`） |
 | 首要目标 | 让 Orbit 成为 Harness 中可安装、可编排、可观察、可操作的一等 Workflow 能力 |
 
@@ -15,7 +15,8 @@ Orbit 已具备 durable Workflow、静态 DSL、版本化 Run、节点级输出�
 二者不应互相替代：
 
 - Orbit 负责 Workflow 定义、DAG 推进、节点状态、幂等、重试、恢复和 Artifact 归属。
-- Harness 负责会话、Agent Provider、CLI/SDK 子进程、Workspace、凭据、权限策略和用户交互。
+- Harness 负责会话、Workspace、Run 投影与用户交互，不负责执行 Orbit 节点。
+- Orbit Runtime 独立启动，负责 Agent CLI、凭据继承、权限、子进程和 Workspace 效果。
 - Harness Session Event 保存可回放的 Run 摘要；Orbit 始终是 Run 详情和命令权限的事实源。
 - UI 采用 Harness 原生 Client Plugin；iframe 只保留为过渡期的“在 Orbit 中打开”入口。
 
@@ -25,12 +26,10 @@ Orbit 已具备 durable Workflow、静态 DSL、版本化 Run、节点级输出�
 flowchart LR
   U[Harness 用户 / Agent] --> HP[dsh-orbit Host Plugin]
   HP --> OG[OrbitGateway]
-  OG --> OR[Orbit Runtime]
-  OR --> EQ[Delegation Queue]
-  EQ --> SP[Harness ctx.subagents]
-  SP --> A1[Codex]
-  SP --> A2[Claude Code]
-  SP --> A3[ACP Agent]
+  OG -->|HTTP MCP| OR[独立 Orbit Runtime]
+  OR --> A1[Codex CLI]
+  OR --> A2[Claude CLI]
+  OR --> A3[其他已注册 CLI]
   OR --> EB[OrbitSessionBridge]
   EB --> SE[(Harness Session Events)]
   SE --> UI[Harness Orbit Client UI]
@@ -45,15 +44,15 @@ flowchart LR
 2. Orbit Run 在 Harness 对话中显示为可回放、实时更新的原生 Run Card。
 3. 用户可在右侧详情页查看 Run、步骤、每步指令与输出、执行图、分支和 Artifact。
 4. Orbit interrupt 可以在 Harness 会话中请求用户输入并恢复 Run。
-5. Orbit 的 Agent 节点可以安全委派给 Harness 已注册的 Codex、Claude Code 或 ACP Provider。
-6. 多 Workspace、重启、断线、重复请求和并发执行下不产生重复 Agent Job。
+5. Orbit 的 Agent 节点由 Runtime 已注册的 CLI Handler 执行。
+6. Harness 重启或断线不影响 Runtime 中正在执行的 Run。
 
 ### 2.2 工程目标
 
 - 保持 Orbit HTTP/MCP 向后兼容。
 - 所有写操作继续使用服务端 `allowed_commands[]`、`expected_version` 和幂等键。
 - 日志、Artifact 内容和完整 Graph 不进入 Harness Session Event。
-- 外部 Agent CLI 的凭据、版本、进程与权限策略只由 Harness 管理。
+- 外部 Agent CLI 的凭据、版本、进程与权限策略只由 Orbit Runtime 管理。
 - 每个长期状态都可在 Host 或 Runtime 重启后重新协调。
 
 ### 2.3 非目标
@@ -79,9 +78,7 @@ integrations/deepseek-harness/
 │   ├── host/
 │   │   ├── orbit-gateway.ts
 │   │   ├── orbit-client.ts
-│   │   ├── runtime-supervisor.ts
 │   │   ├── session-bridge.ts
-│   │   ├── delegation-executor.ts
 │   │   └── remote.ts
 │   └── client/
 │       ├── index.ts
@@ -96,8 +93,7 @@ integrations/deepseek-harness/
 
 后续允许拆成：
 
-- `dsh-orbit`：Runtime 生命周期、Session Bridge、Remote API。
-- `dsh-subagent-orbit-executor`：执行租约、委派队列、`ctx.subagents` Adapter。
+- `dsh-orbit`：Runtime 发现、Session Bridge、Remote API。
 - `dsh-client-ui-orbit`：Conversation Node、详情 Drawer、Settings 和 Dashboard。
 
 ### 3.2 OrbitGateway
@@ -105,20 +101,16 @@ integrations/deepseek-harness/
 `OrbitGateway` 是 Harness 与 Orbit 的唯一 Host 边界：
 
 - 根据 Harness Session 的 Workspace Reference 解析 Orbit Project。
-- 每个规范化 Workspace 最多管理一个 Orbit Runtime。
-- 支持自动启动本地 Runtime或连接外部 Runtime。
-- 负责 readiness、版本握手、MCP/HTTP Client、认证和进程回收。
-- 多个 Agent/Session 通过引用计数共享同一 Workspace Runtime。
+- 通过 `orbit runtimes --json` 查找 `project_root` 精确匹配的 Runtime。
+- 只连接已由用户启动的 `orbit serve`，不自动启动或停止 Runtime。
+- 负责 readiness、版本握手和 HTTP MCP Client。
+- 多个 Agent/Session 复用同一 Workspace MCP endpoint。
 - 新增数据库级 Runtime ownership：对规范化数据库路径建立跨进程所有权锁、实例身份和 stale-owner 接管规则。Gateway 进程内引用计数不等于该保证；第二个 Harness 实例或用户手工执行 `orbit serve` 也必须经过同一约束。
 - 浏览器客户端不得直接访问 `127.0.0.1:8848`，统一经过 Host Remote API。
 
-Orbit 当前 `create_app()` 默认启用 `single_goal_mode`，并按 `owner_actor` 拒绝同一 actor 的第二个活跃 Run。Harness 接入不能使用与 Orbit UI 共用的 Workspace actor。Host Gateway 通过受信任 stdio metadata 为每个 Session 使用 `harness:session:*` actor；Execution Lease 阶段再升级为 Lease-scoped actor。其他备选方案保留如下：
+HTTP MCP 由 Runtime 的 loopback 身份策略授权。`harness` profile 允许 Gateway 在 `/mcp` 上用 `x-orbit-actor` 将同一本机操作者细分为 `harness:session:*`；非 loopback、非 MCP 路径、越界前缀和非法字符全部拒绝。该 actor 不增加本机操作者原本没有的 scope，但使事件查询和 `single_goal_mode` 按 Session 隔离。
 
-- 为每个 Harness Session 或 Execution Lease 签发独立 scoped actor；或
-- 为 Harness 管理的 Runtime 显式关闭 `single_goal_mode`，由 Harness Lease/预算控制并发；或
-- 改造 Orbit，将 single-goal slot 从 actor 身份中分离为显式 scope。
-
-Session-scoped actor 仍会串行同一 Session 中的多个 Run；若产品要求同一 Session 并发，优先选择 Lease-scoped actor，而不全局关闭 single-goal。身份方案必须同时定义 Run 读取、Session Bridge 和人工操作的授权范围。
+当前已选择每个 Harness Session 一个 scoped actor；不关闭 `single_goal_mode`，也不引入 Execution Lease。该方案允许不同 Session 与 Orbit UI 分别持有活跃 Run，但同一 Session 内仍由 Orbit 串行活跃 Goal。若未来要求同一 Session 并发，应单独改造 single-goal slot，而不是通过伪造更多 actor 绕过产品语义。
 
 ### 3.3 事实源
 
@@ -131,7 +123,7 @@ Session-scoped actor 仍会串行同一 Session 中的多个 Run；若产品要�
 | Artifact 元数据 | Orbit | 卡片仅保存数量/摘要 |
 | Artifact 内容 | Orbit Artifact Store | 否 |
 | 可执行操作 | Orbit `allowed_commands[]` | 否，每次操作前重读 |
-| Harness Subagent Job | Harness | Orbit 保存关联 ID 与协调状态 |
+| Agent CLI Job | Orbit Runtime | Harness 只读取所属 Step 状态 |
 
 ## 4. 接口与协议改造
 
@@ -147,6 +139,8 @@ Session-scoped actor 仍会串行同一 Session 中的多个 Run；若产品要�
 6. 加入针对 Harness MCP Client 的互操作测试和 60 秒超时测试。
 
 P0 已提供 `get_capabilities` 握手，返回 Orbit 版本、`orbit-harness/1` 集成协议、MCP 协议、事件 schema 和当前工具 profile。`harness` profile 只包含能力发现、Workflow/Run/Artifact 运行期工具。仓库内 `integrations/deepseek-harness` 是可构建的 Host Profile Bundle，按规范化 Workspace 复用 Runtime，并以 Session actor 路由调用。
+
+Harness 官方 `dsh-mcp-client` 的一个实例绑定固定 URL 与静态 headers，不能根据 `ToolRunContext` 动态选择 Workspace 和 Session actor。因此 Bundle 不直接插入一个全局 MCP Client row，而是在 `ctx.tools` 注册 `orbit_list_workflows`、`orbit_list_runs`、`orbit_inspect_run`、`orbit_start_run`、`orbit_cancel_run`、`orbit_resume_run` 六个稳定工具；执行体再通过统一 Gateway 发 MCP。Host 从调用 Agent 推导 cwd/session，写入自己生成幂等键，并在 Cancel/Resume 前重读 `allowed_commands[]`，模型不能提交 URL、actor 或 revision。
 
 `goal` 是 Run Card 和 Orbit 历史列表的主显示文本；缺失时现有 UI 会回退显示 `run_id`，所以它与 `wait`、公共 DTO 对齐都属于 P0 阻断项。
 
@@ -232,158 +226,28 @@ type OrbitRunEnded = {
 - 事件只保存展示安全的信息，不保存输入正文、日志、Artifact 内容和命令 URL。
 - Orbit `/events` 必须按已认证 actor 在数据库查询层过滤；不能先把其他 actor 的事件读到 Host 再丢弃。
 
-## 5. Harness 调用外部 Agent
+## 5. 外部 Agent 的执行边界
 
-### 5.1 标准 Agent 节点
+当前方案不让 Harness 执行 Orbit 节点，也不让 Orbit 回调 Harness Subagent。Workflow 中的 Agent 节点由独立 `orbit serve` 在 Runtime 启动时发现并注册的 CLI Handler 执行；CLI 凭据、沙箱、并发、超时、取消、进程树回收和副作用判断都归 Orbit 所有。
 
-Orbit 增加 Harness 专用 `action` Handler，不在 DSL 中出现真实 CLI。节点必须遵守当前 DSL：Node kind 只能使用既有种类，`HandlerRef` 只包含必填的 `name` / `version`，Provider 等参数属于 Node `config` 并由 Handler manifest 的 `config_schema` 约束：
+Harness 只承担三件事：通过 MCP 启动/操作 Run；把 actor-scoped Runtime Event 投影到 Session；在 UI 中展示 Run、Step、Output 和 Artifact。Harness 断开或重启不改变已运行节点的所有权，也不会导致 Runtime 重新派发 Agent。
+
+Workflow DSL 继续使用既有 `action` 节点和严格 `HandlerRef`：
 
 ```yaml
 id: implement_login_fix
 kind: action
 handler:
-  name: harness.subagent
-  version: 1.0.0
-inputs:
-  - id: request
-    schema_id: orbit://harness/subagent-request/1.0
-outputs:
-  - id: result
-    schema_id: orbit://harness/subagent-result/1.0
+  name: agent.codex
+  version: 1.2.3
 config:
-  provider: codex-safe
-  execution: background
-  result_contract: final_text
+  prompt: 实现并测试登录接口
+  timeout_seconds: 1800
 ```
 
-标准请求：
+Handler 必须在 Runtime Registry seal 前注册；CLI 安装、移除或版本变化后需重启 Runtime 才能形成新的已固定 manifest。Agent Handler 为 `UNKNOWN_ON_LEASE_LOSS`，因此不得附加 Orbit Retry Policy；编译器负责拒绝非 retry-safe Handler 上的 retry。
 
-```json
-{
-  "task": "实现并测试登录接口",
-  "context": {
-    "files": [],
-    "artifacts": [],
-    "previous_results": []
-  },
-  "constraints": {
-    "timeout_seconds": 1800,
-    "max_output_chars": 16000
-  }
-}
-```
-
-标准结果：
-
-```json
-{
-  "status": "completed",
-  "answer": "...",
-  "provider": "codex-safe",
-  "job_id": "...",
-  "effects": {
-    "changed_files": [],
-    "created_files": [],
-    "deleted_files": [],
-    "generated_artifacts": []
-  },
-  "diagnostic": null
-}
-```
-
-Codex、Claude Code、ACP 的差异由 Harness Adapter 消化，不进入 Workflow DSL。
-
-`harness.subagent@1.0.0` 必须在 Orbit Runtime composition 封版前注册。ExecutionRegistry seal 后不能动态增加 Handler。Provider 名称不应枚举进 Handler manifest；Runtime 启动后新安装的 Provider 由 Harness Gateway/Execution Lease 在执行时解析，但 Provider 的 Host 可用性变更可能仍需要 Harness 重启或 Gateway 重连。若 Handler 本身未在 Runtime 启动前注册，则必须重启 Orbit Runtime。
-
-首版将该 Handler 声明为 `UNKNOWN_ON_LEASE_LOSS`，因此 DSL 作者不得给此节点挂 Orbit Retry Policy；编译器会拒绝非 retry-safe Handler 上的 retry。只有当确定性委派协议能证明重复 execute 只重新关联同一 Harness Job、绝不会启动第二个外部 Agent，才可通过独立决策将其升级为 `REPLAY_SAFE`。
-
-### 5.2 Execution Lease
-
-Harness 启动 Run 时签发受约束租约，Orbit 不能获得通用 Harness 执行权限：
-
-```ts
-type ExecutionLease = {
-  leaseId: string
-  runId: string
-  workspaceId: string
-  sessionId: string
-  allowedProviders: string[]
-  maxConcurrency: number
-  maxDelegations: number
-  maxWallTimeSeconds: number
-  expiresAt: string
-}
-```
-
-Harness Host 在 Session Bridge 启动时通过 `configure_execution_lease`，以实时
-`ctx.subagents.list()` 固定 actor-scoped Provider 白名单、Workspace、委派次数、单次墙钟上限和过期时间。Orbit 将 Agent 节点请求提交到租约关联的 Delegation Queue；claim 在同一 SQLite 事务内完成策略校验并扣减委派次数。租约未配置或过期、Provider 不在白名单、节点墙钟预算越界或次数耗尽时，队列将该委派作为已知失败结算，不启动 Provider，也不执行降级 CLI。同一 `leaseId` 刷新会保留已消费次数；有效租约不能被另一个 ID 覆盖。
-
-有效 Lease 最长 24 小时；同一 ID 刷新时 Workspace、Provider allowlist 和预算必须完全一致，防止 refresh 变成扩权通道。Queue 提供 actor-scoped 状态统计和有界终态清理；未 reconciliation 的 `unknown` 永不由清理任务删除。
-
-### 5.3 幂等委派
-
-每次节点尝试使用确定性委派 ID：
-
-```text
-delegation_id = hash(
-  run_id + node_id + attempt_number + provider_config_revision
-)
-```
-
-Harness 以 `delegation_id` 去重：
-
-- 重复提交返回既有 Job。
-- Orbit 重启后可以重新关联。
-- 请求超时不能启动第二个 Agent。
-- Provider 配置发生语义变化时生成新的委派 ID。
-
-### 5.4 双层状态机
-
-Orbit Node Attempt 和 Harness Job 不合并为一个 Aggregate：
-
-| Harness Job | Orbit Node Attempt | 处理 |
-| --- | --- | --- |
-| 尚未确认创建 | `dispatching` | 可用同一 delegation ID 重查/重提 |
-| queued/running | `running` | 保存 Job ID，继续观察 |
-| completed 且结果有效 | `completed` | 提交标准结果与 Effect Manifest |
-| aborted | `cancelled` | 按 Workflow cancel 路由推进 |
-| Host 暂不可达 | `unknown` | 禁止自动启动新 Job |
-| Job 不存在但可能产生副作用 | `unknown` + `resolution.kind=reconciliation_required` | 转人工处理 |
-
-外部 Agent 可能已经修改 Workspace 却未成功返回结果，因此 `unknown` 不能自动重试。
-
-`reconciliation_required` 不是 Orbit 当前状态机中的状态。首版复用既有 `unknown`，通过结构化 resolution/diagnostic 标记协调原因、delegation ID 和 Harness Job ID；是否新增正式状态必须单独评估其对投影、API、事件、UI、保留策略和状态矩阵的影响。
-
-### 5.5 Workspace 隔离
-
-Workspace 不只是一条 `cwd`：
-
-```ts
-type WorkspaceRef = {
-  id: string
-  canonicalPath: string
-  repositoryId?: string
-  worktreeId?: string
-  baseRevision?: string
-  isolationMode: 'shared' | 'exclusive' | 'worktree' | 'snapshot'
-}
-```
-
-- 只读分析可使用 `shared` 或 `snapshot`。
-- 单写任务至少使用 `exclusive`。
-- 并行写任务默认使用独立 `worktree`。
-- 一个 Run 的分支合并由显式 Workflow 节点处理，不允许多个 Agent 隐式覆盖彼此修改。
-
-### 5.6 Effect Manifest
-
-Agent 最终文本不能证明实际副作用。Harness Adapter 在任务前后生成最小变更清单：
-
-- changed / created / deleted files；
-- base revision 和可选 final revision；
-- 显式生成的 Artifact；
-- 安全、截断后的命令类别摘要。
-
-Orbit 同时保存“语义结果”和“实际效果”，并允许 Workflow 对两者分别校验。
+旧的 `harness.subagent`、Execution Lease、Delegation Queue 与双层状态机方案仅保留在 P3 历史记录中，不属于当前 Harness Bundle，也不进入新 Run 的执行路径。
 
 ## 6. UI 计划
 
@@ -421,7 +285,7 @@ Card 只展示 Goal、Workflow、状态、步骤计数、当前步骤、interrup
 
 1. 概览：Goal、状态、Workflow 版本、Agent binding、时间。
 2. 结果：主结果、错误和 interrupt。
-3. 步骤：状态、指令、Attempt、Provider、Harness Job、Workspace。
+3. 步骤：状态、指令、Attempt、Runtime Agent Handler 和 Workspace。
 4. 输出：拆到每个步骤中，按需读取。
 5. Graph：绘制该 Run 实际执行的定义（见 6.2.1）。
 6. Branch：显示实际选择和跳过的 Edge。
@@ -443,7 +307,7 @@ Card 只展示 Goal、Workflow、状态、步骤计数、当前步骤、interrup
 
 #### 6.2.2 可用操作只有服务端 advertise 的那些
 
-Run 上 advertise 的命令只有 `langgraph_run.resume` 和 `langgraph_run.cancel`。**Orbit 没有 retry 命令**：retry 是节点上的编译期策略，不是用户可触发的操作，这与 5.1 中 `harness.subagent` 不得携带 Retry Policy 是同一件事的两面。
+Run 上 advertise 的命令只有 `langgraph_run.resume` 和 `langgraph_run.cancel`。**Orbit 没有 retry 命令**：retry 是节点上的编译期策略，不是用户可触发的操作；非 retry-safe Agent Handler 上的 retry 会被编译器拒绝。
 
 `langgraph_run.recover` 存在但不进 `allowed_commands[]`，且需要 `OPS_WRITE_SCOPE`。在 Harness UI 暴露它会突破 4.1.5 的最小工具 profile，属于独立决策，首版不做。
 
@@ -459,19 +323,17 @@ Orbit 正在等待确认
 [允许本次] [拒绝] [补充要求]
 ```
 
-用户响应必须携带 Session、Run、interrupt 和 revision；Host 重新读取 `allowed_commands[]` 后执行 Resume。外部 CLI 自身的权限请求首版仍按 Harness Provider 的非交互策略处理，不能与 Orbit interrupt 嵌套。
+用户响应必须携带 Session、Run、interrupt 和 revision；Host 重新读取 `allowed_commands[]` 后执行 Resume。外部 CLI 自身的权限请求由 Orbit Runtime 的非交互策略处理，不能与 Orbit interrupt 嵌套。
 
 ### 6.4 Settings Card（P2）
 
 设置项包括：
 
-- Runtime：自动启动或外部地址；
-- Orbit executable 和数据目录；
-- readiness/启动超时；
+- Runtime：独立进程的发现与连接状态；
+- Orbit executable 和 `ORBIT_RUNTIME_ROOT`；
 - 默认 Workflow；
 - 是否允许展示 sensitive output；
-- 可用 Subagent Provider 与默认预算；
-- Runtime 版本、健康状态和重启操作；
+- Runtime 版本和健康状态；
 - “在 Orbit 中打开”入口。
 
 秘密值只保存 Credential Reference，不进入普通配置或 Client Bundle。
@@ -486,26 +348,27 @@ Orbit 正在等待确认
 
 当前仓库内基线（`codex/deepseek-harness-p0`）：
 
-- 已完成：MCP `goal` / `wait`、公共 Run DTO、`structuredContent` / `outputSchema`、`harness` profile、能力握手、actor 级事件过滤、跨进程数据库 OS ownership lock、Session actor 路由、Workspace Gateway、Host Remote 与 Profile Bundle。
+- 已完成：MCP `goal` / `wait`、公共 Run DTO、`structuredContent` / `outputSchema`、`harness` profile、能力握手、跨进程数据库 OS ownership lock、Runtime endpoint 发布、Workspace Gateway、Host Remote 与 Profile Bundle。
 - 已完成测试：MCP/HTTP 契约、profile、actor 事件隔离、ownership 互斥与 CLI surface。
-- 已验证：独立 TypeScript build、npm pack、真实 `orbit mcp` capability handshake、Gateway 子进程端到端调用。合入 Harness 主仓后仍需运行 Typert 生成阶段和该仓的 Loader 安装/卸载门禁。
+- 已验证：独立 TypeScript build、npm pack、Gateway MCP 契约测试，以及临时 Workspace 中真实 `orbit serve` 的发现、双 Session actor 调用和 Host release 后 Runtime 存活。transport loss 会清除 endpoint cache，下一次调用重新发现重启后地址。另已在隔离的 DeepSeek Harness `0.1.0-rc.6` Web Profile 中通过本地 Bundle 安装、配置合成、Host/Web 启动（HTTP 200）和卸载无残留冒烟。
 
 交付：
 
 - Harness MCP compatibility profile。
 - MCP `start_run` 暴露 Service 已有的 `goal` / `wait` 参数，Harness 默认 `wait=false`。
 - 结构化 MCP 结果，以及 MCP/HTTP 公共 Run DTO 对齐：`goal`、`template_id`、`agent_binding`、`artifact_count`、`allowed_commands[]`。
-- OrbitGateway、Runtime Supervisor、版本握手和健康检查。
+- OrbitGateway、Runtime 发现、版本握手和健康检查。
 - actor/single-goal 并发方案及其授权边界。
 - 数据库级 Runtime ownership 与跨进程互斥。首版使用内核持有的非阻塞文件锁：进程退出后由 OS 自动释放，不实现依赖 heartbeat 的强行 steal；锁文件 JSON 仅用于诊断。
 - Host Remote 查询 API，以及供 P1 Cancel/Resume 使用的受限 `executeCommand`；写接口只接受服务端 advertise 的命令，不接受任意 URL。
+- Agent 原生工具面；`start` 固定 `wait=false`，Cancel/Resume 由 Host 获取最新 revision。
 - Bundle 安装、启动和卸载冒烟测试。
 
 验收：
 
 - Harness 可在 60 秒工具超时内创建后台 Run。
 - Harness 启动的 Run 在 Orbit 历史和 Run Card 中保留原始 Goal，不回退显示 Run ID。
-- 同一 Workspace 多 Session 不启动重复 Runtime；第二个 Harness 进程和手工 `orbit serve` 也不能同时取得同一数据库的执行所有权。
+- 同一 Workspace 多 Session 复用一个已发现 endpoint；Harness 不取得 Runtime 数据库执行所有权。
 - Harness Run 不与 Orbit UI 的活跃 Goal 因共享 actor 意外冲突，并发行为符合选定的 single-goal 方案。
 - Runtime 不在线时返回可诊断错误，Host 不阻塞。
 - HTTP 与 MCP 对同一 Run 返回一致的公共 DTO；`owner_actor` 等内部字段不对外暴露。
@@ -516,6 +379,7 @@ Orbit 正在等待确认
 
 - `list_runtime_events` 与 `get_run_steps` 已进入 `harness` MCP profile，事件在查询层按 Session actor 隔离。
 - `OrbitSessionBridge` 按 position 续读、按 Run 合并 500ms 窗口、终态立即写入，并仅持久化展示安全的快照字段。
+- Host 对启动时恢复和新建的 root Session 自动挂载 Bridge；Session disposal 中止轮询。cursor 与 known Run 从持久化的 `orbit/run-*` 事件重建，不引入第二个 cursor 数据库。
 - Bridge 在首次观察到任意 Run（包括只观察到终态）时先补 `orbit/run-started`，保证 Conversation assembler 始终具有唯一 start。
 - Web Client 已提供 `orbit-run` Conversation Node definition、`sourcePosition` 幂等 reducer 和基础 Run Card renderer；详情能力在 P2 基线上继续增强。
 
@@ -560,7 +424,12 @@ Orbit 正在等待确认
 - stale revision 提示刷新，不重复执行命令。
 - 没有 sensitive scope 时 UI 明确降级且不泄漏内容。
 
-### P3：Harness Subagent 执行桥
+### P3：Harness Subagent 执行桥（已取消）
+
+本节以下内容是旧方案记录，不再是目标架构。Harness Host 不再启动 delegation worker，也不调用 `ctx.subagents`。独立 `orbit serve` 使用 Runtime 自身发现并注册的 CLI Handler 执行节点。历史 Queue/Lease 数据继续可读以兼容旧 Run，但不进入新 Harness Session 的执行路径。
+
+<details>
+<summary>已取消方案的历史实现记录</summary>
 
 当前实现基线：
 
@@ -582,7 +451,7 @@ Orbit 正在等待确认
 - `effects=write` 只有在 Host Workspace 实际标记为 `exclusive/worktree` 且与节点请求一致时才允许启动；当前 worker 强制 `max_concurrency=1`，不能满足的 Workflow 在 Handler validation 阶段失败。
 - Host 对 Git Workspace 做执行前后快照，输出 changed/created/deleted、base/final revision 和观察可信等级；已脏文件再次变化通过内容摘要识别。声明只读却产生文件变化时按策略失败。
 
-仍需完成：由 Harness Workspace Service 实际创建/回收并行 worktree（当前只验证、不会伪造隔离）、Provider 内部 LLM 调用次数的统一计量，以及 Codex/Claude/ACP 真实安装组合的端到端进程故障注入。Provider-neutral 的策略矩阵已经自动化，但不能替代真实 CLI/ACP 进程测试。Harness 当前公开的 `SubagentStartRequest` 没有任意 cwd 或 max-call 参数，Workspace Registry 也只能登记已有目录；前两项不能靠插件字段或孤立创建 Git worktree 假装已生效。
+取消时仍未完成的内容包括 Harness Workspace Service worktree 管理、Provider 内部调用计量和真实 Provider 组合故障注入；新架构不再追踪这些 Harness Provider 工作项。
 
 交付：
 
@@ -604,6 +473,8 @@ Orbit 正在等待确认
 - 未知外部结果进入人工协调，不能自动重跑。
 - 并行写节点位于不同 worktree。
 - UI 只显示一个 Orbit Step，Harness Job 作为其执行详情，不重复生成聊天卡片。
+
+</details>
 
 ### P4：完整工作区与产品化
 
@@ -636,12 +507,11 @@ Orbit 正在等待确认
 
 ### 8.3 状态与故障注入
 
-- 提交前断线、提交后确认前断线、Job 完成后结果返回前断线。
-- Job ID 丢失、Provider 不可用、子进程异常退出。
-- 重复 completion、迟到结果和 cancel/result 竞态。
-- `unknown` / `resolution.kind=reconciliation_required` 不被自动重试。
-- 非 retry-safe `harness.subagent` 节点携带 Retry Policy 时的编译拒绝。
-- Budget、Lease、Run Deadline 和 Provider 并发限制。
+- MCP 提交前断线、提交后响应丢失和幂等重试。
+- Runtime 停止、换端口重启、endpoint cache 失效和重新发现。
+- Session Bridge cursor 恢复、重复 Event、损坏历史 Event 和终态竞态。
+- 非 retry-safe Runtime Agent Handler 携带 Retry Policy 时的编译拒绝。
+- Run Deadline、CLI Handler 超时、取消和并发限制。
 
 ### 8.4 UI 测试
 
@@ -655,20 +525,20 @@ Orbit 正在等待确认
 ### 8.5 端到端场景
 
 1. Harness Agent 启动 Orbit Run，Card 实时完成。
-2. Run 在一个 Agent 节点委派 Codex，产生代码变更和 Effect Manifest。
-3. 两个分支分别委派不同 Provider，在独立 worktree 执行。
+2. 独立 Orbit Runtime 的 Agent Handler 调用 Codex/Claude CLI，Harness 只观察结果。
+3. 两个分支由 Runtime 按 Workflow 和 Workspace 策略并发执行。
 4. Orbit interrupt 在 Harness 会话中请求确认并恢复。
-5. Harness/Orbit 任一方中途重启，Run 和 Job 正确重新关联。
-6. Agent 产生副作用后连接丢失，系统进入人工协调而非重复执行。
+5. Harness 重启后恢复 Card；Orbit 换端口重启后 Gateway 自动重新发现。
+6. Harness 断开不取消、不重派 Runtime 已拥有的 Agent 进程。
 
 ## 9. 安全与治理
 
-- Orbit DSL 只能引用 Harness 中已注册的 Provider 名称。
-- Harness 不接受 Orbit 提供的任意 executable、URL、环境变量或凭据。
-- Provider allowlist、预算和权限模式由 Execution Lease 固定。
+- Orbit DSL 只能引用 Runtime seal 前注册且 manifest 已固定的 Handler。
+- Harness 不接受模型或 Browser 提供的 executable、endpoint、actor、环境变量或凭据。
+- Agent CLI allowlist、预算和权限模式由 Orbit Runtime 配置固定。
 - Client 永远不持有 Orbit 管理 token 或 Agent 凭据。
 - 原始输出必须通过 sensitive scope，并执行现有脱敏/大小限制。
-- Cancel、危险 Resume 和 bypass Provider 需要显式策略与 UI 确认。
+- Cancel 和 Resume 只能来自最新 `allowed_commands[]`；危险 Resume 需要显式 UI 确认。
 - Session Event 和 Telemetry 只记录安全摘要，不记录任务私密正文。
 - Effect Manifest 是观察结果，不宣称可以回滚副作用。
 
@@ -682,9 +552,8 @@ workspace_id
 orbit_run_id
 orbit_node_id
 orbit_attempt_id
-delegation_id
-harness_job_id
-provider_name
+handler_name
+handler_version
 ```
 
 关键指标：
@@ -692,9 +561,9 @@ provider_name
 - Runtime 启动成功率与 readiness 延迟；
 - Session Event Bridge 延迟、断线和重放数量；
 - Run/Node 状态持续时间；
-- 委派去重命中数；
+- MCP 幂等命中数；
 - unknown/reconciliation 数量；
-- Provider 调用、并发、取消和失败率；
+- Runtime Agent Handler 调用、并发、取消和失败率；
 - Remote 和 Output 读取延迟；
 - Event 合并前后数量。
 
@@ -705,37 +574,31 @@ provider_name
 | 风险 | 影响 | 缓解 |
 | --- | --- | --- |
 | Harness 处于 Developer Preview，插件契约变化 | 编译或加载失败 | 固定基线 commit，建立兼容矩阵和冒烟测试 |
-| Orbit 与 Harness 形成循环调用 | 取消、身份和故障归属混乱 | Execution Lease + Queue，不暴露通用回调 API |
-| 外部 Agent 已产生副作用但结果未知 | 重试造成重复修改 | 确定性 delegation ID、unknown 终态、人工协调 |
+| Orbit 与 Harness 形成循环调用 | 取消、身份和故障归属混乱 | Runtime 独立拥有执行；Harness 仅经 MCP 操作和观察 |
+| 外部 Agent 已产生副作用但结果未知 | 重试造成重复修改 | Agent Handler 使用 `UNKNOWN_ON_LEASE_LOSS`，禁止 Orbit retry |
 | Harness 与 Orbit UI 共享 actor | 默认 single-goal 互相阻塞 | 独立 profile/session/lease actor，不全局关闭 single-goal |
 | 多进程驱动同一 Runtime 数据库 | 重复执行、错误恢复和 checkpoint 竞争 | 数据库 OS ownership lock；活进程不可 steal，退出自动释放 |
-| 多 Agent 共享 cwd | 文件竞争和覆盖 | exclusive/worktree 隔离 |
+| 多 Agent 共享 cwd | 文件竞争和覆盖 | 由 Orbit Workspace/Workflow 策略提供 exclusive/worktree 隔离 |
 | 会话事件过大 | 回放慢、泄密 | 只写摘要快照，大内容按需读取 |
 | UI 与 Runtime 状态不同步 | 展示错误或执行旧命令 | Event 仅作提示，操作前重读 DTO |
-| Provider 权限过宽 | Workspace 或凭据风险 | 静态 Provider、Lease allowlist、默认安全模式 |
-| Runtime seal 后 Handler/Provider 变化 | 新能力在 Catalog 可见但不可执行 | 稳定通用 Handler 在 seal 前注册，Provider 运行时解析，披露重启边界 |
-| Run Card 与 Job Card 重复 | 用户无法判断层级 | Orbit Run 为主节点，内部 Job 只做执行详情 |
+| Agent CLI 权限过宽 | Workspace 或凭据风险 | Runtime 静态 allowlist、最小环境和默认安全模式 |
+| Runtime seal 后 Handler/CLI 变化 | 新安装 CLI 不可执行 | 重启 Runtime，生成并固定新的 Handler manifest |
 
 ## 12. 待确认决策
 
 以下决策应在相应阶段实现前固化为 ADR 或协议文档。actor/single-goal 和数据库 ownership 的 P0 方案已经选定：
 
 1. 集成代码长期放在 Orbit 仓库还是独立 npm 仓库。
-2. **已定：** Gateway 使用 Session-scoped actor；P3 Lease 支持后使用 Lease-scoped actor。不与 UI 共用 actor，也不全局关闭 `single_goal_mode`。
+2. **已定：** Gateway 使用 Session-scoped actor。不与 Orbit UI 共用 actor，也不全局关闭 `single_goal_mode`。
 3. **已定：** CLI `serve` / `mcp` 对规范化数据库路径取得 OS ownership lock；活进程不可 steal，进程退出由内核释放，手工启动遵循同一规则。非 CLI embedder 必须显式使用同一 ownership helper。
-4. Orbit → Harness Delegation Queue 使用长轮询、WebSocket、MCP 还是独立本地 IPC。
-5. Harness Session Event 的字段大小和更新频率上限。
-6. Workspace worktree 由 Harness、Orbit 还是独立 Workspace Service 创建和回收。
-7. Effect Manifest 的可信等级：文件扫描结果、Git diff 或 Provider 原生报告。
-8. Orbit interrupt 与 Harness Human Command 的正式协议边界。
-9. P3 首版使用既有 `unknown + resolution.kind=reconciliation_required`；是否值得新增正式 `reconciliation_required` 状态。
-10. `harness.subagent` 何时具备足够的端到端幂等与恢复证据，可从 `UNKNOWN_ON_LEASE_LOSS` 升级为 `REPLAY_SAFE`；升级前禁止 Retry Policy。
-11. Runtime seal 后 Harness Provider 安装/移除的发现、重连和重启语义。
-12. P3 是否需要支持可继续执行的外部 Agent 会话，还是保持 one-shot。
+4. Harness Session Event 的字段大小和更新频率上限。
+5. Orbit interrupt 与 Harness Human Command 的正式协议边界。
+6. 自定义 Runtime discovery root 应长期使用环境变量还是 Bundle 配置 schema。
+7. Runtime Agent CLI 安装、移除和升级后的 manifest 迁移体验。
 
 ## 13. 首个垂直切片
 
-第一阶段不要同时实现所有页面和 Agent Provider。建议先完成以下可演示、可验证的闭环：
+第一阶段先完成以下可演示、可验证的闭环：
 
 ```text
 Harness Agent 启动 Orbit Run
@@ -747,7 +610,7 @@ Harness Agent 启动 Orbit Run
 → 刷新 Harness 后从 Session Event 恢复同一张 Card
 ```
 
-该切片完成后再接 `harness.subagent`，可以先验证 Host、事件、UI、权限和恢复边界，避免把 Runtime 接入与外部 Agent 编排两类风险同时引入。
+该切片已经完成。下一阶段只扩展 Harness 原生历史/Catalog、Workflow 编辑入口、Artifact 导入和发布诊断，不再引入 Harness 反向执行 Orbit 节点。
 
 ## 14. 参考
 
@@ -782,14 +645,14 @@ Harness Agent 启动 Orbit Run
 | O-P0-1 | MCP Harness 契约收口 | Orbit | profile、握手、DTO、异步 start | Orbit 契约测试与全量测试通过；真实 Harness MCP Client 在 60 秒内拿到后台 Run DTO |
 | O-P0-2 | Runtime ownership | Orbit | CLI `serve`/`mcp` OS lock、诊断 | 两进程竞争只有一个成功；持有进程退出后另一进程可取得锁 |
 | O-P0-3 | actor 事件隔离 | Orbit | `/events` 查询层过滤 | 任意 cursor 下均不返回其他 actor 的 Run/Node 元数据 |
-| H-P0-1 | OrbitGateway 与 Supervisor | Harness | Workspace 规范化、引用计数、启动/连接、readiness | 同进程多 Session 复用 Runtime；不兼容版本快速失败（O-P0-1、O-P0-2） |
+| H-P0-1 | OrbitGateway 与 Runtime Discovery | Harness | Workspace 规范化、endpoint 发现、MCP readiness | 多 Session 复用独立 Runtime；不兼容版本快速失败（O-P0-1、O-P0-2） |
 | H-P0-2 | Host Remote 契约 | Harness | `orbit` Host service、Typert Remote、输入校验 | Client 不接触 loopback/token；查询和 advertised command 具备严格 codec（H-P0-1） |
 | H-P0-3 | Profile Bundle 与互操作门禁 | Harness | 正式 npm Bundle、安装/卸载 smoke、MCP fixture | 干净 Profile 安装后发现最小工具集，卸载后无残留（O-P0-1） |
 | H-P1-1 | Session Bridge | Harness | actor-scoped cursor 消费、节流、三类事件 | 断线续读无重复/漏终态；事件不含敏感正文（H-P0-1） |
 | H-P1-2 | Conversation Run Card | Harness Client | reducer、卡片、状态与操作入口 | 历史回放、prepend、live append 一致（H-P1-1、H-P0-2） |
 | H-P2-1 | Run Detail Drawer | Harness Client | 右侧路由 Drawer、Graph/Step/Artifact | 刷新可恢复；逐步骤输出 cursor 正确（H-P0-2） |
 | H-P2-2 | Human Command | Harness Host/Client | interrupt 展示、受限 Resume | stale revision 不执行；按钮来自 schema/安全映射（H-P2-1） |
-| X-P3-1 | Harness Subagent Handler 协议 | 两边 | manifest、Lease、Queue、delegation ID | 编译期拒绝 retry；重复提交只关联一个 Job |
-| X-P3-2 | Provider Adapter 与协调 | Harness | Codex/Claude/ACP Adapter、unknown resolution | 故障注入不重复副作用，取消可回收子进程（X-P3-1） |
+| O-P3-1 | Runtime CLI Agent 执行加固 | Orbit | 固定 CLI Handler、取消、超时、输出契约 | Harness 断开不影响执行；Runtime 可回收 CLI 进程树 |
+| H-P3-1 | 独立 Runtime E2E | Harness/Orbit | 安装、发现、启动 Run、断线恢复 | 真实 Harness 只经 MCP 完成全流程且不产生 Runtime 子进程 |
 
-建议并行波次：第一波 `O-P0-1/2/3`；第二波 `H-P0-1` 与 `H-P0-3`；第三波 `H-P0-2` 与 `H-P1-1`；之后 UI 和 Subagent 两条线可独立推进。
+后续顺序：先完成 `H-P3-1` 真实端到端门禁，再补 Session Bridge 自动挂载，最后加固 Runtime CLI Agent 的跨平台取消与并发策略。

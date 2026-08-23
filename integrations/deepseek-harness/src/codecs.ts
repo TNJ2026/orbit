@@ -1,4 +1,4 @@
-import type { ArtifactContent, ArtifactSummary, DelegationDto, EdgeSummary, OutputPage, RunDto, StepSummary } from './types.js'
+import type { ArtifactContent, ArtifactSummary, EdgeSummary, OutputPage, RunDto, StepSummary } from './types.js'
 
 function object(value: unknown, path: string): Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error(`invalid Orbit DTO at ${path}: expected object`)
@@ -40,15 +40,6 @@ function decodeStep(value: unknown, index: number): StepSummary {
   return item as StepSummary
 }
 
-function decodeDelegation(value: unknown): DelegationDto {
-  const item = object(value, 'delegation')
-  string(item.delegation_id, 'delegation.delegation_id'); string(item.status, 'delegation.status')
-  boolean(item.cancel_requested, 'delegation.cancel_requested')
-  const request = object(item.request, 'delegation.request')
-  object(request.input, 'delegation.request.input'); object(request.config, 'delegation.request.config')
-  return item as unknown as DelegationDto
-}
-
 export function decodeToolResult(name: string, value: unknown): unknown {
   if (['inspect_run', 'start_run', 'resume_run', 'cancel_run'].includes(name)) return decodeRun(value)
   const item = object(value, name)
@@ -68,7 +59,6 @@ export function decodeToolResult(name: string, value: unknown): unknown {
   if (name === 'list_artifacts') { array(item.artifacts, 'artifacts').forEach((v, i) => { const a = object(v, `artifacts[${i}]`); string(a.artifact_id, `artifacts[${i}].artifact_id`); string(a.run_id, `artifacts[${i}].run_id`) }); return item as { artifacts: ArtifactSummary[] } }
   if (name === 'read_artifact') { string(item.artifact_id, 'artifact.artifact_id'); string(item.run_id, 'artifact.run_id'); return item as ArtifactSummary }
   if (name === 'read_artifact_content') { object(item.artifact, 'artifact_content.artifact'); if (string(item.encoding, 'artifact_content.encoding') !== 'base64') throw new Error('invalid Orbit DTO at artifact_content.encoding'); string(item.content, 'artifact_content.content'); return item as unknown as ArtifactContent }
-  if (['claim_delegation', 'renew_delegation', 'complete_delegation'].includes(name)) return { ...item, delegation: item.delegation === null ? null : decodeDelegation(item.delegation) }
   if (name === 'list_runtime_events') { array(item.events, 'events'); number(item.next_position, 'next_position'); return item }
   return item
 }

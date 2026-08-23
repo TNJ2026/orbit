@@ -28,7 +28,12 @@ class DeepSeekHarnessBundleTests(unittest.TestCase):
     def test_host_sources_include_gateway_and_remote_contract(self) -> None:
         gateway = (BUNDLE / "src" / "gateway.ts").read_text(encoding="utf-8")
         remote = (BUNDLE / "src" / "index.ts").read_text(encoding="utf-8")
-        self.assertIn("--actor-prefix', 'harness:session:", gateway)
+        self.assertIn("'runtimes', '--json'", gateway)
+        self.assertIn("entry.project_root === workspaceRoot", gateway)
+        self.assertIn("entry.mcp_url", gateway)
+        self.assertIn("'x-orbit-actor': actor", gateway)
+        self.assertIn("process.env.ORBIT_RUNTIME_ROOT", gateway)
+        self.assertNotIn("'mcp', '--transport'", gateway)
         self.assertIn("@Remote('getRuntime')", remote)
         self.assertIn("@Remote('executeCommand')", remote)
         self.assertIn("@Remote('getGraph')", remote)
@@ -62,25 +67,24 @@ class DeepSeekHarnessBundleTests(unittest.TestCase):
         self.assertIn("刷新核对状态", client)
         self.assertIn("@Remote('reconcileDelegation')", (BUNDLE / "src" / "index.ts").read_text(encoding="utf-8"))
 
-    def test_p3_delegation_worker_uses_native_subagent_runtime(self) -> None:
+    def test_agent_tools_use_independent_runtime_mcp(self) -> None:
         remote = (BUNDLE / "src" / "index.ts").read_text(encoding="utf-8")
+        tools = (BUNDLE / "src" / "orbit-tools.ts").read_text(encoding="utf-8")
         manifest = json.loads((BUNDLE / "package.json").read_text(encoding="utf-8"))
-        self.assertIn("configure_execution_lease", remote)
-        self.assertIn("claim_delegation", remote)
-        self.assertIn("renew_delegation", remote)
-        self.assertIn("@deepseek-ai/dsh-subagent", manifest["peerDependencies"])
-        effects = (BUNDLE / "src" / "effects.ts").read_text(encoding="utf-8")
-        self.assertIn("--porcelain=v1", effects)
-        execution = (BUNDLE / "src" / "delegation-execution.ts").read_text(encoding="utf-8")
-        self.assertIn("effectManifest", execution)
-        self.assertIn("delegationRefusal(workspace, delegation, subagents.list())", execution)
-        self.assertIn("subagents.start", execution)
-        self.assertIn("cancel_requested", execution)
-        self.assertIn("try { result = await run.result }", execution)
-        self.assertIn("if (run) await run.dispose()", execution)
-        policy = (BUNDLE / "src" / "delegation-policy.ts").read_text(encoding="utf-8")
-        self.assertIn("registeredProviders.includes", policy)
-        self.assertIn("write delegation refused", policy)
+        self.assertIn("new OrbitToolBridge(ctx, this.gateway).register()", remote)
+        for name in (
+            "orbit_list_workflows", "orbit_list_runs", "orbit_inspect_run",
+            "orbit_start_run", "orbit_cancel_run", "orbit_resume_run",
+        ):
+            self.assertIn(name, tools)
+        self.assertIn("exec.agent?.session", tools)
+        self.assertIn("wait: false", tools)
+        self.assertIn("run.allowed_commands.find", tools)
+        self.assertNotIn("configure_execution_lease", remote)
+        self.assertNotIn("claim_delegation", remote)
+        self.assertNotIn("@deepseek-ai/dsh-subagent", manifest["peerDependencies"])
+        for removed in ("effects.ts", "delegation-execution.ts", "delegation-policy.ts"):
+            self.assertFalse((BUNDLE / "src" / removed).exists())
 
 
 if __name__ == "__main__":

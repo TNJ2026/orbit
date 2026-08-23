@@ -9,7 +9,6 @@ export interface OutputChunk { chunk_id: number; node_id: string; attempt_id: st
 export interface OutputPage { chunks: OutputChunk[]; after: number; has_more: boolean }
 export interface ArtifactSummary { artifact_id: string; run_id: string; [key: string]: unknown }
 export interface ArtifactContent { artifact: ArtifactSummary; encoding: 'base64'; content: string }
-export interface DelegationDto { delegation_id: string; status: string; request: { input: Record<string, unknown>; config: Record<string, unknown> }; result?: unknown; error?: string | null; lease_expires_at?: string; cancel_requested: boolean }
 export interface RuntimeEventHint { position: number; run_id: string; event_type: string; revision: number; occurred_at: string; node_id?: string; attempt_id?: string }
 export interface RuntimeEventPage { events: RuntimeEventHint[]; next_position: number }
 export interface OrbitRunStarted { type: 'orbit/run-started'; sourcePosition: number; runId: string; workspaceId: string; goal: string; workflowId: string; workflowVersion: number; revision: number; status: string; createdAt: string }

@@ -16,7 +16,6 @@ test('step codec validates reconciliation markers', () => {
   assert.throws(() => decodeToolResult('get_run_steps', { steps: [{ node_id: 'agent', status: 'unknown', reconciliation: { outcome: 'maybe', note: '', created_at: 'now' } }] }), /reconciliation.outcome/)
 })
 
-test('delegation and output codecs reject malformed payloads', () => {
-  assert.throws(() => decodeToolResult('claim_delegation', { delegation: { delegation_id: 'd', status: 'leased', cancel_requested: 'no', request: { input: {}, config: {} } } }), /cancel_requested/)
+test('output codec rejects malformed payloads', () => {
   assert.throws(() => decodeToolResult('read_run_output', { chunks: [], after: '0', has_more: false }), /output.after/)
 })

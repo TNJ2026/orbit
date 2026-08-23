@@ -4,6 +4,27 @@ import { OrbitGateway } from './gateway.js'
 export interface OrbitEventSink { append(event: OrbitSessionEvent): void | Promise<void> }
 export interface OrbitCursorStore { load(workspaceId: string, sessionId: string): number | undefined | Promise<number | undefined>; save(workspaceId: string, sessionId: string, position: number): void | Promise<void> }
 
+export interface StoredOrbitEvent { type: string; data: unknown }
+
+export function restoredBridgeState(events: readonly StoredOrbitEvent[]): { position: number; knownRuns: Set<string> } {
+  const prior = events.flatMap(event => {
+    if (event.type !== 'orbit/run-started' && event.type !== 'orbit/run-checkpoint' && event.type !== 'orbit/run-ended') return []
+    if (event.data === null || typeof event.data !== 'object' || Array.isArray(event.data)) return []
+    const data = event.data as { runId?: unknown; sourcePosition?: unknown }
+    const runId = typeof data.runId === 'string' ? data.runId : ''
+    const sourcePosition = Number(data.sourcePosition)
+    return runId && Number.isSafeInteger(sourcePosition) && sourcePosition >= 0 ? [{ runId, sourcePosition }] : []
+  })
+  return {
+    knownRuns: new Set(prior.map(event => event.runId)),
+    position: prior.reduce((latest, event) => Math.max(latest, event.sourcePosition), 0),
+  }
+}
+
+export function sessionCanBridge(header: { cwd?: string; delegationDepth?: number }): boolean {
+  return Boolean(header.cwd) && (header.delegationDepth ?? 0) === 0
+}
+
 const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'unknown'])
 
 export class OrbitSessionBridge {
@@ -11,15 +32,15 @@ export class OrbitSessionBridge {
 
   async run(workspace: WorkspaceRef, sessionId: string, sink: OrbitEventSink, signal: AbortSignal, knownRuns: Iterable<string> = []): Promise<void> {
     const release = await this.gateway.acquire(workspace)
-    const known = new Set(knownRuns)
-    let position = await this.cursor.load(workspace.id, sessionId)
     try {
+      const known = new Set(knownRuns)
+      let position = await this.cursor.load(workspace.id, sessionId)
       while (!signal.aborted) {
         const page = await this.gateway.call(workspace, sessionId, 'list_runtime_events', {
           ...(position === undefined ? {} : { after_position: position }), limit: 200,
         }) as RuntimeEventPage
         const latest = new Map<string, number>()
-        for (const event of page.events) latest.set(event.run_id, event.position)
+        for (const event of page.events) latest.set(event.run_id, Math.max(latest.get(event.run_id) ?? 0, event.position))
         for (const [runId, sourcePosition] of latest) {
           const run = await this.gateway.run(workspace, sessionId, runId)
           const steps = await this.gateway.call(workspace, sessionId, 'get_run_steps', { run_id: runId }) as { steps: StepSummary[] }

@@ -20,6 +20,7 @@ from orbit.platform import process as process_port
 from orbit.web.api_v1 import READ_SCOPE, SENSITIVE_SCOPE, WRITE_SCOPE, Authorizer
 from orbit.web.local_identity import (
     LOCAL_ACTOR, local_authorizer, loopback_authenticator,
+    loopback_scoped_mcp_authenticator,
 )
 from orbit.workflow.handlers.context import ScopedSecretResolver, SecretAccessError
 from orbit.workflow.handlers.dev_tools import (
@@ -88,6 +89,44 @@ class AuthorizationTests(unittest.TestCase):
         guard = local_authorizer()
         self.assertTrue(guard.allows(LOCAL_ACTOR, WRITE_SCOPE))
         self.assertFalse(guard.allows("someone-else", READ_SCOPE))
+
+    def test_loopback_mcp_may_refine_local_identity_under_one_prefix(self) -> None:
+        request = SimpleNamespace(
+            client=SimpleNamespace(host="127.0.0.1"),
+            url=SimpleNamespace(path="/mcp"),
+            headers={"x-orbit-actor": "harness:session:abc-123"},
+        )
+        actor = loopback_scoped_mcp_authenticator(
+            request, trusted_prefix="harness:session:",
+        )
+        self.assertEqual("harness:session:abc-123", actor)
+        self.assertTrue(local_authorizer(
+            trusted_prefix="harness:session:",
+        ).allows(actor, WRITE_SCOPE))
+
+    def test_scoped_identity_is_not_accepted_off_mcp_or_outside_prefix(self) -> None:
+        base = {
+            "client": SimpleNamespace(host="127.0.0.1"),
+            "headers": {"x-orbit-actor": "attacker"},
+        }
+        invalid = SimpleNamespace(**base, url=SimpleNamespace(path="/mcp"))
+        self.assertIsNone(loopback_scoped_mcp_authenticator(
+            invalid, trusted_prefix="harness:session:",
+        ))
+        api = SimpleNamespace(**base, url=SimpleNamespace(path="/api/v1/runs"))
+        self.assertEqual(LOCAL_ACTOR, loopback_scoped_mcp_authenticator(
+            api, trusted_prefix="harness:session:",
+        ))
+
+    def test_scoped_identity_requires_a_session_suffix(self) -> None:
+        request = SimpleNamespace(
+            client=SimpleNamespace(host="127.0.0.1"),
+            url=SimpleNamespace(path="/mcp"),
+            headers={"x-orbit-actor": "harness:session:"},
+        )
+        self.assertIsNone(loopback_scoped_mcp_authenticator(
+            request, trusted_prefix="harness:session:",
+        ))
 
 
 class WorkspacePathTests(unittest.TestCase):

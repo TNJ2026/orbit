@@ -250,7 +250,7 @@ function OrbitSettings({ useWorkspaces }: { useWorkspaces: <T>(selector: (state:
   return createElement('section', null,
     createElement('strong', null, 'Orbit Runtime'),
     createElement('p', null, `${workspace?.title || 'Workspace'} · ${status}`),
-    createElement('small', null, 'Runtime 按 Workspace 自动启动，并使用当前 Harness Session 隔离运行身份。'),
+    createElement('small', null, '连接独立 Orbit Runtime，并使用当前 Harness Session 隔离 MCP 运行身份。'),
   )
 }
 

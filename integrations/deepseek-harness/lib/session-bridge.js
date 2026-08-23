@@ -1,3 +1,22 @@
+export function restoredBridgeState(events) {
+    const prior = events.flatMap(event => {
+        if (event.type !== 'orbit/run-started' && event.type !== 'orbit/run-checkpoint' && event.type !== 'orbit/run-ended')
+            return [];
+        if (event.data === null || typeof event.data !== 'object' || Array.isArray(event.data))
+            return [];
+        const data = event.data;
+        const runId = typeof data.runId === 'string' ? data.runId : '';
+        const sourcePosition = Number(data.sourcePosition);
+        return runId && Number.isSafeInteger(sourcePosition) && sourcePosition >= 0 ? [{ runId, sourcePosition }] : [];
+    });
+    return {
+        knownRuns: new Set(prior.map(event => event.runId)),
+        position: prior.reduce((latest, event) => Math.max(latest, event.sourcePosition), 0),
+    };
+}
+export function sessionCanBridge(header) {
+    return Boolean(header.cwd) && (header.delegationDepth ?? 0) === 0;
+}
 const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'unknown']);
 export class OrbitSessionBridge {
     gateway;
@@ -10,16 +29,16 @@ export class OrbitSessionBridge {
     }
     async run(workspace, sessionId, sink, signal, knownRuns = []) {
         const release = await this.gateway.acquire(workspace);
-        const known = new Set(knownRuns);
-        let position = await this.cursor.load(workspace.id, sessionId);
         try {
+            const known = new Set(knownRuns);
+            let position = await this.cursor.load(workspace.id, sessionId);
             while (!signal.aborted) {
                 const page = await this.gateway.call(workspace, sessionId, 'list_runtime_events', {
                     ...(position === undefined ? {} : { after_position: position }), limit: 200,
                 });
                 const latest = new Map();
                 for (const event of page.events)
-                    latest.set(event.run_id, event.position);
+                    latest.set(event.run_id, Math.max(latest.get(event.run_id) ?? 0, event.position));
                 for (const [runId, sourcePosition] of latest) {
                     const run = await this.gateway.run(workspace, sessionId, runId);
                     const steps = await this.gateway.call(workspace, sessionId, 'get_run_steps', { run_id: runId });

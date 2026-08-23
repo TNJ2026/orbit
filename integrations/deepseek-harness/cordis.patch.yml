@@ -1,4 +1,4 @@
-# Host Gateway bundle. It starts one Orbit stdio Runtime per normalized Workspace.
+# Host Gateway bundle. It discovers an independent Orbit Runtime over MCP.
 - insert:
     - id: orbit
       name: '@orbit-runtime/dsh-orbit'

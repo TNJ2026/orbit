@@ -1,17 +1,34 @@
 # Orbit for DeepSeek Harness
 
 This directory is the installable Host Profile Bundle for `deepseek-harness`.
-Its `OrbitGateway` starts one Orbit stdio Runtime per normalized Workspace,
-deduplicates concurrent starts, performs the capability handshake, and routes
-each call under a `harness:session:<id>` actor.
+Orbit Runtime stays an independent process. The `OrbitGateway` discovers the
+`orbit serve` instance published for the normalized Workspace, performs the
+capability handshake, and communicates with it only through HTTP MCP.
 
 ## Prerequisites
 
 - Install `orbit` so the executable is on the Harness Host's `PATH`.
+- Start Orbit independently for the Harness Workspace:
 
-Install this directory into the target Harness Profile as a local package,
-then restart that Profile. Client code accesses the generated `orbit` Remote;
+  `orbit serve --project-root /absolute/path/to/workspace --mcp-tool-profile harness`
+
+By default the Gateway discovers ownership records below `~/.orbit`. If Orbit
+uses a database outside that tree, set `ORBIT_RUNTIME_ROOT` for the Harness
+Profile to the directory containing the Runtime ownership record. The same
+setting works on macOS, Linux and Windows; no platform-specific socket path is
+required.
+
+Install this directory into the target Harness Web Profile with one command:
+
+`dsh plugin --profile web add /absolute/path/to/orbit/integrations/deepseek-harness`
+
+Then restart that Profile. Remove it with
+`dsh plugin --profile web remove @orbit-runtime/dsh-orbit`. Client code accesses the generated `orbit` Remote;
 it never receives the child process handle or Orbit loopback credentials.
+
+Maintainers can verify install, Host/Web startup, HTTP readiness and clean
+removal in an isolated temporary Profile with `npm run smoke:profile`. Set
+`DSH_BIN` only when the Harness launcher is not named `dsh` on `PATH`.
 
 ## Compatibility
 
@@ -24,17 +41,18 @@ it never receives the child process handle or Orbit loopback credentials.
 
 The Gateway refuses an incompatible Orbit integration protocol during startup.
 Runtime codecs also reject malformed core DTOs before they reach the Client.
+When an MCP transport fails, the cached endpoint is discarded; the next Bridge
+poll or tool call reruns discovery, allowing `orbit serve` to restart on a new
+port without restarting Harness.
 
 ## Upgrade and rollback
 
-Before upgrading, stop the Harness Profile so it releases the Workspace Runtime
-ownership lock. Install the new bundle, rebuild the Profile, and restart it.
+Before upgrading, install the new bundle, rebuild the Profile, and restart it.
+The independent Orbit Runtime can remain running when its protocol is compatible.
 Verify the Orbit Settings row reports connected and open one historical Run.
 
 To roll back, stop the Profile, reinstall the previous bundle version, rebuild,
-and restart. Delegation and reconciliation records are additive SQLite tables;
-rollback does not require deleting the Runtime database. Do not run old and new
-Profiles against the same Workspace database concurrently.
+and restart. Rollback does not require deleting the Runtime database.
 
 ## Current boundary
 
@@ -49,41 +67,47 @@ refresh restoration and keyboard/focus handling, a guarded Human Resume form, an
 Orbit Runtime row in General Settings. Browser code reaches Orbit only through
 the generated Host Remote; it never connects to loopback directly.
 
-The Orbit CLI takes a non-blocking ownership lock for the runtime database.
-Starting a second managed MCP process or a manual `orbit serve` against the
-same database fails instead of creating two writers.
+The Host automatically attaches one Bridge to every live root Session with a
+`cwd`, including Sessions restored during startup. The Bridge derives its
+cursor and known Run ids from durable `orbit/run-*` Session events, so a Host
+restart resumes without a second cursor database. Session disposal aborts the
+poller, and a temporarily unavailable Runtime is retried without blocking the
+Session lifecycle.
 
-## Subagent delegation
+For the `harness` MCP profile, Orbit accepts `x-orbit-actor` only from loopback,
+only on `/mcp`, and only under `harness:session:*`. This refines the existing
+single local-operator identity for event and single-goal isolation; it does not
+grant a remote caller or local process any additional scope.
 
-`harness.subagent@1.0.0` is registered before Orbit seals its Handler runtime.
-At Session Bridge startup, the Host pins an actor-scoped Execution Lease from
-the live `ctx.subagents` provider list, Workspace identity, delegation count,
-wall-clock ceiling, and expiry. Claim validates that policy and consumes the
-delegation budget atomically before the worker starts a Provider. The worker
-then holds a separate renewable Job Lease. An expired Job Lease becomes an
-unknown external result and is never handed to a second provider automatically;
-an absent or expired Execution Lease is a known refusal before execution.
-An operator may append an idempotent `confirmed_succeeded` or
-`confirmed_failed` reconciliation to an unknown delegation from the Drawer.
-This is an audit verdict only: the original step remains unknown and is never
-resumed or retried.
+## Agent tools
 
-An active Execution Lease is immutable except for its expiry refresh: its
-Workspace, Provider allowlist, and budgets cannot be widened or retargeted, and
-no lease may exceed 24 hours. Actor-scoped statistics are available to the
-Harness profile. Operations may prune bounded old terminal jobs; unresolved
-unknown jobs are retained until a reconciliation exists.
+The Host registers a bounded native Harness tool surface which routes each
+execution through the same Workspace-aware MCP Gateway:
+
+- `orbit_list_workflows`
+- `orbit_list_runs`
+- `orbit_inspect_run`
+- `orbit_start_run`
+- `orbit_cancel_run`
+- `orbit_resume_run`
+
+The model never supplies an endpoint, actor, idempotency key, or mutation
+revision. The Host derives Workspace and Session from `ToolRunContext`, creates
+idempotency keys, and re-reads `allowed_commands[]` before cancel or resume.
+`orbit_start_run` always sends `wait: false`; Run progress is projected by the
+Session Bridge rather than holding a Harness tool call open.
+
+The Orbit CLI takes a non-blocking ownership lock for the runtime database and
+publishes its Workspace and MCP endpoint in that ownership record. Harness
+never owns that lock and never creates a second writer.
+
+## Agent execution boundary
+
+Harness does not execute Orbit workflow nodes and does not call Harness
+Subagent Providers on Orbit's behalf. Agent discovery, CLI credentials,
+sandboxing, process cleanup, retry semantics and effects remain owned by the
+independent Orbit Runtime. Harness is an MCP client and UI projection only.
 
 Core MCP responses cross runtime codecs before reaching Host or Client code.
-Malformed Run, Step, Output, Artifact, or Delegation payloads fail at the
-Gateway boundary instead of flowing through TypeScript assertions.
-
-Provider names are checked against the live Harness registry before start.
-Codex, Claude Code, and ACP pass through the same Provider-neutral policy gate;
-unregistered providers, isolation mismatches, and unsupported concurrency are
-settled before `subagents.start()`.
-Write delegations fail closed unless the Host Workspace is already marked
-`exclusive` or `worktree`; this plugin does not claim that a label created
-isolation. The Host records a bounded Git before/after observation as the
-result's Effect Manifest and rejects a declared read-only task that changed
-the Workspace.
+Malformed Run, Step, Output, or Artifact payloads fail at the Gateway boundary
+instead of flowing through TypeScript assertions.
