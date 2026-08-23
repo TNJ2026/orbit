@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -55,6 +55,10 @@ async function stop(child) {
 }
 
 try {
+  const clientBundle = await readFile(resolve(bundle, 'lib/client.js'), 'utf8')
+  assert.match(clientBundle, /window\.__ModuleLoader__\.load\(\{/)
+  assert.match(clientBundle, /id:\s*["']@orbit-runtime\/dsh-orbit["']/)
+
   await run(['plugin', '--profile', 'web', 'add', installSpec])
   const installed = await run(['--profile', 'web', '--dump-config'])
   assert.match(installed.stdout, /name: '@orbit-runtime\/dsh-orbit'/)

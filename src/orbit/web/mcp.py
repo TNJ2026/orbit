@@ -51,6 +51,7 @@ MCP_SESSION_PRESENCE_SECONDS = 60.0
 MCP_TOOL_PROFILES = frozenset({"full", "harness"})
 HARNESS_TOOL_NAMES = frozenset({
     "get_capabilities", "list_workflows", "list_runs", "inspect_run", "replay_langgraph_run",
+    "generate_workflow", "modify_workflow", "get_authoring_job",
     "list_runtime_events", "get_run_steps", "get_run_graph", "get_run_edges",
     "read_run_output",
     "start_run", "resume_run", "cancel_run", "list_artifacts",
@@ -267,6 +268,26 @@ def build_mcp_dispatcher(
                     "idempotency_key": {"type": "string"},
                 },
                 "required": ["prompt", "idempotency_key"],
+            },
+        },
+        {
+            "name": "modify_workflow",
+            "description": (
+                "Modify or regenerate one published workflow through an asynchronous "
+                "authoring job. Poll get_authoring_job for the outcome."
+            ),
+            "scope": WRITE_SCOPE,
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "workflow_id": {"type": "string"},
+                    "prompt": {"type": "string"},
+                    "mode": {"type": "string", "enum": ["modify", "regenerate"]},
+                    "agent": {"type": "string"},
+                    "display_language": {"type": "string"},
+                    "idempotency_key": {"type": "string"},
+                },
+                "required": ["workflow_id", "prompt", "idempotency_key"],
             },
         },
         {
@@ -943,6 +964,17 @@ def build_mcp_dispatcher(
                 raise ValueError("workflow authoring is not configured")
             return authoring_jobs.create(
                 actor=actor, prompt=str(arguments["prompt"]),
+                idempotency_key=str(arguments["idempotency_key"]),
+                agent=arguments.get("agent"),
+                display_language=arguments.get("display_language"),
+            )
+        if name == "modify_workflow":
+            if authoring_jobs is None:
+                raise ValueError("workflow authoring is not configured")
+            return authoring_jobs.create(
+                actor=actor, workflow_id=str(arguments["workflow_id"]),
+                prompt=str(arguments["prompt"]),
+                mode=str(arguments.get("mode", "modify")),
                 idempotency_key=str(arguments["idempotency_key"]),
                 agent=arguments.get("agent"),
                 display_language=arguments.get("display_language"),

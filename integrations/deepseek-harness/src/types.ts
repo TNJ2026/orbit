@@ -1,5 +1,7 @@
 export interface WorkspaceRef { id: string; canonicalPath: string; repositoryId?: string; worktreeId?: string; baseRevision?: string; isolationMode?: 'shared' | 'exclusive' | 'worktree' | 'snapshot' }
 export interface RuntimeSummary { workspaceId: string; state: 'ready' | 'stopped'; capabilities: Record<string, unknown> }
+export interface WorkflowSummary { workflow_id: string; name: string; description: string; latest_version: number; goal_readiness: string; readiness_reason?: string | null; input_mode?: string; inputs?: unknown[]; goal_binding?: unknown }
+export interface AuthoringJob { job_id: string; type: string; workflow_id?: string | null; prompt: string; status: 'queued' | 'running' | 'done' | 'failed' | 'cancelled'; requested_agent?: string | null; attempts?: number | null; result?: unknown; error?: { code: string; message: string; diagnostics?: unknown[] } | null; created_at: string; updated_at: string }
 export interface OrbitCommandRequest { workspace: WorkspaceRef; sessionId: string; runId: string; command: 'langgraph_run.cancel' | 'langgraph_run.resume'; expectedVersion: number; idempotencyKey: string; value?: unknown; interruptId?: string }
 export type RunDto = Record<string, unknown> & { run_id: string; goal: string; workflow_id: string; workflow_version: number; status: string; revision: number; artifact_count: number; result?: unknown; error?: string | null; created_at: string; updated_at: string; interrupts: unknown[]; allowed_commands: Array<{ command: string; expected_version: number }> }
 export interface StepSummary { node_id: string; status: string; resolution?: { kind: 'reconciliation_required'; delegation_id?: string }; reconciliation?: { outcome: 'confirmed_succeeded' | 'confirmed_failed'; note: string; created_at: string }; [key: string]: unknown }
@@ -7,7 +9,9 @@ export interface RunGraph { [key: string]: unknown }
 export interface EdgeSummary { edge_id: string; source_node: string; target_node: string; status: string; [key: string]: unknown }
 export interface OutputChunk { chunk_id: number; node_id: string; attempt_id: string; stream: 'stdout' | 'stderr'; text: string; created_at: string }
 export interface OutputPage { chunks: OutputChunk[]; after: number; has_more: boolean }
-export interface ArtifactSummary { artifact_id: string; run_id: string; [key: string]: unknown }
+export interface ArtifactSummary { artifact_id: string; run_id: string; content_type?: string; size_bytes?: number; [key: string]: unknown }
+export interface ImportedArtifact { attachmentId: string; mediaType: string; bytes: number; width: number; height: number; name?: string }
+export interface IntegrationDiagnostics { generated_at: string; workspace_id: string; session_id: string; runtime: RuntimeSummary; gateway: { discoveryAttempts: number; rpcCalls: number; transportFailures: number; connectedWorkspaces: number; lastConnectedAt?: string; lastTransportError?: string }; bridge: { state: string; cursorPosition: number; lastError?: string; updatedAt: string } | null }
 export interface ArtifactContent { artifact: ArtifactSummary; encoding: 'base64'; content: string }
 export interface RuntimeEventHint { position: number; run_id: string; event_type: string; revision: number; occurred_at: string; node_id?: string; attempt_id?: string }
 export interface RuntimeEventPage { events: RuntimeEventHint[]; next_position: number }

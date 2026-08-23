@@ -478,6 +478,14 @@ Orbit 正在等待确认
 
 ### P4：完整工作区与产品化
 
+当前实现基线：
+
+- Harness 注册原生 `Orbit` Settings Section，提供 actor-scoped Run 历史、Workflow Catalog、Artifact Catalog 和诊断页；历史详情沿用右侧 Drawer 交互，读取 Steps、逐节点输出、Graph、Edges 和 Artifact。
+- Workflow 页面通过新增的 `generate_workflow` / `modify_workflow` / `get_authoring_job` Harness MCP 工具启动并轮询 Orbit 自有 Authoring Job；DSL 生成、编译、发布与 Handler 校验仍由 Runtime 完成。
+- 图片 Artifact 可通过 Host Remote 显式导入 Harness `AttachmentStore`；类型、base64 和 Attachment admission 在写入前校验。当前 Harness Attachment API 只接受 PNG/JPEG/WebP/GIF，其他 Artifact 明确保留在 Orbit，不伪装为 Attachment/Deliverable。
+- Gateway 记录发现、RPC、transport failure、最近连接时间；Session Bridge 记录连接状态、cursor 和去重后的最近错误。诊断页可复制或下载不含 endpoint、凭据和正文的 JSON 包。
+- GitHub Release 构建 Bundle tarball；兼容矩阵、升级/回滚、源码目录与 tarball Profile 冒烟命令已进入用户文档；Linux/macOS/Windows CI 覆盖 Runtime ownership、安全边界和真实 HTTP MCP E2E。
+
 交付：
 
 - Harness 原生 Orbit 历史和 Catalog 页面。
@@ -485,6 +493,14 @@ Orbit 正在等待确认
 - Workflow 编辑/生成入口。
 - Telemetry、诊断包和升级迁移。
 - 发布、版本兼容矩阵和用户文档。
+
+验收：
+
+- 用户无需离开 Harness 即可浏览当前 Session 的 Run、Workflow 和 Artifact，并从历史打开完整 Run Drawer。
+- 新建、修改和重新生成 Workflow 均只创建一个可恢复 Authoring Job，UI 轮询终态并展示编译诊断。
+- Artifact 导入不会绕过 Harness 图片 admission；不支持的媒体类型得到明确错误。
+- 诊断包不含 Runtime MCP URL、actor header、原始输出、Artifact 内容或凭据。
+- Bundle 可从 GitHub Release tarball 安装、启动和无残留卸载。
 
 ## 8. 测试策略
 
@@ -610,7 +626,7 @@ Harness Agent 启动 Orbit Run
 → 刷新 Harness 后从 Session Event 恢复同一张 Card
 ```
 
-该切片已经完成。下一阶段只扩展 Harness 原生历史/Catalog、Workflow 编辑入口、Artifact 导入和发布诊断，不再引入 Harness 反向执行 Orbit 节点。
+该切片和 P4 产品化入口均已完成；后续只做兼容性维护与体验迭代，不再引入 Harness 反向执行 Orbit 节点。
 
 ## 14. 参考
 

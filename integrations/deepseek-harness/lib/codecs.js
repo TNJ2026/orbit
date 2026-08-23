@@ -50,6 +50,24 @@ export function decodeToolResult(name, value) {
     if (['inspect_run', 'start_run', 'resume_run', 'cancel_run'].includes(name))
         return decodeRun(value);
     const item = object(value, name);
+    if (name === 'list_workflows') {
+        for (const [index, workflow] of array(item.workflows, 'workflows').entries()) {
+            const entry = object(workflow, `workflows[${index}]`);
+            for (const key of ['workflow_id', 'name', 'description', 'goal_readiness'])
+                string(entry[key], `workflows[${index}].${key}`);
+            number(entry.latest_version, `workflows[${index}].latest_version`);
+        }
+        return item;
+    }
+    if (name === 'list_runs') {
+        array(item.runs, 'runs').forEach(decodeRun);
+        return item;
+    }
+    if (name === 'generate_workflow' || name === 'modify_workflow' || name === 'get_authoring_job') {
+        for (const key of ['job_id', 'type', 'prompt', 'status', 'created_at', 'updated_at'])
+            string(item[key], `authoring_job.${key}`);
+        return item;
+    }
     if (name === 'get_run_steps')
         return { ...item, steps: array(item.steps, 'steps').map(decodeStep) };
     if (name === 'get_run_graph') {

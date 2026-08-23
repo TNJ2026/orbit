@@ -7,16 +7,31 @@ interface DiscoveredRuntime { project_root?: string; transport?: string; mcp_url
 interface Managed { mcpUrl: string; nextId: number; refs: number; capabilities: Record<string, unknown> }
 type Fetch = typeof globalThis.fetch
 class OrbitTransportError extends Error {}
+export interface GatewayDiagnostics {
+  discoveryAttempts: number
+  rpcCalls: number
+  transportFailures: number
+  connectedWorkspaces: number
+  lastConnectedAt?: string
+  lastTransportError?: string
+}
 
 /** Connect Harness to an already-running Orbit Runtime over HTTP MCP. */
 export class OrbitGateway {
   private readonly runtimes = new Map<string, Promise<Managed>>()
+  private readonly telemetry: Omit<GatewayDiagnostics, 'connectedWorkspaces'> = {
+    discoveryAttempts: 0, rpcCalls: 0, transportFailures: 0,
+  }
   constructor(
     private readonly command = 'orbit',
     private readonly commandPrefix: readonly string[] = [],
     private readonly fetchImpl: Fetch = globalThis.fetch,
     private readonly discoveryRoot = process.env.ORBIT_RUNTIME_ROOT || undefined,
   ) {}
+
+  diagnostics(): GatewayDiagnostics {
+    return { ...this.telemetry, connectedWorkspaces: this.runtimes.size }
+  }
 
   async acquire(workspace: WorkspaceRef): Promise<() => Promise<void>> {
     const runtime = await this.runtime(workspace)
@@ -40,7 +55,11 @@ export class OrbitGateway {
         name, arguments: args, _meta: { 'orbit/actor': actor },
       }) as typeof envelope
     } catch (error) {
-      if (error instanceof OrbitTransportError) this.runtimes.delete(await realpath(workspace.canonicalPath))
+      if (error instanceof OrbitTransportError) {
+        this.telemetry.transportFailures++
+        this.telemetry.lastTransportError = error.message
+        this.runtimes.delete(await realpath(workspace.canonicalPath))
+      }
       throw error
     }
     if (envelope.isError) throw new Error(JSON.stringify(envelope.structuredContent ?? envelope.content))
@@ -71,10 +90,13 @@ export class OrbitGateway {
     })
     runtime.capabilities = await this.callRaw(runtime, 'get_capabilities', {}) as Record<string, unknown>
     if (runtime.capabilities.integration_protocol !== 'orbit-harness/1') throw new Error('incompatible Orbit integration protocol')
+    this.telemetry.lastConnectedAt = new Date().toISOString()
+    this.telemetry.lastTransportError = undefined
     return runtime
   }
 
   private async discover(workspaceRoot: string): Promise<DiscoveredRuntime> {
+    this.telemetry.discoveryAttempts++
     const output = await new Promise<string>((resolve, reject) => {
       const child = spawn(this.command, [
         ...this.commandPrefix, 'runtimes', '--json',
@@ -104,6 +126,7 @@ export class OrbitGateway {
   }
 
   private async rpc(runtime: Managed, method: string, params: object): Promise<unknown> {
+    this.telemetry.rpcCalls++
     const id = runtime.nextId++
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), 60_000)

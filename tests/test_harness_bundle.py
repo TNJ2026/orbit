@@ -18,6 +18,7 @@ class DeepSeekHarnessBundleTests(unittest.TestCase):
         self.assertEqual("lib/index.js", manifest["main"])
         self.assertNotIn("private", manifest)
         self.assertIn("@deepseek-ai/dsh-typert-protocol", manifest["peerDependencies"])
+        self.assertIn("@deepseek-ai/dsh-attachment", manifest["peerDependencies"])
 
     def test_patch_registers_the_host_gateway(self) -> None:
         patch = yaml.safe_load((BUNDLE / "cordis.patch.yml").read_text(encoding="utf-8"))
@@ -89,6 +90,26 @@ class DeepSeekHarnessBundleTests(unittest.TestCase):
         self.assertNotIn("@deepseek-ai/dsh-subagent", manifest["peerDependencies"])
         for removed in ("effects.ts", "delegation-execution.ts", "delegation-policy.ts"):
             self.assertFalse((BUNDLE / "src" / removed).exists())
+
+    def test_p4_workspace_catalog_authoring_import_and_diagnostics_are_wired(self) -> None:
+        remote = (BUNDLE / "src" / "index.ts").read_text(encoding="utf-8")
+        client = (BUNDLE / "src" / "client.ts").read_text(encoding="utf-8")
+        gateway = (BUNDLE / "src" / "gateway.ts").read_text(encoding="utf-8")
+        for method in (
+            "listWorkflows", "listRuns", "generateWorkflow", "modifyWorkflow",
+            "getAuthoringJob", "importArtifact", "getDiagnostics",
+        ):
+            self.assertIn(f"@Remote('{method}')", remote)
+        self.assertIn("settings.section", client)
+        self.assertIn("Workflow Catalog", client)
+        self.assertIn("Run 历史", client)
+        self.assertIn("导入 Attachment", client)
+        self.assertIn("下载诊断包", client)
+        self.assertIn("diagnostics()", gateway)
+
+        built_client = (BUNDLE / "lib" / "client.js").read_text(encoding="utf-8")
+        self.assertIn("window.__ModuleLoader__.load({", built_client)
+        self.assertIn('id: "@orbit-runtime/dsh-orbit"', built_client)
 
 
 if __name__ == "__main__":

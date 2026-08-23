@@ -57,6 +57,9 @@ test('concurrent sessions reuse one discovered Runtime without owning its lifecy
   assert.equal((await gateway.call(runtime.workspace, 'one', 'inspect_run', {})).run_id, 'run:1')
   assert.equal(runtime.calls(), 3)
   assert.equal(runtime.lastActor(), 'harness:session:one')
+  assert.equal(gateway.diagnostics().discoveryAttempts, 1)
+  assert.equal(gateway.diagnostics().rpcCalls, 3)
+  assert.equal(gateway.diagnostics().transportFailures, 0)
   await releaseOne(); await releaseTwo()
   assert.equal(runtime.server.listening, true)
 })
@@ -91,6 +94,8 @@ test('a transport loss invalidates the cached endpoint for rediscovery', async t
   await release()
   await new Promise(resolve => original.server.close(resolve))
   await assert.rejects(gateway.call(original.workspace, 'one', 'list_runs', {}), /transport failed/)
+  assert.equal(gateway.diagnostics().transportFailures, 1)
+  assert.match(gateway.diagnostics().lastTransportError, /transport failed/)
 
   const replacement = createServer((request, response) => {
     let body = ''
@@ -109,4 +114,6 @@ test('a transport loss invalidates the cached endpoint for rediscovery', async t
   }]))
   const result = await gateway.call(original.workspace, 'one', 'inspect_run', {})
   assert.equal(result.run_id, 'run:1')
+  assert.equal(gateway.diagnostics().discoveryAttempts, 2)
+  assert.equal(gateway.diagnostics().lastTransportError, undefined)
 })

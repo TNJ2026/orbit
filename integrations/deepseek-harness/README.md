@@ -77,6 +77,18 @@ versions and the active tool profile, supports an explicit reconnect probe, and
 shows a copyable independent-Runtime start command when disconnected. Browser code reaches Orbit only through
 the generated Host Remote; it never connects to loopback directly.
 
+The native `Orbit` settings section is the product workspace: actor-scoped Run
+history with the full detail Drawer, Workflow Catalog plus asynchronous Agent
+generation/modification, Artifact Catalog, and diagnostics. Image Artifacts can
+be explicitly imported into Harness Attachment storage after both Orbit's 2 MiB
+proxy bound and Harness image admission pass. The current Harness Attachment
+contract supports PNG, JPEG, WebP and GIF; other media stays in Orbit.
+
+The downloadable diagnostics document contains only Workspace/Session ids,
+protocol capabilities, aggregate counts, Gateway counters and Bridge state. It
+does not contain the MCP endpoint, actor header, raw output, Artifact bytes,
+task prompts or credentials.
+
 The Host automatically attaches one Bridge to every live root Session with a
 `cwd`, including Sessions restored during startup. The Bridge derives its
 cursor and known Run ids from durable `orbit/run-*` Session events, so a Host

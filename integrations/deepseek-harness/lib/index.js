@@ -36,10 +36,17 @@ import { TypertRemoteService, Remote } from '@deepseek-ai/dsh-typert-protocol';
 import { OrbitGateway } from './gateway.js';
 import { OrbitSessionBridge, restoredBridgeState, sessionCanBridge } from './session-bridge.js';
 import { OrbitToolBridge } from './orbit-tools.js';
+import { artifactImageInput } from './artifact-import.js';
 let OrbitRemoteService = (() => {
     let _classSuper = TypertRemoteService;
     let _instanceExtraInitializers = [];
     let _getRuntime_decorators;
+    let _getDiagnostics_decorators;
+    let _listWorkflows_decorators;
+    let _listRuns_decorators;
+    let _generateWorkflow_decorators;
+    let _modifyWorkflow_decorators;
+    let _getAuthoringJob_decorators;
     let _getRun_decorators;
     let _getSteps_decorators;
     let _getGraph_decorators;
@@ -48,12 +55,19 @@ let OrbitRemoteService = (() => {
     let _listArtifacts_decorators;
     let _getArtifact_decorators;
     let _getArtifactContent_decorators;
+    let _importArtifact_decorators;
     let _reconcileDelegation_decorators;
     let _executeCommand_decorators;
     return class OrbitRemoteService extends _classSuper {
         static {
             const _metadata = typeof Symbol === "function" && Symbol.metadata ? Object.create(_classSuper[Symbol.metadata] ?? null) : void 0;
             _getRuntime_decorators = [Remote('getRuntime')];
+            _getDiagnostics_decorators = [Remote('getDiagnostics')];
+            _listWorkflows_decorators = [Remote('listWorkflows')];
+            _listRuns_decorators = [Remote('listRuns')];
+            _generateWorkflow_decorators = [Remote('generateWorkflow')];
+            _modifyWorkflow_decorators = [Remote('modifyWorkflow')];
+            _getAuthoringJob_decorators = [Remote('getAuthoringJob')];
             _getRun_decorators = [Remote('getRun')];
             _getSteps_decorators = [Remote('getSteps')];
             _getGraph_decorators = [Remote('getGraph')];
@@ -62,9 +76,16 @@ let OrbitRemoteService = (() => {
             _listArtifacts_decorators = [Remote('listArtifacts')];
             _getArtifact_decorators = [Remote('getArtifact')];
             _getArtifactContent_decorators = [Remote('getArtifactContent')];
+            _importArtifact_decorators = [Remote('importArtifact')];
             _reconcileDelegation_decorators = [Remote('reconcileDelegation')];
             _executeCommand_decorators = [Remote('executeCommand')];
             __esDecorate(this, null, _getRuntime_decorators, { kind: "method", name: "getRuntime", static: false, private: false, access: { has: obj => "getRuntime" in obj, get: obj => obj.getRuntime }, metadata: _metadata }, null, _instanceExtraInitializers);
+            __esDecorate(this, null, _getDiagnostics_decorators, { kind: "method", name: "getDiagnostics", static: false, private: false, access: { has: obj => "getDiagnostics" in obj, get: obj => obj.getDiagnostics }, metadata: _metadata }, null, _instanceExtraInitializers);
+            __esDecorate(this, null, _listWorkflows_decorators, { kind: "method", name: "listWorkflows", static: false, private: false, access: { has: obj => "listWorkflows" in obj, get: obj => obj.listWorkflows }, metadata: _metadata }, null, _instanceExtraInitializers);
+            __esDecorate(this, null, _listRuns_decorators, { kind: "method", name: "listRuns", static: false, private: false, access: { has: obj => "listRuns" in obj, get: obj => obj.listRuns }, metadata: _metadata }, null, _instanceExtraInitializers);
+            __esDecorate(this, null, _generateWorkflow_decorators, { kind: "method", name: "generateWorkflow", static: false, private: false, access: { has: obj => "generateWorkflow" in obj, get: obj => obj.generateWorkflow }, metadata: _metadata }, null, _instanceExtraInitializers);
+            __esDecorate(this, null, _modifyWorkflow_decorators, { kind: "method", name: "modifyWorkflow", static: false, private: false, access: { has: obj => "modifyWorkflow" in obj, get: obj => obj.modifyWorkflow }, metadata: _metadata }, null, _instanceExtraInitializers);
+            __esDecorate(this, null, _getAuthoringJob_decorators, { kind: "method", name: "getAuthoringJob", static: false, private: false, access: { has: obj => "getAuthoringJob" in obj, get: obj => obj.getAuthoringJob }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _getRun_decorators, { kind: "method", name: "getRun", static: false, private: false, access: { has: obj => "getRun" in obj, get: obj => obj.getRun }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _getSteps_decorators, { kind: "method", name: "getSteps", static: false, private: false, access: { has: obj => "getSteps" in obj, get: obj => obj.getSteps }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _getGraph_decorators, { kind: "method", name: "getGraph", static: false, private: false, access: { has: obj => "getGraph" in obj, get: obj => obj.getGraph }, metadata: _metadata }, null, _instanceExtraInitializers);
@@ -73,17 +94,21 @@ let OrbitRemoteService = (() => {
             __esDecorate(this, null, _listArtifacts_decorators, { kind: "method", name: "listArtifacts", static: false, private: false, access: { has: obj => "listArtifacts" in obj, get: obj => obj.listArtifacts }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _getArtifact_decorators, { kind: "method", name: "getArtifact", static: false, private: false, access: { has: obj => "getArtifact" in obj, get: obj => obj.getArtifact }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _getArtifactContent_decorators, { kind: "method", name: "getArtifactContent", static: false, private: false, access: { has: obj => "getArtifactContent" in obj, get: obj => obj.getArtifactContent }, metadata: _metadata }, null, _instanceExtraInitializers);
+            __esDecorate(this, null, _importArtifact_decorators, { kind: "method", name: "importArtifact", static: false, private: false, access: { has: obj => "importArtifact" in obj, get: obj => obj.importArtifact }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _reconcileDelegation_decorators, { kind: "method", name: "reconcileDelegation", static: false, private: false, access: { has: obj => "reconcileDelegation" in obj, get: obj => obj.reconcileDelegation }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _executeCommand_decorators, { kind: "method", name: "executeCommand", static: false, private: false, access: { has: obj => "executeCommand" in obj, get: obj => obj.executeCommand }, metadata: _metadata }, null, _instanceExtraInitializers);
             if (_metadata) Object.defineProperty(this, Symbol.metadata, { enumerable: true, configurable: true, writable: true, value: _metadata });
         }
-        static inject = ['sessions', 'workspaceRegistry', 'tools'];
+        static inject = ['sessions', 'workspaceRegistry', 'tools', 'attachments'];
         gateway = (__runInitializers(this, _instanceExtraInitializers), new OrbitGateway());
         bridges = new Map();
+        bridgeDiagnostics = new Map();
         hostSessions;
+        attachments;
         constructor(ctx) {
             super(ctx, 'orbit');
             this.hostSessions = ctx.get('sessions');
+            this.attachments = ctx.get('attachments');
             new OrbitToolBridge(ctx, this.gateway).register();
             for (const session of this.hostSessions.list())
                 this.startSessionBridge(ctx, session);
@@ -104,6 +129,7 @@ let OrbitRemoteService = (() => {
                 return;
             const controller = new AbortController();
             this.bridges.set(sessionId, controller);
+            this.bridgeDiagnostics.set(sessionId, { state: 'connecting', cursorPosition: 0, updatedAt: new Date().toISOString() });
             void this.runSessionBridge(ctx, session, cwd, controller.signal).finally(() => {
                 if (this.bridges.get(sessionId) === controller)
                     this.bridges.delete(sessionId);
@@ -112,6 +138,8 @@ let OrbitRemoteService = (() => {
         stopSessionBridge(sessionId) {
             this.bridges.get(sessionId)?.abort();
             this.bridges.delete(sessionId);
+            const previous = this.bridgeDiagnostics.get(sessionId);
+            this.bridgeDiagnostics.set(sessionId, { state: 'stopped', cursorPosition: previous?.cursorPosition || 0, updatedAt: new Date().toISOString() });
         }
         async runSessionBridge(ctx, session, cwd, signal) {
             const registry = ctx.workspaceRegistry;
@@ -125,7 +153,12 @@ let OrbitRemoteService = (() => {
             let cursorPosition = restored.position;
             const cursor = {
                 load: () => cursorPosition || undefined,
-                save: (_workspaceId, _sessionId, position) => { cursorPosition = position; },
+                save: (_workspaceId, _sessionId, position) => {
+                    cursorPosition = position;
+                    this.bridgeDiagnostics.set(String(session.id), {
+                        state: 'connected', cursorPosition: position, updatedAt: new Date().toISOString(),
+                    });
+                },
             };
             let lastError = '';
             while (!signal.aborted) {
@@ -137,6 +170,9 @@ let OrbitRemoteService = (() => {
                     if (signal.aborted)
                         return;
                     const message = String(error);
+                    this.bridgeDiagnostics.set(String(session.id), {
+                        state: 'waiting', cursorPosition, lastError: message, updatedAt: new Date().toISOString(),
+                    });
                     if (message !== lastError)
                         ctx.logger.warn(`Orbit bridge for Session ${String(session.id)} is waiting: ${message}`);
                     lastError = message;
@@ -178,6 +214,45 @@ let OrbitRemoteService = (() => {
                 await release();
             }
         }
+        async getDiagnostics(workspace, sessionId, signal) {
+            const runtime = await this.getRuntime(workspace, signal);
+            return {
+                generated_at: new Date().toISOString(), workspace_id: workspace.id,
+                session_id: sessionId, runtime, gateway: this.gateway.diagnostics(),
+                bridge: this.bridgeDiagnostics.get(sessionId) || null,
+            };
+        }
+        async listWorkflows(workspace, sessionId, signal) {
+            return await this.readListField(workspace, sessionId, 'list_workflows', 'workflows', {}, signal);
+        }
+        async listRuns(workspace, sessionId, status, signal) {
+            return await this.readListField(workspace, sessionId, 'list_runs', 'runs', {
+                limit: 100, ...(status ? { status } : {}),
+            }, signal);
+        }
+        async generateWorkflow(workspace, sessionId, prompt, signal) {
+            signal.throwIfAborted();
+            if (!prompt.trim() || prompt.length > 20_000)
+                throw new Error('Workflow prompt must be 1-20000 characters');
+            return await this.gateway.call(workspace, sessionId, 'generate_workflow', {
+                prompt: prompt.trim(), display_language: 'zh-CN', idempotency_key: crypto.randomUUID(),
+            });
+        }
+        async modifyWorkflow(workspace, sessionId, workflowId, prompt, regenerate, signal) {
+            signal.throwIfAborted();
+            if (!workflowId.trim())
+                throw new Error('Workflow id is required');
+            if (!prompt.trim() || prompt.length > 20_000)
+                throw new Error('Workflow prompt must be 1-20000 characters');
+            return await this.gateway.call(workspace, sessionId, 'modify_workflow', {
+                workflow_id: workflowId, prompt: prompt.trim(), mode: regenerate ? 'regenerate' : 'modify',
+                display_language: 'zh-CN', idempotency_key: crypto.randomUUID(),
+            });
+        }
+        async getAuthoringJob(workspace, sessionId, jobId, signal) {
+            signal.throwIfAborted();
+            return await this.gateway.call(workspace, sessionId, 'get_authoring_job', { job_id: jobId });
+        }
         async getRun(workspace, sessionId, runId, signal) {
             signal.throwIfAborted();
             const release = await this.gateway.acquire(workspace);
@@ -210,7 +285,9 @@ let OrbitRemoteService = (() => {
             }
         }
         async listArtifacts(workspace, sessionId, runId, signal) {
-            return await this.readRunField(workspace, sessionId, runId, 'list_artifacts', 'artifacts', signal);
+            return await this.readListField(workspace, sessionId, 'list_artifacts', 'artifacts', {
+                limit: 100, ...(runId ? { run_id: runId } : {}),
+            }, signal);
         }
         async getArtifact(workspace, sessionId, artifactId, signal) {
             signal.throwIfAborted();
@@ -232,6 +309,10 @@ let OrbitRemoteService = (() => {
                 await release();
             }
         }
+        async importArtifact(workspace, sessionId, artifactId, signal) {
+            const content = await this.getArtifactContent(workspace, sessionId, artifactId, signal);
+            return await this.attachments.saveImage(artifactImageInput(content));
+        }
         async reconcileDelegation(workspace, sessionId, runId, delegationId, outcome, note, signal) {
             signal.throwIfAborted();
             const release = await this.gateway.acquire(workspace);
@@ -252,6 +333,17 @@ let OrbitRemoteService = (() => {
             const release = await this.gateway.acquire(workspace);
             try {
                 const result = await this.gateway.call(workspace, sessionId, tool, { run_id: runId });
+                return result[field];
+            }
+            finally {
+                await release();
+            }
+        }
+        async readListField(workspace, sessionId, tool, field, arguments_, signal) {
+            signal.throwIfAborted();
+            const release = await this.gateway.acquire(workspace);
+            try {
+                const result = await this.gateway.call(workspace, sessionId, tool, arguments_);
                 return result[field];
             }
             finally {

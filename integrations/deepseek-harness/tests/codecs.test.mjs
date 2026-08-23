@@ -19,3 +19,16 @@ test('step codec validates reconciliation markers', () => {
 test('output codec rejects malformed payloads', () => {
   assert.throws(() => decodeToolResult('read_run_output', { chunks: [], after: '0', has_more: false }), /output.after/)
 })
+
+test('P4 catalog and authoring codecs reject malformed product data', () => {
+  const workflows = decodeToolResult('list_workflows', { workflows: [{
+    workflow_id: 'workflow:1', name: 'One', description: '', latest_version: 2, goal_readiness: 'ready',
+  }] })
+  assert.equal(workflows.workflows[0].latest_version, 2)
+  assert.throws(() => decodeToolResult('list_workflows', { workflows: [{ workflow_id: 'x' }] }), /workflows\[0\]\.name/)
+  const job = decodeToolResult('generate_workflow', {
+    job_id: 'job:1', type: 'generate', prompt: 'make it', status: 'queued', created_at: 'now', updated_at: 'now',
+  })
+  assert.equal(job.status, 'queued')
+  assert.throws(() => decodeToolResult('get_authoring_job', { ...job, status: 1 }), /authoring_job.status/)
+})

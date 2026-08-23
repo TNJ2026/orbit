@@ -10,11 +10,17 @@ export class OrbitGateway {
     fetchImpl;
     discoveryRoot;
     runtimes = new Map();
+    telemetry = {
+        discoveryAttempts: 0, rpcCalls: 0, transportFailures: 0,
+    };
     constructor(command = 'orbit', commandPrefix = [], fetchImpl = globalThis.fetch, discoveryRoot = process.env.ORBIT_RUNTIME_ROOT || undefined) {
         this.command = command;
         this.commandPrefix = commandPrefix;
         this.fetchImpl = fetchImpl;
         this.discoveryRoot = discoveryRoot;
+    }
+    diagnostics() {
+        return { ...this.telemetry, connectedWorkspaces: this.runtimes.size };
     }
     async acquire(workspace) {
         const runtime = await this.runtime(workspace);
@@ -40,8 +46,11 @@ export class OrbitGateway {
             });
         }
         catch (error) {
-            if (error instanceof OrbitTransportError)
+            if (error instanceof OrbitTransportError) {
+                this.telemetry.transportFailures++;
+                this.telemetry.lastTransportError = error.message;
                 this.runtimes.delete(await realpath(workspace.canonicalPath));
+            }
             throw error;
         }
         if (envelope.isError)
@@ -71,9 +80,12 @@ export class OrbitGateway {
         runtime.capabilities = await this.callRaw(runtime, 'get_capabilities', {});
         if (runtime.capabilities.integration_protocol !== 'orbit-harness/1')
             throw new Error('incompatible Orbit integration protocol');
+        this.telemetry.lastConnectedAt = new Date().toISOString();
+        this.telemetry.lastTransportError = undefined;
         return runtime;
     }
     async discover(workspaceRoot) {
+        this.telemetry.discoveryAttempts++;
         const output = await new Promise((resolve, reject) => {
             const child = spawn(this.command, [
                 ...this.commandPrefix, 'runtimes', '--json',
@@ -108,6 +120,7 @@ export class OrbitGateway {
         return matches[0];
     }
     async rpc(runtime, method, params) {
+        this.telemetry.rpcCalls++;
         const id = runtime.nextId++;
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), 60_000);

@@ -80,7 +80,7 @@ class DiscoveryTests(ApiTestCase):
                     "list_workflows", "list_artifacts", "read_artifact",
                     "read_artifact_content",
                     "get_artifact_lineage", "collect_artifacts",
-                    "generate_workflow", "get_authoring_job",
+                    "generate_workflow", "modify_workflow", "get_authoring_job",
                     "claim_authoring_request", "wait_authoring_request",
                     "submit_authoring_response",
                 },
@@ -93,7 +93,7 @@ class DiscoveryTests(ApiTestCase):
                 # the advertised tool contract.
                 self.assertNotIn("scope", item)
 
-    def test_harness_profile_excludes_authoring_and_ops_tools(self) -> None:
+    def test_harness_profile_includes_product_authoring_but_excludes_broker_and_ops_tools(self) -> None:
         from orbit.web.app import create_app
         from tests.test_api_v1 import SCHEMAS, transform_registration
         from orbit.web.api_v1 import Authorizer, READ_SCOPE, WRITE_SCOPE
@@ -111,6 +111,7 @@ class DiscoveryTests(ApiTestCase):
         self.assertEqual(
             {
                 "get_capabilities", "list_workflows", "list_runs", "inspect_run",
+                "generate_workflow", "modify_workflow", "get_authoring_job",
                 "list_runtime_events", "get_run_steps", "get_run_graph",
                 "get_run_edges", "read_run_output",
                 "replay_langgraph_run", "start_run", "resume_run",
@@ -413,6 +414,16 @@ class AuthoringToolTests(ApiTestCase):
             self.assertTrue(result["result"]["isError"])
             self.assertIn("not configured", payload_of(result)["error"])
 
+    def test_modification_reports_that_it_is_not_configured(self) -> None:
+        with AsgiHarness(self.app) as client:
+            result = tool(
+                client, "modify_workflow",
+                {"workflow_id": "workflow:one", "prompt": "add approval", "idempotency_key": "m1"},
+                actor="writer",
+            )
+            self.assertTrue(result["result"]["isError"])
+            self.assertIn("not configured", payload_of(result)["error"])
+
 
 class ClientWrittenWorkflowTests(unittest.TestCase):
     """Generation answered by the connected client instead of a forked CLI.
@@ -666,7 +677,7 @@ class StdioTransportTests(ApiTestCase):
 
         self.assertEqual(2, len(responses))
         self.assertEqual("orbit", responses[0]["result"]["serverInfo"]["name"])
-        self.assertEqual(24, len(responses[1]["result"]["tools"]))
+        self.assertEqual(25, len(responses[1]["result"]["tools"]))
 
     def test_a_notification_produces_no_line_at_all(self) -> None:
         """There is no 202 on this transport; silence is the whole answer."""

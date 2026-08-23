@@ -1,4 +1,4 @@
-import type { ArtifactContent, ArtifactSummary, EdgeSummary, OutputPage, RunDto, StepSummary } from './types.js'
+import type { ArtifactContent, ArtifactSummary, AuthoringJob, EdgeSummary, OutputPage, RunDto, StepSummary, WorkflowSummary } from './types.js'
 
 function object(value: unknown, path: string): Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error(`invalid Orbit DTO at ${path}: expected object`)
@@ -43,6 +43,19 @@ function decodeStep(value: unknown, index: number): StepSummary {
 export function decodeToolResult(name: string, value: unknown): unknown {
   if (['inspect_run', 'start_run', 'resume_run', 'cancel_run'].includes(name)) return decodeRun(value)
   const item = object(value, name)
+  if (name === 'list_workflows') {
+    for (const [index, workflow] of array(item.workflows, 'workflows').entries()) {
+      const entry = object(workflow, `workflows[${index}]`)
+      for (const key of ['workflow_id', 'name', 'description', 'goal_readiness']) string(entry[key], `workflows[${index}].${key}`)
+      number(entry.latest_version, `workflows[${index}].latest_version`)
+    }
+    return item as { workflows: WorkflowSummary[] }
+  }
+  if (name === 'list_runs') { array(item.runs, 'runs').forEach(decodeRun); return item as { runs: RunDto[] } }
+  if (name === 'generate_workflow' || name === 'modify_workflow' || name === 'get_authoring_job') {
+    for (const key of ['job_id', 'type', 'prompt', 'status', 'created_at', 'updated_at']) string(item[key], `authoring_job.${key}`)
+    return item as unknown as AuthoringJob
+  }
   if (name === 'get_run_steps') return { ...item, steps: array(item.steps, 'steps').map(decodeStep) }
   if (name === 'get_run_graph') { object(item.graph, 'graph'); return item }
   if (name === 'get_run_edges') {

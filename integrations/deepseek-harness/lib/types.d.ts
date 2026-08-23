@@ -11,6 +11,34 @@ export interface RuntimeSummary {
     state: 'ready' | 'stopped';
     capabilities: Record<string, unknown>;
 }
+export interface WorkflowSummary {
+    workflow_id: string;
+    name: string;
+    description: string;
+    latest_version: number;
+    goal_readiness: string;
+    readiness_reason?: string | null;
+    input_mode?: string;
+    inputs?: unknown[];
+    goal_binding?: unknown;
+}
+export interface AuthoringJob {
+    job_id: string;
+    type: string;
+    workflow_id?: string | null;
+    prompt: string;
+    status: 'queued' | 'running' | 'done' | 'failed' | 'cancelled';
+    requested_agent?: string | null;
+    attempts?: number | null;
+    result?: unknown;
+    error?: {
+        code: string;
+        message: string;
+        diagnostics?: unknown[];
+    } | null;
+    created_at: string;
+    updated_at: string;
+}
 export interface OrbitCommandRequest {
     workspace: WorkspaceRef;
     sessionId: string;
@@ -79,7 +107,37 @@ export interface OutputPage {
 export interface ArtifactSummary {
     artifact_id: string;
     run_id: string;
+    content_type?: string;
+    size_bytes?: number;
     [key: string]: unknown;
+}
+export interface ImportedArtifact {
+    attachmentId: string;
+    mediaType: string;
+    bytes: number;
+    width: number;
+    height: number;
+    name?: string;
+}
+export interface IntegrationDiagnostics {
+    generated_at: string;
+    workspace_id: string;
+    session_id: string;
+    runtime: RuntimeSummary;
+    gateway: {
+        discoveryAttempts: number;
+        rpcCalls: number;
+        transportFailures: number;
+        connectedWorkspaces: number;
+        lastConnectedAt?: string;
+        lastTransportError?: string;
+    };
+    bridge: {
+        state: string;
+        cursorPosition: number;
+        lastError?: string;
+        updatedAt: string;
+    } | null;
 }
 export interface ArtifactContent {
     artifact: ArtifactSummary;

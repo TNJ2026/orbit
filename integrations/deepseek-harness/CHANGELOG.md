@@ -18,6 +18,9 @@
 - Added cross-platform `ORBIT_RUNTIME_ROOT` discovery for custom Runtime database locations.
 - Expanded General Settings diagnostics with Runtime/protocol versions, tool
   profile, reconnect probing and a copyable independent-Runtime start command.
+- Added the native Orbit product workspace with Session Run history, full Run
+  Drawer, Workflow and Artifact catalogs, Agent-backed workflow generation and
+  modification, explicit image Attachment import, and downloadable diagnostics.
 - Removed the cancelled Harness Subagent executor, provider policy, Git effect
   observer, related tests/codecs, and direct Agent/Subagent peer dependencies.
 
