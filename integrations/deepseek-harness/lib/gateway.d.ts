@@ -20,6 +20,14 @@ export declare class OrbitGateway {
     diagnostics(): GatewayDiagnostics;
     acquire(workspace: WorkspaceRef): Promise<() => Promise<void>>;
     call(workspace: WorkspaceRef, sessionId: string, name: string, args: object): Promise<unknown>;
+    /**
+     * Where a person reads this Runtime, as the Runtime itself reports it.
+     *
+     * Never assembled from the MCP endpoint: the two are published together by
+     * the process that owns the database, and guessing one from the other would
+     * survive exactly until they differ.
+     */
+    uiUrl(workspace: WorkspaceRef): Promise<string>;
     run(workspace: WorkspaceRef, sessionId: string, runId: string): Promise<RunDto>;
     private runtime;
     private runtimeFor;

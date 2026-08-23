@@ -55,11 +55,13 @@ async function stop(child) {
 }
 
 try {
-  // Host-only bundle: it contributes tools and Session events, and no browser
-  // module. A client entry reappearing here means UI came back with it.
-  const manifest = JSON.parse(await readFile(resolve(bundle, 'package.json'), 'utf8'))
-  assert.equal(manifest.dsh.client, undefined)
-  assert.equal(manifest.exports['./client'], undefined)
+  // The browser module exists to contribute one argument-free slash command
+  // and nothing else. Its size is the cheapest signal that no interface has
+  // grown back inside it: a rendered surface would not fit.
+  const clientBundle = await readFile(resolve(bundle, 'lib/client.js'), 'utf8')
+  assert.match(clientBundle, /window\.__ModuleLoader__\.load\(\{/)
+  assert.match(clientBundle, /id:\s*["']@orbit-runtime\/dsh-orbit["']/)
+  assert.ok(clientBundle.length < 16_384, `client bundle grew to ${String(clientBundle.length)} bytes`)
 
   await run(['plugin', '--profile', 'web', 'add', installSpec])
   const installed = await run(['--profile', 'web', '--dump-config'])

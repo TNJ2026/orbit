@@ -83,6 +83,7 @@ export class OrbitRemoteService extends TypertRemoteService {
   private async dispatchWebApi(action: string, args: unknown[], signal: AbortSignal): Promise<unknown> {
     switch (action) {
       case 'getRuntime': return await this.getRuntime(args[0] as WorkspaceRef, signal)
+      case 'getRuntimeUi': return await this.getRuntimeUi(String(args[0]), signal)
       case 'getDiagnostics': return await this.getDiagnostics(args[0] as WorkspaceRef, String(args[1]), signal)
       case 'listWorkflows': return await this.listWorkflows(args[0] as WorkspaceRef, String(args[1]), signal)
       case 'listRuns': return await this.listRuns(args[0] as WorkspaceRef, String(args[1]), args[2] === undefined ? undefined : String(args[2]), signal)
@@ -130,6 +131,16 @@ export class OrbitRemoteService extends TypertRemoteService {
       throw new Error('Orbit request names a Workspace this Harness has not registered')
     }
     return { id: String(found.id), canonicalPath: found.path }
+  }
+
+  /**
+   * The Workspace of a Session, derived and never claimed.
+   *
+   * Stronger than `verified`: there is no caller-supplied value to disagree
+   * with, so there is nothing to check.
+   */
+  private async sessionWorkspace(sessionId: string): Promise<WorkspaceRef> {
+    return await this.workspaceForSession(this.liveSession(sessionId))
   }
 
   private liveSession(sessionId: string): Session {
@@ -213,6 +224,15 @@ export class OrbitRemoteService extends TypertRemoteService {
       const capabilities = await this.gateway.call(scope, 'probe', 'get_capabilities', {}) as Record<string, unknown>
       return { workspaceId: scope.id, state: 'ready', capabilities }
     } finally { await release() }
+  }
+
+  @Remote('getRuntimeUi')
+  async getRuntimeUi(sessionId: string, signal: AbortSignal): Promise<string> {
+    signal.throwIfAborted()
+    const scope = await this.sessionWorkspace(sessionId)
+    const release = await this.gateway.acquire(scope)
+    try { return await this.gateway.uiUrl(scope) }
+    finally { await release() }
   }
 
   @Remote('getDiagnostics')

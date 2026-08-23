@@ -70,6 +70,12 @@ test('Harness discovers and talks to an independent Runtime without owning it', 
   assert.deepEqual(second.runs, [])
   await release()
 
+  // What `/orbit` opens. Taken from what the Runtime published about itself,
+  // so a Runtime on another port or host stays reachable.
+  const ui = await gateway.uiUrl(workspace)
+  assert.equal(ui, `${base}/ui/`)
+  assert.equal((await fetch(ui)).ok, true)
+
   const sessions = await (await fetch(`${base}/api/v1/mcp/sessions`)).json()
   assert.deepEqual(
     sessions.data.sessions.map(item => item.actor).filter(Boolean).sort(),

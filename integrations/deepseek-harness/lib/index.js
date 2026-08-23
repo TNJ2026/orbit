@@ -41,6 +41,7 @@ let OrbitRemoteService = (() => {
     let _classSuper = TypertRemoteService;
     let _instanceExtraInitializers = [];
     let _getRuntime_decorators;
+    let _getRuntimeUi_decorators;
     let _getDiagnostics_decorators;
     let _listWorkflows_decorators;
     let _listRuns_decorators;
@@ -62,6 +63,7 @@ let OrbitRemoteService = (() => {
         static {
             const _metadata = typeof Symbol === "function" && Symbol.metadata ? Object.create(_classSuper[Symbol.metadata] ?? null) : void 0;
             _getRuntime_decorators = [Remote('getRuntime')];
+            _getRuntimeUi_decorators = [Remote('getRuntimeUi')];
             _getDiagnostics_decorators = [Remote('getDiagnostics')];
             _listWorkflows_decorators = [Remote('listWorkflows')];
             _listRuns_decorators = [Remote('listRuns')];
@@ -80,6 +82,7 @@ let OrbitRemoteService = (() => {
             _reconcileDelegation_decorators = [Remote('reconcileDelegation')];
             _executeCommand_decorators = [Remote('executeCommand')];
             __esDecorate(this, null, _getRuntime_decorators, { kind: "method", name: "getRuntime", static: false, private: false, access: { has: obj => "getRuntime" in obj, get: obj => obj.getRuntime }, metadata: _metadata }, null, _instanceExtraInitializers);
+            __esDecorate(this, null, _getRuntimeUi_decorators, { kind: "method", name: "getRuntimeUi", static: false, private: false, access: { has: obj => "getRuntimeUi" in obj, get: obj => obj.getRuntimeUi }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _getDiagnostics_decorators, { kind: "method", name: "getDiagnostics", static: false, private: false, access: { has: obj => "getDiagnostics" in obj, get: obj => obj.getDiagnostics }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _listWorkflows_decorators, { kind: "method", name: "listWorkflows", static: false, private: false, access: { has: obj => "listWorkflows" in obj, get: obj => obj.listWorkflows }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _listRuns_decorators, { kind: "method", name: "listRuns", static: false, private: false, access: { has: obj => "listRuns" in obj, get: obj => obj.listRuns }, metadata: _metadata }, null, _instanceExtraInitializers);
@@ -175,6 +178,7 @@ let OrbitRemoteService = (() => {
         async dispatchWebApi(action, args, signal) {
             switch (action) {
                 case 'getRuntime': return await this.getRuntime(args[0], signal);
+                case 'getRuntimeUi': return await this.getRuntimeUi(String(args[0]), signal);
                 case 'getDiagnostics': return await this.getDiagnostics(args[0], String(args[1]), signal);
                 case 'listWorkflows': return await this.listWorkflows(args[0], String(args[1]), signal);
                 case 'listRuns': return await this.listRuns(args[0], String(args[1]), args[2] === undefined ? undefined : String(args[2]), signal);
@@ -220,6 +224,15 @@ let OrbitRemoteService = (() => {
                 throw new Error('Orbit request names a Workspace this Harness has not registered');
             }
             return { id: String(found.id), canonicalPath: found.path };
+        }
+        /**
+         * The Workspace of a Session, derived and never claimed.
+         *
+         * Stronger than `verified`: there is no caller-supplied value to disagree
+         * with, so there is nothing to check.
+         */
+        async sessionWorkspace(sessionId) {
+            return await this.workspaceForSession(this.liveSession(sessionId));
         }
         liveSession(sessionId) {
             const session = this.hostSessions.list().find(item => String(item.id) === sessionId);
@@ -308,6 +321,17 @@ let OrbitRemoteService = (() => {
             try {
                 const capabilities = await this.gateway.call(scope, 'probe', 'get_capabilities', {});
                 return { workspaceId: scope.id, state: 'ready', capabilities };
+            }
+            finally {
+                await release();
+            }
+        }
+        async getRuntimeUi(sessionId, signal) {
+            signal.throwIfAborted();
+            const scope = await this.sessionWorkspace(sessionId);
+            const release = await this.gateway.acquire(scope);
+            try {
+                return await this.gateway.uiUrl(scope);
             }
             finally {
                 await release();

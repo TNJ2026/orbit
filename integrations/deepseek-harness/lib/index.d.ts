@@ -34,12 +34,20 @@ export declare class OrbitRemoteService extends TypertRemoteService {
      * is not somewhere this Host will go looking for a Runtime.
      */
     private registered;
+    /**
+     * The Workspace of a Session, derived and never claimed.
+     *
+     * Stronger than `verified`: there is no caller-supplied value to disagree
+     * with, so there is nothing to check.
+     */
+    private sessionWorkspace;
     private liveSession;
     private startSessionBridge;
     private stopSessionBridge;
     private runSessionBridge;
     bridgeSession(workspace: WorkspaceRef, session: Session, cursor: OrbitCursorStore, signal: AbortSignal, knownRuns?: Iterable<string>): Promise<void>;
     getRuntime(workspace: WorkspaceRef, signal: AbortSignal): Promise<RuntimeSummary>;
+    getRuntimeUi(sessionId: string, signal: AbortSignal): Promise<string>;
     getDiagnostics(workspace: WorkspaceRef, sessionId: string, signal: AbortSignal): Promise<IntegrationDiagnostics>;
     listWorkflows(workspace: WorkspaceRef, sessionId: string, signal: AbortSignal): Promise<WorkflowSummary[]>;
     listRuns(workspace: WorkspaceRef, sessionId: string, status: string | undefined, signal: AbortSignal): Promise<RunDto[]>;

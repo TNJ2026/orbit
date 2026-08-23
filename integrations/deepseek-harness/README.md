@@ -70,8 +70,11 @@ output, bounded Artifact content, and command execution. Commands are accepted
 only after the Host re-reads the Run and matches the requested command and
 revision against Orbit's current `allowed_commands[]`.
 
-This bundle contributes no user interface. Orbit's own Runtime UI is the only
-place a person reads or drives a Run; Harness gets the Agent tools below, the
+This bundle contributes one thing to the Harness interface: `/orbit`, which
+takes no argument and opens Orbit's own Runtime UI for the Session's Workspace
+in a new tab. The address comes from what the Runtime published about itself,
+so a Runtime on another port or host stays reachable. Everything else a person
+does with a Run happens in that UI; Harness gets the Agent tools below, the
 Host API, and durable `orbit/run-*` Session events.
 
 The Host API at `/plugins/dsh-orbit/api` on the Harness origin remains available

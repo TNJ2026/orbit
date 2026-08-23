@@ -3,8 +3,8 @@ import { realpath } from 'node:fs/promises'
 import type { WorkspaceRef, RunDto } from './types.js'
 import { decodeRun, decodeToolResult } from './codecs.js'
 
-interface DiscoveredRuntime { project_root?: string; transport?: string; mcp_url?: string }
-interface Managed { mcpUrl: string; nextId: number; capabilities: Record<string, unknown> }
+interface DiscoveredRuntime { project_root?: string; transport?: string; mcp_url?: string; base_url?: string }
+interface Managed { mcpUrl: string; baseUrl: string; nextId: number; capabilities: Record<string, unknown> }
 type Fetch = typeof globalThis.fetch
 class OrbitTransportError extends Error {}
 export interface GatewayDiagnostics {
@@ -78,6 +78,19 @@ export class OrbitGateway {
     return decodeToolResult(name, envelope.structuredContent)
   }
 
+  /**
+   * Where a person reads this Runtime, as the Runtime itself reports it.
+   *
+   * Never assembled from the MCP endpoint: the two are published together by
+   * the process that owns the database, and guessing one from the other would
+   * survive exactly until they differ.
+   */
+  async uiUrl(workspace: WorkspaceRef): Promise<string> {
+    const runtime = await this.runtime(workspace)
+    if (!runtime.baseUrl) throw new Error('Orbit Runtime did not publish a browser address')
+    return `${runtime.baseUrl.replace(/\/$/, '')}/ui/`
+  }
+
   async run(workspace: WorkspaceRef, sessionId: string, runId: string): Promise<RunDto> {
     return decodeRun(await this.call(workspace, sessionId, 'inspect_run', { run_id: runId }))
   }
@@ -98,7 +111,10 @@ export class OrbitGateway {
 
   private async connect(workspaceRoot: string): Promise<Managed> {
     const discovered = await this.discover(workspaceRoot)
-    const runtime: Managed = { mcpUrl: discovered.mcp_url!, nextId: 1, capabilities: {} }
+    const runtime: Managed = {
+      mcpUrl: discovered.mcp_url!, baseUrl: discovered.base_url ?? '',
+      nextId: 1, capabilities: {},
+    }
     await this.rpc(runtime, 'initialize', {
       protocolVersion: '2025-06-18', capabilities: {},
       clientInfo: { name: 'dsh-orbit', version: '0.1.0' },

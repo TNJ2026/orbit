@@ -68,6 +68,19 @@ export class OrbitGateway {
             throw new Error(JSON.stringify(envelope.structuredContent ?? envelope.content));
         return decodeToolResult(name, envelope.structuredContent);
     }
+    /**
+     * Where a person reads this Runtime, as the Runtime itself reports it.
+     *
+     * Never assembled from the MCP endpoint: the two are published together by
+     * the process that owns the database, and guessing one from the other would
+     * survive exactly until they differ.
+     */
+    async uiUrl(workspace) {
+        const runtime = await this.runtime(workspace);
+        if (!runtime.baseUrl)
+            throw new Error('Orbit Runtime did not publish a browser address');
+        return `${runtime.baseUrl.replace(/\/$/, '')}/ui/`;
+    }
     async run(workspace, sessionId, runId) {
         return decodeRun(await this.call(workspace, sessionId, 'inspect_run', { run_id: runId }));
     }
@@ -85,7 +98,10 @@ export class OrbitGateway {
     }
     async connect(workspaceRoot) {
         const discovered = await this.discover(workspaceRoot);
-        const runtime = { mcpUrl: discovered.mcp_url, nextId: 1, capabilities: {} };
+        const runtime = {
+            mcpUrl: discovered.mcp_url, baseUrl: discovered.base_url ?? '',
+            nextId: 1, capabilities: {},
+        };
         await this.rpc(runtime, 'initialize', {
             protocolVersion: '2025-06-18', capabilities: {},
             clientInfo: { name: 'dsh-orbit', version: '0.1.0' },
