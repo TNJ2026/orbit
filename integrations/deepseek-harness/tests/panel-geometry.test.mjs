@@ -31,10 +31,18 @@ test('the panel starts folded away', () => {
   assert.equal(DEFAULT_PANEL_LAYOUT.collapsed, true)
 })
 
-test('a docked panel hangs from the right edge and fills the height', () => {
-  const box = placePanel({ ...DEFAULT_PANEL_LAYOUT, collapsed: false }, wide)
+test('a docked panel hangs from the right edge at the height it was given', () => {
+  const layout = { ...DEFAULT_PANEL_LAYOUT, collapsed: false }
+  const box = placePanel(layout, wide)
   assert.equal(box.left + box.width, wide.width - 18)
-  assert.ok(box.top > 0 && box.height > PANEL_MIN_HEIGHT)
+  assert.equal(box.height, layout.height, 'docked is a side, not a full-height column')
+})
+
+test('a short window caps the docked height rather than overflowing it', () => {
+  const short = { width: 1440, height: 380 }
+  const box = placePanel({ ...DEFAULT_PANEL_LAYOUT, collapsed: false }, short)
+  assert.ok(box.top + box.height <= short.height, 'the panel fits the window it is in')
+  assert.ok(box.height >= PANEL_MIN_HEIGHT)
 })
 
 test('a narrow window docks a floating panel rather than floating it off-screen', () => {

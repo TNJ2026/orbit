@@ -25,7 +25,7 @@ export interface PanelBounds {
 
 export const PANEL_STORAGE_KEY = 'orbit:panel:v1'
 export const PANEL_DEFAULT_WIDTH = 400
-export const PANEL_DEFAULT_HEIGHT = 620
+export const PANEL_DEFAULT_HEIGHT = 420
 export const PANEL_MIN_WIDTH = 320
 export const PANEL_MAX_WIDTH = 720
 export const PANEL_MIN_HEIGHT = 280
@@ -87,11 +87,15 @@ export function placePanel(layout: PanelLayout, bounds: PanelBounds): {
     : clamp(layout.width, PANEL_MIN_WIDTH, maxWidth)
   if (layout.mode === 'docked' || compact) {
     const top = PANEL_DOCK_TOP
+    // Docked is a side, not a column: filling to the bottom of the window made
+    // a panel of three Runs as tall as the conversation beside it. The height
+    // is the arranged one, capped by what the window has.
+    const available = Math.max(PANEL_MIN_HEIGHT, bounds.height - top - PANEL_DOCK_BOTTOM)
     return {
       left: Math.max(PANEL_FLOAT_MARGIN, bounds.width - width - PANEL_DOCK_RIGHT),
       top,
       width,
-      height: Math.max(PANEL_MIN_HEIGHT, bounds.height - top - PANEL_DOCK_BOTTOM),
+      height: Math.min(Math.max(layout.height, PANEL_MIN_HEIGHT), available),
     }
   }
   const height = clamp(layout.height, PANEL_MIN_HEIGHT, Math.max(PANEL_MIN_HEIGHT, bounds.height - 2 * PANEL_FLOAT_MARGIN))

@@ -61,8 +61,9 @@ export function apply(ctx: ClientContext): void {
     'orbit: dictionaries',
   )
   registerOrbitSlashSource(ctx)
-  const Panel = ({ t, sessionId }: PropsLocale<'orbit'> & { sessionId?: string }) =>
-    <OrbitPanel t={t} sessionId={sessionId} />
+  const Panel = ({ t, useSessions }: PropsLocale<'orbit'> & {
+    useSessions: <T>(selector: (state: { current?: string }) => T) => T
+  }) => <OrbitPanel t={t} useSessions={useSessions} />
   ctx.slots.inject('shell.overlay', () => ctx.slots.register({
     name: 'shell.overlay',
     id: 'orbit-runs',

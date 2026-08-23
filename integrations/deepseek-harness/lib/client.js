@@ -50,7 +50,7 @@ window.__ModuleLoader__.load({
 			x: 0,
 			y: 64,
 			width: 400,
-			height: 620
+			height: 420
 		});
 		function clamp(value, low, high) {
 			return value < low ? low : value > high ? high : value;
@@ -82,7 +82,7 @@ window.__ModuleLoader__.load({
 				x: finite(stored.x, DEFAULT_PANEL_LAYOUT.x),
 				y: finite(stored.y, DEFAULT_PANEL_LAYOUT.y),
 				width: clamp(finite(stored.width, 400), 320, 720),
-				height: Math.max(finite(stored.height, 620), 280)
+				height: Math.max(finite(stored.height, 420), 280)
 			};
 		}
 		/** The CSS box for a layout inside the bounds it has to live in. */
@@ -92,11 +92,12 @@ window.__ModuleLoader__.load({
 			const width = compact ? Math.max(320, bounds.width - 24) : clamp(layout.width, 320, maxWidth);
 			if (layout.mode === "docked" || compact) {
 				const top = 64;
+				const available = Math.max(280, bounds.height - top - 24);
 				return {
 					left: Math.max(12, bounds.width - width - 18),
 					top,
 					width,
-					height: Math.max(280, bounds.height - top - 24)
+					height: Math.min(Math.max(layout.height, 280), available)
 				};
 			}
 			const height = clamp(layout.height, 280, Math.max(280, bounds.height - 24));
@@ -473,7 +474,8 @@ window.__ModuleLoader__.load({
 			}, []);
 			return bounds;
 		}
-		function OrbitPanel({ t, sessionId }) {
+		function OrbitPanel({ t, useSessions }) {
+			const sessionId = useSessions((state) => state.current);
 			const [layout, setLayout] = (0, react.useState)(() => {
 				try {
 					return readLayout(localStorage.getItem(PANEL_STORAGE_KEY));
@@ -499,7 +501,6 @@ window.__ModuleLoader__.load({
 				return () => window.removeEventListener("orbit:toggle-panel", toggle);
 			}, [layout, update]);
 			(0, react.useEffect)(() => {
-				if (layout.collapsed && rows !== null) return;
 				if (!sessionId) {
 					setRows([]);
 					return;
@@ -516,7 +517,7 @@ window.__ModuleLoader__.load({
 						setError("");
 						timer = setTimeout(() => {
 							tick();
-						}, nextInterval(next));
+						}, layout.collapsed ? ORBIT_IDLE_MS : nextInterval(next));
 					} catch (reason) {
 						if (controller.signal.aborted) return;
 						setError(String(reason));
@@ -530,11 +531,7 @@ window.__ModuleLoader__.load({
 					controller.abort();
 					if (timer !== void 0) clearTimeout(timer);
 				};
-			}, [
-				sessionId,
-				layout.collapsed,
-				rows === null
-			]);
+			}, [sessionId, layout.collapsed]);
 			const counts = summarise(rows ?? []);
 			const box = placePanel(layout, bounds);
 			if (layout.collapsed) return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("button", {
@@ -552,6 +549,7 @@ window.__ModuleLoader__.load({
 				children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { className: `${OrbitPanel_module_css_default.dot} ${counts.live ? OrbitPanel_module_css_default.live : OrbitPanel_module_css_default.done}` }), counts.live ? t("liveCount", counts) : t("idleCount", counts)]
 			});
 			const onPointerDown = (event) => {
+				if (event.target !== event.currentTarget) return;
 				drag.current = {
 					x: event.clientX,
 					y: event.clientY
@@ -755,9 +753,9 @@ window.__ModuleLoader__.load({
 				en
 			}), "orbit: dictionaries");
 			registerOrbitSlashSource(ctx);
-			const Panel = ({ t, sessionId }) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(OrbitPanel, {
+			const Panel = ({ t, useSessions }) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(OrbitPanel, {
 				t,
-				sessionId
+				useSessions
 			});
 			ctx.slots.inject("shell.overlay", () => ctx.slots.register({
 				name: "shell.overlay",

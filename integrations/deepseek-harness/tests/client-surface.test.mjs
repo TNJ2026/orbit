@@ -56,3 +56,17 @@ test('the panel is a Harness surface, not one with its own palette', async () =>
   assert.deepEqual(hardcoded, [], 'colours belong to the --dsw-alias-* tokens')
   assert.match(css, /--dsw-alias-/)
 })
+
+test('the panel reads its Session from the store the slot actually hands over', () => {
+  // `shell.overlay` is root-scoped and passes the session *store*, never an id.
+  // A `sessionId` prop typechecks, arrives undefined forever, and leaves the
+  // panel permanently empty — which is exactly how it shipped once.
+  assert.match(code, /useSessions\(state => state\.current\)/)
+  assert.equal(/sessionId\?: string\s*\}/.test(code), false, 'a prop the slot never sends is back')
+})
+
+test('a drag begun on the bar does not swallow the controls in it', () => {
+  // setPointerCapture redirects every following pointer event to the captor,
+  // so a press that started on the close button never became a click.
+  assert.match(code, /event\.target !== event\.currentTarget/)
+})
