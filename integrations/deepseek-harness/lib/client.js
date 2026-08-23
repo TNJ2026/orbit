@@ -440,26 +440,10 @@ window.__ModuleLoader__.load({
 				]
 			});
 		}
-		let known = [];
-		function rememberWorkflows(workflows) {
-			known = workflows;
-		}
-		/**
-		* The Workflows worth offering for what has been typed after the command.
-		*
-		* Matched on the name alone. The id is in the row for the Agent to act on, but
-		* nobody searches by it — a person reaching for one of these is remembering
-		* what it was called, and matching ids too would surface rows whose visible
-		* text has nothing to do with what they typed.
-		*/
-		function matchWorkflows(query) {
-			const needle = query.trim().toLowerCase();
-			return (needle ? known.filter((item) => (item.name || "").toLowerCase().includes(needle)) : known).slice(0, 12);
-		}
 		//#endregion
 		//#region src/client/OrbitPanel.tsx
 		/** The resident Orbit panel: what is running, and a way into Orbit itself. */
-		async function hostCall(action, args, signal) {
+		async function hostCall$1(action, args, signal) {
 			const response = await fetch("/plugins/dsh-orbit/api", {
 				method: "POST",
 				headers: { "content-type": "application/json" },
@@ -529,14 +513,13 @@ window.__ModuleLoader__.load({
 				const controller = new AbortController();
 				const tick = async () => {
 					try {
-						const state = await hostCall("getPanelState", [sessionId], controller.signal);
+						const state = await hostCall$1("getPanelState", [sessionId], controller.signal);
 						if (controller.signal.aborted) return;
 						const next = orderRows(state.runs.map(toRow));
 						setRows(next);
 						setUiUrl(state.uiUrl);
 						setError("");
 						setWorkflows(state.workflows ?? []);
-						rememberWorkflows(state.workflows ?? []);
 						timer = setTimeout(() => {
 							tick();
 						}, layout.collapsed ? ORBIT_IDLE_MS : nextInterval(next));
@@ -679,7 +662,7 @@ window.__ModuleLoader__.load({
 								]
 							}) : null,
 							sessionId ? rows?.map((row) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(OrbitRunRow, {
-								call: hostCall,
+								call: hostCall$1,
 								t,
 								sessionId,
 								run: row
@@ -741,9 +724,7 @@ window.__ModuleLoader__.load({
 			runnableHint: "Ask the Agent to run one — it has the tools.",
 			togglePanel: "Show or hide the Orbit panel",
 			askWhatRuns: "List the workflows that can run here",
-			askWhatRunsHint: "search by name",
-			runPrefix: "Run \"{name}\" ({id}): ",
-			noMatch: "No workflow here goes by that name."
+			openInOrbit: "Opens this workflow in Orbit, where the goal is written."
 		};
 		const zh = {
 			title: "Orbit",
@@ -772,34 +753,18 @@ window.__ModuleLoader__.load({
 			runnableHint: "让 agent 跑其中一个即可——它有对应的工具。",
 			togglePanel: "显示或收起 Orbit 面板",
 			askWhatRuns: "列出这里可运行的工作流",
-			askWhatRunsHint: "按名称搜索",
-			runPrefix: "用「{name}」（{id}）跑：",
-			noMatch: "没有叫这个名字的工作流。"
+			openInOrbit: "在 Orbit 中打开这个工作流，目标在那里填写。"
 		};
 		//#endregion
 		//#region src/client/index.tsx
 		const PANEL_COMMAND = "orbit";
 		const LIST_COMMAND = "orbit-workflows";
-		/**
-		* The `/` menu shows two commands; `/orbit-workflows ` turns it into a Workflow
-		* picker.
-		*
-		* Two levels, because the first attempt had one: listing the Workflows beside
-		* the commands buried the native ones under however many a Workspace happened
-		* to have, and made picking from `/` mean "paste a name" rather than "do the
-		* thing". Behind the command they are a list someone asked for, filtered by
-		* what they type after it.
-		*
-		* Picking one writes a request into the draft rather than starting anything.
-		* The Run has to be the Agent's — a Run begun here would be one it knows
-		* nothing about, unable to report on it or take the next step from it — so the
-		* menu's job ends at sparing a person the name.
-		*/
+		/** `/orbit` folds the resident panel; it never opens a second one. */
 		function registerOrbitSlashSource(ctx, t) {
 			const inputTriggers = ctx.get("inputTriggers");
 			if (!inputTriggers) throw new Error("Orbit /orbit requires the Harness inputTriggers service");
 			const claim = () => ({
-				token: "/orbit",
+				token: `/${PANEL_COMMAND}`,
 				submit: async (args) => {
 					if (args.trim()) return {
 						kind: "error",
@@ -814,60 +779,75 @@ window.__ModuleLoader__.load({
 				name: "orbit",
 				order: -10,
 				showGroupTitle: false,
-				candidates: async (_session, request) => {
-					const typed = request.query;
-					const heading = LIST_COMMAND.startsWith(typed) && typed.length > 5;
-					if (typed.startsWith(LIST_COMMAND) || heading) {
-						const hits = matchWorkflows(typed.startsWith(LIST_COMMAND) ? typed.slice(15).replace(/^\s+/u, "") : "");
-						if (!hits.length) return [{
-							name: t("noMatch"),
-							value: "none"
-						}];
-						return hits.map((item) => ({
-							name: item.name || item.workflow_id,
-							description: `${item.workflow_id}@${String(item.latest_version)}`,
-							value: `run:${item.workflow_id}`
-						}));
-					}
-					return [{
-						name: PANEL_COMMAND,
-						description: t("togglePanel"),
-						value: "panel"
-					}, {
-						name: LIST_COMMAND,
-						description: t("askWhatRuns"),
-						hint: t("askWhatRunsHint"),
-						value: "open"
-					}].filter((item) => item.name.includes(typed.toLowerCase()));
-				},
-				onPick: (pick) => {
-					const value = pick.candidate.value;
-					if (value === "none") return "handled";
-					if (value?.startsWith("run:")) return { text: t("runPrefix", {
-						name: pick.candidate.name,
-						id: value.slice(4)
-					}) };
-					if (value === "open") return {
-						text: `/${LIST_COMMAND}`,
-						continue: true
-					};
-					if (value === "panel") return { claim: claim() };
-				},
-				matchSpace: (_session, token) => token === "/orbit" ? { claim: claim() } : void 0,
-				matchEnter: async (_session, line) => /^\/orbit(?:\s|$)/u.test(line.trim()) ? { claim: claim() } : void 0
+				candidates: async (_session, request) => PANEL_COMMAND.includes(request.query.toLowerCase()) ? [{
+					name: PANEL_COMMAND,
+					description: t("togglePanel")
+				}] : [],
+				onPick: () => ({ claim: claim() }),
+				matchSpace: (_session, token) => token === `/${PANEL_COMMAND}` ? { claim: claim() } : void 0,
+				matchEnter: async (_session, line) => new RegExp(`^/${PANEL_COMMAND}(?:\\s|$)`, "u").test(line.trim()) ? { claim: claim() } : void 0
 			}), "orbit: slash command folding the panel");
+		}
+		async function hostCall(action, args, signal) {
+			const response = await fetch("/plugins/dsh-orbit/api", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					action,
+					args
+				}),
+				signal
+			});
+			const payload = await response.json();
+			if (!response.ok || payload.error) throw new Error(payload.error || `HTTP ${String(response.status)}`);
+			return payload.result;
+		}
+		/**
+		* `/orbit-workflows` opens the shell's own popup — the one `/model` uses.
+		*
+		* Selecting opens the Workflow in Orbit rather than starting it. A popupSelect
+		* is one list and one pick: it has nowhere to put the goal these Workflows
+		* declare an input for, and starting without one is refused by the Runtime
+		* (`missing workflow input 'prompt'`). Orbit's own page is where that sentence
+		* gets written.
+		*/
+		function registerWorkflowPopup(ctx, t) {
+			const commandUi = ctx.get("commandUi");
+			if (!commandUi) return;
+			ctx.effect(() => commandUi.register({
+				name: LIST_COMMAND,
+				description: t("askWhatRuns"),
+				available: () => true,
+				ui: {
+					kind: "popupSelect",
+					options: async (session, signal) => {
+						return ((await hostCall("getPanelState", [session.sessionId], signal)).workflows ?? []).map((item) => ({
+							id: item.workflow_id,
+							label: item.name || item.workflow_id,
+							detail: `${item.workflow_id}@${String(item.latest_version)}`
+						}));
+					},
+					onSelect: async (option, session) => {
+						const base = await hostCall("getRuntimeUi", [session.sessionId], new AbortController().signal);
+						window.open(`${base}#/workflows/${encodeURIComponent(option.id)}`, "_blank", "noopener");
+					}
+				}
+			}), "orbit: workflow popup");
 		}
 		const inject = [
 			"inputTriggers",
 			"slots",
-			"locale"
+			"locale",
+			"commandUi"
 		];
 		function apply(ctx) {
 			ctx.effect(() => ctx.locale.register(ORBIT_LOCALE_NAMESPACE, {
 				zh,
 				en
 			}), "orbit: dictionaries");
-			registerOrbitSlashSource(ctx, ctx.locale.bind(ORBIT_LOCALE_NAMESPACE));
+			const t = ctx.locale.bind(ORBIT_LOCALE_NAMESPACE);
+			registerOrbitSlashSource(ctx, t);
+			registerWorkflowPopup(ctx, t);
 			const Panel = ({ t, useSessions }) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(OrbitPanel, {
 				t,
 				useSessions

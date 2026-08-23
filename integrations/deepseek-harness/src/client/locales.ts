@@ -29,9 +29,8 @@ export const en = {
   runnableHint: 'Ask the Agent to run one — it has the tools.',
   togglePanel: 'Show or hide the Orbit panel',
   askWhatRuns: 'List the workflows that can run here',
-  askWhatRunsHint: 'search by name',
-  runPrefix: 'Run "{name}" ({id}): ',
-  noMatch: 'No workflow here goes by that name.',
+  openInOrbit: 'Opens this workflow in Orbit, where the goal is written.',
+
 } as const
 
 export const zh = {
@@ -61,9 +60,8 @@ export const zh = {
   runnableHint: '让 agent 跑其中一个即可——它有对应的工具。',
   togglePanel: '显示或收起 Orbit 面板',
   askWhatRuns: '列出这里可运行的工作流',
-  askWhatRunsHint: '按名称搜索',
-  runPrefix: '用「{name}」（{id}）跑：',
-  noMatch: '没有叫这个名字的工作流。',
+  openInOrbit: '在 Orbit 中打开这个工作流，目标在那里填写。',
+
 } as const
 
 export type OrbitLocaleKey = keyof typeof en

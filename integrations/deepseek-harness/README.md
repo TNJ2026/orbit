@@ -108,17 +108,12 @@ Workflows of every bridged Workspace in the model's context — with the inputs
 each one needs, which is the mistake it exists to prevent — so the Agent can
 answer "which of these did you mean" instead of asking what Orbit is. The panel
 lists the same catalog below the Runs, for the person doing the asking, and
-`/orbit-w` turns the input menu into a Workflow picker, searched by name once
-the command name is complete. It opens while the name is being typed rather
-than when the entry is picked: the trigger pipeline re-polls its sources on
-keystrokes, so a pick lands its text and leaves the menu shut until the next
-one. Picking one writes `Run "<name>" (<id>): ` into the draft —
-the name for you, the id for the Agent — and stops there. The Run has to be the
-Agent's, or it cannot report on it afterwards.
+`/orbit-workflows` opens the shell's own popup — the one `/model` uses, with
+its search box and empty state — and selecting a Workflow opens it in Orbit.
 
-The picker sits behind the command rather than beside it: the `/` menu is for
-commands, and filling its top level with Workflows buried the native ones under
-however many a Workspace happened to have.
+Not starting it: a popupSelect is one list and one pick, with nowhere to put the
+goal these Workflows declare an input for, and starting without it is refused by
+the Runtime. Orbit's page is where that sentence gets written.
 
 Both read one cache filled by the panel's own poll, so nothing asks twice for
 something that changes when a Workflow is published; a Runtime that is down

@@ -42,15 +42,9 @@ test('every Host call is one the panel can name a reason for', async () => {
   // membership test.
   const used = dispatchable.filter(action => new RegExp(`'${action}'`).test(code))
   assert.deepEqual(used.sort(), [
-    'getPanelState', 'getRunDetail', 'getStepOutput', 'reconcileStep', 'runCommand',
+    'getPanelState', 'getRunDetail', 'getRuntimeUi', 'getStepOutput',
+    'reconcileStep', 'runCommand',
   ])
-})
-
-test('/orbit folds the resident panel rather than opening another', () => {
-  assert.equal(/hint:\s*'<goal>'/.test(code), false, 'the goal argument is back')
-  assert.match(code, /takes no argument/)
-  assert.match(code, /orbit:toggle-panel/)
-  assert.equal(code.includes('window.open('), false, 'the panel is resident, not launched')
 })
 
 test('the panel is a Harness surface, not one with its own palette', async () => {
@@ -113,54 +107,29 @@ test('the catalog names Workflows and does not offer to start one', () => {
   assert.equal(/runCommand|start_run|startRun/.test(section), false)
 })
 
-test('the top level of the menu is commands, the Workflows sit behind one', () => {
-  // Listing them beside the commands buried the native ones under however many
-  // a Workspace happened to have, and made picking from `/` mean "paste a name".
-  const candidates = code.slice(code.indexOf('candidates:'), code.indexOf('onPick:'))
-  const gate = candidates.indexOf('startsWith(LIST_COMMAND)')
-  assert.ok(gate > 0, 'the picker is not gated behind the command')
-  assert.ok(gate < candidates.indexOf('name: PANEL_COMMAND'), 'the gate comes first')
+
+test('the Workflow list is the shell\'s own popup, not one built here', () => {
+  // `/model` registers a `popupSelect` contribution and the shell owns the
+  // list, its search box and its empty state. Building a second one over the
+  // trigger menu meant reproducing all three — and the trigger pipeline will
+  // not reopen a menu from a pick, so it could never behave like this one.
+  assert.match(code, /commandUi\.register/)
+  assert.match(code, /kind: 'popupSelect'/)
+  assert.match(code, /options: async \(session, signal\)/)
 })
 
-test('picking a Workflow writes a request, it does not start one', () => {
-  // The Run has to be the Agent's or it cannot report on it afterwards, so the
-  // menu spares a person the name and stops there.
-  assert.match(code, /text: t\('runPrefix'/)
-  const pick = code.slice(code.indexOf('onPick:'), code.indexOf('matchSpace:'))
-  assert.equal(/start_run|runCommand|getPanelState/.test(pick), false, 'the menu grew a launcher')
+test('selecting a Workflow opens it in Orbit rather than starting it', () => {
+  // A popupSelect is one list and one pick, with nowhere to put the goal these
+  // Workflows declare an input for; starting without it is refused by the
+  // Runtime. Orbit's own page is where that sentence gets written.
+  const select = code.slice(code.indexOf('onSelect: async'), code.indexOf('}, \'orbit: workflow popup\''))
+  assert.match(select, /getRuntimeUi/)
+  assert.match(select, /window\.open\(/)
+  assert.equal(/start_run|runCommand/.test(select), false, 'the popup grew a launcher')
 })
 
-test('every menu candidate is told apart by its own payload, not by falling through', () => {
-  // The opener shipped without a `value`, so picking it fell to the last branch
-  // and claimed `/orbit` — the command appeared to do nothing while quietly
-  // folding the panel. Each candidate carries what onPick dispatches on.
-  const candidates = code.slice(code.indexOf('candidates:'), code.indexOf('onPick:'))
-  const named = [...candidates.matchAll(/\{ name: (?:PANEL_COMMAND|LIST_COMMAND)[^}]*\}/g)].map(([hit]) => hit)
-  assert.ok(named.length >= 2, 'the command candidates were not found')
-  for (const entry of named) assert.match(entry, /value:/, `${entry} has no payload to dispatch on`)
-})
-
-test('picking the opener reopens the menu, and leaves no space to close it', () => {
-  // A space is the pipeline's adjudication moment and ends the trigger token,
-  // so a trailing one closed the menu the pick had just opened.
-  assert.match(code, /text: `\/\$\{LIST_COMMAND\}`, continue: true/)
-})
-
-test('the picker opens while the command is typed, not when it is picked', () => {
-  // Measured in the running shell: a `continue` outcome writes the draft, but
-  // the pipeline re-polls sources on keystrokes only — so a pick lands the text
-  // and leaves the menu shut. Anything past the panel command can only be
-  // heading here, and that is where the list opens.
-  const candidates = code.slice(code.indexOf('candidates:'), code.indexOf('onPick:'))
-  assert.match(candidates, /LIST_COMMAND\.startsWith\(typed\)/)
-  assert.match(candidates, /typed\.length > PANEL_COMMAND\.length/)
-  assert.match(candidates, /typed\.startsWith\(LIST_COMMAND\)/)
-  assert.equal(/startsWith\(`\$\{LIST_COMMAND\} `\)/.test(candidates), false)
-})
-
-test('the search is only what follows the whole command name', () => {
-  // While the name is still being spelled, its own letters are not a search:
-  // `orbit-w` would match nothing and empty the list mid-word.
-  const candidates = code.slice(code.indexOf('candidates:'), code.indexOf('onPick:'))
-  assert.match(candidates, /typed\.startsWith\(LIST_COMMAND\)\s*\n?\s*\?/)
+test('/orbit still only folds the panel', () => {
+  const source = code.slice(code.indexOf('registerOrbitSlashSource'), code.indexOf('interface SelectOption'))
+  assert.match(source, /orbit:toggle-panel/)
+  assert.equal(/workflow/i.test(source), false, 'the trigger source is carrying Workflows again')
 })

@@ -14,7 +14,6 @@ import {
 } from './orbit-model.ts'
 import type { OrbitLocaleKey } from './locales.ts'
 import { OrbitRunRow } from './OrbitRunRow.tsx'
-import { rememberWorkflows } from './catalog-store.ts'
 
 type Translate = (key: OrbitLocaleKey, values?: Record<string, string | number>) => string
 
@@ -100,8 +99,7 @@ export function OrbitPanel({ t, useSessions }: OrbitPanelProps) {
         if (controller.signal.aborted) return
         const next = orderRows(state.runs.map(toRow))
         setRows(next); setUiUrl(state.uiUrl); setError('')
-        // The input menu reads this too, and has no way of its own to ask.
-        setWorkflows(state.workflows ?? []); rememberWorkflows(state.workflows ?? [])
+        setWorkflows(state.workflows ?? [])
         timer = setTimeout(
           () => { void tick() },
           layout.collapsed ? ORBIT_IDLE_MS : nextInterval(next),
