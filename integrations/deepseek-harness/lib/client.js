@@ -440,6 +440,22 @@ window.__ModuleLoader__.load({
 				]
 			});
 		}
+		let known = [];
+		function rememberWorkflows(workflows) {
+			known = workflows;
+		}
+		/**
+		* The Workflows worth offering for what has been typed after the command.
+		*
+		* Matched on the name alone. The id is in the row for the Agent to act on, but
+		* nobody searches by it — a person reaching for one of these is remembering
+		* what it was called, and matching ids too would surface rows whose visible
+		* text has nothing to do with what they typed.
+		*/
+		function matchWorkflows(query) {
+			const needle = query.trim().toLowerCase();
+			return (needle ? known.filter((item) => (item.name || "").toLowerCase().includes(needle)) : known).slice(0, 12);
+		}
 		//#endregion
 		//#region src/client/OrbitPanel.tsx
 		/** The resident Orbit panel: what is running, and a way into Orbit itself. */
@@ -520,6 +536,7 @@ window.__ModuleLoader__.load({
 						setUiUrl(state.uiUrl);
 						setError("");
 						setWorkflows(state.workflows ?? []);
+						rememberWorkflows(state.workflows ?? []);
 						timer = setTimeout(() => {
 							tick();
 						}, layout.collapsed ? ORBIT_IDLE_MS : nextInterval(next));
@@ -724,7 +741,9 @@ window.__ModuleLoader__.load({
 			runnableHint: "Ask the Agent to run one — it has the tools.",
 			togglePanel: "Show or hide the Orbit panel",
 			askWhatRuns: "List the workflows that can run here",
-			listRequest: "Call orbit_list_workflows and lay out the workflows that can run in this Workspace, with the input each one needs."
+			askWhatRunsHint: "search by name",
+			runPrefix: "Run \"{name}\" ({id}): ",
+			noMatch: "No workflow here goes by that name."
 		};
 		const zh = {
 			title: "Orbit",
@@ -753,23 +772,27 @@ window.__ModuleLoader__.load({
 			runnableHint: "让 agent 跑其中一个即可——它有对应的工具。",
 			togglePanel: "显示或收起 Orbit 面板",
 			askWhatRuns: "列出这里可运行的工作流",
-			listRequest: "调用 orbit_list_workflows，列出这个 Workspace 可运行的工作流，并注明每个需要的输入。"
+			askWhatRunsHint: "按名称搜索",
+			runPrefix: "用「{name}」（{id}）跑：",
+			noMatch: "没有叫这个名字的工作流。"
 		};
 		//#endregion
 		//#region src/client/index.tsx
+		const LIST_COMMAND = "orbit-workflows";
 		/**
-		* Two commands: fold the panel, and ask for the Workflows.
+		* The `/` menu shows two commands; `/orbit-workflows ` turns it into a Workflow
+		* picker.
 		*
-		* The second writes an instruction into the draft — call the tool, lay out the
-		* answer — rather than listing anything itself. Going through the Agent costs a
-		* turn and buys the only thing a command result cannot have: the listing is in
-		* the conversation, so "run the second one" has something to count, and the
-		* numbers come from the tool rather than from a catalog that may be minutes old.
+		* Two levels, because the first attempt had one: listing the Workflows beside
+		* the commands buried the native ones under however many a Workspace happened
+		* to have, and made picking from `/` mean "paste a name" rather than "do the
+		* thing". Behind the command they are a list someone asked for, filtered by
+		* what they type after it.
 		*
-		* An earlier version listed the Workflows themselves as menu entries. The `/`
-		* menu is for commands, where picking one makes something happen; filling it
-		* with data made picking mean "paste a name", and buried the native commands
-		* under however many Workflows a Workspace happened to have.
+		* Picking one writes a request into the draft rather than starting anything.
+		* The Run has to be the Agent's — a Run begun here would be one it knows
+		* nothing about, unable to report on it or take the next step from it — so the
+		* menu's job ends at sparing a person the name.
 		*/
 		function registerOrbitSlashSource(ctx, t) {
 			const inputTriggers = ctx.get("inputTriggers");
@@ -791,23 +814,39 @@ window.__ModuleLoader__.load({
 				order: -10,
 				showGroupTitle: false,
 				candidates: async (_session, request) => {
-					const query = request.query.toLowerCase();
+					const typed = request.query;
+					if (typed.startsWith(`${LIST_COMMAND} `) || typed === LIST_COMMAND) {
+						const hits = matchWorkflows(typed.slice(15));
+						if (!hits.length) return [{
+							name: t("noMatch"),
+							value: "none"
+						}];
+						return hits.map((item) => ({
+							name: item.name || item.workflow_id,
+							description: `${item.workflow_id}@${String(item.latest_version)}`,
+							value: `run:${item.workflow_id}`
+						}));
+					}
 					return [{
 						name: "orbit",
 						description: t("togglePanel")
 					}, {
-						name: "orbit-workflows",
+						name: LIST_COMMAND,
 						description: t("askWhatRuns"),
-						value: "list"
-					}].filter((item) => item.name.includes(query));
+						hint: t("askWhatRunsHint")
+					}].filter((item) => item.name.includes(typed.toLowerCase()));
 				},
-				onPick: (pick) => pick.candidate.value === "list" ? { text: t("listRequest") } : { claim: claim() },
-				matchSpace: (_session, token) => token === "/orbit-workflows" ? { text: t("listRequest") } : token === "/orbit" ? { claim: claim() } : void 0,
-				matchEnter: async (_session, line) => {
-					const text = line.trim();
-					if (/^\/orbit-workflows(?:\s|$)/u.test(text)) return { text: t("listRequest") };
-					return /^\/orbit(?:\s|$)/u.test(text) ? { claim: claim() } : void 0;
-				}
+				onPick: (pick) => {
+					const value = pick.candidate.value;
+					if (value === "none") return "handled";
+					if (value?.startsWith("run:")) return { text: t("runPrefix", {
+						name: pick.candidate.name,
+						id: value.slice(4)
+					}) };
+					return { claim: claim() };
+				},
+				matchSpace: (_session, token) => token === "/orbit" ? { claim: claim() } : void 0,
+				matchEnter: async (_session, line) => /^\/orbit(?:\s|$)/u.test(line.trim()) ? { claim: claim() } : void 0
 			}), "orbit: slash command folding the panel");
 		}
 		const inject = [

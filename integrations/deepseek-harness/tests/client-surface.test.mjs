@@ -113,26 +113,19 @@ test('the catalog names Workflows and does not offer to start one', () => {
   assert.equal(/runCommand|start_run|startRun/.test(section), false)
 })
 
-test('the slash menu carries commands, not a catalogue', () => {
-  // Picking from `/` should make something happen. Listing the Workflows there
-  // made picking mean "paste a name", and buried the native commands under
-  // however many Workflows a Workspace happened to have.
+test('the top level of the menu is commands, the Workflows sit behind one', () => {
+  // Listing them beside the commands buried the native ones under however many
+  // a Workspace happened to have, and made picking from `/` mean "paste a name".
   const candidates = code.slice(code.indexOf('candidates:'), code.indexOf('onPick:'))
-  assert.equal(/matchWorkflows|workflow_id|latest_version/.test(candidates), false)
-  assert.match(candidates, /'orbit-workflows'/)
+  const gate = candidates.indexOf('startsWith(`${LIST_COMMAND} `)')
+  assert.ok(gate > 0, 'the picker is not gated behind the command')
+  assert.ok(gate < candidates.indexOf("{ name: 'orbit',"), 'the gate comes first')
 })
 
-test('asking for the Workflows goes through the Agent and its tool', () => {
-  // A command result cannot be referred to afterwards; a turn can. The
-  // instruction names the tool so the numbers come from it rather than from a
-  // catalog that may be minutes old.
-  assert.match(code, /text: t\('listRequest'\)/)
-  assert.match(sources[names.indexOf('locales.ts')], /orbit_list_workflows/)
+test('picking a Workflow writes a request, it does not start one', () => {
+  // The Run has to be the Agent's or it cannot report on it afterwards, so the
+  // menu spares a person the name and stops there.
+  assert.match(code, /text: t\('runPrefix'/)
   const pick = code.slice(code.indexOf('onPick:'), code.indexOf('matchSpace:'))
-  assert.equal(/start_run|runCommand|listRunnable/.test(pick), false, 'the menu grew a launcher')
-})
-
-test('the longer command is matched before the one it starts with', () => {
-  const order = code.indexOf("token === '/orbit-workflows'")
-  assert.ok(order > 0 && order < code.indexOf("token === '/orbit'"))
+  assert.equal(/start_run|runCommand|getPanelState/.test(pick), false, 'the menu grew a launcher')
 })

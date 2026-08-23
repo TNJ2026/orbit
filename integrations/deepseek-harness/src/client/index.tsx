@@ -17,6 +17,7 @@ import type {} from '@deepseek-ai/dsh-client-locale/client'
 // the runtime wait for that declaration.
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import { OrbitPanel } from './OrbitPanel.tsx'
+import { matchWorkflows } from './catalog-store.ts'
 import { ORBIT_LOCALE_NAMESPACE, en, zh, type OrbitLocaleKey } from './locales.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -31,19 +32,22 @@ interface InputTriggerRegistry { registerSource(source: Record<string, unknown>)
 type Translate = (key: OrbitLocaleKey, values?: Record<string, string | number>) => string
 type SubmitResult = { kind: 'success' } | { kind: 'error'; text: string }
 
+const LIST_COMMAND = 'orbit-workflows'
+
 /**
- * Two commands: fold the panel, and ask for the Workflows.
+ * The `/` menu shows two commands; `/orbit-workflows ` turns it into a Workflow
+ * picker.
  *
- * The second writes an instruction into the draft — call the tool, lay out the
- * answer — rather than listing anything itself. Going through the Agent costs a
- * turn and buys the only thing a command result cannot have: the listing is in
- * the conversation, so "run the second one" has something to count, and the
- * numbers come from the tool rather than from a catalog that may be minutes old.
+ * Two levels, because the first attempt had one: listing the Workflows beside
+ * the commands buried the native ones under however many a Workspace happened
+ * to have, and made picking from `/` mean "paste a name" rather than "do the
+ * thing". Behind the command they are a list someone asked for, filtered by
+ * what they type after it.
  *
- * An earlier version listed the Workflows themselves as menu entries. The `/`
- * menu is for commands, where picking one makes something happen; filling it
- * with data made picking mean "paste a name", and buried the native commands
- * under however many Workflows a Workspace happened to have.
+ * Picking one writes a request into the draft rather than starting anything.
+ * The Run has to be the Agent's — a Run begun here would be one it knows
+ * nothing about, unable to report on it or take the next step from it — so the
+ * menu's job ends at sparing a person the name.
  */
 function registerOrbitSlashSource(ctx: ClientContext, t: Translate): void {
   const inputTriggers = ctx.get('inputTriggers') as unknown as InputTriggerRegistry | undefined
@@ -59,26 +63,44 @@ function registerOrbitSlashSource(ctx: ClientContext, t: Translate): void {
   ctx.effect(() => inputTriggers.registerSource({
     trigger: '/', name: 'orbit', order: -10, showGroupTitle: false,
     candidates: async (_session: unknown, request: { query: string }) => {
-      const query = request.query.toLowerCase()
+      const typed = request.query
+      if (typed.startsWith(`${LIST_COMMAND} `) || typed === LIST_COMMAND) {
+        const search = typed.slice(LIST_COMMAND.length)
+        const hits = matchWorkflows(search)
+        if (!hits.length) return [{ name: t('noMatch'), value: 'none' }]
+        return hits.map(item => ({
+          name: item.name || item.workflow_id,
+          description: `${item.workflow_id}@${String(item.latest_version)}`,
+          // `value` is the source's own opaque payload: it is how onPick tells
+          // a Workflow from a command without re-matching on the label.
+          value: `run:${item.workflow_id}`,
+        }))
+      }
       return [
         { name: 'orbit', description: t('togglePanel') },
-        { name: 'orbit-workflows', description: t('askWhatRuns'), value: 'list' },
-      ].filter(item => item.name.includes(query))
+        { name: LIST_COMMAND, description: t('askWhatRuns'), hint: t('askWhatRunsHint') },
+      ].filter(item => item.name.includes(typed.toLowerCase()))
     },
-    onPick: (pick: { candidate: { value?: string } }) =>
-      pick.candidate.value === 'list' ? { text: t('listRequest') } : { claim: claim() },
+    onPick: (pick: { candidate: { name: string; value?: string; description?: string } }) => {
+      const value = pick.candidate.value
+      if (value === 'none') return 'handled'
+      if (value?.startsWith('run:')) {
+        return { text: t('runPrefix', { name: pick.candidate.name, id: value.slice(4) }) }
+      }
+      return { claim: claim() }
+    },
     // Longest token first: `/orbit-workflows` starts with `/orbit`, and the
     // shorter claim would swallow it and then refuse its own name as an
     // argument. Typed in full it resolves to the same instruction the menu
     // writes, so the two ways of reaching it agree.
+    // `/orbit-workflows` is a menu opener, not a command that settles: space
+    // and enter leave it alone so the picker stays up while a name is typed.
+    // `/orbit` still claims, and is checked first only because the longer name
+    // starts with it.
     matchSpace: (_session: unknown, token: string) =>
-      token === '/orbit-workflows' ? { text: t('listRequest') }
-        : token === '/orbit' ? { claim: claim() } : undefined,
-    matchEnter: async (_session: unknown, line: string) => {
-      const text = line.trim()
-      if (/^\/orbit-workflows(?:\s|$)/u.test(text)) return { text: t('listRequest') }
-      return /^\/orbit(?:\s|$)/u.test(text) ? { claim: claim() } : undefined
-    },
+      token === '/orbit' ? { claim: claim() } : undefined,
+    matchEnter: async (_session: unknown, line: string) =>
+      /^\/orbit(?:\s|$)/u.test(line.trim()) ? { claim: claim() } : undefined,
   }), 'orbit: slash command folding the panel')
 }
 
