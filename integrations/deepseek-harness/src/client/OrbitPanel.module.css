@@ -289,3 +289,44 @@
   color: var(--dsw-alias-label-tertiary, GrayText);
   font-size: 11px;
 }
+
+/* A Workflow row opens too, so it is a control like a Run row is. */
+.flowButton {
+  display: block;
+  width: 100%;
+  border-left: 0;
+  border-right: 0;
+  border-top: 0;
+  background: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.flowButton:hover { background: var(--dsw-alias-bg-module, Canvas); }
+
+.prose {
+  margin: 0;
+  padding: 8px 12px;
+  color: var(--dsw-alias-label-secondary, GrayText);
+  font-size: 12px;
+  line-height: 1.55;
+}
+/* Facts read as a table because they answer fixed questions; a paragraph would
+   make the reader find the one they came for. */
+.facts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 3px 10px;
+  margin: 0;
+  padding: 4px 12px 10px;
+  font-size: 11.5px;
+}
+.facts dt { color: var(--dsw-alias-label-tertiary, GrayText); }
+.facts dd { margin: 0; }
+.outLink { display: block; padding: 0 12px 10px; font-size: 11.5px; }
+.sectionLabel {
+  padding: 8px 12px 4px;
+  border-top: 1px solid var(--dsw-alias-line-normal, rgb(128 128 128 / 28%));
+  color: var(--dsw-alias-label-tertiary, GrayText);
+  font-size: 11px;
+}

@@ -14,6 +14,7 @@ import {
 } from './orbit-model.ts'
 import type { OrbitLocaleKey } from './locales.ts'
 import { OrbitRunDetail, OrbitRunListRow } from './OrbitRunRow.tsx'
+import { OrbitWorkflowDetail } from './OrbitWorkflowDetail.tsx'
 
 type Translate = (key: OrbitLocaleKey, values?: Record<string, string | number>) => string
 
@@ -98,6 +99,7 @@ export function OrbitPanel({ t, useSessions }: OrbitPanelProps) {
   // rather than surviving it: a detail left behind a tab is a place a reader
   // returns to without meaning to.
   const [selected, setSelected] = useState<string | null>(null)
+  const [selectedFlow, setSelectedFlow] = useState<string | null>(null)
   const [error, setError] = useState('')
   const bounds = useBounds()
   const drag = useRef<{ x: number; y: number } | null>(null)
@@ -156,6 +158,7 @@ export function OrbitPanel({ t, useSessions }: OrbitPanelProps) {
   // Split once: the Runtime's own pages read as "what is happening" and "what
   // happened", and a Run belongs to exactly one of them.
   const chosen = (rows ?? []).find(row => row.runId === selected)
+  const chosenFlow = workflows.find(item => item.workflow_id === selectedFlow)
   const live = (rows ?? []).filter(row => row.live)
   const settled = (rows ?? []).filter(row => !row.live)
   const box = placePanel(layout, bounds)
@@ -245,7 +248,7 @@ export function OrbitPanel({ t, useSessions }: OrbitPanelProps) {
             type="button"
             className={key === tab ? `${styles.tab} ${styles.tabActive}` : styles.tab}
             aria-pressed={key === tab}
-            onClick={() => { setSelected(null); setTab(key) }}
+            onClick={() => { setSelected(null); setSelectedFlow(null); setTab(key) }}
           >
             {t(label)}
           </button>
@@ -256,6 +259,12 @@ export function OrbitPanel({ t, useSessions }: OrbitPanelProps) {
           <OrbitRunDetail
             call={hostCall} t={t} sessionId={sessionId} run={chosen}
             onBack={() => setSelected(null)}
+          />
+        ) : chosenFlow !== undefined ? (
+          <OrbitWorkflowDetail
+            t={t} workflow={chosenFlow} runs={rows ?? []} uiUrl={uiUrl}
+            onBack={() => setSelectedFlow(null)}
+            onOpenRun={runId => setSelected(runId)}
           />
         ) : <>
         {error ? <p className={styles.error}>{error}</p> : null}
@@ -291,7 +300,12 @@ export function OrbitPanel({ t, useSessions }: OrbitPanelProps) {
 
         {!error && tab === 'workflows' ? (
           workflows.length ? workflows.map(item => (
-            <div className={styles.flowRow} key={item.workflow_id}>
+            <button
+              type="button"
+              className={`${styles.flowRow} ${styles.flowButton}`}
+              key={item.workflow_id}
+              onClick={() => setSelectedFlow(item.workflow_id)}
+            >
               <div className={styles.flowId}>
                 {item.workflow_id.replace(/^workflow:/u, '')}
               </div>
@@ -301,7 +315,7 @@ export function OrbitPanel({ t, useSessions }: OrbitPanelProps) {
                 {Array.isArray(item.inputs)
                   ? <span>{t('inputCount', { total: item.inputs.length })}</span> : null}
               </div>
-            </div>
+            </button>
           )) : <p className={styles.empty}>{t('emptyWorkflows')}</p>
         ) : null}
 

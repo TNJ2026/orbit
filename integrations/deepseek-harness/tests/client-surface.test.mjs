@@ -108,12 +108,12 @@ test('the panel carries the Runtime\'s own four pages, in its order', () => {
   )
 })
 
-test('the Workflows and Agents pages name things and offer no action', () => {
-  // Naming them answers "what can I ask for". Starting one here would answer a
-  // different question wrongly: the Agent would not know the Run exists.
+test('a listing navigates and never starts anything', () => {
+  // Opening a row is navigation; starting a Run from one would answer a
+  // different question wrongly, because the Agent would not know it exists.
   const listing = code.slice(code.indexOf("tab === 'workflows'"), code.indexOf('styles.resize'))
-  assert.equal(/onClick/.test(listing), false, 'a listing grew an action')
-  assert.equal(/runCommand|start_run/.test(listing), false)
+  assert.match(listing, /setSelectedFlow\(item\.workflow_id\)/, 'a Workflow row does not open')
+  assert.equal(/runCommand|start_run/.test(listing), false, 'a listing grew a launcher')
 })
 
 
@@ -211,7 +211,27 @@ test('a Run opens into the panel rather than inside the list', () => {
   assert.equal(/<DisclosureRow[\s\S]{0,400}OrbitRunDetail/.test(code), false)
 })
 
-test('changing page clears the Run it was showing', () => {
-  // A detail left behind a tab is a place a reader returns to without meaning to.
-  assert.match(code, /setSelected\(null\); setTab\(key\)/)
+test('changing page clears every detail it was showing', () => {
+  // A detail left behind a tab is a place a reader returns to without meaning
+  // to — and there are two kinds now, so forgetting one is the likely mistake.
+  const handler = code.slice(code.indexOf('onClick={() => {'), code.indexOf('setTab(key) }}') + 14)
+  assert.match(handler, /setSelected\(null\)/)
+  assert.match(handler, /setSelectedFlow\(null\)/)
+})
+
+test('a Workflow opens into the panel, and links out for its graph', async () => {
+  // Its graph and definition are drawn by Orbit in a frame built for them; a
+  // smaller second drawing here would answer a question already answered.
+  const detail = await readFile(join(clientDir, 'OrbitWorkflowDetail.tsx'), 'utf8')
+  assert.match(detail, /openThisInOrbit/)
+  assert.match(detail, /#\/workflows\//)
+  for (const drawn of ['getGraph', 'getEdges', 'graph', 'definition']) {
+    assert.equal(new RegExp(`\\b${drawn}\\b`).test(detail.replace(/^\s*\*.*$/gm, '')), false,
+      `${drawn} is being drawn here`)
+  }
+})
+
+test('a Workflow detail says why it cannot start a goal, not just that it cannot', () => {
+  // "Not ready" alone sends a person to Orbit to learn what this line knows.
+  assert.match(code, /readiness_reason/)
 })
