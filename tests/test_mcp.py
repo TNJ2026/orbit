@@ -142,6 +142,40 @@ class ToolCallTests(ApiTestCase):
         )
         return payload_of(result)
 
+    def test_list_runs_shows_the_caller_its_own_work_by_default(self) -> None:
+        """An Agent's account of what it started, not everything on the machine."""
+
+        with AsgiHarness(self.app) as client:
+            self._start(client, key="mine")
+            mine = payload_of(tool(client, "list_runs", {}, actor="writer"))["runs"]
+            others = payload_of(tool(client, "list_runs", {}, actor="reader"))["runs"]
+
+        self.assertEqual(1, len(mine))
+        self.assertEqual([], others, "a second actor sees none of it")
+
+    def test_list_runs_can_show_the_whole_Workspace(self) -> None:
+        """What the Runtime's own UI shows, for a surface that stands beside it.
+
+        Not a widening of scope: every actor on this transport is the same local
+        operator, and the UI already shows all of it. The default exists so an
+        Agent's own account is not buried, not to keep anything from anyone.
+        """
+
+        with AsgiHarness(self.app) as client:
+            self._start(client, key="theirs")
+            everything = payload_of(
+                tool(client, "list_runs", {"owner": "workspace"}, actor="reader")
+            )["runs"]
+
+        self.assertEqual(1, len(everything), "a run another actor started is still in the Workspace")
+
+    def test_an_unknown_owner_is_refused_rather_than_guessed(self) -> None:
+        with AsgiHarness(self.app) as client:
+            result = tool(client, "list_runs", {"owner": "everyone"}, actor="reader")
+
+        self.assertTrue(result["result"]["isError"])
+        self.assertIn("owner must be", payload_of(result)["error"])
+
     def test_list_agents_reports_identity_and_nothing_a_caller_could_run(self) -> None:
         """The Agents surface, mirroring the HTTP catalog it stands in for.
 

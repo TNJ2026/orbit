@@ -401,13 +401,25 @@ def build_mcp_dispatcher(
         tools += (
             {
                 "name": "list_runs",
-                "description": "List workflow runs executed by LangGraph.",
+                "description": (
+                    "List workflow runs executed by LangGraph. Yours by "
+                    "default; pass owner=workspace for every run this Runtime "
+                    "holds, which is what its own UI shows."
+                ),
                 "scope": READ_SCOPE,
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "status": {"type": "string"},
                         "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+                        "owner": {
+                            "type": "string",
+                            "enum": ["caller", "workspace"],
+                            "description": (
+                                "caller: runs this actor started (default). "
+                                "workspace: every run in this Runtime."
+                            ),
+                        },
                     },
                 },
             },
@@ -743,6 +755,13 @@ def build_mcp_dispatcher(
                 "tool_profile": tool_profile,
             }
         if name == "list_runs":
+            owner = arguments.get("owner", "caller")
+            if owner not in ("caller", "workspace"):
+                raise ValueError("owner must be caller or workspace")
+            # Not a widening of scope: every actor reaching this transport is
+            # the same local operator, and the Runtime's own UI already shows
+            # all of it. What the default protects is an Agent's account of its
+            # own work, which a Workspace-wide list would bury.
             return {"runs": [
                 langgraph_run_dto(
                     run, can_write=guard.allows(actor, WRITE_SCOPE),
@@ -750,7 +769,7 @@ def build_mcp_dispatcher(
                 for run in langgraph_service.list_runs(
                     status=arguments.get("status") or None,
                     limit=min(200, max(1, int(arguments.get("limit", 20)))),
-                    actor=actor,
+                    actor=None if owner == "workspace" else actor,
                 )
             ]}
         if name == "configure_execution_lease":

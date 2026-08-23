@@ -427,8 +427,11 @@ let OrbitRemoteService = (() => {
             const scope = await this.sessionWorkspace(sessionId);
             const release = await this.gateway.acquire(scope);
             try {
+                // The panel is a view of the Workspace, not of one chat: a Run started in
+                // Orbit's own UI is the same Run, and a History that hid it would sit
+                // empty beside a Runtime full of work.
                 const result = await this.gateway.call(scope, sessionId, 'list_runs', {
-                    limit: 50,
+                    limit: 50, owner: 'workspace',
                 });
                 // The catalog the model is told about, read rather than fetched again:
                 // a poll running every two seconds should not ask twice for something

@@ -95,6 +95,13 @@ panel was displaying and is refused if Orbit has moved past it — a button that
 quietly acted on a newer Run than the one being read would be worse than one
 that fails.
 
+The panel lists the Workspace's Runs, not the chat's. Every call this Gateway
+makes carries a per-Session actor, and `list_runs` scopes to its caller by
+default — which is right for the Agent's own account of its work and wrong for a
+panel standing beside Orbit's UI, where it showed an empty History next to a
+Runtime holding twenty-five Runs. It passes `owner: workspace`; the Agent tool
+keeps the default.
+
 Polling follows the work: every couple of seconds while a Run is moving, every
 fifteen while none is, and one round trip per tick that carries only a Session
 id — the Host derives the Workspace itself, for reads and writes alike.
