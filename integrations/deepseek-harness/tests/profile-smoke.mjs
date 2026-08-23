@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const bundle = resolve(here, '..')
+const installSpec = process.env.DSH_BUNDLE_SPEC || bundle
 const dsh = process.env.DSH_BIN || (process.platform === 'win32' ? 'dsh.cmd' : 'dsh')
 const home = await mkdtemp(resolve(tmpdir(), 'orbit-dsh-profile-'))
 const environment = { ...process.env, DSH_HOME: home }
@@ -54,7 +55,7 @@ async function stop(child) {
 }
 
 try {
-  await run(['plugin', '--profile', 'web', 'add', bundle])
+  await run(['plugin', '--profile', 'web', 'add', installSpec])
   const installed = await run(['--profile', 'web', '--dump-config'])
   assert.match(installed.stdout, /name: '@orbit-runtime\/dsh-orbit'/)
 

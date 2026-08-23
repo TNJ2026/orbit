@@ -14,8 +14,8 @@
   execution derives Session routing in Host code and owns idempotency and
   advertised-command revision checks.
 - Added a real-process independent Runtime E2E gate and endpoint rediscovery
-- Added cross-platform `ORBIT_RUNTIME_ROOT` discovery for custom Runtime database locations
   after transport loss or Runtime restart.
+- Added cross-platform `ORBIT_RUNTIME_ROOT` discovery for custom Runtime database locations.
 - Removed the cancelled Harness Subagent executor, provider policy, Git effect
   observer, related tests/codecs, and direct Agent/Subagent peer dependencies.
 

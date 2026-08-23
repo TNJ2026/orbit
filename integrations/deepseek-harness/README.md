@@ -28,16 +28,19 @@ it never receives the child process handle or Orbit loopback credentials.
 
 Maintainers can verify install, Host/Web startup, HTTP readiness and clean
 removal in an isolated temporary Profile with `npm run smoke:profile`. Set
-`DSH_BIN` only when the Harness launcher is not named `dsh` on `PATH`.
+`DSH_BIN` only when the Harness launcher is not named `dsh` on `PATH`. To test
+the exact release artifact, set `DSH_BUNDLE_SPEC` to an absolute `.tgz` path.
 
 ## Compatibility
 
 | Component | Supported range |
 | --- | --- |
+| Orbit Runtime | `>=0.4.0 <0.5.0` |
 | Orbit integration protocol | `orbit-harness/1` |
 | Harness packages | `>=0.1.1-rc.2 <0.2.0` |
+| Verified Harness launcher | `0.1.0-rc.6` |
 | React | `^18.2.0` |
-| Node.js | current Harness-supported Node runtime |
+| Node.js | `>=22` (verified with Harness bundled Node.js 26) |
 
 The Gateway refuses an incompatible Orbit integration protocol during startup.
 Runtime codecs also reject malformed core DTOs before they reach the Client.

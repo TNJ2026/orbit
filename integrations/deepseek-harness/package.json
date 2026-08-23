@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "publishConfig": { "access": "public" },
   "license": "MIT",
+  "engines": { "node": ">=22" },
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",

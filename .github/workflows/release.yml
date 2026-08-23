@@ -40,6 +40,14 @@ jobs:
       - name: Build Python packages
         run: uv build
 
+      - name: Test and pack DeepSeek Harness Bundle
+        working-directory: integrations/deepseek-harness
+        run: |
+          npm ci
+          npm test
+          npm run typecheck
+          npm pack --pack-destination ../../dist
+
       - name: Build local Marketplace archive
         run: |
           uv run python scripts/build-marketplace-release.py \
