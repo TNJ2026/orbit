@@ -778,6 +778,7 @@ window.__ModuleLoader__.load({
 		};
 		//#endregion
 		//#region src/client/index.tsx
+		const PANEL_COMMAND = "orbit";
 		const LIST_COMMAND = "orbit-workflows";
 		/**
 		* The `/` menu shows two commands; `/orbit-workflows ` turns it into a Workflow
@@ -815,8 +816,9 @@ window.__ModuleLoader__.load({
 				showGroupTitle: false,
 				candidates: async (_session, request) => {
 					const typed = request.query;
-					if (typed.startsWith(LIST_COMMAND)) {
-						const hits = matchWorkflows(typed.slice(15).replace(/^\s+/u, ""));
+					const heading = LIST_COMMAND.startsWith(typed) && typed.length > 5;
+					if (typed.startsWith(LIST_COMMAND) || heading) {
+						const hits = matchWorkflows(typed.startsWith(LIST_COMMAND) ? typed.slice(15).replace(/^\s+/u, "") : "");
 						if (!hits.length) return [{
 							name: t("noMatch"),
 							value: "none"
@@ -828,7 +830,7 @@ window.__ModuleLoader__.load({
 						}));
 					}
 					return [{
-						name: "orbit",
+						name: PANEL_COMMAND,
 						description: t("togglePanel"),
 						value: "panel"
 					}, {

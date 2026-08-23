@@ -108,8 +108,11 @@ Workflows of every bridged Workspace in the model's context — with the inputs
 each one needs, which is the mistake it exists to prevent — so the Agent can
 answer "which of these did you mean" instead of asking what Orbit is. The panel
 lists the same catalog below the Runs, for the person doing the asking, and
-`/orbit-workflows ` turns the input menu into a Workflow picker, searched by
-name as you type. Picking one writes `Run "<name>" (<id>): ` into the draft —
+`/orbit-w` turns the input menu into a Workflow picker, searched by name once
+the command name is complete. It opens while the name is being typed rather
+than when the entry is picked: the trigger pipeline re-polls its sources on
+keystrokes, so a pick lands its text and leaves the menu shut until the next
+one. Picking one writes `Run "<name>" (<id>): ` into the draft —
 the name for you, the id for the Agent — and stops there. The Run has to be the
 Agent's, or it cannot report on it afterwards.
 

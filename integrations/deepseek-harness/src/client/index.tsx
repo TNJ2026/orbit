@@ -32,6 +32,7 @@ interface InputTriggerRegistry { registerSource(source: Record<string, unknown>)
 type Translate = (key: OrbitLocaleKey, values?: Record<string, string | number>) => string
 type SubmitResult = { kind: 'success' } | { kind: 'error'; text: string }
 
+const PANEL_COMMAND = 'orbit'
 const LIST_COMMAND = 'orbit-workflows'
 
 /**
@@ -64,13 +65,17 @@ function registerOrbitSlashSource(ctx: ClientContext, t: Translate): void {
     trigger: '/', name: 'orbit', order: -10, showGroupTitle: false,
     candidates: async (_session: unknown, request: { query: string }) => {
       const typed = request.query
-      // Prefix, not prefix-plus-space. A space is the pipeline's own
-      // adjudication moment and ends the token, so requiring one meant the
-      // picker only appeared once the space was deleted again — and anything
-      // typed after the name matched neither branch, which is why it never
-      // filtered.
-      if (typed.startsWith(LIST_COMMAND)) {
-        const search = typed.slice(LIST_COMMAND.length).replace(/^\s+/u, '')
+      // The picker opens while the command name is still being typed, not after
+      // it is picked. Picking cannot open it: a `continue` outcome writes the
+      // draft but the pipeline re-polls sources on keystrokes only, so a pick
+      // lands the text and leaves the menu shut until the next one. Anything
+      // past `orbit` can only be heading here, so that is where it opens.
+      const heading = LIST_COMMAND.startsWith(typed) && typed.length > PANEL_COMMAND.length
+      if (typed.startsWith(LIST_COMMAND) || heading) {
+        // Still spelling the command: everything, not a search for its letters.
+        const search = typed.startsWith(LIST_COMMAND)
+          ? typed.slice(LIST_COMMAND.length).replace(/^\s+/u, '')
+          : ''
         const hits = matchWorkflows(search)
         if (!hits.length) return [{ name: t('noMatch'), value: 'none' }]
         return hits.map(item => ({
@@ -82,7 +87,7 @@ function registerOrbitSlashSource(ctx: ClientContext, t: Translate): void {
         }))
       }
       return [
-        { name: 'orbit', description: t('togglePanel'), value: 'panel' },
+        { name: PANEL_COMMAND, description: t('togglePanel'), value: 'panel' },
         { name: LIST_COMMAND, description: t('askWhatRuns'), hint: t('askWhatRunsHint'), value: 'open' },
       ].filter(item => item.name.includes(typed.toLowerCase()))
     },
@@ -94,8 +99,10 @@ function registerOrbitSlashSource(ctx: ClientContext, t: Translate): void {
       }
       // The opener writes its own token back and keeps the menu up, so the next
       // query is the search.
-      // Written without a trailing space for the same reason: the space would
-      // close the menu the pick just opened.
+      // Writes the name and leaves the caret after it. The menu cannot be
+      // reopened from here — see the note on `heading` above — so the next
+      // keystroke is what shows the list. Typing the name reaches it sooner,
+      // which is the path this entry exists to advertise.
       if (value === 'open') return { text: `/${LIST_COMMAND}`, continue: true }
       if (value === 'panel') return { claim: claim() }
       // No default. The opener shipped without a payload and fell through to

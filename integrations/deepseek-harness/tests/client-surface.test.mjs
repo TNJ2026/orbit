@@ -119,7 +119,7 @@ test('the top level of the menu is commands, the Workflows sit behind one', () =
   const candidates = code.slice(code.indexOf('candidates:'), code.indexOf('onPick:'))
   const gate = candidates.indexOf('startsWith(LIST_COMMAND)')
   assert.ok(gate > 0, 'the picker is not gated behind the command')
-  assert.ok(gate < candidates.indexOf("{ name: 'orbit',"), 'the gate comes first')
+  assert.ok(gate < candidates.indexOf('name: PANEL_COMMAND'), 'the gate comes first')
 })
 
 test('picking a Workflow writes a request, it does not start one', () => {
@@ -135,7 +135,7 @@ test('every menu candidate is told apart by its own payload, not by falling thro
   // and claimed `/orbit` — the command appeared to do nothing while quietly
   // folding the panel. Each candidate carries what onPick dispatches on.
   const candidates = code.slice(code.indexOf('candidates:'), code.indexOf('onPick:'))
-  const named = [...candidates.matchAll(/\{ name: (?:'[a-z]+'|LIST_COMMAND)[^}]*\}/g)].map(([hit]) => hit)
+  const named = [...candidates.matchAll(/\{ name: (?:PANEL_COMMAND|LIST_COMMAND)[^}]*\}/g)].map(([hit]) => hit)
   assert.ok(named.length >= 2, 'the command candidates were not found')
   for (const entry of named) assert.match(entry, /value:/, `${entry} has no payload to dispatch on`)
 })
@@ -146,11 +146,21 @@ test('picking the opener reopens the menu, and leaves no space to close it', () 
   assert.match(code, /text: `\/\$\{LIST_COMMAND\}`, continue: true/)
 })
 
-test('the search is whatever follows the command name', () => {
-  // Gating on `name + ' '` meant the picker appeared only while the space was
-  // absent and filtered on nothing when it was present.
+test('the picker opens while the command is typed, not when it is picked', () => {
+  // Measured in the running shell: a `continue` outcome writes the draft, but
+  // the pipeline re-polls sources on keystrokes only — so a pick lands the text
+  // and leaves the menu shut. Anything past the panel command can only be
+  // heading here, and that is where the list opens.
   const candidates = code.slice(code.indexOf('candidates:'), code.indexOf('onPick:'))
+  assert.match(candidates, /LIST_COMMAND\.startsWith\(typed\)/)
+  assert.match(candidates, /typed\.length > PANEL_COMMAND\.length/)
   assert.match(candidates, /typed\.startsWith\(LIST_COMMAND\)/)
   assert.equal(/startsWith\(`\$\{LIST_COMMAND\} `\)/.test(candidates), false)
-  assert.match(candidates, /replace\(\/\^\\s\+\/u, ''\)/)
+})
+
+test('the search is only what follows the whole command name', () => {
+  // While the name is still being spelled, its own letters are not a search:
+  // `orbit-w` would match nothing and empty the list mid-word.
+  const candidates = code.slice(code.indexOf('candidates:'), code.indexOf('onPick:'))
+  assert.match(candidates, /typed\.startsWith\(LIST_COMMAND\)\s*\n?\s*\?/)
 })
