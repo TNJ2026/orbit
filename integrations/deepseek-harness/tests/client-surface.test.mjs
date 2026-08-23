@@ -132,3 +132,15 @@ test('/orbit still only folds the panel', () => {
   assert.match(source, /orbit:toggle-panel/)
   assert.equal(/workflow/i.test(source), false, 'the trigger source is carrying Workflows again')
 })
+
+test('the Workflow name is delimited in the request it writes', async () => {
+  // Several names carry a full-width colon of their own, which ran straight
+  // into the one ending the sentence: `用覆盖 A：分支与条件执行：` reads as one
+  // run-on where the name stops being findable.
+  const copy = await readFile(join(clientDir, 'locales.ts'), 'utf8')
+  const lines = [...copy.matchAll(/runPrefix: '([^']*)'/g)].map(([, value]) => value)
+  assert.equal(lines.length, 2, 'both dictionaries must carry it')
+  for (const line of lines) {
+    assert.match(line, /[「"]\{name\}[」"]/, `${line} leaves the name undelimited`)
+  }
+})

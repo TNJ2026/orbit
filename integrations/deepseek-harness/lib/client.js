@@ -724,7 +724,7 @@ window.__ModuleLoader__.load({
 			runnableHint: "Ask the Agent to run one — it has the tools.",
 			togglePanel: "Show or hide the Orbit panel",
 			askWhatRuns: "List the workflows that can run here",
-			runPrefix: "Run with {name}: "
+			runPrefix: "Run with \"{name}\": "
 		};
 		const zh = {
 			title: "Orbit",
@@ -753,7 +753,7 @@ window.__ModuleLoader__.load({
 			runnableHint: "让 agent 跑其中一个即可——它有对应的工具。",
 			togglePanel: "显示或收起 Orbit 面板",
 			askWhatRuns: "列出这里可运行的工作流",
-			runPrefix: "用{name}执行："
+			runPrefix: "用「{name}」执行："
 		};
 		//#endregion
 		//#region src/client/index.tsx
