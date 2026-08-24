@@ -359,7 +359,18 @@ export function OrbitPanel({ t, useSessions }: OrbitPanelProps) {
               {/* Name and shape, as Orbit's own card reads: the id is how a
                   machine addresses this, and it is a line above the only thing
                   a person is choosing by. Both are on the detail page. */}
-              <div className={styles.flowName}>{item.name || item.workflow_id}</div>
+              <div className={styles.flowName}>
+                {item.name || item.workflow_id}
+                {/* The list carries the whole catalog now, so it has to say
+                    which of these a goal cannot actually be started from —
+                    otherwise the ones needing work read as ready. */}
+                {item.goal_readiness === 'ready' ? null : (
+                  <span className={styles.flowBlocked}>
+                    {t(item.goal_readiness === 'needs_migration'
+                      ? 'needsMigration' : 'needsUpgrade')}
+                  </span>
+                )}
+              </div>
               <WorkflowShape
                 kinds={item.node_kinds ?? {}} total={item.node_count ?? 0}
               />

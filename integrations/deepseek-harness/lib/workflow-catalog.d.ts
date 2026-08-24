@@ -16,7 +16,14 @@ export declare class WorkflowCatalog {
     constructor(now?: () => number);
     remember(canonicalPath: string, workflows: readonly WorkflowSummary[]): void;
     forget(canonicalPath: string): void;
-    /** What is remembered for one Workspace, ready-only, in the order shown. */
+    /**
+     * Everything remembered for one Workspace, in the order it was read.
+     *
+     * All of it, not the runnable subset: this answers the panel, where a person
+     * is reading a catalog and a Workflow that has gone unrunnable is something
+     * they need to see — it is the one they have to go and fix. `render`, which
+     * answers the model, keeps the filter: there a name is an offer to run.
+     */
     list(canonicalPath: string): readonly WorkflowSummary[];
     /** Whether a workspace's entry is missing or old enough to re-read. */
     stale(canonicalPath: string): boolean;

@@ -88,7 +88,11 @@ export class OrbitRemoteService extends TypertRemoteService {
    * checked.
    */
   private refreshCatalog(scope: WorkspaceRef): Promise<void> {
-    return this.gateway.call(scope, 'catalog', 'list_workflows', { ready_only: true })
+    // Everything, not `ready_only`: two readers share this, and they want
+    // different halves. The model is offered only what it can start, which
+    // `WorkflowCatalog.render` filters for; the panel lists the catalog as it
+    // is, including the entries someone has to go and fix.
+    return this.gateway.call(scope, 'catalog', 'list_workflows', {})
       .then(result => {
         this.catalog.remember(
           scope.canonicalPath,

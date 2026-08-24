@@ -32,12 +32,16 @@ export class WorkflowCatalog {
     forget(canonicalPath) {
         this.byWorkspace.delete(canonicalPath);
     }
-    /** What is remembered for one Workspace, ready-only, in the order shown. */
+    /**
+     * Everything remembered for one Workspace, in the order it was read.
+     *
+     * All of it, not the runnable subset: this answers the panel, where a person
+     * is reading a catalog and a Workflow that has gone unrunnable is something
+     * they need to see — it is the one they have to go and fix. `render`, which
+     * answers the model, keeps the filter: there a name is an offer to run.
+     */
     list(canonicalPath) {
-        const entry = this.byWorkspace.get(canonicalPath);
-        if (!entry)
-            return [];
-        return entry.workflows.filter(item => item.goal_readiness === 'ready');
+        return this.byWorkspace.get(canonicalPath)?.workflows ?? [];
     }
     /** Whether a workspace's entry is missing or old enough to re-read. */
     stale(canonicalPath) {

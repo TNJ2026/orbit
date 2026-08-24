@@ -28,6 +28,23 @@ test('a Workflow that cannot start a goal is not offered as one', () => {
   assert.equal(catalog.render(), '')
 })
 
+test('the panel is still shown the Workflow the model is not offered', () => {
+  // The two readers want different halves of one read. Naming an unrunnable
+  // Workflow to the model is an offer it cannot take; hiding it from the panel
+  // hides the one entry a person has to go and fix, and leaves them reading a
+  // catalog that quietly disagrees with Orbit's own.
+  const catalog = new WorkflowCatalog()
+  catalog.remember('/w', [
+    workflow({ goal_readiness: 'needs_upgrade' }),
+    workflow({ workflow_id: 'workflow:fine' }),
+  ])
+  assert.deepEqual(
+    catalog.list('/w').map(item => item.goal_readiness), ['needs_upgrade', 'ready'],
+  )
+  assert.equal(catalog.render().includes('workflow:clean'), false)
+  assert.match(catalog.render(), /workflow:fine/)
+})
+
 test('each Workspace is named, so a model with two can tell them apart', () => {
   const catalog = new WorkflowCatalog()
   catalog.remember('/b', [workflow({ workflow_id: 'workflow:b' })])

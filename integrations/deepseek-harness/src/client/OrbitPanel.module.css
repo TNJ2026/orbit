@@ -377,3 +377,11 @@
 .node_terminal { color: var(--dsw-alias-state-success, rgb(60 160 90 / 95%)); }
 .node_decision { color: var(--dsw-alias-label-secondary, GrayText); }
 .node_more { color: var(--dsw-alias-label-tertiary, GrayText); font-size: 7px; }
+
+/* Not a red alarm: a Workflow needing an upgrade is a job for later, not a
+   failure now. It reads as a note beside the name, in the name's own line. */
+.flowBlocked {
+  margin-left: 6px;
+  color: var(--dsw-alias-state-warning, rgb(180 125 35 / 95%));
+  font-size: 10px; font-weight: 500;
+}
