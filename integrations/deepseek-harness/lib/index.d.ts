@@ -4,7 +4,7 @@ import { type OrbitCursorStore } from './session-bridge.js';
 import type { Session } from '@deepseek-ai/dsh-session';
 import { type OrbitRunCommand } from './commands.js';
 import type { AgentSummary } from './types.js';
-import type { ArtifactContent, ArtifactSummary, AuthoringJob, EdgeSummary, ImportedArtifact, IntegrationDiagnostics, OrbitCommandRequest, OutputPage, RunDto, RunGraph, RuntimeSummary, StepSummary, WorkflowNode, WorkflowSummary, WorkspaceRef } from './types.js';
+import type { ArtifactContent, ArtifactSummary, AuthoringJob, AuthoringSummary, EdgeSummary, ImportedArtifact, IntegrationDiagnostics, OrbitCommandRequest, OutputPage, RunDto, RunGraph, RuntimeSummary, StepSummary, WorkflowNode, WorkflowSummary, WorkspaceRef } from './types.js';
 declare module '@deepseek-ai/cordis' {
     interface Context {
         orbit: OrbitRemoteService;
@@ -17,6 +17,13 @@ export declare class OrbitRemoteService extends TypertRemoteService {
     /** Agent handlers per Workspace. The Runtime seals its registry at startup,
      *  so one read answers for as long as that Runtime is up. */
     private readonly agentsByWorkspace;
+    /** Authoring jobs started from this Harness, per Workspace.
+     *
+     *  Held here because there is nothing to ask: a job is addressed by an id
+     *  the starter was handed, and `get_authoring_job` is scoped to the actor
+     *  that created it. Jobs started in Orbit's own UI are shown by Orbit's own
+     *  UI, which has the whole authoring surface. */
+    private readonly authoringByWorkspace;
     private readonly bridges;
     /** One entry per live Bridge: the Workspaces worth knowing the Workflows of. */
     private readonly bridgedWorkspaces;
@@ -44,6 +51,16 @@ export declare class OrbitRemoteService extends TypertRemoteService {
      * bundle's guard reads, so calling it anything else is how this stops being
      * checked.
      */
+    private watchAuthoring;
+    /**
+     * Bring the tracked jobs up to date, and say which of them are worth drawing.
+     *
+     * Reports whether one of them has just published, which is the one case
+     * where this Host knows the catalog it holds is out of date without being
+     * told — so the caller re-reads rather than making a person press refresh
+     * for a Workflow they asked for and watched arrive.
+     */
+    private readAuthoring;
     private refreshCatalog;
     private registerWebApi;
     private dispatchWebApi;
@@ -97,6 +114,7 @@ export declare class OrbitRemoteService extends TypertRemoteService {
         uiUrl: string;
         workflows: readonly WorkflowSummary[];
         agents: readonly AgentSummary[];
+        authoring: readonly AuthoringSummary[];
     }>;
     /**
      * The steps of one Run, for a panel row the reader opened.

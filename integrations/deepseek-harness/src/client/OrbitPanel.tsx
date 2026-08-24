@@ -1,8 +1,8 @@
 /** The resident Orbit panel: what is running, and a way into Orbit itself. */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { IconCloseOutline16, IconRefreshOutline16, IconShareOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { AgentSummary, RunDto, WorkflowSummary } from '../types.js'
+import { IconCloseOutline16, IconRefreshOutline16, IconShareOutline16, StateDot } from '@deepseek-ai/dsh-client-ui-primitives'
+import type { AgentSummary, AuthoringSummary, RunDto, WorkflowSummary } from '../types.js'
 import styles from './OrbitPanel.module.css'
 import {
   DEFAULT_PANEL_LAYOUT, PANEL_STORAGE_KEY, dragPanel, placePanel, readLayout,
@@ -117,6 +117,39 @@ function WorkflowShape({ kinds, total }: { kinds: Record<string, number>; total:
   )
 }
 
+/**
+ * One authoring job, on the page where its result will land.
+ *
+ * Not the Goal page: authoring is not a Run, and a job among the Runs would
+ * make "what is this Workspace working on" answer with two different kinds of
+ * thing. It sits above the catalog it is about to change.
+ */
+function AuthoringRow({ t, job }: { t: Translate; job: AuthoringSummary }) {
+  const settled = job.status === 'done' || job.status === 'failed'
+  const state = job.status === 'done' ? 'done' : job.status === 'failed' ? 'error' : 'ongoing'
+  const label = job.status === 'done' ? t('authoringDone')
+    : job.status === 'failed' ? t('authoringFailed')
+      : job.status === 'queued' ? t('authoringQueued') : t('authoringRunning')
+  return (
+    <div className={styles.authoringRow}>
+      <StateDot state={state} size={8} />
+      <div className={styles.authoringMain}>
+        <div className={styles.authoringLabel}>
+          {label}
+          {job.requested_agent
+            ? <span className={styles.meta}> · {t('authoringBy', { agent: job.requested_agent })}</span>
+            : null}
+        </div>
+        {/* The prompt is how a reader tells two jobs apart, and after it lands
+            it is the only record here of what was asked for. */}
+        <div className={styles.authoringPrompt}>
+          {settled && job.status === 'failed' && job.error ? job.error : job.prompt}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export interface OrbitPanelProps {
   t: Translate
   /** `shell.overlay` is root-scoped: it hands over the session *store*, never
@@ -135,6 +168,7 @@ export function OrbitPanel({ t, useSessions }: OrbitPanelProps) {
   const [uiUrl, setUiUrl] = useState('')
   const [workflows, setWorkflows] = useState<readonly WorkflowSummary[]>([])
   const [agents, setAgents] = useState<readonly AgentSummary[]>([])
+  const [authoring, setAuthoring] = useState<readonly AuthoringSummary[]>([])
   // The Runtime's own four: what is running, what could, what did, and who by.
   const [tab, setTab] = useState<'goal' | 'workflows' | 'history' | 'agents'>('goal')
   // One Run at a time, filling the panel. Selection is cleared by changing page
@@ -186,6 +220,7 @@ export function OrbitPanel({ t, useSessions }: OrbitPanelProps) {
         const state = await hostCall<{
           runs: RunDto[]; uiUrl: string
           workflows: readonly WorkflowSummary[]; agents: readonly AgentSummary[]
+          authoring: readonly AuthoringSummary[]
         }>(
           'getPanelState', [sessionId, forced], controller.signal,
         )
@@ -193,6 +228,7 @@ export function OrbitPanel({ t, useSessions }: OrbitPanelProps) {
         const next = orderRows(state.runs.map(toRow))
         setRows(next); setUiUrl(state.uiUrl); setError('')
         setWorkflows(state.workflows ?? []); setAgents(state.agents ?? [])
+        setAuthoring(state.authoring ?? [])
         setAsking(false)
         timer = setTimeout(
           () => { void tick() },
@@ -348,6 +384,9 @@ export function OrbitPanel({ t, useSessions }: OrbitPanelProps) {
           )) : <p className={styles.empty}>{t('emptyHistory')}</p>
         ) : null}
 
+        {!error && tab === 'workflows'
+          ? authoring.map(job => <AuthoringRow key={job.job_id} t={t} job={job} />)
+          : null}
         {!error && tab === 'workflows' ? (
           workflows.length ? workflows.map(item => (
             <button

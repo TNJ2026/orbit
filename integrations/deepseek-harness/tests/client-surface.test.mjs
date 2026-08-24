@@ -191,7 +191,9 @@ test('only the tick the press starts is forced', async () => {
   assert.match(code, /forceNext\.current = false/)
   const host = await readFile(join(here, '..', 'src', 'index.ts'), 'utf8')
   const state = host.slice(host.indexOf("@Remote('getPanelState')"), host.indexOf("@Remote('getRunDetail')"))
-  assert.match(state, /if \(force\) await this\.refreshCatalog\(scope\)/)
+  // Also re-read when a job this Host was watching has just published: the
+  // page a person is looking at is the page it lands on.
+  assert.match(state, /if \(force \|\| authoring\.published\) await this\.refreshCatalog\(scope\)/)
   assert.match(state, /if \(force \|\| !this\.agentsByWorkspace\.has/)
 })
 

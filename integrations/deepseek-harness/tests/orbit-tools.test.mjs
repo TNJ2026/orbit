@@ -4,31 +4,60 @@ import test from 'node:test'
 import { OrbitToolBridge } from '../lib/orbit-tools.js'
 
 function fixture() {
-  const definitions = new Map(), calls = []
+  const definitions = new Map(), calls = [], watched = []
   const tools = { register(definition) { definitions.set(definition.name, definition); return () => definitions.delete(definition.name) } }
   const workspaceRegistry = { async resolveByPath(path) { return { id: 'workspace:1', path } } }
   const ctx = { get(name) { return name === 'tools' ? tools : workspaceRegistry } }
   const gateway = {
     async call(workspace, sessionId, name, args) {
       calls.push({ workspace, sessionId, name, args })
-      return name === 'start_run' ? { run_id: 'run:1' } : { ok: true }
+      if (name === 'start_run') return { run_id: 'run:1' }
+      if (name === 'generate_workflow') return { job_id: 'job:1', status: 'queued', prompt: args.prompt }
+      return { ok: true }
     },
     async run(workspace, sessionId, runId) {
       calls.push({ workspace, sessionId, name: 'inspect_run', args: { run_id: runId } })
       return { run_id: runId, allowed_commands: [{ command: 'langgraph_run.cancel', expected_version: 7 }] }
     },
   }
-  new OrbitToolBridge(ctx, gateway).register()
+  new OrbitToolBridge(ctx, gateway, (workspace, sessionId, job) => {
+    watched.push({ workspace, sessionId, job })
+  }).register()
   const exec = { signal: new AbortController().signal, agent: { session: { id: 'session:abc', header: { cwd: '/workspace' } } } }
-  return { definitions, calls, exec }
+  return { definitions, calls, exec, watched }
 }
 
 test('registers the bounded Orbit MCP tool surface', () => {
   const { definitions } = fixture()
   assert.deepEqual([...definitions.keys()], [
     'orbit_list_workflows', 'orbit_list_runs', 'orbit_inspect_run',
-    'orbit_start_run', 'orbit_cancel_run', 'orbit_resume_run',
+    'orbit_start_run', 'orbit_generate_workflow', 'orbit_get_authoring_job',
+    'orbit_cancel_run', 'orbit_resume_run',
   ])
+})
+
+test('generate owns idempotency and tells the panel before it answers', async () => {
+  // The panel is a person watching; the return value is the model's next turn.
+  // Telling the model first would leave a person looking at a still panel for
+  // as long as the Agent takes to say something.
+  const { definitions, calls, exec, watched } = fixture()
+  const job = await definitions.get('orbit_generate_workflow')
+    .execute({ prompt: '  clean the CSV  ', agent: 'codex' }, exec)
+
+  assert.equal(job.job_id, 'job:1')
+  assert.equal(calls[0].name, 'generate_workflow')
+  assert.equal(calls[0].sessionId, 'session:abc')
+  assert.equal(calls[0].args.agent, 'codex')
+  assert.match(calls[0].args.idempotency_key, /^[0-9a-f-]{36}$/)
+  assert.deepEqual(watched.map(item => item.job.job_id), ['job:1'])
+  assert.equal(watched[0].sessionId, 'session:abc')
+  assert.equal(watched[0].workspace.canonicalPath, '/workspace')
+})
+
+test('the Agent is the Runtime\'s choice unless the caller named one', async () => {
+  const { definitions, calls, exec } = fixture()
+  await definitions.get('orbit_generate_workflow').execute({ prompt: 'anything' }, exec)
+  assert.equal('agent' in calls[0].args, false)
 })
 
 test('start routes through Session Workspace and owns idempotency', async () => {

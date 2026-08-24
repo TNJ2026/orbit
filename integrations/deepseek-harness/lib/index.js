@@ -39,6 +39,8 @@ import { OrbitToolBridge } from './orbit-tools.js';
 import { artifactImageInput } from './artifact-import.js';
 import { advertisedAt, commandTool } from './commands.js';
 import { WorkflowCatalog } from './workflow-catalog.js';
+/** How long a settled job stays on the panel before it stops being news. */
+const AUTHORING_LINGER_MS = 60_000;
 let OrbitRemoteService = (() => {
     let _classSuper = TypertRemoteService;
     let _instanceExtraInitializers = [];
@@ -128,6 +130,13 @@ let OrbitRemoteService = (() => {
         /** Agent handlers per Workspace. The Runtime seals its registry at startup,
          *  so one read answers for as long as that Runtime is up. */
         agentsByWorkspace = new Map();
+        /** Authoring jobs started from this Harness, per Workspace.
+         *
+         *  Held here because there is nothing to ask: a job is addressed by an id
+         *  the starter was handed, and `get_authoring_job` is scoped to the actor
+         *  that created it. Jobs started in Orbit's own UI are shown by Orbit's own
+         *  UI, which has the whole authoring surface. */
+        authoringByWorkspace = new Map();
         bridges = new Map();
         /** One entry per live Bridge: the Workspaces worth knowing the Workflows of. */
         bridgedWorkspaces = new Map();
@@ -140,7 +149,9 @@ let OrbitRemoteService = (() => {
             this.hostSessions = ctx.get('sessions');
             this.attachments = ctx.get('attachments');
             this.workspaceRegistry = ctx.get('workspaceRegistry');
-            new OrbitToolBridge(ctx, this.gateway).register();
+            new OrbitToolBridge(ctx, this.gateway, (workspace, sessionId, job) => {
+                this.watchAuthoring(workspace, sessionId, job);
+            }).register();
             this.registerWebApi(ctx);
             this.tellTheModelWhatCanRun(ctx);
             for (const session of this.hostSessions.list())
@@ -189,6 +200,53 @@ let OrbitRemoteService = (() => {
          * bundle's guard reads, so calling it anything else is how this stops being
          * checked.
          */
+        watchAuthoring(workspace, sessionId, job) {
+            const held = this.authoringByWorkspace.get(workspace.canonicalPath)
+                ?? new Map();
+            held.set(job.job_id, { sessionId, job });
+            this.authoringByWorkspace.set(workspace.canonicalPath, held);
+        }
+        /**
+         * Bring the tracked jobs up to date, and say which of them are worth drawing.
+         *
+         * Reports whether one of them has just published, which is the one case
+         * where this Host knows the catalog it holds is out of date without being
+         * told — so the caller re-reads rather than making a person press refresh
+         * for a Workflow they asked for and watched arrive.
+         */
+        async readAuthoring(scope) {
+            const held = this.authoringByWorkspace.get(scope.canonicalPath);
+            if (!held?.size)
+                return { jobs: [], published: false };
+            let published = false;
+            const now = Date.now();
+            for (const [jobId, tracked] of [...held]) {
+                if (tracked.settledAt !== undefined) {
+                    if (now - tracked.settledAt > AUTHORING_LINGER_MS)
+                        held.delete(jobId);
+                    continue;
+                }
+                try {
+                    tracked.job = await this.gateway.call(scope, tracked.sessionId, 'get_authoring_job', { job_id: jobId });
+                }
+                catch {
+                    // An unreachable Runtime is not an outcome. The row stands as it was
+                    // and the next poll asks again.
+                    continue;
+                }
+                if (tracked.job.status === 'queued' || tracked.job.status === 'running')
+                    continue;
+                tracked.settledAt = now;
+                if (tracked.job.status === 'done')
+                    published = true;
+            }
+            return { published, jobs: [...held.values()].map(({ job }) => ({
+                    job_id: job.job_id, status: job.status, prompt: job.prompt,
+                    requested_agent: job.requested_agent ?? null,
+                    workflow_id: job.workflow_id ?? null,
+                    error: job.error?.message ?? null,
+                })) };
+        }
         refreshCatalog(scope) {
             // Everything, not `ready_only`: two readers share this, and they want
             // different halves. The model is offered only what it can start, which
@@ -450,9 +508,13 @@ let OrbitRemoteService = (() => {
                 const result = await this.gateway.call(scope, sessionId, 'list_runs', {
                     limit: 50, owner: 'workspace',
                 });
-                // Awaited when forced, so the press answers with the new list rather
-                // than leaving it for whichever poll lands next.
-                if (force)
+                // Before the catalog, so a publish is known in time to re-read it below.
+                const authoring = await this.readAuthoring(scope);
+                // Awaited whenever this answer is meant to carry the new list: a press,
+                // or a publish someone just watched happen. Forgetting the entry and
+                // letting a later poll fill it would empty the page at the very moment
+                // the Workflow they asked for was supposed to appear on it.
+                if (force || authoring.published)
                     await this.refreshCatalog(scope);
                 else if (this.catalog.stale(scope.canonicalPath))
                     this.refreshCatalog(scope);
@@ -465,6 +527,7 @@ let OrbitRemoteService = (() => {
                     uiUrl: await this.gateway.uiUrl(scope),
                     workflows: this.catalog.list(scope.canonicalPath),
                     agents: this.agentsByWorkspace.get(scope.canonicalPath) ?? [],
+                    authoring: authoring.jobs,
                 };
             }
             finally {

@@ -11,12 +11,23 @@ import { artifactImageInput } from './artifact-import.js'
 import { advertisedAt, commandTool, type OrbitRunCommand } from './commands.js'
 import { WorkflowCatalog } from './workflow-catalog.js'
 import type { AgentSummary } from './types.js'
-import type { ArtifactContent, ArtifactSummary, AuthoringJob, EdgeSummary, ImportedArtifact, IntegrationDiagnostics, OrbitCommandRequest, OutputPage, RunDto, RunGraph, RuntimeSummary, StepSummary, WorkflowNode, WorkflowSummary, WorkspaceRef } from './types.js'
+import type { ArtifactContent, ArtifactSummary, AuthoringJob, AuthoringSummary, EdgeSummary, ImportedArtifact, IntegrationDiagnostics, OrbitCommandRequest, OutputPage, RunDto, RunGraph, RuntimeSummary, StepSummary, WorkflowNode, WorkflowSummary, WorkspaceRef } from './types.js'
 
 declare module '@deepseek-ai/cordis' { interface Context { orbit: OrbitRemoteService } }
 
 interface OrbitWebServer {
   register(route: { kind: 'exact'; path: string; handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void> }): () => void
+}
+
+/** How long a settled job stays on the panel before it stops being news. */
+const AUTHORING_LINGER_MS = 60_000
+
+interface TrackedAuthoring {
+  /** The Session that started it; `get_authoring_job` answers only to it. */
+  readonly sessionId: string
+  job: AuthoringJob
+  /** When it settled, or undefined while it is still going. */
+  settledAt?: number
 }
 
 export class OrbitRemoteService extends TypertRemoteService {
@@ -26,6 +37,13 @@ export class OrbitRemoteService extends TypertRemoteService {
   /** Agent handlers per Workspace. The Runtime seals its registry at startup,
    *  so one read answers for as long as that Runtime is up. */
   private readonly agentsByWorkspace = new Map<string, readonly AgentSummary[]>()
+  /** Authoring jobs started from this Harness, per Workspace.
+   *
+   *  Held here because there is nothing to ask: a job is addressed by an id
+   *  the starter was handed, and `get_authoring_job` is scoped to the actor
+   *  that created it. Jobs started in Orbit's own UI are shown by Orbit's own
+   *  UI, which has the whole authoring surface. */
+  private readonly authoringByWorkspace = new Map<string, Map<string, TrackedAuthoring>>()
   private readonly bridges = new Map<string, AbortController>()
   /** One entry per live Bridge: the Workspaces worth knowing the Workflows of. */
   private readonly bridgedWorkspaces = new Map<string, WorkspaceRef>()
@@ -38,7 +56,9 @@ export class OrbitRemoteService extends TypertRemoteService {
     this.hostSessions = ctx.get('sessions') as unknown as SessionStore
     this.attachments = ctx.get('attachments') as unknown as AttachmentStore
     this.workspaceRegistry = ctx.get('workspaceRegistry') as unknown as WorkspaceRegistry
-    new OrbitToolBridge(ctx, this.gateway).register()
+    new OrbitToolBridge(ctx, this.gateway, (workspace, sessionId, job) => {
+      this.watchAuthoring(workspace, sessionId, job)
+    }).register()
     this.registerWebApi(ctx)
     this.tellTheModelWhatCanRun(ctx)
     for (const session of this.hostSessions.list()) this.startSessionBridge(ctx, session)
@@ -87,6 +107,54 @@ export class OrbitRemoteService extends TypertRemoteService {
    * bundle's guard reads, so calling it anything else is how this stops being
    * checked.
    */
+  private watchAuthoring(workspace: WorkspaceRef, sessionId: string, job: AuthoringJob): void {
+    const held = this.authoringByWorkspace.get(workspace.canonicalPath)
+      ?? new Map<string, TrackedAuthoring>()
+    held.set(job.job_id, { sessionId, job })
+    this.authoringByWorkspace.set(workspace.canonicalPath, held)
+  }
+
+  /**
+   * Bring the tracked jobs up to date, and say which of them are worth drawing.
+   *
+   * Reports whether one of them has just published, which is the one case
+   * where this Host knows the catalog it holds is out of date without being
+   * told — so the caller re-reads rather than making a person press refresh
+   * for a Workflow they asked for and watched arrive.
+   */
+  private async readAuthoring(
+    scope: WorkspaceRef,
+  ): Promise<{ jobs: AuthoringSummary[]; published: boolean }> {
+    const held = this.authoringByWorkspace.get(scope.canonicalPath)
+    if (!held?.size) return { jobs: [], published: false }
+    let published = false
+    const now = Date.now()
+    for (const [jobId, tracked] of [...held]) {
+      if (tracked.settledAt !== undefined) {
+        if (now - tracked.settledAt > AUTHORING_LINGER_MS) held.delete(jobId)
+        continue
+      }
+      try {
+        tracked.job = await this.gateway.call(
+          scope, tracked.sessionId, 'get_authoring_job', { job_id: jobId },
+        ) as AuthoringJob
+      } catch {
+        // An unreachable Runtime is not an outcome. The row stands as it was
+        // and the next poll asks again.
+        continue
+      }
+      if (tracked.job.status === 'queued' || tracked.job.status === 'running') continue
+      tracked.settledAt = now
+      if (tracked.job.status === 'done') published = true
+    }
+    return { published, jobs: [...held.values()].map(({ job }) => ({
+      job_id: job.job_id, status: job.status, prompt: job.prompt,
+      requested_agent: job.requested_agent ?? null,
+      workflow_id: job.workflow_id ?? null,
+      error: job.error?.message ?? null,
+    })) }
+  }
+
   private refreshCatalog(scope: WorkspaceRef): Promise<void> {
     // Everything, not `ready_only`: two readers share this, and they want
     // different halves. The model is offered only what it can start, which
@@ -329,6 +397,7 @@ export class OrbitRemoteService extends TypertRemoteService {
   async getPanelState(sessionId: string, force: boolean, signal: AbortSignal): Promise<{
     runs: RunDto[]; uiUrl: string
     workflows: readonly WorkflowSummary[]; agents: readonly AgentSummary[]
+    authoring: readonly AuthoringSummary[]
   }> {
     signal.throwIfAborted()
     const scope = await this.sessionWorkspace(sessionId)
@@ -340,9 +409,13 @@ export class OrbitRemoteService extends TypertRemoteService {
       const result = await this.gateway.call(scope, sessionId, 'list_runs', {
         limit: 50, owner: 'workspace',
       }) as { runs: RunDto[] }
-      // Awaited when forced, so the press answers with the new list rather
-      // than leaving it for whichever poll lands next.
-      if (force) await this.refreshCatalog(scope)
+      // Before the catalog, so a publish is known in time to re-read it below.
+      const authoring = await this.readAuthoring(scope)
+      // Awaited whenever this answer is meant to carry the new list: a press,
+      // or a publish someone just watched happen. Forgetting the entry and
+      // letting a later poll fill it would empty the page at the very moment
+      // the Workflow they asked for was supposed to appear on it.
+      if (force || authoring.published) await this.refreshCatalog(scope)
       else if (this.catalog.stale(scope.canonicalPath)) this.refreshCatalog(scope)
       if (force || !this.agentsByWorkspace.has(scope.canonicalPath)) {
         const listed = await this.gateway.call(scope, sessionId, 'list_agents', {}) as {
@@ -355,6 +428,7 @@ export class OrbitRemoteService extends TypertRemoteService {
         uiUrl: await this.gateway.uiUrl(scope),
         workflows: this.catalog.list(scope.canonicalPath),
         agents: this.agentsByWorkspace.get(scope.canonicalPath) ?? [],
+        authoring: authoring.jobs,
       }
     } finally { await release() }
   }

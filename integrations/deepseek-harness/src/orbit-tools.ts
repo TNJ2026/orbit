@@ -3,7 +3,7 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import type { ToolDefinition, ToolRunContext, ToolRuntime, JsonValue } from '@deepseek-ai/dsh-tools'
 import type { WorkspaceRegistry } from '@deepseek-ai/dsh-workspace'
 import { OrbitGateway } from './gateway.js'
-import type { RunDto, WorkspaceRef } from './types.js'
+import type { AuthoringJob, RunDto, WorkspaceRef } from './types.js'
 
 const JSON_OUTPUT = {
   schema: {} as const,
@@ -19,10 +19,19 @@ function args(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>
 }
 
+/** Told when an authoring job starts here, so the panel can show it running. */
+export type AuthoringWatcher = (
+  workspace: WorkspaceRef, sessionId: string, job: AuthoringJob,
+) => void
+
 export class OrbitToolBridge {
   private readonly tools: ToolRuntime
   private readonly registry: WorkspaceRegistry
-  constructor(private readonly ctx: Context, private readonly gateway: OrbitGateway) {
+  constructor(
+    private readonly ctx: Context,
+    private readonly gateway: OrbitGateway,
+    private readonly watch: AuthoringWatcher = () => {},
+  ) {
     this.tools = ctx.get('tools') as unknown as ToolRuntime
     this.registry = ctx.get('workspaceRegistry') as unknown as WorkspaceRegistry
   }
@@ -53,6 +62,36 @@ export class OrbitToolBridge {
           })
         },
       },
+      {
+        name: 'orbit_generate_workflow',
+        description:
+          'Draft a new Orbit workflow from a description and publish it if the compiler accepts it. '
+          + 'Returns a job immediately — authoring takes a while — so poll orbit_get_authoring_job '
+          + 'with the job_id until its status leaves queued/running. Nothing is published until the '
+          + 'compiler accepts the draft, so a failed job has changed nothing. Progress also appears '
+          + 'in the Orbit panel.',
+        parameters: object({
+          prompt: { type: 'string', maxLength: 4000 },
+          agent: { type: 'string', description: 'Which Agent writes it; the Runtime picks one if omitted.' },
+        }, ['prompt']), output: JSON_OUTPUT, timeoutMs: 60_000,
+        execute: async (value, exec) => {
+          const input = args(value)
+          const { workspace, session } = await this.route(exec)
+          const job = await this.gateway.call(workspace, String(session.id), 'generate_workflow', {
+            prompt: String(input.prompt),
+            ...(input.agent === undefined ? {} : { agent: String(input.agent) }),
+            idempotency_key: crypto.randomUUID(),
+          }) as AuthoringJob
+          // The panel is told before the model is: a person watching it should
+          // not have to wait for the Agent's next turn to learn work started.
+          this.watch(workspace, String(session.id), job)
+          return job as unknown as JsonValue
+        },
+      },
+      this.definition('orbit_get_authoring_job',
+        'Check an Orbit authoring job started by orbit_generate_workflow. Status queued or running '
+        + 'means it is still going; done carries the published workflow, failed carries why.',
+        object({ job_id: { type: 'string' } }, ['job_id']), 'get_authoring_job', true),
       {
         name: 'orbit_cancel_run',
         description: 'Cancel an Orbit Run if its latest server-advertised commands allow cancellation.',

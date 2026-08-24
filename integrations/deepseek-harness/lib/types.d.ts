@@ -49,6 +49,15 @@ export interface AuthoringJob {
     created_at: string;
     updated_at: string;
 }
+/** An authoring job as the panel draws it: what was asked, and how it went. */
+export interface AuthoringSummary {
+    job_id: string;
+    status: string;
+    prompt: string;
+    requested_agent?: string | null;
+    workflow_id?: string | null;
+    error?: string | null;
+}
 export interface OrbitCommandRequest {
     workspace: WorkspaceRef;
     sessionId: string;
