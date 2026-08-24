@@ -1,7 +1,7 @@
 /** The resident Orbit panel: what is running, and a way into Orbit itself. */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { IconCloseOutline16, IconShareOutline16, StateDot } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconCloseOutline16, IconShareOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { AgentSummary, RunDto, WorkflowSummary } from '../types.js'
 import styles from './OrbitPanel.module.css'
 import {
@@ -65,16 +65,6 @@ function agentMark(name: string): { initials: string; style: React.CSSProperties
 }
 
 /** One page's heading, the line under it, and anything it counts. */
-function PageHead({ title, sub, aside }: { title: string; sub: string; aside?: React.ReactNode }) {
-  return (
-    <div className={styles.head}>
-      {aside === undefined ? null : <span className={styles.headAside}>{aside}</span>}
-      <div className={styles.headTitle}>{title}</div>
-      <div className={styles.headSub}>{sub}</div>
-    </div>
-  )
-}
-
 /** The letter a step wears in the chain, as Orbit's own card assigns it. */
 function glyph(kind: string): string {
   if (kind === 'terminal') return '✓'
@@ -322,22 +312,6 @@ export function OrbitPanel({ t, useSessions }: OrbitPanelProps) {
         ) : <>
         {error ? <p className={styles.error}>{error}</p> : null}
         {!error && rows === null ? <p className={styles.empty}>{t('loading')}</p> : null}
-
-        {!error && tab === 'goal' ? (
-          <PageHead title={t('headGoal')} sub={t('subGoal')} />
-        ) : null}
-        {!error && tab === 'history' ? (
-          <PageHead title={t('headHistory')} sub={t('subHistory')} />
-        ) : null}
-        {!error && tab === 'workflows' ? (
-          <PageHead title={t('headWorkflows')} sub={t('subWorkflows')} />
-        ) : null}
-        {!error && tab === 'agents' ? (
-          <PageHead
-            title={t('headAgents')} sub={t('subAgents')}
-            aside={<><StateDot state="done" size={7} />{t('onlineCount', { total: agents.length })}</>}
-          />
-        ) : null}
 
         {!error && rows !== null && tab === 'goal' ? (
           live.length ? live.map(row => (

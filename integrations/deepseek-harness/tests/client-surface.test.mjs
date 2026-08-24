@@ -171,13 +171,15 @@ test('the sentence leaves a gap for the Workflow rather than naming it', async (
   assert.equal(/runHead: '[^']*\{name\}/.test(copy), false, 'the head interpolates a name again')
 })
 
-test('each page opens with a heading and a line saying what it lists', () => {
-  // Orbit's pages do, and a page is legible before its first row loads only if
-  // this one does too.
+test('a page with nothing on it still says something', () => {
+  // The pages carried a heading and a subtitle each, which is how a panel this
+  // size spends a fifth of its height explaining four tabs that already name
+  // themselves. What that copy was really covering is a page with no rows yet,
+  // and the empty line covers it without costing anything when there are rows.
   for (const page of ['Goal', 'Workflows', 'History', 'Agents']) {
-    assert.ok(code.includes(`t('head${page}')`), `${page} has no heading`)
-    assert.ok(code.includes(`t('sub${page}')`), `${page} says nothing about itself`)
+    assert.ok(code.includes(`t('empty${page}')`), `${page} goes blank when empty`)
   }
+  assert.ok(code.includes("t('loading')"), 'nothing is said while the first poll runs')
 })
 
 test('the Agent mark is derived, not a palette that would drift from Orbit\'s', async () => {

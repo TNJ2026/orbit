@@ -196,18 +196,6 @@
 
 /* Pages open with what Orbit's own do: a heading and one line saying what the
    list below is, so a page is legible before its first row loads. */
-.head { padding: 12px 12px 2px; }
-.headTitle { font-size: 13px; font-weight: 650; }
-.headSub { color: var(--dsw-alias-label-tertiary, GrayText); font-size: 11px; line-height: 1.5; }
-.headAside {
-  float: right;
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  color: var(--dsw-alias-label-tertiary, GrayText);
-  font-size: 11px;
-}
-
 /* An Agent reads as an identity: the mark, then who and which build. */
 .agentRow { display: flex; align-items: center; gap: 10px; padding: 8px 12px; }
 .avatar {
