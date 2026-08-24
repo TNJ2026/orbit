@@ -148,6 +148,10 @@ export function OrbitPanel({ t, useSessions }: OrbitPanelProps) {
   // aborts the sleep the loop is sitting in, which a call into it could not.
   const [asked, setAsked] = useState(0)
   const [asking, setAsking] = useState(false)
+  /* Only the tick the press starts is forced. The timer ticks that follow it
+     are ordinary polls, and forcing those would re-read the whole catalog
+     every two seconds for the rest of the session. */
+  const forceNext = useRef(false)
   const bounds = useBounds()
   const drag = useRef<{ x: number; y: number } | null>(null)
 
@@ -177,11 +181,13 @@ export function OrbitPanel({ t, useSessions }: OrbitPanelProps) {
     const controller = new AbortController()
     const tick = async () => {
       try {
+        const forced = forceNext.current
+        forceNext.current = false
         const state = await hostCall<{
           runs: RunDto[]; uiUrl: string
           workflows: readonly WorkflowSummary[]; agents: readonly AgentSummary[]
         }>(
-          'getPanelState', [sessionId], controller.signal,
+          'getPanelState', [sessionId, forced], controller.signal,
         )
         if (controller.signal.aborted) return
         const next = orderRows(state.runs.map(toRow))
@@ -266,7 +272,7 @@ export function OrbitPanel({ t, useSessions }: OrbitPanelProps) {
           type="button"
           className={styles.iconButton}
           disabled={asking}
-          onClick={() => { setAsking(true); setAsked(count => count + 1) }}
+          onClick={() => { forceNext.current = true; setAsking(true); setAsked(count => count + 1) }}
           aria-label={t('refresh')}
           title={t('refresh')}
         >

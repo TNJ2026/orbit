@@ -83,7 +83,16 @@ export declare class OrbitRemoteService extends TypertRemoteService {
      * couple of seconds carries no claim the Host has to check — and the panel
      * never has to know what a Workspace is.
      */
-    getPanelState(sessionId: string, signal: AbortSignal): Promise<{
+    /**
+     * Everything the panel draws, in one call.
+     *
+     * `force` is a person pressing refresh, and it is the difference between a
+     * poll and an answer: the catalog and the Agent registry are both held
+     * deliberately — one behind a TTL, one for the life of the Runtime — because
+     * a two-second poll must not re-ask questions that change when somebody
+     * publishes. A press is exactly the case where they may have.
+     */
+    getPanelState(sessionId: string, force: boolean, signal: AbortSignal): Promise<{
         runs: RunDto[];
         uiUrl: string;
         workflows: readonly WorkflowSummary[];

@@ -781,6 +781,7 @@ window.__ModuleLoader__.load({
 			const [error, setError] = (0, react.useState)("");
 			const [asked, setAsked] = (0, react.useState)(0);
 			const [asking, setAsking] = (0, react.useState)(false);
+			const forceNext = (0, react.useRef)(false);
 			const bounds = useBounds();
 			const drag = (0, react.useRef)(null);
 			const update = (0, react.useCallback)((next) => {
@@ -804,7 +805,9 @@ window.__ModuleLoader__.load({
 				const controller = new AbortController();
 				const tick = async () => {
 					try {
-						const state = await hostCall$1("getPanelState", [sessionId], controller.signal);
+						const forced = forceNext.current;
+						forceNext.current = false;
+						const state = await hostCall$1("getPanelState", [sessionId, forced], controller.signal);
 						if (controller.signal.aborted) return;
 						const next = orderRows(state.runs.map(toRow));
 						setRows(next);
@@ -906,6 +909,7 @@ window.__ModuleLoader__.load({
 								className: OrbitPanel_module_css_default.iconButton,
 								disabled: asking,
 								onClick: () => {
+									forceNext.current = true;
 									setAsking(true);
 									setAsked((count) => count + 1);
 								},

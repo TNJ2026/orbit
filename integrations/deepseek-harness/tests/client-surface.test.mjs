@@ -177,6 +177,22 @@ test('refresh asks again rather than redrawing what is already held', () => {
   // Bumping a dependency tears that loop down and starts a fresh one.
   assert.match(code, /setAsked\(count => count \+ 1\)/)
   assert.match(code, /\[sessionId, layout\.collapsed, asked\]/)
+  // And the press has to say it is one. Two of the three lists the panel draws
+  // are held on purpose — the catalog behind a TTL, the Agents for the life of
+  // the Runtime — so an unmarked poll re-reads neither, and pressing refresh
+  // redraws the runs beside a workflow list up to five minutes old.
+  assert.match(code, /'getPanelState', \[sessionId, forced\]/)
+  assert.match(code, /forceNext\.current = true/)
+})
+
+test('only the tick the press starts is forced', async () => {
+  // Forcing the timer ticks that follow would re-read the whole catalog every
+  // two seconds for the rest of the session.
+  assert.match(code, /forceNext\.current = false/)
+  const host = await readFile(join(here, '..', 'src', 'index.ts'), 'utf8')
+  const state = host.slice(host.indexOf("@Remote('getPanelState')"), host.indexOf("@Remote('getRunDetail')"))
+  assert.match(state, /if \(force\) await this\.refreshCatalog\(scope\)/)
+  assert.match(state, /if \(force \|\| !this\.agentsByWorkspace\.has/)
 })
 
 test('a page with nothing on it still says something', () => {

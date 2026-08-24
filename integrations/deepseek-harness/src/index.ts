@@ -142,7 +142,7 @@ export class OrbitRemoteService extends TypertRemoteService {
     switch (action) {
       case 'getRuntime': return await this.getRuntime(args[0] as WorkspaceRef, signal)
       case 'getRuntimeUi': return await this.getRuntimeUi(String(args[0]), signal)
-      case 'getPanelState': return await this.getPanelState(String(args[0]), signal)
+      case 'getPanelState': return await this.getPanelState(String(args[0]), Boolean(args[1]), signal)
       case 'getRunDetail': return await this.getRunDetail(String(args[0]), String(args[1]), signal)
       case 'getWorkflowDefinition': return await this.getWorkflowDefinition(String(args[0]), String(args[1]), signal)
       case 'getStepOutput': return await this.getStepOutput(String(args[0]), String(args[1]), String(args[2]), Number(args[3]), signal)
@@ -312,8 +312,17 @@ export class OrbitRemoteService extends TypertRemoteService {
    * couple of seconds carries no claim the Host has to check — and the panel
    * never has to know what a Workspace is.
    */
+  /**
+   * Everything the panel draws, in one call.
+   *
+   * `force` is a person pressing refresh, and it is the difference between a
+   * poll and an answer: the catalog and the Agent registry are both held
+   * deliberately — one behind a TTL, one for the life of the Runtime — because
+   * a two-second poll must not re-ask questions that change when somebody
+   * publishes. A press is exactly the case where they may have.
+   */
   @Remote('getPanelState')
-  async getPanelState(sessionId: string, signal: AbortSignal): Promise<{
+  async getPanelState(sessionId: string, force: boolean, signal: AbortSignal): Promise<{
     runs: RunDto[]; uiUrl: string
     workflows: readonly WorkflowSummary[]; agents: readonly AgentSummary[]
   }> {
@@ -327,14 +336,11 @@ export class OrbitRemoteService extends TypertRemoteService {
       const result = await this.gateway.call(scope, sessionId, 'list_runs', {
         limit: 50, owner: 'workspace',
       }) as { runs: RunDto[] }
-      // The catalog the model is told about, read rather than fetched again:
-      // a poll running every two seconds should not ask twice for something
-      // that changes when someone publishes a Workflow.
-      if (this.catalog.stale(scope.canonicalPath)) this.refreshCatalog(scope)
-      if (!this.agentsByWorkspace.has(scope.canonicalPath)) {
-        // Read once and kept: a sealed registry cannot change under us, and a
-        // poll every two seconds should not keep asking a question whose answer
-        // is fixed for the life of the Runtime.
+      // Awaited when forced, so the press answers with the new list rather
+      // than leaving it for whichever poll lands next.
+      if (force) await this.refreshCatalog(scope)
+      else if (this.catalog.stale(scope.canonicalPath)) this.refreshCatalog(scope)
+      if (force || !this.agentsByWorkspace.has(scope.canonicalPath)) {
         const listed = await this.gateway.call(scope, sessionId, 'list_agents', {}) as {
           agents: AgentSummary[]
         }
