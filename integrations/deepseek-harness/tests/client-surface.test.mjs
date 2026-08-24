@@ -171,6 +171,14 @@ test('the sentence leaves a gap for the Workflow rather than naming it', async (
   assert.equal(/runHead: '[^']*\{name\}/.test(copy), false, 'the head interpolates a name again')
 })
 
+test('refresh asks again rather than redrawing what is already held', () => {
+  // The obvious wrong version calls the poll function, which leaves the loop
+  // asleep on its own timer and races the answer it is already waiting for.
+  // Bumping a dependency tears that loop down and starts a fresh one.
+  assert.match(code, /setAsked\(count => count \+ 1\)/)
+  assert.match(code, /\[sessionId, layout\.collapsed, asked\]/)
+})
+
 test('a page with nothing on it still says something', () => {
   // The pages carried a heading and a subtitle each, which is how a panel this
   // size spends a fifth of its height explaining four tabs that already name

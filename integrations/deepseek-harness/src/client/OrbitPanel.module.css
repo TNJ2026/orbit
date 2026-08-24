@@ -148,6 +148,14 @@
   cursor: pointer;
 }
 .iconButton:hover { color: var(--dsw-alias-label-primary); }
+/* Spinning while the poll is out, so a refresh that finds nothing new still
+   shows it was asked. A press with no visible answer reads as a dead button. */
+.iconButton:disabled { cursor: default; }
+.iconButton:disabled svg { animation: orbit-spin .7s linear infinite; }
+@keyframes orbit-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .iconButton:disabled svg { animation: none; opacity: .45; }
+}
 
 .catalogRow {
   display: flex;

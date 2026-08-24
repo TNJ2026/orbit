@@ -1,7 +1,7 @@
 /** The resident Orbit panel: what is running, and a way into Orbit itself. */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { IconCloseOutline16, IconShareOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconCloseOutline16, IconRefreshOutline16, IconShareOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { AgentSummary, RunDto, WorkflowSummary } from '../types.js'
 import styles from './OrbitPanel.module.css'
 import {
@@ -143,6 +143,11 @@ export function OrbitPanel({ t, useSessions }: OrbitPanelProps) {
   const [selected, setSelected] = useState<string | null>(null)
   const [selectedFlow, setSelectedFlow] = useState<string | null>(null)
   const [error, setError] = useState('')
+  // Asking again, now. Every page is drawn from one poll, so a refresh is that
+  // poll brought forward rather than four per-tab reloads — and bumping this
+  // aborts the sleep the loop is sitting in, which a call into it could not.
+  const [asked, setAsked] = useState(0)
+  const [asking, setAsking] = useState(false)
   const bounds = useBounds()
   const drag = useRef<{ x: number; y: number } | null>(null)
 
@@ -182,6 +187,7 @@ export function OrbitPanel({ t, useSessions }: OrbitPanelProps) {
         const next = orderRows(state.runs.map(toRow))
         setRows(next); setUiUrl(state.uiUrl); setError('')
         setWorkflows(state.workflows ?? []); setAgents(state.agents ?? [])
+        setAsking(false)
         timer = setTimeout(
           () => { void tick() },
           layout.collapsed ? ORBIT_IDLE_MS : nextInterval(next),
@@ -189,12 +195,13 @@ export function OrbitPanel({ t, useSessions }: OrbitPanelProps) {
       } catch (reason) {
         if (controller.signal.aborted) return
         setError(String(reason))
+        setAsking(false)
         timer = setTimeout(() => { void tick() }, 15_000)
       }
     }
     void tick()
     return () => { controller.abort(); if (timer !== undefined) clearTimeout(timer) }
-  }, [sessionId, layout.collapsed])
+  }, [sessionId, layout.collapsed, asked])
 
   const counts = summarise(rows ?? [])
   // Split once: the Runtime's own pages read as "what is happening" and "what
@@ -255,6 +262,16 @@ export function OrbitPanel({ t, useSessions }: OrbitPanelProps) {
         <span className={styles.count}>
           {counts.live ? t('liveCount', counts) : t('idleCount', counts)}
         </span>
+        <button
+          type="button"
+          className={styles.iconButton}
+          disabled={asking}
+          onClick={() => { setAsking(true); setAsked(count => count + 1) }}
+          aria-label={t('refresh')}
+          title={t('refresh')}
+        >
+          <IconRefreshOutline16 size={14} />
+        </button>
         {uiUrl ? (
           /* An anchor, not a scripted open: the browser's own new-tab
              behaviour comes with it — modified clicks, the middle button, and
