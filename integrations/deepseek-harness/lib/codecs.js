@@ -29,6 +29,8 @@ function decodeStep(value, index) {
     const item = object(value, `steps[${index}]`);
     string(item.node_id, `steps[${index}].node_id`);
     string(item.status, `steps[${index}].status`);
+    if (item.has_output !== undefined)
+        boolean(item.has_output, `steps[${index}].has_output`);
     if (item.resolution !== undefined && item.resolution !== null) {
         const resolution = object(item.resolution, `steps[${index}].resolution`);
         if (string(resolution.kind, `steps[${index}].resolution.kind`) !== 'reconciliation_required')
@@ -61,6 +63,19 @@ export function decodeToolResult(name, value) {
     }
     if (name === 'list_runs') {
         array(item.runs, 'runs').forEach(decodeRun);
+        return item;
+    }
+    if (name === 'list_agents') {
+        for (const [index, agent] of array(item.agents, 'agents').entries()) {
+            const entry = object(agent, `agents[${index}]`);
+            string(entry.name, `agents[${index}].name`);
+            string(entry.version, `agents[${index}].version`);
+            array(entry.node_kinds, `agents[${index}].node_kinds`);
+            if (entry.attempt_count !== undefined)
+                number(entry.attempt_count, `agents[${index}].attempt_count`);
+            if (entry.failed_count !== undefined)
+                number(entry.failed_count, `agents[${index}].failed_count`);
+        }
         return item;
     }
     if (name === 'generate_workflow' || name === 'modify_workflow' || name === 'get_authoring_job') {

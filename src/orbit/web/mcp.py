@@ -23,6 +23,7 @@ import time
 from typing import Any, Callable, Mapping
 
 from orbit import __version__
+from .run_visibility import reading_actor
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
@@ -54,6 +55,13 @@ HARNESS_TOOL_NAMES = frozenset({
     "list_runs", "inspect_run",
     "replay_langgraph_run",
     "generate_workflow", "modify_workflow", "get_authoring_job",
+    # The Host stands on the authoring queue with these, which is what makes it
+    # a writer Orbit will pick over forking an Agent CLI. Without them the
+    # preference has nothing to prefer: being connected does not put a client
+    # on the queue, waiting does, and a profile that hides the wait leaves the
+    # Host permanently absent from it.
+    "register_authoring_client", "wait_authoring_request",
+    "submit_authoring_response",
     "list_runtime_events", "get_run_steps", "get_run_graph", "get_run_edges",
     "read_run_output",
     "start_run", "resume_run", "cancel_run", "list_artifacts",
@@ -167,19 +175,25 @@ def _content(payload: Any, *, is_error: bool = False) -> dict[str, Any]:
     }
 
 
-def reading_actor(arguments, caller: str) -> str | None:
-    """Whose runs a read may see: the caller's, or the Workspace's.
+def workflow_id_argument(arguments: Mapping[str, Any]) -> str:
+    """The workflow id as Orbit stores it, however the caller wrote it.
 
-    Reads only. A write carries `actor` as both the scope and the record of who
-    acted, so widening it there would file somebody else's cancellation under
-    this caller's name — and a delegation read keeps the caller for the same
-    reason, since whose ruling it was is the point of recording one.
+    Every published id is namespaced — `workflow:wf_…` — and every surface
+    that hands one back says so. An Agent given one reliably drops the
+    prefix: `workflow:` reads as a label on the value rather than part of
+    it, so the id it passes back is the id it was shown minus its kind. That
+    cost a real run three failed starts and a detour through the source,
+    because the miss was reported as a missing *version* of a workflow whose
+    every version was in fact there.
+
+    Restoring the prefix is unambiguous here — a workflow id is the only kind
+    of id these tools take — and a caller that spells it in full is untouched.
     """
 
-    owner = arguments.get("owner", "caller")
-    if owner not in ("caller", "workspace"):
-        raise ValueError("owner must be caller or workspace")
-    return None if owner == "workspace" else caller
+    raw = str(arguments["workflow_id"]).strip()
+    if not raw:
+        raise ValueError("workflow_id is required")
+    return raw if raw.startswith("workflow:") else f"workflow:{raw}"
 
 
 def build_mcp_dispatcher(
@@ -347,8 +361,23 @@ def build_mcp_dispatcher(
         },
         # A job whose chosen agent is a connected App writes no DSL of its own:
         # it parks the prompt here and waits for that App to answer. These two
-        # tools are that exchange, and a job needs one round-trip per compile
-        # attempt.
+        # tools are that exchange: registration makes an exact delivery route
+        # addressable without taking somebody else's work, then each compile
+        # attempt needs one claim/submit round-trip.
+        {
+            "name": "register_authoring_client",
+            "description": (
+                "Register an authoring delivery address without claiming any "
+                "queued request. Use this immediately before creating a job "
+                "that explicitly targets the address."
+            ),
+            "scope": WRITE_SCOPE,
+            "inputSchema": {
+                "type": "object",
+                "properties": {"client": {"type": "string"}},
+                "required": ["client"],
+            },
+        },
         {
             "name": "claim_authoring_request",
             "description": (
@@ -442,14 +471,6 @@ def build_mcp_dispatcher(
                     "properties": {
                         "status": {"type": "string"},
                         "limit": {"type": "integer", "minimum": 1, "maximum": 200},
-                        "owner": {
-                            "type": "string",
-                            "enum": ["caller", "workspace"],
-                            "description": (
-                                "caller: runs this actor started (default). "
-                                "workspace: every run in this Runtime."
-                            ),
-                        },
                     },
                 },
             },
@@ -459,8 +480,7 @@ def build_mcp_dispatcher(
                 "scope": READ_SCOPE,
                 "inputSchema": {
                     "type": "object",
-                    "properties": {"run_id": {"type": "string"},
-                        "owner": {"type": "string", "enum": ["caller", "workspace"]}},
+                    "properties": {"run_id": {"type": "string"},},
                     "required": ["run_id"],
                 },
             },
@@ -470,8 +490,7 @@ def build_mcp_dispatcher(
                 "scope": READ_SCOPE,
                 "inputSchema": {
                     "type": "object",
-                    "properties": {"run_id": {"type": "string"},
-                        "owner": {"type": "string", "enum": ["caller", "workspace"]}},
+                    "properties": {"run_id": {"type": "string"},},
                     "required": ["run_id"],
                 },
             },
@@ -481,8 +500,7 @@ def build_mcp_dispatcher(
                 "scope": READ_SCOPE,
                 "inputSchema": {
                     "type": "object",
-                    "properties": {"run_id": {"type": "string"},
-                        "owner": {"type": "string", "enum": ["caller", "workspace"]}},
+                    "properties": {"run_id": {"type": "string"},},
                     "required": ["run_id"],
                 },
             },
@@ -492,8 +510,7 @@ def build_mcp_dispatcher(
                 "scope": READ_SCOPE,
                 "inputSchema": {
                     "type": "object",
-                    "properties": {"run_id": {"type": "string"},
-                        "owner": {"type": "string", "enum": ["caller", "workspace"]}},
+                    "properties": {"run_id": {"type": "string"},},
                     "required": ["run_id"],
                 },
             },
@@ -505,7 +522,6 @@ def build_mcp_dispatcher(
                     "type": "object",
                     "properties": {
                         "run_id": {"type": "string"},
-                        "owner": {"type": "string", "enum": ["caller", "workspace"]},
                         "after": {"type": "integer", "minimum": 0},
                         "limit": {"type": "integer", "minimum": 1, "maximum": 500},
                         "node_id": {"type": "string"},
@@ -790,7 +806,7 @@ def build_mcp_dispatcher(
                 "tool_profile": tool_profile,
             }
         if name == "list_runs":
-            owner = reading_actor(arguments, actor)
+            owner = reading_actor(actor)
             # Not a widening of scope: every actor reaching this transport is
             # the same local operator, and the Runtime's own UI already shows
             # all of it. What the default protects is an Agent's account of its
@@ -847,13 +863,13 @@ def build_mcp_dispatcher(
             )
         if name == "inspect_run":
             return langgraph_run_dto(
-                langgraph_service.get(str(arguments["run_id"]), actor=reading_actor(arguments, actor)),
+                langgraph_service.get(str(arguments["run_id"]), actor=reading_actor(actor)),
                 can_write=guard.allows(actor, WRITE_SCOPE),
             )
         if name == "get_run_steps":
             run_id = str(arguments["run_id"])
-            langgraph_service.get(run_id, actor=reading_actor(arguments, actor))
-            steps = list(langgraph_service.steps(run_id, actor=reading_actor(arguments, actor)))
+            langgraph_service.get(run_id, actor=reading_actor(actor))
+            steps = list(langgraph_service.steps(run_id, actor=reading_actor(actor)))
             if delegation_queue is not None:
                 steps = [dict(step) for step in steps]
                 for step in steps:
@@ -871,13 +887,13 @@ def build_mcp_dispatcher(
             return {"steps": steps}
         if name == "get_run_graph":
             run_id = str(arguments["run_id"])
-            return {"graph": langgraph_service.graph(run_id, actor=reading_actor(arguments, actor))}
+            return {"graph": langgraph_service.graph(run_id, actor=reading_actor(actor))}
         if name == "get_run_edges":
             run_id = str(arguments["run_id"])
-            return {"edges": list(langgraph_service.edges(run_id, actor=reading_actor(arguments, actor)))}
+            return {"edges": list(langgraph_service.edges(run_id, actor=reading_actor(actor)))}
         if name == "read_run_output":
             run_id = str(arguments["run_id"])
-            langgraph_service.get(run_id, actor=reading_actor(arguments, actor))
+            langgraph_service.get(run_id, actor=reading_actor(actor))
             after = int(arguments.get("after", 0))
             console = getattr(langgraph_service, "console", None)
             if console is None:
@@ -910,7 +926,7 @@ def build_mcp_dispatcher(
                 raise ValueError("wait must be true or false")
             return langgraph_run_dto(
                 langgraph_service.start(
-                    str(arguments["workflow_id"]), arguments.get("input") or {},
+                    workflow_id_argument(arguments), arguments.get("input") or {},
                     workflow_version=arguments.get("workflow_version"),
                     idempotency_key=str(arguments["idempotency_key"]),
                     actor=actor, goal=str(arguments.get("goal") or ""),
@@ -999,7 +1015,7 @@ def build_mcp_dispatcher(
             )
             return {"collected_artifact_ids": list(collected)}
         if name == "get_workflow_definition":
-            detail = workflow_reads.detail(str(arguments["workflow_id"]))
+            detail = workflow_reads.detail(workflow_id_argument(arguments))
             graph = detail.get("graph") or {}
             layout = {
                 spot["node_id"]: spot
@@ -1037,12 +1053,23 @@ def build_mcp_dispatcher(
                 if execution_registry is not None and execution_registry.sealed
                 else ()
             )
+            attempt_stats = (
+                langgraph_service.handler_attempts()
+                if getattr(langgraph_service, "handler_attempts", None) is not None
+                else {}
+            )
             return {
                 "agents": [
                     {
                         "name": entry.manifest.name,
                         "version": entry.manifest.version,
                         "node_kinds": list(entry.manifest.node_kinds),
+                        "attempt_count": int(
+                            attempt_stats.get(entry.manifest.name, {}).get("total", 0)
+                        ),
+                        "failed_count": int(
+                            attempt_stats.get(entry.manifest.name, {}).get("failed", 0)
+                        ),
                     }
                     for entry in registered
                     if entry.manifest.name.startswith("agent.")
@@ -1092,7 +1119,7 @@ def build_mcp_dispatcher(
             if authoring_jobs is None:
                 raise ValueError("workflow authoring is not configured")
             return authoring_jobs.create(
-                actor=actor, workflow_id=str(arguments["workflow_id"]),
+                actor=actor, workflow_id=workflow_id_argument(arguments),
                 prompt=str(arguments["prompt"]),
                 mode=str(arguments.get("mode", "modify")),
                 idempotency_key=str(arguments["idempotency_key"]),
@@ -1103,6 +1130,11 @@ def build_mcp_dispatcher(
             if authoring_jobs is None:
                 raise ValueError("workflow authoring is not configured")
             return authoring_jobs.get(str(arguments["job_id"]), actor=actor)
+        if name == "register_authoring_client":
+            if authoring_broker is None:
+                raise ValueError("client-side workflow generation is not configured")
+            client = authoring_broker.touch(str(arguments["client"]))
+            return {"client": client, "registered": True}
         if name == "claim_authoring_request":
             if authoring_broker is None:
                 raise ValueError("client-side workflow generation is not configured")

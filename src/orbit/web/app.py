@@ -33,6 +33,7 @@ from ..workflow.application.revision_worker import (
 from ..workflow.catalogs import InMemorySchemaCatalog
 from ..workflow.persistence.database import connect_workflow_database
 from ..workflow.persistence.migrations import migrate_workflow_database
+from ..workflow.authoring import AuthoringUnavailableError
 from .schema_guard import MixedSchemaError, assert_runtime_schema
 
 
@@ -335,6 +336,47 @@ class _LiveCapabilities(Mapping):
 
     def __len__(self) -> int:
         return len(self._static)
+
+
+def _connected_client_first(broker, forked):
+    """Write with the Agent already operating this Runtime; fork one if none is.
+
+    An Agent App connected over MCP is a writer that is *here* — it has the
+    conversation the request came out of, and the person watching it can see it
+    work. A forked CLI is a second, blind writer started for the occasion. So
+    the connected one goes first.
+
+    The choice is taken when the prompt is written, not when the Runtime
+    started: authoring is a job that runs minutes after it is asked for, and
+    clients arrive and leave the whole time. `broker.clients()` is presence as
+    observed — a client holding an event stream, or one that polled recently —
+    not presence as declared.
+
+    Falling back on `AuthoringUnavailableError` is the whole reason this is
+    safe. That error means the prompt was parked and *never handed to anybody*:
+    nothing was spent and nothing happened, so forking a CLI now is the first
+    attempt at the work rather than a second. `AuthoringUnknownResultError` is
+    the opposite case — a client took it and went quiet, and may already have
+    paid for a model call — so it is left to propagate. Retrying that is how
+    one request becomes two bills, which this codebase refuses everywhere else
+    it can happen.
+    """
+
+    def resolve():
+        return broker if broker.clients() else forked
+
+    def generate(prompt: str) -> str:
+        if not broker.clients():
+            return forked(prompt)
+        try:
+            return broker(prompt)
+        except AuthoringUnavailableError:
+            # Present when asked, gone before it answered. The parked prompt
+            # reached nobody, so this is still the first attempt.
+            return forked(prompt)
+
+    generate.resolve = resolve
+    return generate
 
 
 def create_app(
@@ -672,14 +714,27 @@ def create_app(
     if workflow_generator is None and generation_agents:
         workflow_generator = next(iter(generation_agents.values()))
 
+    if authoring_broker is not None and workflow_generator is not authoring_broker:
+        workflow_generator = _connected_client_first(
+            authoring_broker, workflow_generator,
+        )
+
     # Which name in the list the Runtime actually falls back to. The list is
     # sorted for display, so the default is not simply its first entry; it is
     # settled above and identified here by identity, whichever path set it.
+    #
+    # Asked rather than compared, because the default is now a decision taken
+    # per request: `resolve` answers who would write one if an author asked
+    # now. A connected client answers as the broker, which is deliberately not
+    # a name in the menu — so the report says "no named default", which is the
+    # truth about "whoever turns up".
     def default_generation_agent() -> str | None:
+        resolve = getattr(workflow_generator, "resolve", None)
+        active = workflow_generator if resolve is None else resolve()
         return next(
             (
                 name for name, generator in generation_agents.items()
-                if generator is workflow_generator
+                if generator is active
             ),
             None,
         )

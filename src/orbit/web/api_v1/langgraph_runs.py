@@ -16,9 +16,11 @@ from .common import (
     OPS_WRITE_SCOPE, READ_SCOPE, SENSITIVE_SCOPE, WRITE_SCOPE, error,
 )
 from ..run_projection import langgraph_run_dto
+from ..run_visibility import reading_actor
 
 
 CURSOR_KIND = "langgraph-runs-v1"
+
 
 
 def build_routes(ctx, service) -> list[Route]:
@@ -27,6 +29,7 @@ def build_routes(ctx, service) -> list[Route]:
         if isinstance(actor, JSONResponse):
             return actor
         try:
+            owner = reading_actor(actor)
             unknown = set(request.query_params) - {"limit", "status", "cursor", "q"}
             if unknown:
                 raise ValueError(f"unknown query parameter: {sorted(unknown)[0]}")
@@ -35,7 +38,7 @@ def build_routes(ctx, service) -> list[Route]:
             runs = service.list_runs(
                 status=request.query_params.get("status") or None,
                 limit=limit,
-                actor=actor,
+                actor=owner,
                 after=(
                     (cursor["created_at"], cursor["run_id"]) if cursor else None
                 ),
@@ -62,10 +65,11 @@ def build_routes(ctx, service) -> list[Route]:
         if isinstance(actor, JSONResponse):
             return actor
         try:
+            owner = reading_actor(actor)
             # A run belonging to somebody else is not found — the same rule
             # the Artifact endpoints below already apply, and the reason it
             # matters here is that `interrupts` carry node input data.
-            run = service.get(request.path_params["run_id"], actor=actor)
+            run = service.get(request.path_params["run_id"], actor=owner)
         except LookupError as exc:
             return error("not_found", str(exc), 404)
         return JSONResponse(envelope(
@@ -78,12 +82,13 @@ def build_routes(ctx, service) -> list[Route]:
         if isinstance(actor, JSONResponse):
             return actor
         try:
+            owner = reading_actor(actor)
             unknown = set(request.query_params) - {"limit"}
             if unknown:
                 raise ValueError(f"unknown query parameter: {sorted(unknown)[0]}")
             steps = service.replay(
                 request.path_params["run_id"],
-                actor=actor,
+                actor=owner,
                 limit=page_size(request.query_params.get("limit")),
             )
         except LookupError as exc:
@@ -109,12 +114,13 @@ def build_routes(ctx, service) -> list[Route]:
         if isinstance(actor, JSONResponse):
             return actor
         try:
+            owner = reading_actor(actor)
             run_id = request.path_params["run_id"]
             unknown = set(request.query_params)
             if unknown:
                 raise ValueError(f"unknown query parameter: {sorted(unknown)[0]}")
-            run = service.get(run_id, actor=actor)
-            steps = service.steps(run_id, actor=actor)
+            run = service.get(run_id, actor=owner)
+            steps = service.steps(run_id, actor=owner)
         except LookupError as exc:
             return error("not_found", str(exc), 404)
         except ValueError as exc:
@@ -134,12 +140,13 @@ def build_routes(ctx, service) -> list[Route]:
         if isinstance(actor, JSONResponse):
             return actor
         try:
+            owner = reading_actor(actor)
             run_id = request.path_params["run_id"]
             unknown = set(request.query_params)
             if unknown:
                 raise ValueError(f"unknown query parameter: {sorted(unknown)[0]}")
-            run = service.get(run_id, actor=actor)
-            edges = service.edges(run_id, actor=actor)
+            run = service.get(run_id, actor=owner)
+            edges = service.edges(run_id, actor=owner)
         except LookupError as exc:
             return error("not_found", str(exc), 404)
         except ValueError as exc:
@@ -159,12 +166,13 @@ def build_routes(ctx, service) -> list[Route]:
         if isinstance(actor, JSONResponse):
             return actor
         try:
+            owner = reading_actor(actor)
             run_id = request.path_params["run_id"]
             unknown = set(request.query_params)
             if unknown:
                 raise ValueError(f"unknown query parameter: {sorted(unknown)[0]}")
-            run = service.get(run_id, actor=actor)
-            graph = service.graph(run_id, actor=actor)
+            run = service.get(run_id, actor=owner)
+            graph = service.graph(run_id, actor=owner)
         except LookupError as exc:
             return error("not_found", str(exc), 404)
         except ValueError as exc:
@@ -187,12 +195,13 @@ def build_routes(ctx, service) -> list[Route]:
             return actor
         run_id = request.path_params["run_id"]
         try:
+            owner = reading_actor(actor)
             unknown = set(request.query_params) - {"after", "limit", "node_id"}
             if unknown:
                 raise ValueError(f"unknown query parameter: {sorted(unknown)[0]}")
             # Whose run this is decides whether its console may be read, and
             # it is asked before the console is touched.
-            service.get(run_id, actor=actor)
+            service.get(run_id, actor=owner)
             after = request.query_params.get("after") or "0"
             if not after.isdigit():
                 raise ValueError("after must be a chunk id")
@@ -307,13 +316,14 @@ def build_routes(ctx, service) -> list[Route]:
         if isinstance(actor, JSONResponse):
             return actor
         try:
+            owner = reading_actor(actor)
             unknown = set(request.query_params) - {"limit", "run_id"}
             if unknown:
                 raise ValueError(f"unknown query parameter: {sorted(unknown)[0]}")
             items = service.artifacts.list(
                 run_id=request.query_params.get("run_id") or None,
                 limit=page_size(request.query_params.get("limit")),
-                actor=actor,
+                actor=owner,
             )
         except ValueError as exc:
             return error("invalid_request", str(exc))
@@ -324,8 +334,9 @@ def build_routes(ctx, service) -> list[Route]:
         if isinstance(actor, JSONResponse):
             return actor
         try:
+            owner = reading_actor(actor)
             item = service.artifacts.get(
-                request.path_params["artifact_id"], actor=actor,
+                request.path_params["artifact_id"], actor=owner,
             )
         except LookupError as exc:
             return error("not_found", str(exc), 404)
@@ -336,10 +347,11 @@ def build_routes(ctx, service) -> list[Route]:
         if isinstance(actor, JSONResponse):
             return actor
         try:
+            owner = reading_actor(actor)
             item = service.artifacts.get(
-                request.path_params["artifact_id"], actor=actor,
+                request.path_params["artifact_id"], actor=owner,
             )
-            content = service.artifacts.read(item["artifact_id"], actor=actor)
+            content = service.artifacts.read(item["artifact_id"], actor=owner)
         except LookupError as exc:
             return error("not_found", str(exc), 404)
         return Response(
@@ -358,8 +370,9 @@ def build_routes(ctx, service) -> list[Route]:
         if isinstance(actor, JSONResponse):
             return actor
         try:
+            owner = reading_actor(actor)
             graph = service.artifacts.lineage(
-                request.path_params["artifact_id"], actor=actor,
+                request.path_params["artifact_id"], actor=owner,
             )
         except LookupError as exc:
             return error("not_found", str(exc), 404)

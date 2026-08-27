@@ -28,6 +28,16 @@ UNKNOWN_RESULT_CODES = frozenset({
 })
 
 
+def _public_agent_name(value):
+    """A writer identity for readers, without its private delivery address."""
+
+    if not value:
+        return value
+    text = str(value)
+    parts = text.split(".", 2)
+    return parts[1] if len(parts) == 3 and parts[0] == "route" else text
+
+
 class AuthoringJobConflict(ValueError):
     def __init__(self, code: str, job: Mapping[str, Any]) -> None:
         self.code, self.job = code, dict(job)
@@ -191,7 +201,7 @@ class AuthoringJobService:
             "job_id": row["job_id"], "type": row["job_type"],
             "workflow_id": row["workflow_id"], "prompt": row["prompt"],
             "mode": row["mode"], "status": status,
-            "requested_agent": row["requested_agent"],
+            "requested_agent": _public_agent_name(row["requested_agent"]),
             "deadline_at": row["deadline_at"] or None,
             "result": None if row["result_json"] is None else json.loads(row["result_json"]),
             # How many rounds the Agent needed, and what the compiler refused

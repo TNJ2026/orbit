@@ -13,6 +13,7 @@ import threading
 import time
 import unittest
 
+from orbit.web.app import _connected_client_first
 from orbit.workflow.authoring import (
     AuthoringUnavailableError, AuthoringUnknownResultError, CancelScope,
     ExternalAuthoringBroker, UnknownAuthoringRequestError, WorkflowAuthoringService,
@@ -52,6 +53,15 @@ class ReservedNameTests(unittest.TestCase):
         broker.claim(actor="local", client="cursor")
         self.assertEqual(["cursor"], broker.clients())
         self.assertEqual(["cursor"], sorted(broker.generators()))
+
+    def test_a_private_route_is_addressable_but_not_offered_as_an_agent(self) -> None:
+        broker = self.broker()
+        route = "route.harness.0123456789abcdef"
+        self.assertEqual(route, broker.touch(route))
+
+        self.assertEqual([route], broker.clients())
+        self.assertEqual([], sorted(broker.generators()))
+        self.assertIn(route, broker.generators())
 
     def test_a_registered_client_keeps_polling_without_re_checking(self) -> None:
         """The reserved set is read at registration, not on every claim.
@@ -120,6 +130,27 @@ class BrokerJobTests(AuthoringJobTestCase):
         request = self.claimed(client="cursor")
         self.assertEqual("cursor", request["addressed_to"])
         self.broker.respond(request["request_id"], dsl(), actor="cursor")
+        self.assertEqual("done", self.settled(jobs, created["job_id"])["status"])
+
+    def test_private_session_routes_do_not_cross_or_leak_into_the_job(self) -> None:
+        first = "route.harness.1111111111111111"
+        second = "route.harness.2222222222222222"
+        self.broker.touch(first)
+        self.broker.touch(second)
+        jobs = self.service()
+        created = jobs.create(
+            actor="author", prompt="Research", idempotency_key="routed",
+            agent=first,
+        )
+        self.assertEqual("harness", created["requested_agent"])
+        deadline = time.monotonic() + 10.0
+        while not self.broker.pending() and time.monotonic() < deadline:
+            time.sleep(0.02)
+
+        self.assertIsNone(self.broker.claim(actor="local", client=second))
+        request = self.claimed(client=first)
+        self.assertEqual(first, request["addressed_to"])
+        self.broker.respond(request["request_id"], dsl(), actor=first)
         self.assertEqual("done", self.settled(jobs, created["job_id"])["status"])
 
     def test_an_app_that_never_polled_cannot_be_addressed(self) -> None:
@@ -532,3 +563,104 @@ class SubscriptionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ConnectedClientFirstTests(unittest.TestCase):
+    """Who writes a workflow when both a connected App and a CLI could.
+
+    The connected one, because it is the Agent already operating this Runtime:
+    the request came out of its conversation, and the person watching it can
+    see it work. A forked CLI is a second, blind writer started for the
+    occasion, and it stays as the answer for a Runtime nothing is connected to.
+    """
+
+    def setUp(self) -> None:
+        self.forked_prompts: list[str] = []
+
+        def forked(prompt: str) -> str:
+            self.forked_prompts.append(prompt)
+            return "written by the CLI"
+
+        # One object, because the capability report identifies the writer by
+        # identity — a fresh bound method per access would not be the same
+        # writer twice, which is a fact about this test, not about the report.
+        self.forked = forked
+
+    def _dispatcher(self, broker):
+        return _connected_client_first(broker, self.forked)
+
+    def test_a_forked_CLI_writes_it_when_nothing_is_connected(self) -> None:
+        broker = _StubBroker(clients=[])
+        self.assertEqual("written by the CLI", self._dispatcher(broker)("draft me one"))
+        self.assertEqual(["draft me one"], self.forked_prompts)
+        self.assertEqual([], broker.parked, "a prompt must not be parked for nobody")
+
+    def test_a_connected_client_writes_it_in_preference_to_a_CLI(self) -> None:
+        broker = _StubBroker(clients=["harness"], answer="written by the App")
+        self.assertEqual("written by the App", self._dispatcher(broker)("draft me one"))
+        self.assertEqual([], self.forked_prompts, "no CLI is forked while an App is here")
+
+    def test_the_choice_is_taken_when_the_prompt_is_written(self) -> None:
+        """Not at startup. Authoring runs minutes after it is asked for."""
+
+        broker = _StubBroker(clients=[], answer="written by the App")
+        dispatch = self._dispatcher(broker)
+        self.assertEqual("written by the CLI", dispatch("first"))
+        broker.clients_list = ["harness"]
+        self.assertEqual("written by the App", dispatch("second"))
+        broker.clients_list = []
+        self.assertEqual("written by the CLI", dispatch("third"))
+
+    def test_a_prompt_nobody_claimed_falls_back_to_the_CLI(self) -> None:
+        """Present when asked, gone before it answered.
+
+        `AuthoringUnavailableError` means the prompt reached nobody, so nothing
+        was spent — forking now is the first attempt at the work, not a second.
+        """
+
+        broker = _StubBroker(clients=["harness"], raises=AuthoringUnavailableError("none came"))
+        self.assertEqual("written by the CLI", self._dispatcher(broker)("draft me one"))
+        self.assertEqual(["draft me one"], self.forked_prompts)
+
+    def test_a_claimed_prompt_that_went_quiet_is_never_written_twice(self) -> None:
+        """The one case that must not fall back.
+
+        A client took the request and stopped answering; it may already have
+        called — and been charged for — a model. Forking a CLI here turns one
+        request into two bills, which is exactly what `AuthoringUnknownResult`
+        exists to prevent.
+        """
+
+        broker = _StubBroker(
+            clients=["harness"],
+            raises=AuthoringUnknownResultError("claimed then silent"),
+        )
+        with self.assertRaises(AuthoringUnknownResultError):
+            self._dispatcher(broker)("draft me one")
+        self.assertEqual([], self.forked_prompts, "an unknown result is not retried")
+
+    def test_the_capability_report_can_ask_who_would_write_one_now(self) -> None:
+        """`default_agent` is matched by identity, so the dispatcher answers."""
+
+        broker = _StubBroker(clients=[])
+        dispatch = self._dispatcher(broker)
+        self.assertIs(self.forked, dispatch.resolve())
+        broker.clients_list = ["harness"]
+        self.assertIs(broker, dispatch.resolve(),
+                      "a connected client is not a name in the menu, and says so")
+
+
+class _StubBroker:
+    def __init__(self, *, clients, answer="", raises=None) -> None:
+        self.clients_list = list(clients)
+        self.answer, self.raises = answer, raises
+        self.parked: list[str] = []
+
+    def clients(self):
+        return list(self.clients_list)
+
+    def __call__(self, prompt: str) -> str:
+        self.parked.append(prompt)
+        if self.raises is not None:
+            raise self.raises
+        return self.answer

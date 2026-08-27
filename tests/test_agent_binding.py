@@ -151,6 +151,15 @@ class SubstitutionTests(unittest.TestCase):
 
         self.assertIsNone(AgentFallback([claude])(ir))
 
+    def test_an_installed_agent_matches_without_cli_version_or_fingerprint(self) -> None:
+        claude = manifest_for("claude", "2.0.0")
+        reference = IRHandlerRef(
+            "agent.claude", "1.2.3", "sha256:" + "a" * 64,
+        )
+        ir = single_step_workflow(agent_step(handler=reference))
+
+        self.assertIsNone(AgentFallback([claude])(ir))
+
     def test_a_graph_with_no_agent_step_needs_no_agent(self) -> None:
         transform = IRNode(
             "shape", "action", (port("prompt"),), (port("result"),),

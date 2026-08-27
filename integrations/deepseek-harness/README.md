@@ -2,15 +2,16 @@
 
 This directory is the installable Host Profile Bundle for `deepseek-harness`.
 Orbit Runtime stays an independent process. The `OrbitGateway` discovers the
-`orbit serve` instance published for the normalized Workspace, performs the
-capability handshake, and communicates with it only through HTTP MCP.
+`orbit serve` instance published for the normalized Workspace, starts one on a
+free port when none exists, performs the capability handshake, and communicates
+with it only through HTTP MCP. A Runtime started this way remains available
+after the panel or Harness Profile closes.
 
 ## Prerequisites
 
 - Install `orbit` so the executable is on the Harness Host's `PATH`.
-- Start Orbit independently for the Harness Workspace:
-
-  `orbit serve --project-root /absolute/path/to/workspace --mcp-tool-profile harness`
+Opening `/orbit` starts Orbit for the Harness Workspace when necessary. You may
+still start it independently to choose additional `orbit serve` options.
 
 By default the Gateway discovers ownership records below `~/.orbit`. If Orbit
 uses a database outside that tree, set `ORBIT_RUNTIME_ROOT` for the Harness

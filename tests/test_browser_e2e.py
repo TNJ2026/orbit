@@ -2280,12 +2280,11 @@ class EngineRefusalNoticeTests(BrowserE2ETestCase):
 
 
 class TwoSubstitutesNoticeTests(BrowserE2ETestCase):
-    """A graph can be carried to two Agents at once, and must say both.
+    """Installed Agent names stay available across CLI upgrades.
 
-    Each Agent step is decided on its own, so a graph with two stale pins
-    lands on two installed builds. Both Agents are registered here and none is
-    connected, which is exactly the state where a step is carried to its *own*
-    Agent's build rather than to whichever Agent is current.
+    Both steps carry stale version and fingerprint pins, but their logical
+    Agent names are installed. They therefore need neither substitution nor a
+    missing-Agent notice.
     """
 
     @classmethod
@@ -2332,22 +2331,12 @@ class TwoSubstitutesNoticeTests(BrowserE2ETestCase):
             actor="test:author", dsl_version="1.3",
         )
 
-    def test_the_notice_names_every_agent_a_step_lands_on(self) -> None:
-        """A substitution is per step, so a graph can land on two Agents.
-
-        The notice used to read the engine's one-line summary of them —
-        `"agent.a@1, agent.b@2"` — and strip from the first `@` to the end,
-        which reported the first Agent as the answer for all of it. On a
-        nine-step graph with two stale pins that is a sentence saying four
-        steps run somewhere three of them do not.
-        """
+    def test_stale_cli_versions_do_not_show_a_missing_agent_notice(self) -> None:
 
         page = self.open("en-US")
         page.goto(f"{self.base}/ui/#/workflows/workflow:two-substitutes")
-        notice = page.locator(".workflow-agent-binding p")
-        notice.wait_for()
+        page.locator(".workflow-detail").wait_for()
 
-        text = notice.inner_text()
-        self.assertIn("claude", text)
-        self.assertIn("codex", text)
-        self.assertIn("2 steps", text)
+        self.assertEqual(
+            0, page.locator(".workflow-agent-binding p").count(),
+        )

@@ -4909,8 +4909,13 @@ class LangGraphHttpApiTests(unittest.TestCase):
         self.assertEqual(artifact_id, detail.json()["data"]["artifact_id"])
         self.assertEqual(b"projected content", content.content)
         self.assertEqual([], lineage.json()["data"]["derived_from"])
-        self.assertEqual(404, denied.status_code)
-        self.assertEqual([], hidden.json()["data"]["artifacts"])
+        # An Artifact belongs to the Run that wrote it, and the Run belongs to
+        # this Workspace — which is the whole of who may read either.
+        self.assertEqual(200, denied.status_code)
+        self.assertEqual(
+            [artifact_id],
+            [item["artifact_id"] for item in hidden.json()["data"]["artifacts"]],
+        )
         self.assertEqual(
             artifact_id,
             json.loads(mcp["result"]["content"][0]["text"])["artifact_id"],
@@ -5216,14 +5221,14 @@ class LangGraphHttpApiTests(unittest.TestCase):
         self.assertEqual("completed", run["status"])
         self.assertEqual({"decision": "approve", "value": 43}, run["result"])
 
-    def test_replay_is_a_read_on_both_doors_and_owner_scoped(self) -> None:
+    def test_replay_is_a_read_on_both_doors_and_workspace_scoped(self) -> None:
         """Replay reads recorded state, so it is offered on the read scope.
 
         It is forbidden to call a Handler or write anything — that is what
         replay means in this codebase — which is why it carries no command and
-        needs no idempotency key. What it does need is the same ownership rule
-        every other run read has: the recorded state is the run's inputs and
-        outputs, node by node.
+        needs no idempotency key. What it does need is the same visibility
+        rule every other run read has: the recorded state belongs to the
+        Workspace this Runtime serves, not to whoever started the run.
         """
 
         action = node("action", inputs=("value",), outputs=("value",))
@@ -5300,8 +5305,9 @@ class LangGraphHttpApiTests(unittest.TestCase):
             ["action", "terminal"], steps[-1]["execution_order"],
         )
         self.assertEqual(21, steps[-1]["node_outputs"]["action"]["value"])
-        # Somebody else's run is not found, as it is on every other read.
-        self.assertEqual(404, foreign.status_code)
+        # A second reader is not a second Workspace: a Runtime serves one,
+        # and what it recorded there is what a read of it may see.
+        self.assertEqual(200, foreign.status_code)
         self.assertEqual(400, bad_query.status_code)
         self.assertEqual(
             steps,
@@ -5407,10 +5413,14 @@ class LangGraphHttpApiTests(unittest.TestCase):
         self.assertEqual({"question": "approve?"}, started["interrupts"][0]["value"])
         self.assertTrue(started["allowed_commands"])
         self.assertEqual([], own_view["allowed_commands"])
-        self.assertEqual(404, foreign_view.status_code)
-        self.assertEqual(
-            [own.run_id], [item["run_id"] for item in foreign_list],
-        )
+        # Readable by anyone reaching this Runtime; the empty command list above
+        # is what still separates looking from acting.
+        self.assertEqual(200, foreign_view.status_code)
+        # Both Runs, because both happened here. The list used to hold only
+        # the reader's own, which is what left Orbit's UI showing part of its
+        # own database with no sign that the rest existed.
+        self.assertIn(own.run_id, [item["run_id"] for item in foreign_list])
+        self.assertEqual(2, len(foreign_list))
         self.assertEqual(403, forbidden.status_code)
         self.assertEqual(200, completed.status_code)
         self.assertEqual(completed.json(), replayed.json())

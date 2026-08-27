@@ -1,4 +1,4 @@
-import type { ArtifactContent, ArtifactSummary, AuthoringJob, EdgeSummary, OutputPage, RunDto, StepSummary, WorkflowSummary } from './types.js'
+import type { AgentSummary, ArtifactContent, ArtifactSummary, AuthoringJob, EdgeSummary, OutputPage, RunDto, StepSummary, WorkflowSummary } from './types.js'
 
 function object(value: unknown, path: string): Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error(`invalid Orbit DTO at ${path}: expected object`)
@@ -25,6 +25,7 @@ export function decodeRun(value: unknown): RunDto {
 function decodeStep(value: unknown, index: number): StepSummary {
   const item = object(value, `steps[${index}]`)
   string(item.node_id, `steps[${index}].node_id`); string(item.status, `steps[${index}].status`)
+  if (item.has_output !== undefined) boolean(item.has_output, `steps[${index}].has_output`)
   if (item.resolution !== undefined && item.resolution !== null) {
     const resolution = object(item.resolution, `steps[${index}].resolution`)
     if (string(resolution.kind, `steps[${index}].resolution.kind`) !== 'reconciliation_required') throw new Error(`invalid Orbit DTO at steps[${index}].resolution.kind`)
@@ -52,6 +53,16 @@ export function decodeToolResult(name: string, value: unknown): unknown {
     return item as { workflows: WorkflowSummary[] }
   }
   if (name === 'list_runs') { array(item.runs, 'runs').forEach(decodeRun); return item as { runs: RunDto[] } }
+  if (name === 'list_agents') {
+    for (const [index, agent] of array(item.agents, 'agents').entries()) {
+      const entry = object(agent, `agents[${index}]`)
+      string(entry.name, `agents[${index}].name`); string(entry.version, `agents[${index}].version`)
+      array(entry.node_kinds, `agents[${index}].node_kinds`)
+      if (entry.attempt_count !== undefined) number(entry.attempt_count, `agents[${index}].attempt_count`)
+      if (entry.failed_count !== undefined) number(entry.failed_count, `agents[${index}].failed_count`)
+    }
+    return item as { agents: AgentSummary[] }
+  }
   if (name === 'generate_workflow' || name === 'modify_workflow' || name === 'get_authoring_job') {
     for (const key of ['job_id', 'type', 'prompt', 'status', 'created_at', 'updated_at']) string(item[key], `authoring_job.${key}`)
     return item as unknown as AuthoringJob

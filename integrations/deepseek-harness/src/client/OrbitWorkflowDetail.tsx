@@ -9,32 +9,25 @@
 import { useEffect, useState } from 'react'
 import type { WorkflowNode, WorkflowSummary } from '../types.js'
 import styles from './OrbitPanel.module.css'
-import { OrbitRunListRow } from './OrbitRunRow.tsx'
+import { BackButton, OrbitRunListRow, PanelErrorText } from './OrbitRunRow.tsx'
+import { panelError, type PanelError } from './error-text.ts'
 import type { OrbitRunRow as RunRowData } from './orbit-model.ts'
 import type { OrbitLocaleKey } from './locales.ts'
 
 type Translate = (key: OrbitLocaleKey, values?: Record<string, string | number>) => string
 type HostCall = <T>(action: string, args: unknown[], signal: AbortSignal) => Promise<T>
 
-/** The input ids a caller has to supply, in the order the Workflow declares them. */
-function inputIds(workflow: WorkflowSummary): string[] {
-  return Array.isArray(workflow.inputs)
-    ? workflow.inputs
-      .map(input => (input as { id?: unknown }).id)
-      .filter((id): id is string => typeof id === 'string')
-    : []
-}
-
-/** The kinds that get their own accent; anything else reads as structure. */
-const ACCENTED = new Set(['action', 'human', 'decision'])
 /** The kinds that carry work, and so are the ones a missing prompt is news about. */
 const PROMPTED = new Set(['action', 'human'])
 
 function StepRow({ t, step }: { t: Translate; step: WorkflowNode }) {
-  const accent = ACCENTED.has(step.kind) ? step.kind : 'plain'
   const prompt = step.prompt.trim()
+  // Every step gets a stripe, and its kind picks the colour. A kind the
+  // stylesheet has no rule for still gets one — `.defnRow`'s own border-left
+  // is the neutral, so an unrecognised kind reads as "a step of some other
+  // sort" rather than silently losing its leading edge.
   return (
-    <div className={`${styles.defnRow} ${styles[`kind_${accent}`] ?? ''}`}>
+    <div className={`${styles.defnRow} ${styles[`kind_${step.kind}`] ?? ''}`}>
       <div className={styles.defnHead}>
         <span className={styles.defnName}>{step.label}</span>
         <span className={styles.defnKind}>{step.kind}</span>
@@ -70,28 +63,26 @@ export interface OrbitWorkflowDetailProps {
 export function OrbitWorkflowDetail(
   { call, t, sessionId, workflow, runs, uiUrl, onBack, onOpenRun }: OrbitWorkflowDetailProps,
 ) {
-  const inputs = inputIds(workflow)
   const ran = runs.filter(run => run.workflow.startsWith(`${workflow.workflow_id}@`))
-  const ready = workflow.goal_readiness === 'ready'
   const [steps, setSteps] = useState<readonly WorkflowNode[] | null>(null)
-  const [stepsError, setStepsError] = useState('')
+  const [stepsError, setStepsError] = useState<PanelError | null>(null)
 
   // Read once per Workflow, and not again: a definition changes only when
   // somebody republishes it, so polling it would ask a settled question.
   useEffect(() => {
     const controller = new AbortController()
-    setSteps(null); setStepsError('')
+    setSteps(null); setStepsError(null)
     call<{ nodes: WorkflowNode[] }>(
       'getWorkflowDefinition', [sessionId, workflow.workflow_id], controller.signal,
     )
       .then(detail => { if (!controller.signal.aborted) setSteps(detail.nodes) })
-      .catch(reason => { if (!controller.signal.aborted) setStepsError(String(reason)) })
+      .catch(reason => { if (!controller.signal.aborted) setStepsError(panelError(reason)) })
     return () => controller.abort()
   }, [call, sessionId, workflow.workflow_id])
 
   return (
     <div>
-      <button type="button" className={styles.back} onClick={onBack}>{t('back')}</button>
+      <BackButton t={t} onBack={onBack} />
       <div className={styles.detailHead}>
         <span className={styles.detailGoal}>{workflow.name || workflow.workflow_id}</span>
       </div>
@@ -101,26 +92,13 @@ export function OrbitWorkflowDetail(
 
       {workflow.description ? <p className={styles.prose}>{workflow.description}</p> : null}
 
-      <dl className={styles.facts}>
-        <dt>{t('factReadiness')}</dt>
-        <dd>
-          {ready ? t('readyYes') : t('readyNo')}
-          {/* The reason is the actionable half: "not ready" alone sends a person
-              to Orbit to find out what this line already knows. */}
-          {!ready && workflow.readiness_reason
-            ? <span className={styles.meta}> · {workflow.readiness_reason}</span> : null}
-        </dd>
-        <dt>{t('factInputs')}</dt>
-        <dd>{inputs.length ? inputs.join(', ') : t('factNone')}</dd>
-      </dl>
-
       <a className={styles.outLink} href={`${uiUrl}#/workflows/${encodeURIComponent(workflow.workflow_id)}`} target="_blank" rel="noopener">
         {t('openThisInOrbit')}
       </a>
 
       <div className={styles.sectionLabel}>{t('factSteps', { total: steps?.length ?? 0 })}</div>
-      {stepsError ? <p className={styles.error}>{stepsError}</p> : null}
-      {!stepsError && steps === null ? <p className={styles.empty}>{t('stepsLoading')}</p> : null}
+      <PanelErrorText t={t} error={stepsError} />
+      {stepsError === null && steps === null ? <p className={styles.empty}>{t('stepsLoading')}</p> : null}
       {steps?.map(step => <StepRow key={step.node_id} t={t} step={step} />)}
 
       <div className={styles.sectionLabel}>{t('factRuns', { total: ran.length })}</div>

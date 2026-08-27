@@ -38,6 +38,12 @@ def langgraph_run_dto(run, *, can_write: bool) -> dict[str, Any]:
     return {
         "run_id": run.run_id,
         "goal": run.goal,
+        # What the run was asked to work on, beside what it answered. `goal` is
+        # the label the work was given and is often a summary of this rather
+        # than a copy of it — a reader shown only the label cannot see the
+        # request. Safe to return to a caller who is by definition the one who
+        # sent it, and `result`, already here, is derived from it.
+        "inputs": dict(run.inputs),
         "artifact_count": run.artifact_count,
         "workflow_id": run.workflow_id,
         "workflow_version": run.workflow_version,

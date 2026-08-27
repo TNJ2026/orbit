@@ -66,6 +66,10 @@ DEFAULT_PRESENCE_SECONDS = 600.0
 _POLL_SECONDS = 0.2
 # Client names are addresses that appear in a UI menu and in job records.
 _CLIENT_NAME = re.compile(r"^[a-zA-Z][a-zA-Z0-9_.-]{0,63}$")
+# Private delivery addresses are callable generator keys but are not Agents a
+# person can choose from a menu. Apps use them to distinguish two live
+# conversations that share one public client identity.
+_PRIVATE_ROUTE_PREFIX = "route."
 
 
 class ReservedClientNameError(ValueError):
@@ -181,10 +185,17 @@ class _GeneratorView(Mapping):
         self._broker = broker
 
     def _names(self) -> list[str]:
-        return [client_agent_name(name) for name in self._broker.clients()]
+        return [
+            client_agent_name(name) for name in self._broker.clients()
+            if not name.startswith(_PRIVATE_ROUTE_PREFIX)
+        ]
 
     def __getitem__(self, key: str) -> Callable[[str], str]:
-        if key in self._names():
+        # A private route is deliberately absent from iteration (and therefore
+        # from authoring Agent menus), but an explicit request may address it.
+        # Mapping.__contains__ delegates here, so AuthoringService.ensure_agent
+        # still verifies that the route is live before accepting a Job.
+        if key in self._broker.clients():
             return self._broker.generator_for(key)
         raise KeyError(key)
 
@@ -268,6 +279,20 @@ class ExternalAuthoringBroker:
             }
             connected = {name for name, _deliver in self._subscribers.values()}
         return sorted(polled | connected)
+
+    def touch(self, client: str) -> str:
+        """Mark one delivery address present without claiming queued work."""
+
+        name = normalise_client(client)
+        if name is None:
+            raise ValueError("a client name is required")
+        with self._lock:
+            if name not in self._seen and name in {
+                str(item) for item in self._reserved_names()
+            }:
+                raise ReservedClientNameError(name)
+            self._seen[name] = self.clock()
+        return name
 
     # -- the event stream ---------------------------------------------------
 

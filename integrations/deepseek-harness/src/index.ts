@@ -1,19 +1,46 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { TypertRemoteService, Remote } from '@deepseek-ai/dsh-typert-protocol'
 import { OrbitGateway } from './gateway.js'
-import { OrbitSessionBridge, bridgeWithRetry, restoredBridgeState, sessionCanBridge, type OrbitCursorStore, type StoredOrbitEvent } from './session-bridge.js'
+import { OrbitSessionBridge, sessionCanBridge, type OrbitCursorStore } from './session-bridge.js'
 import { OrbitToolBridge } from './orbit-tools.js'
 import type { Session, SessionStore } from '@deepseek-ai/dsh-session'
 import type { WorkspaceRegistry } from '@deepseek-ai/dsh-workspace'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { mkdir, writeFile } from 'node:fs/promises'
+import { homedir } from 'node:os'
+import { dirname, join } from 'node:path'
+import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
 import { artifactImageInput } from './artifact-import.js'
+import { artifactFilename, readableAsText } from './artifact-export.js'
 import { advertisedAt, commandTool, type OrbitRunCommand } from './commands.js'
 import { WorkflowCatalog } from './workflow-catalog.js'
+import { goalRuns, isLive } from './run-progress.js'
+import {
+  CLAIM_RETRY_MS, CLAIM_WAIT_SECONDS, answerFrom, authoringClientForSession,
+  claimOnce, isUnknownToolError,
+  type ClaimedRequest,
+} from './authoring-claim.js'
 import type { AgentSummary } from './types.js'
-import type { ArtifactContent, ArtifactSummary, AuthoringJob, AuthoringSummary, EdgeSummary, ImportedArtifact, IntegrationDiagnostics, OrbitCommandRequest, OutputPage, RunDto, RunGraph, RuntimeSummary, StepSummary, WorkflowNode, WorkflowSummary, WorkspaceRef } from './types.js'
+import type { ArtifactContent, ArtifactSummary, AuthoringJob, AuthoringOutputPage, AuthoringSummary, EdgeSummary, ImportedArtifact, IntegrationDiagnostics, OrbitCommandRequest, OutputPage, RunDto, RunGraph, RuntimeSummary, StepSummary, WorkflowNode, WorkflowSummary, WorkspaceRef } from './types.js'
 
 declare module '@deepseek-ai/cordis' { interface Context { orbit: OrbitRemoteService } }
+
+/** The slice of the Agent registry this Host uses to drive one Session. */
+interface AgentLookup {
+  get(id: string): {
+    session: { events: readonly { type: string; data?: unknown }[] }
+    /** Queue an ordinary turn and wake the driver. On the Agent, not its
+     *  inbox — the inbox is the durable projection, the Agent is what runs. */
+    followup(message: UserMessage): void
+    whenIdle(): Promise<void>
+  } | undefined
+}
+
+/** How long to let one authoring turn run before giving the request back.
+ *  Under the broker's own lease, so this Host stops waiting before Orbit
+ *  stops expecting it to. */
+const AUTHORING_TURN_MS = 240_000
 
 interface OrbitWebServer {
   register(route: { kind: 'exact'; path: string; handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void> }): () => void
@@ -22,21 +49,32 @@ interface OrbitWebServer {
 /** How long a settled job stays on the panel before it stops being news. */
 const AUTHORING_LINGER_MS = 60_000
 
+/**
+ * How many Runs the panel poll will read steps for.
+ *
+ * Steps are one extra Runtime read per Run, on a two-second poll, so this is
+ * not free the way the Run list is — the list is one read whatever its length.
+ * A Workspace with more than a handful of Runs moving at once has a different
+ * problem than a missing progress line, and the ones past the cap are the ones
+ * furthest down a list ordered by recency.
+ */
+const LIVE_STEP_LIMIT = 6
+
 interface TrackedAuthoring {
   /** The Session that started it; `get_authoring_job` answers only to it. */
   readonly sessionId: string
   job: AuthoringJob
   /** When it settled, or undefined while it is still going. */
   settledAt?: number
+  /** Set only after the newly published Workflow was actually read back. */
+  catalogRefreshed?: boolean
 }
 
 export class OrbitRemoteService extends TypertRemoteService {
-  static inject = ['sessions', 'workspaceRegistry', 'tools', 'attachments', 'systemPrompt']
+  static inject = ['sessions', 'workspaceRegistry', 'tools', 'attachments', 'systemPrompt', 'agents']
   private readonly gateway = new OrbitGateway()
+  private readonly agents: AgentLookup | undefined
   private readonly catalog = new WorkflowCatalog()
-  /** Agent handlers per Workspace. The Runtime seals its registry at startup,
-   *  so one read answers for as long as that Runtime is up. */
-  private readonly agentsByWorkspace = new Map<string, readonly AgentSummary[]>()
   /** Authoring jobs started from this Harness, per Workspace.
    *
    *  Held here because there is nothing to ask: a job is addressed by an id
@@ -47,6 +85,12 @@ export class OrbitRemoteService extends TypertRemoteService {
   private readonly bridges = new Map<string, AbortController>()
   /** One entry per live Bridge: the Workspaces worth knowing the Workflows of. */
   private readonly bridgedWorkspaces = new Map<string, WorkspaceRef>()
+  /** Live authoring consumers, keyed by the exact Harness Session they drive. */
+  private readonly authoringWaiters = new Map<string, AbortController>()
+  /** The last thing that went wrong while writing a Workflow here. */
+  private readonly authoringTrouble = new Map<
+    string, { stage: string; error: string; at: string }
+  >()
   private readonly bridgeDiagnostics = new Map<string, { state: string; cursorPosition: number; lastError?: string; updatedAt: string }>()
   private readonly hostSessions: SessionStore
   private readonly attachments: AttachmentStore
@@ -56,6 +100,11 @@ export class OrbitRemoteService extends TypertRemoteService {
     this.hostSessions = ctx.get('sessions') as unknown as SessionStore
     this.attachments = ctx.get('attachments') as unknown as AttachmentStore
     this.workspaceRegistry = ctx.get('workspaceRegistry') as unknown as WorkspaceRegistry
+    // Captured here like every other service, rather than read from `this.ctx`
+    // at the moment it is needed: a service this Host cannot reach is a fact
+    // about how it was composed, and finding that out at the instant a
+    // Workflow needs writing is finding out in the worst place.
+    this.agents = ctx.get('agents') as unknown as AgentLookup | undefined
     new OrbitToolBridge(ctx, this.gateway, (workspace, sessionId, job) => {
       this.watchAuthoring(workspace, sessionId, job)
     }).register()
@@ -67,6 +116,8 @@ export class OrbitRemoteService extends TypertRemoteService {
     ctx.effect(() => () => {
       for (const controller of this.bridges.values()) controller.abort()
       this.bridges.clear()
+      for (const controller of this.authoringWaiters.values()) controller.abort()
+      this.authoringWaiters.clear()
     }, 'orbit: stop Session Bridges')
   }
 
@@ -132,6 +183,7 @@ export class OrbitRemoteService extends TypertRemoteService {
     for (const [jobId, tracked] of [...held]) {
       if (tracked.settledAt !== undefined) {
         if (now - tracked.settledAt > AUTHORING_LINGER_MS) held.delete(jobId)
+        else if (tracked.job.status === 'done' && !tracked.catalogRefreshed) published = true
         continue
       }
       try {
@@ -152,10 +204,26 @@ export class OrbitRemoteService extends TypertRemoteService {
       requested_agent: job.requested_agent ?? null,
       workflow_id: job.workflow_id ?? null,
       error: job.error?.message ?? null,
+      output_href: job.output_href ?? null,
     })) }
   }
 
-  private refreshCatalog(scope: WorkspaceRef): Promise<void> {
+  private markPublishedCatalogRefreshed(scope: WorkspaceRef): void {
+    for (const tracked of this.authoringByWorkspace.get(scope.canonicalPath)?.values() ?? []) {
+      if (tracked.job.status === 'done') tracked.catalogRefreshed = true
+    }
+  }
+
+  @Remote('getAuthoringOutput')
+  async getAuthoringOutput(
+    sessionId: string, outputHref: string, after: number, signal: AbortSignal,
+  ): Promise<AuthoringOutputPage> {
+    signal.throwIfAborted()
+    const scope = await this.sessionWorkspace(sessionId)
+    return await this.gateway.authoringOutput(scope, sessionId, outputHref, after)
+  }
+
+  private refreshCatalog(scope: WorkspaceRef): Promise<boolean> {
     // Everything, not `ready_only`: two readers share this, and they want
     // different halves. The model is offered only what it can start, which
     // `WorkflowCatalog.render` filters for; the panel lists the catalog as it
@@ -166,8 +234,9 @@ export class OrbitRemoteService extends TypertRemoteService {
           scope.canonicalPath,
           (result as { workflows: WorkflowSummary[] }).workflows,
         )
+        return true
       })
-      .catch(() => { /* an unreachable Runtime is not worth a turn's worth of noise */ })
+      .catch(() => false) // Background warming retries when the entry stays stale.
   }
 
   private registerWebApi(ctx: Context): void {
@@ -177,6 +246,64 @@ export class OrbitRemoteService extends TypertRemoteService {
       const webServer = (ctx.get('webServer') ?? ctx.get('httpServer')) as OrbitWebServer | undefined
       if (!webServer) return
       registered = true
+      /**
+       * Hand a browser the bytes of one Artifact.
+       *
+       * A GET, because a link is what a person clicks and a browser is what
+       * renders the result. It exists because Orbit's own address for an
+       * Artifact cannot serve one: Artifacts are owned by the actor that
+       * produced them, a browser reaching `/api/v1` on loopback is `local`,
+       * and the Runs this panel starts belong to `harness:session:<id>`. So
+       * the link was a 404 for every Artifact this Harness ever made.
+       *
+       * This route is that identity. It reads the Artifact as the Session that
+       * owns it and passes the bytes through unchanged — no gallery, no
+       * viewer, no second drawing of anything Orbit draws. The browser opens
+       * what it was given, exactly as it would have from Orbit's own URL.
+       */
+      ctx.effect(() => webServer.register({
+        kind: 'exact', path: '/plugins/dsh-orbit/artifact',
+        handler: async (req, res) => {
+          const send = (status: number, body: string) => {
+            res.writeHead(status, {
+              'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store',
+            })
+            res.end(body)
+          }
+          try {
+            if (req.method !== 'GET') return send(405, 'GET only')
+            const query = new URL(req.url ?? '', 'http://localhost').searchParams
+            const sessionId = query.get('session') ?? ''
+            const artifactId = query.get('id') ?? ''
+            if (!sessionId || !artifactId) return send(400, 'session and id are required')
+            const scope = await this.sessionWorkspace(sessionId)
+            const held = await this.gateway.call(
+              scope, sessionId, 'read_artifact_content', { artifact_id: artifactId },
+            ) as ArtifactContent
+            const bytes = Buffer.from(held.content, 'base64')
+            res.writeHead(200, {
+              // What Orbit recorded it as, so the browser treats it the way it
+              // would have coming from Orbit. A missing type is bytes, not a
+              // guess: guessing is how a text file renders as a download and a
+              // script renders as a script.
+              'content-type': String(held.artifact.content_type || 'application/octet-stream'),
+              'content-length': String(bytes.length),
+              'cache-control': 'no-store',
+              // Never inline into this page's origin. The bytes are whatever a
+              // workflow wrote, and this origin is the Harness the person is
+              // signed in to.
+              'content-security-policy': "sandbox; default-src 'none'",
+              'x-content-type-options': 'nosniff',
+              ...(typeof held.artifact.filename === 'string' && held.artifact.filename
+                ? { 'content-disposition': `inline; filename*=UTF-8''${encodeURIComponent(held.artifact.filename)}` }
+                : {}),
+            })
+            res.end(bytes)
+          } catch (error) {
+            send(404, String(error))
+          }
+        },
+      }), 'orbit: Artifact bytes for a browser link')
       ctx.effect(() => webServer.register({
         kind: 'exact', path: '/plugins/dsh-orbit/api',
         handler: async (req, res) => {
@@ -214,13 +341,18 @@ export class OrbitRemoteService extends TypertRemoteService {
     switch (action) {
       case 'getRuntime': return await this.getRuntime(args[0] as WorkspaceRef, signal)
       case 'getRuntimeUi': return await this.getRuntimeUi(String(args[0]), signal)
-      case 'getPanelState': return await this.getPanelState(String(args[0]), Boolean(args[1]), signal)
+      case 'getPanelState': return await this.getPanelState(String(args[0]), Boolean(args[1]), Boolean(args[2]), signal)
+      case 'generateWorkflowForSession': return await this.generateWorkflowForSession(String(args[0]), String(args[1]), signal)
+      case 'getAuthoringOutput': return await this.getAuthoringOutput(String(args[0]), String(args[1]), Number(args[2]), signal)
       case 'getRunDetail': return await this.getRunDetail(String(args[0]), String(args[1]), signal)
       case 'getWorkflowDefinition': return await this.getWorkflowDefinition(String(args[0]), String(args[1]), signal)
       case 'getStepOutput': return await this.getStepOutput(String(args[0]), String(args[1]), String(args[2]), Number(args[3]), signal)
       case 'runCommand': return await this.runCommand(String(args[0]), String(args[1]), args[2] as 'langgraph_run.cancel' | 'langgraph_run.resume', Number(args[3]), args[4], args[5] === undefined ? undefined : String(args[5]), signal)
       case 'reconcileStep': return await this.reconcileStep(String(args[0]), String(args[1]), String(args[2]), args[3] as 'confirmed_succeeded' | 'confirmed_failed', String(args[4]), signal)
+      case 'exportArtifact': return await this.exportArtifact(String(args[0]), String(args[1]), signal)
+      case 'readArtifactText': return await this.readArtifactText(String(args[0]), String(args[1]), signal)
       case 'getDiagnostics': return await this.getDiagnostics(args[0] as WorkspaceRef, String(args[1]), signal)
+      case 'stopRuntime': return await this.stopRuntime(String(args[0]), signal)
       case 'listWorkflows': return await this.listWorkflows(args[0] as WorkspaceRef, String(args[1]), signal)
       case 'listRuns': return await this.listRuns(args[0] as WorkspaceRef, String(args[1]), args[2] === undefined ? undefined : String(args[2]), signal)
       case 'generateWorkflow': return await this.generateWorkflow(args[0] as WorkspaceRef, String(args[1]), String(args[2]), signal)
@@ -293,7 +425,7 @@ export class OrbitRemoteService extends TypertRemoteService {
     const controller = new AbortController()
     this.bridges.set(sessionId, controller)
     this.bridgeDiagnostics.set(sessionId, { state: 'connecting', cursorPosition: 0, updatedAt: new Date().toISOString() })
-    void this.runSessionBridge(ctx, session, cwd, controller.signal).finally(() => {
+    void this.bindSessionWorkspace(ctx, session, cwd).finally(() => {
       if (this.bridges.get(sessionId) === controller) this.bridges.delete(sessionId)
     })
   }
@@ -306,10 +438,24 @@ export class OrbitRemoteService extends TypertRemoteService {
     // for every Session the Host ever opened.
     this.bridgeDiagnostics.delete(sessionId)
     this.bridgedWorkspaces.delete(sessionId)
-    this.agentsByWorkspace.clear()
+    this.authoringWaiters.get(sessionId)?.abort()
+    this.authoringWaiters.delete(sessionId)
   }
 
-  private async runSessionBridge(ctx: Context, session: Session, cwd: string, signal: AbortSignal): Promise<void> {
+  /**
+   * Bind a Session to the Workspace it is working in, and warm that catalog.
+   *
+   * Warmed before the first turn asks, because this runs when the Session is
+   * created and the person types afterwards. The binding is what
+   * `tellTheModelWhatCanRun` reads, so every Session that can reach a Runtime
+   * is registered here whether or not anything else happens.
+   *
+   * This is all that happens at Session start now. It used to also run
+   * `OrbitSessionBridge`, which recorded each Run into the Session log as
+   * `orbit/run-started` / `-checkpoint` / `-ended`; see `stopSessionBridge`
+   * and the note on why that stopped.
+   */
+  private async bindSessionWorkspace(ctx: Context, session: Session, cwd: string): Promise<void> {
     const registry = ctx.workspaceRegistry as WorkspaceRegistry
     const registered = await registry.resolveByPath(cwd)
     const workspace: WorkspaceRef = {
@@ -317,34 +463,134 @@ export class OrbitRemoteService extends TypertRemoteService {
       canonicalPath: registered?.path ?? cwd,
     }
     this.bridgedWorkspaces.set(String(session.id), workspace)
-    // Warm it before the first turn asks: a Bridge starts when the Session is
-    // created, and the person types afterwards.
     this.refreshCatalog(workspace)
-    let cursorPosition = restoredBridgeState(session.events).position
-    const cursor: OrbitCursorStore = {
-      load: () => cursorPosition || undefined,
-      save: (_workspaceId, _sessionId, position) => {
-        cursorPosition = position
-        this.bridgeDiagnostics.set(String(session.id), {
-          state: 'connected', cursorPosition: position, updatedAt: new Date().toISOString(),
+    this.bridgeDiagnostics.set(String(session.id), {
+      state: 'bound', cursorPosition: 0, updatedAt: new Date().toISOString(),
+    })
+    this.waitForAuthoring(ctx, workspace, String(session.id))
+  }
+
+  /**
+   * Stand on Orbit's authoring queue for this Workspace, and write what comes.
+   *
+   * Being on the queue is what makes this Host a writer Orbit will choose:
+   * `_connected_client_first` prefers a connected client over forking an Agent
+   * CLI, and it counts a client as connected because it is waiting here. A
+   * Host that only ever called tools was never on the queue, so the preference
+   * had nothing to prefer and every Workflow was written by a forked CLI whose
+   * work nobody could watch.
+   *
+   * Restarted after every wait, including after a failure, because the wait is
+   * how the Host stays addressable — stopping on the first unreachable Runtime
+   * would take this Workspace off the menu until the Session was recreated.
+   */
+  private waitForAuthoring(ctx: Context, scope: WorkspaceRef, sessionId: string): void {
+    if (this.authoringWaiters.has(sessionId)) return
+    const controller = new AbortController()
+    this.authoringWaiters.set(sessionId, controller)
+    const client = authoringClientForSession(sessionId)
+    const loop = async () => {
+      while (!controller.signal.aborted) {
+        const outcome = await claimOnce({
+          wait: async seconds => await this.gateway.call(
+            scope, sessionId, 'wait_authoring_request',
+            { client, timeout_seconds: seconds },
+          ).then(result => (result as { request: ClaimedRequest | null }).request),
+          ask: async prompt => await this.askTheSession(sessionId, prompt),
+          submit: async (requestId, dsl) => await this.gateway.call(
+            scope, sessionId, 'submit_authoring_response',
+            { request_id: requestId, dsl },
+          ),
+          report: (stage, error) => {
+            // Logged and kept. The log goes to whichever terminal started the
+            // Harness, which is nowhere a person debugging the panel is
+            // looking; the diagnostics endpoint is.
+            this.authoringTrouble.set(scope.canonicalPath, {
+              stage, error: String(error), at: new Date().toISOString(),
+            })
+            ctx.logger.warn(
+              `Orbit authoring ${stage} failed in ${scope.canonicalPath}: ${String(error)}`,
+            )
+          },
         })
-      },
+        if (controller.signal.aborted) return
+        // A failed round waits before asking again; an expired one is the
+        // queue working as intended and goes straight back on it.
+        if (outcome === 'failed') {
+          await new Promise<void>(resolve => {
+            const timer = setTimeout(resolve, CLAIM_RETRY_MS)
+            controller.signal.addEventListener(
+              'abort', () => { clearTimeout(timer); resolve() }, { once: true },
+            )
+          })
+        }
+      }
     }
-    await bridgeWithRetry({
-      events: () => session.events as readonly StoredOrbitEvent[],
-      attempt: async knownRuns => {
-        await this.bridgeSession(workspace, session, cursor, signal, knownRuns)
-      },
-      onWaiting: message => {
-        this.bridgeDiagnostics.set(String(session.id), {
-          state: 'waiting', cursorPosition, lastError: message, updatedAt: new Date().toISOString(),
-        })
-        ctx.logger.warn(`Orbit bridge for Session ${String(session.id)} is waiting: ${message}`)
-      },
-      signal,
+    void loop().finally(() => {
+      if (this.authoringWaiters.get(sessionId) === controller) {
+        this.authoringWaiters.delete(sessionId)
+      }
     })
   }
 
+  /**
+   * Put the prompt to the Workspace's Session and return what its model said.
+   *
+   * `followup` rather than anything quieter: the whole point is that the work
+   * happens in the conversation, where a person can watch it and where the
+   * Agent has the context the request came out of. It becomes an ordinary turn
+   * and queues behind whatever the person is doing, so this never interrupts
+   * one — it waits for one to end.
+   *
+   * The answer is read back out of the Session's own log rather than returned
+   * by the call, because the log is what actually happened: a turn that used
+   * tools answers across several messages, and the log has all of them in
+   * order.
+   */
+  private async askTheSession(sessionId: string, prompt: string): Promise<string> {
+    if (this.agents === undefined) throw new Error('this Harness exposes no Agent registry')
+    const agent = this.agents.get(sessionId)
+    if (agent === undefined) throw new Error(`no live Agent for Session ${sessionId}`)
+    const mark = agent.session.events.length
+    agent.followup(createUserMessage({
+      content: [{ type: 'text', text: prompt }],
+      source: { kind: 'plugin', plugin: 'orbit' },
+    }))
+    /* `whenIdle` follows whole-agent quiescence, not this message: a Session
+       busy with the person's own turn reaches idle when *that* turn ends,
+       which can be before the queued one has run. So idle is a prompt to look
+       rather than an answer, and looking is asking whether anything was said.
+       Bounded, because an Agent that never answers must give the request back
+       while Orbit is still willing to re-offer it. */
+    const deadline = Date.now() + AUTHORING_TURN_MS
+    for (;;) {
+      await agent.whenIdle()
+      const said = answerFrom(agent.session.events, mark)
+      if (said.trim()) return said
+      if (Date.now() >= deadline) return ''
+      await new Promise<void>(resolve => setTimeout(resolve, 1_000))
+    }
+  }
+
+  /**
+   * Drive the Session Bridge for one Session, writing each Run into its log.
+   *
+   * NOT called at Session start, and must not be until the Harness can accept
+   * the events it writes. `orbit/run-*` are not in the Harness's own event
+   * vocabulary, and `Session.append` offers no way to set the envelope's
+   * `ignorable` marker — the one thing that lets a reader skip a type it does
+   * not know. So every Session this ran in became unreadable on reload:
+   *
+   *   session "…" contains event type "orbit/run-started" (seq 964) unknown to
+   *   this harness and not marked ignorable; refusing to interpret the log
+   *
+   * Kept rather than deleted because nothing here is wrong except where the
+   * record is put. `@deepseek-ai/dsh-session` says a registration surface for
+   * out-of-repo plugin events "is deferred until such a consumer exists"; this
+   * is that consumer. When `append` can mark an event ignorable, or the
+   * vocabulary can be extended, calling this from `bindSessionWorkspace`
+   * restores the account of what ran.
+   */
   async bridgeSession(workspace: WorkspaceRef, session: Session, cursor: OrbitCursorStore, signal: AbortSignal, knownRuns: Iterable<string> = []): Promise<void> {
     const bridge = new OrbitSessionBridge(this.gateway, cursor)
     await bridge.run(workspace, String(session.id), {
@@ -394,20 +640,23 @@ export class OrbitRemoteService extends TypertRemoteService {
    * publishes. A press is exactly the case where they may have.
    */
   @Remote('getPanelState')
-  async getPanelState(sessionId: string, force: boolean, signal: AbortSignal): Promise<{
+  async getPanelState(sessionId: string, force: boolean, startIfMissing: boolean, signal: AbortSignal): Promise<{
     runs: RunDto[]; uiUrl: string
     workflows: readonly WorkflowSummary[]; agents: readonly AgentSummary[]
     authoring: readonly AuthoringSummary[]
+    steps: Record<string, StepSummary[]>
   }> {
     signal.throwIfAborted()
     const scope = await this.sessionWorkspace(sessionId)
-    const release = await this.gateway.acquire(scope)
+    const release = await this.gateway.acquire(scope, startIfMissing)
     try {
       // The panel is a view of the Workspace, not of one chat: a Run started in
       // Orbit's own UI is the same Run, and a History that hid it would sit
-      // empty beside a Runtime full of work.
+      // empty beside a Runtime full of work. It used to say so with
+      // `owner: 'workspace'`; the Runtime says it now, because a Runtime
+      // serves one Workspace and that is the whole of what a read may see.
       const result = await this.gateway.call(scope, sessionId, 'list_runs', {
-        limit: 50, owner: 'workspace',
+        limit: 50,
       }) as { runs: RunDto[] }
       // Before the catalog, so a publish is known in time to re-read it below.
       const authoring = await this.readAuthoring(scope)
@@ -415,22 +664,78 @@ export class OrbitRemoteService extends TypertRemoteService {
       // or a publish someone just watched happen. Forgetting the entry and
       // letting a later poll fill it would empty the page at the very moment
       // the Workflow they asked for was supposed to appear on it.
-      if (force || authoring.published) await this.refreshCatalog(scope)
-      else if (this.catalog.stale(scope.canonicalPath)) this.refreshCatalog(scope)
-      if (force || !this.agentsByWorkspace.has(scope.canonicalPath)) {
-        const listed = await this.gateway.call(scope, sessionId, 'list_agents', {}) as {
-          agents: AgentSummary[]
-        }
-        this.agentsByWorkspace.set(scope.canonicalPath, listed.agents)
+      if (force || authoring.published) {
+        const refreshed = await this.refreshCatalog(scope)
+        if (authoring.published && refreshed) this.markPublishedCatalogRefreshed(scope)
       }
+      else if (this.catalog.stale(scope.canonicalPath)) this.refreshCatalog(scope)
+      // Identity is fixed for the Runtime, but attempt totals are not. This is
+      // one grouped read and stays beside the Runs it counts on every poll.
+      const listed = await this.gateway.call(scope, sessionId, 'list_agents', {}) as {
+        agents: AgentSummary[]
+      }
+      // A Runtime already alive during a Harness upgrade may still expose the
+      // older identity-only MCP shape. Orbit's HTTP Agent page has always held
+      // these totals, so merge that same projection instead of silently
+      // rendering a missing value as zero until somebody restarts Runtime.
+      const needsAttemptCounts = listed.agents.some(
+        agent => agent.attempt_count === undefined || agent.failed_count === undefined,
+      )
+      const attemptCounts = needsAttemptCounts
+        ? await this.gateway.handlerAttemptCounts(scope, sessionId)
+        : undefined
+      const agents = listed.agents.map(agent => ({
+        ...agent,
+        ...(attemptCounts?.get(agent.name) ?? {}),
+      }))
       return {
         runs: result.runs,
         uiUrl: await this.gateway.uiUrl(scope),
         workflows: this.catalog.list(scope.canonicalPath),
-        agents: this.agentsByWorkspace.get(scope.canonicalPath) ?? [],
+        agents,
         authoring: authoring.jobs,
+        steps: await this.liveSteps(scope, sessionId, result.runs),
       }
     } finally { await release() }
+  }
+
+  /**
+   * The steps of the Runs that are still moving, so the Goal page can draw them.
+   *
+   * Only the live ones, and only what that page draws: the name and status of
+   * each step, whether it has output to offer, and whether it is waiting on a
+   * person. The rest of a StepSummary — the prompt it was authored with, its
+   * handler, its timestamps — is detail nobody reads here, and sending the
+   * whole thing on a two-second poll would put a page of JSON on the wire per
+   * Run to render a list of names.
+   *
+   * A Run whose steps cannot be read loses its progress line and keeps its
+   * row. The alternative is a panel that goes blank because one Run out of six
+   * answered badly, which trades the thing a reader came for against a detail
+   * they did not.
+   */
+  private async liveSteps(
+    scope: WorkspaceRef, sessionId: string, runs: readonly RunDto[],
+  ): Promise<Record<string, StepSummary[]>> {
+    // Exactly the Runs the Goal page draws, by the same rule it draws them: a
+    // Goal that has just finished is still on that page, and its steps have to
+    // be re-read once more or it keeps the last step it was seen *running*.
+    const drawn = goalRuns(
+      runs.map(run => ({ live: isLive(run.status), updatedAt: run.updated_at, run })),
+    ).slice(0, LIVE_STEP_LIMIT)
+    const read = await Promise.all(drawn.map(async ({ run }) => {
+      try {
+        const detail = await this.gateway.call(scope, sessionId, 'get_run_steps', {
+          run_id: run.run_id,
+        }) as { steps: StepSummary[] }
+        return [run.run_id, detail.steps.map(step => ({
+          node_id: step.node_id, label: step.label, status: step.status,
+          has_output: step.has_output, resolution: step.resolution,
+          reconciliation: step.reconciliation,
+        }))] as const
+      } catch { return null }
+    }))
+    return Object.fromEntries(read.filter(entry => entry !== null))
   }
 
   /**
@@ -448,7 +753,7 @@ export class OrbitRemoteService extends TypertRemoteService {
     const release = await this.gateway.acquire(scope)
     try {
       return await this.gateway.call(scope, sessionId, 'get_run_steps', {
-        run_id: runId, owner: 'workspace',
+        run_id: runId,
       }) as { steps: StepSummary[] }
     } finally { await release() }
   }
@@ -482,7 +787,7 @@ export class OrbitRemoteService extends TypertRemoteService {
     const release = await this.gateway.acquire(scope)
     try {
       return await this.gateway.call(scope, sessionId, 'read_run_output', {
-        run_id: runId, after, node_id: nodeId, owner: 'workspace',
+        run_id: runId, after, node_id: nodeId,
       }) as OutputPage
     } finally { await release() }
   }
@@ -553,6 +858,27 @@ export class OrbitRemoteService extends TypertRemoteService {
     } finally { await release() }
   }
 
+  /**
+   * Stop the Orbit Runtime serving this Session's Workspace.
+   *
+   * Session-scoped like every other call here: the Workspace is derived from
+   * the Session rather than taken from the caller, so this can only ever stop
+   * the Runtime the person is actually looking at.
+   *
+   * The waiter goes first. It is parked on that Runtime's authoring queue, and
+   * leaving it there would have it discover the shutdown as a transport error
+   * and log one — a failure report about something that was asked for.
+   */
+  @Remote('stopRuntime')
+  async stopRuntime(sessionId: string, signal: AbortSignal): Promise<{ stopped: true }> {
+    signal.throwIfAborted()
+    const scope = await this.sessionWorkspace(sessionId)
+    this.authoringWaiters.get(scope.canonicalPath)?.abort()
+    this.authoringWaiters.delete(scope.canonicalPath)
+    await this.gateway.stopRuntime(scope, sessionId)
+    return { stopped: true }
+  }
+
   @Remote('getDiagnostics')
   async getDiagnostics(workspace: WorkspaceRef, sessionId: string, signal: AbortSignal): Promise<IntegrationDiagnostics> {
     const runtime = await this.getRuntime(workspace, signal)
@@ -560,6 +886,12 @@ export class OrbitRemoteService extends TypertRemoteService {
       generated_at: new Date().toISOString(), workspace_id: workspace.id,
       session_id: sessionId, runtime, gateway: this.gateway.diagnostics(),
       bridge: this.bridgeDiagnostics.get(sessionId) || null,
+      authoring: {
+        waiting: this.authoringWaiters.has(sessionId),
+        driving: this.authoringWaiters.has(sessionId) ? sessionId : null,
+        agentRegistry: this.agents !== undefined,
+        lastError: this.authoringTrouble.get(workspace.canonicalPath) ?? null,
+      },
     }
   }
 
@@ -590,9 +922,52 @@ export class OrbitRemoteService extends TypertRemoteService {
     signal.throwIfAborted()
     if (!prompt.trim() || prompt.length > 20_000) throw new Error('Workflow prompt must be 1-20000 characters')
     const scope = await this.verified(workspace, sessionId)
-    return await this.gateway.call(scope, sessionId, 'generate_workflow', {
-      prompt: prompt.trim(), display_language: 'zh-CN', idempotency_key: crypto.randomUUID(),
+    const agent = await this.prepareAuthoringRoute(scope, sessionId)
+    const job = await this.gateway.call(scope, sessionId, 'generate_workflow', {
+      prompt: prompt.trim(), display_language: 'zh-CN', agent,
+      idempotency_key: crypto.randomUUID(),
     }) as AuthoringJob
+    this.watchAuthoring(scope, sessionId, job)
+    return job
+  }
+
+  /** Start authoring from a Slash command whose only authority is its Session. */
+  @Remote('generateWorkflowForSession')
+  async generateWorkflowForSession(
+    sessionId: string, prompt: string, signal: AbortSignal,
+  ): Promise<AuthoringJob> {
+    signal.throwIfAborted()
+    if (!prompt.trim() || prompt.length > 20_000) throw new Error(
+      'Workflow prompt must be 1-20000 characters',
+    )
+    const scope = await this.sessionWorkspace(sessionId)
+    const release = await this.gateway.acquire(scope, true)
+    try {
+      const agent = await this.prepareAuthoringRoute(scope, sessionId)
+      const job = await this.gateway.call(scope, sessionId, 'generate_workflow', {
+        prompt: prompt.trim(), display_language: 'zh-CN',
+        agent, idempotency_key: crypto.randomUUID(),
+      }) as AuthoringJob
+      this.watchAuthoring(scope, sessionId, job)
+      return job
+    } finally { await release() }
+  }
+
+  /** Register this exact Session route before asking Orbit to address work to it. */
+  private async prepareAuthoringRoute(
+    scope: WorkspaceRef, sessionId: string,
+  ): Promise<string> {
+    const client = authoringClientForSession(sessionId)
+    try {
+      await this.gateway.call(scope, sessionId, 'register_authoring_client', { client })
+    } catch (error) {
+      // Runtimes from before the presence-only registration tool still learn
+      // this route from the Session's standing wait_authoring_request call.
+      // Ignore only that one protocol-version miss; authorization, transport
+      // and every other registration failure remain actionable errors.
+      if (!isUnknownToolError(error, 'register_authoring_client')) throw error
+    }
+    return client
   }
 
   @Remote('modifyWorkflow')
@@ -601,9 +976,10 @@ export class OrbitRemoteService extends TypertRemoteService {
     if (!workflowId.trim()) throw new Error('Workflow id is required')
     if (!prompt.trim() || prompt.length > 20_000) throw new Error('Workflow prompt must be 1-20000 characters')
     const scope = await this.verified(workspace, sessionId)
+    const agent = await this.prepareAuthoringRoute(scope, sessionId)
     return await this.gateway.call(scope, sessionId, 'modify_workflow', {
       workflow_id: workflowId, prompt: prompt.trim(), mode: regenerate ? 'regenerate' : 'modify',
-      display_language: 'zh-CN', idempotency_key: crypto.randomUUID(),
+      display_language: 'zh-CN', agent, idempotency_key: crypto.randomUUID(),
     }) as AuthoringJob
   }
 
@@ -673,6 +1049,69 @@ export class OrbitRemoteService extends TypertRemoteService {
     const release = await this.gateway.acquire(scope)
     try { return await this.gateway.call(scope, sessionId, 'read_artifact_content', { artifact_id: artifactId }) as ArtifactContent }
     finally { await release() }
+  }
+
+  /**
+   * What an Artifact is, and its text when its text is the answer.
+   *
+   * Metadata first, always: a workflow that writes its reply as markdown has
+   * written the reply, and making a reader click through to it charges them a
+   * click for the thing they asked for. But asking for a 2 MiB PDF in order to
+   * discover it is a 2 MiB PDF is the round trip this ordering avoids, so the
+   * bytes are fetched only once the recorded type and size say they are worth
+   * fetching.
+   */
+  @Remote('readArtifactText')
+  async readArtifactText(
+    sessionId: string, artifactId: string, signal: AbortSignal,
+  ): Promise<{ contentType: string; sizeBytes: number; text: string | null }> {
+    signal.throwIfAborted()
+    const scope = await this.sessionWorkspace(sessionId)
+    const meta = await this.gateway.call(
+      scope, sessionId, 'read_artifact', { artifact_id: artifactId },
+    ) as ArtifactSummary
+    const contentType = String(meta.content_type ?? '')
+    const sizeBytes = Number(meta.size_bytes ?? 0)
+    if (!readableAsText(contentType, sizeBytes)) return { contentType, sizeBytes, text: null }
+    const held = await this.gateway.call(
+      scope, sessionId, 'read_artifact_content', { artifact_id: artifactId },
+    ) as ArtifactContent
+    return { contentType, sizeBytes, text: Buffer.from(held.content, 'base64').toString('utf8') }
+  }
+
+  /**
+   * Write one Artifact out as an ordinary file and say where it went.
+   *
+   * Not the path it already has. Orbit stores Artifacts content-addressed: the
+   * file on disk is named by the sha256 of its own bytes, has no extension, is
+   * shared by every Artifact with identical content, and is collected when
+   * nothing references it. Handing that path to a person invites them to open
+   * it in an editor and save — and saving corrupts every Artifact sharing
+   * those bytes. So they get a copy that is theirs.
+   *
+   * Session-scoped like everything else here, and for the same reason twice
+   * over: an Artifact belongs to the actor that produced it, so the Session is
+   * both which Workspace to look in and the only identity allowed to read it.
+   */
+  @Remote('exportArtifact')
+  async exportArtifact(
+    sessionId: string, artifactId: string, signal: AbortSignal,
+  ): Promise<{ path: string }> {
+    signal.throwIfAborted()
+    const scope = await this.sessionWorkspace(sessionId)
+    const held = await this.gateway.call(
+      scope, sessionId, 'read_artifact_content', { artifact_id: artifactId },
+    ) as ArtifactContent
+    const target = join(
+      homedir(), 'Downloads',
+      artifactFilename(artifactId, held.artifact.content_type, held.artifact.filename),
+    )
+    await mkdir(dirname(target), { recursive: true })
+    // Rewritten rather than skipped when it exists: the name carries the
+    // digest, so a file already at that path holds these exact bytes — and one
+    // truncated by an interrupted write would otherwise stand forever.
+    await writeFile(target, Buffer.from(held.content, 'base64'))
+    return { path: target }
   }
 
   @Remote('importArtifact')

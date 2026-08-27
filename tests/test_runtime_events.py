@@ -773,6 +773,19 @@ class HandlerConsoleTests(unittest.TestCase):
         chunks, _after, _more = self.console.read("langgraph_run:r", after_chunk_id=after)
         self.assertEqual(["two\n"], [item["text"] for item in chunks])
 
+    def test_nodes_with_output_are_reported_once(self) -> None:
+        sink = self.sink()
+        sink.emit("stdout", "one\n")
+        sink.emit("stderr", "two\n")
+        from orbit.workflow.langgraph_runtime.console import AttemptConsoleSink
+        other = AttemptConsoleSink(
+            self.console, run_id="langgraph_run:r", node_id="other",
+            attempt_id="langgraph_attempt:other:1",
+        )
+        other.emit("stdout", "three\n")
+        self.assertEqual(("other", "work"), self.console.output_nodes("langgraph_run:r"))
+        self.assertEqual((), self.console.output_nodes("langgraph_run:missing"))
+
     def test_has_more_distinguishes_a_full_page_from_the_end(self) -> None:
         sink = self.sink()
         for index in range(3):

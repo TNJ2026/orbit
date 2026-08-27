@@ -69,3 +69,38 @@ test('resizing stays between the bounds a person can still use', () => {
   assert.equal(resizePanel(floating, -99_999, -99_999, wide).height, PANEL_MIN_HEIGHT)
   assert.equal(resizePanel(floating, 99_999, 0, wide).width, PANEL_MAX_WIDTH)
 })
+
+/**
+ * Put away is a third state, not a deeper fold.
+ *
+ * `collapsed` is the panel folded to its mark and still watching; `dismissed`
+ * is a person done with Orbit here. The close button reaches the second after
+ * stopping the Runtime, because a mark still sitting there would be an offer
+ * to reopen a page about a service that is no longer running.
+ */
+test('a layout written before dismissal existed still shows the panel', () => {
+  assert.equal(readLayout(JSON.stringify({ collapsed: false })).dismissed, false)
+  assert.equal(DEFAULT_PANEL_LAYOUT.dismissed, false)
+  assert.equal(readLayout(null).dismissed, false)
+  assert.equal(readLayout('not json').dismissed, false)
+})
+
+test('only an explicit dismissal hides it', () => {
+  assert.equal(readLayout(JSON.stringify({ dismissed: true })).dismissed, true)
+  // Anything else is a layout this panel cannot read as "hidden", and the
+  // safe reading of that is to be visible: a panel nobody can reach is worse
+  // than one they have to fold again.
+  for (const value of ['true', 1, null, undefined, {}]) {
+    assert.equal(readLayout(JSON.stringify({ dismissed: value })).dismissed, false, String(value))
+  }
+})
+
+test('dismissal is independent of the fold and of the geometry', () => {
+  const stored = readLayout(JSON.stringify({
+    dismissed: true, collapsed: false, mode: 'floating', width: 500, height: 400,
+  }))
+  assert.equal(stored.dismissed, true)
+  assert.equal(stored.collapsed, false, 'it remembers how it was folded when it comes back')
+  assert.equal(stored.mode, 'floating')
+  assert.equal(stored.width, 500)
+})

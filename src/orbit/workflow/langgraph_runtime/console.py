@@ -119,6 +119,17 @@ class AttemptConsole:
             ).fetchone()
         return int(row["total"])
 
+    def output_nodes(self, run_id: str) -> tuple[str, ...]:
+        """Nodes that printed at least one stored chunk for this run."""
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT node_id FROM langgraph_attempt_output"
+                " WHERE run_id=? ORDER BY node_id",
+                (run_id,),
+            ).fetchall()
+        return tuple(str(row["node_id"]) for row in rows)
+
 
 class AttemptConsoleSink:
     """The port a Handler sees: one attempt, bounded, never raising.

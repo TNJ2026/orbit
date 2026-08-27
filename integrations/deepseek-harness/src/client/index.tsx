@@ -18,6 +18,8 @@ import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import { OrbitPanel } from './OrbitPanel.tsx'
 import { ORBIT_LOCALE_NAMESPACE, en, zh, type OrbitLocaleKey } from './locales.ts'
+import { panelError } from './error-text.ts'
+import { referenceLabel } from './orbit-model.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
@@ -28,9 +30,10 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 
 const PANEL_COMMAND = 'orbit'
 const LIST_COMMAND = 'orbit-workflows'
+const GENERATE_COMMAND = 'orbit-generate'
 
 interface InputTriggerRegistry { registerSource(source: Record<string, unknown>): () => void }
-type SubmitResult = { kind: 'success' } | { kind: 'error'; text: string }
+type SubmitResult = { kind: 'success'; text?: string } | { kind: 'error'; text: string }
 type Translate = (key: OrbitLocaleKey, values?: Record<string, string | number>) => string
 
 /** `/orbit` folds the resident panel; it never opens a second one. */
@@ -70,6 +73,53 @@ function registerOrbitSlashSource(ctx: ClientContext, t: Translate): void {
 
 interface SelectOption { readonly id: string; readonly label: string; readonly detail?: string }
 interface SessionContext { readonly sessionId: string }
+interface TriggerPick { readonly session: SessionContext }
+
+/** `/orbit-generate` starts the existing authoring flow and reveals its row. */
+function registerGenerateSlashSource(ctx: ClientContext, t: Translate): void {
+  const inputTriggers = ctx.get('inputTriggers') as unknown as InputTriggerRegistry | undefined
+  if (!inputTriggers) throw new Error('Orbit /orbit-generate requires the Harness inputTriggers service')
+  const claim = (session: SessionContext) => ({
+    // The claim token is also what a menu pick inserts into the composer.
+    // Keep the argument separator in it so the person can type the Workflow
+    // description immediately without first adding a space.
+    token: `/${GENERATE_COMMAND} `,
+    submit: async (args: string): Promise<SubmitResult> => {
+      const prompt = args.trim()
+      if (!prompt) return { kind: 'error', text: t('generateUsage') }
+      try {
+        await hostCall<unknown>(
+          'generateWorkflowForSession', [session.sessionId, prompt], new AbortController().signal,
+        )
+        window.dispatchEvent(new CustomEvent('orbit:show-panel', {
+          detail: { tab: 'workflows' },
+        }))
+        return { kind: 'success' }
+      } catch (reason) {
+        // The same reading the panel gives, because it is the same failure
+        // arriving by the same route — only the place it is shown differs.
+        const failure = panelError(reason)
+        return { kind: 'error', text: t(failure.key, failure.values) }
+      }
+    },
+  })
+  ctx.effect(() => inputTriggers.registerSource({
+    trigger: '/', name: GENERATE_COMMAND, order: -9, showGroupTitle: false,
+    candidates: async (session: SessionContext, request: { query: string }) =>
+      GENERATE_COMMAND.includes(request.query.toLowerCase())
+        ? [{ name: GENERATE_COMMAND, description: t('generateCommandDescription') }] : [],
+    // Menu picks wrap the Session in an InputTriggerPick; space and enter pass
+    // the ClientSessionContext directly. Treating the wrapper itself as the
+    // Session sent `undefined` to the Host and produced "requires a live
+    // Harness Session" only when the command was chosen from the menu.
+    onPick: (pick: TriggerPick) => ({ claim: claim(pick.session) }),
+    matchSpace: (session: SessionContext, token: string) =>
+      token === `/${GENERATE_COMMAND}` ? { claim: claim(session) } : undefined,
+    matchEnter: async (session: SessionContext, line: string) =>
+      new RegExp(`^/${GENERATE_COMMAND}(?:\\s|$)`, 'u').test(line.trim())
+        ? { claim: claim(session) } : undefined,
+  }), 'orbit: slash command generating a workflow')
+}
 interface ReferenceInsert {
   readonly source: string; readonly ref: string
   readonly label: string; readonly clipboardText: string
@@ -133,9 +183,19 @@ function registerWorkflowPopup(ctx: ClientContext, t: Translate): void {
       // Loaded once per open; the shell filters these as the reader types, so
       // the search is its own and matches on the label it is showing.
       options: async (session, signal) => {
+        // `startIfMissing`, because typing the command is the asking. The
+        // panel starts a Runtime when it is expanded and `/orbit-generate`
+        // starts one to write into; this list was the one entry point that
+        // required a Runtime to already be there, and answered a person who
+        // asked what could run with an error about nothing running.
+        //
+        // Not `force`: the catalog refreshes itself when stale, and making
+        // every open re-ask would charge each one for a freshness that only
+        // matters after somebody publishes. A cold start is waited on here,
+        // so the popup can take a few seconds the first time.
         const state = await hostCall<{ workflows: readonly {
           workflow_id: string; name: string; latest_version: number
-        }[] }>('getPanelState', [session.sessionId], signal)
+        }[] }>('getPanelState', [session.sessionId, false, true], signal)
         return (state.workflows ?? []).map(item => {
           const label = item.name || item.workflow_id
           namesById.set(item.workflow_id, label)
@@ -159,13 +219,16 @@ function registerWorkflowPopup(ctx: ClientContext, t: Translate): void {
         // The sentence first, then the Workflow into the gap it left. A
         // reference replaces a span, so there has to be a span to replace.
         input.setDraft(`${head}${t('runTail')}`)
+        // The chip is shortened; the clipboard is not. What a person copies
+        // out of the draft should be the Workflow's name, not the part of it
+        // that happened to fit.
         const inserted = input.insertReference({
-          source: 'orbit', ref: option.id, label: option.label,
+          source: 'orbit', ref: option.id, label: referenceLabel(option.label),
           clipboardText: `「${option.label}」`,
         }, { start: head.length, end: head.length, draftRev: input.state.getSnapshot().draftRev })
         // A refused CAS is silent by contract, and a sentence with a hole in it
         // is worse than a plain one.
-        if (!inserted) input.setDraft(`${head}「${option.label}」${t('runTail')}`)
+        if (!inserted) input.setDraft(`${head}「${referenceLabel(option.label)}」${t('runTail')}`)
       },
     },
   }), 'orbit: workflow popup')
@@ -183,6 +246,7 @@ export function apply(ctx: ClientContext): void {
   // the language the shell is in.
   const t = ctx.locale.bind(ORBIT_LOCALE_NAMESPACE)
   registerOrbitSlashSource(ctx, t)
+  registerGenerateSlashSource(ctx, t)
   registerWorkflowPopup(ctx, t)
   const Panel = ({ t, useSessions }: PropsLocale<'orbit'> & {
     useSessions: <T>(selector: (state: { current?: string }) => T) => T

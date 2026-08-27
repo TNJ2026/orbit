@@ -2412,10 +2412,16 @@ class RunStepsApiTests(unittest.TestCase):
                 self.assertNotIn("output", step)
                 self.assertNotIn("error", step)
 
-    def test_a_run_belonging_to_somebody_else_is_not_found(self) -> None:
+    def test_a_run_started_by_somebody_else_is_still_this_Workspace_s(self) -> None:
+        """Visibility is which Runtime you reached, not who started the Run.
+
+        This asserted the opposite while `/mcp` let the same caller ask for the
+        Workspace's work and get it — two rules over one database.
+        """
+
         with AsgiHarness(self.app) as client:
             run = self.start(client)
-            self.assertEqual(404, client.get(
+            self.assertEqual(200, client.get(
                 f"/api/v1/langgraph-runs/{run['run_id']}/steps", actor="reader",
             ).status_code)
 
@@ -2476,7 +2482,8 @@ class RunStepsApiTests(unittest.TestCase):
             self.assertEqual(404, client.get(
                 "/api/v1/langgraph-runs/langgraph_run:nope/edges", actor="author",
             ).status_code)
-            self.assertEqual(404, client.get(
+            # A second reader is not a second Workspace.
+            self.assertEqual(200, client.get(
                 f"/api/v1/langgraph-runs/{run['run_id']}/edges", actor="reader",
             ).status_code)
             self.assertEqual(400, client.get(
@@ -2798,3 +2805,57 @@ class WorkflowCatalogSurfaceTests(ApiTestCase):
             },
             names,
         )
+
+
+class WorkspaceScopedReadsTests(ApiTestCase):
+    """A Runtime serves one Workspace, and that is the whole of visibility.
+
+    It used to be two rules at once: `/mcp` let a caller ask for the
+    Workspace's work and the panel did, while `/api/v1` had no way to ask and
+    every loopback caller is `local`. One database, and Orbit's own UI showing
+    the Runs it had started with no sign that the others existed.
+
+    An actor is still recorded on everything and still scopes every write —
+    who cancelled a Run is the point of recording who cancelled it. What it no
+    longer does is decide who may look.
+    """
+
+    def _started_by(self, client, actor, key):
+        return client.post(
+            "/api/v1/langgraph-runs", actor=actor, key=key,
+            body={"workflow_id": "workflow:linear", "input": {"value": 0}},
+        ).json()["data"]["run"]
+
+    def test_a_read_sees_the_Workspace_whoever_is_asking(self) -> None:
+        with AsgiHarness(self.app) as client:
+            started = self._started_by(client, "writer", "theirs")
+            listed = client.get("/api/v1/langgraph-runs", actor="reader").json()["data"]["runs"]
+            self.assertEqual([started["run_id"]], [run["run_id"] for run in listed])
+            # And what is listed can be opened, or the list is links to 404s.
+            for path in ("", "/steps", "/edges", "/graph"):
+                answered = client.get(
+                    f"/api/v1/langgraph-runs/{started['run_id']}{path}", actor="reader",
+                )
+                self.assertEqual(200, answered.status_code, path)
+
+    def test_asking_for_an_owner_is_asking_for_what_already_happens(self) -> None:
+        """The parameter is gone rather than accepted and ignored.
+
+        A query string that quietly changes nothing is worse than one that is
+        refused: it reads as a control somebody is relying on.
+        """
+
+        with AsgiHarness(self.app) as client:
+            answered = client.get("/api/v1/langgraph-runs?owner=workspace", actor="reader")
+        self.assertEqual(400, answered.status_code)
+        self.assertIn("unknown query parameter", answered.json()["error"]["message"])
+
+    def test_a_write_is_still_the_record_of_who_acted(self) -> None:
+        with AsgiHarness(self.app) as client:
+            started = self._started_by(client, "writer", "not-yours")
+            refused = client.post(
+                f"/api/v1/langgraph-runs/{started['run_id']}/cancel",
+                actor="reader", key="steal",
+                body={"expected_version": started["revision"]},
+            )
+        self.assertIn(refused.status_code, (400, 403, 404))

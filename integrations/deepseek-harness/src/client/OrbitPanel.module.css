@@ -2,12 +2,30 @@
    happens to be about Orbit, so it follows the shell's theme rather than
    carrying an opinion of its own. */
 
+/* Every box inside the panel counts its padding within its width.
+ *
+ * Three rows are written as `width: 100%` with horizontal padding — a step, a
+ * list row, a Goal's heading — and under the default `content-box` each one is
+ * its container plus 24px, so the panel scrolls sideways however narrow its
+ * contents are. Bounding the contents cannot fix that: the row was already
+ * wider than the panel before they were laid out.
+ *
+ * The panel itself is included so its own border counts inside the width the
+ * geometry computed, rather than making it two pixels wider than asked for.
+ *
+ * Scoped to the panel by its own hashed class, so this is a rule about this
+ * surface and not a reset imposed on the page hosting it. */
+.panel,
+.panel *,
+.panel *::before,
+.panel *::after { box-sizing: border-box; }
+
 .panel {
   position: absolute;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  border: 1px solid var(--dsw-alias-line-normal, rgb(128 128 128 / 28%));
+  border: 1px solid var(--dsw-alias-border-l4, rgb(128 128 128 / 20%));
   border-radius: 12px;
   background: var(--dsw-alias-bg-layer-1, Canvas);
   color: var(--dsw-alias-label-primary);
@@ -20,8 +38,8 @@
   align-items: center;
   gap: 8px;
   padding: 8px 10px 8px 12px;
-  border-bottom: 1px solid var(--dsw-alias-line-normal, rgb(128 128 128 / 28%));
-  background: var(--dsw-alias-bg-module, Canvas);
+  border-bottom: 1px solid var(--dsw-alias-border-l2, rgb(128 128 128 / 12%));
+  background: var(--dsw-alias-bg-module-platform, rgb(128 128 128 / 8%));
   cursor: grab;
   user-select: none;
 }
@@ -38,15 +56,21 @@
   align-items: start;
   gap: 8px;
   padding: 10px 12px;
-  border-bottom: 1px solid var(--dsw-alias-line-normal, rgb(128 128 128 / 28%));
+  border-bottom: 1px solid var(--dsw-alias-border-l2, rgb(128 128 128 / 12%));
 }
 .row:last-child { border-bottom: 0; }
 
 .dot { width: 8px; height: 8px; margin-top: 5px; border-radius: 50%; }
-.live { background: var(--dsw-alias-state-business-primary); }
-.done { background: var(--dsw-alias-state-success); }
-.failed { background: var(--dsw-alias-state-danger); }
-.unknown { background: var(--dsw-alias-state-warning, var(--dsw-alias-label-tertiary)); }
+/* Every dot names a token the shell defines, and carries that token's own
+   value beside it. `state-success` and `state-danger` are not tokens — the
+   shell's are `state-success-primary` and `state-error-primary` — and `.done`
+   and `.failed` named them with no fallback at all. An invalid `background`
+   computes to the initial value, so both drew nothing: a Run that finished
+   and a Run that failed were the same blank 8px square. */
+.live { background: var(--dsw-alias-state-business-primary, rgb(103 158 254)); }
+.done { background: var(--dsw-alias-state-success-primary, rgb(34 197 94)); }
+.failed { background: var(--dsw-alias-state-error-primary, rgb(242 90 90)); }
+.unknown { background: var(--dsw-alias-state-warn-primary, rgb(245 158 11)); }
 
 .goal {
   font-size: 13px;
@@ -74,24 +98,57 @@
 }
 .error { color: var(--dsw-alias-state-error-primary); text-align: left; }
 
-/* Collapsed, the panel is a single control that says whether anything is
-   running. It stays out of the way without going away. */
-.badge {
-  position: absolute;
+.connecting {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 6px 12px;
-  border: 1px solid var(--dsw-alias-line-normal, rgb(128 128 128 / 28%));
+  justify-content: center;
+  gap: 9px;
+  padding: 24px 14px;
+  color: var(--dsw-alias-label-secondary, GrayText);
+  font-size: 12px;
+}
+.connectSpinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--dsw-alias-border-l3, rgb(128 128 128 / 16%));
+  border-top-color: var(--dsw-alias-state-business-primary, Highlight);
+  border-radius: 50%;
+  animation: orbit-spin .7s linear infinite;
+}
+
+/* Collapsed, only Orbit's mark remains — against the right edge, halfway down.
+ *
+ * Centred by margin rather than by `translateY(-50%)`: the hover lift owns
+ * `transform`, and a transform used for placement would be cancelled by it the
+ * moment a pointer arrived. The offset is half the height below, and the two
+ * have to stay a pair. */
+.badge {
+  position: absolute;
+  right: 18px;
+  top: 50%;
+  margin-top: -21px;
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  padding: 0;
+  border: 1px solid var(--dsw-alias-border-l4, rgb(128 128 128 / 20%));
   border-radius: 999px;
   background: var(--dsw-alias-bg-layer-1, Canvas);
   color: var(--dsw-alias-label-secondary);
   box-shadow: 0 6px 20px rgb(0 0 0 / 14%);
-  font-size: 12px;
   cursor: pointer;
   pointer-events: auto;
 }
-.badge:hover { color: var(--dsw-alias-label-primary); }
+.badge:hover { transform: translateY(-1px); }
+.orbitMark { width: 30px; height: 30px; }
+.orbitBackground { fill: var(--dsw-alias-label-primary); }
+.orbitRing {
+  fill: none;
+  stroke: var(--dsw-alias-bg-layer-1, Canvas);
+  stroke-width: 6;
+}
+.orbitSatellite { fill: var(--dsw-alias-state-business-primary, Highlight); }
 
 .resize {
   position: absolute;
@@ -101,36 +158,63 @@
   cursor: nwse-resize;
 }
 
-/* Disclosure rows: the shell primitive brings the chrome, these bring the
-   spacing that makes a list of Runs readable at panel width. */
-.stepRow { padding: 4px 12px 4px 22px; font-size: 12px; }
+/* Step disclosure keeps the outcome dot at the left and the disclosure affordance
+   at the far right, where a reader expects a row-level action to live. */
+.stepDisclosure { width: 100%; min-width: 0; }
+.stepRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  padding: 4px 12px 4px 22px;
+  border: 0;
+  background: none;
+  color: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.stepRow:disabled { cursor: default; }
+.stepTitle { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stepChevron { flex: 0 0 auto; color: var(--dsw-alias-label-tertiary, GrayText); transition: transform 120ms ease; }
+.stepChevronOpen { transform: rotate(180deg); }
+.stepContent { padding: 0 12px 4px 38px; }
+.stepDot {
+  display: block;
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+/* Same five states as the Run dots above, and the same colours: a step that
+   failed and a Run that failed should not be two different reds. These did
+   have fallbacks, so they drew — but the token beside each one never
+   resolved, so they drew the literal in both themes. */
+.stepDot_success { background: var(--dsw-alias-state-success-primary, rgb(34 197 94)); }
+.stepDot_error { background: var(--dsw-alias-state-error-primary, rgb(242 90 90)); }
+.stepDot_skipped { background: var(--dsw-alias-label-tertiary, rgb(173 178 184)); }
+.stepDot_warning { background: var(--dsw-alias-state-warn-primary, rgb(245 158 11)); }
+.stepDot_ongoing { background: var(--dsw-alias-state-business-primary, rgb(103 158 254)); }
 
 .attention {
   margin: 4px 0;
   padding: 6px 8px;
-  border-left: 2px solid var(--dsw-alias-state-warning, var(--dsw-alias-label-tertiary));
+  border-left: 2px solid var(--dsw-alias-state-warn-primary, rgb(245 158 11));
   color: var(--dsw-alias-label-secondary);
   font-size: 11px;
 }
 
-.output {
-  margin: 4px 0 8px;
-  padding: 8px;
-  max-height: 220px;
-  overflow: auto;
-  border-radius: 6px;
-  background: var(--dsw-alias-bg-module-platform, var(--dsw-alias-bg-module, Canvas));
-  color: var(--dsw-alias-label-secondary);
-  font-size: 11px;
-  line-height: 1.5;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
 
 .actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 6px 0 8px; }
+/* What can be done to a Run, centred under what the Run was asked to do. The
+   reconciliation buttons inside a step keep the left edge they share with the
+   step's own text — they answer a question in that step, not about the Run. */
+.runActions { justify-content: center; padding: 0 12px; }
 .actions input {
   flex: 1 1 140px; min-width: 0; padding: 4px 8px; font-size: 11px;
-  border: 1px solid var(--dsw-alias-line-normal, rgb(128 128 128 / 28%)); border-radius: 6px;
+  border: 1px solid var(--dsw-alias-border-l3, rgb(128 128 128 / 16%)); border-radius: 6px;
   background: var(--dsw-alias-bg-layer-1, Canvas); color: var(--dsw-alias-label-primary);
 }
 
@@ -154,8 +238,43 @@
 .iconButton:disabled svg { animation: orbit-spin .7s linear infinite; }
 @keyframes orbit-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) {
-  .iconButton:disabled svg { animation: none; opacity: .45; }
+  .iconButton:disabled svg, .connectSpinner { animation: none; opacity: .45; }
 }
+
+/* The one control in the bar that cannot be undone, and it says so before it
+   is pressed rather than after. */
+.stopButton:hover { color: var(--dsw-alias-state-error-primary, LinkText); }
+
+.confirmBar {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--dsw-alias-border-l2, rgb(128 128 128 / 12%));
+  background: var(--dsw-alias-bg-module-platform, rgb(128 128 128 / 8%));
+}
+.confirmText { color: var(--dsw-alias-label-secondary, GrayText); font-size: 12px; line-height: 1.5; }
+.confirmActions { display: flex; justify-content: flex-end; gap: 8px; }
+.confirmCancel,
+.confirmGo {
+  padding: 4px 10px;
+  border-radius: 6px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.confirmCancel {
+  border: 1px solid var(--dsw-alias-border-l3, rgb(128 128 128 / 16%));
+  background: var(--dsw-alias-bg-layer-1, Canvas);
+  color: var(--dsw-alias-label-primary);
+}
+/* The destructive one is the one that looks destructive; "keep it running" is
+   the quiet default, because a reader who opened this by accident wants out. */
+.confirmGo {
+  border: 0;
+  background: var(--dsw-alias-state-error-primary, Highlight);
+  color: var(--dsw-alias-label-primary-foreground, rgb(255 255 255));
+}
+.confirmGo:disabled { opacity: .6; cursor: default; }
 
 .catalogRow {
   display: flex;
@@ -182,8 +301,8 @@
   flex: 0 0 auto;
   gap: 2px;
   padding: 6px 8px 0;
-  border-bottom: 1px solid var(--dsw-alias-line-normal, rgb(128 128 128 / 28%));
-  background: var(--dsw-alias-bg-module, Canvas);
+  border-bottom: 1px solid var(--dsw-alias-border-l2, rgb(128 128 128 / 12%));
+  background: var(--dsw-alias-bg-module-platform, rgb(128 128 128 / 8%));
 }
 .tab {
   flex: 1 1 0;
@@ -202,29 +321,61 @@
   font-weight: 600;
 }
 
-/* Pages open with what Orbit's own do: a heading and one line saying what the
-   list below is, so a page is legible before its first row loads. */
-/* An Agent reads as an identity: the mark, then who and which build. */
-.agentRow { display: flex; align-items: center; gap: 10px; padding: 8px 12px; }
+/* Orbit's Agent identity tile, scaled to the resident panel's single column. */
+.agentsGrid { display: grid; gap: 10px; padding: 10px 12px; }
+.agentCard {
+  display: grid;
+  gap: 11px;
+  padding: 12px;
+  border: 1px solid var(--dsw-alias-border-l3, rgb(128 128 128 / 16%));
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-1, Canvas);
+  transition: border-color 120ms ease, background-color 120ms ease;
+}
+.agentCard:hover {
+  border-color: var(--dsw-alias-state-business-primary, Highlight);
+  background: var(--dsw-alias-bg-module-platform, rgb(128 128 128 / 8%));
+}
+.agentHead { display: flex; align-items: flex-start; gap: 10px; }
 .avatar {
   flex: 0 0 auto;
   display: grid;
   place-items: center;
-  width: 28px;
-  height: 28px;
+  width: 36px;
+  height: 36px;
   border-radius: 7px;
   font-size: 10px;
   font-weight: 700;
   letter-spacing: .5px;
   text-transform: uppercase;
 }
-.agentName { font-size: 12px; font-weight: 600; }
+.agentIdentity { display: grid; min-width: 0; gap: 2px; }
+.agentName { overflow: hidden; color: var(--dsw-alias-label-primary, CanvasText); font-size: 13px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .agentVersion { color: var(--dsw-alias-label-tertiary, GrayText); font-size: 11px; font-family: ui-monospace, monospace; }
+.agentStat {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-top: 9px;
+  border-top: 1px solid var(--dsw-alias-border-l2, rgb(128 128 128 / 12%));
+}
+.agentStatLabel { color: var(--dsw-alias-label-tertiary, GrayText); font-size: 11px; }
+.agentStatPill {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--dsw-alias-bg-module-platform, rgb(128 128 128 / 8%));
+  color: var(--dsw-alias-label-secondary, GrayText);
+  font-size: 11px;
+  font-weight: 600;
+}
+.agentStatError {
+  background: var(--dsw-alias-state-error-secondary, rgb(242 90 90 / 12%));
+  color: var(--dsw-alias-state-error-primary, LinkText);
+}
 
 /* A Workflow leads with its id, small, because that is the half the Agent uses
    and the half a person checks — the name below is what they read. */
-.flowRow { padding: 9px 12px; border-bottom: 1px solid var(--dsw-alias-line-normal, rgb(128 128 128 / 28%)); }
-.flowRow:last-child { border-bottom: 0; }
+.flowRow { padding: 9px 12px; }
 .flowName { font-size: 12.5px; font-weight: 600; line-height: 1.45; }
 
 /* A Run in a list is a control: the whole row opens it, so the whole row is the
@@ -236,16 +387,67 @@
   width: 100%;
   padding: 9px 12px;
   border: 0;
-  border-bottom: 1px solid var(--dsw-alias-line-normal, rgb(128 128 128 / 28%));
   background: none;
   color: inherit;
   text-align: left;
   cursor: pointer;
 }
-.listRow:last-child { border-bottom: 0; }
-.listRow:hover { background: var(--dsw-alias-bg-module, Canvas); }
+.listRow:hover { background: var(--dsw-alias-bg-module-platform, rgb(128 128 128 / 8%)); }
+
+/* What separates one row of a list from the next.
+ *
+ * Drawn as a rule inside the row rather than as its border, so it can stop
+ * short of the panel's edges: a line that runs the full width reads as the
+ * edge of a section, and these are items in one. Inset to the same 12px the
+ * rows are padded by, so the line starts where their text does.
+ *
+ * `--dsw-alias-border-l2` rather than the divider fallback the panel used to
+ * reach for: `--dsw-alias-line-normal` is not a token the shell defines, so
+ * that rule only ever drew the flat 28% grey written beside it — heavier than
+ * anything the shell draws, and blind to the theme. l2 is 10% on light and
+ * 12% on dark, which is the weight a list separator is meant to carry. */
+.listRow,
+.flowRow,
+.defnRow { position: relative; }
+.listRow::after,
+.flowRow::after,
+.defnRow::after {
+  content: '';
+  position: absolute;
+  right: 12px;
+  bottom: 0;
+  left: 12px;
+  height: 1px;
+  background: var(--dsw-alias-border-l2, rgb(128 128 128 / 12%));
+}
+/* Every step carries a stripe at its leading edge. A divider that stopped
+   12px in would leave that stripe standing past the end of its own row, so
+   this one list's rule starts where the stripe ends instead. `left: 0` is the
+   padding box, which begins after the 2px border: the two meet, flush. */
+.defnRow::after { left: 0; }
+/* Nothing to separate it from. */
+.listRow:last-child::after,
+.flowRow:last-child::after,
+.defnRow:last-child::after { display: none; }
 .listDot { margin-top: 4px; flex: 0 0 auto; }
-.listMain { flex: 1 1 auto; min-width: 0; display: grid; gap: 1px; }
+/* `minmax(0, 1fr)`, not the implicit `auto` track.
+ *
+ * A grid item's default `min-width` is `auto`, so an `auto` track is sized by
+ * what its content refuses to shrink below — a pasted URL, a line of JSON —
+ * and the track grows past the panel. `max-width: 100%` on the child then
+ * resolves against a track that has *already* grown, which is why bounding the
+ * child alone did not stop the panel scrolling sideways. `min-width: 0` here
+ * lets the flex item shrink; only this lets the column inside it follow.
+ *
+ * The title's ellipsis depends on the same thing: `text-overflow` needs a
+ * bounded box, and an auto track never gives it one. */
+.listMain {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1px;
+}
 .listGoal {
   font-size: 12.5px;
   line-height: 1.4;
@@ -254,24 +456,298 @@
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
 }
+/* The request under the label, folded at two lines. A request is often a
+   paragraph, and a row that grew with it would push the rest of the list off
+   the page — so this is a glance, and the Run's own page carries the whole. */
+.listPrompt {
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  /* `normal`, not the `pre-wrap` the request wears everywhere else: here the
+     two lines are a glance, and a request that opens with a blank line would
+     spend one of them saying nothing. Collapsing folds every newline and run
+     of spaces into one space, which is what a summary of a paragraph is. The
+     Goal page still shows it exactly as it was written. */
+  white-space: normal;
+}
 
 /* Detail owns the body: the way back is a control at its top, not a row the
    reader has to find again in a list that is no longer there. */
+/* The way out, and it looks like one.
+ *
+ * The shell's accent rather than label-primary: this is the one control on a
+ * detail page a reader is looking for, and a body-coloured word is something
+ * they have to find. It used to brighten on hover through
+ * `--dsw-alias-label-accent`, which the shell does not define — so the colour
+ * it reached for only ever existed as the `LinkText` beside it. */
 .back {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: 5px;
   padding: 8px 12px 4px;
   border: 0;
   background: none;
-  color: var(--dsw-alias-label-tertiary, GrayText);
+  color: var(--dsw-alias-state-business-primary, Highlight);
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+}
+/* A size of its own: the arrow is what the eye lands on, and inside the label
+   it could only ever be as big as the word. */
+.backArrow { font-size: 16px; line-height: 1; }
+/* On the label, not the button: a flex container does not pass its
+   text-decoration down to its items, so the same rule up there drew nothing. */
+.back:hover .backLabel { text-decoration: underline; }
+/* The Goal's own heading: what it was called, then what was actually asked.
+   The title is one line and clips; the request folds at five and unfolds. */
+.goalTitle {
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The request reads as a quoted block, the way a step's output does: it is
+   somebody else's text sitting inside the panel's own, and the same card says
+   so in both places.
+
+   `max-width: 100%` with a zero min-width is what keeps the panel from
+   scrolling sideways. A `pre` sizes to its longest line unless it is told not
+   to, and a pasted URL or a line of JSON is one long line — `overflow-wrap`
+   alone cannot break what the box has already grown to fit. */
+/* The card is the wrapper. The text and the control that unfolds it are one
+   thing to a reader, and a toggle outside the tinted block read as a separate
+   remark that happened to sit under it. */
+.goalPromptCard {
+  min-width: 0;
+  max-width: 100%;
+  margin: 3px 0 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-module-platform, rgb(128 128 128 / 8%));
+}
+.goalPrompt {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  min-width: 0;
+  max-width: 100%;
+  margin: 0;
+  color: var(--dsw-alias-label-secondary, GrayText);
+  font-family: inherit;
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+/* Unfolded it is simply a block, as tall as what it holds.
+ *
+ * No height and no scrollbar: a box that scrolls inside a panel that scrolls
+ * is two places to be lost in, and the reader asked for the whole thing by
+ * pressing the control that says so. The panel's own body is what scrolls. */
+.goalPrompt[data-open] { display: block; }
+.goalPromptToggle {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  margin-top: 4px;
+  padding: 0;
+  border: 0;
+  background: none;
+  /* The accent, like the way out of a detail page: this is the one control
+     inside the card, and a control the colour of the text it sits under is
+     something a reader has to find rather than see. */
+  color: var(--dsw-alias-state-business-primary, Highlight);
+  font: inherit;
   font-size: 11px;
   cursor: pointer;
 }
-.back:hover { color: var(--dsw-alias-label-primary, CanvasText); }
+.goalPromptToggle:hover { text-decoration: underline; }
+/* Points down to open, up to close — the same turn the step disclosures make,
+   so one arrow means one thing across the panel. */
+.goalPromptChevronOpen { transform: rotate(180deg); }
+
+/* The authoring stages, threaded like a Goal's steps — the same ladder for
+   the same kind of fact, so a reader who has learned one has learned both. */
+.authoringStages { --orbit-step-line: 26px; padding: 2px 0 6px; }
+.authoringStages .stepDisclosure { position: relative; }
+.authoringStages .stepDisclosure::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--orbit-step-line);
+  width: 1px;
+  margin-left: -0.5px;
+  background: var(--dsw-alias-label-tertiary, rgb(128 128 128 / 70%));
+}
+.authoringStages .stepDisclosure:first-child::before { top: 16px; }
+.authoringStages .stepDisclosure:last-child::before { bottom: calc(100% - 16px); }
+.authoringStages .stepDot { position: relative; z-index: 1; }
+/* Not a control here: a stage has no console of its own to open — the job has
+   one console and it is below. So the row must not look pressable. */
+.authoringStages .stepRow { cursor: default; }
+
+/* What the Run produced, under the steps that produced it. Bounded and
+   scrollable for the same reason the step consoles are: an answer that is a
+   page long must not push the ladder that explains it off the panel. */
+.resultBlock { display: grid; gap: 3px; padding: 4px 12px 8px 22px; }
+.resultLabel {
+  color: var(--dsw-alias-label-tertiary, GrayText);
+  font-size: 10.5px;
+  letter-spacing: 0.02em;
+}
+/* How it ended, said first and in a word. */
+.outcome { font-size: 12px; font-weight: 600; }
+/* The same four state colours the dots use, so the word and the dot beside it
+   agree. `state-success` and `state-warning` are not tokens the shell defines,
+   and the fallbacks written beside them were system colours: `LinkText` is the
+   browser's link blue, so a finished Run said "done" in blue — next to a green
+   dot, once the dot was drawing at all. */
+.outcome_done { color: var(--dsw-alias-state-success-primary, rgb(34 197 94)); }
+.outcome_error { color: var(--dsw-alias-state-error-primary, rgb(242 90 90)); }
+.outcome_warning { color: var(--dsw-alias-state-warn-primary, rgb(245 158 11)); }
+.outcome_ongoing { color: var(--dsw-alias-state-business-primary, rgb(103 158 254)); }
+
+/* What it produced, as doors rather than as hashes. Reading an Artifact is
+   Orbit's job — this panel never fetches one — so what a reader gets is a link
+   and the browser does the rest. */
+.artifactRow { display: grid; gap: 4px; }
+/* An Artifact small enough to be the answer is shown as the answer, in the
+   same card its Run's request and its steps' output wear. */
+.artifactText {
+  max-width: 100%;
+  max-height: 240px;
+  margin: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-module-platform, rgb(128 128 128 / 8%));
+  color: var(--dsw-alias-label-primary);
+  font-family: inherit;
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.artifacts { display: flex; flex-wrap: wrap; gap: 6px; }
+/* The point of a path is to be taken somewhere else, so it is selectable and
+   wraps rather than being clipped: half a path is not a path. */
+.artifactPath {
+  max-width: 100%;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-module-platform, rgb(128 128 128 / 8%));
+  color: var(--dsw-alias-label-secondary, GrayText);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10.5px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+.artifact {
+  max-width: 100%;
+  overflow: hidden;
+  padding: 3px 8px;
+  border: 1px solid var(--dsw-alias-border-l3, rgb(128 128 128 / 16%));
+  border-radius: 999px;
+  color: var(--dsw-alias-state-business-primary, Highlight);
+  font-size: 11px;
+  text-decoration: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+a.artifact:hover { text-decoration: underline; }
+
+/* The same card the request and a step's console wear, because it is the same
+   kind of thing: writing the panel did not produce.
+   `--dsw-alias-bg-module` is not a token the shell defines, so this used to
+   fall through to `Canvas` — the page's own colour, which is to say no card at
+   all. `bg-module-platform` is the one that is actually a shade off. */
+.result {
+  max-height: 220px;
+  margin: 0;
+  overflow: auto;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-module-platform, rgb(128 128 128 / 8%));
+  color: var(--dsw-alias-label-primary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.resultError { color: var(--dsw-alias-state-error-primary); }
+
+/* A running Goal on the Goal page: its heading, then its steps, as one block.
+   Separated from its neighbours by the same rule a list row uses, so a page of
+   two running Goals still reads as a list and not as one long ladder. */
+.goalCard { border-bottom: 1px solid var(--dsw-alias-border-l2, rgb(128 128 128 / 12%)); }
+.goalCard:last-child { border-bottom: 0; }
+/* A heading, not a control: the card below it is the whole Run, so there is
+   nowhere for a click to go. It kept the button's hover for a while after it
+   stopped being one, which is how a dead affordance survives a refactor. */
+.goalHead {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  width: 100%;
+  padding: 9px 12px 6px;
+}
+.goalSteps { padding-bottom: 6px; }
+
+/* The steps as a chain: one line threaded through every dot.
+ *
+ * Drawn on the disclosure rather than between the rows, because a step that is
+ * open is as tall as its output and the line has to cross that too — a
+ * connector sized to the row would break wherever a reader was actually
+ * looking. It runs the full height of each step and is cut back to the dot at
+ * each end, so the chain begins at the first step and stops at the last rather
+ * than trailing into the card.
+ *
+ * 26px is where the dot's centre is: the row's 22px left padding plus half of
+ * an 8px dot. Kept as a variable so the two cannot drift apart silently.
+ */
+.goalSteps { --orbit-step-line: 26px; }
+.goalSteps .stepDisclosure { position: relative; }
+.goalSteps .stepDisclosure::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--orbit-step-line);
+  width: 1px;
+  margin-left: -0.5px;
+  /* Not the divider token the rest of the panel uses. `--dsw-alias-line-normal`
+     is not one the shell defines, so it has always been the fallback beside it
+     — a flat 28% grey that neither follows the theme nor reads as a line at
+     this width. The shell's real border tokens are fainter still (l1 is 4%,
+     l3 is 16%), so the chain borrows a label colour instead: defined,
+     theme-aware, and actually visible against both grounds. */
+  background: var(--dsw-alias-label-tertiary, rgb(128 128 128 / 70%));
+}
+/* 16px is the dot's centre down the 32px row. */
+.goalSteps .stepDisclosure:first-child::before { top: 16px; }
+.goalSteps .stepDisclosure:last-child::before { bottom: calc(100% - 16px); }
+/* A single step is a chain of one: both ends cut leaves nothing to draw. */
+.goalSteps .stepDisclosure:only-child::before { display: none; }
+/* The dot is positioned so it paints over the line rather than under it: an
+   absolutely positioned pseudo-element outranks its static siblings. */
+.goalSteps .stepDot { position: relative; z-index: 1; }
+
 .detailHead { display: flex; align-items: baseline; gap: 8px; padding: 0 12px; }
 .detailGoal { font-size: 13px; font-weight: 650; line-height: 1.4; }
 .detailMeta {
   padding: 2px 12px 8px;
-  border-bottom: 1px solid var(--dsw-alias-line-normal, rgb(128 128 128 / 28%));
+  border-bottom: 1px solid var(--dsw-alias-border-l2, rgb(128 128 128 / 12%));
   color: var(--dsw-alias-label-tertiary, GrayText);
   font-size: 11px;
 }
@@ -280,15 +756,17 @@
 .flowButton {
   display: block;
   width: 100%;
-  border-left: 0;
-  border-right: 0;
-  border-top: 0;
+  /* All four sides. Three of them were zeroed because the fourth used to carry
+     this row's divider — and when that moved into a rule of its own, what came
+     back was the browser's own 2px outset black, which is why this list looked
+     heavier than the one beside it. */
+  border: 0;
   background: none;
   color: inherit;
   text-align: left;
   cursor: pointer;
 }
-.flowButton:hover { background: var(--dsw-alias-bg-module, Canvas); }
+.flowButton:hover { background: var(--dsw-alias-bg-module-platform, rgb(128 128 128 / 8%)); }
 
 .prose {
   margin: 0;
@@ -297,37 +775,37 @@
   font-size: 12px;
   line-height: 1.55;
 }
-/* Facts read as a table because they answer fixed questions; a paragraph would
-   make the reader find the one they came for. */
-.facts {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 3px 10px;
-  margin: 0;
-  padding: 4px 12px 10px;
-  font-size: 11.5px;
-}
-.facts dt { color: var(--dsw-alias-label-tertiary, GrayText); }
-.facts dd { margin: 0; }
-.outLink { display: block; padding: 0 12px 10px; font-size: 11.5px; }
+/* The same room above as below. It had none above, so it sat against whatever
+   ended the block before it and floated over the section that follows. */
+.outLink { display: block; padding: 10px 12px; font-size: 11.5px; }
 .sectionLabel {
   padding: 8px 12px 4px;
-  border-top: 1px solid var(--dsw-alias-line-normal, rgb(128 128 128 / 28%));
+  border-top: 1px solid var(--dsw-alias-border-l2, rgb(128 128 128 / 12%));
   color: var(--dsw-alias-label-tertiary, GrayText);
   font-size: 11px;
 }
 
 /* A published step, listed rather than drawn. The accent stripe carries the
    kind at a glance so the chip is confirmation, not the only signal. */
+/* The kind stripe is this row's own; what separates one row from the next is
+   the rule every list in the panel uses. It carried a full-width border in the
+   heavier divider colour, so a published step read as the end of a section
+   while a Workflow two taps away read as an item in one. */
 .defnRow {
   padding: 8px 12px 9px;
-  border-bottom: 1px solid var(--dsw-alias-line-normal, rgb(128 128 128 / 28%));
-  border-left: 2px solid transparent;
+  border-left: 2px solid var(--dsw-alias-label-tertiary, rgb(173 178 184 / 70%));
 }
-.defnRow:last-child { border-bottom: 0; }
-.kind_action { border-left-color: var(--dsw-alias-state-business-primary, rgb(80 120 255 / 70%)); }
-.kind_human { border-left-color: var(--dsw-alias-state-warning, rgb(210 150 40 / 70%)); }
-.kind_decision { border-left-color: var(--dsw-alias-label-tertiary, GrayText); }
+/* One stripe per kind, in the same colour the shape chips use, because a
+   reader scanning the list and a reader scanning the chips are reading the
+   same five kinds. Three of them carry a hue — work, a person, an ending —
+   and the two that only route are neutral, brighter for the branch than for
+   the merge. An unnamed kind keeps the tertiary the rule above sets: still a
+   stripe, because "no stripe" is not a thing the eye reads as a kind. */
+.kind_action { border-left-color: var(--dsw-alias-state-business-primary, rgb(103 158 254 / 85%)); }
+.kind_human { border-left-color: var(--dsw-alias-state-warn-primary, rgb(245 158 11 / 85%)); }
+.kind_terminal { border-left-color: var(--dsw-alias-state-success-primary, rgb(34 197 94 / 85%)); }
+.kind_decision { border-left-color: var(--dsw-alias-label-secondary, rgb(207 211 214 / 85%)); }
+.kind_join { border-left-color: var(--dsw-alias-label-tertiary, rgb(173 178 184 / 70%)); }
 .defnHead { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
 .defnName {
   flex: 0 1 auto; min-width: 0;
@@ -362,7 +840,7 @@
 .shapeNode {
   position: relative; flex: 0 0 15px;
   width: 15px; height: 15px; display: grid; place-items: center;
-  border: 1px solid var(--dsw-alias-line-normal, rgb(128 128 128 / 34%));
+  border: 1px solid var(--dsw-alias-border-l3, rgb(128 128 128 / 16%));
   border-radius: 50%;
   color: var(--dsw-alias-state-business-primary, rgb(80 120 255 / 90%));
   font-family: ui-monospace, monospace; font-size: 7.5px; font-weight: 700;
@@ -371,10 +849,10 @@
 .shapeNode + .shapeNode { margin-left: 8px; }
 .shapeNode + .shapeNode::before {
   content: ""; position: absolute; right: 100%; top: 50%; width: 8px;
-  border-top: 1px solid var(--dsw-alias-line-normal, rgb(128 128 128 / 34%));
+  border-top: 1px solid var(--dsw-alias-border-l3, rgb(128 128 128 / 16%));
 }
-.node_human { color: var(--dsw-alias-state-warning, rgb(200 140 40 / 95%)); }
-.node_terminal { color: var(--dsw-alias-state-success, rgb(60 160 90 / 95%)); }
+.node_human { color: var(--dsw-alias-state-warn-primary, rgb(200 140 40 / 95%)); }
+.node_terminal { color: var(--dsw-alias-state-success-primary, rgb(60 160 90 / 95%)); }
 .node_decision { color: var(--dsw-alias-label-secondary, GrayText); }
 .node_more { color: var(--dsw-alias-label-tertiary, GrayText); font-size: 7px; }
 
@@ -382,18 +860,18 @@
    failure now. It reads as a note beside the name, in the name's own line. */
 .flowBlocked {
   margin-left: 6px;
-  color: var(--dsw-alias-state-warning, rgb(180 125 35 / 95%));
+  color: var(--dsw-alias-state-warn-primary, rgb(245 158 11));
   font-size: 10px; font-weight: 500;
 }
 
 /* An authoring job, above the catalog it is about to change. Tinted so it
    reads as something happening rather than another entry in the list. */
 .authoringRow {
-  display: flex; align-items: flex-start; gap: 8px;
   padding: 9px 12px;
-  border-bottom: 1px solid var(--dsw-alias-line-normal, rgb(128 128 128 / 28%));
-  background: var(--dsw-alias-bg-module, rgb(128 128 128 / 6%));
+  border-bottom: 1px solid var(--dsw-alias-border-l2, rgb(128 128 128 / 12%));
+  background: var(--dsw-alias-bg-module-platform, rgb(128 128 128 / 8%));
 }
+.authoringSummary { display: flex; align-items: flex-start; gap: 8px; }
 .authoringMain { flex: 1 1 auto; min-width: 0; display: grid; gap: 2px; }
 .authoringLabel { font-size: 12px; font-weight: 600; line-height: 1.4; }
 .authoringPrompt {
@@ -401,4 +879,22 @@
   font-size: 11px; line-height: 1.45;
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
   overflow: hidden;
+}
+.authoringOutputToggle {
+  flex: 0 0 auto; display: grid; place-items: center;
+  width: 24px; height: 24px; padding: 0; border: 0; background: transparent;
+  color: var(--dsw-alias-label-secondary, GrayText); cursor: pointer;
+}
+.authoringOutputToggle svg { transition: transform 150ms ease; }
+.authoringChevronOpen { transform: rotate(180deg); }
+.authoringOutput {
+  margin: 8px 0 0 16px; padding: 8px;
+  max-height: 180px; overflow: auto;
+  border: 1px solid var(--dsw-alias-border-l3, rgb(128 128 128 / 16%));
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-base, Canvas);
+}
+.authoringOutput pre {
+  margin: 0; white-space: pre-wrap; overflow-wrap: anywhere;
+  font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
 }

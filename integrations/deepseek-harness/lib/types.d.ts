@@ -46,6 +46,7 @@ export interface AuthoringJob {
         message: string;
         diagnostics?: unknown[];
     } | null;
+    output_href?: string | null;
     created_at: string;
     updated_at: string;
 }
@@ -57,6 +58,17 @@ export interface AuthoringSummary {
     requested_agent?: string | null;
     workflow_id?: string | null;
     error?: string | null;
+    output_href?: string | null;
+}
+export interface AuthoringOutputChunk {
+    chunk_id: number;
+    stream: 'stdout' | 'stderr';
+    text: string;
+    created_at: string;
+}
+export interface AuthoringOutputPage {
+    chunks: AuthoringOutputChunk[];
+    has_more: boolean;
 }
 export interface OrbitCommandRequest {
     workspace: WorkspaceRef;
@@ -71,6 +83,7 @@ export interface OrbitCommandRequest {
 export type RunDto = Record<string, unknown> & {
     run_id: string;
     goal: string;
+    inputs?: Record<string, unknown>;
     workflow_id: string;
     workflow_version: number;
     status: string;
@@ -89,6 +102,7 @@ export type RunDto = Record<string, unknown> & {
 export interface StepSummary {
     node_id: string;
     status: string;
+    has_output?: boolean;
     resolution?: {
         kind: 'reconciliation_required';
         delegation_id?: string;
@@ -104,6 +118,8 @@ export interface AgentSummary {
     name: string;
     version: string;
     node_kinds: string[];
+    attempt_count?: number;
+    failed_count?: number;
 }
 export interface RunGraph {
     [key: string]: unknown;
@@ -133,6 +149,7 @@ export interface ArtifactSummary {
     run_id: string;
     content_type?: string;
     size_bytes?: number;
+    filename?: string | null;
     [key: string]: unknown;
 }
 export interface ImportedArtifact {
@@ -162,6 +179,16 @@ export interface IntegrationDiagnostics {
         lastError?: string;
         updatedAt: string;
     } | null;
+    authoring: {
+        waiting: boolean;
+        driving: string | null;
+        agentRegistry: boolean;
+        lastError: {
+            stage: string;
+            error: string;
+            at: string;
+        } | null;
+    };
 }
 export interface ArtifactContent {
     artifact: ArtifactSummary;

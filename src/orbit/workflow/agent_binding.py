@@ -259,11 +259,11 @@ def _apply(
 class AgentFallback:
     """A substitute for an Agent step whose Handler is not on this machine.
 
-    A published Workflow pins the exact Handler build it was compiled against,
-    and for an Agent that build is its CLI version. That pin is the guarantee
-    working — but it also means a Workflow written on one machine is dead on
-    the next, and a CLI upgrade retires every Workflow bound to the old one.
-    Neither is a fault the author can fix from where they are.
+    Agent CLI releases are operational upgrades, not Workflow contract
+    migrations. Availability is therefore decided by the logical Handler name:
+    a locally installed ``agent.claude`` satisfies a step naming
+    ``agent.claude`` regardless of the CLI version or manifest fingerprint the
+    published Workflow recorded.
 
     So a step whose Handler is *here* runs on it, exactly as published: this
     changes nothing about a Workflow that names Agents this Runtime has, and
@@ -315,20 +315,16 @@ class AgentFallback:
 
     def __call__(self, ir: WorkflowIR) -> AgentRebinding | None:
         manifests = tuple(self._manifests())
-        # Exactly what the engine's registry will resolve: name, version and
-        # fingerprint. Matching on the name alone would call a step bound to a
-        # CLI build that is gone "available", and it would fail at compile
-        # instead of being carried to the build that is here.
+        # ExecutionRegistry resolves Agent handlers by logical name when the
+        # published CLI build is no longer installed. Keep this availability
+        # check aligned with it so a routine CLI upgrade neither emits a
+        # misleading fallback warning nor rewrites the run's Agent binding.
         installed = {
-            (item.name, item.version, item.fingerprint) for item in manifests
+            item.name for item in agent_manifests(manifests)
         }
         stranded = [
             node for node in ir.nodes
-            if is_agent_node(node) and (
-                node.handler.name,
-                node.handler.version,
-                node.handler.manifest_fingerprint,
-            ) not in installed
+            if is_agent_node(node) and node.handler.name not in installed
         ]
         if not stranded:
             return None

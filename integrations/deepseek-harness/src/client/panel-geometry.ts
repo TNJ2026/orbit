@@ -11,6 +11,16 @@ export type PanelMode = 'docked' | 'floating'
 export interface PanelLayout {
   readonly mode: PanelMode
   readonly collapsed: boolean
+  /**
+   * Put away entirely — no panel and no badge.
+   *
+   * Distinct from `collapsed`, which is the panel folded down to its mark and
+   * still watching. This is a person saying they are done with Orbit here: the
+   * close button sets it after stopping the Runtime, because a badge still
+   * sitting there would be an offer to reopen a page about a service that is
+   * no longer running. `/orbit` brings it back.
+   */
+  readonly dismissed: boolean
   readonly x: number
   readonly y: number
   readonly width: number
@@ -39,6 +49,7 @@ export const PANEL_COMPACT_BREAKPOINT = 960
 export const DEFAULT_PANEL_LAYOUT: PanelLayout = Object.freeze({
   mode: 'docked',
   collapsed: true,
+  dismissed: false,
   x: 0,
   y: PANEL_DOCK_TOP,
   width: PANEL_DEFAULT_WIDTH,
@@ -70,6 +81,9 @@ export function readLayout(raw: string | null): PanelLayout {
   return {
     mode: stored.mode === 'floating' ? 'floating' : 'docked',
     collapsed: stored.collapsed !== false,
+    // Absent means present: a layout written before this existed is one the
+    // panel should still appear for, and only an explicit `true` hides it.
+    dismissed: stored.dismissed === true,
     x: finite(stored.x, DEFAULT_PANEL_LAYOUT.x),
     y: finite(stored.y, DEFAULT_PANEL_LAYOUT.y),
     width: clamp(finite(stored.width, PANEL_DEFAULT_WIDTH), PANEL_MIN_WIDTH, PANEL_MAX_WIDTH),

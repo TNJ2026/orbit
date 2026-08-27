@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from contextlib import contextmanager, nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
@@ -110,6 +110,11 @@ class LangGraphRun:
     # `agent.claude@1.2.3`, or None for a run that executed the Agents its
     # definition names.
     agent_binding: str | None = None
+    # What this run was asked to work on. Recorded since the first run and read
+    # back by nothing until a reader wanted to see the request beside the
+    # answer — `goal` is the label somebody gave the work, which is not the
+    # same as the work.
+    inputs: Mapping[str, Any] = field(default_factory=dict)
 
 
 EVENT_LOG_DDL = """
@@ -478,7 +483,18 @@ class LangGraphWorkflowService:
             raise LookupError(f"workflow not found: {workflow_id}")
         record = self.workflow_versions.get(workflow_id, resolved)
         if record is None:
-            raise LookupError(f"workflow version not found: {workflow_id}@{resolved}")
+            # Which of the two things is missing decides what the caller does
+            # next, so the message has to say. An unknown id reported as a
+            # missing version sends them hunting through the versions of a
+            # workflow that was never there — and a caller who *did* name a
+            # real workflow is owed the versions it does have.
+            latest = self.workflow_versions.latest_version(workflow_id)
+            if latest < 1:
+                raise LookupError(f"workflow not found: {workflow_id}")
+            raise LookupError(
+                f"workflow version not found: {workflow_id}@{resolved};"
+                f" latest is {latest}"
+            )
         return record
 
     def _bound(self, ir):
@@ -1510,6 +1526,10 @@ class LangGraphWorkflowService:
         ir = self._run_ir(run)
         executed = self._executed_nodes(run_id)
         attempts = self._attempt_facts(run_id)
+        output_nodes = (
+            set(self.console.output_nodes(run_id))
+            if self.console is not None else set()
+        )
         counts: dict[str, int] = {}
         for node_id in executed:
             counts[node_id] = counts.get(node_id, 0) + 1
@@ -1585,6 +1605,7 @@ class LangGraphWorkflowService:
                 },
                 "status": status,
                 "runs": counts.get(node.id, 0),
+                "has_output": node.id in output_nodes,
                 "first_at": fact.get("first_at"),
                 "last_at": fact.get("last_at"),
                 "resolution": (
@@ -2386,4 +2407,8 @@ class LangGraphWorkflowService:
             (row["goal"] or "") if "goal" in row.keys() else "",
             int(row["artifact_count"]) if "artifact_count" in row.keys() else 0,
             row["agent_binding"] if "agent_binding" in row.keys() else None,
+            # Absent from the projections a run is listed by, so read
+            # defensively rather than assumed onto every row.
+            json.loads(row["input_json"]) if "input_json" in row.keys()
+            and row["input_json"] else {},
         )

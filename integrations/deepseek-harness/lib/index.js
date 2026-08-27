@@ -34,16 +34,38 @@ var __esDecorate = (this && this.__esDecorate) || function (ctor, descriptorIn, 
 };
 import { TypertRemoteService, Remote } from '@deepseek-ai/dsh-typert-protocol';
 import { OrbitGateway } from './gateway.js';
-import { OrbitSessionBridge, bridgeWithRetry, restoredBridgeState, sessionCanBridge } from './session-bridge.js';
+import { OrbitSessionBridge, sessionCanBridge } from './session-bridge.js';
 import { OrbitToolBridge } from './orbit-tools.js';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import { artifactImageInput } from './artifact-import.js';
+import { artifactFilename, readableAsText } from './artifact-export.js';
 import { advertisedAt, commandTool } from './commands.js';
 import { WorkflowCatalog } from './workflow-catalog.js';
+import { goalRuns, isLive } from './run-progress.js';
+import { CLAIM_RETRY_MS, answerFrom, authoringClientForSession, claimOnce, isUnknownToolError, } from './authoring-claim.js';
+/** How long to let one authoring turn run before giving the request back.
+ *  Under the broker's own lease, so this Host stops waiting before Orbit
+ *  stops expecting it to. */
+const AUTHORING_TURN_MS = 240_000;
 /** How long a settled job stays on the panel before it stops being news. */
 const AUTHORING_LINGER_MS = 60_000;
+/**
+ * How many Runs the panel poll will read steps for.
+ *
+ * Steps are one extra Runtime read per Run, on a two-second poll, so this is
+ * not free the way the Run list is — the list is one read whatever its length.
+ * A Workspace with more than a handful of Runs moving at once has a different
+ * problem than a missing progress line, and the ones past the cap are the ones
+ * furthest down a list ordered by recency.
+ */
+const LIVE_STEP_LIMIT = 6;
 let OrbitRemoteService = (() => {
     let _classSuper = TypertRemoteService;
     let _instanceExtraInitializers = [];
+    let _getAuthoringOutput_decorators;
     let _getRuntime_decorators;
     let _getRuntimeUi_decorators;
     let _getPanelState_decorators;
@@ -52,10 +74,12 @@ let OrbitRemoteService = (() => {
     let _getStepOutput_decorators;
     let _runCommand_decorators;
     let _reconcileStep_decorators;
+    let _stopRuntime_decorators;
     let _getDiagnostics_decorators;
     let _listWorkflows_decorators;
     let _listRuns_decorators;
     let _generateWorkflow_decorators;
+    let _generateWorkflowForSession_decorators;
     let _modifyWorkflow_decorators;
     let _getAuthoringJob_decorators;
     let _getRun_decorators;
@@ -66,12 +90,15 @@ let OrbitRemoteService = (() => {
     let _listArtifacts_decorators;
     let _getArtifact_decorators;
     let _getArtifactContent_decorators;
+    let _readArtifactText_decorators;
+    let _exportArtifact_decorators;
     let _importArtifact_decorators;
     let _reconcileDelegation_decorators;
     let _executeCommand_decorators;
     return class OrbitRemoteService extends _classSuper {
         static {
             const _metadata = typeof Symbol === "function" && Symbol.metadata ? Object.create(_classSuper[Symbol.metadata] ?? null) : void 0;
+            _getAuthoringOutput_decorators = [Remote('getAuthoringOutput')];
             _getRuntime_decorators = [Remote('getRuntime')];
             _getRuntimeUi_decorators = [Remote('getRuntimeUi')];
             _getPanelState_decorators = [Remote('getPanelState')];
@@ -80,10 +107,12 @@ let OrbitRemoteService = (() => {
             _getStepOutput_decorators = [Remote('getStepOutput')];
             _runCommand_decorators = [Remote('runCommand')];
             _reconcileStep_decorators = [Remote('reconcileStep')];
+            _stopRuntime_decorators = [Remote('stopRuntime')];
             _getDiagnostics_decorators = [Remote('getDiagnostics')];
             _listWorkflows_decorators = [Remote('listWorkflows')];
             _listRuns_decorators = [Remote('listRuns')];
             _generateWorkflow_decorators = [Remote('generateWorkflow')];
+            _generateWorkflowForSession_decorators = [Remote('generateWorkflowForSession')];
             _modifyWorkflow_decorators = [Remote('modifyWorkflow')];
             _getAuthoringJob_decorators = [Remote('getAuthoringJob')];
             _getRun_decorators = [Remote('getRun')];
@@ -94,9 +123,12 @@ let OrbitRemoteService = (() => {
             _listArtifacts_decorators = [Remote('listArtifacts')];
             _getArtifact_decorators = [Remote('getArtifact')];
             _getArtifactContent_decorators = [Remote('getArtifactContent')];
+            _readArtifactText_decorators = [Remote('readArtifactText')];
+            _exportArtifact_decorators = [Remote('exportArtifact')];
             _importArtifact_decorators = [Remote('importArtifact')];
             _reconcileDelegation_decorators = [Remote('reconcileDelegation')];
             _executeCommand_decorators = [Remote('executeCommand')];
+            __esDecorate(this, null, _getAuthoringOutput_decorators, { kind: "method", name: "getAuthoringOutput", static: false, private: false, access: { has: obj => "getAuthoringOutput" in obj, get: obj => obj.getAuthoringOutput }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _getRuntime_decorators, { kind: "method", name: "getRuntime", static: false, private: false, access: { has: obj => "getRuntime" in obj, get: obj => obj.getRuntime }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _getRuntimeUi_decorators, { kind: "method", name: "getRuntimeUi", static: false, private: false, access: { has: obj => "getRuntimeUi" in obj, get: obj => obj.getRuntimeUi }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _getPanelState_decorators, { kind: "method", name: "getPanelState", static: false, private: false, access: { has: obj => "getPanelState" in obj, get: obj => obj.getPanelState }, metadata: _metadata }, null, _instanceExtraInitializers);
@@ -105,10 +137,12 @@ let OrbitRemoteService = (() => {
             __esDecorate(this, null, _getStepOutput_decorators, { kind: "method", name: "getStepOutput", static: false, private: false, access: { has: obj => "getStepOutput" in obj, get: obj => obj.getStepOutput }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _runCommand_decorators, { kind: "method", name: "runCommand", static: false, private: false, access: { has: obj => "runCommand" in obj, get: obj => obj.runCommand }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _reconcileStep_decorators, { kind: "method", name: "reconcileStep", static: false, private: false, access: { has: obj => "reconcileStep" in obj, get: obj => obj.reconcileStep }, metadata: _metadata }, null, _instanceExtraInitializers);
+            __esDecorate(this, null, _stopRuntime_decorators, { kind: "method", name: "stopRuntime", static: false, private: false, access: { has: obj => "stopRuntime" in obj, get: obj => obj.stopRuntime }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _getDiagnostics_decorators, { kind: "method", name: "getDiagnostics", static: false, private: false, access: { has: obj => "getDiagnostics" in obj, get: obj => obj.getDiagnostics }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _listWorkflows_decorators, { kind: "method", name: "listWorkflows", static: false, private: false, access: { has: obj => "listWorkflows" in obj, get: obj => obj.listWorkflows }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _listRuns_decorators, { kind: "method", name: "listRuns", static: false, private: false, access: { has: obj => "listRuns" in obj, get: obj => obj.listRuns }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _generateWorkflow_decorators, { kind: "method", name: "generateWorkflow", static: false, private: false, access: { has: obj => "generateWorkflow" in obj, get: obj => obj.generateWorkflow }, metadata: _metadata }, null, _instanceExtraInitializers);
+            __esDecorate(this, null, _generateWorkflowForSession_decorators, { kind: "method", name: "generateWorkflowForSession", static: false, private: false, access: { has: obj => "generateWorkflowForSession" in obj, get: obj => obj.generateWorkflowForSession }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _modifyWorkflow_decorators, { kind: "method", name: "modifyWorkflow", static: false, private: false, access: { has: obj => "modifyWorkflow" in obj, get: obj => obj.modifyWorkflow }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _getAuthoringJob_decorators, { kind: "method", name: "getAuthoringJob", static: false, private: false, access: { has: obj => "getAuthoringJob" in obj, get: obj => obj.getAuthoringJob }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _getRun_decorators, { kind: "method", name: "getRun", static: false, private: false, access: { has: obj => "getRun" in obj, get: obj => obj.getRun }, metadata: _metadata }, null, _instanceExtraInitializers);
@@ -119,17 +153,17 @@ let OrbitRemoteService = (() => {
             __esDecorate(this, null, _listArtifacts_decorators, { kind: "method", name: "listArtifacts", static: false, private: false, access: { has: obj => "listArtifacts" in obj, get: obj => obj.listArtifacts }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _getArtifact_decorators, { kind: "method", name: "getArtifact", static: false, private: false, access: { has: obj => "getArtifact" in obj, get: obj => obj.getArtifact }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _getArtifactContent_decorators, { kind: "method", name: "getArtifactContent", static: false, private: false, access: { has: obj => "getArtifactContent" in obj, get: obj => obj.getArtifactContent }, metadata: _metadata }, null, _instanceExtraInitializers);
+            __esDecorate(this, null, _readArtifactText_decorators, { kind: "method", name: "readArtifactText", static: false, private: false, access: { has: obj => "readArtifactText" in obj, get: obj => obj.readArtifactText }, metadata: _metadata }, null, _instanceExtraInitializers);
+            __esDecorate(this, null, _exportArtifact_decorators, { kind: "method", name: "exportArtifact", static: false, private: false, access: { has: obj => "exportArtifact" in obj, get: obj => obj.exportArtifact }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _importArtifact_decorators, { kind: "method", name: "importArtifact", static: false, private: false, access: { has: obj => "importArtifact" in obj, get: obj => obj.importArtifact }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _reconcileDelegation_decorators, { kind: "method", name: "reconcileDelegation", static: false, private: false, access: { has: obj => "reconcileDelegation" in obj, get: obj => obj.reconcileDelegation }, metadata: _metadata }, null, _instanceExtraInitializers);
             __esDecorate(this, null, _executeCommand_decorators, { kind: "method", name: "executeCommand", static: false, private: false, access: { has: obj => "executeCommand" in obj, get: obj => obj.executeCommand }, metadata: _metadata }, null, _instanceExtraInitializers);
             if (_metadata) Object.defineProperty(this, Symbol.metadata, { enumerable: true, configurable: true, writable: true, value: _metadata });
         }
-        static inject = ['sessions', 'workspaceRegistry', 'tools', 'attachments', 'systemPrompt'];
+        static inject = ['sessions', 'workspaceRegistry', 'tools', 'attachments', 'systemPrompt', 'agents'];
         gateway = (__runInitializers(this, _instanceExtraInitializers), new OrbitGateway());
+        agents;
         catalog = new WorkflowCatalog();
-        /** Agent handlers per Workspace. The Runtime seals its registry at startup,
-         *  so one read answers for as long as that Runtime is up. */
-        agentsByWorkspace = new Map();
         /** Authoring jobs started from this Harness, per Workspace.
          *
          *  Held here because there is nothing to ask: a job is addressed by an id
@@ -140,6 +174,10 @@ let OrbitRemoteService = (() => {
         bridges = new Map();
         /** One entry per live Bridge: the Workspaces worth knowing the Workflows of. */
         bridgedWorkspaces = new Map();
+        /** Live authoring consumers, keyed by the exact Harness Session they drive. */
+        authoringWaiters = new Map();
+        /** The last thing that went wrong while writing a Workflow here. */
+        authoringTrouble = new Map();
         bridgeDiagnostics = new Map();
         hostSessions;
         attachments;
@@ -149,6 +187,11 @@ let OrbitRemoteService = (() => {
             this.hostSessions = ctx.get('sessions');
             this.attachments = ctx.get('attachments');
             this.workspaceRegistry = ctx.get('workspaceRegistry');
+            // Captured here like every other service, rather than read from `this.ctx`
+            // at the moment it is needed: a service this Host cannot reach is a fact
+            // about how it was composed, and finding that out at the instant a
+            // Workflow needs writing is finding out in the worst place.
+            this.agents = ctx.get('agents');
             new OrbitToolBridge(ctx, this.gateway, (workspace, sessionId, job) => {
                 this.watchAuthoring(workspace, sessionId, job);
             }).register();
@@ -162,6 +205,9 @@ let OrbitRemoteService = (() => {
                 for (const controller of this.bridges.values())
                     controller.abort();
                 this.bridges.clear();
+                for (const controller of this.authoringWaiters.values())
+                    controller.abort();
+                this.authoringWaiters.clear();
             }, 'orbit: stop Session Bridges');
         }
         /**
@@ -224,6 +270,8 @@ let OrbitRemoteService = (() => {
                 if (tracked.settledAt !== undefined) {
                     if (now - tracked.settledAt > AUTHORING_LINGER_MS)
                         held.delete(jobId);
+                    else if (tracked.job.status === 'done' && !tracked.catalogRefreshed)
+                        published = true;
                     continue;
                 }
                 try {
@@ -245,7 +293,19 @@ let OrbitRemoteService = (() => {
                     requested_agent: job.requested_agent ?? null,
                     workflow_id: job.workflow_id ?? null,
                     error: job.error?.message ?? null,
+                    output_href: job.output_href ?? null,
                 })) };
+        }
+        markPublishedCatalogRefreshed(scope) {
+            for (const tracked of this.authoringByWorkspace.get(scope.canonicalPath)?.values() ?? []) {
+                if (tracked.job.status === 'done')
+                    tracked.catalogRefreshed = true;
+            }
+        }
+        async getAuthoringOutput(sessionId, outputHref, after, signal) {
+            signal.throwIfAborted();
+            const scope = await this.sessionWorkspace(sessionId);
+            return await this.gateway.authoringOutput(scope, sessionId, outputHref, after);
         }
         refreshCatalog(scope) {
             // Everything, not `ready_only`: two readers share this, and they want
@@ -255,8 +315,9 @@ let OrbitRemoteService = (() => {
             return this.gateway.call(scope, 'catalog', 'list_workflows', {})
                 .then(result => {
                 this.catalog.remember(scope.canonicalPath, result.workflows);
+                return true;
             })
-                .catch(() => { });
+                .catch(() => false); // Background warming retries when the entry stays stale.
         }
         registerWebApi(ctx) {
             let registered = false;
@@ -267,6 +328,65 @@ let OrbitRemoteService = (() => {
                 if (!webServer)
                     return;
                 registered = true;
+                /**
+                 * Hand a browser the bytes of one Artifact.
+                 *
+                 * A GET, because a link is what a person clicks and a browser is what
+                 * renders the result. It exists because Orbit's own address for an
+                 * Artifact cannot serve one: Artifacts are owned by the actor that
+                 * produced them, a browser reaching `/api/v1` on loopback is `local`,
+                 * and the Runs this panel starts belong to `harness:session:<id>`. So
+                 * the link was a 404 for every Artifact this Harness ever made.
+                 *
+                 * This route is that identity. It reads the Artifact as the Session that
+                 * owns it and passes the bytes through unchanged — no gallery, no
+                 * viewer, no second drawing of anything Orbit draws. The browser opens
+                 * what it was given, exactly as it would have from Orbit's own URL.
+                 */
+                ctx.effect(() => webServer.register({
+                    kind: 'exact', path: '/plugins/dsh-orbit/artifact',
+                    handler: async (req, res) => {
+                        const send = (status, body) => {
+                            res.writeHead(status, {
+                                'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store',
+                            });
+                            res.end(body);
+                        };
+                        try {
+                            if (req.method !== 'GET')
+                                return send(405, 'GET only');
+                            const query = new URL(req.url ?? '', 'http://localhost').searchParams;
+                            const sessionId = query.get('session') ?? '';
+                            const artifactId = query.get('id') ?? '';
+                            if (!sessionId || !artifactId)
+                                return send(400, 'session and id are required');
+                            const scope = await this.sessionWorkspace(sessionId);
+                            const held = await this.gateway.call(scope, sessionId, 'read_artifact_content', { artifact_id: artifactId });
+                            const bytes = Buffer.from(held.content, 'base64');
+                            res.writeHead(200, {
+                                // What Orbit recorded it as, so the browser treats it the way it
+                                // would have coming from Orbit. A missing type is bytes, not a
+                                // guess: guessing is how a text file renders as a download and a
+                                // script renders as a script.
+                                'content-type': String(held.artifact.content_type || 'application/octet-stream'),
+                                'content-length': String(bytes.length),
+                                'cache-control': 'no-store',
+                                // Never inline into this page's origin. The bytes are whatever a
+                                // workflow wrote, and this origin is the Harness the person is
+                                // signed in to.
+                                'content-security-policy': "sandbox; default-src 'none'",
+                                'x-content-type-options': 'nosniff',
+                                ...(typeof held.artifact.filename === 'string' && held.artifact.filename
+                                    ? { 'content-disposition': `inline; filename*=UTF-8''${encodeURIComponent(held.artifact.filename)}` }
+                                    : {}),
+                            });
+                            res.end(bytes);
+                        }
+                        catch (error) {
+                            send(404, String(error));
+                        }
+                    },
+                }), 'orbit: Artifact bytes for a browser link');
                 ctx.effect(() => webServer.register({
                     kind: 'exact', path: '/plugins/dsh-orbit/api',
                     handler: async (req, res) => {
@@ -311,13 +431,18 @@ let OrbitRemoteService = (() => {
             switch (action) {
                 case 'getRuntime': return await this.getRuntime(args[0], signal);
                 case 'getRuntimeUi': return await this.getRuntimeUi(String(args[0]), signal);
-                case 'getPanelState': return await this.getPanelState(String(args[0]), Boolean(args[1]), signal);
+                case 'getPanelState': return await this.getPanelState(String(args[0]), Boolean(args[1]), Boolean(args[2]), signal);
+                case 'generateWorkflowForSession': return await this.generateWorkflowForSession(String(args[0]), String(args[1]), signal);
+                case 'getAuthoringOutput': return await this.getAuthoringOutput(String(args[0]), String(args[1]), Number(args[2]), signal);
                 case 'getRunDetail': return await this.getRunDetail(String(args[0]), String(args[1]), signal);
                 case 'getWorkflowDefinition': return await this.getWorkflowDefinition(String(args[0]), String(args[1]), signal);
                 case 'getStepOutput': return await this.getStepOutput(String(args[0]), String(args[1]), String(args[2]), Number(args[3]), signal);
                 case 'runCommand': return await this.runCommand(String(args[0]), String(args[1]), args[2], Number(args[3]), args[4], args[5] === undefined ? undefined : String(args[5]), signal);
                 case 'reconcileStep': return await this.reconcileStep(String(args[0]), String(args[1]), String(args[2]), args[3], String(args[4]), signal);
+                case 'exportArtifact': return await this.exportArtifact(String(args[0]), String(args[1]), signal);
+                case 'readArtifactText': return await this.readArtifactText(String(args[0]), String(args[1]), signal);
                 case 'getDiagnostics': return await this.getDiagnostics(args[0], String(args[1]), signal);
+                case 'stopRuntime': return await this.stopRuntime(String(args[0]), signal);
                 case 'listWorkflows': return await this.listWorkflows(args[0], String(args[1]), signal);
                 case 'listRuns': return await this.listRuns(args[0], String(args[1]), args[2] === undefined ? undefined : String(args[2]), signal);
                 case 'generateWorkflow': return await this.generateWorkflow(args[0], String(args[1]), String(args[2]), signal);
@@ -388,7 +513,7 @@ let OrbitRemoteService = (() => {
             const controller = new AbortController();
             this.bridges.set(sessionId, controller);
             this.bridgeDiagnostics.set(sessionId, { state: 'connecting', cursorPosition: 0, updatedAt: new Date().toISOString() });
-            void this.runSessionBridge(ctx, session, cwd, controller.signal).finally(() => {
+            void this.bindSessionWorkspace(ctx, session, cwd).finally(() => {
                 if (this.bridges.get(sessionId) === controller)
                     this.bridges.delete(sessionId);
             });
@@ -401,9 +526,23 @@ let OrbitRemoteService = (() => {
             // for every Session the Host ever opened.
             this.bridgeDiagnostics.delete(sessionId);
             this.bridgedWorkspaces.delete(sessionId);
-            this.agentsByWorkspace.clear();
+            this.authoringWaiters.get(sessionId)?.abort();
+            this.authoringWaiters.delete(sessionId);
         }
-        async runSessionBridge(ctx, session, cwd, signal) {
+        /**
+         * Bind a Session to the Workspace it is working in, and warm that catalog.
+         *
+         * Warmed before the first turn asks, because this runs when the Session is
+         * created and the person types afterwards. The binding is what
+         * `tellTheModelWhatCanRun` reads, so every Session that can reach a Runtime
+         * is registered here whether or not anything else happens.
+         *
+         * This is all that happens at Session start now. It used to also run
+         * `OrbitSessionBridge`, which recorded each Run into the Session log as
+         * `orbit/run-started` / `-checkpoint` / `-ended`; see `stopSessionBridge`
+         * and the note on why that stopped.
+         */
+        async bindSessionWorkspace(ctx, session, cwd) {
             const registry = ctx.workspaceRegistry;
             const registered = await registry.resolveByPath(cwd);
             const workspace = {
@@ -411,33 +550,127 @@ let OrbitRemoteService = (() => {
                 canonicalPath: registered?.path ?? cwd,
             };
             this.bridgedWorkspaces.set(String(session.id), workspace);
-            // Warm it before the first turn asks: a Bridge starts when the Session is
-            // created, and the person types afterwards.
             this.refreshCatalog(workspace);
-            let cursorPosition = restoredBridgeState(session.events).position;
-            const cursor = {
-                load: () => cursorPosition || undefined,
-                save: (_workspaceId, _sessionId, position) => {
-                    cursorPosition = position;
-                    this.bridgeDiagnostics.set(String(session.id), {
-                        state: 'connected', cursorPosition: position, updatedAt: new Date().toISOString(),
+            this.bridgeDiagnostics.set(String(session.id), {
+                state: 'bound', cursorPosition: 0, updatedAt: new Date().toISOString(),
+            });
+            this.waitForAuthoring(ctx, workspace, String(session.id));
+        }
+        /**
+         * Stand on Orbit's authoring queue for this Workspace, and write what comes.
+         *
+         * Being on the queue is what makes this Host a writer Orbit will choose:
+         * `_connected_client_first` prefers a connected client over forking an Agent
+         * CLI, and it counts a client as connected because it is waiting here. A
+         * Host that only ever called tools was never on the queue, so the preference
+         * had nothing to prefer and every Workflow was written by a forked CLI whose
+         * work nobody could watch.
+         *
+         * Restarted after every wait, including after a failure, because the wait is
+         * how the Host stays addressable — stopping on the first unreachable Runtime
+         * would take this Workspace off the menu until the Session was recreated.
+         */
+        waitForAuthoring(ctx, scope, sessionId) {
+            if (this.authoringWaiters.has(sessionId))
+                return;
+            const controller = new AbortController();
+            this.authoringWaiters.set(sessionId, controller);
+            const client = authoringClientForSession(sessionId);
+            const loop = async () => {
+                while (!controller.signal.aborted) {
+                    const outcome = await claimOnce({
+                        wait: async (seconds) => await this.gateway.call(scope, sessionId, 'wait_authoring_request', { client, timeout_seconds: seconds }).then(result => result.request),
+                        ask: async (prompt) => await this.askTheSession(sessionId, prompt),
+                        submit: async (requestId, dsl) => await this.gateway.call(scope, sessionId, 'submit_authoring_response', { request_id: requestId, dsl }),
+                        report: (stage, error) => {
+                            // Logged and kept. The log goes to whichever terminal started the
+                            // Harness, which is nowhere a person debugging the panel is
+                            // looking; the diagnostics endpoint is.
+                            this.authoringTrouble.set(scope.canonicalPath, {
+                                stage, error: String(error), at: new Date().toISOString(),
+                            });
+                            ctx.logger.warn(`Orbit authoring ${stage} failed in ${scope.canonicalPath}: ${String(error)}`);
+                        },
                     });
-                },
+                    if (controller.signal.aborted)
+                        return;
+                    // A failed round waits before asking again; an expired one is the
+                    // queue working as intended and goes straight back on it.
+                    if (outcome === 'failed') {
+                        await new Promise(resolve => {
+                            const timer = setTimeout(resolve, CLAIM_RETRY_MS);
+                            controller.signal.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true });
+                        });
+                    }
+                }
             };
-            await bridgeWithRetry({
-                events: () => session.events,
-                attempt: async (knownRuns) => {
-                    await this.bridgeSession(workspace, session, cursor, signal, knownRuns);
-                },
-                onWaiting: message => {
-                    this.bridgeDiagnostics.set(String(session.id), {
-                        state: 'waiting', cursorPosition, lastError: message, updatedAt: new Date().toISOString(),
-                    });
-                    ctx.logger.warn(`Orbit bridge for Session ${String(session.id)} is waiting: ${message}`);
-                },
-                signal,
+            void loop().finally(() => {
+                if (this.authoringWaiters.get(sessionId) === controller) {
+                    this.authoringWaiters.delete(sessionId);
+                }
             });
         }
+        /**
+         * Put the prompt to the Workspace's Session and return what its model said.
+         *
+         * `followup` rather than anything quieter: the whole point is that the work
+         * happens in the conversation, where a person can watch it and where the
+         * Agent has the context the request came out of. It becomes an ordinary turn
+         * and queues behind whatever the person is doing, so this never interrupts
+         * one — it waits for one to end.
+         *
+         * The answer is read back out of the Session's own log rather than returned
+         * by the call, because the log is what actually happened: a turn that used
+         * tools answers across several messages, and the log has all of them in
+         * order.
+         */
+        async askTheSession(sessionId, prompt) {
+            if (this.agents === undefined)
+                throw new Error('this Harness exposes no Agent registry');
+            const agent = this.agents.get(sessionId);
+            if (agent === undefined)
+                throw new Error(`no live Agent for Session ${sessionId}`);
+            const mark = agent.session.events.length;
+            agent.followup(createUserMessage({
+                content: [{ type: 'text', text: prompt }],
+                source: { kind: 'plugin', plugin: 'orbit' },
+            }));
+            /* `whenIdle` follows whole-agent quiescence, not this message: a Session
+               busy with the person's own turn reaches idle when *that* turn ends,
+               which can be before the queued one has run. So idle is a prompt to look
+               rather than an answer, and looking is asking whether anything was said.
+               Bounded, because an Agent that never answers must give the request back
+               while Orbit is still willing to re-offer it. */
+            const deadline = Date.now() + AUTHORING_TURN_MS;
+            for (;;) {
+                await agent.whenIdle();
+                const said = answerFrom(agent.session.events, mark);
+                if (said.trim())
+                    return said;
+                if (Date.now() >= deadline)
+                    return '';
+                await new Promise(resolve => setTimeout(resolve, 1_000));
+            }
+        }
+        /**
+         * Drive the Session Bridge for one Session, writing each Run into its log.
+         *
+         * NOT called at Session start, and must not be until the Harness can accept
+         * the events it writes. `orbit/run-*` are not in the Harness's own event
+         * vocabulary, and `Session.append` offers no way to set the envelope's
+         * `ignorable` marker — the one thing that lets a reader skip a type it does
+         * not know. So every Session this ran in became unreadable on reload:
+         *
+         *   session "…" contains event type "orbit/run-started" (seq 964) unknown to
+         *   this harness and not marked ignorable; refusing to interpret the log
+         *
+         * Kept rather than deleted because nothing here is wrong except where the
+         * record is put. `@deepseek-ai/dsh-session` says a registration surface for
+         * out-of-repo plugin events "is deferred until such a consumer exists"; this
+         * is that consumer. When `append` can mark an event ignorable, or the
+         * vocabulary can be extended, calling this from `bindSessionWorkspace`
+         * restores the account of what ran.
+         */
         async bridgeSession(workspace, session, cursor, signal, knownRuns = []) {
             const bridge = new OrbitSessionBridge(this.gateway, cursor);
             await bridge.run(workspace, String(session.id), {
@@ -497,16 +730,18 @@ let OrbitRemoteService = (() => {
          * a two-second poll must not re-ask questions that change when somebody
          * publishes. A press is exactly the case where they may have.
          */
-        async getPanelState(sessionId, force, signal) {
+        async getPanelState(sessionId, force, startIfMissing, signal) {
             signal.throwIfAborted();
             const scope = await this.sessionWorkspace(sessionId);
-            const release = await this.gateway.acquire(scope);
+            const release = await this.gateway.acquire(scope, startIfMissing);
             try {
                 // The panel is a view of the Workspace, not of one chat: a Run started in
                 // Orbit's own UI is the same Run, and a History that hid it would sit
-                // empty beside a Runtime full of work.
+                // empty beside a Runtime full of work. It used to say so with
+                // `owner: 'workspace'`; the Runtime says it now, because a Runtime
+                // serves one Workspace and that is the whole of what a read may see.
                 const result = await this.gateway.call(scope, sessionId, 'list_runs', {
-                    limit: 50, owner: 'workspace',
+                    limit: 50,
                 });
                 // Before the catalog, so a publish is known in time to re-read it below.
                 const authoring = await this.readAuthoring(scope);
@@ -514,25 +749,77 @@ let OrbitRemoteService = (() => {
                 // or a publish someone just watched happen. Forgetting the entry and
                 // letting a later poll fill it would empty the page at the very moment
                 // the Workflow they asked for was supposed to appear on it.
-                if (force || authoring.published)
-                    await this.refreshCatalog(scope);
+                if (force || authoring.published) {
+                    const refreshed = await this.refreshCatalog(scope);
+                    if (authoring.published && refreshed)
+                        this.markPublishedCatalogRefreshed(scope);
+                }
                 else if (this.catalog.stale(scope.canonicalPath))
                     this.refreshCatalog(scope);
-                if (force || !this.agentsByWorkspace.has(scope.canonicalPath)) {
-                    const listed = await this.gateway.call(scope, sessionId, 'list_agents', {});
-                    this.agentsByWorkspace.set(scope.canonicalPath, listed.agents);
-                }
+                // Identity is fixed for the Runtime, but attempt totals are not. This is
+                // one grouped read and stays beside the Runs it counts on every poll.
+                const listed = await this.gateway.call(scope, sessionId, 'list_agents', {});
+                // A Runtime already alive during a Harness upgrade may still expose the
+                // older identity-only MCP shape. Orbit's HTTP Agent page has always held
+                // these totals, so merge that same projection instead of silently
+                // rendering a missing value as zero until somebody restarts Runtime.
+                const needsAttemptCounts = listed.agents.some(agent => agent.attempt_count === undefined || agent.failed_count === undefined);
+                const attemptCounts = needsAttemptCounts
+                    ? await this.gateway.handlerAttemptCounts(scope, sessionId)
+                    : undefined;
+                const agents = listed.agents.map(agent => ({
+                    ...agent,
+                    ...(attemptCounts?.get(agent.name) ?? {}),
+                }));
                 return {
                     runs: result.runs,
                     uiUrl: await this.gateway.uiUrl(scope),
                     workflows: this.catalog.list(scope.canonicalPath),
-                    agents: this.agentsByWorkspace.get(scope.canonicalPath) ?? [],
+                    agents,
                     authoring: authoring.jobs,
+                    steps: await this.liveSteps(scope, sessionId, result.runs),
                 };
             }
             finally {
                 await release();
             }
+        }
+        /**
+         * The steps of the Runs that are still moving, so the Goal page can draw them.
+         *
+         * Only the live ones, and only what that page draws: the name and status of
+         * each step, whether it has output to offer, and whether it is waiting on a
+         * person. The rest of a StepSummary — the prompt it was authored with, its
+         * handler, its timestamps — is detail nobody reads here, and sending the
+         * whole thing on a two-second poll would put a page of JSON on the wire per
+         * Run to render a list of names.
+         *
+         * A Run whose steps cannot be read loses its progress line and keeps its
+         * row. The alternative is a panel that goes blank because one Run out of six
+         * answered badly, which trades the thing a reader came for against a detail
+         * they did not.
+         */
+        async liveSteps(scope, sessionId, runs) {
+            // Exactly the Runs the Goal page draws, by the same rule it draws them: a
+            // Goal that has just finished is still on that page, and its steps have to
+            // be re-read once more or it keeps the last step it was seen *running*.
+            const drawn = goalRuns(runs.map(run => ({ live: isLive(run.status), updatedAt: run.updated_at, run }))).slice(0, LIVE_STEP_LIMIT);
+            const read = await Promise.all(drawn.map(async ({ run }) => {
+                try {
+                    const detail = await this.gateway.call(scope, sessionId, 'get_run_steps', {
+                        run_id: run.run_id,
+                    });
+                    return [run.run_id, detail.steps.map(step => ({
+                            node_id: step.node_id, label: step.label, status: step.status,
+                            has_output: step.has_output, resolution: step.resolution,
+                            reconciliation: step.reconciliation,
+                        }))];
+                }
+                catch {
+                    return null;
+                }
+            }));
+            return Object.fromEntries(read.filter(entry => entry !== null));
         }
         /**
          * The steps of one Run, for a panel row the reader opened.
@@ -546,7 +833,7 @@ let OrbitRemoteService = (() => {
             const release = await this.gateway.acquire(scope);
             try {
                 return await this.gateway.call(scope, sessionId, 'get_run_steps', {
-                    run_id: runId, owner: 'workspace',
+                    run_id: runId,
                 });
             }
             finally {
@@ -578,7 +865,7 @@ let OrbitRemoteService = (() => {
             const release = await this.gateway.acquire(scope);
             try {
                 return await this.gateway.call(scope, sessionId, 'read_run_output', {
-                    run_id: runId, after, node_id: nodeId, owner: 'workspace',
+                    run_id: runId, after, node_id: nodeId,
                 });
             }
             finally {
@@ -642,12 +929,37 @@ let OrbitRemoteService = (() => {
                 await release();
             }
         }
+        /**
+         * Stop the Orbit Runtime serving this Session's Workspace.
+         *
+         * Session-scoped like every other call here: the Workspace is derived from
+         * the Session rather than taken from the caller, so this can only ever stop
+         * the Runtime the person is actually looking at.
+         *
+         * The waiter goes first. It is parked on that Runtime's authoring queue, and
+         * leaving it there would have it discover the shutdown as a transport error
+         * and log one — a failure report about something that was asked for.
+         */
+        async stopRuntime(sessionId, signal) {
+            signal.throwIfAborted();
+            const scope = await this.sessionWorkspace(sessionId);
+            this.authoringWaiters.get(scope.canonicalPath)?.abort();
+            this.authoringWaiters.delete(scope.canonicalPath);
+            await this.gateway.stopRuntime(scope, sessionId);
+            return { stopped: true };
+        }
         async getDiagnostics(workspace, sessionId, signal) {
             const runtime = await this.getRuntime(workspace, signal);
             return {
                 generated_at: new Date().toISOString(), workspace_id: workspace.id,
                 session_id: sessionId, runtime, gateway: this.gateway.diagnostics(),
                 bridge: this.bridgeDiagnostics.get(sessionId) || null,
+                authoring: {
+                    waiting: this.authoringWaiters.has(sessionId),
+                    driving: this.authoringWaiters.has(sessionId) ? sessionId : null,
+                    agentRegistry: this.agents !== undefined,
+                    lastError: this.authoringTrouble.get(workspace.canonicalPath) ?? null,
+                },
             };
         }
         async listWorkflows(workspace, sessionId, signal) {
@@ -673,9 +985,49 @@ let OrbitRemoteService = (() => {
             if (!prompt.trim() || prompt.length > 20_000)
                 throw new Error('Workflow prompt must be 1-20000 characters');
             const scope = await this.verified(workspace, sessionId);
-            return await this.gateway.call(scope, sessionId, 'generate_workflow', {
-                prompt: prompt.trim(), display_language: 'zh-CN', idempotency_key: crypto.randomUUID(),
+            const agent = await this.prepareAuthoringRoute(scope, sessionId);
+            const job = await this.gateway.call(scope, sessionId, 'generate_workflow', {
+                prompt: prompt.trim(), display_language: 'zh-CN', agent,
+                idempotency_key: crypto.randomUUID(),
             });
+            this.watchAuthoring(scope, sessionId, job);
+            return job;
+        }
+        /** Start authoring from a Slash command whose only authority is its Session. */
+        async generateWorkflowForSession(sessionId, prompt, signal) {
+            signal.throwIfAborted();
+            if (!prompt.trim() || prompt.length > 20_000)
+                throw new Error('Workflow prompt must be 1-20000 characters');
+            const scope = await this.sessionWorkspace(sessionId);
+            const release = await this.gateway.acquire(scope, true);
+            try {
+                const agent = await this.prepareAuthoringRoute(scope, sessionId);
+                const job = await this.gateway.call(scope, sessionId, 'generate_workflow', {
+                    prompt: prompt.trim(), display_language: 'zh-CN',
+                    agent, idempotency_key: crypto.randomUUID(),
+                });
+                this.watchAuthoring(scope, sessionId, job);
+                return job;
+            }
+            finally {
+                await release();
+            }
+        }
+        /** Register this exact Session route before asking Orbit to address work to it. */
+        async prepareAuthoringRoute(scope, sessionId) {
+            const client = authoringClientForSession(sessionId);
+            try {
+                await this.gateway.call(scope, sessionId, 'register_authoring_client', { client });
+            }
+            catch (error) {
+                // Runtimes from before the presence-only registration tool still learn
+                // this route from the Session's standing wait_authoring_request call.
+                // Ignore only that one protocol-version miss; authorization, transport
+                // and every other registration failure remain actionable errors.
+                if (!isUnknownToolError(error, 'register_authoring_client'))
+                    throw error;
+            }
+            return client;
         }
         async modifyWorkflow(workspace, sessionId, workflowId, prompt, regenerate, signal) {
             signal.throwIfAborted();
@@ -684,9 +1036,10 @@ let OrbitRemoteService = (() => {
             if (!prompt.trim() || prompt.length > 20_000)
                 throw new Error('Workflow prompt must be 1-20000 characters');
             const scope = await this.verified(workspace, sessionId);
+            const agent = await this.prepareAuthoringRoute(scope, sessionId);
             return await this.gateway.call(scope, sessionId, 'modify_workflow', {
                 workflow_id: workflowId, prompt: prompt.trim(), mode: regenerate ? 'regenerate' : 'modify',
-                display_language: 'zh-CN', idempotency_key: crypto.randomUUID(),
+                display_language: 'zh-CN', agent, idempotency_key: crypto.randomUUID(),
             });
         }
         async getAuthoringJob(workspace, sessionId, jobId, signal) {
@@ -753,6 +1106,53 @@ let OrbitRemoteService = (() => {
             finally {
                 await release();
             }
+        }
+        /**
+         * What an Artifact is, and its text when its text is the answer.
+         *
+         * Metadata first, always: a workflow that writes its reply as markdown has
+         * written the reply, and making a reader click through to it charges them a
+         * click for the thing they asked for. But asking for a 2 MiB PDF in order to
+         * discover it is a 2 MiB PDF is the round trip this ordering avoids, so the
+         * bytes are fetched only once the recorded type and size say they are worth
+         * fetching.
+         */
+        async readArtifactText(sessionId, artifactId, signal) {
+            signal.throwIfAborted();
+            const scope = await this.sessionWorkspace(sessionId);
+            const meta = await this.gateway.call(scope, sessionId, 'read_artifact', { artifact_id: artifactId });
+            const contentType = String(meta.content_type ?? '');
+            const sizeBytes = Number(meta.size_bytes ?? 0);
+            if (!readableAsText(contentType, sizeBytes))
+                return { contentType, sizeBytes, text: null };
+            const held = await this.gateway.call(scope, sessionId, 'read_artifact_content', { artifact_id: artifactId });
+            return { contentType, sizeBytes, text: Buffer.from(held.content, 'base64').toString('utf8') };
+        }
+        /**
+         * Write one Artifact out as an ordinary file and say where it went.
+         *
+         * Not the path it already has. Orbit stores Artifacts content-addressed: the
+         * file on disk is named by the sha256 of its own bytes, has no extension, is
+         * shared by every Artifact with identical content, and is collected when
+         * nothing references it. Handing that path to a person invites them to open
+         * it in an editor and save — and saving corrupts every Artifact sharing
+         * those bytes. So they get a copy that is theirs.
+         *
+         * Session-scoped like everything else here, and for the same reason twice
+         * over: an Artifact belongs to the actor that produced it, so the Session is
+         * both which Workspace to look in and the only identity allowed to read it.
+         */
+        async exportArtifact(sessionId, artifactId, signal) {
+            signal.throwIfAborted();
+            const scope = await this.sessionWorkspace(sessionId);
+            const held = await this.gateway.call(scope, sessionId, 'read_artifact_content', { artifact_id: artifactId });
+            const target = join(homedir(), 'Downloads', artifactFilename(artifactId, held.artifact.content_type, held.artifact.filename));
+            await mkdir(dirname(target), { recursive: true });
+            // Rewritten rather than skipped when it exists: the name carries the
+            // digest, so a file already at that path holds these exact bytes — and one
+            // truncated by an interrupted write would otherwise stand forever.
+            await writeFile(target, Buffer.from(held.content, 'base64'));
+            return { path: target };
         }
         async importArtifact(workspace, sessionId, artifactId, signal) {
             const content = await this.getArtifactContent(workspace, sessionId, artifactId, signal);

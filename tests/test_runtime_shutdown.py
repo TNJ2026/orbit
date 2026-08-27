@@ -229,3 +229,42 @@ class ExecutionDoesNotBlockTheServerTests(unittest.TestCase):
         self.assertEqual("completed", started.json()["data"]["run"]["status"])
         self.assertIsNotNone(health, "no request was served while the run ran")
         self.assertEqual(200, health.status_code)
+
+
+class HarnessReachesShutdownAsTheOperatorTests(unittest.TestCase):
+    """Why the Harness panel's stop button works without widening anything.
+
+    On loopback every caller of `/api/v1` is `local` — the one operator — and
+    the `x-orbit-actor` header is honoured only on `/mcp`, where it refines
+    that operator into Session slots and grants no scope it did not have. So a
+    Harness posting `harness:session:<id>` to the shutdown endpoint arrives as
+    `local` and is already allowed.
+
+    Written down because the shape invites the opposite conclusion: the
+    endpoint refuses non-operators, the Harness has a Session actor, and the
+    obvious fix is to make that actor an operator — a real widening, for a
+    permission it turns out to have had all along.
+    """
+
+    def test_a_session_header_does_not_reach_the_HTTP_API(self) -> None:
+        from starlette.requests import Request
+
+        from orbit.web.local_identity import loopback_scoped_mcp_authenticator
+
+        def ask(path: str) -> str | None:
+            scope = {
+                "type": "http", "path": path, "method": "POST",
+                "client": ("127.0.0.1", 5000), "scheme": "http",
+                "server": ("127.0.0.1", 80), "query_string": b"",
+                "root_path": "", "headers": [
+                    (b"x-orbit-actor", b"harness:session:abc"),
+                ],
+            }
+            return loopback_scoped_mcp_authenticator(
+                Request(scope), trusted_prefix="harness:session:",
+            )
+
+        self.assertEqual("harness:session:abc", ask("/mcp"),
+                         "on /mcp the header refines the operator into a Session")
+        self.assertEqual("local", ask("/api/v1/runtime/shutdown"),
+                         "everywhere else a loopback caller is the one operator")

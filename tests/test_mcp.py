@@ -11,7 +11,7 @@ import json
 from types import SimpleNamespace
 import unittest
 
-from orbit.web.mcp import McpSessionRegistry
+from orbit.web.mcp import HARNESS_TOOL_NAMES, McpSessionRegistry
 from tests.test_api_v1 import ApiTestCase
 from tests.test_web_composition import AsgiHarness
 
@@ -82,6 +82,7 @@ class DiscoveryTests(ApiTestCase):
                     "read_artifact_content",
                     "get_artifact_lineage", "collect_artifacts",
                     "generate_workflow", "modify_workflow", "get_authoring_job",
+                    "register_authoring_client",
                     "claim_authoring_request", "wait_authoring_request",
                     "submit_authoring_response",
                 },
@@ -94,7 +95,24 @@ class DiscoveryTests(ApiTestCase):
                 # the advertised tool contract.
                 self.assertNotIn("scope", item)
 
-    def test_harness_profile_includes_product_authoring_but_excludes_broker_and_ops_tools(self) -> None:
+    def test_harness_profile_carries_the_writer_surface_but_not_the_ops_one(self) -> None:
+        """What a Harness needs to ask for a Workflow, and to write one.
+
+        The broker half used to be excluded outright: a Harness asked for
+        Workflows and a forked Agent CLI wrote them. It is here now because the
+        Runtime prefers a writer that is already connected over one it has to
+        fork, and a client only counts as connected while it is *waiting* on
+        the authoring queue. Without `wait_authoring_request` the Harness can
+        never be on that queue, so the preference has nothing to prefer and
+        every Workflow is written by a CLI nobody can watch.
+
+        The registration tool is presence-only, while
+        `claim_authoring_request` is the
+        non-blocking variant, and a surface that offers both ways to take the
+        same work invites a client that polls when it could be waiting — which
+        is the thing that leaves gaps in its own presence.
+        """
+
         from orbit.web.app import create_app
         from tests.test_api_v1 import SCHEMAS, transform_registration
         from orbit.web.api_v1 import Authorizer, READ_SCOPE, WRITE_SCOPE
@@ -120,8 +138,14 @@ class DiscoveryTests(ApiTestCase):
                 "cancel_run", "list_artifacts", "read_artifact",
                 "read_artifact_content",
                 "get_artifact_lineage",
+                "register_authoring_client", "wait_authoring_request",
+                "submit_authoring_response",
             },
             {item["name"] for item in tools},
+        )
+        self.assertNotIn(
+            "claim_authoring_request", {item["name"] for item in tools},
+            "one way onto the queue, and it is the one that waits",
         )
 
     def test_capability_handshake_identifies_profile_and_protocol(self) -> None:
@@ -144,8 +168,14 @@ class ToolCallTests(ApiTestCase):
         )
         return payload_of(result)
 
-    def test_list_runs_shows_the_caller_its_own_work_by_default(self) -> None:
-        """An Agent's account of what it started, not everything on the machine."""
+    def test_list_runs_shows_the_Workspace_whoever_is_asking(self) -> None:
+        """A Runtime serves one Workspace, and that is the whole of visibility.
+
+        This asserted that a second actor saw none of it, while the panel asked
+        for `owner=workspace` and saw all of it, and Orbit's own UI could not
+        ask at all — two rules over one database, and a UI that showed
+        twenty-five of thirty-five Runs with no sign the rest existed.
+        """
 
         with AsgiHarness(self.app) as client:
             self._start(client, key="mine")
@@ -153,58 +183,15 @@ class ToolCallTests(ApiTestCase):
             others = payload_of(tool(client, "list_runs", {}, actor="reader"))["runs"]
 
         self.assertEqual(1, len(mine))
-        self.assertEqual([], others, "a second actor sees none of it")
+        self.assertEqual(
+            [run["run_id"] for run in mine], [run["run_id"] for run in others],
+            "a second actor is not a second Workspace",
+        )
 
-    def test_list_runs_can_show_the_whole_Workspace(self) -> None:
-        """What the Runtime's own UI shows, for a surface that stands beside it.
-
-        Not a widening of scope: every actor on this transport is the same local
-        operator, and the UI already shows all of it. The default exists so an
-        Agent's own account is not buried, not to keep anything from anyone.
-        """
-
-        with AsgiHarness(self.app) as client:
-            self._start(client, key="theirs")
-            everything = payload_of(
-                tool(client, "list_runs", {"owner": "workspace"}, actor="reader")
-            )["runs"]
-
-        self.assertEqual(1, len(everything), "a run another actor started is still in the Workspace")
-
-    def test_a_run_listed_for_the_Workspace_can_also_be_read(self) -> None:
-        """The pair that has to agree.
-
-        Widening the list without the reads makes every row a trap: a surface
-        shows a Run and then answers "not found" when someone opens it.
-        """
-
-        with AsgiHarness(self.app) as client:
-            started = self._start(client, key="theirs")
-            run_id = started["run_id"]
-            listed = payload_of(
-                tool(client, "list_runs", {"owner": "workspace"}, actor="reader")
-            )["runs"]
-            self.assertEqual([run_id], [run["run_id"] for run in listed])
-
-            for name in ("inspect_run", "get_run_steps", "get_run_edges", "get_run_graph"):
-                refused = tool(client, name, {"run_id": run_id}, actor="reader")
-                self.assertTrue(refused["result"]["isError"], name)
-                opened = tool(
-                    client, name, {"run_id": run_id, "owner": "workspace"}, actor="reader",
-                )
-                self.assertFalse(opened["result"]["isError"], name)
-
-    def test_an_unknown_owner_is_refused_rather_than_guessed(self) -> None:
-        with AsgiHarness(self.app) as client:
-            result = tool(client, "list_runs", {"owner": "everyone"}, actor="reader")
-
-        self.assertTrue(result["result"]["isError"])
-        self.assertIn("owner must be", payload_of(result)["error"])
-
-    def test_list_agents_reports_identity_and_nothing_a_caller_could_run(self) -> None:
+    def test_list_agents_reports_identity_and_attempt_totals_only(self) -> None:
         """The Agents surface, mirroring the HTTP catalog it stands in for.
 
-        Identity only. A caller that could read a Handler's config schema or its
+        Identity and aggregate outcomes only. A caller that could read a Handler's config schema or its
         required secrets from here would be reading the makings of a command
         this Runtime exists to keep it from composing.
         """
@@ -215,7 +202,12 @@ class ToolCallTests(ApiTestCase):
         self.assertIn("agents", payload)
         for agent in payload["agents"]:
             self.assertTrue(agent["name"].startswith("agent."))
-            self.assertEqual({"name", "version", "node_kinds"}, set(agent))
+            self.assertEqual(
+                {"name", "version", "node_kinds", "attempt_count", "failed_count"},
+                set(agent),
+            )
+            self.assertEqual(0, agent["attempt_count"])
+            self.assertEqual(0, agent["failed_count"])
 
     def test_list_agents_answers_none_rather_than_refusing_without_a_registry(self) -> None:
         """An unsealed registry is a startup state, not a caller's problem."""
@@ -252,12 +244,16 @@ class ToolCallTests(ApiTestCase):
             started = payload_of(result)
             self.assertEqual(started, result["result"]["structuredContent"])
             self.assertEqual("check the login flow", started["goal"])
+            # The request beside the label given to it. A goal is routinely a
+            # summary of the inputs rather than a copy of them, so a reader
+            # given only the goal cannot see what was actually asked for.
+            self.assertEqual({"value": 0}, started["inputs"])
             self.assertEqual(
                 {
-                    "goal", "artifact_count", "workflow_id", "workflow_version",
-                    "template_id", "agent_binding", "status", "revision",
-                    "result", "interrupts", "error", "created_at", "updated_at",
-                    "allowed_commands", "run_id",
+                    "goal", "inputs", "artifact_count", "workflow_id",
+                    "workflow_version", "template_id", "agent_binding", "status",
+                    "revision", "result", "interrupts", "error", "created_at",
+                    "updated_at", "allowed_commands", "run_id",
                 },
                 set(started),
             )
@@ -305,10 +301,56 @@ class ToolCallTests(ApiTestCase):
             self.assertTrue(result["result"]["isError"])
             self.assertIn("error", payload_of(result))
 
+    def test_a_workflow_id_without_its_kind_prefix_still_starts(self) -> None:
+        """The id an Agent passes back is the id it was shown, minus `workflow:`.
+
+        Every surface reports the namespaced form, and a model reads the kind
+        as a label rather than part of the value. This used to fail as a
+        missing *version*, which is the one thing that was not wrong.
+        """
+
+        with AsgiHarness(self.app) as client:
+            payload = payload_of(tool(
+                client, "start_run",
+                {"workflow_id": "linear", "input": {"value": 0},
+                 "idempotency_key": "bare-id"},
+                actor="writer",
+            ))
+        self.assertEqual("workflow:linear", payload["workflow_id"])
+
+    def test_an_unknown_workflow_is_not_reported_as_a_missing_version(self) -> None:
+        with AsgiHarness(self.app) as client:
+            result = tool(
+                client, "start_run",
+                {"workflow_id": "workflow:nope", "workflow_version": 2,
+                 "idempotency_key": "gone"},
+                actor="writer",
+            )
+        self.assertTrue(result["result"]["isError"])
+        self.assertIn("workflow not found", payload_of(result)["error"])
+
     def test_a_missing_argument_is_reported_to_the_caller(self) -> None:
         with AsgiHarness(self.app) as client:
             result = tool(client, "start_run", {"workflow_id": "workflow:linear"}, actor="writer")
             self.assertTrue(result["result"]["isError"])
+
+    def test_the_harness_profile_carries_what_the_Host_actually_calls(self) -> None:
+        """A tool in the profile is the Host's only way to reach the Runtime.
+
+        The Host's authoring loop parks on the queue with
+        `wait_authoring_request` and answers with `submit_authoring_response`.
+        Standing on that queue is what makes it a writer Orbit prefers over
+        forking an Agent CLI — being connected is not enough, waiting is what
+        counts. A profile that omits the wait leaves the Host permanently off
+        the queue, and the preference silently never fires.
+
+        The delegation tools that were already here are a different mechanism
+        with confusingly similar names: `claim_delegation` is about a person
+        confirming what an external Agent did, not about writing a Workflow.
+        """
+
+        for name in ("wait_authoring_request", "submit_authoring_response"):
+            self.assertIn(name, HARNESS_TOOL_NAMES, name)
 
     def test_unknown_tool_is_an_invalid_params_error(self) -> None:
         with AsgiHarness(self.app) as client:
@@ -849,7 +891,7 @@ class StdioTransportTests(ApiTestCase):
 
         self.assertEqual(2, len(responses))
         self.assertEqual("orbit", responses[0]["result"]["serverInfo"]["name"])
-        self.assertEqual(27, len(responses[1]["result"]["tools"]))
+        self.assertEqual(28, len(responses[1]["result"]["tools"]))
 
     def test_a_notification_produces_no_line_at_all(self) -> None:
         """There is no 202 on this transport; silence is the whole answer."""
@@ -1011,3 +1053,38 @@ class McpSessionEndpointTests(ApiTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WorkspaceIsTheBoundaryTests(ApiTestCase):
+    """One rule for visibility, and both transports read it from one place.
+
+    They disagreed for as long as both existed: `/mcp` offered `owner` and
+    `/api/v1` did not, so what had happened in a Workspace depended on which
+    door you came through.
+    """
+
+    def test_the_choice_is_gone_from_the_tool_surface(self) -> None:
+        with AsgiHarness(self.app) as client:
+            tools = rpc(client, "tools/list", actor="reader").json()["result"]["tools"]
+        offered = [
+            tool["name"] for tool in tools
+            if "owner" in (tool["inputSchema"].get("properties") or {})
+        ]
+        self.assertEqual(
+            [], offered,
+            "a parameter that changes nothing reads as a control somebody relies on",
+        )
+
+    def test_both_transports_answer_from_the_same_rule(self) -> None:
+        import inspect
+
+        from orbit.web import api_v1, mcp, run_visibility
+
+        self.assertIsNone(run_visibility.reading_actor("anybody"))
+        # Read from the shared module rather than each deciding for itself,
+        # which is the arrangement that let them drift in the first place.
+        for module in (mcp, api_v1.langgraph_runs):
+            source = inspect.getsource(module)
+            self.assertIn("run_visibility import reading_actor", source, module.__name__)
+            self.assertNotIn("def reading_actor", source, module.__name__)
+            self.assertNotIn("def reading_owner", source, module.__name__)
