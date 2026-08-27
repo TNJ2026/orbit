@@ -9,6 +9,10 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 BUNDLE = ROOT / "integrations" / "deepseek-harness"
+# The host-agnostic half moved out of the integration and into a package two
+# integrations share. These checks are about that code's behaviour, not about
+# where it sits, so they follow it rather than being deleted with the path.
+CORE = BUNDLE.parents[1] / "integration-core"
 
 
 class DeepSeekHarnessBundleTests(unittest.TestCase):
@@ -27,7 +31,7 @@ class DeepSeekHarnessBundleTests(unittest.TestCase):
         self.assertEqual("orbit", plugin["id"])
 
     def test_host_sources_include_gateway_and_remote_contract(self) -> None:
-        gateway = (BUNDLE / "src" / "gateway.ts").read_text(encoding="utf-8")
+        gateway = (CORE / "src" / "gateway.ts").read_text(encoding="utf-8")
         remote = (BUNDLE / "src" / "index.ts").read_text(encoding="utf-8")
         self.assertIn("'runtimes', '--json'", gateway)
         self.assertIn("entry.project_root === workspaceRoot", gateway)
@@ -45,7 +49,7 @@ class DeepSeekHarnessBundleTests(unittest.TestCase):
         # and matches the command against what Orbit advertises at the exact
         # revision the caller was reading. It now lives in one shared helper
         # rather than being spelled twice.
-        commands = (BUNDLE / "src" / "commands.ts").read_text(encoding="utf-8")
+        commands = (CORE / "src" / "commands.ts").read_text(encoding="utf-8")
         self.assertIn("allowed_commands.find", commands)
         self.assertIn("item.expected_version === expectedRevision", commands)
         self.assertEqual(2, remote.count("advertisedAt("))
@@ -88,10 +92,10 @@ class DeepSeekHarnessBundleTests(unittest.TestCase):
 
         manifest = json.loads((BUNDLE / "package.json").read_text(encoding="utf-8"))
         self.assertIn("lib/**/*.js", manifest["files"])
-        bridge = (BUNDLE / "src" / "session-bridge.ts").read_text(encoding="utf-8")
+        bridge = (CORE / "src" / "session-bridge.ts").read_text(encoding="utf-8")
         self.assertIn("list_runtime_events", bridge)
         self.assertIn("sourcePosition", bridge)
-        self.assertIn("orbit/run-started", (BUNDLE / "src" / "types.ts").read_text(encoding="utf-8"))
+        self.assertIn("orbit/run-started", (CORE / "src" / "types.ts").read_text(encoding="utf-8"))
         self.assertFalse((BUNDLE / "src" / "run-card.ts").exists())
 
     def test_the_panel_stops_where_orbits_own_UI_begins(self) -> None:
@@ -171,7 +175,7 @@ class DeepSeekHarnessBundleTests(unittest.TestCase):
         """
 
         remote = (BUNDLE / "src" / "index.ts").read_text(encoding="utf-8")
-        gateway = (BUNDLE / "src" / "gateway.ts").read_text(encoding="utf-8")
+        gateway = (CORE / "src" / "gateway.ts").read_text(encoding="utf-8")
         for method in (
             "listWorkflows", "listRuns", "generateWorkflow", "modifyWorkflow",
             "getAuthoringJob", "importArtifact", "getDiagnostics", "getRuntimeUi",

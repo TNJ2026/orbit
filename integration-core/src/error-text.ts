@@ -11,11 +11,53 @@
  * get help with, and the classification is a guess that can be wrong.
  */
 
-import type { OrbitLocaleKey } from './locales.ts'
+/**
+ * Everything that can be said to have gone wrong.
+ *
+ * The vocabulary lives here rather than in a host's dictionary because it is
+ * decided here: the table below is what turns a raw failure into one of these,
+ * and a host that adds a key nothing classifies has written a sentence nobody
+ * will ever see. A host supplies the wording — `errNoRuntime` reads differently
+ * in a panel and in a terminal — and must supply it for every key.
+ */
+export const ORBIT_ERROR_KEYS = [
+  'errAborted',
+  'errArtifactTooLarge',
+  'errAuthoringActive',
+  'errDiscoveryFailed',
+  'errGoalActive',
+  'errHostGone',
+  'errImageOnly',
+  'errNoAgent',
+  'errNoAnswer',
+  'errNoRuntime',
+  'errNoSession',
+  'errNoWorkspace',
+  'errNotAllowed',
+  'errPromptLength',
+  'errProtocol',
+  'errRequestTooLarge',
+  'errRunElsewhere',
+  'errRunGone',
+  'errRunMoved',
+  'errRuntimeAddress',
+  'errRuntimeConflict',
+  'errStartFailed',
+  'errStopRefused',
+  'errTimeout',
+  'errUnknown',
+  'errUnreachable',
+  'errVersionMismatch',
+  'errWorkflowDeleted',
+  'errWorkflowGone',
+  'errWorkspaceMismatch',
+] as const
+
+export type OrbitErrorKey = (typeof ORBIT_ERROR_KEYS)[number]
 
 export interface PanelError {
   /** The sentence to show. */
-  readonly key: OrbitLocaleKey
+  readonly key: OrbitErrorKey
   /** What it was that failed, when the sentence has a place for it. */
   readonly values?: Record<string, string | number>
   /** The original text, for a tooltip and for quoting into a bug report. */
@@ -25,7 +67,7 @@ export interface PanelError {
 /* Matched in order, because these overlap: a stopped Runtime answers a tool
    call with a transport failure, and a workflow that was deleted is also a
    workflow that is not found. The more specific reading goes first. */
-const READINGS: readonly (readonly [RegExp, OrbitLocaleKey])[] = [
+const READINGS: readonly (readonly [RegExp, OrbitErrorKey])[] = [
   // The Runtime is not there. Nothing else can be true at the same time, and
   // it is the one a person can fix by opening the panel again.
   [/No independent Orbit Runtime is serving/i, 'errNoRuntime'],
@@ -50,6 +92,17 @@ const READINGS: readonly (readonly [RegExp, OrbitLocaleKey])[] = [
   // It is there and did not answer in time, or did not answer at all.
   [/timed out/i, 'errTimeout'],
   [/transport failed|MCP HTTP|HTTP 5\d\d|failed with HTTP/i, 'errUnreachable'],
+
+  // The host this surface lives in is gone — not Orbit, the thing that draws
+  // the panel. Below the readings above on purpose: `Orbit MCP transport
+  // failed: fetch failed` is a browser's network wording wrapped around a
+  // fact about Orbit, and it is Orbit that is unreachable there. What is left
+  // by the time it reaches here names nothing — a bare `Failed to fetch`, or
+  // the 404 a plugin route answers with when the plugin did not load — and
+  // that is the panel's own server having stopped. Both used to fall through
+  // to "something went wrong" while the reader looked at a dead page.
+  [/Failed to fetch|fetch failed|NetworkError|Load failed|ECONNREFUSED|HTTP 40[04]/i,
+    'errHostGone'],
 
   // Nothing is wrong with Orbit; the panel has no Session or no project.
   // `cwd` first: "requires the Harness Session to have a Workspace cwd" is
@@ -83,7 +136,11 @@ const READINGS: readonly (readonly [RegExp, OrbitLocaleKey])[] = [
   [/supports images only/i, 'errImageOnly'],
 
   // Nobody did anything wrong and there is nothing to retry.
-  [/request aborted/i, 'errAborted'],
+  // `AbortError: This operation was aborted` is what the platform says, and it
+  // says nothing about who aborted or why. Read as a cancellation because that
+  // is what an abort nobody labelled is: code that aborts on a deadline knows
+  // it did, and says so in words of its own before this is reached.
+  [/request aborted|operation was aborted|AbortError/i, 'errAborted'],
   [/produced no answer to submit/i, 'errNoAnswer'],
 
   // Last, because it is the widest: something arrived that could not be read.

@@ -5,14 +5,14 @@
  * how to stop asking when none is. React only renders the answer.
  */
 
-import type { OutputChunk, RunDto, StepSummary } from '../types.js'
-import { isLive, labelOf } from '../run-progress.ts'
+import type { OutputChunk, RunDto, StepSummary } from './types.js'
+import { isLive, labelOf } from './run-progress.js'
 
 // Re-exported rather than re-implemented: the Host decides which Runs to read
 // steps for using the same predicate the panel sorts and polls by, and a second
 // list of terminal statuses is a second answer waiting to drift.
 export { isLive }
-export { goalRuns, progressOf, type RunProgress } from '../run-progress.ts'
+export { goalRuns, progressOf, type RunProgress } from './run-progress.js'
 
 /** Cadence while a Run is moving. */
 export const ORBIT_POLL_MS = 2_000
@@ -237,28 +237,6 @@ export function artifactHref(sessionId: string, artifactId: string): string {
 export function artifactLabel(artifactId: string): string {
   const bare = artifactId.replace(/^langgraph_artifact:/, '')
   return bare.length > 12 ? `${bare.slice(0, 12)}…` : bare
-}
-
-/** Past this a Workflow's name stops being a chip and starts being a sentence
- *  sitting in the middle of the draft somebody is still writing. */
-export const REFERENCE_LABEL_MAX = 20
-
-/**
- * The name a Workflow reference is drawn under, shortened to fit a chip.
- *
- * Only what is drawn. The same name goes to the model in full through the
- * codec's `serialize`, and to the clipboard in full through `clipboardText` —
- * a chip is a thing a reader looks at, and shortening what gets *sent* would
- * hand the model a Workflow name that no longer names the Workflow.
- *
- * Counted in code points rather than UTF-16 units: `slice` on a string with an
- * emoji in it can cut between the halves of a surrogate pair and end the chip
- * with a replacement character.
- */
-export function referenceLabel(name: string): string {
-  const points = [...name]
-  if (points.length <= REFERENCE_LABEL_MAX) return name
-  return `${points.slice(0, REFERENCE_LABEL_MAX).join('')}…`
 }
 
 /** How soon to ask again, given what the last answer contained. */

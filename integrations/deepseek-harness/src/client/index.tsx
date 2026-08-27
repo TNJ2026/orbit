@@ -18,8 +18,8 @@ import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import { OrbitPanel } from './OrbitPanel.tsx'
 import { ORBIT_LOCALE_NAMESPACE, en, zh, type OrbitLocaleKey } from './locales.ts'
-import { panelError } from './error-text.ts'
-import { referenceLabel } from './orbit-model.ts'
+import { panelError } from '@orbit-runtime/integration-core'
+import { caretToEnd } from './composer-caret.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
@@ -58,15 +58,18 @@ function registerOrbitSlashSource(ctx: ClientContext, t: Translate): void {
       token === `/${PANEL_COMMAND}` ? { claim: claim() } : undefined,
     matchEnter: async (_session: unknown, line: string) =>
       new RegExp(`^/${PANEL_COMMAND}(?:\\s|$)`, 'u').test(line.trim()) ? { claim: claim() } : undefined,
-    // Required of any source that produces insert outcomes. A throw here blocks
-    // the send rather than degrading to the clipboard text, so both projections
-    // answer for an id they have never seen.
+    // Required of any source that produces insert outcomes. A throw here
+    // blocks the send rather than degrading to the clipboard text, so both
+    // projections must answer for any id at all.
+    //
+    // Nothing mints an Orbit reference now that the Workflow goes into the
+    // draft as text, so in practice neither of these is called. They stay
+    // because the contract is about what a source must be able to answer, not
+    // about what it happens to produce today — and answering from the id is
+    // the honest answer once there is no table of names to consult.
     codec: {
-      clipboardText: (ref: string) => `「${namesById.get(ref) ?? ref}」`,
-      serialize: async (ref: string) => {
-        const name = namesById.get(ref)
-        return name === undefined ? ref : `${ref}（${name}）`
-      },
+      clipboardText: (ref: string) => `${MARK_OPEN}${ref}${MARK_CLOSE}`,
+      serialize: async (ref: string) => ref,
     },
   }), 'orbit: slash command folding the panel')
 }
@@ -87,13 +90,14 @@ function registerGenerateSlashSource(ctx: ClientContext, t: Translate): void {
     submit: async (args: string): Promise<SubmitResult> => {
       const prompt = args.trim()
       if (!prompt) return { kind: 'error', text: t('generateUsage') }
+      // The Workflows tab, because that is where the job appears and where the
+      // Workflow it publishes will land. Before the call: writing one takes a
+      // while, and the panel is the only place that says it started.
+      showOrbitPanel('workflows')
       try {
         await hostCall<unknown>(
           'generateWorkflowForSession', [session.sessionId, prompt], new AbortController().signal,
         )
-        window.dispatchEvent(new CustomEvent('orbit:show-panel', {
-          detail: { tab: 'workflows' },
-        }))
         return { kind: 'success' }
       } catch (reason) {
         // The same reading the panel gives, because it is the same failure
@@ -120,26 +124,37 @@ function registerGenerateSlashSource(ctx: ClientContext, t: Translate): void {
         ? { claim: claim(session) } : undefined,
   }), 'orbit: slash command generating a workflow')
 }
-interface ReferenceInsert {
-  readonly source: string; readonly ref: string
-  readonly label: string; readonly clipboardText: string
-}
 interface SessionInput {
   setDraft(text: string): void
-  insertReference(ref: ReferenceInsert, span: { start: number; end: number; draftRev: number }): boolean
   readonly state: { getSnapshot(): { draft: string; draftRev: number } }
 }
 interface Conversation { readonly input: { for(actx: unknown): SessionInput } }
 interface Sessions { scope(id: string): unknown }
 
 /**
- * Names for the ids a reference carries, learned when the popup lists them.
+ * Bring the panel out, wherever it was put.
  *
- * The codec is handed a `ref` and nothing else, and a `ref` is the id — which
- * is the right thing to send the model and the wrong thing to show a person.
- * Remembering the pair at list time is what lets the chip be both.
+ * Distinct from `orbit:toggle-panel`, which flips: a command that toggles is a
+ * command that hides the panel for anyone who already had it open. This one
+ * only ever shows, so running an Orbit command twice is not a way to lose
+ * sight of what it did.
+ *
+ * The panel is where an Orbit command's result actually appears — a Run's
+ * steps, a Workflow being written — so a command that starts work behind a
+ * hidden panel has reported nothing. Called before the work rather than after
+ * it, so a failure is met by an open panel too.
  */
-const namesById = new Map<string, string>()
+function showOrbitPanel(tab?: 'workflows'): void {
+  window.dispatchEvent(new CustomEvent('orbit:show-panel', {
+    detail: tab === undefined ? {} : { tab },
+  }))
+}
+
+/* The Workflow's name is written into the sentence rather than chipped, so
+   something has to show where it starts and ends. Corner brackets, because the
+   sentence around them is Chinese and a name may contain spaces or a comma. */
+const MARK_OPEN = '「'
+const MARK_CLOSE = '」'
 interface CommandUi {
   register(contribution: {
     name: string
@@ -183,6 +198,11 @@ function registerWorkflowPopup(ctx: ClientContext, t: Translate): void {
       // Loaded once per open; the shell filters these as the reader types, so
       // the search is its own and matches on the label it is showing.
       options: async (session, signal) => {
+        // No tab: the popup is already showing the list, and taking over the
+        // panel's tab as well would move something the person did not ask to
+        // have moved. What they need is for the panel to be on screen when the
+        // Run they are about to describe starts reporting.
+        showOrbitPanel()
         // `startIfMissing`, because typing the command is the asking. The
         // panel starts a Runtime when it is expanded and `/orbit-generate`
         // starts one to write into; this list was the one entry point that
@@ -196,15 +216,15 @@ function registerWorkflowPopup(ctx: ClientContext, t: Translate): void {
         const state = await hostCall<{ workflows: readonly {
           workflow_id: string; name: string; latest_version: number
         }[] }>('getPanelState', [session.sessionId, false, true], signal)
-        return (state.workflows ?? []).map(item => {
+        const options = (state.workflows ?? []).map(item => {
           const label = item.name || item.workflow_id
-          namesById.set(item.workflow_id, label)
           return {
             id: item.workflow_id,
             label,
             detail: `${item.workflow_id}@${String(item.latest_version)}`,
           }
         })
+        return options
       },
       // Writes the request and stops. Starting here would be a Run the Agent
       // knows nothing about — unable to report on it or take the next step from
@@ -216,19 +236,26 @@ function registerWorkflowPopup(ctx: ClientContext, t: Translate): void {
         if (!conversation || actx === undefined) return
         const input = conversation.input.for(actx)
         const head = t('runHead')
-        // The sentence first, then the Workflow into the gap it left. A
-        // reference replaces a span, so there has to be a span to replace.
-        input.setDraft(`${head}${t('runTail')}`)
-        // The chip is shortened; the clipboard is not. What a person copies
-        // out of the draft should be the Workflow's name, not the part of it
-        // that happened to fit.
-        const inserted = input.insertReference({
-          source: 'orbit', ref: option.id, label: referenceLabel(option.label),
-          clipboardText: `「${option.label}」`,
-        }, { start: head.length, end: head.length, draftRev: input.state.getSnapshot().draftRev })
-        // A refused CAS is silent by contract, and a sentence with a hole in it
-        // is worse than a plain one.
-        if (!inserted) input.setDraft(`${head}「${referenceLabel(option.label)}」${t('runTail')}`)
+        // Plain text, not a reference chip.
+        //
+        // The composer draws in two layers: the visible text is a `.backdrop`
+        // element, and the `<textarea>` over it has transparent text and a
+        // visible caret. They line up only while both lay out the same string,
+        // and a chip is one `￼` cell in the backdrop no matter how long the
+        // name is — which is why a chip squeezes the name to about six
+        // characters, and why widening the chip moved the visible text 86px
+        // right while the caret, laid out from the textarea's own single `￼`,
+        // did not follow. Measured, both ways.
+        //
+        // Written as bracketed text there is no `￼`: both layers lay out the
+        // same characters, the caret lands where the text ends, and the name
+        // is shown whole at full size. What it costs is the chip's atomicity —
+        // this can be edited character by character — and the codec's
+        // `serialize`, which only fires for minted references. The Workflow's
+        // identity survives because the model is already told the catalog:
+        // `- workflow:wf_… — name (input: …)` sits in its system prompt.
+        input.setDraft(`${head}${MARK_OPEN}${option.label}${MARK_CLOSE}${t('runTail')}`)
+        caretToEnd(input.state.getSnapshot().draft)
       },
     },
   }), 'orbit: workflow popup')

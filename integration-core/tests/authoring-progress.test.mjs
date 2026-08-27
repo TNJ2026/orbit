@@ -3,7 +3,7 @@ import test from 'node:test'
 
 import {
   AUTHORING_STAGES, authoringProgress, isProgressMarker,
-} from '../src/authoring-progress.ts'
+} from '../lib/authoring-progress.js'
 
 const mark = (stage, attempt = 1, max = 3) => ({
   text: `\x1eorbit-progress:${JSON.stringify({ stage, attempt, max_attempts: max })}`,

@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
-import { panelError } from '../src/client/error-text.ts'
+import { ORBIT_ERROR_KEYS, panelError } from '../lib/error-text.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 
@@ -79,14 +79,35 @@ test('the original text is always kept, whatever shape it arrived in', () => {
   assert.equal(panelError(null).detail, 'null')
 })
 
-test('every reading it can return is a sentence both locales carry', async () => {
-  const source = await readFile(join(here, '..', 'src', 'client', 'error-text.ts'), 'utf8')
-  const locales = await readFile(join(here, '..', 'src', 'client', 'locales.ts'), 'utf8')
-  const keys = [...source.matchAll(/'(err[A-Za-z]+)'/g)].map(([, key]) => key)
-  assert.ok(keys.length >= 10, `expected the readings, found ${String(keys.length)}`)
-  const [english, chinese] = locales.split('export const zh')
-  for (const key of new Set(keys)) {
-    assert.ok(english.includes(`${key}:`), `en is missing ${key}`)
-    assert.ok(chinese.includes(`${key}:`), `zh is missing ${key}`)
+/**
+ * The vocabulary is the core's, the wording is the host's.
+ *
+ * `ORBIT_ERROR_KEYS` is what a host must be able to say. It used to be derived
+ * from one host's dictionary — `keyof typeof en` — which made the set of
+ * things that can go wrong a property of the panel's copy. It is not: it is
+ * decided by the table below, and a second host has to answer for the same
+ * failures in its own words.
+ *
+ * So the two are checked against each other here, and each host checks its own
+ * dictionary covers them.
+ */
+test('the vocabulary and the readings describe the same failures', async () => {
+  const source = await readFile(join(here, '..', 'src', 'error-text.ts'), 'utf8')
+  const readings = new Set([...source.matchAll(/\[\/.+?\/i,\s*'(err[A-Za-z]+)'\]/gs)]
+    .map(([, key]) => key))
+  assert.ok(readings.size >= 20, `expected the readings, found ${String(readings.size)}`)
+
+  const declared = new Set(ORBIT_ERROR_KEYS)
+  // Everything the table can produce is declared, or a host cannot know to
+  // write a sentence for it and the reader gets a key.
+  for (const key of readings) assert.ok(declared.has(key), `${key} is not declared`)
+  // And nothing is declared that the table can never produce, or hosts are
+  // asked to translate failures that cannot happen. `errUnknown` is the one
+  // exception: it is the fallback, reached by matching nothing.
+  for (const key of declared) {
+    if (key === 'errUnknown') continue
+    assert.ok(readings.has(key), `${key} is declared but nothing classifies to it`)
   }
+  assert.ok(declared.has('errUnknown'))
 })
+

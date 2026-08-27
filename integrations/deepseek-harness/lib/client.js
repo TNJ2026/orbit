@@ -7,6 +7,472 @@ window.__ModuleLoader__.load({
 		let react = require("react");
 		let _deepseek_ai_dsh_client_ui_primitives = require("@deepseek-ai/dsh-client-ui-primitives");
 		let react_jsx_runtime = require("react/jsx-runtime");
+		//#region ../../integration-core/lib/authoring-progress.js
+		/** How far a Workflow being written has got, read from what it printed.
+		*
+		* Authoring has stages the way a Run has steps — it drafts, it compiles what
+		* came back, it goes round again when the compiler refuses, and it publishes —
+		* and the Runtime has always said so: `AuthoringJobService` writes a marker
+		* into the job's console at each turn. Nothing read them. The panel matched
+		* them only to drop them, so a job that spent a minute on its second attempt
+		* showed one unchanging line, and the one question a person watching has —
+		* *is it stuck or is it working* — had no answer on the page.
+		*
+		* A marker is a whole chunk whose text is the sentinel followed by JSON, so
+		* this reads chunks rather than scanning text: an Agent that prints the
+		* sentinel itself is printing inside a chunk of its own output, not writing a
+		* marker, and must not be able to move the ladder.
+		*/
+		const SENTINEL = "orbit-progress:";
+		/** The three things authoring does. Repairing is not among them — see below. */
+		const AUTHORING_STAGES = [
+			"generating",
+			"validating",
+			"publishing"
+		];
+		const LANDS_ON = {
+			generating: 0,
+			repairing: 0,
+			validating: 1,
+			validated: 2,
+			publishing: 2
+		};
+		/** Whether this chunk is a progress marker rather than Agent output. */
+		function isProgressMarker(chunk) {
+			return chunk.text.startsWith(SENTINEL);
+		}
+		function marker(chunk) {
+			if (!isProgressMarker(chunk)) return null;
+			try {
+				const value = JSON.parse(chunk.text.slice(16));
+				const stage = typeof value.stage === "string" ? value.stage : "";
+				if (!(stage in LANDS_ON)) return null;
+				return {
+					stage,
+					attempt: typeof value.attempt === "number" ? value.attempt : 0,
+					maxAttempts: typeof value.max_attempts === "number" ? value.max_attempts : 0
+				};
+			} catch {
+				return null;
+			}
+		}
+		/**
+		* The ladder, from the markers a job has printed and the state it is in.
+		*
+		* The job's own status has the last word on the stages: a job that failed
+		* failed at whatever rung it had reached, and one that is done reached all of
+		* them — the markers stop when the process does, so a job killed mid-stage
+		* would otherwise show that stage running for as long as anyone looked at it.
+		*/
+		function authoringProgress(chunks, jobStatus) {
+			let reached = -1;
+			let attempt = 0;
+			let maxAttempts = 0;
+			for (const chunk of chunks) {
+				const found = marker(chunk);
+				if (found === null) continue;
+				reached = LANDS_ON[found.stage] ?? reached;
+				if (found.attempt) attempt = found.attempt;
+				if (found.maxAttempts) maxAttempts = found.maxAttempts;
+			}
+			const settled = jobStatus === "done" || jobStatus === "failed" || jobStatus === "cancelled";
+			return {
+				stages: AUTHORING_STAGES.map((stage, index) => {
+					if (jobStatus === "done") return {
+						stage,
+						status: "succeeded"
+					};
+					if (index < reached) return {
+						stage,
+						status: "succeeded"
+					};
+					if (index > reached) return {
+						stage,
+						status: "not_reached"
+					};
+					return {
+						stage,
+						status: settled ? "failed" : "running"
+					};
+				}),
+				attempt,
+				maxAttempts
+			};
+		}
+		//#endregion
+		//#region ../../integration-core/lib/error-text.js
+		const READINGS = [
+			[/No independent Orbit Runtime is serving/i, "errNoRuntime"],
+			[/auto-start (failed|timed out)/i, "errStartFailed"],
+			[/Runtime discovery (failed|returned invalid JSON|must return an array)/i, "errDiscoveryFailed"],
+			[/Multiple Orbit Runtimes claim/i, "errRuntimeConflict"],
+			[/not reachable over HTTP MCP|published no HTTP address|did not publish a browser address/i, "errRuntimeAddress"],
+			[/incompatible Orbit integration protocol/i, "errVersionMismatch"],
+			[/only a Runtime operator|valid actor credentials|HTTP 40[13]/i, "errNotAllowed"],
+			[/refused to stop/i, "errStopRefused"],
+			[/timed out/i, "errTimeout"],
+			[/transport failed|MCP HTTP|HTTP 5\d\d|failed with HTTP/i, "errUnreachable"],
+			[/Failed to fetch|fetch failed|NetworkError|Load failed|ECONNREFUSED|HTTP 40[04]/i, "errHostGone"],
+			[/Workspace cwd/i, "errNoWorkspace"],
+			[/requires? a live Harness|invalid Harness session id/i, "errNoSession"],
+			[/Workspace does not match the Harness Session|has not registered/i, "errWorkspaceMismatch"],
+			[/workflow was deleted/i, "errWorkflowDeleted"],
+			[/workflow (version )?not found/i, "errWorkflowGone"],
+			[/no longer (offers|advertis(es|ed))/i, "errRunMoved"],
+			[/run not found|LangGraph run not found/i, "errRunGone"],
+			[/ActiveGoalExists|active_goal_exists/i, "errGoalActive"],
+			[/workflow_generation_already_active/i, "errAuthoringActive"],
+			[/too large for MCP content proxy/i, "errArtifactTooLarge"],
+			[/no live Agent for Session|exposes no Agent registry/i, "errNoAgent"],
+			[/was started elsewhere/i, "errRunElsewhere"],
+			[/exceeds 256 KiB/i, "errRequestTooLarge"],
+			[/must be 1-20000 characters/i, "errPromptLength"],
+			[/supports images only/i, "errImageOnly"],
+			[/request aborted|operation was aborted|AbortError/i, "errAborted"],
+			[/produced no answer to submit/i, "errNoAnswer"],
+			[/invalid Orbit DTO|not canonical base64|arguments must be an object/i, "errProtocol"],
+			[/Unknown Orbit client action|requires action and args|Workflow id is required/i, "errProtocol"],
+			[/invalid authoring output (cursor|address)|authoring output returned invalid JSON/i, "errProtocol"],
+			[/returned an invalid authoring output address/i, "errProtocol"]
+		];
+		/**
+		* Read one failure into something worth showing.
+		*
+		* An unrecognised failure is not dressed up as a known one: it says that
+		* something went wrong and carries its own text, which is honest and still
+		* lets the reader copy it. Guessing here would be worse than saying nothing —
+		* a wrong diagnosis sends somebody to fix the wrong thing.
+		*/
+		function panelError(reason) {
+			const detail = textOf(reason);
+			for (const [pattern, key] of READINGS) if (pattern.test(detail)) return {
+				key,
+				detail
+			};
+			return {
+				key: "errUnknown",
+				detail
+			};
+		}
+		function textOf(reason) {
+			if (typeof reason === "string") return reason;
+			if (reason instanceof Error) return reason.message;
+			if (reason !== null && typeof reason === "object") {
+				const held = reason;
+				for (const value of [held.error, held.message]) if (typeof value === "string" && value) return value;
+			}
+			return String(reason);
+		}
+		//#endregion
+		//#region ../../integration-core/lib/run-progress.js
+		/** How far a Run has got, derived once for everywhere that says it.
+		*
+		* The panel answers "where is this now" in three places — the Host, when it
+		* decides which Runs are worth reading steps for; the list line under a Run;
+		* the bar above its steps — and two of those disagreeing is worse than either
+		* being absent, because a reader has no way to tell which one lied. So the
+		* vocabulary of statuses lives here, once, beside the arithmetic that reads it.
+		*/
+		/** Run statuses there is no coming back from. */
+		const TERMINAL = /* @__PURE__ */ new Set([
+			"completed",
+			"failed",
+			"cancelled",
+			"unknown"
+		]);
+		/** Whether a Run could still do something. */
+		function isLive(status) {
+			return !TERMINAL.has(status);
+		}
+		/** The step's authored name, or the node id it was authored without one. */
+		function labelOf(step) {
+			return typeof step.label === "string" && step.label ? step.label : step.node_id;
+		}
+		/**
+		* The Runs the Goal page shows: everything still moving, or the one that
+		* moved last when nothing is.
+		*
+		* A Goal reaching its end is the moment its result matters most, and dropping
+		* it from the page right then answered "what happened" with an empty page —
+		* the reader watched four steps go green and was left looking at "nothing is
+		* running here". So a finished Goal stays, with its steps and its outcome,
+		* until the next one starts and takes the page.
+		*
+		* Shared because the Host reads steps for exactly the Runs this page draws. A
+		* Host that kept its own idea of that would go on serving a settled Run's last
+		* *running* step forever, since the step read stops with the Run.
+		*/
+		function goalRuns(rows) {
+			const live = rows.filter((row) => row.live);
+			if (live.length) return live;
+			const latest = rows.reduce((best, row) => best === void 0 || row.updatedAt > best.updatedAt ? row : best, void 0);
+			return latest === void 0 ? [] : [latest];
+		}
+		//#endregion
+		//#region ../../integration-core/lib/orbit-model.js
+		/** What the panel shows, and how often it asks.
+		*
+		* Separated from the view because the interesting decisions here are not
+		* visual: which Runs count as live, how fast to ask while any of them is, and
+		* how to stop asking when none is. React only renders the answer.
+		*/
+		/** Cadence while a Run is moving. */
+		const ORBIT_POLL_MS = 2e3;
+		/** Cadence while nothing is. A resident panel costs nothing when idle. */
+		const ORBIT_IDLE_MS = 15e3;
+		/** Read the interrupts a Run advertises, keeping only the ones answerable here.
+		*
+		* An interrupt with no output port is a question this panel cannot form an
+		* answer to — the reply would have to name a port, and guessing one produces a
+		* node that "returned undeclared outputs" minutes later. */
+		function toInterrupts(items) {
+			const found = [];
+			for (const item of items ?? []) {
+				if (item === null || typeof item !== "object") continue;
+				const held = item;
+				const value = held.value;
+				if (value === null || typeof value !== "object") continue;
+				const asked = value;
+				const first = (Array.isArray(asked.output_ports) ? asked.output_ports : [])[0];
+				const config = asked.config ?? {};
+				if (typeof held.id !== "string" || typeof first?.id !== "string") continue;
+				found.push({
+					id: held.id,
+					nodeId: typeof asked.node_id === "string" ? asked.node_id : "",
+					taskKind: typeof config.task_kind === "string" ? config.task_kind : "",
+					outputPort: first.id
+				});
+			}
+			return found;
+		}
+		/**
+		* The answer to a yes/no question, in the shape the next step will read.
+		*
+		* A Mapping handed to `resume` *is* the node's outputs, so the port has to be
+		* named — replying with a bare `{decision: …}` would look for a port called
+		* `decision` and fail as a node returning something it never declared. And
+		* `decision` is the field the branches test: `source.result.decision == …` is
+		* how every approval workflow here routes.
+		*
+		* Which is why this is built rather than typed. A person asked to approve
+		* something was being handed a text box and expected to know both of those
+		* facts — and to spell them without a typo, minutes after the question.
+		*/
+		function approvalValue(interrupt, decision) {
+			return { [interrupt.outputPort]: { decision } };
+		}
+		function toRow(run, workflowName) {
+			return {
+				runId: run.run_id,
+				goal: run.goal || run.run_id,
+				workflow: `${run.workflow_id}@${String(run.workflow_version)}`,
+				workflowName: workflowName || run.workflow_id,
+				status: run.status,
+				live: isLive(run.status),
+				revision: run.revision,
+				artifactCount: run.artifact_count,
+				updatedAt: run.updated_at,
+				prompt: promptText(run.inputs),
+				result: run.result,
+				...typeof run.error === "string" && run.error ? { error: run.error } : {},
+				commands: run.allowed_commands,
+				interrupts: toInterrupts(run.interrupts)
+			};
+		}
+		/**
+		* What a Run was asked to work on, as something a person can read.
+		*
+		* The same shape of question as `resultText` and answered the same way: a lone
+		* string input is the request, so it is shown as written; anything else is
+		* printed, because a workflow taking three inputs has no one of them that is
+		* "the prompt" and picking one would hide the other two.
+		*
+		* Not the goal. A goal is a label somebody put on the work — for a Run an
+		* Agent started it is usually a sentence about the request rather than the
+		* request — and a reader shown only the label cannot see what was asked.
+		*/
+		function promptText(inputs) {
+			if (inputs === null || typeof inputs !== "object" || Array.isArray(inputs)) return "";
+			const entries = Object.entries(inputs);
+			if (!entries.length) return "";
+			const [only] = entries;
+			if (entries.length === 1 && only !== void 0 && typeof only[1] === "string") return only[1];
+			try {
+				return JSON.stringify(inputs, null, 2) ?? "";
+			} catch {
+				return "";
+			}
+		}
+		/**
+		* What a Run produced, as something a person can read.
+		*
+		* A workflow's answer is the reason someone started it, and it arrives as
+		* whatever the terminal step emitted — most often a string, sometimes an
+		* object with one string in it, sometimes a document. A plain string is shown
+		* as it was written rather than as a quoted JSON scalar; a single-field object
+		* is unwrapped, because `{"translation": "…"}` is a container, not the answer.
+		* Anything else is printed, since guessing further would start hiding fields.
+		*/
+		function resultText(value) {
+			if (value === null || value === void 0) return "";
+			if (typeof value === "string") return value;
+			if (typeof value === "number" || typeof value === "boolean") return String(value);
+			if (typeof value === "object" && !Array.isArray(value)) {
+				const entries = Object.entries(value);
+				const [only] = entries;
+				if (entries.length === 1 && only !== void 0 && typeof only[1] === "string") return only[1];
+			}
+			try {
+				return JSON.stringify(value, null, 2) ?? "";
+			} catch {
+				return String(value);
+			}
+		}
+		/** What an Artifact id looks like wherever a result happens to carry one. */
+		const ARTIFACT = /^langgraph_artifact:[A-Za-z0-9]+$/;
+		/**
+		* Split a result into what a person can read and what they have to open.
+		*
+		* A workflow that writes a file answers `{"artifact_id":
+		* "langgraph_artifact:4c1e5281…"}`, and printing that put a 64-character hash
+		* on the page where the answer should have been — the one thing in the result
+		* that means nothing at all to a reader. It is a door, so it is drawn as one.
+		*
+		* The rest of the result still shows. A workflow that returns a summary *and*
+		* a file has both, and dropping either would be answering a different
+		* question than the one that was asked.
+		*/
+		function resultOutcome(value) {
+			const artifacts = [];
+			const remainder = strip(value, artifacts);
+			return {
+				artifacts,
+				text: remainder === void 0 ? "" : resultText(remainder)
+			};
+		}
+		/** The value with its Artifact references taken out, or undefined if that is
+		*  all it was. Containers left empty by the removal go too: `{"artifact_id":
+		*  …}` is a wrapper around a door, not an answer with a door in it. */
+		function strip(value, into) {
+			if (typeof value === "string") {
+				if (!ARTIFACT.test(value)) return value;
+				into.push(value);
+				return;
+			}
+			if (Array.isArray(value)) {
+				const kept = value.map((item) => strip(item, into)).filter((item) => item !== void 0);
+				return kept.length ? kept : void 0;
+			}
+			if (value !== null && typeof value === "object") {
+				const kept = {};
+				for (const [key, item] of Object.entries(value)) {
+					const left = strip(item, into);
+					if (left !== void 0) kept[key] = left;
+				}
+				return Object.keys(kept).length ? kept : void 0;
+			}
+			return value;
+		}
+		/**
+		* Where an Artifact can be opened: through this Host, as the Session that owns
+		* it.
+		*
+		* Not Orbit's own address for it. Artifacts belong to the actor that produced
+		* them, a browser reaching `/api/v1` on loopback is `local`, and a Run this
+		* panel started belongs to `harness:session:<id>` — so Orbit's link is a 404
+		* for every Artifact this Harness ever made, and so is Orbit's own UI. The
+		* Host holds the identity that can read it, and hands the bytes to the
+		* browser unchanged.
+		*
+		* Empty without a Session, which is what a reader gets instead of a link that
+		* goes nowhere.
+		*/
+		function artifactHref(sessionId, artifactId) {
+			if (!sessionId || !artifactId) return "";
+			return `/plugins/dsh-orbit/artifact?${new URLSearchParams({
+				session: sessionId,
+				id: artifactId
+			}).toString()}`;
+		}
+		/** The short name an Artifact is offered under: its id without the kind. */
+		function artifactLabel(artifactId) {
+			const bare = artifactId.replace(/^langgraph_artifact:/, "");
+			return bare.length > 12 ? `${bare.slice(0, 12)}…` : bare;
+		}
+		/** How soon to ask again, given what the last answer contained. */
+		function nextInterval(rows) {
+			return rows.some((row) => row.live) ? ORBIT_POLL_MS : ORBIT_IDLE_MS;
+		}
+		/** Newest first, with anything still running ahead of anything finished.
+		*
+		* A resident panel is read at a glance, and the glance is almost always about
+		* what is happening now — so recency alone would bury a running Run under a
+		* pile of Runs that already have their answer.
+		*/
+		function orderRows(rows) {
+			return [...rows].sort((a, b) => {
+				if (a.live !== b.live) return a.live ? -1 : 1;
+				return a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0;
+			});
+		}
+		/** A one-line count for the collapsed badge. */
+		function summarise(rows) {
+			return {
+				live: rows.filter((row) => row.live).length,
+				total: rows.length
+			};
+		}
+		/** The four states the shell's StateDot draws, from an Orbit status.
+		*
+		* `unknown` is amber rather than red on purpose: it is the outcome nobody has
+		* ruled on yet, and colouring it as a failure would answer a question the
+		* Runtime deliberately left open.
+		*/
+		function dotState(status) {
+			if (status === "completed") return "done";
+			if (status === "unknown" || status === "waiting") return "warning";
+			if (status === "failed" || status === "cancelled") return "error";
+			return "ongoing";
+		}
+		/** A step card uses a still dot: history records outcomes, not activity. */
+		function stepDotState(status) {
+			if (status === "succeeded") return "success";
+			if (status === "failed" || status === "cancelled") return "error";
+			if (status === "not_reached") return "skipped";
+			if (status === "unknown" || status === "waiting") return "warning";
+			return "ongoing";
+		}
+		function toStepRow(step) {
+			return {
+				nodeId: step.node_id,
+				label: labelOf(step),
+				status: step.status,
+				hasOutput: step.has_output === true,
+				needsPerson: step.resolution?.kind === "reconciliation_required" && step.reconciliation === void 0,
+				...step.resolution?.delegation_id ? { delegationId: step.resolution.delegation_id } : {}
+			};
+		}
+		/** Join an output page into displayable text, oldest chunk first. */
+		function outputText(chunks) {
+			return [...chunks].sort((a, b) => a.chunk_id - b.chunk_id).map((chunk) => chunk.text).join("");
+		}
+		/** Merge a new page into what is already shown without duplicating a chunk. */
+		function mergeChunks(previous, next) {
+			const byId = new Map(previous.map((chunk) => [chunk.chunk_id, chunk]));
+			for (const chunk of next) byId.set(chunk.chunk_id, chunk);
+			return [...byId.values()].sort((a, b) => a.chunk_id - b.chunk_id);
+		}
+		/** The revision a command may be issued at, or undefined if it may not be.
+		*
+		* Read from what the Run advertises rather than from what the panel last drew:
+		* a button offered for a command Orbit has since withdrawn is a button that
+		* fails, and one offered at a stale revision is worse — it succeeds against a
+		* Run the reader was not looking at.
+		*/
+		function commandRevision(row, command) {
+			return row.commands.find((item) => item.command === command)?.expected_version;
+		}
+		//#endregion
 		//#region \0dsh-css:/Users/cxd/develop/orbit/integrations/deepseek-harness/src/client/OrbitPanel.module.css.mjs
 		const css = ".JeOz9W_panel,.JeOz9W_panel *,.JeOz9W_panel :before,.JeOz9W_panel :after{box-sizing:border-box}.JeOz9W_panel{border:1px solid var(--dsw-alias-border-l4,#80808033);background:var(--dsw-alias-bg-layer-1,Canvas);color:var(--dsw-alias-label-primary);pointer-events:auto;border-radius:12px;flex-direction:column;display:flex;position:absolute;overflow:hidden;box-shadow:0 12px 40px #0000002e}.JeOz9W_bar{border-bottom:1px solid var(--dsw-alias-border-l2,#8080801f);background:var(--dsw-alias-bg-module-platform,#80808014);cursor:grab;user-select:none;align-items:center;gap:8px;padding:8px 10px 8px 12px;display:flex}.JeOz9W_bar:active{cursor:grabbing}.JeOz9W_title{font-size:13px;font-weight:600}.JeOz9W_count{color:var(--dsw-alias-label-tertiary);flex:1;font-size:12px}.JeOz9W_body{flex:1;min-height:0;overflow-y:auto}.JeOz9W_row{border-bottom:1px solid var(--dsw-alias-border-l2,#8080801f);grid-template-columns:8px 1fr auto;align-items:start;gap:8px;padding:10px 12px;display:grid}.JeOz9W_row:last-child{border-bottom:0}.JeOz9W_dot{border-radius:50%;width:8px;height:8px;margin-top:5px}.JeOz9W_live{background:var(--dsw-alias-state-business-primary,#679efe)}.JeOz9W_done{background:var(--dsw-alias-state-success-primary,#22c55e)}.JeOz9W_failed{background:var(--dsw-alias-state-error-primary,#f25a5a)}.JeOz9W_unknown{background:var(--dsw-alias-state-warn-primary,#f59e0b)}.JeOz9W_goal{-webkit-line-clamp:2;-webkit-box-orient:vertical;font-size:13px;line-height:1.4;display:-webkit-box;overflow:hidden}.JeOz9W_meta{color:var(--dsw-alias-label-tertiary);font-size:11px}.JeOz9W_status{color:var(--dsw-alias-label-secondary,GrayText);white-space:nowrap;margin-left:8px;font-size:11px}.JeOz9W_empty,.JeOz9W_error{color:var(--dsw-alias-label-tertiary);text-align:center;padding:20px 14px;font-size:12px}.JeOz9W_error{color:var(--dsw-alias-state-error-primary);text-align:left}.JeOz9W_connecting{color:var(--dsw-alias-label-secondary,GrayText);justify-content:center;align-items:center;gap:9px;padding:24px 14px;font-size:12px;display:flex}.JeOz9W_connectSpinner{border:2px solid var(--dsw-alias-border-l3,#80808029);border-top-color:var(--dsw-alias-state-business-primary,Highlight);border-radius:50%;width:14px;height:14px;animation:.7s linear infinite JeOz9W_orbit-spin}.JeOz9W_badge{border:1px solid var(--dsw-alias-border-l4,#80808033);background:var(--dsw-alias-bg-layer-1,Canvas);width:42px;height:42px;color:var(--dsw-alias-label-secondary);cursor:pointer;pointer-events:auto;border-radius:999px;place-items:center;margin-top:-21px;padding:0;display:grid;position:absolute;top:50%;right:18px;box-shadow:0 6px 20px #00000024}.JeOz9W_badge:hover{transform:translateY(-1px)}.JeOz9W_orbitMark{width:30px;height:30px}.JeOz9W_orbitBackground{fill:var(--dsw-alias-label-primary)}.JeOz9W_orbitRing{fill:none;stroke:var(--dsw-alias-bg-layer-1,Canvas);stroke-width:6px}.JeOz9W_orbitSatellite{fill:var(--dsw-alias-state-business-primary,Highlight)}.JeOz9W_resize{cursor:nwse-resize;width:14px;height:14px;position:absolute;inset:auto 0 0 auto}.JeOz9W_stepDisclosure{width:100%;min-width:0}.JeOz9W_stepRow{width:100%;min-width:0;height:32px;color:inherit;text-align:left;cursor:pointer;background:0 0;border:0;align-items:center;gap:8px;padding:4px 12px 4px 22px;font-size:12px;display:flex}.JeOz9W_stepRow:disabled{cursor:default}.JeOz9W_stepTitle{text-overflow:ellipsis;white-space:nowrap;flex:auto;min-width:0;overflow:hidden}.JeOz9W_stepChevron{color:var(--dsw-alias-label-tertiary,GrayText);flex:none;transition:transform .12s}.JeOz9W_stepChevronOpen{transform:rotate(180deg)}.JeOz9W_stepContent{padding:0 12px 4px 38px}.JeOz9W_stepDot{border-radius:50%;flex:none;width:8px;height:8px;display:block}.JeOz9W_stepDot_success{background:var(--dsw-alias-state-success-primary,#22c55e)}.JeOz9W_stepDot_error{background:var(--dsw-alias-state-error-primary,#f25a5a)}.JeOz9W_stepDot_skipped{background:var(--dsw-alias-label-tertiary,#adb2b8)}.JeOz9W_stepDot_warning{background:var(--dsw-alias-state-warn-primary,#f59e0b)}.JeOz9W_stepDot_ongoing{background:var(--dsw-alias-state-business-primary,#679efe)}.JeOz9W_attention{border-left:2px solid var(--dsw-alias-state-warn-primary,#f59e0b);color:var(--dsw-alias-label-secondary);margin:4px 0;padding:6px 8px;font-size:11px}.JeOz9W_actions{flex-wrap:wrap;align-items:center;gap:6px;margin:6px 0 8px;display:flex}.JeOz9W_runActions{justify-content:center;padding:0 12px}.JeOz9W_actions input{border:1px solid var(--dsw-alias-border-l3,#80808029);background:var(--dsw-alias-bg-layer-1,Canvas);min-width:0;color:var(--dsw-alias-label-primary);border-radius:6px;flex:140px;padding:4px 8px;font-size:11px}.JeOz9W_iconButton{color:var(--dsw-alias-label-tertiary);cursor:pointer;background:0 0;border:0;border-radius:4px;justify-content:center;align-items:center;padding:2px;display:inline-flex}.JeOz9W_iconButton:hover{color:var(--dsw-alias-label-primary)}.JeOz9W_iconButton:disabled{cursor:default}.JeOz9W_iconButton:disabled svg{animation:.7s linear infinite JeOz9W_orbit-spin}@keyframes JeOz9W_orbit-spin{to{transform:rotate(360deg)}}@media (prefers-reduced-motion:reduce){.JeOz9W_iconButton:disabled svg,.JeOz9W_connectSpinner{opacity:.45;animation:none}}.JeOz9W_stopButton:hover{color:var(--dsw-alias-state-error-primary,LinkText)}.JeOz9W_confirmBar{border-bottom:1px solid var(--dsw-alias-border-l2,#8080801f);background:var(--dsw-alias-bg-module-platform,#80808014);gap:8px;padding:10px 12px;display:grid}.JeOz9W_confirmText{color:var(--dsw-alias-label-secondary,GrayText);font-size:12px;line-height:1.5}.JeOz9W_confirmActions{justify-content:flex-end;gap:8px;display:flex}.JeOz9W_confirmCancel,.JeOz9W_confirmGo{font:inherit;cursor:pointer;border-radius:6px;padding:4px 10px;font-size:12px}.JeOz9W_confirmCancel{border:1px solid var(--dsw-alias-border-l3,#80808029);background:var(--dsw-alias-bg-layer-1,Canvas);color:var(--dsw-alias-label-primary)}.JeOz9W_confirmGo{background:var(--dsw-alias-state-error-primary,Highlight);color:var(--dsw-alias-label-primary-foreground,#fff);border:0}.JeOz9W_confirmGo:disabled{opacity:.6;cursor:default}.JeOz9W_catalogRow{justify-content:space-between;align-items:baseline;gap:8px;padding:4px 0 4px 12px;display:flex}.JeOz9W_catalogRow>*{text-overflow:ellipsis;white-space:nowrap;min-width:0;overflow:hidden}.JeOz9W_catalogRow>span{flex:auto}.JeOz9W_catalogRow>code{flex:0 auto}.JeOz9W_tabs{border-bottom:1px solid var(--dsw-alias-border-l2,#8080801f);background:var(--dsw-alias-bg-module-platform,#80808014);flex:none;gap:2px;padding:6px 8px 0;display:flex}.JeOz9W_tab{color:var(--dsw-alias-label-tertiary,GrayText);cursor:pointer;background:0 0;border:0;border-bottom:2px solid #0000;flex:1 1 0;padding:6px 4px 8px;font-size:12px}.JeOz9W_tab:hover{color:var(--dsw-alias-label-primary,CanvasText)}.JeOz9W_tabActive{color:var(--dsw-alias-label-primary,CanvasText);border-bottom-color:var(--dsw-alias-state-business-primary,Highlight);font-weight:600}.JeOz9W_agentsGrid{gap:10px;padding:10px 12px;display:grid}.JeOz9W_agentCard{border:1px solid var(--dsw-alias-border-l3,#80808029);background:var(--dsw-alias-bg-layer-1,Canvas);border-radius:8px;gap:11px;padding:12px;transition:border-color .12s,background-color .12s;display:grid}.JeOz9W_agentCard:hover{border-color:var(--dsw-alias-state-business-primary,Highlight);background:var(--dsw-alias-bg-module-platform,#80808014)}.JeOz9W_agentHead{align-items:flex-start;gap:10px;display:flex}.JeOz9W_avatar{letter-spacing:.5px;text-transform:uppercase;border-radius:7px;flex:none;place-items:center;width:36px;height:36px;font-size:10px;font-weight:700;display:grid}.JeOz9W_agentIdentity{gap:2px;min-width:0;display:grid}.JeOz9W_agentName{color:var(--dsw-alias-label-primary,CanvasText);text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:600;overflow:hidden}.JeOz9W_agentVersion{color:var(--dsw-alias-label-tertiary,GrayText);font-family:ui-monospace,monospace;font-size:11px}.JeOz9W_agentStat{border-top:1px solid var(--dsw-alias-border-l2,#8080801f);justify-content:space-between;align-items:center;padding-top:9px;display:flex}.JeOz9W_agentStatLabel{color:var(--dsw-alias-label-tertiary,GrayText);font-size:11px}.JeOz9W_agentStatPill{background:var(--dsw-alias-bg-module-platform,#80808014);color:var(--dsw-alias-label-secondary,GrayText);border-radius:999px;padding:2px 8px;font-size:11px;font-weight:600}.JeOz9W_agentStatError{background:var(--dsw-alias-state-error-secondary,#f25a5a1f);color:var(--dsw-alias-state-error-primary,LinkText)}.JeOz9W_flowRow{padding:9px 12px}.JeOz9W_flowName{font-size:12.5px;font-weight:600;line-height:1.45}.JeOz9W_listRow{width:100%;color:inherit;text-align:left;cursor:pointer;background:0 0;border:0;align-items:flex-start;gap:9px;padding:9px 12px;display:flex}.JeOz9W_listRow:hover{background:var(--dsw-alias-bg-module-platform,#80808014)}.JeOz9W_listRow,.JeOz9W_flowRow,.JeOz9W_defnRow{position:relative}.JeOz9W_listRow:after,.JeOz9W_flowRow:after,.JeOz9W_defnRow:after{content:\"\";background:var(--dsw-alias-border-l2,#8080801f);height:1px;position:absolute;bottom:0;left:12px;right:12px}.JeOz9W_defnRow:after{left:0}.JeOz9W_listRow:last-child:after,.JeOz9W_flowRow:last-child:after,.JeOz9W_defnRow:last-child:after{display:none}.JeOz9W_listDot{flex:none;margin-top:4px}.JeOz9W_listMain{flex:auto;grid-template-columns:minmax(0,1fr);gap:1px;min-width:0;display:grid}.JeOz9W_listGoal{-webkit-line-clamp:2;-webkit-box-orient:vertical;font-size:12.5px;line-height:1.4;display:-webkit-box;overflow:hidden}.JeOz9W_listPrompt{-webkit-line-clamp:2;color:var(--dsw-alias-label-tertiary);overflow-wrap:anywhere;white-space:normal;-webkit-box-orient:vertical;font-size:11px;line-height:1.45;display:-webkit-box;overflow:hidden}.JeOz9W_back{color:var(--dsw-alias-state-business-primary,Highlight);cursor:pointer;background:0 0;border:0;align-items:center;gap:5px;padding:8px 12px 4px;font-size:14px;font-weight:500;display:flex}.JeOz9W_backArrow{font-size:16px;line-height:1}.JeOz9W_back:hover .JeOz9W_backLabel{text-decoration:underline}.JeOz9W_goalTitle{text-overflow:ellipsis;white-space:nowrap;font-size:12.5px;font-weight:600;line-height:1.4;overflow:hidden}.JeOz9W_goalPromptCard{background:var(--dsw-alias-bg-module-platform,#80808014);border-radius:6px;min-width:0;max-width:100%;margin:3px 0 0;padding:6px 8px}.JeOz9W_goalPrompt{min-width:0;max-width:100%;color:var(--dsw-alias-label-secondary,GrayText);white-space:pre-wrap;overflow-wrap:anywhere;-webkit-box-orient:vertical;margin:0;font-family:inherit;font-size:11.5px;line-height:1.5;display:-webkit-box;overflow:hidden}.JeOz9W_goalPrompt[data-open]{display:block}.JeOz9W_goalPromptToggle{color:var(--dsw-alias-state-business-primary,Highlight);font:inherit;cursor:pointer;background:0 0;border:0;align-items:center;gap:3px;margin-top:4px;padding:0;font-size:11px;display:flex}.JeOz9W_goalPromptToggle:hover{text-decoration:underline}.JeOz9W_goalPromptChevronOpen{transform:rotate(180deg)}.JeOz9W_authoringStages{--orbit-step-line:26px;padding:2px 0 6px}.JeOz9W_authoringStages .JeOz9W_stepDisclosure{position:relative}.JeOz9W_authoringStages .JeOz9W_stepDisclosure:before{content:\"\";top:0;bottom:0;left:var(--orbit-step-line);background:var(--dsw-alias-label-tertiary,#808080b3);width:1px;margin-left:-.5px;position:absolute}.JeOz9W_authoringStages .JeOz9W_stepDisclosure:first-child:before{top:16px}.JeOz9W_authoringStages .JeOz9W_stepDisclosure:last-child:before{bottom:calc(100% - 16px)}.JeOz9W_authoringStages .JeOz9W_stepDot{z-index:1;position:relative}.JeOz9W_authoringStages .JeOz9W_stepRow{cursor:default}.JeOz9W_resultBlock{gap:3px;padding:4px 12px 8px 22px;display:grid}.JeOz9W_resultLabel{color:var(--dsw-alias-label-tertiary,GrayText);letter-spacing:.02em;font-size:10.5px}.JeOz9W_outcome{font-size:12px;font-weight:600}.JeOz9W_outcome_done{color:var(--dsw-alias-state-success-primary,#22c55e)}.JeOz9W_outcome_error{color:var(--dsw-alias-state-error-primary,#f25a5a)}.JeOz9W_outcome_warning{color:var(--dsw-alias-state-warn-primary,#f59e0b)}.JeOz9W_outcome_ongoing{color:var(--dsw-alias-state-business-primary,#679efe)}.JeOz9W_artifactRow{gap:4px;display:grid}.JeOz9W_artifactText{background:var(--dsw-alias-bg-module-platform,#80808014);max-width:100%;max-height:240px;color:var(--dsw-alias-label-primary);white-space:pre-wrap;overflow-wrap:anywhere;border-radius:6px;margin:0;padding:6px 8px;font-family:inherit;font-size:11.5px;line-height:1.5;overflow:hidden auto}.JeOz9W_artifacts{flex-wrap:wrap;gap:6px;display:flex}.JeOz9W_artifactPath{background:var(--dsw-alias-bg-module-platform,#80808014);max-width:100%;color:var(--dsw-alias-label-secondary,GrayText);overflow-wrap:anywhere;user-select:all;border-radius:6px;padding:4px 8px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px;line-height:1.5}.JeOz9W_artifact{border:1px solid var(--dsw-alias-border-l3,#80808029);max-width:100%;color:var(--dsw-alias-state-business-primary,Highlight);text-overflow:ellipsis;white-space:nowrap;border-radius:999px;padding:3px 8px;font-size:11px;text-decoration:none;overflow:hidden}a.JeOz9W_artifact:hover{text-decoration:underline}.JeOz9W_result{background:var(--dsw-alias-bg-module-platform,#80808014);max-height:220px;color:var(--dsw-alias-label-primary);white-space:pre-wrap;overflow-wrap:anywhere;border-radius:6px;margin:0;padding:6px 8px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;line-height:1.5;overflow:auto}.JeOz9W_resultError{color:var(--dsw-alias-state-error-primary)}.JeOz9W_goalCard{border-bottom:1px solid var(--dsw-alias-border-l2,#8080801f)}.JeOz9W_goalCard:last-child{border-bottom:0}.JeOz9W_goalHead{align-items:flex-start;gap:9px;width:100%;padding:9px 12px 6px;display:flex}.JeOz9W_goalSteps{--orbit-step-line:26px;padding-bottom:6px}.JeOz9W_goalSteps .JeOz9W_stepDisclosure{position:relative}.JeOz9W_goalSteps .JeOz9W_stepDisclosure:before{content:\"\";top:0;bottom:0;left:var(--orbit-step-line);background:var(--dsw-alias-label-tertiary,#808080b3);width:1px;margin-left:-.5px;position:absolute}.JeOz9W_goalSteps .JeOz9W_stepDisclosure:first-child:before{top:16px}.JeOz9W_goalSteps .JeOz9W_stepDisclosure:last-child:before{bottom:calc(100% - 16px)}.JeOz9W_goalSteps .JeOz9W_stepDisclosure:only-child:before{display:none}.JeOz9W_goalSteps .JeOz9W_stepDot{z-index:1;position:relative}.JeOz9W_detailHead{align-items:baseline;gap:8px;padding:0 12px;display:flex}.JeOz9W_detailGoal{font-size:13px;font-weight:650;line-height:1.4}.JeOz9W_detailMeta{border-bottom:1px solid var(--dsw-alias-border-l2,#8080801f);color:var(--dsw-alias-label-tertiary,GrayText);padding:2px 12px 8px;font-size:11px}.JeOz9W_flowButton{width:100%;color:inherit;text-align:left;cursor:pointer;background:0 0;border:0;display:block}.JeOz9W_flowButton:hover{background:var(--dsw-alias-bg-module-platform,#80808014)}.JeOz9W_prose{color:var(--dsw-alias-label-secondary,GrayText);margin:0;padding:8px 12px;font-size:12px;line-height:1.55}.JeOz9W_outLink{padding:10px 12px;font-size:11.5px;display:block}.JeOz9W_sectionLabel{border-top:1px solid var(--dsw-alias-border-l2,#8080801f);color:var(--dsw-alias-label-tertiary,GrayText);padding:8px 12px 4px;font-size:11px}.JeOz9W_defnRow{border-left:2px solid var(--dsw-alias-label-tertiary,#adb2b8b3);padding:8px 12px 9px}.JeOz9W_kind_action{border-left-color:var(--dsw-alias-state-business-primary,#679efed9)}.JeOz9W_kind_human{border-left-color:var(--dsw-alias-state-warn-primary,#f59e0bd9)}.JeOz9W_kind_terminal{border-left-color:var(--dsw-alias-state-success-primary,#22c55ed9)}.JeOz9W_kind_decision{border-left-color:var(--dsw-alias-label-secondary,#cfd3d6d9)}.JeOz9W_kind_join{border-left-color:var(--dsw-alias-label-tertiary,#adb2b8b3)}.JeOz9W_defnHead{align-items:baseline;gap:6px;min-width:0;display:flex}.JeOz9W_defnName{text-overflow:ellipsis;white-space:nowrap;flex:0 auto;min-width:0;font-size:12.5px;font-weight:600;overflow:hidden}.JeOz9W_defnKind{color:var(--dsw-alias-label-tertiary,GrayText);letter-spacing:.04em;text-transform:uppercase;flex:none;font-size:10px}.JeOz9W_defnHandler{text-overflow:ellipsis;white-space:nowrap;min-width:0;color:var(--dsw-alias-label-tertiary,GrayText);flex:0 auto;margin-left:auto;font-family:ui-monospace,monospace;font-size:11px;overflow:hidden}.JeOz9W_defnPrompt,.JeOz9W_defnNoPrompt{color:var(--dsw-alias-label-secondary,GrayText);-webkit-line-clamp:3;-webkit-box-orient:vertical;margin:3px 0 0;font-size:11.5px;line-height:1.5;display:-webkit-box;overflow:hidden}.JeOz9W_defnNoPrompt{color:var(--dsw-alias-label-tertiary,GrayText);font-style:italic}.JeOz9W_shape{align-items:center;margin-top:5px;display:flex}.JeOz9W_shapeNode{border:1px solid var(--dsw-alias-border-l3,#80808029);width:15px;height:15px;color:var(--dsw-alias-state-business-primary,#5078ffe6);border-radius:50%;flex:0 0 15px;place-items:center;font-family:ui-monospace,monospace;font-size:7.5px;font-weight:700;line-height:1;display:grid;position:relative}.JeOz9W_shapeNode+.JeOz9W_shapeNode{margin-left:8px}.JeOz9W_shapeNode+.JeOz9W_shapeNode:before{content:\"\";border-top:1px solid var(--dsw-alias-border-l3,#80808029);width:8px;position:absolute;top:50%;right:100%}.JeOz9W_node_human{color:var(--dsw-alias-state-warn-primary,#c88c28f2)}.JeOz9W_node_terminal{color:var(--dsw-alias-state-success-primary,#3ca05af2)}.JeOz9W_node_decision{color:var(--dsw-alias-label-secondary,GrayText)}.JeOz9W_node_more{color:var(--dsw-alias-label-tertiary,GrayText);font-size:7px}.JeOz9W_flowBlocked{color:var(--dsw-alias-state-warn-primary,#f59e0b);margin-left:6px;font-size:10px;font-weight:500}.JeOz9W_authoringRow{border-bottom:1px solid var(--dsw-alias-border-l2,#8080801f);background:var(--dsw-alias-bg-module-platform,#80808014);padding:9px 12px}.JeOz9W_authoringSummary{align-items:flex-start;gap:8px;display:flex}.JeOz9W_authoringMain{flex:auto;gap:2px;min-width:0;display:grid}.JeOz9W_authoringLabel{font-size:12px;font-weight:600;line-height:1.4}.JeOz9W_authoringPrompt{color:var(--dsw-alias-label-secondary,GrayText);-webkit-line-clamp:2;-webkit-box-orient:vertical;font-size:11px;line-height:1.45;display:-webkit-box;overflow:hidden}.JeOz9W_authoringOutputToggle{width:24px;height:24px;color:var(--dsw-alias-label-secondary,GrayText);cursor:pointer;background:0 0;border:0;flex:none;place-items:center;padding:0;display:grid}.JeOz9W_authoringOutputToggle svg{transition:transform .15s}.JeOz9W_authoringChevronOpen{transform:rotate(180deg)}.JeOz9W_authoringOutput{border:1px solid var(--dsw-alias-border-l3,#80808029);background:var(--dsw-alias-bg-base,Canvas);border-radius:6px;max-height:180px;margin:8px 0 0 16px;padding:8px;overflow:auto}.JeOz9W_authoringOutput pre{white-space:pre-wrap;overflow-wrap:anywhere;margin:0;font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}";
 		const tagId = "@orbit-runtime/dsh-orbit/OrbitPanel.module.css";
@@ -238,381 +704,6 @@ window.__ModuleLoader__.load({
 				width: clamp(layout.width + dWidth, 320, maxWidth),
 				height: clamp(layout.height + dHeight, 280, Math.max(280, bounds.height - 24))
 			};
-		}
-		//#endregion
-		//#region src/run-progress.ts
-		/** Run statuses there is no coming back from. */
-		const TERMINAL = /* @__PURE__ */ new Set([
-			"completed",
-			"failed",
-			"cancelled",
-			"unknown"
-		]);
-		/** Whether a Run could still do something. */
-		function isLive(status) {
-			return !TERMINAL.has(status);
-		}
-		/** The step's authored name, or the node id it was authored without one. */
-		function labelOf(step) {
-			return typeof step.label === "string" && step.label ? step.label : step.node_id;
-		}
-		/**
-		* The Runs the Goal page shows: everything still moving, or the one that
-		* moved last when nothing is.
-		*
-		* A Goal reaching its end is the moment its result matters most, and dropping
-		* it from the page right then answered "what happened" with an empty page —
-		* the reader watched four steps go green and was left looking at "nothing is
-		* running here". So a finished Goal stays, with its steps and its outcome,
-		* until the next one starts and takes the page.
-		*
-		* Shared because the Host reads steps for exactly the Runs this page draws. A
-		* Host that kept its own idea of that would go on serving a settled Run's last
-		* *running* step forever, since the step read stops with the Run.
-		*/
-		function goalRuns(rows) {
-			const live = rows.filter((row) => row.live);
-			if (live.length) return live;
-			const latest = rows.reduce((best, row) => best === void 0 || row.updatedAt > best.updatedAt ? row : best, void 0);
-			return latest === void 0 ? [] : [latest];
-		}
-		//#endregion
-		//#region src/client/orbit-model.ts
-		/** Cadence while a Run is moving. */
-		const ORBIT_POLL_MS = 2e3;
-		/** Cadence while nothing is. A resident panel costs nothing when idle. */
-		const ORBIT_IDLE_MS = 15e3;
-		/** Read the interrupts a Run advertises, keeping only the ones answerable here.
-		*
-		* An interrupt with no output port is a question this panel cannot form an
-		* answer to — the reply would have to name a port, and guessing one produces a
-		* node that "returned undeclared outputs" minutes later. */
-		function toInterrupts(items) {
-			const found = [];
-			for (const item of items ?? []) {
-				if (item === null || typeof item !== "object") continue;
-				const held = item;
-				const value = held.value;
-				if (value === null || typeof value !== "object") continue;
-				const asked = value;
-				const first = (Array.isArray(asked.output_ports) ? asked.output_ports : [])[0];
-				const config = asked.config ?? {};
-				if (typeof held.id !== "string" || typeof first?.id !== "string") continue;
-				found.push({
-					id: held.id,
-					nodeId: typeof asked.node_id === "string" ? asked.node_id : "",
-					taskKind: typeof config.task_kind === "string" ? config.task_kind : "",
-					outputPort: first.id
-				});
-			}
-			return found;
-		}
-		/**
-		* The answer to a yes/no question, in the shape the next step will read.
-		*
-		* A Mapping handed to `resume` *is* the node's outputs, so the port has to be
-		* named — replying with a bare `{decision: …}` would look for a port called
-		* `decision` and fail as a node returning something it never declared. And
-		* `decision` is the field the branches test: `source.result.decision == …` is
-		* how every approval workflow here routes.
-		*
-		* Which is why this is built rather than typed. A person asked to approve
-		* something was being handed a text box and expected to know both of those
-		* facts — and to spell them without a typo, minutes after the question.
-		*/
-		function approvalValue(interrupt, decision) {
-			return { [interrupt.outputPort]: { decision } };
-		}
-		function toRow(run, workflowName) {
-			return {
-				runId: run.run_id,
-				goal: run.goal || run.run_id,
-				workflow: `${run.workflow_id}@${String(run.workflow_version)}`,
-				workflowName: workflowName || run.workflow_id,
-				status: run.status,
-				live: isLive(run.status),
-				revision: run.revision,
-				artifactCount: run.artifact_count,
-				updatedAt: run.updated_at,
-				prompt: promptText(run.inputs),
-				result: run.result,
-				...typeof run.error === "string" && run.error ? { error: run.error } : {},
-				commands: run.allowed_commands,
-				interrupts: toInterrupts(run.interrupts)
-			};
-		}
-		/**
-		* What a Run was asked to work on, as something a person can read.
-		*
-		* The same shape of question as `resultText` and answered the same way: a lone
-		* string input is the request, so it is shown as written; anything else is
-		* printed, because a workflow taking three inputs has no one of them that is
-		* "the prompt" and picking one would hide the other two.
-		*
-		* Not the goal. A goal is a label somebody put on the work — for a Run an
-		* Agent started it is usually a sentence about the request rather than the
-		* request — and a reader shown only the label cannot see what was asked.
-		*/
-		function promptText(inputs) {
-			if (inputs === null || typeof inputs !== "object" || Array.isArray(inputs)) return "";
-			const entries = Object.entries(inputs);
-			if (!entries.length) return "";
-			const [only] = entries;
-			if (entries.length === 1 && only !== void 0 && typeof only[1] === "string") return only[1];
-			try {
-				return JSON.stringify(inputs, null, 2) ?? "";
-			} catch {
-				return "";
-			}
-		}
-		/**
-		* What a Run produced, as something a person can read.
-		*
-		* A workflow's answer is the reason someone started it, and it arrives as
-		* whatever the terminal step emitted — most often a string, sometimes an
-		* object with one string in it, sometimes a document. A plain string is shown
-		* as it was written rather than as a quoted JSON scalar; a single-field object
-		* is unwrapped, because `{"translation": "…"}` is a container, not the answer.
-		* Anything else is printed, since guessing further would start hiding fields.
-		*/
-		function resultText(value) {
-			if (value === null || value === void 0) return "";
-			if (typeof value === "string") return value;
-			if (typeof value === "number" || typeof value === "boolean") return String(value);
-			if (typeof value === "object" && !Array.isArray(value)) {
-				const entries = Object.entries(value);
-				const [only] = entries;
-				if (entries.length === 1 && only !== void 0 && typeof only[1] === "string") return only[1];
-			}
-			try {
-				return JSON.stringify(value, null, 2) ?? "";
-			} catch {
-				return String(value);
-			}
-		}
-		/** What an Artifact id looks like wherever a result happens to carry one. */
-		const ARTIFACT = /^langgraph_artifact:[A-Za-z0-9]+$/;
-		/**
-		* Split a result into what a person can read and what they have to open.
-		*
-		* A workflow that writes a file answers `{"artifact_id":
-		* "langgraph_artifact:4c1e5281…"}`, and printing that put a 64-character hash
-		* on the page where the answer should have been — the one thing in the result
-		* that means nothing at all to a reader. It is a door, so it is drawn as one.
-		*
-		* The rest of the result still shows. A workflow that returns a summary *and*
-		* a file has both, and dropping either would be answering a different
-		* question than the one that was asked.
-		*/
-		function resultOutcome(value) {
-			const artifacts = [];
-			const remainder = strip(value, artifacts);
-			return {
-				artifacts,
-				text: remainder === void 0 ? "" : resultText(remainder)
-			};
-		}
-		/** The value with its Artifact references taken out, or undefined if that is
-		*  all it was. Containers left empty by the removal go too: `{"artifact_id":
-		*  …}` is a wrapper around a door, not an answer with a door in it. */
-		function strip(value, into) {
-			if (typeof value === "string") {
-				if (!ARTIFACT.test(value)) return value;
-				into.push(value);
-				return;
-			}
-			if (Array.isArray(value)) {
-				const kept = value.map((item) => strip(item, into)).filter((item) => item !== void 0);
-				return kept.length ? kept : void 0;
-			}
-			if (value !== null && typeof value === "object") {
-				const kept = {};
-				for (const [key, item] of Object.entries(value)) {
-					const left = strip(item, into);
-					if (left !== void 0) kept[key] = left;
-				}
-				return Object.keys(kept).length ? kept : void 0;
-			}
-			return value;
-		}
-		/**
-		* Where an Artifact can be opened: through this Host, as the Session that owns
-		* it.
-		*
-		* Not Orbit's own address for it. Artifacts belong to the actor that produced
-		* them, a browser reaching `/api/v1` on loopback is `local`, and a Run this
-		* panel started belongs to `harness:session:<id>` — so Orbit's link is a 404
-		* for every Artifact this Harness ever made, and so is Orbit's own UI. The
-		* Host holds the identity that can read it, and hands the bytes to the
-		* browser unchanged.
-		*
-		* Empty without a Session, which is what a reader gets instead of a link that
-		* goes nowhere.
-		*/
-		function artifactHref(sessionId, artifactId) {
-			if (!sessionId || !artifactId) return "";
-			return `/plugins/dsh-orbit/artifact?${new URLSearchParams({
-				session: sessionId,
-				id: artifactId
-			}).toString()}`;
-		}
-		/** The short name an Artifact is offered under: its id without the kind. */
-		function artifactLabel(artifactId) {
-			const bare = artifactId.replace(/^langgraph_artifact:/, "");
-			return bare.length > 12 ? `${bare.slice(0, 12)}…` : bare;
-		}
-		/**
-		* The name a Workflow reference is drawn under, shortened to fit a chip.
-		*
-		* Only what is drawn. The same name goes to the model in full through the
-		* codec's `serialize`, and to the clipboard in full through `clipboardText` —
-		* a chip is a thing a reader looks at, and shortening what gets *sent* would
-		* hand the model a Workflow name that no longer names the Workflow.
-		*
-		* Counted in code points rather than UTF-16 units: `slice` on a string with an
-		* emoji in it can cut between the halves of a surrogate pair and end the chip
-		* with a replacement character.
-		*/
-		function referenceLabel(name) {
-			const points = [...name];
-			if (points.length <= 20) return name;
-			return `${points.slice(0, 20).join("")}…`;
-		}
-		/** How soon to ask again, given what the last answer contained. */
-		function nextInterval(rows) {
-			return rows.some((row) => row.live) ? ORBIT_POLL_MS : ORBIT_IDLE_MS;
-		}
-		/** Newest first, with anything still running ahead of anything finished.
-		*
-		* A resident panel is read at a glance, and the glance is almost always about
-		* what is happening now — so recency alone would bury a running Run under a
-		* pile of Runs that already have their answer.
-		*/
-		function orderRows(rows) {
-			return [...rows].sort((a, b) => {
-				if (a.live !== b.live) return a.live ? -1 : 1;
-				return a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0;
-			});
-		}
-		/** A one-line count for the collapsed badge. */
-		function summarise(rows) {
-			return {
-				live: rows.filter((row) => row.live).length,
-				total: rows.length
-			};
-		}
-		/** The four states the shell's StateDot draws, from an Orbit status.
-		*
-		* `unknown` is amber rather than red on purpose: it is the outcome nobody has
-		* ruled on yet, and colouring it as a failure would answer a question the
-		* Runtime deliberately left open.
-		*/
-		function dotState(status) {
-			if (status === "completed") return "done";
-			if (status === "unknown" || status === "waiting") return "warning";
-			if (status === "failed" || status === "cancelled") return "error";
-			return "ongoing";
-		}
-		/** A step card uses a still dot: history records outcomes, not activity. */
-		function stepDotState(status) {
-			if (status === "succeeded") return "success";
-			if (status === "failed" || status === "cancelled") return "error";
-			if (status === "not_reached") return "skipped";
-			if (status === "unknown" || status === "waiting") return "warning";
-			return "ongoing";
-		}
-		function toStepRow(step) {
-			return {
-				nodeId: step.node_id,
-				label: labelOf(step),
-				status: step.status,
-				hasOutput: step.has_output === true,
-				needsPerson: step.resolution?.kind === "reconciliation_required" && step.reconciliation === void 0,
-				...step.resolution?.delegation_id ? { delegationId: step.resolution.delegation_id } : {}
-			};
-		}
-		/** Join an output page into displayable text, oldest chunk first. */
-		function outputText(chunks) {
-			return [...chunks].sort((a, b) => a.chunk_id - b.chunk_id).map((chunk) => chunk.text).join("");
-		}
-		/** Merge a new page into what is already shown without duplicating a chunk. */
-		function mergeChunks(previous, next) {
-			const byId = new Map(previous.map((chunk) => [chunk.chunk_id, chunk]));
-			for (const chunk of next) byId.set(chunk.chunk_id, chunk);
-			return [...byId.values()].sort((a, b) => a.chunk_id - b.chunk_id);
-		}
-		/** The revision a command may be issued at, or undefined if it may not be.
-		*
-		* Read from what the Run advertises rather than from what the panel last drew:
-		* a button offered for a command Orbit has since withdrawn is a button that
-		* fails, and one offered at a stale revision is worse — it succeeds against a
-		* Run the reader was not looking at.
-		*/
-		function commandRevision(row, command) {
-			return row.commands.find((item) => item.command === command)?.expected_version;
-		}
-		//#endregion
-		//#region src/client/error-text.ts
-		const READINGS = [
-			[/No independent Orbit Runtime is serving/i, "errNoRuntime"],
-			[/auto-start (failed|timed out)/i, "errStartFailed"],
-			[/Runtime discovery (failed|returned invalid JSON|must return an array)/i, "errDiscoveryFailed"],
-			[/Multiple Orbit Runtimes claim/i, "errRuntimeConflict"],
-			[/not reachable over HTTP MCP|published no HTTP address|did not publish a browser address/i, "errRuntimeAddress"],
-			[/incompatible Orbit integration protocol/i, "errVersionMismatch"],
-			[/only a Runtime operator|valid actor credentials|HTTP 40[13]/i, "errNotAllowed"],
-			[/refused to stop/i, "errStopRefused"],
-			[/timed out/i, "errTimeout"],
-			[/transport failed|MCP HTTP|HTTP 5\d\d|failed with HTTP/i, "errUnreachable"],
-			[/Workspace cwd/i, "errNoWorkspace"],
-			[/requires? a live Harness|invalid Harness session id/i, "errNoSession"],
-			[/Workspace does not match the Harness Session|has not registered/i, "errWorkspaceMismatch"],
-			[/workflow was deleted/i, "errWorkflowDeleted"],
-			[/workflow (version )?not found/i, "errWorkflowGone"],
-			[/no longer (offers|advertis(es|ed))/i, "errRunMoved"],
-			[/run not found|LangGraph run not found/i, "errRunGone"],
-			[/ActiveGoalExists|active_goal_exists/i, "errGoalActive"],
-			[/workflow_generation_already_active/i, "errAuthoringActive"],
-			[/too large for MCP content proxy/i, "errArtifactTooLarge"],
-			[/no live Agent for Session|exposes no Agent registry/i, "errNoAgent"],
-			[/was started elsewhere/i, "errRunElsewhere"],
-			[/exceeds 256 KiB/i, "errRequestTooLarge"],
-			[/must be 1-20000 characters/i, "errPromptLength"],
-			[/supports images only/i, "errImageOnly"],
-			[/request aborted/i, "errAborted"],
-			[/produced no answer to submit/i, "errNoAnswer"],
-			[/invalid Orbit DTO|not canonical base64|arguments must be an object/i, "errProtocol"],
-			[/Unknown Orbit client action|requires action and args|Workflow id is required/i, "errProtocol"],
-			[/invalid authoring output (cursor|address)|authoring output returned invalid JSON/i, "errProtocol"],
-			[/returned an invalid authoring output address/i, "errProtocol"]
-		];
-		/**
-		* Read one failure into something worth showing.
-		*
-		* An unrecognised failure is not dressed up as a known one: it says that
-		* something went wrong and carries its own text, which is honest and still
-		* lets the reader copy it. Guessing here would be worse than saying nothing —
-		* a wrong diagnosis sends somebody to fix the wrong thing.
-		*/
-		function panelError(reason) {
-			const detail = textOf(reason);
-			for (const [pattern, key] of READINGS) if (pattern.test(detail)) return {
-				key,
-				detail
-			};
-			return {
-				key: "errUnknown",
-				detail
-			};
-		}
-		function textOf(reason) {
-			if (typeof reason === "string") return reason;
-			if (reason instanceof Error) return reason.message;
-			if (reason !== null && typeof reason === "object") {
-				const held = reason;
-				for (const value of [held.error, held.message]) if (typeof value === "string" && value) return value;
-			}
-			return String(reason);
 		}
 		//#endregion
 		//#region src/client/OrbitRunRow.tsx
@@ -1222,99 +1313,6 @@ window.__ModuleLoader__.load({
 					})
 				]
 			})] });
-		}
-		//#endregion
-		//#region src/authoring-progress.ts
-		/** How far a Workflow being written has got, read from what it printed.
-		*
-		* Authoring has stages the way a Run has steps — it drafts, it compiles what
-		* came back, it goes round again when the compiler refuses, and it publishes —
-		* and the Runtime has always said so: `AuthoringJobService` writes a marker
-		* into the job's console at each turn. Nothing read them. The panel matched
-		* them only to drop them, so a job that spent a minute on its second attempt
-		* showed one unchanging line, and the one question a person watching has —
-		* *is it stuck or is it working* — had no answer on the page.
-		*
-		* A marker is a whole chunk whose text is the sentinel followed by JSON, so
-		* this reads chunks rather than scanning text: an Agent that prints the
-		* sentinel itself is printing inside a chunk of its own output, not writing a
-		* marker, and must not be able to move the ladder.
-		*/
-		const SENTINEL = "orbit-progress:";
-		/** The three things authoring does. Repairing is not among them — see below. */
-		const AUTHORING_STAGES = [
-			"generating",
-			"validating",
-			"publishing"
-		];
-		const LANDS_ON = {
-			generating: 0,
-			repairing: 0,
-			validating: 1,
-			validated: 2,
-			publishing: 2
-		};
-		/** Whether this chunk is a progress marker rather than Agent output. */
-		function isProgressMarker(chunk) {
-			return chunk.text.startsWith(SENTINEL);
-		}
-		function marker(chunk) {
-			if (!isProgressMarker(chunk)) return null;
-			try {
-				const value = JSON.parse(chunk.text.slice(16));
-				const stage = typeof value.stage === "string" ? value.stage : "";
-				if (!(stage in LANDS_ON)) return null;
-				return {
-					stage,
-					attempt: typeof value.attempt === "number" ? value.attempt : 0,
-					maxAttempts: typeof value.max_attempts === "number" ? value.max_attempts : 0
-				};
-			} catch {
-				return null;
-			}
-		}
-		/**
-		* The ladder, from the markers a job has printed and the state it is in.
-		*
-		* The job's own status has the last word on the stages: a job that failed
-		* failed at whatever rung it had reached, and one that is done reached all of
-		* them — the markers stop when the process does, so a job killed mid-stage
-		* would otherwise show that stage running for as long as anyone looked at it.
-		*/
-		function authoringProgress(chunks, jobStatus) {
-			let reached = -1;
-			let attempt = 0;
-			let maxAttempts = 0;
-			for (const chunk of chunks) {
-				const found = marker(chunk);
-				if (found === null) continue;
-				reached = LANDS_ON[found.stage] ?? reached;
-				if (found.attempt) attempt = found.attempt;
-				if (found.maxAttempts) maxAttempts = found.maxAttempts;
-			}
-			const settled = jobStatus === "done" || jobStatus === "failed" || jobStatus === "cancelled";
-			return {
-				stages: AUTHORING_STAGES.map((stage, index) => {
-					if (jobStatus === "done") return {
-						stage,
-						status: "succeeded"
-					};
-					if (index < reached) return {
-						stage,
-						status: "succeeded"
-					};
-					if (index > reached) return {
-						stage,
-						status: "not_reached"
-					};
-					return {
-						stage,
-						status: settled ? "failed" : "running"
-					};
-				}),
-				attempt,
-				maxAttempts
-			};
 		}
 		//#endregion
 		//#region src/client/OrbitWorkflowDetail.tsx
@@ -2201,6 +2199,7 @@ window.__ModuleLoader__.load({
 			noPrompt: "This step was authored without a prompt.",
 			openThisInOrbit: "Open in Orbit for the graph →",
 			noOutput: "No output from this step.",
+			errHostGone: "This page has lost the app behind it. Restart it, then reload.",
 			errNoRuntime: "Orbit is not running for this Workspace. Reopen the panel to start it.",
 			errStartFailed: "Orbit would not start here. Hover for what it said on the way out.",
 			errDiscoveryFailed: "The orbit command did not answer properly. Check that it is installed and on PATH.",
@@ -2316,6 +2315,7 @@ window.__ModuleLoader__.load({
 			noPrompt: "这一步没有写提示词。",
 			openThisInOrbit: "在 Orbit 中查看流程图 →",
 			noOutput: "这个步骤没有输出。",
+			errHostGone: "这个页面背后的服务已经停止。重启它，然后刷新页面。",
 			errNoRuntime: "Orbit 没有在这个 Workspace 上运行。重新打开面板会启动它。",
 			errStartFailed: "Orbit 在这里启动失败了。把鼠标移上去可以看到它退出前说了什么。",
 			errDiscoveryFailed: "orbit 命令没有正常返回。检查它是否已安装、是否在 PATH 中。",
@@ -2387,9 +2387,85 @@ window.__ModuleLoader__.load({
 			askWhatRuns: "列出这里可运行的工作流",
 			generateCommandDescription: "根据描述生成 Orbit 工作流",
 			generateUsage: "用法：/orbit-generate <工作流描述>",
-			runHead: "用 ",
-			runTail: " 执行："
+			runHead: "用",
+			runTail: "执行："
 		};
+		//#endregion
+		//#region src/client/composer-caret.ts
+		/** Putting the caret where the person is about to type.
+		*
+		* Picking a Workflow writes a half-finished sentence into the draft — "用
+		* 「名字」执行：" — and leaves the goal for the person to add. So the caret
+		* belongs at the end of it. It was not going there: the draft is written
+		* through the input machine, and the machine has no caret. The composer's own
+		* `restoreCaret` is scoped to the cut and paste handlers that already hold the
+		* element, and nothing on the plugin-facing facade — `setDraft`,
+		* `insertReference`, `insertText`, `track` — carries a caret position. The
+		* caret lives in a `<textarea>` in the shell's DOM, and reaching it is the
+		* only way there is.
+		*
+		* Which is a real cost, so the reach is kept small and honest: one attribute
+		* selector, a rule that refuses to guess between two candidates, and no
+		* assumption that the write has landed by the time we look.
+		*/
+		/** The composer's textarea. `data-phase` is the input machine's own phase,
+		*  written on the element it belongs to, so it marks a composer rather than
+		*  any textarea a page happens to contain. */
+		const COMPOSER_SELECTOR = "textarea[data-phase]";
+		/**
+		* The composer to act on, or nothing.
+		*
+		* Focus first: with more than one Session rendered, the focused composer is
+		* the one the person is looking at. Otherwise the only one, if there is only
+		* one. Two unfocused candidates is a genuine ambiguity, and moving the caret
+		* in the wrong conversation is worse than leaving it where it was.
+		*/
+		function pickComposer(candidates, focused) {
+			if (candidates.length === 0) return null;
+			const active = candidates.find((candidate) => candidate === focused);
+			if (active !== void 0) return active;
+			return candidates.length === 1 ? candidates[0] ?? null : null;
+		}
+		/**
+		* Whether this element is showing the draft we just wrote.
+		*
+		* Guards against two races at once: a render that has not happened yet, and a
+		* person who has already started typing. The first shows the old draft, the
+		* second shows a longer one — and in both cases the answer is to leave the
+		* caret alone rather than to move it somewhere that made sense a moment ago.
+		*/
+		function draftHasLanded(value, expected) {
+			return value === expected;
+		}
+		/**
+		* Put the caret at the end of the draft the machine says it has.
+		*
+		* `expected` comes from the input's own snapshot rather than from rebuilding
+		* the string here: inserting a reference splices a placeholder and sometimes a
+		* space, and a second opinion about what that produced would be wrong the day
+		* the shell changes it.
+		*
+		* Focus comes with it. The pick happened in a popup, which had focus; leaving
+		* the caret correct in an unfocused box would be a caret nobody is typing at.
+		*/
+		function caretToEnd(expected, attempts = 6) {
+			if (typeof document === "undefined" || typeof requestAnimationFrame !== "function") return;
+			const attempt = (left) => {
+				const composer = pickComposer([...document.querySelectorAll(COMPOSER_SELECTOR)].filter((node) => node instanceof HTMLTextAreaElement), document.activeElement);
+				if (composer !== null && draftHasLanded(composer.value, expected)) {
+					const end = composer.value.length;
+					composer.focus({ preventScroll: true });
+					composer.setSelectionRange(end, end);
+					return;
+				}
+				if (left > 0) requestAnimationFrame(() => {
+					attempt(left - 1);
+				});
+			};
+			requestAnimationFrame(() => {
+				attempt(attempts);
+			});
+		}
 		//#endregion
 		//#region src/client/index.tsx
 		const PANEL_COMMAND = "orbit";
@@ -2423,11 +2499,8 @@ window.__ModuleLoader__.load({
 				matchSpace: (_session, token) => token === `/${PANEL_COMMAND}` ? { claim: claim() } : void 0,
 				matchEnter: async (_session, line) => new RegExp(`^/${PANEL_COMMAND}(?:\\s|$)`, "u").test(line.trim()) ? { claim: claim() } : void 0,
 				codec: {
-					clipboardText: (ref) => `「${namesById.get(ref) ?? ref}」`,
-					serialize: async (ref) => {
-						const name = namesById.get(ref);
-						return name === void 0 ? ref : `${ref}（${name}）`;
-					}
+					clipboardText: (ref) => `${MARK_OPEN}${ref}${MARK_CLOSE}`,
+					serialize: async (ref) => ref
 				}
 			}), "orbit: slash command folding the panel");
 		}
@@ -2443,9 +2516,9 @@ window.__ModuleLoader__.load({
 						kind: "error",
 						text: t("generateUsage")
 					};
+					showOrbitPanel("workflows");
 					try {
 						await hostCall("generateWorkflowForSession", [session.sessionId, prompt], new AbortController().signal);
-						window.dispatchEvent(new CustomEvent("orbit:show-panel", { detail: { tab: "workflows" } }));
 						return { kind: "success" };
 					} catch (reason) {
 						const failure = panelError(reason);
@@ -2471,13 +2544,23 @@ window.__ModuleLoader__.load({
 			}), "orbit: slash command generating a workflow");
 		}
 		/**
-		* Names for the ids a reference carries, learned when the popup lists them.
+		* Bring the panel out, wherever it was put.
 		*
-		* The codec is handed a `ref` and nothing else, and a `ref` is the id — which
-		* is the right thing to send the model and the wrong thing to show a person.
-		* Remembering the pair at list time is what lets the chip be both.
+		* Distinct from `orbit:toggle-panel`, which flips: a command that toggles is a
+		* command that hides the panel for anyone who already had it open. This one
+		* only ever shows, so running an Orbit command twice is not a way to lose
+		* sight of what it did.
+		*
+		* The panel is where an Orbit command's result actually appears — a Run's
+		* steps, a Workflow being written — so a command that starts work behind a
+		* hidden panel has reported nothing. Called before the work rather than after
+		* it, so a failure is met by an open panel too.
 		*/
-		const namesById = /* @__PURE__ */ new Map();
+		function showOrbitPanel(tab) {
+			window.dispatchEvent(new CustomEvent("orbit:show-panel", { detail: tab === void 0 ? {} : { tab } }));
+		}
+		const MARK_OPEN = "「";
+		const MARK_CLOSE = "」";
 		async function hostCall(action, args, signal) {
 			const response = await fetch("/plugins/dsh-orbit/api", {
 				method: "POST",
@@ -2510,13 +2593,13 @@ window.__ModuleLoader__.load({
 				ui: {
 					kind: "popupSelect",
 					options: async (session, signal) => {
+						showOrbitPanel();
 						return ((await hostCall("getPanelState", [
 							session.sessionId,
 							false,
 							true
 						], signal)).workflows ?? []).map((item) => {
 							const label = item.name || item.workflow_id;
-							namesById.set(item.workflow_id, label);
 							return {
 								id: item.workflow_id,
 								label,
@@ -2530,17 +2613,8 @@ window.__ModuleLoader__.load({
 						if (!conversation || actx === void 0) return;
 						const input = conversation.input.for(actx);
 						const head = t("runHead");
-						input.setDraft(`${head}${t("runTail")}`);
-						if (!input.insertReference({
-							source: "orbit",
-							ref: option.id,
-							label: referenceLabel(option.label),
-							clipboardText: `「${option.label}」`
-						}, {
-							start: head.length,
-							end: head.length,
-							draftRev: input.state.getSnapshot().draftRev
-						})) input.setDraft(`${head}「${referenceLabel(option.label)}」${t("runTail")}`);
+						input.setDraft(`${head}${MARK_OPEN}${option.label}${MARK_CLOSE}${t("runTail")}`);
+						caretToEnd(input.state.getSnapshot().draft);
 					}
 				}
 			}), "orbit: workflow popup");

@@ -34,6 +34,7 @@ export const en = {
   noPrompt: 'This step was authored without a prompt.',
   openThisInOrbit: 'Open in Orbit for the graph →',
   noOutput: 'No output from this step.',
+  errHostGone: 'This page has lost the app behind it. Restart it, then reload.',
   errNoRuntime: 'Orbit is not running for this Workspace. Reopen the panel to start it.',
   errStartFailed: 'Orbit would not start here. Hover for what it said on the way out.',
   errDiscoveryFailed: 'The orbit command did not answer properly. Check that it is installed and on PATH.',
@@ -130,6 +131,7 @@ export const zh = {
   noPrompt: '这一步没有写提示词。',
   openThisInOrbit: '在 Orbit 中查看流程图 →',
   noOutput: '这个步骤没有输出。',
+  errHostGone: '这个页面背后的服务已经停止。重启它，然后刷新页面。',
   errNoRuntime: 'Orbit 没有在这个 Workspace 上运行。重新打开面板会启动它。',
   errStartFailed: 'Orbit 在这里启动失败了。把鼠标移上去可以看到它退出前说了什么。',
   errDiscoveryFailed: 'orbit 命令没有正常返回。检查它是否已安装、是否在 PATH 中。',
@@ -189,8 +191,8 @@ export const zh = {
   askWhatRuns: '列出这里可运行的工作流',
   generateCommandDescription: '根据描述生成 Orbit 工作流',
   generateUsage: '用法：/orbit-generate <工作流描述>',
-  runHead: '用 ',
-  runTail: ' 执行：',
+  runHead: '用',
+  runTail: '执行：',
 
 } as const
 

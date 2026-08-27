@@ -4,9 +4,9 @@ import test from 'node:test'
 import {
   ORBIT_IDLE_MS, ORBIT_POLL_MS, commandRevision, dotState, goalRuns, isLive, mergeChunks,
   approvalValue, artifactHref, artifactLabel, nextInterval, orderRows, outputText,
-  progressOf, promptText, REFERENCE_LABEL_MAX, referenceLabel, resultOutcome, resultText,
-  stepDotState, summarise, toInterrupts, toRow, toStepRow,
-} from '../src/client/orbit-model.ts'
+  progressOf, promptText, resultOutcome, resultText, stepDotState, summarise, toInterrupts,
+  toRow, toStepRow,
+} from '../lib/orbit-model.js'
 
 const run = (over = {}) => ({
   run_id: 'r', goal: 'g', workflow_id: 'wf', workflow_version: 1,
@@ -395,39 +395,4 @@ test('an answer names the port, because a mapping *is* the outputs', () => {
     approvalValue({ id: 'x', nodeId: 'n', taskKind: 'approval', outputPort: 'confirmation' }, 'approve'),
     { confirmation: { decision: 'approve' } },
   )
-})
-
-/**
- * A Workflow reference is a chip, and a chip has to stay chip-sized.
- *
- * Twenty code points, then an ellipsis to say there was more. The ellipsis is
- * not inside the budget: it marks the cut rather than being part of the name,
- * which is how `artifactLabel` already reads a length in this file.
- */
-test('a Workflow reference is shortened to fit a chip', () => {
-  assert.equal(REFERENCE_LABEL_MAX, 20)
-  // The names this Workspace actually holds, both well inside the budget.
-  assert.equal(referenceLabel('网络调研并生成报告'), '网络调研并生成报告')
-  assert.equal(referenceLabel('开发评审与人工审核合并流程'), '开发评审与人工审核合并流程')
-  // The boundary: twenty is kept whole, twenty-one is cut.
-  const twenty = '一二三四五六七八九十'.repeat(2)
-  assert.equal(referenceLabel(twenty), twenty)
-  assert.equal([...referenceLabel(twenty)].length, 20)
-  assert.equal(referenceLabel(`${twenty}一`), `${twenty}…`)
-  assert.equal(referenceLabel('Quarterly revenue reconciliation'), 'Quarterly revenue re…')
-  assert.equal(referenceLabel(''), '')
-})
-
-/**
- * Counted in code points, because a chip that cuts an emoji in half shows a
- * replacement character where the name used to be.
- */
-test('shortening a name never splits a character', () => {
-  const many = '📊'.repeat(21)
-  const short = referenceLabel(many)
-  assert.doesNotMatch(short, /\uFFFD/, 'cut between the halves of a surrogate pair')
-  // Twenty emoji kept, not the ten a UTF-16 slice would have left.
-  assert.equal([...short].length, 21)
-  assert.equal(short, `${'📊'.repeat(20)}…`)
-  assert.notEqual(short, `${many.slice(0, 20)}…`)
 })

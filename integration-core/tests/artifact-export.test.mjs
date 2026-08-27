@@ -3,7 +3,7 @@ import test from 'node:test'
 
 import {
   READABLE_MAX_BYTES, artifactExtension, artifactFilename, readableAsText,
-} from '../src/artifact-export.ts'
+} from '../lib/artifact-export.js'
 
 const ART = 'langgraph_artifact:4c1e5281cb5f49d9b60afbbac0508a7c4c2c37022312a116ebd54d703adfecd6'
 

@@ -1,10 +1,8 @@
 import type { Context } from '@deepseek-ai/cordis';
 import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol';
-import { type OrbitCursorStore } from './session-bridge.js';
+import { type OrbitCursorStore, type OrbitRunCommand } from '@orbit-runtime/integration-core';
+import type { AgentSummary, ArtifactContent, ArtifactSummary, AuthoringJob, AuthoringOutputPage, AuthoringSummary, EdgeSummary, ImportedArtifact, IntegrationDiagnostics, OrbitCommandRequest, OutputPage, RunDto, RunGraph, RuntimeSummary, StepSummary, WorkflowNode, WorkflowSummary, WorkspaceRef } from '@orbit-runtime/integration-core';
 import type { Session } from '@deepseek-ai/dsh-session';
-import { type OrbitRunCommand } from './commands.js';
-import type { AgentSummary } from './types.js';
-import type { ArtifactContent, ArtifactSummary, AuthoringJob, AuthoringOutputPage, AuthoringSummary, EdgeSummary, ImportedArtifact, IntegrationDiagnostics, OrbitCommandRequest, OutputPage, RunDto, RunGraph, RuntimeSummary, StepSummary, WorkflowNode, WorkflowSummary, WorkspaceRef } from './types.js';
 declare module '@deepseek-ai/cordis' {
     interface Context {
         orbit: OrbitRemoteService;

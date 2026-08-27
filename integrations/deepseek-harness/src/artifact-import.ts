@@ -1,5 +1,5 @@
 import type { ImageMediaType, SaveImageAttachment } from '@deepseek-ai/dsh-attachment'
-import type { ArtifactContent } from './types.js'
+import type { ArtifactContent } from '@orbit-runtime/integration-core'
 
 const IMAGE_TYPES = new Set<ImageMediaType>(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
 

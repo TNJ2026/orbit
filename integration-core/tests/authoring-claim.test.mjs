@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 import {
   CLAIM_CLIENT, CLAIM_RETRY_MS, CLAIM_WAIT_SECONDS, answerFrom,
   authoringClientForSession, claimOnce, isUnknownToolError,
-} from '../src/authoring-claim.ts'
+} from '../lib/authoring-claim.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const gateway = await readFile(join(here, '..', 'src', 'gateway.ts'), 'utf8')

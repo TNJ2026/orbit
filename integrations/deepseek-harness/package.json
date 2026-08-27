@@ -81,5 +81,8 @@
     "typecheck": "tsc --noEmit && tsc -p tsconfig.client.json",
     "test": "npm run build && node --test tests/*.test.mjs",
     "smoke:profile": "npm run build && node tests/profile-smoke.mjs"
+  },
+  "dependencies": {
+    "@orbit-runtime/integration-core": "file:../../integration-core"
   }
 }

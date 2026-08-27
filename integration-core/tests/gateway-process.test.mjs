@@ -211,3 +211,29 @@ test('a transport loss invalidates the cached endpoint for rediscovery', async t
   assert.equal(gateway.diagnostics().discoveryAttempts, 2)
   assert.equal(gateway.diagnostics().lastTransportError, undefined)
 })
+
+/**
+ * The profile belongs to the Runtime, and whoever starts it chooses.
+ *
+ * It used to be written into the spawn line, so every Runtime this code
+ * started offered the Harness's subset — including one started on behalf of a
+ * general-purpose client that has no use for the Harness's authoring loop and
+ * every use for the tools the subset leaves out. The default is unchanged,
+ * because widening what an existing caller starts is not a refactor.
+ */
+test('the tool profile a started Runtime offers is the caller\'s choice', async t => {
+  const started = async (profile, tag) => {
+    const path = await realpath(await mkdtemp(join(tmpdir(), `orbit-profile-${tag}-`)))
+    await writeFile(join(path, 'runtime.json'), '[]')
+    const gateway = profile === undefined
+      ? new OrbitGateway(process.execPath, [fixture])
+      : new OrbitGateway(process.execPath, [fixture], undefined, undefined, profile)
+    await gateway.acquire({ id: tag, canonicalPath: path }, true)
+    const pid = Number(await readFile(join(path, 'spawned.pid'), 'utf8'))
+    t.after(() => { try { process.kill(pid, 'SIGTERM') } catch {} })
+    return (await readFile(join(path, 'spawned.argv'), 'utf8')).split('\n')
+  }
+  // Unchanged for a caller that does not ask.
+  assert.ok((await started(undefined, 'default')).includes('harness'))
+  assert.ok((await started('full', 'full')).includes('full'))
+})

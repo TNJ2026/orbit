@@ -7,14 +7,14 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button, IconChevronDownOutline14, StateDot } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { OutputChunk, StepSummary } from '../types.js'
+import { panelError, type PanelError } from '@orbit-runtime/integration-core'
+import type { OutputChunk, StepSummary } from '@orbit-runtime/integration-core'
 import styles from './OrbitPanel.module.css'
 import {
   approvalValue, artifactHref, artifactLabel, commandRevision, dotState, mergeChunks,
   outputText, resultOutcome, stepDotState, toStepRow, type OrbitRunRow as RunRowData,
-} from './orbit-model.ts'
+} from '@orbit-runtime/integration-core'
 import type { OrbitLocaleKey } from './locales.ts'
-import { panelError, type PanelError } from './error-text.ts'
 
 type Translate = (key: OrbitLocaleKey, values?: Record<string, string | number>) => string
 type HostCall = <T>(action: string, args: unknown[], signal: AbortSignal) => Promise<T>

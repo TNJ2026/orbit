@@ -2,8 +2,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Session } from '@deepseek-ai/dsh-session'
 import type { ToolDefinition, ToolRunContext, ToolRuntime, JsonValue } from '@deepseek-ai/dsh-tools'
 import type { WorkspaceRegistry } from '@deepseek-ai/dsh-workspace'
-import { OrbitGateway } from './gateway.js'
-import type { AuthoringJob, RunDto, WorkspaceRef } from './types.js'
+import { OrbitGateway } from '@orbit-runtime/integration-core'
+import type { AuthoringJob, RunDto, WorkspaceRef } from '@orbit-runtime/integration-core'
 
 const JSON_OUTPUT = {
   schema: {} as const,

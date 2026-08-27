@@ -34,6 +34,9 @@ if (args.slice(-2).join(' ') === 'runtimes --json') {
     project_root: projectRoot, transport: 'http', base_url: base, mcp_url: `${base}/mcp`,
   }]))
   await writeFile(join(projectRoot, 'spawned.pid'), String(process.pid))
+  // What it was asked to be, so a test can check the flags rather than trusting
+  // the line that wrote them.
+  await writeFile(join(projectRoot, 'spawned.argv'), args.join('\n'))
   const stop = () => server.close(() => process.exit(0))
   process.on('SIGTERM', stop); process.on('SIGINT', stop)
 } else {

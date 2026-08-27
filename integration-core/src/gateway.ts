@@ -10,6 +10,9 @@ interface DiscoveredRuntime { project_root?: string; transport?: string; mcp_url
 interface Managed { mcpUrl: string; baseUrl: string; nextId: number; capabilities: Record<string, unknown> }
 type Fetch = typeof globalThis.fetch
 class OrbitTransportError extends Error {}
+/** A Runtime's two addresses: the one to speak MCP to, and the one a person
+ *  opens. */
+export interface OrbitEndpoint { readonly mcpUrl: string; readonly baseUrl: string }
 const STARTUP_TIMEOUT_MS = 10_000
 const STARTUP_POLL_MS = 100
 /* Enough of the end of a failed start to carry a Python traceback's last
@@ -47,6 +50,18 @@ export class OrbitGateway {
     private readonly commandPrefix: readonly string[] = [],
     private readonly fetchImpl: Fetch = globalThis.fetch,
     private readonly discoveryRoot = process.env.ORBIT_RUNTIME_ROOT || undefined,
+    /**
+     * Which tools a Runtime this Gateway *starts* will offer.
+     *
+     * A profile belongs to a Runtime, not to a caller: whoever starts it
+     * decides, and everyone who later discovers it gets what it was started
+     * with. `harness` is the default because that is what this used to hard-
+     * code, and a Harness that suddenly began starting `full` Runtimes would
+     * be widening a surface nobody asked it to widen. A host whose client is
+     * the whole point of the connection — an MCP server fronting Orbit for a
+     * general-purpose model — asks for `full` instead.
+     */
+    private readonly toolProfile: 'harness' | 'full' = 'harness',
   ) {}
 
   diagnostics(): GatewayDiagnostics {
@@ -148,6 +163,20 @@ export class OrbitGateway {
    * the process that owns the database, and guessing one from the other would
    * survive exactly until they differ.
    */
+  /**
+   * Where this Workspace's Runtime answers, connecting or starting it first.
+   *
+   * For a caller that speaks MCP itself rather than asking this class to make
+   * calls on its behalf — a stdio server fronting Orbit for a host that has
+   * its own MCP client. Everything before the URL is the part worth sharing:
+   * finding the Runtime, starting one when there is none, and refusing a
+   * Runtime whose integration protocol this code does not know.
+   */
+  async endpoint(workspace: WorkspaceRef, startIfMissing = false): Promise<OrbitEndpoint> {
+    const runtime = await this.runtime(workspace, startIfMissing)
+    return { mcpUrl: runtime.mcpUrl, baseUrl: runtime.baseUrl }
+  }
+
   async uiUrl(workspace: WorkspaceRef): Promise<string> {
     const runtime = await this.runtime(workspace)
     if (!runtime.baseUrl) throw new Error('Orbit Runtime did not publish a browser address')
@@ -360,7 +389,7 @@ export class OrbitGateway {
     try {
       const child = spawn(this.command, [
         ...this.commandPrefix, 'serve', '--port', '0',
-        '--project-root', workspaceRoot, '--mcp-tool-profile', 'harness',
+        '--project-root', workspaceRoot, '--mcp-tool-profile', this.toolProfile,
       ], {
         cwd: workspaceRoot,
         detached: true,

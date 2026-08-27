@@ -1,7 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { TypertRemoteService, Remote } from '@deepseek-ai/dsh-typert-protocol'
-import { OrbitGateway } from './gateway.js'
-import { OrbitSessionBridge, sessionCanBridge, type OrbitCursorStore } from './session-bridge.js'
+import { OrbitGateway, OrbitSessionBridge, WorkflowCatalog, advertisedAt, artifactFilename, commandTool, goalRuns, isLive, readableAsText, sessionCanBridge, type OrbitCursorStore, type OrbitRunCommand } from '@orbit-runtime/integration-core'
+import type { AgentSummary, ArtifactContent, ArtifactSummary, AuthoringJob, AuthoringOutputPage, AuthoringSummary, EdgeSummary, ImportedArtifact, IntegrationDiagnostics, OrbitCommandRequest, OutputPage, RunDto, RunGraph, RuntimeSummary, StepSummary, WorkflowNode, WorkflowSummary, WorkspaceRef } from '@orbit-runtime/integration-core'
 import { OrbitToolBridge } from './orbit-tools.js'
 import type { Session, SessionStore } from '@deepseek-ai/dsh-session'
 import type { WorkspaceRegistry } from '@deepseek-ai/dsh-workspace'
@@ -12,17 +12,11 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
 import { artifactImageInput } from './artifact-import.js'
-import { artifactFilename, readableAsText } from './artifact-export.js'
-import { advertisedAt, commandTool, type OrbitRunCommand } from './commands.js'
-import { WorkflowCatalog } from './workflow-catalog.js'
-import { goalRuns, isLive } from './run-progress.js'
 import {
   CLAIM_RETRY_MS, CLAIM_WAIT_SECONDS, answerFrom, authoringClientForSession,
   claimOnce, isUnknownToolError,
   type ClaimedRequest,
-} from './authoring-claim.js'
-import type { AgentSummary } from './types.js'
-import type { ArtifactContent, ArtifactSummary, AuthoringJob, AuthoringOutputPage, AuthoringSummary, EdgeSummary, ImportedArtifact, IntegrationDiagnostics, OrbitCommandRequest, OutputPage, RunDto, RunGraph, RuntimeSummary, StepSummary, WorkflowNode, WorkflowSummary, WorkspaceRef } from './types.js'
+} from '@orbit-runtime/integration-core'
 
 declare module '@deepseek-ai/cordis' { interface Context { orbit: OrbitRemoteService } }
 

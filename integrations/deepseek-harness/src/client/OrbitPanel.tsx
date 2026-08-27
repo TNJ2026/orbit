@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { IconChevronDownOutline14, IconCloseOutline16, IconPanelLeftOutline16, IconRefreshOutline16, IconShareOutline16, StateDot } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { AgentSummary, AuthoringOutputChunk, AuthoringOutputPage, AuthoringSummary, RunDto, StepSummary, WorkflowSummary } from '../types.js'
+import { authoringProgress, isProgressMarker, panelError, type PanelError } from '@orbit-runtime/integration-core'
+import type { AgentSummary, AuthoringOutputChunk, AuthoringOutputPage, AuthoringSummary, RunDto, StepSummary, WorkflowSummary } from '@orbit-runtime/integration-core'
 import styles from './OrbitPanel.module.css'
 import {
   DEFAULT_PANEL_LAYOUT, PANEL_STORAGE_KEY, dragPanel, placePanel, readLayout,
@@ -11,11 +12,9 @@ import {
 import {
   ORBIT_IDLE_MS, ORBIT_POLL_MS, goalRuns, nextInterval, orderRows, stepDotState, summarise,
   toRow, type OrbitRunRow as RunRowData,
-} from './orbit-model.ts'
+} from '@orbit-runtime/integration-core'
 import type { OrbitLocaleKey } from './locales.ts'
 import { OrbitRunDetail, OrbitRunGoalCard, OrbitRunListRow, PanelErrorText } from './OrbitRunRow.tsx'
-import { panelError, type PanelError } from './error-text.ts'
-import { authoringProgress, isProgressMarker } from '../authoring-progress.ts'
 import { OrbitWorkflowDetail } from './OrbitWorkflowDetail.tsx'
 
 type Translate = (key: OrbitLocaleKey, values?: Record<string, string | number>) => string

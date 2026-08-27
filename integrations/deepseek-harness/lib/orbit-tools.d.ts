@@ -1,6 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis';
-import { OrbitGateway } from './gateway.js';
-import type { AuthoringJob, WorkspaceRef } from './types.js';
+import { OrbitGateway } from '@orbit-runtime/integration-core';
+import type { AuthoringJob, WorkspaceRef } from '@orbit-runtime/integration-core';
 /** Told when an authoring job starts here, so the panel can show it running. */
 export type AuthoringWatcher = (workspace: WorkspaceRef, sessionId: string, job: AuthoringJob) => void;
 export declare class OrbitToolBridge {

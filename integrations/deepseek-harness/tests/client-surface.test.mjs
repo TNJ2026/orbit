@@ -6,6 +6,11 @@ import test from 'node:test'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const clientDir = join(here, '..', 'src', 'client')
+/* The host-agnostic half of this integration lives outside it. These tests
+   still read it because several of the rules they hold are about the two
+   halves agreeing — the panel and the Host reaching for the same `goalRuns`,
+   the close button and `stopRuntime` being one gesture. */
+const coreDir = join(here, '..', '..', '..', 'integration-core', 'src')
 const names = (await readdir(clientDir)).filter(name => /\.(ts|tsx)$/.test(name))
 const sources = await Promise.all(names.map(name => readFile(join(clientDir, name), 'utf8')))
 const code = sources.join('\n').split('\n')
@@ -138,16 +143,23 @@ test('selecting a Workflow writes the request, it does not start one', () => {
   // popupSelect has nowhere to put the goal these Workflows declare an input
   // for, so the sentence is left for the person to finish.
   const select = code.slice(code.indexOf('onSelect: (option, session)'), code.indexOf("}, 'orbit: workflow popup'"))
-  assert.match(select, /insertReference/)
+  assert.match(select, /input\.setDraft\(/)
   assert.equal(/start_run|runCommand|window\.open/.test(select), false, 'the popup grew a launcher')
 })
 
-test('a reference that cannot be inserted falls back to a readable sentence', () => {
-  // insertReference is span-CAS'd and refuses silently; a sentence with a hole
-  // where the Workflow should be is worse than a plain one.
+/**
+ * One write, so there is no half-written sentence to fall back from.
+ *
+ * `insertReference` was span-CAS'd and refused silently, which is why picking
+ * a Workflow used to write the sentence, then splice the name into the gap,
+ * then check whether the splice had happened. The name is part of the sentence
+ * now: it goes in with the one `setDraft` or not at all.
+ */
+test('the sentence is written whole, in a single draft write', () => {
   const select = code.slice(code.indexOf('onSelect: (option, session)'), code.indexOf("}, 'orbit: workflow popup'"))
-  assert.match(select, /if \(!inserted\)/)
-  assert.match(select, /「\$\{option\.label\}」/)
+  assert.equal((select.match(/input\.setDraft\(/g) ?? []).length, 1)
+  assert.doesNotMatch(select, /if \(!inserted\)/)
+  assert.doesNotMatch(select, /draftRev/)
 })
 
 test('the source that owns the reference can project and serialise it', () => {
@@ -157,14 +169,27 @@ test('the source that owns the reference can project and serialise it', () => {
   assert.match(code, /codec: \{/)
   assert.match(code, /clipboardText: \(ref: string\)/)
   assert.match(code, /serialize: async \(ref: string\)/)
-  const codec = code.slice(code.indexOf('codec: {'), code.indexOf("}, 'orbit: slash command"))
-  assert.equal((codec.match(/\?\? ref|=== undefined \? ref/g) ?? []).length, 2, 'an unknown id must still resolve')
+  // `}), ` — the registration closes a call, not just an object. The anchor
+  // used to read `}, `, never matched, and sliced to the end of the file; the
+  // count it asserted happened to hold across the whole module.
+  const end = code.indexOf("}), 'orbit: slash command")
+  assert.notEqual(end, -1, 'the codec slice no longer ends where it thinks')
+  const codec = code.slice(code.indexOf('codec: {'), end)
+  // Answered from the id itself. There is no table of names to miss in now,
+  // which is the only way an unknown id can be guaranteed an answer.
+  assert.doesNotMatch(codec, /namesById|\?\?|undefined/,
+    'a projection that can come up empty can throw, and a throw blocks the send')
+  assert.match(codec, /clipboardText: \(ref: string\) => `\$\{MARK_OPEN\}\$\{ref\}\$\{MARK_CLOSE\}`/)
+  assert.match(codec, /serialize: async \(ref: string\) => ref/)
 })
 
 test('/orbit still only folds the panel', () => {
   const source = code.slice(code.indexOf('registerOrbitSlashSource'), code.indexOf('interface SelectOption'))
   assert.match(source, /orbit:toggle-panel/)
-  assert.equal(/workflow/i.test(source), false, 'the trigger source is carrying Workflows again')
+  // Comments stripped first: this is about what the source does, and a comment
+  // explaining why it no longer carries Workflows names them to say so.
+  const behaviour = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '')
+  assert.equal(/workflow/i.test(behaviour), false, 'the trigger source is carrying Workflows again')
 })
 
 test('the sentence leaves a gap for the Workflow rather than naming it', async () => {
@@ -368,9 +393,13 @@ test('the Host sends the Goal page what its steps are drawn from', async () => {
  *  a set the page does not draw — and the page draws Runs with no steps. */
 test('the Goal page and the Host agree on which Runs it is about', async () => {
   const host = await readFile(join(here, '..', 'src', 'index.ts'), 'utf8')
-  const shared = await readFile(join(here, '..', 'src', 'run-progress.ts'), 'utf8')
+  const shared = await readFile(join(coreDir, 'run-progress.ts'), 'utf8')
   assert.ok(shared.includes('export function goalRuns'))
-  assert.ok(host.includes("from './run-progress.js'"))
+  // Reached through the shared package now, but still the same function: two
+  // copies of "which Runs is this Goal page about" is the disagreement this
+  // test exists to prevent.
+  assert.match(host, /goalRuns[^\n]*|[^\n]*goalRuns/)
+  assert.match(host, /from '@orbit-runtime\/integration-core'/)
   const panel = sources[names.indexOf('OrbitPanel.tsx')]
   const from = panel.indexOf("tab === 'goal' ? (")
   const until = panel.indexOf("tab === 'history' ? (")
@@ -619,7 +648,7 @@ test('stopping Orbit is asked for, not merely clicked', async () => {
   assert.match(body, /this\.authoringWaiters\.get\(scope\.canonicalPath\)\?\.abort\(\)/)
 
   // The Runtime's own command, not a signal: it unwinds rather than is cut.
-  const gateway = await readFile(join(here, '..', 'src', 'gateway.ts'), 'utf8')
+  const gateway = await readFile(join(coreDir, 'gateway.ts'), 'utf8')
   assert.match(gateway, /\/api\/v1\/runtime\/shutdown/)
   assert.match(gateway, /'idempotency-key': crypto\.randomUUID\(\)/)
   assert.equal(/process\.kill|SIGTERM/.test(gateway), false,
@@ -894,30 +923,138 @@ test('list rows are separated, not bounded', async () => {
 })
 
 /**
- * The chip is shortened. What is sent is not.
+ * An Orbit command reports into the panel, so it opens the panel.
  *
- * A reference travels three ways from one pick: the chip a reader sees, the
- * text they get if they copy it, and the string the codec serializes into the
- * message the model receives. Only the first is a piece of layout. Shortening
- * the other two would hand the model a Workflow name that no longer names the
- * Workflow, and put a name with an ellipsis in it on somebody's clipboard.
+ * The panel is where the work an Orbit command starts becomes visible — a
+ * Run's steps, a Workflow being written. Started behind a folded panel or a
+ * dismissed one, a command has done something and said nothing.
+ *
+ * `orbit:show-panel` and not `orbit:toggle-panel`: a toggle run twice hides
+ * the thing it was meant to reveal, and hides it for someone who already had
+ * it open. `/orbit` is the one command that may toggle, because toggling is
+ * what it is for.
  */
-test('shortening a Workflow reference does not shorten what is sent', async () => {
+test('every Orbit command that does work opens the panel', async () => {
+  const client = await readFile(join(clientDir, 'index.tsx'), 'utf8')
+
+  // One helper, and it only ever shows.
+  assert.match(client, /function showOrbitPanel\(tab\?: 'workflows'\): void/)
+  const helper = client.slice(client.indexOf('function showOrbitPanel'),
+    client.indexOf('const MARK_OPEN'))
+  assert.match(helper, /'orbit:show-panel'/)
+  assert.doesNotMatch(helper, /toggle/)
+
+  // Only `/orbit` toggles. Counted over code alone: the helper's own comment
+  // names the toggle event in order to say it is not that.
+  const code = client.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '')
+  const toggles = [...code.matchAll(/orbit:toggle-panel/g)]
+  assert.equal(toggles.length, 1, 'something other than /orbit is toggling the panel')
+  const panelCommand = client.slice(client.indexOf('function registerOrbitSlashSource'),
+    client.indexOf('interface SelectOption'))
+  assert.match(panelCommand, /orbit:toggle-panel/)
+
+  // Both working commands call it, and neither dispatches the event itself.
+  // Ends at its own registration, not at whatever declaration follows it: the
+  // helper is defined further down the file and would otherwise be read as
+  // part of this command's body.
+  const generate = client.slice(client.indexOf('function registerGenerateSlashSource'),
+    client.indexOf("}), 'orbit: slash command generating a workflow')"))
+  assert.ok(generate.length > 0 && generate.length < 4000, 'the generate slice ran past its command')
+  const popup = client.slice(client.indexOf('function registerWorkflowPopup'),
+    client.indexOf("}), 'orbit: workflow popup')"))
+  for (const [where, body] of [['generate', generate], ['popup', popup]]) {
+    assert.match(body, /showOrbitPanel\(/, `${where} does not open the panel`)
+    assert.doesNotMatch(body, /dispatchEvent/, `${where} should go through the helper`)
+  }
+
+  // Before the work, not after it: a failure has to be met by an open panel
+  // too, and writing a Workflow takes long enough that the panel is the only
+  // thing that can say it started.
+  const started = generate.indexOf('showOrbitPanel')
+  const called = generate.indexOf('hostCall')
+  assert.ok(started > 0 && started < called, 'the panel opens only if the work succeeds')
+
+  // The generate command lands on the tab its job will appear on; the popup
+  // takes no view over, having just shown the list itself.
+  assert.match(generate, /showOrbitPanel\('workflows'\)/)
+  assert.match(popup, /showOrbitPanel\(\)/)
+})
+
+/**
+ * Being put away is not being unmounted.
+ *
+ * A dismissed panel renders nothing, so the only way "show it again" can reach
+ * it is if the listener is registered before that return — a hook after a
+ * conditional return would not run at all, and the command would be shouting
+ * at something that had stopped listening.
+ */
+test('a hidden panel is still listening for the command that reveals it', async () => {
+  const panel = await readFile(join(clientDir, 'OrbitPanel.tsx'), 'utf8')
+  const listener = panel.indexOf("addEventListener('orbit:show-panel'")
+  const bail = panel.indexOf('if (layout.dismissed) return null')
+  assert.ok(listener > 0 && bail > 0)
+  assert.ok(listener < bail, 'the show listener is registered after the panel bails out')
+
+  // Showing clears both ways of being out of sight, not just the fold.
+  const show = panel.slice(panel.indexOf('const show = (event: Event)'), listener)
+  assert.match(show, /dismissed: false/)
+  assert.match(show, /collapsed: false/)
+  // And a tab is only taken over when one was asked for.
+  assert.match(show, /detail\?\.tab === 'workflows'/)
+})
+
+/**
+ * The Workflow goes into the sentence as text, not as a chip.
+ *
+ * The composer draws in two layers: a `.backdrop` holds the visible text and
+ * the `<textarea>` over it is transparent except for its caret. They agree
+ * only while both lay out the same string — and a reference is one `￼` cell
+ * in the backdrop however long the name is. That is why a chipped name is
+ * squeezed to about six characters, and why giving the chip a real width moved
+ * the visible text 86px right while the caret did not move at all: the
+ * textarea still had one `￼` to lay out. Both measured in a browser.
+ *
+ * Bracketed text has no `￼`, so the layers cannot drift, the name is shown
+ * whole, and the caret lands where the sentence ends. The Workflow's identity
+ * is not lost with the chip: the model is already handed the catalog, ids and
+ * all, in its system prompt.
+ */
+test('a picked Workflow is written into the draft as its whole name', async () => {
   const client = await readFile(join(clientDir, 'index.tsx'), 'utf8')
   const pick = client.slice(client.indexOf('onSelect:'), client.indexOf("}), 'orbit: workflow popup')"))
 
-  // Drawn short.
-  assert.match(pick, /label: referenceLabel\(option\.label\)/)
-  // Copied whole: the clipboard text beside it takes the untruncated name.
-  assert.match(pick, /clipboardText: `「\$\{option\.label\}」`/)
-  assert.doesNotMatch(pick, /clipboardText: `「\$\{referenceLabel/)
+  // One write, of the whole sentence, with the name entire.
+  assert.match(pick, /input\.setDraft\(`\$\{head\}\$\{MARK_OPEN\}\$\{option\.label\}\$\{MARK_CLOSE\}\$\{t\('runTail'\)\}`\)/)
+  assert.match(client, /const MARK_OPEN = '「'/)
+  assert.match(client, /const MARK_CLOSE = '」'/)
+  // Not shortened: the reason to shorten was a chip that no longer exists.
+  assert.doesNotMatch(client, /referenceLabel/)
 
-  // Sent whole. The codec reads `namesById`, which is filled from the option
-  // list — so the truncation must not happen there either.
-  assert.match(client, /namesById\.set\(item\.workflow_id, label\)/)
-  const codec = client.slice(client.indexOf('codec: {'), client.indexOf('}), \'orbit: slash command'))
-  assert.doesNotMatch(codec, /referenceLabel/,
-    'the model would receive a name with an ellipsis in it')
+  // No chip, and nothing left over from having had one: a reference would
+  // reintroduce the `￼` the two layers disagree about, and a width override
+  // is what made them disagree by 86px.
+  assert.doesNotMatch(client, /insertReference/)
+  assert.doesNotMatch(client, /data-decoration="chip"/)
+  assert.doesNotMatch(client, /syncWorkflowChipWidths|HARNESS_CHIP_LABEL_SCALE/)
+  // The name table fed a codec that answered for minted references; with none
+  // minted it would be filled and never read.
+  assert.doesNotMatch(client, /namesById/)
+
+  // And the caret is put where the sentence ends, which is the point of
+  // writing the goal's colon last.
+  assert.match(pick, /caretToEnd\(input\.state\.getSnapshot\(\)\.draft\)/)
+})
+
+/**
+ * The brackets are the separation, so the sentence adds none of its own —
+ * `用「名字」执行：` rather than `用 「名字」 执行：`.
+ */
+test('the run sentence leans on the brackets, not on spaces', async () => {
+  const locale = await readFile(join(clientDir, 'locales.ts'), 'utf8')
+  assert.match(locale, /runHead: '用'/)
+  assert.match(locale, /runTail: '执行：'/)
+  assert.doesNotMatch(locale, /runHead: '用 '/)
+  assert.doesNotMatch(locale, /runTail: ' 执行：'/)
 })
 
 /**
@@ -969,15 +1106,16 @@ test('every deliberate entry point starts a Runtime rather than reporting its ab
  * arrives with one — it cannot quietly land on the fallback.
  */
 test('every failure this integration can throw is classified', async () => {
-  const table = await readFile(join(clientDir, 'error-text.ts'), 'utf8')
+  const table = await readFile(join(coreDir, 'error-text.ts'), 'utf8')
   const readings = [...table.matchAll(/\[\/(.+?)\/i,\s*'(\w+)'\]/gs)]
     .map(([, pattern, key]) => [new RegExp(pattern, 'i'), key])
   assert.ok(readings.length >= 20, `expected the readings table, saw ${readings.length}`)
 
-  const roots = ['.', 'client']
+  // Both halves. The table is the shared package's, and it has to answer for
+  // what this host throws as well as for what the package does.
+  const roots = [join(clientDir, '..'), join(clientDir, '..', 'client'), coreDir]
   const thrown = new Set()
-  for (const dir of roots) {
-    const here = join(clientDir, '..', dir)
+  for (const here of roots) {
     for (const name of await readdir(here)) {
       if (!name.endsWith('.ts') || name.endsWith('.d.ts')) continue
       const text = await readFile(join(here, name), 'utf8')

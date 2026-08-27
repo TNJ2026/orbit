@@ -7,11 +7,10 @@
  */
 
 import { useEffect, useState } from 'react'
-import type { WorkflowNode, WorkflowSummary } from '../types.js'
+import { panelError, type PanelError } from '@orbit-runtime/integration-core'
+import type { OrbitRunRow as RunRowData, WorkflowNode, WorkflowSummary } from '@orbit-runtime/integration-core'
 import styles from './OrbitPanel.module.css'
 import { BackButton, OrbitRunListRow, PanelErrorText } from './OrbitRunRow.tsx'
-import { panelError, type PanelError } from './error-text.ts'
-import type { OrbitRunRow as RunRowData } from './orbit-model.ts'
 import type { OrbitLocaleKey } from './locales.ts'
 
 type Translate = (key: OrbitLocaleKey, values?: Record<string, string | number>) => string
