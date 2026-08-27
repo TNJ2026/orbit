@@ -48,9 +48,7 @@ tests/visual_baselines/*.actual.png
 tests/visual_baselines/*.diff.png
 !docs/ui/workflow-prompt-authoring.md
 
-# Per-package installs for the TypeScript integrations. Build output is *not*
-# ignored: the DeepSeek-Harness plugin is loaded from `lib/` by the host, and
-# `integration-core/lib/` is what its bare import resolves to — a checkout
-# without them cannot load the plugin at all.
+# Build output is *not* ignored: the DeepSeek-Harness plugin is loaded from
+# `lib/` by the host, and `integration-core/lib/` is what its bare import
+# resolves to — a checkout without them cannot load the plugin at all.
 integration-core/node_modules/
-integrations/claude-app/node_modules/

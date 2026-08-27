@@ -3,9 +3,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "npm --prefix integration-core run build && npm --prefix integrations/deepseek-harness run build && npm --prefix integrations/claude-app run build",
-    "test": "npm --prefix integration-core test && npm --prefix integrations/deepseek-harness test && npm --prefix integrations/claude-app test",
-    "typecheck": "npm --prefix integration-core run typecheck && npm --prefix integrations/deepseek-harness run typecheck && npm --prefix integrations/claude-app run typecheck",
-    "install:all": "npm --prefix integration-core install && npm --prefix integrations/claude-app install"
+    "build": "npm --prefix integration-core run build && npm --prefix integrations/deepseek-harness run build",
+    "test": "npm --prefix integration-core test && npm --prefix integrations/deepseek-harness test",
+    "typecheck": "npm --prefix integration-core run typecheck && npm --prefix integrations/deepseek-harness run typecheck",
+    "install:all": "npm --prefix integration-core install"
   }
 }

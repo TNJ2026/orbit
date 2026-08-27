@@ -280,6 +280,57 @@ class McpProxyTests(unittest.TestCase):
         self.assertEqual(-32603, response["error"]["code"])
         self.assertEqual("x", response["id"])
 
+    def test_a_transport_failure_says_what_to_do_and_keeps_what_it_was(self) -> None:
+        """The message is a sentence; the exception text rides beside it.
+
+        `MCP endpoint is unavailable: [Errno 61] Connection refused` is true and
+        is not an instruction.  A reader needs to know whether to start
+        something, wait, or go and read a log — and still needs the original,
+        because the reading is a guess and a guess nobody can check is worse
+        than none.
+        """
+
+        source = io.StringIO('{"jsonrpc":"2.0","id":"x","method":"ping"}\n')
+        sink = io.StringIO()
+        raw = "MCP endpoint is unavailable: [Errno 61] Connection refused"
+        serve_proxy(
+            self.manifest, stdin=source, stdout=sink,
+            forward=lambda _url, _message: (_ for _ in ()).throw(RuntimeError(raw)),
+        )
+        error = json.loads(sink.getvalue())["error"]
+        self.assertIn("not listening", error["message"])
+        self.assertNotIn("Errno", error["message"])
+        self.assertEqual(raw, error["data"]["detail"])
+
+    def test_an_unreadable_failure_is_not_dressed_up_as_a_known_one(self) -> None:
+        """A wrong diagnosis sends somebody to fix the wrong thing."""
+
+        source = io.StringIO('{"jsonrpc":"2.0","id":"x","method":"ping"}\n')
+        sink = io.StringIO()
+        serve_proxy(
+            self.manifest, stdin=source, stdout=sink,
+            forward=lambda _url, _message: (_ for _ in ()).throw(RuntimeError("weird")),
+        )
+        error = json.loads(sink.getvalue())["error"]
+        self.assertIn("does not recognise", error["message"])
+        self.assertEqual("weird", error["data"]["detail"])
+
+    def test_orbits_own_error_is_forwarded_rather_than_reworded(self) -> None:
+        """Orbit answered the question; a proxy that rewrote it would be
+        putting words in the Runtime's mouth."""
+
+        source = io.StringIO('{"jsonrpc":"2.0","id":"x","method":"ping"}\n')
+        sink = io.StringIO()
+        answered = {
+            "jsonrpc": "2.0", "id": "x",
+            "error": {"code": -32001, "message": "valid actor credentials are required"},
+        }
+        serve_proxy(
+            self.manifest, stdin=source, stdout=sink,
+            forward=lambda _url, _message: answered,
+        )
+        self.assertEqual(answered, json.loads(sink.getvalue()))
+
     def test_proxy_rejects_malformed_input_without_calling_service(self) -> None:
         source = io.StringIO("not json\n")
         sink = io.StringIO()

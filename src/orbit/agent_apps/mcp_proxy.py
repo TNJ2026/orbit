@@ -9,6 +9,7 @@ from typing import Any, Callable, Mapping
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from .error_text import reading
 from .manifest import AgentAppManifest
 
 
@@ -63,6 +64,19 @@ EVENT_TOOLS = (
 
 def _error(request_id: Any, message: str, code: int = INTERNAL_ERROR) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
+
+
+def _transport_error(request_id: Any, detail: str) -> dict[str, Any]:
+    """A transport failure, said twice: once to act on, once to quote.
+
+    The sentence is what a reader does something about; the raw text is what
+    they put in a bug report.  Both travel, because the classification is a
+    guess and a guess nobody can check is worse than no guess at all.
+    """
+
+    payload = _error(request_id, reading(detail))
+    payload["error"]["data"] = {"detail": detail}
+    return payload
 
 
 def forward_http(url: str, message: Any, *, timeout: float = 330) -> Any:
@@ -135,7 +149,7 @@ def serve_proxy(
                     if inbox is not None:
                         response = _with_event_tools(message, response)
             except (RuntimeError, ValueError) as exc:
-                _emit(sink, _error(request_id, str(exc)))
+                _emit(sink, _transport_error(request_id, str(exc)))
                 continue
             if response is not None:
                 _emit(sink, response)

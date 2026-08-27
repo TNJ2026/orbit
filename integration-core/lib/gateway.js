@@ -26,29 +26,15 @@ export class OrbitGateway {
     commandPrefix;
     fetchImpl;
     discoveryRoot;
-    toolProfile;
     runtimes = new Map();
     telemetry = {
         discoveryAttempts: 0, rpcCalls: 0, transportFailures: 0,
     };
-    constructor(command = 'orbit', commandPrefix = [], fetchImpl = globalThis.fetch, discoveryRoot = process.env.ORBIT_RUNTIME_ROOT || undefined, 
-    /**
-     * Which tools a Runtime this Gateway *starts* will offer.
-     *
-     * A profile belongs to a Runtime, not to a caller: whoever starts it
-     * decides, and everyone who later discovers it gets what it was started
-     * with. `harness` is the default because that is what this used to hard-
-     * code, and a Harness that suddenly began starting `full` Runtimes would
-     * be widening a surface nobody asked it to widen. A host whose client is
-     * the whole point of the connection — an MCP server fronting Orbit for a
-     * general-purpose model — asks for `full` instead.
-     */
-    toolProfile = 'harness') {
+    constructor(command = 'orbit', commandPrefix = [], fetchImpl = globalThis.fetch, discoveryRoot = process.env.ORBIT_RUNTIME_ROOT || undefined) {
         this.command = command;
         this.commandPrefix = commandPrefix;
         this.fetchImpl = fetchImpl;
         this.discoveryRoot = discoveryRoot;
-        this.toolProfile = toolProfile;
     }
     diagnostics() {
         return { ...this.telemetry, connectedWorkspaces: this.runtimes.size };
@@ -149,19 +135,6 @@ export class OrbitGateway {
      * the process that owns the database, and guessing one from the other would
      * survive exactly until they differ.
      */
-    /**
-     * Where this Workspace's Runtime answers, connecting or starting it first.
-     *
-     * For a caller that speaks MCP itself rather than asking this class to make
-     * calls on its behalf — a stdio server fronting Orbit for a host that has
-     * its own MCP client. Everything before the URL is the part worth sharing:
-     * finding the Runtime, starting one when there is none, and refusing a
-     * Runtime whose integration protocol this code does not know.
-     */
-    async endpoint(workspace, startIfMissing = false) {
-        const runtime = await this.runtime(workspace, startIfMissing);
-        return { mcpUrl: runtime.mcpUrl, baseUrl: runtime.baseUrl };
-    }
     async uiUrl(workspace) {
         const runtime = await this.runtime(workspace);
         if (!runtime.baseUrl)
@@ -369,7 +342,12 @@ export class OrbitGateway {
         try {
             const child = spawn(this.command, [
                 ...this.commandPrefix, 'serve', '--port', '0',
-                '--project-root', workspaceRoot, '--mcp-tool-profile', this.toolProfile,
+                // `harness`, and written here rather than passed in: the only caller
+                // is the Harness. A Runtime's profile also decides whether it honours
+                // `x-orbit-actor` at all — `harness` installs the scoped authenticator
+                // under the `harness:session:` prefix, `full` ignores the header — so
+                // this is not a knob to turn without deciding about actors too.
+                '--project-root', workspaceRoot, '--mcp-tool-profile', 'harness',
             ], {
                 cwd: workspaceRoot,
                 detached: true,

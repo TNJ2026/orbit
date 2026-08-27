@@ -1,11 +1,5 @@
 import type { AuthoringOutputPage, WorkspaceRef, RunDto } from './types.js';
 type Fetch = typeof globalThis.fetch;
-/** A Runtime's two addresses: the one to speak MCP to, and the one a person
- *  opens. */
-export interface OrbitEndpoint {
-    readonly mcpUrl: string;
-    readonly baseUrl: string;
-}
 export interface GatewayDiagnostics {
     discoveryAttempts: number;
     rpcCalls: number;
@@ -29,33 +23,9 @@ export declare class OrbitGateway {
     private readonly commandPrefix;
     private readonly fetchImpl;
     private readonly discoveryRoot;
-    /**
-     * Which tools a Runtime this Gateway *starts* will offer.
-     *
-     * A profile belongs to a Runtime, not to a caller: whoever starts it
-     * decides, and everyone who later discovers it gets what it was started
-     * with. `harness` is the default because that is what this used to hard-
-     * code, and a Harness that suddenly began starting `full` Runtimes would
-     * be widening a surface nobody asked it to widen. A host whose client is
-     * the whole point of the connection — an MCP server fronting Orbit for a
-     * general-purpose model — asks for `full` instead.
-     */
-    private readonly toolProfile;
     private readonly runtimes;
     private readonly telemetry;
-    constructor(command?: string, commandPrefix?: readonly string[], fetchImpl?: Fetch, discoveryRoot?: string | undefined, 
-    /**
-     * Which tools a Runtime this Gateway *starts* will offer.
-     *
-     * A profile belongs to a Runtime, not to a caller: whoever starts it
-     * decides, and everyone who later discovers it gets what it was started
-     * with. `harness` is the default because that is what this used to hard-
-     * code, and a Harness that suddenly began starting `full` Runtimes would
-     * be widening a surface nobody asked it to widen. A host whose client is
-     * the whole point of the connection — an MCP server fronting Orbit for a
-     * general-purpose model — asks for `full` instead.
-     */
-    toolProfile?: 'harness' | 'full');
+    constructor(command?: string, commandPrefix?: readonly string[], fetchImpl?: Fetch, discoveryRoot?: string | undefined);
     diagnostics(): GatewayDiagnostics;
     acquire(workspace: WorkspaceRef, startIfMissing?: boolean): Promise<() => Promise<void>>;
     /**
@@ -80,16 +50,6 @@ export declare class OrbitGateway {
      * the process that owns the database, and guessing one from the other would
      * survive exactly until they differ.
      */
-    /**
-     * Where this Workspace's Runtime answers, connecting or starting it first.
-     *
-     * For a caller that speaks MCP itself rather than asking this class to make
-     * calls on its behalf — a stdio server fronting Orbit for a host that has
-     * its own MCP client. Everything before the URL is the part worth sharing:
-     * finding the Runtime, starting one when there is none, and refusing a
-     * Runtime whose integration protocol this code does not know.
-     */
-    endpoint(workspace: WorkspaceRef, startIfMissing?: boolean): Promise<OrbitEndpoint>;
     uiUrl(workspace: WorkspaceRef): Promise<string>;
     /**
      * Read the same durable attempt totals as Orbit's Agent page.
