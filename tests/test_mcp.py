@@ -43,6 +43,19 @@ class HandshakeTests(ApiTestCase):
             self.assertEqual("2.0", body["jsonrpc"])
             self.assertEqual("orbit", body["result"]["serverInfo"]["name"])
             self.assertIn("tools", body["result"]["capabilities"])
+            self.assertIn("resources", body["result"]["capabilities"])
+
+    def test_dashboard_resource_is_discoverable_and_readable(self) -> None:
+        with AsgiHarness(self.app) as client:
+            listed = rpc(client, "resources/list", actor="reader").json()
+            resource = listed["result"]["resources"][0]
+            self.assertEqual("ui://orbit/workflows.html", resource["uri"])
+            self.assertEqual("text/html;profile=mcp-app", resource["mimeType"])
+            read = rpc(
+                client, "resources/read", {"uri": resource["uri"]}, actor="reader",
+            ).json()
+        content = read["result"]["contents"][0]
+        self.assertIn("window.openai.callTool('list_workflows'", content["text"])
 
     def test_a_notification_gets_no_response_body(self) -> None:
         with AsgiHarness(self.app) as client:
@@ -74,6 +87,7 @@ class DiscoveryTests(ApiTestCase):
             self.assertEqual(
                 {
                     "get_capabilities", "list_runs", "inspect_run", "start_run", "resume_run",
+                    "open_orbit_dashboard",
                     "list_runtime_events", "get_run_steps", "get_run_graph",
                     "get_run_edges", "read_run_output",
                     "recover_run", "cancel_run", "replay_langgraph_run",
@@ -94,6 +108,13 @@ class DiscoveryTests(ApiTestCase):
                 # The scope is an internal authorisation detail, not part of
                 # the advertised tool contract.
                 self.assertNotIn("scope", item)
+            dashboard = next(
+                item for item in tools if item["name"] == "open_orbit_dashboard"
+            )
+            self.assertEqual(
+                "ui://orbit/workflows.html",
+                dashboard["_meta"]["ui"]["resourceUri"],
+            )
 
     def test_harness_profile_carries_the_writer_surface_but_not_the_ops_one(self) -> None:
         """What a Harness needs to ask for a Workflow, and to write one.
@@ -222,6 +243,14 @@ class ToolCallTests(ApiTestCase):
             result = tool(client, "list_runs", {}, actor="reader")
             self.assertFalse(result["result"]["isError"])
             self.assertEqual([], payload_of(result)["runs"])
+
+    def test_dashboard_tool_returns_the_initial_workflow_projection(self) -> None:
+        with AsgiHarness(self.app) as client:
+            result = tool(client, "open_orbit_dashboard", {}, actor="reader")
+
+        payload = payload_of(result)
+        self.assertIn("workflows", payload)
+        self.assertTrue(payload["workflows"])
 
     def test_write_tool_starts_a_run(self) -> None:
         with AsgiHarness(self.app) as client:
@@ -891,7 +920,7 @@ class StdioTransportTests(ApiTestCase):
 
         self.assertEqual(2, len(responses))
         self.assertEqual("orbit", responses[0]["result"]["serverInfo"]["name"])
-        self.assertEqual(28, len(responses[1]["result"]["tools"]))
+        self.assertEqual(29, len(responses[1]["result"]["tools"]))
 
     def test_a_notification_produces_no_line_at_all(self) -> None:
         """There is no 202 on this transport; silence is the whole answer."""

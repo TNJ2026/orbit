@@ -27,11 +27,12 @@ codex plugin add orbit@orbit-local
 Orbit 必须获得明确的项目目录。如果聊天没有项目 workspace，启动会停止并提示用户
 打开或选择项目；不会再把进程碰巧所在的目录当作项目。
 
-Orbit 会为当前项目启动 Runtime，打开 `http://127.0.0.1:8848/ui`，并自动监听
-工作流编写请求。当前任务运行期间，Agent 选择器会出现 `app:chatgpt`，并默认
+Orbit 会为当前项目启动 Runtime，在 Codex 对话旁打开原生工作流面板，并自动监听
+工作流编写请求。完整浏览器 UI 仍可通过 Runtime 地址访问。当前任务运行期间，
+Agent 选择器会出现 `codex`，并默认
 选中它。
 
-监听状态属于当前 Codex 任务。任务结束后 `app:chatgpt` 会离线，但 Runtime
+监听状态属于当前 Codex 任务。任务结束后 `codex` 会离线，但 Runtime
 可以继续运行。新建任务并再次说“打开 Orbit”即可重新连接。
 
 ## 安装 CLI
@@ -74,7 +75,7 @@ Agent 存在的地方用它们。
 ```
 
 Codex 会启动或复用当前项目的 Runtime、打开 UI，并调用
-`wait_authoring_request(client="chatgpt")`。当前任务保持活跃时，监听超时后会
+`wait_authoring_request(client="codex-app")`。当前任务保持活跃时，监听超时后会
 自动续听。
 
 ### 运行目标

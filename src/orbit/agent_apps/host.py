@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import os
 from pathlib import Path
 import subprocess
 import time
-from typing import Callable, Iterator
+from typing import Callable, Iterable, Iterator
 from urllib.error import URLError
+from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 from ..platform.process import (
@@ -20,6 +21,7 @@ from ..platform.process import (
     kill_pid_tree,
     terminate_pid_tree,
 )
+from ..platform.runtime_ownership import DiscoveredRuntime, discover_runtimes
 from .manifest import AgentAppManifest, load_manifest
 
 
@@ -69,6 +71,47 @@ def _process_exists(pid: int) -> bool:
         return False
 
 
+def _at_runtime(base_url: str, declared_url: str, *, websocket: bool = False) -> str:
+    """Move one declared loopback path onto a discovered Runtime address."""
+
+    base = urlsplit(base_url)
+    declared = urlsplit(declared_url)
+    scheme = base.scheme
+    if websocket:
+        scheme = "wss" if scheme == "https" else "ws"
+    return urlunsplit((scheme, base.netloc, declared.path, "", ""))
+
+
+def _manifest_at_runtime(
+    manifest: AgentAppManifest, runtime: DiscoveredRuntime,
+) -> AgentAppManifest | None:
+    base_url = runtime.base_url
+    if manifest.service.discovery != "orbit-runtime" or base_url is None:
+        return None
+    parsed = urlsplit(base_url)
+    if parsed.scheme not in {"http", "https"} or parsed.hostname not in {
+        "127.0.0.1", "::1", "localhost",
+    }:
+        return None
+    return replace(
+        manifest,
+        service=replace(
+            manifest.service,
+            ready_url=_at_runtime(base_url, manifest.service.ready_url),
+        ),
+        ui_url=_at_runtime(base_url, manifest.ui_url),
+        mcp=(
+            None if manifest.mcp is None else replace(
+                manifest.mcp, url=_at_runtime(base_url, manifest.mcp.url),
+            )
+        ),
+        events=(
+            None if manifest.events is None else replace(
+                manifest.events,
+                url=_at_runtime(base_url, manifest.events.url, websocket=True),
+            )
+        ),
+    )
 @contextmanager
 def _startup_lock(path: Path) -> Iterator[None]:
     """An advisory, process-wide lock; callers still use health as truth."""
@@ -108,6 +151,7 @@ class AgentAppHost:
         health_check: Callable[[str], bool] | None = None,
         launcher: Callable[[AgentAppManifest, Path, Path | None], subprocess.Popen] | None = None,
         process_exists: Callable[[int], bool] = _process_exists,
+        runtime_discovery: Callable[[], Iterable[DiscoveredRuntime]] = discover_runtimes,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
@@ -115,6 +159,7 @@ class AgentAppHost:
         self.health_check = health_check or _health_check
         self.launcher = launcher or self._launch
         self.process_exists = process_exists
+        self.runtime_discovery = runtime_discovery
         self.clock = clock
         self.sleep = sleep
 
@@ -140,6 +185,11 @@ class AgentAppHost:
                         )
                     return EnsuredApp(
                         manifest, resolved_workspace, state_dir, started=False
+                    )
+                discovered = self._discover_runtime(manifest, resolved_workspace)
+                if discovered is not None:
+                    return EnsuredApp(
+                        discovered, resolved_workspace, state_dir, started=False
                     )
                 process = self.launcher(manifest, state_dir, resolved_workspace)
                 self._record_process(
@@ -171,6 +221,18 @@ class AgentAppHost:
         if manifest.scope == "global":
             return None
         candidates: set[Path] = set()
+        if manifest.service.discovery == "orbit-runtime":
+            for runtime in self.runtime_discovery():
+                project_root = runtime.facts.get("project_root")
+                if not isinstance(project_root, str):
+                    continue
+                candidate = Path(project_root).expanduser().resolve()
+                discovered = _manifest_at_runtime(manifest, runtime)
+                if (
+                    candidate.is_dir() and discovered is not None
+                    and self.health_check(discovered.service.ready_url)
+                ):
+                    candidates.add(candidate)
         for pid_file in (self.state_root / manifest.app_id).glob("*/pid.json"):
             try:
                 payload = json.loads(pid_file.read_text(encoding="utf-8"))
@@ -197,6 +259,32 @@ class AgentAppHost:
                 f"multiple active workspaces found for {manifest.app_id}; set --workspace"
             )
         return next(iter(candidates))
+
+    def _discover_runtime(
+        self, manifest: AgentAppManifest, workspace: Path | None,
+    ) -> AgentAppManifest | None:
+        if manifest.service.discovery != "orbit-runtime" or workspace is None:
+            return None
+        requested = self._workspace_identity(workspace)
+        matches: list[AgentAppManifest] = []
+        for runtime in self.runtime_discovery():
+            try:
+                published = self._workspace_identity(
+                    runtime.facts.get("project_root")
+                )
+            except (OSError, TypeError, ValueError):
+                continue
+            discovered = _manifest_at_runtime(manifest, runtime)
+            if (
+                published == requested and discovered is not None
+                and self.health_check(discovered.service.ready_url)
+            ):
+                matches.append(discovered)
+        if len(matches) > 1:
+            raise AgentAppHostError(
+                f"multiple live Runtimes found for workspace {requested}"
+            )
+        return matches[0] if matches else None
 
     def _launch(
         self, manifest: AgentAppManifest, state_dir: Path, workspace: Path | None,

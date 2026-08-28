@@ -50,6 +50,16 @@ export interface AuthoringJob {
     created_at: string;
     updated_at: string;
 }
+export interface GenerateAndRunOptions {
+    agent?: string;
+    displayLanguage?: string;
+    pollMs?: number;
+    timeoutMs?: number;
+}
+export interface GenerateAndRunResult {
+    workflow: AuthoringJob;
+    run: RunDto;
+}
 /** An authoring job as the panel draws it: what was asked, and how it went. */
 export interface AuthoringSummary {
     job_id: string;

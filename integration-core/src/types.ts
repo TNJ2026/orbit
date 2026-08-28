@@ -7,6 +7,13 @@ export interface WorkflowNode {
   handler: string | null; prompt: string
 }
 export interface AuthoringJob { job_id: string; type: string; workflow_id?: string | null; prompt: string; status: 'queued' | 'running' | 'done' | 'failed' | 'cancelled'; requested_agent?: string | null; attempts?: number | null; result?: unknown; error?: { code: string; message: string; diagnostics?: unknown[] } | null; output_href?: string | null; created_at: string; updated_at: string }
+export interface GenerateAndRunOptions {
+  agent?: string
+  displayLanguage?: string
+  pollMs?: number
+  timeoutMs?: number
+}
+export interface GenerateAndRunResult { workflow: AuthoringJob; run: RunDto }
 /** An authoring job as the panel draws it: what was asked, and how it went. */
 export interface AuthoringSummary {
   job_id: string; status: string; prompt: string

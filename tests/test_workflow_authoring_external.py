@@ -78,6 +78,24 @@ class ReservedNameTests(unittest.TestCase):
         self.assertIsNone(broker.claim(actor="local", client="cursor"))
         self.assertEqual(["cursor"], broker.clients())
 
+    def test_registration_does_not_hold_the_lock_while_reading_reserved_names(self) -> None:
+        """Agent discovery may inspect the broker's own live generator view."""
+
+        broker = None
+        broker = ExternalAuthoringBroker(reserved_names=lambda: broker.clients())
+        finished = threading.Event()
+
+        def register() -> None:
+            broker.touch("cursor")
+            finished.set()
+
+        worker = threading.Thread(target=register, daemon=True)
+        worker.start()
+        worker.join(1.0)
+
+        self.assertTrue(finished.is_set(), "registration deadlocked on its own view")
+        self.assertEqual(["cursor"], broker.clients())
+
 
 class BrokerJobTests(AuthoringJobTestCase):
     def setUp(self) -> None:

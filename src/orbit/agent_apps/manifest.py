@@ -26,6 +26,7 @@ class ServiceSpec:
     environment: tuple[str, ...]
     ready_url: str
     timeout_seconds: float
+    discovery: str | None
 
 
 @dataclass(frozen=True)
@@ -146,7 +147,14 @@ def load_manifest(path: Path | str) -> AgentAppManifest:
         environment=_environment(service_data.get("environment")),
         ready_url=_loopback_url(service_data.get("ready_url"), "service.ready_url"),
         timeout_seconds=float(timeout),
+        discovery=(
+            None
+            if service_data.get("discovery") is None
+            else _string(service_data.get("discovery"), "service.discovery")
+        ),
     )
+    if service.discovery not in {None, "orbit-runtime"}:
+        raise ManifestError("service.discovery must be orbit-runtime when provided")
     ui_data = _mapping(document.get("ui"), "ui")
     mcp_data = document.get("mcp")
     mcp = None

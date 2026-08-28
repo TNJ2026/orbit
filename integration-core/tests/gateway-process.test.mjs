@@ -68,6 +68,40 @@ test('concurrent sessions reuse one discovered Runtime without owning its lifecy
   assert.equal(runtime.server.listening, true)
 })
 
+test('generateAndRunGoal drives authoring and execution over MCP without a UI', async t => {
+  let inspected = 0
+  const run = status => ({
+    run_id: 'run:generated', goal: 'do the work', workflow_id: 'workflow:generated',
+    workflow_version: 1, status, revision: inspected, artifact_count: 1,
+    created_at: 'now', updated_at: 'now', interrupts: [], allowed_commands: [],
+  })
+  const runtime = await target('generate-and-run', message => {
+    if (message.method === 'initialize') return { protocolVersion: '2025-06-18', capabilities: {} }
+    const name = message.params.name
+    if (name === 'get_capabilities') return { structuredContent: { integration_protocol: 'orbit-harness/1' } }
+    if (name === 'generate_workflow') return { structuredContent: {
+      job_id: 'authoring_job:1', type: 'generate', workflow_id: 'workflow:generated',
+      prompt: 'make a workflow', status: 'queued', created_at: 'now', updated_at: 'now',
+    } }
+    if (name === 'get_authoring_job') return { structuredContent: {
+      job_id: 'authoring_job:1', type: 'generate', workflow_id: 'workflow:generated',
+      prompt: 'make a workflow', status: 'done', created_at: 'now', updated_at: 'now',
+    } }
+    if (name === 'start_run') return { structuredContent: run('running') }
+    if (name === 'inspect_run') return { structuredContent: run(++inspected > 1 ? 'completed' : 'running') }
+    throw new Error(`unexpected tool ${String(name)}`)
+  })
+  t.after(() => runtime.server.close())
+  const gateway = new OrbitGateway(process.execPath, [fixture])
+  const result = await gateway.generateAndRunGoal(
+    runtime.workspace, 'session', 'make a workflow', 'do the work', { text: 'input' },
+    { agent: 'antigravity', pollMs: 1 },
+  )
+  assert.equal(result.workflow.workflow_id, 'workflow:generated')
+  assert.equal(result.run.status, 'completed')
+  assert.equal(runtime.lastMessage().params.name, 'inspect_run')
+})
+
 test('an incompatible independent Runtime fails readiness', async t => {
   const runtime = await target('incompatible', mcp('other/9'))
   t.after(() => runtime.server.close())

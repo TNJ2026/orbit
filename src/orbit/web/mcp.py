@@ -37,6 +37,9 @@ from .api_v1 import (
     OPS_READ_SCOPE, OPS_WRITE_SCOPE, READ_SCOPE, SENSITIVE_SCOPE, WRITE_SCOPE, Authorizer,
 )
 from .run_projection import langgraph_run_dto
+from .mcp_app import (
+    ORBIT_DASHBOARD_HTML, ORBIT_DASHBOARD_MIME_TYPE, ORBIT_DASHBOARD_URI,
+)
 
 PROTOCOL_VERSION = "2025-06-18"
 SERVER_INFO = {"name": "orbit", "version": "1.0"}
@@ -255,6 +258,16 @@ def build_mcp_dispatcher(
             "description": "Report Orbit and integration protocol capabilities.",
             "scope": READ_SCOPE,
             "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "open_orbit_dashboard",
+            "description": (
+                "Open Orbit's interactive workflow dashboard beside the "
+                "conversation. Use this when the user asks to open or show Orbit."
+            ),
+            "scope": READ_SCOPE,
+            "inputSchema": {"type": "object", "properties": {}},
+            "_meta": {"ui": {"resourceUri": ORBIT_DASHBOARD_URI}},
         },
         # -- discovery ----------------------------------------------------
         # `start_run` needs a workflow_id, and until now nothing over MCP could
@@ -805,6 +818,8 @@ def build_mcp_dispatcher(
                 "event_schemas": ["langgraph_run/1", "langgraph_node/1"],
                 "tool_profile": tool_profile,
             }
+        if name == "open_orbit_dashboard":
+            name = "list_workflows"
         if name == "list_runs":
             owner = reading_actor(actor)
             # Not a widening of scope: every actor reaching this transport is
@@ -1186,7 +1201,10 @@ def build_mcp_dispatcher(
         if method == "initialize":
             return _result(request_id, {
                 "protocolVersion": PROTOCOL_VERSION,
-                "capabilities": {"tools": {"listChanged": False}},
+                "capabilities": {
+                    "tools": {"listChanged": False},
+                    "resources": {"listChanged": False},
+                },
                 "serverInfo": SERVER_INFO,
             })
         if method in {"notifications/initialized", "notifications/cancelled"}:
@@ -1199,6 +1217,21 @@ def build_mcp_dispatcher(
                     {k: v for k, v in tool.items() if k != "scope"} for tool in tools
                 ]
             })
+        if method == "resources/list":
+            return _result(request_id, {"resources": [{
+                "uri": ORBIT_DASHBOARD_URI,
+                "name": "Orbit workflow dashboard",
+                "description": "Interactive list of published Orbit workflows.",
+                "mimeType": ORBIT_DASHBOARD_MIME_TYPE,
+            }]})
+        if method == "resources/read":
+            if params.get("uri") != ORBIT_DASHBOARD_URI:
+                return _failure(request_id, INVALID_PARAMS, "unknown resource")
+            return _result(request_id, {"contents": [{
+                "uri": ORBIT_DASHBOARD_URI,
+                "mimeType": ORBIT_DASHBOARD_MIME_TYPE,
+                "text": ORBIT_DASHBOARD_HTML,
+            }]})
         if method != "tools/call":
             return _failure(request_id, METHOD_NOT_FOUND, f"unknown method {method}")
 

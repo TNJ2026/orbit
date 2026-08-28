@@ -30,13 +30,14 @@ Orbit requires an explicit project directory. If the chat has no project
 workspace, startup stops and asks the user to open or select one; it never uses
 an incidental process working directory.
 
-Orbit starts the Runtime for the current project, opens
-`http://127.0.0.1:8848/ui`, and automatically begins listening for workflow
-authoring requests. While the task is active, `app:chatgpt` appears in Orbit's
+Orbit starts the Runtime for the current project, opens the native workflow
+dashboard beside the Codex conversation, and automatically begins listening
+for workflow authoring requests. The full browser UI remains available from
+the Runtime URL. While the task is active, `codex` appears in Orbit's
 Agent selector and is selected by default.
 
 The listening presence belongs to the active Codex task. Ending the task
-removes `app:chatgpt`; the Runtime may continue running. Start a new task and
+removes `codex`; the Runtime may continue running. Start a new task and
 ask it to open Orbit to reconnect.
 
 ## Install the CLI
@@ -92,7 +93,7 @@ Open Orbit
 ```
 
 Codex starts or reuses the project Runtime, opens the UI, and calls
-`wait_authoring_request(client="chatgpt")`. The wait is automatically renewed
+`wait_authoring_request(client="codex-app")`. The wait is automatically renewed
 while the task remains active.
 
 ### Run a goal
@@ -178,6 +179,7 @@ stream, written outside every transaction, and never something a replay reads.
 orbit serve
 orbit --version
 orbit mcp
+orbit mcp --project-root /absolute/path/to/project
 orbit run list
 orbit run inspect <run_id>
 orbit workflow validate <file> --catalog <catalog.json>

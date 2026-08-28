@@ -446,6 +446,11 @@ class WorkflowLibraryResolutionTests(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertFalse(hasattr(self.parse(*command), "ui_mode"))
 
+    def test_mcp_accepts_an_explicit_project_root(self) -> None:
+        args = self.parse("mcp", "--project-root", "/tmp/orbit-workspace")
+
+        self.assertEqual("/tmp/orbit-workspace", args.project_root)
+
     def test_an_explicit_database_is_self_contained_in_every_command(self) -> None:
         """No sibling file that only one command knows the name of."""
 

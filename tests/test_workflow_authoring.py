@@ -216,6 +216,8 @@ class AuthoringServiceTests(unittest.TestCase):
         # The half that reads it, guarded the way an open result must be.
         self.assertIn("source.<port>.text", prompt)
         self.assertIn('"exists"', prompt)
+        self.assertIn("Never apply `agent_outcome` to an artifact_ref result", prompt)
+        self.assertIn("route it directly to the success terminal", prompt)
         # And why it is needed at all, so the rule is not read as ceremony.
         self.assertIn("exits successfully whether it did the work", prompt)
         self.assertIn("Do not put a check after every action", prompt)

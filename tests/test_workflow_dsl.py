@@ -628,9 +628,24 @@ class ArtifactEdgeTests(unittest.TestCase):
         self.assertEqual(
             {"prompt": {"op": "ref", "path": "source.result"}}, mapping["fields"]
         )
-        # The same-named edge still compiles to bare identity.
-        same = next(e for e in compiled.ir.edges if e.id == "c_d")
-        self.assertEqual("identity", to_primitive(same.mapping)["op"])
+
+    def test_a_condition_cannot_read_artifact_content_as_an_inline_member(self) -> None:
+        document = self.document()
+        document["edges"][1]["condition"] = {
+            "op": "call", "name": "exists",
+            "args": [{"op": "ref", "path": "source.result.text"}],
+        }
+
+        with self.assertRaises(DiagnosticError) as raised:
+            compile_source(
+                json.dumps(document), self.handlers, self.schemas,
+                source_format="json",
+            )
+
+        diagnostic = raised.exception.diagnostics[0]
+        self.assertEqual("DSL_EXPRESSION_INVALID", diagnostic.code)
+        self.assertIn("artifact_ref", diagnostic.message)
+        self.assertIn("source.result.text", diagnostic.message)
 
     def test_a_transform_mapping_on_an_artifact_edge_is_refused(self) -> None:
         document = self.document(edge_extra={

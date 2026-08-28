@@ -1,17 +1,23 @@
 ---
 name: orbit
-description: Open and use the local Orbit workflow Runtime, automatically listen for workflow authoring requests in the current App, and connect other MCP-capable Agent Apps.
+description: Open Orbit, generate or modify Workflow DSL, and execute user goals with the local workflow Runtime; also inspect runs, process Runtime events, and connect other MCP-capable Agent Apps.
 ---
 
 # Orbit
 
-Use this skill for requests to open Orbit, inspect local workflow runs, or work
-with Orbit's workflow UI.
+Use this skill for requests to open Orbit, create or modify a workflow, execute
+a goal through a published workflow, inspect local runs, or work with Orbit's
+workflow UI.
 
 For opening the Runtime, follow [open-orbit.md](reference/open-orbit.md).
 
-For generating a workflow in the current App after the user clicks Generate in
-Orbit, follow [authoring-with-current-app.md](reference/authoring-with-current-app.md).
+For generating or modifying a workflow with the current Codex task, whether
+the request starts in chat or from the Orbit UI, follow
+[authoring-with-current-app.md](reference/authoring-with-current-app.md).
+
+For selecting a published workflow, starting a run from the user's goal, and
+following it through completion or an interrupt, follow
+[execute-goal.md](reference/execute-goal.md).
 
 For configuring or operating Orbit from another Agent App, follow
 [using-from-other-agent-apps.md](reference/using-from-other-agent-apps.md).

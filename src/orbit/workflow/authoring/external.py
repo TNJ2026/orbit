@@ -286,10 +286,14 @@ class ExternalAuthoringBroker:
         name = normalise_client(client)
         if name is None:
             raise ValueError("a client name is required")
+        # Resolve the dynamic registry before taking the broker lock.  The
+        # registry may include this broker's live generator view, whose
+        # iteration calls ``clients()`` and therefore takes the same lock.
+        # Calling it from inside the critical section deadlocks registration
+        # exactly when an App uses a name also considered by Agent discovery.
+        reserved = {str(item) for item in self._reserved_names()}
         with self._lock:
-            if name not in self._seen and name in {
-                str(item) for item in self._reserved_names()
-            }:
+            if name not in self._seen and name in reserved:
                 raise ReservedClientNameError(name)
             self._seen[name] = self.clock()
         return name

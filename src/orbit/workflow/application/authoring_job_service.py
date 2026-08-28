@@ -235,9 +235,9 @@ class AuthoringJobService:
             raise LookupError("authoring job not found")
         return self._dto(row)
 
-    def list(self, *, actor, active_only=False, job_type=None):
+    def list(self, *, actor, active_only=False, job_type=None, workspace=False):
         self._expire_due()
-        clauses, params = ["actor=?"], [actor]
+        clauses, params = ([], []) if workspace else (["actor=?"], [actor])
         if active_only:
             clauses.append("status IN ('queued','running')")
         if job_type:
@@ -246,12 +246,21 @@ class AuthoringJobService:
             clauses.append("job_type=?")
             params.append(job_type)
         with connect_workflow_database(self.path, read_only=True) as db:
+            where = "" if not clauses else f" WHERE {' AND '.join(clauses)}"
             rows = db.execute(
-                f"SELECT * FROM workflow_authoring_jobs WHERE {' AND '.join(clauses)}"
+                f"SELECT * FROM workflow_authoring_jobs{where}"
                 " ORDER BY created_at DESC,job_id",
                 tuple(params),
             ).fetchall()
-        return [self._dto(row) for row in rows]
+        jobs = [self._dto(row) for row in rows]
+        if workspace:
+            # Workspace observers may follow another App's generation, but the
+            # command remains owned by the actor that created it.  In
+            # particular, merely seeing a job must never grant cancellation.
+            for row, job in zip(rows, jobs):
+                if row["actor"] != actor:
+                    job["allowed_commands"] = []
+        return jobs
 
     def active_for_workflow(self, workflow_id, *, actor):
         self._expire_due()

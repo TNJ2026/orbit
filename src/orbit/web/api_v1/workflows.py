@@ -24,7 +24,7 @@ from ...workflow.dsl import LANGGRAPH_NODE_KINDS, authoring_json_schema
 from ...workflow.persistence.database import connect_workflow_database
 
 from .common import (
-    READ_SCOPE, SENSITIVE_SCOPE, WRITE_SCOPE,
+    OPS_READ_SCOPE, READ_SCOPE, SENSITIVE_SCOPE, WRITE_SCOPE,
     _display_language, _generation_agent, _required_version,
     _retarget_handlers, error,
 )
@@ -258,10 +258,19 @@ def build_routes(ctx) -> list[Route]:
         unknown = set(request.query_params) - {"mine", "active", "type"}
         if unknown:
             return error("invalid_request", "unknown authoring job query parameter")
+        mine = request.query_params.get("mine", "true")
+        if mine not in {"true", "false"}:
+            return error("invalid_request", "mine must be true or false")
+        workspace = mine == "false"
+        if workspace and not ctx.guard.allows(actor, OPS_READ_SCOPE):
+            return error(
+                "forbidden", "workspace authoring jobs require operator read scope", 403,
+            )
         jobs = ctx.authoring_jobs.list(
             actor=actor,
             active_only=request.query_params.get("active") == "true",
             job_type=request.query_params.get("type") or None,
+            workspace=workspace,
         )
         return JSONResponse(envelope({"jobs": jobs}))
 

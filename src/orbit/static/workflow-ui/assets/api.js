@@ -220,7 +220,10 @@ export class Api {
   }
 
   authoringJobs({ active = false, type = "" } = {}) {
-    const params = new URLSearchParams({ mine: "true" });
+    // The local operator watches the Workspace, not only commands issued by
+    // this browser actor.  Jobs owned by another App are returned read-only;
+    // the server strips their commands and keeps their console private.
+    const params = new URLSearchParams({ mine: "false" });
     if (active) params.set("active", "true");
     if (type) params.set("type", type);
     return this.get(`/api/v1/workflow-authoring-jobs?${params}`);

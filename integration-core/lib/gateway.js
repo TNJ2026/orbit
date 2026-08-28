@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { open, realpath, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -186,6 +186,61 @@ export class OrbitGateway {
     }
     async run(workspace, sessionId, runId) {
         return decodeRun(await this.call(workspace, sessionId, 'inspect_run', { run_id: runId }));
+    }
+    /** Generate a Workflow and execute its Goal through Runtime MCP, without a UI.
+     *
+     * The authoring and execution calls are deliberately kept in one method so a
+     * host can offer one synchronous operation. Runtime remains authoritative:
+     * the job's published workflow id is used verbatim, and every mutation gets
+     * its own idempotency key. No page routes or guessed URLs are involved.
+     */
+    async generateAndRunGoal(workspace, sessionId, prompt, goal, input = {}, options = {}) {
+        const generated = await this.call(workspace, sessionId, 'generate_workflow', {
+            prompt,
+            idempotency_key: randomUUID(),
+            ...(options.agent === undefined ? {} : { agent: options.agent }),
+            ...(options.displayLanguage === undefined ? {} : { display_language: options.displayLanguage }),
+        });
+        const workflow = await this.waitForAuthoringJob(workspace, sessionId, generated.job_id, options);
+        if (workflow.status !== 'done') {
+            throw new Error(`Orbit workflow generation ${workflow.status}: ${workflow.error?.message ?? workflow.job_id}`);
+        }
+        if (typeof workflow.workflow_id !== 'string' || !workflow.workflow_id) {
+            throw new Error('Orbit completed workflow generation without a workflow_id');
+        }
+        const started = await this.call(workspace, sessionId, 'start_run', {
+            workflow_id: workflow.workflow_id,
+            goal,
+            input,
+            wait: false,
+            idempotency_key: randomUUID(),
+        });
+        const run = await this.waitForRun(workspace, sessionId, started.run_id, options);
+        return { workflow, run };
+    }
+    async waitForAuthoringJob(workspace, sessionId, jobId, options) {
+        const pollMs = options.pollMs ?? 500;
+        const deadline = Date.now() + (options.timeoutMs ?? 600_000);
+        while (true) {
+            const job = await this.call(workspace, sessionId, 'get_authoring_job', { job_id: jobId });
+            if (job.status === 'done' || job.status === 'failed' || job.status === 'cancelled')
+                return job;
+            if (Date.now() >= deadline)
+                throw new Error(`Orbit workflow generation timed out: ${jobId}`);
+            await new Promise(resolve => setTimeout(resolve, pollMs));
+        }
+    }
+    async waitForRun(workspace, sessionId, runId, options) {
+        const pollMs = options.pollMs ?? 500;
+        const deadline = Date.now() + (options.timeoutMs ?? 600_000);
+        while (true) {
+            const run = await this.run(workspace, sessionId, runId);
+            if (['completed', 'failed', 'cancelled', 'unknown'].includes(run.status))
+                return run;
+            if (Date.now() >= deadline)
+                throw new Error(`Orbit Goal execution timed out: ${runId}`);
+            await new Promise(resolve => setTimeout(resolve, pollMs));
+        }
     }
     async runtime(workspace, startIfMissing = false) {
         return await this.runtimeFor(await realpath(workspace.canonicalPath), startIfMissing);

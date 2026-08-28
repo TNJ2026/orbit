@@ -115,9 +115,10 @@ def compile_document(
             f"source.{source_port['id']}",
             *(f"workflow.inputs.{item['id']}" for item in data.get("inputs", [])),
         }
+        condition_references = expression_references(condition)
         invalid = [
             reference
-            for reference in expression_references(condition) + mapping_references(mapping)
+            for reference in condition_references + mapping_references(mapping)
             if not any(reference == allowed or reference.startswith(allowed + ".") for allowed in allowed_references)
         ]
         if invalid:
@@ -134,6 +135,33 @@ def compile_document(
                         ),
                     )
                     for reference in sorted(set(invalid))
+                ]
+            )
+        source_reference = f"source.{source_port['id']}"
+        source_transport = PortTransport(source_port.get("transport", "inline"))
+        opaque_members = [
+            reference for reference in condition_references
+            if source_transport in {
+                PortTransport.ARTIFACT_REF, PortTransport.SECRET_REF,
+            }
+            and reference.startswith(source_reference + ".")
+        ]
+        if opaque_members:
+            raise DiagnosticError(
+                [
+                    Diagnostic(
+                        "DSL_EXPRESSION_INVALID",
+                        f"condition cannot read member {reference!r} from "
+                        f"{source_transport.value} port {source_port['id']!r}",
+                        "compile",
+                        ("edges", index, "condition"),
+                        hint=(
+                            "opaque references carry metadata, not their content; "
+                            "route the Artifact directly or branch on a separate "
+                            "inline status output"
+                        ),
+                    )
+                    for reference in sorted(set(opaque_members))
                 ]
             )
         edges.append(

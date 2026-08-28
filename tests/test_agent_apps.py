@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 import json
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -12,8 +14,9 @@ from orbit.agent_apps import host as host_module
 from orbit.agent_apps.host import AgentAppHost, AgentAppHostError
 from orbit.agent_apps.event_bridge import AgentAppEventBridge, EventInbox
 from orbit.agent_apps.manifest import ManifestError, load_manifest
-from orbit.agent_apps.mcp_proxy import serve_proxy
+from orbit.agent_apps.mcp_proxy import forward_http, serve_proxy
 from orbit.platform.projects import project_db_path
+from orbit.platform.runtime_ownership import DiscoveredRuntime
 
 
 def write_manifest(root: Path, **overrides) -> Path:
@@ -78,6 +81,16 @@ class ManifestTests(unittest.TestCase):
         with self.assertRaisesRegex(ManifestError, "loopback"):
             load_manifest(path)
 
+    def test_manifest_accepts_declared_orbit_runtime_discovery(self) -> None:
+        path = write_manifest(self.root)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["service"]["discovery"] = "orbit-runtime"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+        self.assertEqual(
+            "orbit-runtime", load_manifest(path).service.discovery,
+        )
+
 
 class _Process:
     pid = 12345
@@ -120,6 +133,53 @@ class HostTests(unittest.TestCase):
         ensured = second.ensure(self.manifest_path, workspace=self.workspace)
         self.assertFalse(ensured.started)
         self.assertEqual([], launched)
+
+    def test_discovered_workspace_runtime_is_reused_at_its_published_port(self) -> None:
+        path = write_manifest(self.root)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["service"]["discovery"] = "orbit-runtime"
+        payload["events"] = {
+            "transport": "websocket", "url": "ws://127.0.0.1:9911/events",
+        }
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        runtime = DiscoveredRuntime(Path("owner.lock"), {
+            "base_url": "http://127.0.0.1:51325",
+            "project_root": str(self.workspace.resolve()),
+        })
+        launched = []
+        host = AgentAppHost(
+            state_root=self.root / "state",
+            health_check=lambda url: url == "http://127.0.0.1:51325/health/ready",
+            launcher=lambda *_args: launched.append(True),
+            runtime_discovery=lambda: (runtime,),
+        )
+
+        ensured = host.ensure(path, workspace=self.workspace)
+
+        self.assertFalse(ensured.started)
+        self.assertEqual([], launched)
+        self.assertEqual("http://127.0.0.1:51325/ui/", ensured.manifest.ui_url)
+        self.assertEqual("http://127.0.0.1:51325/mcp", ensured.manifest.mcp.url)
+        self.assertEqual("ws://127.0.0.1:51325/events", ensured.manifest.events.url)
+
+    def test_active_workspace_can_be_recovered_from_runtime_discovery(self) -> None:
+        path = write_manifest(self.root)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["service"]["discovery"] = "orbit-runtime"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        runtime = DiscoveredRuntime(Path("owner.lock"), {
+            "base_url": "http://127.0.0.1:51325",
+            "project_root": str(self.workspace.resolve()),
+        })
+        host = AgentAppHost(
+            state_root=self.root / "state",
+            health_check=lambda url: url == "http://127.0.0.1:51325/health/ready",
+            runtime_discovery=lambda: (runtime,),
+        )
+
+        self.assertEqual(
+            self.workspace.resolve(), host.active_workspace(path),
+        )
 
     def test_ready_owner_compares_canonical_workspace_paths(self) -> None:
         health = iter((False, False, True))
@@ -543,3 +603,200 @@ class HostHelperTests(unittest.TestCase):
                     self.assertEqual(
                         expected, host_module._health_check("http://example/health"),
                     )
+
+
+class _Endpoint:
+    """A real HTTP MCP endpoint on a port nobody chose in advance.
+
+    The proxy's transport was only ever tested with `forward` replaced by a
+    lambda, which is a test of the loop around it and of nothing it actually
+    does: the status handling, the body-on-error path, and every failure the
+    socket can produce were unexercised. This is small enough to be worth
+    having and real enough to have caught them.
+    """
+
+    def __init__(self, respond) -> None:
+        endpoint = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler's name
+                length = int(self.headers.get("content-length", "0"))
+                body = self.rfile.read(length).decode("utf-8")
+                endpoint.seen.append(json.loads(body))
+                # Lower-cased on the way in: HTTP header names are
+                # case-insensitive and `urllib` capitalises what it sends, so
+                # an assertion on the literal key is about urllib, not about
+                # the proxy.
+                endpoint.headers.append(
+                    {key.lower(): value for key, value in self.headers.items()}
+                )
+                status, payload = respond(json.loads(body))
+                raw = payload.encode("utf-8")
+                self.send_response(status)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+            def log_message(self, *_args) -> None:
+                """Silence: a test's output is its assertions."""
+
+        self.seen: list = []
+        self.headers: list = []
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    @property
+    def url(self) -> str:
+        host, port = self.server.server_address[:2]
+        return f"http://{host}:{port}/mcp"
+
+    def close(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+
+
+class McpProxyTransportTests(unittest.TestCase):
+    """`forward_http` against a socket, rather than against a stand-in."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.root = Path(self.temp.name)
+        self.endpoints: list[_Endpoint] = []
+
+    def tearDown(self) -> None:
+        for endpoint in self.endpoints:
+            endpoint.close()
+        self.temp.cleanup()
+
+    def _endpoint(self, respond) -> _Endpoint:
+        endpoint = _Endpoint(respond)
+        self.endpoints.append(endpoint)
+        return endpoint
+
+    def test_it_round_trips_one_message_over_a_socket(self) -> None:
+        endpoint = self._endpoint(lambda message: (
+            200, json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": {"ok": True}}),
+        ))
+        answer = forward_http(endpoint.url, {"jsonrpc": "2.0", "id": 3, "method": "ping"})
+        self.assertEqual({"ok": True}, answer["result"])
+        self.assertEqual("ping", endpoint.seen[0]["method"])
+        self.assertEqual("application/json", endpoint.headers[0]["content-type"])
+
+    def test_an_error_orbit_answered_with_is_forwarded_not_swallowed(self) -> None:
+        """A 4xx carrying a JSON-RPC error is Orbit's answer, not a transport
+        failure. Raising here would replace what Orbit said with what the proxy
+        guessed, and the caller would never see the reason it was refused."""
+
+        refusal = {
+            "jsonrpc": "2.0", "id": 4,
+            "error": {"code": -32001, "message": "valid actor credentials are required"},
+        }
+        endpoint = self._endpoint(lambda _message: (400, json.dumps(refusal)))
+        self.assertEqual(refusal, forward_http(endpoint.url, {"jsonrpc": "2.0", "id": 4}))
+
+    def test_a_status_with_no_body_is_a_transport_failure(self) -> None:
+        """Nothing to forward, so the status is all there is to report."""
+
+        endpoint = self._endpoint(lambda _message: (502, ""))
+        with self.assertRaises(RuntimeError) as caught:
+            forward_http(endpoint.url, {"jsonrpc": "2.0", "id": 5})
+        self.assertIn("HTTP 502", str(caught.exception))
+
+    def test_an_unreadable_body_is_named_as_such(self) -> None:
+        endpoint = self._endpoint(lambda _message: (200, "{not json"))
+        with self.assertRaises(RuntimeError) as caught:
+            forward_http(endpoint.url, {"jsonrpc": "2.0", "id": 6})
+        self.assertIn("invalid JSON", str(caught.exception))
+
+    def test_an_empty_answer_is_not_a_failure(self) -> None:
+        """A notification is answered with nothing, and nothing is correct."""
+
+        endpoint = self._endpoint(lambda _message: (200, ""))
+        self.assertIsNone(forward_http(endpoint.url, {"jsonrpc": "2.0", "method": "note"}))
+
+    def test_a_port_nobody_is_listening_on_reads_as_unavailable(self) -> None:
+        endpoint = self._endpoint(lambda _message: (200, "{}"))
+        url = endpoint.url
+        endpoint.close()
+        self.endpoints.remove(endpoint)
+        with self.assertRaises(RuntimeError) as caught:
+            forward_http(url, {"jsonrpc": "2.0", "id": 7})
+        self.assertIn("unavailable", str(caught.exception))
+
+    def test_a_service_that_never_answers_is_bounded(self) -> None:
+        """The wedge this timeout exists for: a Runtime holding the socket open
+        and saying nothing. Given its own short deadline so the test does not
+        wait out the five-and-a-half minute one the proxy ships with."""
+
+        held = threading.Event()
+        self.addCleanup(held.set)
+
+        def respond(_message):
+            held.wait(timeout=30)
+            return 200, "{}"
+
+        endpoint = self._endpoint(respond)
+        with self.assertRaises(RuntimeError) as caught:
+            forward_http(endpoint.url, {"jsonrpc": "2.0", "id": 8}, timeout=0.25)
+        self.assertIn("unavailable", str(caught.exception))
+        held.set()
+
+
+class McpProxyEndToEndTests(unittest.TestCase):
+    """The whole pipe: a line of stdin becomes a request on a socket."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.root = Path(self.temp.name)
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def _manifest(self, endpoint: _Endpoint):
+        return load_manifest(write_manifest(
+            self.root, mcp={"transport": "http-jsonrpc", "url": endpoint.url},
+        ))
+
+    def test_stdin_reaches_the_socket_and_the_answer_reaches_stdout(self) -> None:
+        endpoint = _Endpoint(lambda message: (
+            200, json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": {"tools": []}}),
+        ))
+        self.addCleanup(endpoint.close)
+        sink = io.StringIO()
+        serve_proxy(
+            self._manifest(endpoint),
+            stdin=io.StringIO('{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n'),
+            stdout=sink,
+        )
+        self.assertEqual({"tools": []}, json.loads(sink.getvalue())["result"])
+        self.assertEqual("tools/list", endpoint.seen[0]["method"])
+
+    def test_a_runtime_that_dies_mid_session_is_explained_not_echoed(self) -> None:
+        """Two messages with a shutdown between them, ordered by the generator
+        rather than by a sleep: the first is answered, the Runtime goes away,
+        and the second has to say what happened in words somebody can act on
+        while keeping the text they would quote."""
+
+        endpoint = _Endpoint(lambda message: (
+            200, json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": {}}),
+        ))
+
+        def lines():
+            yield '{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n'
+            endpoint.close()
+            yield '{"jsonrpc":"2.0","id":2,"method":"tools/list"}\n'
+
+        sink = io.StringIO()
+        serve_proxy(self._manifest(endpoint), stdin=lines(), stdout=sink)
+        first, second = [json.loads(line) for line in sink.getvalue().splitlines()]
+        self.assertEqual({}, first["result"])
+        error = second["error"]
+        self.assertEqual(2, second["id"])
+        # A sentence, and not the exception's own wording.
+        self.assertIn("not listening", error["message"])
+        self.assertNotIn("Errno", error["message"])
+        # And the wording it replaced, for whoever has to fix it.
+        self.assertIn("unavailable", error["data"]["detail"])

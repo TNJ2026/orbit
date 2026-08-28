@@ -247,6 +247,15 @@ test("workflow detail encodes identity and asks for no particular version", asyn
   assert.equal(calls[0].url, "/api/v1/workflows/workflow%3Alaunch%20plan");
 });
 
+test("authoring jobs follow the operator's whole workspace", async () => {
+  const calls = stubFetch([{ status: 200, body: { data: { jobs: [] } } }]);
+  await new Api().authoringJobs({ active: true, type: "generate" });
+  assert.equal(
+    calls[0].url,
+    "/api/v1/workflow-authoring-jobs?mine=false&active=true&type=generate",
+  );
+});
+
 
 test("live reads use their versioned API view", async () => {
   const calls = stubFetch([

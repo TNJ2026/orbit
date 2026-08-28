@@ -215,11 +215,19 @@ class ApiContext:
             audit_position = connection.execute(
                 "SELECT COUNT(*) FROM audit_records"
             ).fetchone()[0]
+            authoring_updated = connection.execute(
+                "SELECT COALESCE(MAX(updated_at), '') FROM workflow_authoring_jobs"
+            ).fetchone()[0]
+            authoring_output_position = connection.execute(
+                "SELECT COALESCE(MAX(chunk_id), 0) FROM authoring_job_output"
+            ).fetchone()[0]
         source = getattr(self.langgraph_service, "last_change", None)
         engine_updated = "" if source is None else (source() or "")
         events = getattr(self.langgraph_service, "events_head", None)
         return {
             "audit_position": int(audit_position),
+            "authoring_updated": str(authoring_updated),
+            "authoring_output_position": int(authoring_output_position),
             "engine_updated": engine_updated,
             "event_position": 0 if events is None else int(events()),
         }

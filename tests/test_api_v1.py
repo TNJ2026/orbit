@@ -24,6 +24,7 @@ from orbit.workflow.api.dto import (
 )
 from orbit.workflow.artifacts.local_cas import LocalCASBackend
 from orbit.workflow.api.workflow_catalog import WorkflowCatalogReadModelService
+from orbit.workflow.application.authoring_job_service import AuthoringJobService
 from orbit.workflow.domain.ids import EntityId
 from orbit.workflow.catalogs.handlers import HandlerManifest
 from orbit.workflow.domain.durable_execution import ExecutionSafety
@@ -2153,6 +2154,59 @@ class OperationsReadTests(ApiTestCase):
                 f"/api/v1/live?cursor={initial['cursor']}", actor="reader"
             ).json()["data"]
             self.assertTrue(changed["changed"])
+
+    def test_live_cursor_moves_when_authoring_progress_is_written(self) -> None:
+        with AsgiHarness(self.app) as client:
+            before = client.get("/api/v1/live", actor="reader").json()["data"]
+            with connect_workflow_database(self.db) as connection:
+                connection.execute(
+                    "INSERT INTO workflow_authoring_jobs("
+                    "job_id,job_type,actor,workflow_id,prompt,mode,status,"
+                    "idempotency_key,deadline_at,created_at,updated_at) "
+                    "VALUES (?,?,?,?,?,?,'running',?,?,?,?)",
+                    (
+                        "authoring_job:live", "generate", "writer",
+                        "workflow:live", "generate it", "generate", "live-key", "",
+                        "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z",
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO authoring_job_output(job_id,stream,text,created_at)"
+                    " VALUES (?,?,?,?)",
+                    (
+                        "authoring_job:live", "stderr", "generating",
+                        "2026-01-01T00:00:01Z",
+                    ),
+                )
+                connection.commit()
+            after = client.get(
+                f"/api/v1/live?cursor={before['cursor']}", actor="reader",
+            ).json()["data"]
+            self.assertTrue(after["changed"])
+
+    def test_operator_can_watch_another_apps_job_without_its_commands(self) -> None:
+        with connect_workflow_database(self.db) as connection:
+            connection.execute(
+                "INSERT INTO workflow_authoring_jobs("
+                "job_id,job_type,actor,workflow_id,prompt,mode,status,"
+                "idempotency_key,deadline_at,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,'running',?,?,?,?)",
+                (
+                    "authoring_job:other-app", "generate", "second-writer",
+                    "workflow:other-app", "generate it", "generate", "other-key", "",
+                    "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z",
+                ),
+            )
+            connection.commit()
+
+        service = object.__new__(AuthoringJobService)
+        service.path = self.db
+        service.clock = lambda: datetime(2025, 1, 1, tzinfo=timezone.utc)
+
+        self.assertEqual([], service.list(actor="writer"))
+        jobs = service.list(actor="writer", workspace=True)
+        self.assertEqual(["authoring_job:other-app"], [job["job_id"] for job in jobs])
+        self.assertEqual([], jobs[0]["allowed_commands"])
 
 
 class RunGoalTests(ApiTestCase):

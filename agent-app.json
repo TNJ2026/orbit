@@ -16,7 +16,8 @@
     "cwd": ".",
     "environment": ["HOME", "PATH"],
     "ready_url": "http://127.0.0.1:8848/health/ready",
-    "timeout_seconds": 60
+    "timeout_seconds": 60,
+    "discovery": "orbit-runtime"
   },
   "ui": {
     "url": "http://127.0.0.1:8848/ui/"

@@ -25,7 +25,11 @@ from .platform.projects import (
 )
 
 
-def _workflow_db_path(explicit: str | None) -> str:
+def _workflow_db_path(
+    explicit: str | None,
+    *,
+    project_root: Path | str | None = None,
+) -> str:
     """Which library holds published definitions, for every command alike.
 
     One rule now, which is the point: an explicit database is self-contained,
@@ -37,7 +41,9 @@ def _workflow_db_path(explicit: str | None) -> str:
 
     if explicit:
         return explicit
-    _runtime_db_path(None)  # Preserve the existing cutover acknowledgement gate.
+    _runtime_db_path(
+        None, project_root=project_root,
+    )  # Preserve the existing cutover acknowledgement gate.
     return str(public_workflow_db_path())
 
 
@@ -437,7 +443,9 @@ def _serve(args) -> None:
         handlers.extend(dev_handlers)
         print(f"dev tools: {', '.join(tool_names) or 'none granted'}", flush=True)
 
-    workflow_db_path = Path(_workflow_db_path(args.db))
+    workflow_db_path = Path(
+        _workflow_db_path(args.db, project_root=project_root)
+    )
     langgraph_state_directory = (
         Path(args.langgraph_state_dir).expanduser().absolute()
         if args.langgraph_state_dir else Path(db_path).parent
@@ -561,7 +569,8 @@ def _mcp(args) -> None:
     actor_prefix = getattr(args, "actor_prefix", None)
     if actor_prefix is not None and not actor_prefix.strip():
         raise SystemExit("orbit mcp: --actor-prefix cannot be empty")
-    db_path = _runtime_db_path(args.db)
+    project_root = resolve_project_root(getattr(args, "project_root", None))
+    db_path = _runtime_db_path(args.db, project_root=project_root)
     try:
         assert_runtime_schema(db_path)
     except MixedSchemaError as exc:
@@ -580,7 +589,7 @@ def _mcp(args) -> None:
     # Discoverable, but deliberately without an endpoint: this Runtime speaks
     # only to the process holding its stdio. Saying so keeps a client from
     # reading "no base_url yet" as "still starting up" and waiting forever.
-    ownership.publish(transport="stdio")
+    ownership.publish(transport="stdio", project_root=str(project_root))
 
     artifact_root = _artifact_root_path(args.artifact_root, db_path)
     try:
@@ -609,7 +618,9 @@ def _mcp(args) -> None:
     try:
         app = create_app(
             db_path,
-            workflow_db_path=_workflow_db_path(args.db),
+            workflow_db_path=_workflow_db_path(
+                args.db, project_root=project_root,
+            ),
             handlers=handlers,
             schemas=BUILTIN_SCHEMAS,
             artifact_backend=artifact_backend,
@@ -791,6 +802,10 @@ def build_parser() -> argparse.ArgumentParser:
     mcp_cmd = sub.add_parser(
         "mcp",
         help="Serve the MCP tools over stdio, Runtime included",
+    )
+    mcp_cmd.add_argument(
+        "--project-root", default=None,
+        help="Project directory used for Runtime state (default: current directory)",
     )
     mcp_cmd.add_argument(
         "--db", default=None,

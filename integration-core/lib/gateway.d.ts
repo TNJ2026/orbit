@@ -1,4 +1,4 @@
-import type { AuthoringOutputPage, WorkspaceRef, RunDto } from './types.js';
+import type { AuthoringOutputPage, GenerateAndRunOptions, GenerateAndRunResult, WorkspaceRef, RunDto } from './types.js';
 type Fetch = typeof globalThis.fetch;
 export interface GatewayDiagnostics {
     discoveryAttempts: number;
@@ -63,6 +63,16 @@ export declare class OrbitGateway {
     }>>;
     authoringOutput(workspace: WorkspaceRef, sessionId: string, outputHref: string, after: number): Promise<AuthoringOutputPage>;
     run(workspace: WorkspaceRef, sessionId: string, runId: string): Promise<RunDto>;
+    /** Generate a Workflow and execute its Goal through Runtime MCP, without a UI.
+     *
+     * The authoring and execution calls are deliberately kept in one method so a
+     * host can offer one synchronous operation. Runtime remains authoritative:
+     * the job's published workflow id is used verbatim, and every mutation gets
+     * its own idempotency key. No page routes or guessed URLs are involved.
+     */
+    generateAndRunGoal(workspace: WorkspaceRef, sessionId: string, prompt: string, goal: string, input?: Record<string, unknown>, options?: GenerateAndRunOptions): Promise<GenerateAndRunResult>;
+    private waitForAuthoringJob;
+    private waitForRun;
     private runtime;
     private runtimeFor;
     private connect;

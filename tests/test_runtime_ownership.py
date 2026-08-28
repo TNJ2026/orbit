@@ -63,6 +63,7 @@ class McpOwnershipCleanupTests(unittest.TestCase):
         return types.SimpleNamespace(
             db=str(Path(root) / "runtime.db"), artifact_root=None,
             no_agent_discovery=True, actor="local", mcp_tool_profile="full",
+            project_root=root,
         )
 
     def test_a_failed_artifact_store_does_not_bury_its_own_fault(self) -> None:
@@ -79,6 +80,24 @@ class McpOwnershipCleanupTests(unittest.TestCase):
             self.assertIs(boom, caught.exception)
             # And the database is free for the next process.
             RuntimeOwnership(Path(args.db)).acquire().release()
+
+    def test_explicit_project_root_selects_the_stdio_runtime_workspace(self) -> None:
+        from orbit.__main__ import _mcp
+
+        boom = RuntimeError("stop after resolving the workspace")
+        with tempfile.TemporaryDirectory() as root:
+            args = self.args(root)
+            with patch(
+                "orbit.__main__._runtime_db_path", return_value=args.db,
+            ) as resolve_db, patch(
+                "orbit.workflow.artifacts.LocalCASBackend", side_effect=boom,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "resolving the workspace"):
+                    _mcp(args)
+
+            resolve_db.assert_called_once_with(
+                args.db, project_root=Path(root).resolve(),
+            )
 
     def test_a_failed_shutdown_still_releases(self) -> None:
         """Asserted on the call, not on a second acquire succeeding.
