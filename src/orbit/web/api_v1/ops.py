@@ -19,6 +19,27 @@ from .common import (
 )
 
 
+def _proposal_commands(ctx, actor) -> list[dict]:
+    """The one command this page offers, issued by the server that owns it.
+
+    A page that knew this URL would be a page deciding for itself what it may
+    do, which is the arrangement `allowed_commands[]` exists to prevent. It
+    matters more here than usual: what is on the other end proposes additions
+    to the allowlist that stands between a workflow step and arbitrary
+    execution, so who may reach it is the server's answer to give.
+    """
+
+    if ctx.authoring_service is None or not ctx.guard.allows(actor, WRITE_SCOPE):
+        return []
+    return [{
+        "command": "agent.proposal.probe",
+        "label": "Look for another Agent CLI",
+        "method": "POST",
+        "href": "/api/v1/agent-proposals",
+        "payload_schema": "agent-proposal/1.0",
+    }]
+
+
 def build_routes(ctx) -> list[Route]:
     async def handler_catalog(request: Request) -> JSONResponse:
         """Installed handlers for the authoring UI.
@@ -40,6 +61,7 @@ def build_routes(ctx) -> list[Route]:
                         for item in ctx.agent_catalog
                     ],
                     "status_semantics": "registration_only",
+                    "allowed_commands": _proposal_commands(ctx, actor),
                 })
             )
         recent, attempt_counts, failed_counts = ctx.recent_handler_attempts()
@@ -75,6 +97,7 @@ def build_routes(ctx) -> list[Route]:
                     for item in ctx.agent_catalog
                 ],
                 "status_semantics": "registration_only",
+                "allowed_commands": _proposal_commands(ctx, actor),
             })
         )
 

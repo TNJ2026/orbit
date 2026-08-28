@@ -1833,6 +1833,116 @@ export function createViews(context) {
         ]);
       })
       : [el("div", { class: "muted", text: i18n.t("agents.empty") })]));
+
+    root.append(agentFinder(agents, catalog.allowed_commands || []));
+  }
+
+  /* Ask an installed Agent what to look for; let the server do the looking.
+   *
+   * The button produces a patch and never a registration, which is the whole
+   * reason this is allowed to exist on a page: the allowlist it proposes into
+   * is the thing standing between a workflow step and arbitrary execution, and
+   * it grows by review or not at all. So the result is text, the proposed spec
+   * carries no invocation, and the copy below says both out loud rather than
+   * leaving somebody to assume the button did more than it did. */
+  function agentFinder(installed, allowedCommands) {
+    const allowed = allowedCommands.find(
+      (item) => item.command === "agent.proposal.probe",
+    );
+    // No command, no form. Whether this may be reached is the server's answer,
+    // and a box that posts nowhere is worse than an absent one.
+    if (!allowed) return el("div", { hidden: "hidden" });
+    const names = installed.map((handler) => handler.name.replace(/^agent\./, ""));
+    const chooser = el("select", { class: "input", id: "agentFinderAgent" },
+      names.map((name) => el("option", { value: name, text: name })));
+    const prompt = el("textarea", {
+      class: "input", id: "agentFinderPrompt", required: "required",
+      // The server refuses beyond this; saying so here stops a long paste
+      // where it is typed instead of after a round trip.
+      maxlength: "2000",
+      placeholder: i18n.t("agents.find.placeholder"),
+    });
+    const submit = el("button", {
+      class: "button primary", type: "submit",
+      text: i18n.t("agents.find.submit"),
+      disabled: names.length ? null : "disabled",
+    });
+    const problem = el("div", { class: "banner error", hidden: "hidden" });
+    const results = el("div", { class: "agent-finder-results" });
+
+    const form = el("form", { class: "panel agent-finder" }, [
+      el("h3", { text: i18n.t("agents.find.title") }),
+      el("p", { class: "muted", text: i18n.t("agents.find.hint") }),
+      problem, prompt,
+      el("div", { class: "agent-finder-actions" }, [chooser, submit]),
+      results,
+    ]);
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (!prompt.value.trim() || !prompt.reportValidity()) return;
+      submit.disabled = true;
+      problem.hidden = true;
+      results.replaceChildren(el("div", {
+        class: "muted",
+        text: i18n.t("agents.find.searching", { agent: chooser.value }),
+      }));
+      try {
+        const { data } = await api.execute(
+          allowed,
+          { prompt: prompt.value.trim(), agent: chooser.value },
+          // Each press is a fresh look, so each gets its own key rather than
+          // replaying the previous answer.
+          `agent.proposal.probe:${Date.now()}`,
+        );
+        results.replaceChildren(...agentFinderResults(data));
+      } catch (error) {
+        results.replaceChildren();
+        problem.hidden = false;
+        problem.textContent = error?.message || String(error);
+      } finally {
+        submit.disabled = false;
+      }
+    });
+    return form;
+  }
+
+  function agentFinderResults(data) {
+    const out = [];
+    if (data.asked_agent) {
+      out.push(el("p", {
+        class: "muted",
+        text: i18n.t("agents.find.asked", { agent: data.asked_agent }),
+      }));
+    }
+    if (!data.proposals.length) {
+      out.push(el("div", { class: "muted", text: i18n.t("agents.find.noCandidates") }));
+      return out;
+    }
+    out.push(el("ul", { class: "agent-finder-list" }, data.proposals.map((item) =>
+      el("li", { class: `agent-finder-item verdict-${item.verdict}` }, [
+        el("span", { class: "mono", text: item.executable }),
+        el("span", {
+          class: "agent-stat-pill",
+          text: i18n.t(`agents.verdict.${item.verdict}`),
+        }),
+        el("span", { class: "muted", text: item.version || "" }),
+      ]))));
+    if (data.patch) {
+      const copy = el("button", {
+        class: "button", type: "button", text: i18n.t("agents.find.copy"),
+        onclick: async () => {
+          await navigator.clipboard?.writeText(data.patch);
+          copy.textContent = i18n.t("agents.find.copied");
+        },
+      });
+      out.push(el("div", { class: "agent-finder-patch" }, [
+        el("h4", { text: i18n.t("agents.find.patchTitle") }),
+        el("p", { class: "muted", text: i18n.t("agents.find.patchHint") }),
+        copy,
+        el("pre", { class: "mono agent-finder-diff" }, [el("code", { text: data.patch })]),
+      ]));
+    }
+    return out;
   }
 
   /* A detail reads as a centred modal over the page that listed it, not a

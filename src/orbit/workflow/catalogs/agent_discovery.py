@@ -399,6 +399,63 @@ def registrable_agents(
     return tuple(pairs)
 
 
+@dataclass(frozen=True)
+class CandidateProbe:
+    """What this machine can be made to say about one proposed program name.
+
+    Evidence, not a decision. It exists so a reviewer reads what the probe
+    *saw* rather than what something reported to it, and so the two can never
+    be confused for each other.
+
+    The resolved path is deliberately absent, for the same reason
+    `catalog_entries` withholds it: a location this file's reviewer never saw
+    is the one thing the bare-program-name rule exists to keep out.
+    """
+
+    executable: str
+    refused: str | None
+    on_path: bool
+    version: str | None
+    already_trusted: str | None
+
+
+def probe_executable(
+    name: str,
+    *,
+    specs: Sequence[AgentCliSpec] = TRUSTED_AGENT_CLIS,
+    which: Callable[[str], str | None] = shutil.which,
+    runner=subprocess.run,
+) -> CandidateProbe:
+    """Look at one proposed program name. Runs its version flag and nothing else.
+
+    Where the suggestion came from does not matter — a person typing, a model
+    reading their prompt — because this refuses to act on it in every way that
+    would matter. The name is held to the same bare-program-name rule the
+    allowlist is, resolution goes through PATH, and the only thing executed is
+    the CLI's own version flag, from a neutral cwd with a bare environment.
+
+    Being on PATH is not being trusted, and this function registers nothing.
+    Its result feeds a proposal a person reads and merges, which is the only
+    way the allowlist has ever grown.
+    """
+
+    try:
+        candidate = AgentCliSpec(name, name)
+    except AgentDiscoveryError as exc:
+        return CandidateProbe(name, str(exc), False, None, None)
+    covered = next(
+        (spec.name for spec in specs if spec.executable == candidate.executable),
+        None,
+    )
+    resolved = which(candidate.executable)
+    if not resolved:
+        return CandidateProbe(candidate.executable, None, False, None, covered)
+    return CandidateProbe(
+        candidate.executable, None, True,
+        _probe_version(resolved, candidate, runner), covered,
+    )
+
+
 def catalog_entries(agents: Iterable[DiscoveredAgent]) -> tuple[Mapping[str, object], ...]:
     """What `/api/v1/handler-catalog` may say about a discovered Agent.
 

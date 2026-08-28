@@ -23,7 +23,7 @@ from starlette.routing import Route
 
 from ...workflow.api.routes import RateLimiter
 
-from . import drafts, langgraph_runs, ops, workflows
+from . import agent_proposals, drafts, langgraph_runs, ops, workflows
 from .common import (
     OPS_READ_SCOPE, OPS_WRITE_SCOPE, READ_SCOPE, SENSITIVE_SCOPE, WRITE_SCOPE,
     Authorizer, authoring_timeout_seconds, error,
@@ -108,6 +108,7 @@ def build_api_v1(
         *ops.build_routes(ctx),
         *workflows.build_routes(ctx),
         *drafts.build_routes(ctx),
+        *agent_proposals.build_routes(ctx),
     ]
     if langgraph_service is not None:
         routes.extend(langgraph_runs.build_routes(

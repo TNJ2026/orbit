@@ -1587,3 +1587,30 @@ html[data-theme="light"] .console-chunk.stderr { color: var(--text); }
   padding: 6px 0; border-top: 1px solid var(--line); font-size: 13px;
 }
 .workflow-branch-finding:first-child { border-top: 0; }
+
+/* Agents page: proposing one more trusted CLI.
+   The diff is the product, so it gets room to be read rather than a one-line
+   preview somebody would copy without looking at. */
+.agent-finder { margin-top: var(--space-3); display: grid; gap: var(--space-2); }
+/* The panel lays itself out with a grid gap, so the headings' own margins are
+   a second spacing system arguing with the first. */
+.agent-finder > h3, .agent-finder > p, .agent-finder h4 { margin: 0; }
+.agent-finder textarea { min-height: 72px; resize: vertical; width: 100%; }
+.agent-finder-actions { display: flex; gap: var(--space-2); align-items: center; }
+.agent-finder-actions select { flex: 0 0 auto; }
+.agent-finder-results { display: grid; gap: var(--space-2); }
+.agent-finder-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.agent-finder-item {
+  display: flex; gap: var(--space-2); align-items: center;
+  padding: 6px var(--space-2);
+  border: 1px solid var(--line-soft); border-radius: var(--radius);
+}
+/* Only the one a reviewer can act on is accented. The rest are answers too —
+   "already trusted" is a useful answer — so they stay quiet rather than red. */
+.agent-finder-item.verdict-proposable { border-color: var(--brand-line); }
+.agent-finder-patch { display: grid; gap: var(--space-2); }
+.agent-finder-diff {
+  max-height: 340px; overflow: auto; padding: var(--space-2);
+  background: var(--panel-2); border: 1px solid var(--line-soft);
+  border-radius: var(--radius); white-space: pre; font-size: 12px;
+}

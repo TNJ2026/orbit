@@ -679,6 +679,16 @@ class WorkflowAuthoringService:
         self._writer(agent)
         return agent.strip()
 
+    def text_writer(self, agent: str | None) -> Callable[[str], str]:
+        """A named Agent's raw text generator, for callers that are not authoring.
+
+        Same refusal on an unknown name as everything else here: somebody told
+        the answer came from the Agent they asked for has to be able to believe
+        it, whatever they asked it for.
+        """
+
+        return self._writer(agent)
+
     def _writer(self, agent: str | None) -> Callable[[str], str]:
         """The text generator for a named Agent, or the default one.
 
