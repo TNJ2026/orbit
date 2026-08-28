@@ -10,16 +10,16 @@
    canvas while their saturated text stays legible. */
 :root {
   color-scheme: dark;
-  --chrome: #212121;        /* ChatGPT app canvas */
-  --bg: #212121;            /* ChatGPT app canvas */
-  --panel: #212121;         /* cards share the ChatGPT app canvas */
-  --panel-2: #212121;       /* inputs and buttons share the canvas */
-  --panel-3: #212121;       /* raised neutral surfaces share the canvas */
+  --chrome: #181818;        /* app canvas */
+  --bg: #181818;            /* app canvas */
+  --panel: #181818;         /* cards share the app canvas */
+  --panel-2: #181818;       /* inputs and buttons share the canvas */
+  --panel-3: #181818;       /* raised neutral surfaces share the canvas */
   --line: #424754;          /* outline-variant — component boundaries */
   --line-soft: #2a2d35;     /* quieter dividers inside a card */
   /* Hover surface: a clear step above --panel-3 so the lift reads on a dark
      screen. */
-  --hover: #212121;         /* hover remains on the shared canvas */
+  --hover: #181818;         /* hover remains on the shared canvas */
   --text: #e1e2ec;          /* on-surface — primary text */
   --muted: #c2c6d6;         /* on-surface-variant — secondary text */
   --muted-2: #8c909f;       /* outline — tertiary / metadata text */
