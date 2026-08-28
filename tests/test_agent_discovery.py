@@ -200,11 +200,29 @@ class ManifestTests(unittest.TestCase):
     def test_the_cli_version_is_the_handler_version(self) -> None:
         self.assertEqual("2.1.3", agent_manifest(self.agent).version)
 
-    def test_a_different_cli_version_is_a_different_fingerprint(self) -> None:
+    def test_a_different_cli_version_is_the_same_fingerprint(self) -> None:
+        """A release is an upgrade, not a new contract.
+
+        The fingerprint is what a published Workflow records so it can be sure
+        it is binding to the same Handler. While the build number was inside
+        it, every routine `claude` release invalidated every Workflow that
+        named the previous one — a break no author could have avoided, for a
+        change none of them made.
+        """
+
         other = DiscoveredAgent(CLAUDE, "/usr/local/bin/claude", "2.2.0")
-        self.assertNotEqual(
+        self.assertEqual(
             agent_manifest(self.agent).fingerprint, agent_manifest(other).fingerprint
         )
+
+    def test_a_different_contract_is_still_a_different_fingerprint(self) -> None:
+        """Only the build number left. Everything the binding rests on stayed."""
+
+        base = agent_manifest(self.agent)
+        widened = replace(
+            base, outputs={**dict(base.outputs), "extra": "schema://object/1.0"},
+        )
+        self.assertNotEqual(base.fingerprint, widened.fingerprint)
 
     def test_the_same_cli_at_the_same_version_is_stable(self) -> None:
         same = DiscoveredAgent(CLAUDE, "/opt/bin/claude", "2.1.3")

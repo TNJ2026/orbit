@@ -108,6 +108,11 @@ class BoundHandler:
     # Attempt-scoped pruning for winner joins. Unlike ``cancel_run`` this must
     # not poison the whole run: the winner and its downstream join continue.
     cancel_attempts: Callable[[str, frozenset[str]], bool] | None = None
+    # What this Handler's fingerprint was while the build number was part of
+    # it. Published WorkflowVersions are immutable, so the ones written before
+    # the version left the fingerprint still name that older value; accepting
+    # it here is what keeps them runnable.
+    legacy_manifest_fingerprint: str | None = None
 
     def __post_init__(self) -> None:
         if not self.name.strip() or not self.version.strip():
@@ -138,15 +143,22 @@ class LangGraphRunCancelled(Exception):
 
 
 class LangGraphHandlerRegistry:
-    """Sealed exact-version allow-list used during graph compilation."""
+    """Sealed allow-list used during graph compilation, keyed by Handler name.
+
+    Identity is the name plus the manifest fingerprint — never the build
+    number. A Handler's version says which release is installed, which is an
+    operational fact that changes without the contract changing; binding on it
+    meant a routine CLI upgrade made every Workflow that named the old build
+    unresolvable, and there is nothing a Workflow author could have done
+    differently to avoid that.
+    """
 
     def __init__(self, handlers: Iterable[BoundHandler]) -> None:
-        entries: dict[tuple[str, str], BoundHandler] = {}
+        entries: dict[str, BoundHandler] = {}
         for handler in handlers:
-            key = (handler.name, handler.version)
-            if key in entries:
-                raise ValueError(f"duplicate LangGraph handler: {handler.name}@{handler.version}")
-            entries[key] = handler
+            if handler.name in entries:
+                raise ValueError(f"duplicate LangGraph handler: {handler.name}")
+            entries[handler.name] = handler
         self._entries = MappingProxyType(entries)
         self._join_lock = Lock()
         self._join_progress: dict[
@@ -157,14 +169,15 @@ class LangGraphHandlerRegistry:
         reference = node.handler
         if reference is None:
             raise HandlerBindingError(f"node {node.id!r} has no Handler binding")
-        handler = self._entries.get((reference.name, reference.version))
+        handler = self._entries.get(reference.name)
         if handler is None:
             raise HandlerBindingError(
-                f"handler not registered: {reference.name}@{reference.version}"
+                f"handler not registered: {reference.name}"
             )
-        if handler.manifest_fingerprint != reference.manifest_fingerprint:
+        accepted = {handler.manifest_fingerprint, handler.legacy_manifest_fingerprint}
+        if reference.manifest_fingerprint not in accepted:
             raise HandlerBindingError(
-                f"handler manifest mismatch: {reference.name}@{reference.version}"
+                f"handler manifest mismatch: {reference.name}"
             )
         return handler
 

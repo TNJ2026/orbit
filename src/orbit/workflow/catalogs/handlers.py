@@ -10,7 +10,7 @@ from typing import Iterable, Mapping, Protocol
 
 from ..domain.durable_execution import ExecutionSafety
 from ..domain.handlers import ResourceProfile
-from ..domain.serialization import canonical_json, freeze_json
+from ..domain.serialization import canonical_json, freeze_json, to_primitive
 
 
 _VERSION = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
@@ -80,6 +80,34 @@ class HandlerManifest:
 
     @property
     def fingerprint(self) -> str:
+        """The contract this Handler promises, without its build number.
+
+        A CLI release is an operational upgrade, not a contract migration. What
+        a binding has to be sure of is the ports, schemas and capabilities a
+        Workflow was compiled against — the version is none of those. While it
+        was hashed in here, every routine upgrade produced a different
+        fingerprint, so a published Workflow naming the build it was written
+        against stopped resolving the moment that build was replaced.
+        """
+
+        payload = {
+            key: value for key, value in to_primitive(self).items()
+            if key != "version"
+        }
+        return "sha256:" + hashlib.sha256(canonical_json(payload).encode()).hexdigest()
+
+    @property
+    def legacy_fingerprint(self) -> str:
+        """What `fingerprint` was while the build number was still in it.
+
+        Published WorkflowVersions are immutable — a database trigger enforces
+        it — so fingerprints already recorded in them can never be rewritten.
+        They are accepted at resolve time instead: a Workflow published before
+        this change keeps running on the exact build it named, and anything
+        compiled after it survives an upgrade. Both are the same Handler; only
+        one of them says so in a way that outlives a release.
+        """
+
         return "sha256:" + hashlib.sha256(canonical_json(self).encode()).hexdigest()
 
 
@@ -116,5 +144,31 @@ class InMemoryHandlerCatalog:
         return self._fingerprint
 
     def resolve(self, name: str, constraint: str) -> HandlerManifest | None:
-        matches = [item for item in self._by_name.get(name, ()) if _matches(item.version, constraint)]
-        return matches[0] if matches else None
+        """The manifest a declaration selects, or None when nothing answers.
+
+        The constraint is honoured whenever something satisfies it. When
+        nothing does and the Handler is an Agent, the installed build answers
+        anyway: an Agent's version says which CLI release is on this machine,
+        which is not a choice the author made and not one they can keep true.
+        A Workflow that named the build it was written against would otherwise
+        stop compiling the day that build was replaced — so editing a Workflow
+        from last month would begin by working out which release it was born
+        on. Other Handler kinds keep their pin, because their versions move
+        only when this repository does, and a pin that misses is real drift
+        worth reporting rather than papering over.
+
+        This is not a hole in the contract. The compiler still checks the
+        selected manifest's ports and schemas against the node that declared
+        it, so an Agent whose contract really did change is refused here — it
+        is only the release number that stopped being a reason to refuse.
+        """
+
+        candidates = self._by_name.get(name, ())
+        matches = [item for item in candidates if _matches(item.version, constraint)]
+        if matches:
+            return matches[0]
+        # Sorted newest-first at construction, so the first is the newest.
+        installed = [
+            item for item in candidates if "agent.invoke" in item.capabilities
+        ]
+        return installed[0] if installed else None

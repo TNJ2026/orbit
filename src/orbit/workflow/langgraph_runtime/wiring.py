@@ -724,6 +724,7 @@ def trusted_handlers(
                 manifest.fingerprint,
                 _transform,
                 retry_safe=True,
+                legacy_manifest_fingerprint=manifest.legacy_fingerprint,
             ))
         elif (
             isinstance(registration.implementation, AgentHandler)
@@ -746,6 +747,7 @@ def trusted_handlers(
                 }),
                 finish_run=finish_run,
                 cancel_attempts=cancel_attempts,
+                legacy_manifest_fingerprint=manifest.legacy_fingerprint,
             ))
         elif (
             isinstance(registration.implementation, (ToolHandler, HarnessSubagentHandler))
@@ -768,6 +770,7 @@ def trusted_handlers(
                 ),
                 finish_run=finish_run,
                 cancel_attempts=cancel_attempts,
+                legacy_manifest_fingerprint=manifest.legacy_fingerprint,
             ))
     return LangGraphHandlerRegistry(handlers)
 

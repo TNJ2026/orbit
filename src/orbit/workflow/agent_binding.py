@@ -315,10 +315,12 @@ class AgentFallback:
 
     def __call__(self, ir: WorkflowIR) -> AgentRebinding | None:
         manifests = tuple(self._manifests())
-        # ExecutionRegistry resolves Agent handlers by logical name when the
-        # published CLI build is no longer installed. Keep this availability
-        # check aligned with it so a routine CLI upgrade neither emits a
-        # misleading fallback warning nor rewrites the run's Agent binding.
+        # Availability is a question about names, and now so is resolution: the
+        # execution registries key on the Handler name and check the contract
+        # fingerprint, never the build number. So a routine CLI upgrade is not
+        # a stranded step and must not be reported as one — it resolves on its
+        # own, and rewriting the run's Agent binding for it would move work
+        # nobody asked to move.
         installed = {
             item.name for item in agent_manifests(manifests)
         }

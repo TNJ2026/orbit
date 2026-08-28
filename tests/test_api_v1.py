@@ -322,7 +322,13 @@ class ReadAuthTests(ApiTestCase):
 
 
 class HandlerDriftTests(unittest.TestCase):
-    """A published plan pins a Handler build; upgrading the build strands it."""
+    """A published plan names a Handler; what still strands it, and what no longer does.
+
+    Upgrading a build used to strand every plan that named the previous one.
+    It no longer does — the fingerprint stopped covering the version — so what
+    is under test here is the pair: a build that moved still runs, and a
+    contract that moved still does not.
+    """
 
     DRIFTED = {
         "dsl_version": "1.2",
@@ -368,26 +374,41 @@ class HandlerDriftTests(unittest.TestCase):
         # A version whose plan pins transform@0.9.0, kept coherent with its own
         # source. The running registry has transform@1.0.0 — the exact drift an
         # upgraded Agent CLI produces.
+        store = SQLiteWorkflowVersionStore(self.db)
         stale = self.manifest_at("0.9.0")
         source = json_module.dumps(self.DRIFTED)
         compiled = compile_source(
             source, InMemoryHandlerCatalog([stale]),
             InMemorySchemaCatalog(dict(SCHEMAS)), source_format="json",
         )
-        SQLiteWorkflowVersionStore(self.db).publish(
+        store.publish(
             compiled, expected_latest_version=0, source_format="json",
             source_text=source, actor="drift-test",
         )
+        # The other kind of drift, and the one that must still fail closed: a
+        # Handler whose *contract* moved. Same ports, so it still compiles;
+        # a different cancellation promise, so it is a different Handler.
+        changed = {**self.DRIFTED, "metadata": {"id": "contract", "name": "Contract"}}
+        other_source = json_module.dumps(changed)
+        other = compile_source(
+            other_source,
+            InMemoryHandlerCatalog([self.manifest_at("0.9.0", cancel=False)]),
+            InMemorySchemaCatalog(dict(SCHEMAS)), source_format="json",
+        )
+        store.publish(
+            other, expected_latest_version=0, source_format="json",
+            source_text=other_source, actor="drift-test",
+        )
 
     @staticmethod
-    def manifest_at(version: str) -> HandlerManifest:
+    def manifest_at(version: str, *, cancel: bool = True) -> HandlerManifest:
         return HandlerManifest(
             "transform", version, ("action",),
             {"value": "example://integer/1.0"},
             {"value": "example://integer/1.0"},
             {"type": "object"}, ExecutionSafety.REPLAY_SAFE,
             ResourceProfile(100, 100, 5, 60, 1_000_000, "test"),
-            "schema://object/1.0", (), (), True, True,
+            "schema://object/1.0", (), (), cancel, True,
         )
 
     def detail(self, client):
@@ -410,7 +431,14 @@ class HandlerDriftTests(unittest.TestCase):
                 [c["command"] for c in data["allowed_commands"]],
             )
 
-    def test_starting_the_stranded_version_says_so_and_does_not_ask_to_retry(self) -> None:
+    def test_a_build_that_moved_no_longer_strands_the_plan(self) -> None:
+        """The plan pins transform@0.9.0 and the registry has 1.0.0. It runs.
+
+        This is the whole point of taking the version out of the fingerprint:
+        the contract the plan was compiled against is unchanged, and a build
+        number is not something a Workflow author chose or can fix.
+        """
+
         with AsgiHarness(self.app) as client:
             response = client.post(
                 "/api/v1/langgraph-runs", actor="writer", key="run-stranded",
@@ -419,10 +447,28 @@ class HandlerDriftTests(unittest.TestCase):
                     "input": {"value": 1},
                 },
             )
-            self.assertEqual(409, response.status_code, response.text)
-            self.assertIn(
-                "0.9.0", response.json()["error"]["message"],
+            self.assertEqual(200, response.status_code, response.text)
+            self.assertEqual(
+                "completed", response.json()["data"]["run"]["status"],
             )
+
+    def test_a_contract_that_moved_still_fails_closed(self) -> None:
+        """Same ports, different cancellation promise: a different Handler.
+
+        Without this the change above would read as "drift stopped mattering",
+        which is not what happened — only the build number stopped counting as
+        drift.
+        """
+
+        with AsgiHarness(self.app) as client:
+            response = client.post(
+                "/api/v1/langgraph-runs", actor="writer", key="run-contract",
+                body={
+                    "workflow_id": "workflow:contract", "workflow_version": 1,
+                    "input": {"value": 1},
+                },
+            )
+            self.assertEqual(409, response.status_code, response.text)
 
     def test_rebind_moves_every_node_to_the_installed_build(self) -> None:
         with AsgiHarness(self.app) as client:

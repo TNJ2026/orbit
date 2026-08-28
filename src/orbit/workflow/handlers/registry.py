@@ -55,9 +55,9 @@ class ExecutionRegistry:
             raise ValueError("implementation_id is required")
         if not isinstance(implementation, NodeHandler):
             raise TypeError("implementation does not satisfy NodeHandler")
-        key = (manifest.name, manifest.version)
+        key = manifest.name
         if key in self._entries:
-            raise ValueError(f"duplicate executable handler: {manifest.name}@{manifest.version}")
+            raise ValueError(f"duplicate executable handler: {manifest.name}")
         digest = "sha256:" + hashlib.sha256(
             canonical_json(
                 {
@@ -75,11 +75,10 @@ class ExecutionRegistry:
             payload = [
                 {
                     "name": name,
-                    "version": version,
                     "manifest_fingerprint": entry.manifest.fingerprint,
                     "implementation_fingerprint": entry.implementation_fingerprint,
                 }
-                for (name, version), entry in sorted(self._entries.items())
+                for name, entry in sorted(self._entries.items())
             ]
             self._fingerprint = "sha256:" + hashlib.sha256(
                 canonical_json(payload).encode()
@@ -96,32 +95,23 @@ class ExecutionRegistry:
     ) -> RegisteredHandler:
         if not self._sealed:
             raise RuntimeError("ExecutionRegistry must be sealed before resolve")
+        # The version is still required to be a well-formed exact one, because
+        # a caller passing a constraint has confused a published binding with a
+        # DSL declaration. It no longer selects anything: identity is the name
+        # plus the contract fingerprint, and the build number belongs to
+        # neither. The Agent-shaped exception this used to carry is gone with
+        # it — every Handler kind now survives a release the same way.
         _version_tuple(exact_version)
-        entry = self._entries.get((name, exact_version))
-        # Agent CLI releases are operational upgrades, not Workflow contract
-        # migrations. A published Workflow keeps the logical Agent name while
-        # execution follows the currently installed build. Other Handler kinds
-        # remain exact-version and fingerprint pinned.
+        entry = self._entries.get(name)
         if entry is None:
-            compatible_agents = [
-                candidate for (candidate_name, _), candidate in self._entries.items()
-                if candidate_name == name
-                and "agent.invoke" in candidate.manifest.capabilities
-            ]
-            if compatible_agents:
-                entry = max(
-                    compatible_agents,
-                    key=lambda candidate: _version_tuple(candidate.manifest.version),
-                )
-        if entry is None:
-            raise HandlerNotAvailableError(f"handler not available: {name}@{exact_version}")
-        if (
-            expected_manifest_fingerprint is not None
-            and entry.manifest.fingerprint != expected_manifest_fingerprint
-            and "agent.invoke" not in entry.manifest.capabilities
+            raise HandlerNotAvailableError(f"handler not available: {name}")
+        if expected_manifest_fingerprint is not None and (
+            expected_manifest_fingerprint not in {
+                entry.manifest.fingerprint, entry.manifest.legacy_fingerprint,
+            }
         ):
             raise HandlerContractMismatchError(
-                f"handler manifest mismatch: {name}@{exact_version}"
+                f"handler manifest mismatch: {name}"
             )
         return entry
 
