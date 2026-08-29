@@ -293,6 +293,105 @@ class HostTests(unittest.TestCase):
         terminate.assert_called_once_with(_Process.pid)
 
 
+class _ExitedProcess:
+    """A child that lost the race with a predecessor still letting go."""
+
+    pid = 12346
+
+    def __init__(self, returncode: int = 1) -> None:
+        self.returncode = returncode
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+
+class RestartRaceTests(unittest.TestCase):
+    """`ensure` is called to restart, so it meets predecessors letting go.
+
+    A Runtime asked to stop keeps its database lock while it drains
+    connections, and stops answering its ready URL first. A successor launched
+    in that window exits — it cannot take a lock somebody still holds. Failing
+    on that first exit made an ordinary restart an error the caller had to
+    retry by hand, which is what happened repeatedly in practice.
+    """
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.root = Path(self.temp.name)
+        self.workspace = self.root / "workspace"
+        self.workspace.mkdir()
+        self.manifest_path = write_manifest(self.root)
+        self.addCleanup(self.temp.cleanup)
+
+    def test_a_child_that_lost_the_race_is_launched_again(self) -> None:
+        # Unhealthy, unhealthy, then ready once the predecessor has gone.
+        health = iter((False, False, False, True))
+        launched: list[object] = []
+
+        def launcher(*_args):
+            process = _ExitedProcess() if not launched else _Process()
+            launched.append(process)
+            return process
+
+        host = AgentAppHost(
+            state_root=self.root / "state",
+            health_check=lambda _url: next(health),
+            launcher=launcher,
+            clock=iter((0.0, 0.0, 0.1, 0.2)).__next__,
+            sleep=lambda _seconds: None,
+        )
+        ensured = host.ensure(self.manifest_path, workspace=self.workspace)
+        self.assertTrue(ensured.started)
+        self.assertEqual(2, len(launched))
+
+    def test_it_does_not_start_a_rival_for_an_endpoint_now_answering(self) -> None:
+        """Losing the race means somebody else is serving; leave them alone."""
+
+        health = iter((False, False, True, True))
+        launched: list[object] = []
+
+        def launcher(*_args):
+            launched.append(_ExitedProcess())
+            return launched[-1]
+
+        host = AgentAppHost(
+            state_root=self.root / "state",
+            health_check=lambda _url: next(health),
+            launcher=launcher,
+            clock=iter((0.0, 0.0, 0.1, 0.2)).__next__,
+            sleep=lambda _seconds: None,
+        )
+        host.ensure(self.manifest_path, workspace=self.workspace)
+        self.assertEqual(1, len(launched))
+
+    def test_a_broken_command_still_fails_and_says_what_happened(self) -> None:
+        """Retrying must not turn a real failure into a bare timeout.
+
+        The App never becomes ready, so the deadline is spent — but the reason
+        is that every attempt exited, and the message has to carry that or the
+        reader goes looking for a slow start that never happened.
+        """
+
+        host = AgentAppHost(
+            state_root=self.root / "state",
+            health_check=lambda _url: False,
+            launcher=lambda *_args: _ExitedProcess(returncode=127),
+            sleep=lambda _seconds: None,
+        )
+        with mock.patch(
+            "orbit.agent_apps.host.descendant_pids", return_value=[]
+        ), mock.patch("orbit.agent_apps.host.terminate_pid_tree"):
+            with self.assertRaises(AgentAppHostError) as raised:
+                host.ensure(self.manifest_path, workspace=self.workspace)
+        message = str(raised.exception)
+        self.assertIn("last exit code 127", message)
+        self.assertIn("attempt(s)", message)
+        self.assertIn("service.stderr.log", message)
+
+
 class ProjectRootTests(unittest.TestCase):
     def test_explicit_project_root_selects_default_runtime_database(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:

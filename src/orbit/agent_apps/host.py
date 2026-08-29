@@ -37,6 +37,14 @@ class EnsuredApp:
     started: bool
 
 
+# How long to leave a departing predecessor before trying again, and the cap
+# it grows to. Short enough that an ordinary restart is not perceptibly slower;
+# doubling so that a command which is simply broken is not relaunched in a hot
+# loop for the whole readiness deadline.
+_RELAUNCH_BACKOFF_SECONDS = 0.2
+_RELAUNCH_BACKOFF_CEILING = 2.0
+
+
 def default_state_root() -> Path:
     configured = os.environ.get("AGENT_APP_STATE_DIR")
     if configured:
@@ -196,21 +204,54 @@ class AgentAppHost:
                     state_dir, manifest, process, resolved_workspace
                 )
                 deadline = self.clock() + manifest.service.timeout_seconds
+                attempts, backoff, last_code = 1, _RELAUNCH_BACKOFF_SECONDS, None
                 while self.clock() < deadline:
                     if self.health_check(manifest.service.ready_url):
                         return EnsuredApp(
                             manifest, resolved_workspace, state_dir, started=True
                         )
-                    if process.poll() is not None:
-                        raise AgentAppHostError(
-                            f"{manifest.app_id} exited with code {process.returncode}; "
-                            f"see {state_dir / 'service.stderr.log'}"
-                        )
-                    self.sleep(0.1)
+                    if process.poll() is None:
+                        self.sleep(0.1)
+                        continue
+                    # An exit during startup is not proof of a broken App.
+                    # `ensure` is called to restart something, so the moment it
+                    # runs is exactly the moment a predecessor is letting go:
+                    # still holding the endpoint, or a database it locks, and
+                    # gone a second later. A successor launched into that
+                    # window exits, and failing on it turns an ordinary restart
+                    # into an error the caller has to retry by hand.
+                    #
+                    # Whether the exit was a lost race or a real failure is a
+                    # question only another attempt answers, so the readiness
+                    # deadline decides it rather than the first try. A genuinely
+                    # broken command still fails, having spent the deadline
+                    # saying so — and the message carries the attempts and the
+                    # last exit code so it does not read as a timeout.
+                    last_code = process.returncode
+                    if self.clock() + backoff >= deadline:
+                        break
+                    self.sleep(backoff)
+                    backoff = min(backoff * 2, _RELAUNCH_BACKOFF_CEILING)
+                    if self.health_check(manifest.service.ready_url):
+                        # Whoever we lost to is serving. Launching now would
+                        # start a rival for an endpoint already answering.
+                        continue
+                    process = self.launcher(
+                        manifest, state_dir, resolved_workspace
+                    )
+                    self._record_process(
+                        state_dir, manifest, process, resolved_workspace
+                    )
+                    attempts += 1
                 self._stop_process(process)
+                exited = (
+                    "" if last_code is None
+                    else f", last exit code {last_code}"
+                )
                 raise AgentAppHostError(
                     f"{manifest.app_id} did not become ready within "
-                    f"{manifest.service.timeout_seconds:g}s; "
+                    f"{manifest.service.timeout_seconds:g}s "
+                    f"({attempts} attempt(s){exited}); "
                     f"see {state_dir / 'service.stderr.log'}"
                 )
 
