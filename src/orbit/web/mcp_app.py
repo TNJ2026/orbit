@@ -86,12 +86,85 @@ ORBIT_DASHBOARD_HTML = r"""<!doctype html>
       </article>`).join('') : '<div class="empty">还没有已发布的工作流</div>';
   }
 
-  // The host bridge when there is one, and this page's own origin when there
-  // is not. Read either way: the panel has nothing to send.
+  // -- the ways in --------------------------------------------------------
+  // Three, and the page has to work on all of them: the OpenAI Apps SDK
+  // global that Codex provides, the MCP Apps postMessage bridge (SEP-1865),
+  // and plain HTTP when this page is opened at /panel. The ext-apps SDK would
+  // supply the middle one, but this file ships as a single self-contained
+  // document with no build step and no reachable CDN, so the handshake is
+  // written out. Protocol revision 2026-01-26.
+  const MCP_UI_PROTOCOL = '2026-01-26';
+
+  function mcpAppsBridge() {
+    // A View is always framed. Top-level means /panel, where HTTP is the way.
+    if (window.parent === window) return null;
+    const pending = new Map();
+    let nextId = 0;
+    let deliverResult = () => {};
+    window.addEventListener('message', event => {
+      const message = event.data;
+      if (!message || message.jsonrpc !== '2.0') return;
+      if (message.id != null && pending.has(message.id)) {
+        const settle = pending.get(message.id);
+        pending.delete(message.id);
+        if (message.error) settle.reject(new Error(message.error.message || '宿主返回错误'));
+        else settle.resolve(message.result);
+      } else if (message.method === 'ui/notifications/tool-result') {
+        deliverResult(message.params);
+      }
+    });
+    const post = message => window.parent.postMessage(message, '*');
+    // Every request is timed. Being framed says nothing about who is out
+    // there, and a parent that never answers must not leave the panel waiting
+    // on it forever — there is another way to read, and it cannot be taken if
+    // the first attempt never settles.
+    return {
+      request: (method, params, timeoutMs) => new Promise((resolve, reject) => {
+        const id = ++nextId;
+        pending.set(id, { resolve, reject });
+        post({ jsonrpc: '2.0', id, method, params });
+        setTimeout(() => {
+          if (!pending.delete(id)) return;
+          reject(new Error(`宿主未响应 ${method}`));
+        }, timeoutMs);
+      }),
+      notify: method => post({ jsonrpc: '2.0', method }),
+      onResult: handler => { deliverResult = handler; },
+    };
+  }
+
+  // Reassigned, not fixed: what looked like a host may turn out not to be one,
+  // and the page stops asking it once that is known.
+  let hostBridge = mcpAppsBridge();
+
+  // A handshake is instant when there is somebody to shake hands with, so a
+  // short deadline separates an MCP Apps host from a plain iframe embed.
+  async function connectHost() {
+    await hostBridge.request('ui/initialize', {
+      capabilities: {},
+      clientInfo: { name: 'orbit-panel', version: '1' },
+      protocolVersion: MCP_UI_PROTOCOL,
+    }, 4000);
+    // The host sends nothing before this, tool-input and tool-result included.
+    hostBridge.notify('ui/notifications/initialized');
+  }
+
   async function load() {
     if (window.openai?.callTool) {
       const result = await window.openai.callTool('list_workflows', {});
       return result?.structuredContent || result;
+    }
+    if (hostBridge) {
+      try {
+        // Standard MCP, proxied to the originating server by the host.
+        return await hostBridge.request('tools/call', {
+          name: 'list_workflows', arguments: {},
+        }, 15000);
+      } catch (error) {
+        // Whatever is out there is not answering as a host. Give up on it for
+        // good rather than spending another deadline on the next refresh.
+        hostBridge = null;
+      }
     }
     const response = await fetch('/api/v1/workflows', {
       headers: { accept: 'application/json' },
@@ -114,8 +187,23 @@ ORBIT_DASHBOARD_HTML = r"""<!doctype html>
     const globals = event.detail?.globals || event.detail || {};
     if (globals.toolOutput) render(globals.toolOutput);
   });
-  if (window.openai?.toolOutput) render(window.openai.toolOutput);
-  else refresh();
+
+  // The opening list arrives unasked on both bridges: Codex leaves it on the
+  // global, an MCP Apps host pushes it as tool-result once the handshake is
+  // done. Only HTTP has to go and get it.
+  if (window.openai?.toolOutput) {
+    render(window.openai.toolOutput);
+  } else if (hostBridge) {
+    hostBridge.onResult(render);
+    connectHost().catch(() => {
+      // Not an MCP Apps host after all. Same origin may still answer, but
+      // only once the parent is out of the way.
+      hostBridge = null;
+      refresh();
+    });
+  } else {
+    refresh();
+  }
 </script>
 </body>
 </html>"""

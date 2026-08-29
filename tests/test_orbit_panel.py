@@ -94,6 +94,62 @@ class NoWayToMutateTests(unittest.TestCase):
         self.assertIn("只读", ORBIT_DASHBOARD_HTML)
 
 
+class McpAppsBridgeTests(unittest.TestCase):
+    """The handshake this page performs when a host speaks MCP Apps.
+
+    The ext-apps SDK would supply this, and cannot: the page ships as one
+    self-contained document with no build step. So the wire protocol is
+    written out, which means the spec is only honoured for as long as these
+    strings survive — nothing here fails loudly if the sequence is broken, the
+    panel just sits empty on a host nobody tests against.
+
+    Behaviour was verified in a browser against a simulated host: the page
+    completes the handshake, renders from `ui/notifications/tool-result`,
+    refreshes over `tools/call`, and falls back to HTTP against a parent that
+    answers nothing. These assertions pin what that verification exercised.
+    """
+
+    def test_it_announces_the_protocol_revision_it_speaks(self) -> None:
+        self.assertIn("'2026-01-26'", ORBIT_DASHBOARD_HTML)
+
+    def test_it_performs_the_initialization_sequence(self) -> None:
+        """`ui/initialize`, then the notification that unblocks the host.
+
+        A host MUST NOT send tool input or results before the initialized
+        notification, so dropping it leaves the panel waiting on data that is
+        never coming.
+        """
+
+        self.assertIn("'ui/initialize'", ORBIT_DASHBOARD_HTML)
+        self.assertIn("'ui/notifications/initialized'", ORBIT_DASHBOARD_HTML)
+
+    def test_it_takes_the_opening_list_from_the_tool_result(self) -> None:
+        self.assertIn("'ui/notifications/tool-result'", ORBIT_DASHBOARD_HTML)
+
+    def test_it_refreshes_with_a_standard_tool_call(self) -> None:
+        self.assertIn("'tools/call'", ORBIT_DASHBOARD_HTML)
+
+    def test_it_speaks_to_the_parent_frame(self) -> None:
+        self.assertIn("window.parent.postMessage", ORBIT_DASHBOARD_HTML)
+        self.assertIn("window.parent === window", ORBIT_DASHBOARD_HTML)
+
+    def test_every_host_request_is_deadlined(self) -> None:
+        """Being framed says nothing about who is out there.
+
+        A plain embed answers no request at all. Without a deadline the first
+        one never settles, and the HTTP path that would have worked is never
+        reached — the panel says "refreshing" forever.
+        """
+
+        self.assertIn("setTimeout", ORBIT_DASHBOARD_HTML)
+        self.assertIn("宿主未响应", ORBIT_DASHBOARD_HTML)
+
+    def test_a_host_that_does_not_answer_is_dropped(self) -> None:
+        """And dropped for good, or every refresh spends another deadline."""
+
+        self.assertIn("hostBridge = null", ORBIT_DASHBOARD_HTML)
+
+
 class BothDataPathsTests(unittest.TestCase):
     """The page is fed by a host bridge or by HTTP, and shapes differ.
 

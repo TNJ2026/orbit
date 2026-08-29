@@ -74,10 +74,11 @@ hands the user every mutating control the panel was built to withhold, and
 routes work around the Agent that holds this skill rather than through it.
 Send them to `/ui` only when they ask to operate Orbit directly.
 
-**Another App.** Claude Desktop and other MCP Apps hosts may mount the card;
-hosts have also been reported to fetch the resource without mounting it. Look
-at what actually happened before adding a second surface, and if nothing was
-drawn, open that URL in whatever browser the App has, or the user's own.
+**Another App.** The card performs the MCP Apps handshake itself, so a host
+that mounts it gets a working panel rather than one stuck connecting. Hosts
+have been reported to fetch the resource without mounting it, though, so look
+at what actually happened before adding a second surface; if nothing was
+drawn, open `/panel` in whatever browser the App has, or the user's own.
 
 The rule that outlives any of these: if the card did not appear, show the UI
 another way. If a host starts mounting it, drop that host's workaround rather
