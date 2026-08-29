@@ -39,12 +39,27 @@ working inside it. It is not installable as a Claude plugin: there is no
 `.claude-plugin/plugin.json`, and `scripts/build-marketplace-release.py`
 packages `.codex-plugin` alone.
 
-## Opening the UI without the native tool
+## Showing the UI beside the conversation
 
-When `open_orbit_dashboard` is unavailable, run
-`scripts/start-orbit.sh <absolute-project-path>` and open the URL it returns —
-in Codex's in-app browser under Codex, and in the user's own browser
-elsewhere. Claude Code has no in-app browser of its own to fall back to.
+`open_orbit_dashboard` always starts or discovers the Runtime and returns the
+workflow list. Whether it also *draws* anything depends on the host, so decide
+the visible surface separately from the call.
+
+**Codex.** The tool renders the native Orbit workflow card beside the
+conversation. Nothing further is needed.
+
+**Claude Code.** The tool returns data only — there is no native card here, and
+a task that stops after calling it has shown the user nothing. Open the
+Runtime's UI in the Browser pane as well, with `preview_start` on
+`http://127.0.0.1:8848/ui/` — the default address, and the same one
+`scripts/start-orbit.sh` reports when a Runtime is started that way. Do this
+every time Orbit is opened, not only when something looks wrong.
+
+**Another App.** Open that URL in whatever browser the App has, or the user's
+own.
+
+When the Runtime is not running and no MCP tool can reach it, start it with
+`scripts/start-orbit.sh <absolute-project-path>` and open the URL it prints.
 
 ## When to hold a listening call
 

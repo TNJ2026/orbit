@@ -11,8 +11,8 @@ workflow UI.
 
 The procedures below are host-neutral. For what differs between the Agent Apps
 that read this skill — the client name to register under, how the MCP proxy
-finds the workspace, and when a listening call may be held open — read
-[hosts.md](reference/hosts.md).
+finds the workspace, where the UI has to be opened, and when a listening call
+may be held open — read [hosts.md](reference/hosts.md).
 
 For opening the Runtime, follow [open-orbit.md](reference/open-orbit.md).
 

@@ -1,19 +1,19 @@
 # Open Orbit
 
 Read [hosts.md](hosts.md) first for this host's client name, how its MCP proxy
-finds the workspace, and whether a listening call may be held open.
+finds the workspace, where the UI has to be opened, and whether a listening
+call may be held open.
 
 1. Resolve the current project workspace to an absolute directory. If the App
    has no project workspace, stop and ask the user to open or select a project
    directory; never use the process working directory as a fallback.
 2. Call `open_orbit_dashboard`. The MCP proxy starts or discovers the Runtime
-   for the resolved workspace, and the tool opens the native Orbit workflow
-   card beside the conversation.
-3. If the native tool is unavailable, open the UI the way
-   [hosts.md](hosts.md) describes for this host. Do not use that fallback when
-   the native tool is available.
-4. Tell the user whether the native dashboard or the full browser UI was
-   opened.
+   for the resolved workspace and returns its published workflows.
+3. Put the UI where the user can see it, the way [hosts.md](hosts.md)
+   describes for this host. On some hosts step 2 has already drawn it; on
+   others that call renders nothing and this step is what the user sees.
+4. Tell the user where Orbit opened, and what the Runtime holds — the
+   published workflows are in the step 2 response.
 5. Register this App under its client name, so an author can address it from
    the Orbit UI. Whether to do that by holding `wait_authoring_request` open or
    by calling `register_authoring_client` and renewing it depends on the host:
