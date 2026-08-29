@@ -72,8 +72,9 @@ class NoWayToMutateTests(unittest.TestCase):
                 self.assertNotIn(tag, ORBIT_DASHBOARD_HTML)
 
     def test_its_only_control_is_refresh(self) -> None:
-        buttons = re.findall(r"<button[^>]*>(.*?)</button>", ORBIT_DASHBOARD_HTML)
-        self.assertEqual(["刷新"], buttons)
+        buttons = re.findall(r"<button([^>]*)>", ORBIT_DASHBOARD_HTML)
+        self.assertEqual(1, len(buttons))
+        self.assertIn('id="refresh"', buttons[0])
 
     def test_it_calls_read_only_tools_only(self) -> None:
         """`list_workflows` reads; `start_run` and `generate_workflow` do not."""
@@ -90,8 +91,71 @@ class NoWayToMutateTests(unittest.TestCase):
     def test_it_says_where_those_actions_went(self) -> None:
         """A panel missing its controls without explanation reads as broken."""
 
-        self.assertIn("Agent", ORBIT_DASHBOARD_HTML)
+        self.assertIn("read-only", ORBIT_DASHBOARD_HTML)
         self.assertIn("只读", ORBIT_DASHBOARD_HTML)
+
+
+class SpeaksBothLanguagesTests(unittest.TestCase):
+    """The rule the full UI is held to, applied to the page that escaped it.
+
+    `tests/test_ui_assets.py` refuses hardcoded user-visible Chinese and holds
+    the catalogs to matching keys, but it reads `static/workflow-ui`. This page
+    is a string in Python, so none of that saw it, and it shipped monolingual
+    with an English enum showing through. Being out of a guard's reach is not
+    an exemption from the rule it enforces.
+    """
+
+    @staticmethod
+    def _markup() -> str:
+        """Everything before the script: what the document itself spells."""
+
+        return ORBIT_DASHBOARD_HTML.split("<script>")[0]
+
+    def test_the_markup_carries_no_user_visible_text(self) -> None:
+        """Every string is chosen at runtime, so none is baked into the page."""
+
+        self.assertEqual([], re.findall(r"[一-鿿]", self._markup()))
+        self.assertNotIn("<html lang=", self._markup())
+
+    def test_it_ships_both_catalogs(self) -> None:
+        self.assertIn("'en-US'", ORBIT_DASHBOARD_HTML)
+        self.assertIn("'zh-CN'", ORBIT_DASHBOARD_HTML)
+
+    def test_it_translates_the_readiness_states_the_api_produces(self) -> None:
+        """`ready`, and the two the workflows projection substitutes.
+
+        An untranslated token reaching the card is how "15 个步骤 · ready"
+        happened. The fallback keeps a state nobody translated readable as
+        exactly that, rather than dressed as an ordinary one.
+        """
+
+        for state in ("ready", "needs_upgrade", "needs_migration"):
+            with self.subTest(state=state):
+                self.assertIn(state, ORBIT_DASHBOARD_HTML)
+        self.assertIn("t().readiness[state] || state", ORBIT_DASHBOARD_HTML)
+
+
+class HostContextTests(unittest.TestCase):
+    """Theme and language belong to the host, not to the operating system.
+
+    The panel is drawn inside somebody else's conversation. Reading the OS for
+    a theme the host has overridden puts a light card in a dark thread — and
+    the disagreement appears exactly when a user has set the theme by hand.
+    """
+
+    def test_it_takes_the_context_offered_at_the_handshake(self) -> None:
+        self.assertIn("applyHostContext(result?.hostContext)", ORBIT_DASHBOARD_HTML)
+
+    def test_it_follows_the_host_when_the_context_changes(self) -> None:
+        self.assertIn(
+            "'ui/notifications/host-context-changed'", ORBIT_DASHBOARD_HTML,
+        )
+
+    def test_the_theme_reaches_the_whole_page(self) -> None:
+        """One property, because the page is drawn in system colours."""
+
+        self.assertIn("style.colorScheme = context.theme", ORBIT_DASHBOARD_HTML)
+        self.assertIn("color-scheme: light dark", ORBIT_DASHBOARD_HTML)
 
 
 class McpAppsBridgeTests(unittest.TestCase):

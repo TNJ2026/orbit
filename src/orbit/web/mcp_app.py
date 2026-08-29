@@ -17,7 +17,7 @@ ORBIT_DASHBOARD_MIME_TYPE = "text/html;profile=mcp-app"
 ORBIT_PANEL_PATH = "/panel"
 
 ORBIT_DASHBOARD_HTML = r"""<!doctype html>
-<html lang="zh-CN">
+<html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -48,16 +48,87 @@ ORBIT_DASHBOARD_HTML = r"""<!doctype html>
 </head>
 <body>
 <main>
-  <header><h1>Orbit Workflows</h1><button id="refresh" type="button">刷新</button></header>
-  <div id="status">正在连接 Orbit…</div>
+  <header><h1 id="title"></h1><button id="refresh" type="button"></button></header>
+  <div id="status"></div>
   <section id="items"></section>
-  <footer>启动目标、生成或修改工作流,请在对话中交给 Agent。此面板只读。</footer>
+  <footer id="note"></footer>
 </main>
 <script>
   const items = document.getElementById('items');
   const status = document.getElementById('status');
   const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, ch =>
     ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+
+  // -- what it says -------------------------------------------------------
+  // The full UI keeps its catalogs beside it as assets and has a test that
+  // refuses monolingual text. This page cannot share them: it ships as one
+  // self-contained document, so it carries its own. Same rule, smaller table.
+  //
+  // `readiness` covers the states the projection actually produces and falls
+  // back to the raw token, because a state nobody translated should read as
+  // an untranslated state rather than silently as an ordinary one.
+  const STRINGS = {
+    'en-US': {
+      title: 'Orbit Workflows', refresh: 'Refresh',
+      connecting: 'Connecting to Orbit…', refreshing: 'Refreshing…',
+      published: count => `${count} published workflow${count === 1 ? '' : 's'}`,
+      steps: count => `${count} step${count === 1 ? '' : 's'}`,
+      empty: 'No published workflows yet',
+      failed: detail => `Refresh failed: ${detail}`,
+      noAnswer: method => `the host did not answer ${method}`,
+      hostError: 'the host returned an error',
+      readiness: {
+        ready: 'ready', needs_upgrade: 'upgrade needed',
+        needs_migration: 'cannot upgrade',
+      },
+      note: 'Starting a goal and writing or changing a workflow are asked of '
+        + 'the Agent in the conversation. This panel is read-only.',
+    },
+    'zh-CN': {
+      title: 'Orbit 工作流', refresh: '刷新',
+      connecting: '正在连接 Orbit…', refreshing: '正在刷新…',
+      published: count => `${count} 个已发布工作流`,
+      steps: count => `${count} 个步骤`,
+      empty: '还没有已发布的工作流',
+      failed: detail => `刷新失败：${detail}`,
+      noAnswer: method => `宿主未响应 ${method}`,
+      hostError: '宿主返回错误',
+      readiness: {
+        ready: '可启动', needs_upgrade: '需要升级',
+        needs_migration: '无法升级',
+      },
+      note: '启动目标、生成或修改工作流，请在对话中交给 Agent。此面板只读。',
+    },
+  };
+
+  const localeFor = tag => String(tag || '').toLowerCase().startsWith('zh')
+    ? 'zh-CN' : 'en-US';
+  let locale = localeFor(navigator.language);
+  const t = () => STRINGS[locale];
+
+  function applyLocale() {
+    document.documentElement.lang = locale;
+    document.getElementById('title').textContent = t().title;
+    document.getElementById('refresh').textContent = t().refresh;
+    document.getElementById('note').textContent = t().note;
+  }
+
+  // The host tells the View its theme, and the page is drawn in system colors
+  // — so honouring it is one property, and the whole panel follows. Without
+  // this the page reads the operating system while the conversation around it
+  // reads the host, and the two disagree exactly when a user has overridden
+  // one of them.
+  function applyHostContext(context) {
+    if (!context) return;
+    if (context.theme) document.documentElement.style.colorScheme = context.theme;
+    if (context.locale && localeFor(context.locale) !== locale) {
+      locale = localeFor(context.locale);
+      applyLocale();
+      // Redraw what is already on screen; the host may change its mind about
+      // the language long after the list arrived.
+      if (lastPayload !== null) render();
+    }
+  }
 
   // The two surfaces answer in different shapes: the tool returns the list at
   // the top level, the HTTP projection wraps it in `data`. Neither is wrong,
@@ -74,16 +145,24 @@ ORBIT_DASHBOARD_HTML = r"""<!doctype html>
   const stepCount = workflow =>
     Number(workflow.node_count ?? workflow.summary?.node_count ?? 0);
 
+  const readinessLabel = workflow => {
+    const state = workflow.goal_readiness || 'unknown';
+    return t().readiness[state] || state;
+  };
+
+  let lastPayload = null;
+
   function render(payload) {
-    const workflows = workflowsIn(payload);
-    status.textContent = `${workflows.length} 个已发布工作流`;
+    if (payload !== undefined) lastPayload = payload;
+    const workflows = workflowsIn(lastPayload);
+    status.textContent = t().published(workflows.length);
     items.innerHTML = workflows.length ? workflows.map(workflow => `
       <article title="${escapeHtml(workflow.workflow_id)}">
         <div class="row"><h2>${escapeHtml(workflow.name || workflow.workflow_id)}</h2>
           <span class="dot ${workflow.goal_readiness === 'ready' ? 'ready' : ''}"></span></div>
         ${workflow.description ? `<p>${escapeHtml(workflow.description)}</p>` : ''}
-        <div class="meta">${stepCount(workflow)} 个步骤 · ${escapeHtml(workflow.goal_readiness || 'unknown')}</div>
-      </article>`).join('') : '<div class="empty">还没有已发布的工作流</div>';
+        <div class="meta">${escapeHtml(t().steps(stepCount(workflow)))} · ${escapeHtml(readinessLabel(workflow))}</div>
+      </article>`).join('') : `<div class="empty">${escapeHtml(t().empty)}</div>`;
   }
 
   // -- the ways in --------------------------------------------------------
@@ -107,10 +186,13 @@ ORBIT_DASHBOARD_HTML = r"""<!doctype html>
       if (message.id != null && pending.has(message.id)) {
         const settle = pending.get(message.id);
         pending.delete(message.id);
-        if (message.error) settle.reject(new Error(message.error.message || '宿主返回错误'));
+        if (message.error) settle.reject(new Error(message.error.message || t().hostError));
         else settle.resolve(message.result);
       } else if (message.method === 'ui/notifications/tool-result') {
         deliverResult(message.params);
+      } else if (message.method === 'ui/notifications/host-context-changed') {
+        // A partial context: only what changed, merged onto what is held.
+        applyHostContext(message.params);
       }
     });
     const post = message => window.parent.postMessage(message, '*');
@@ -125,7 +207,7 @@ ORBIT_DASHBOARD_HTML = r"""<!doctype html>
         post({ jsonrpc: '2.0', id, method, params });
         setTimeout(() => {
           if (!pending.delete(id)) return;
-          reject(new Error(`宿主未响应 ${method}`));
+          reject(new Error(t().noAnswer(method)));
         }, timeoutMs);
       }),
       notify: method => post({ jsonrpc: '2.0', method }),
@@ -140,11 +222,13 @@ ORBIT_DASHBOARD_HTML = r"""<!doctype html>
   // A handshake is instant when there is somebody to shake hands with, so a
   // short deadline separates an MCP Apps host from a plain iframe embed.
   async function connectHost() {
-    await hostBridge.request('ui/initialize', {
+    const result = await hostBridge.request('ui/initialize', {
       capabilities: {},
       clientInfo: { name: 'orbit-panel', version: '1' },
       protocolVersion: MCP_UI_PROTOCOL,
     }, 4000);
+    // Theme and language arrive with the handshake, before anything is drawn.
+    applyHostContext(result?.hostContext);
     // The host sends nothing before this, tool-input and tool-result included.
     hostBridge.notify('ui/notifications/initialized');
   }
@@ -174,14 +258,16 @@ ORBIT_DASHBOARD_HTML = r"""<!doctype html>
   }
 
   async function refresh() {
-    status.textContent = '正在刷新…';
+    status.textContent = t().refreshing;
     try {
       render(await load());
     } catch (error) {
-      status.textContent = `刷新失败：${error?.message || error}`;
+      status.textContent = t().failed(error?.message || error);
     }
   }
 
+  applyLocale();
+  status.textContent = t().connecting;
   document.getElementById('refresh').addEventListener('click', refresh);
   window.addEventListener('openai:set_globals', event => {
     const globals = event.detail?.globals || event.detail || {};
