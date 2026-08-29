@@ -23,7 +23,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse
 from starlette.routing import Mount, Route, WebSocketRoute
 
 from ..workflow.application.handler_runtime_service import HandlerRuntimeBuilder
@@ -994,6 +994,20 @@ def create_app(
                 response = super().file_response(*args, **kwargs)
                 response.headers["cache-control"] = "no-cache"
                 return response
+
+        # The same page the MCP App resource serves, over HTTP, for a host
+        # that does not mount MCP Apps. It is deliberately not part of the /ui
+        # bundle: what makes it a panel is that it offers no way to start a
+        # run or write a workflow, and a route inside the full UI would invite
+        # someone to add one.
+        from .mcp_app import ORBIT_DASHBOARD_HTML, ORBIT_PANEL_PATH
+
+        async def orbit_panel(_request: Request) -> HTMLResponse:
+            return HTMLResponse(
+                ORBIT_DASHBOARD_HTML, headers={"cache-control": "no-cache"},
+            )
+
+        routes.append(Route(ORBIT_PANEL_PATH, orbit_panel, name="orbit-panel"))
 
         ui_root = resources.files("orbit").joinpath("static/workflow-ui")
         routes.append(

@@ -53,14 +53,26 @@ host-specific in any of that: a host that implements MCP Apps mounts the card
 in a sandboxed iframe and the user sees the dashboard; a host that does not
 shows only the JSON the tool returned.
 
+The card is read-only by design. It lists published workflows and refreshes,
+and offers no way to start a goal or write a workflow — those are asked of the
+Agent in the conversation, which holds this skill. Keep it that way: a control
+added there is a path around the Agent.
+
 **Codex.** Mounts it. Nothing further is needed.
 
 **Claude Code.** Observed not to mount it — the call returns data and the
 user sees nothing — so a task that stops there has not opened Orbit from where
-the user sits. Open the Runtime's UI in the Browser pane as well, with
-`preview_start` on `http://127.0.0.1:8848/ui/`: the default address, and the
-one `scripts/start-orbit.sh` reports when a Runtime is started that way. Do
-this every time Orbit is opened, not only when something looks wrong.
+the user sits. Open the panel in the Browser pane instead, with
+`preview_start` on `http://127.0.0.1:8848/panel`. That route serves the same
+page as the resource above, so what the user gets beside the conversation is
+what the card would have shown.
+
+Open `/panel`, not `/ui`. They are different surfaces on purpose: the panel
+lists workflows and refreshes, while the full UI at `/ui` also starts goals,
+generates workflows and deletes them. Putting `/ui` beside the conversation
+hands the user every mutating control the panel was built to withhold, and
+routes work around the Agent that holds this skill rather than through it.
+Send them to `/ui` only when they ask to operate Orbit directly.
 
 **Another App.** Claude Desktop and other MCP Apps hosts may mount the card;
 hosts have also been reported to fetch the resource without mounting it. Look
