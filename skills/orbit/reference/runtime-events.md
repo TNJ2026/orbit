@@ -11,5 +11,5 @@ stores notifications in a durable local Inbox.
 4. Execute only commands returned in `allowed_commands[]`; never construct a mutation URL.
 5. Call `ack_app_event` only after processing succeeds or the user deliberately dismisses it.
 
-An event does not autonomously wake a finished Codex task. The background proxy
+An event does not autonomously wake a finished task. The background proxy
 retains it until this task, another task, or a separate Agent worker consumes it.

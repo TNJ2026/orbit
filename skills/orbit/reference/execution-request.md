@@ -112,5 +112,5 @@ parse -> resolve_workflow -> validate_input -> preview
 ```
 
 Do not start before resolution and validation, start a new run to answer an
-interrupt, continue polling a terminal run, or cancel merely because the Codex
-task ends.
+interrupt, continue polling a terminal run, or cancel merely because the
+current task ends.
