@@ -127,6 +127,51 @@ class SpeaksBothLanguagesTests(unittest.TestCase):
         self.assertIn("'en-US'", ORBIT_DASHBOARD_HTML)
         self.assertIn("'zh-CN'", ORBIT_DASHBOARD_HTML)
 
+    @staticmethod
+    def _catalog_keys() -> dict[str, set[str]]:
+        """The keys each locale defines, nested ones included.
+
+        Parsed out of the source the way test_ui_assets.py reads the UI. If
+        the table is ever reformatted this stops finding keys, which is why
+        the test below refuses an implausibly small answer rather than
+        passing on one.
+        """
+
+        table = ORBIT_DASHBOARD_HTML.split("const STRINGS = {")[1]
+        table = table.split("\n  };")[0]
+        parts = re.split(r"\n    '(en-US|zh-CN)': \{", table)
+        catalogs: dict[str, set[str]] = {}
+        for index in range(1, len(parts), 2):
+            body = parts[index + 1]
+            keys = set(re.findall(r"^\s{6}(\w+):", body, re.M))
+            for name, nested in re.findall(
+                r"^\s{6}(\w+): \{(.*?)^\s{6}\},", body, re.M | re.S
+            ):
+                keys |= {f"{name}.{key}" for key in re.findall(r"(\w+):", nested)}
+            catalogs[parts[index]] = keys
+        return catalogs
+
+    def test_the_catalogs_define_the_same_keys(self) -> None:
+        """The guard the full UI has, which this page needs more.
+
+        A key present in one catalog and missing from the other renders as
+        `undefined` for whoever gets the other language — and nothing else
+        here would notice, because the page still loads and the list still
+        draws.
+        """
+
+        catalogs = self._catalog_keys()
+        self.assertEqual({"en-US", "zh-CN"}, set(catalogs))
+        english, chinese = catalogs["en-US"], catalogs["zh-CN"]
+        self.assertGreater(len(english), 15, "the key parser stopped working")
+        self.assertEqual(english, chinese)
+
+    def test_no_translation_is_left_empty(self) -> None:
+        """An empty string is a missing translation wearing a key."""
+
+        self.assertNotIn(": ''", ORBIT_DASHBOARD_HTML.split("const STRINGS = {")[1]
+                         .split("\n  };")[0])
+
     def test_it_translates_the_readiness_states_the_api_produces(self) -> None:
         """`ready`, and the two the workflows projection substitutes.
 
