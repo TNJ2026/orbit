@@ -42,21 +42,34 @@ packages `.codex-plugin` alone.
 ## Showing the UI beside the conversation
 
 `open_orbit_dashboard` always starts or discovers the Runtime and returns the
-workflow list. Whether it also *draws* anything depends on the host, so decide
-the visible surface separately from the call.
+workflow list. Whether it also *draws* anything is the host's decision, not
+Orbit's, so treat the visible surface as a separate question from the call.
 
-**Codex.** The tool renders the native Orbit workflow card beside the
-conversation. Nothing further is needed.
+The card it offers is an MCP App (the MCP Apps extension, SEP-1865). Orbit
+serves it as the resource `ui://orbit/workflows.html` with mime type
+`text/html;profile=mcp-app`, and binds it to the tool through
+`_meta.ui.resourceUri` — see `src/orbit/web/mcp_app.py`. There is nothing
+host-specific in any of that: a host that implements MCP Apps mounts the card
+in a sandboxed iframe and the user sees the dashboard; a host that does not
+shows only the JSON the tool returned.
 
-**Claude Code.** The tool returns data only — there is no native card here, and
-a task that stops after calling it has shown the user nothing. Open the
-Runtime's UI in the Browser pane as well, with `preview_start` on
-`http://127.0.0.1:8848/ui/` — the default address, and the same one
-`scripts/start-orbit.sh` reports when a Runtime is started that way. Do this
-every time Orbit is opened, not only when something looks wrong.
+**Codex.** Mounts it. Nothing further is needed.
 
-**Another App.** Open that URL in whatever browser the App has, or the user's
-own.
+**Claude Code.** Observed not to mount it — the call returns data and the
+user sees nothing — so a task that stops there has not opened Orbit from where
+the user sits. Open the Runtime's UI in the Browser pane as well, with
+`preview_start` on `http://127.0.0.1:8848/ui/`: the default address, and the
+one `scripts/start-orbit.sh` reports when a Runtime is started that way. Do
+this every time Orbit is opened, not only when something looks wrong.
+
+**Another App.** Claude Desktop and other MCP Apps hosts may mount the card;
+hosts have also been reported to fetch the resource without mounting it. Look
+at what actually happened before adding a second surface, and if nothing was
+drawn, open that URL in whatever browser the App has, or the user's own.
+
+The rule that outlives any of these: if the card did not appear, show the UI
+another way. If a host starts mounting it, drop that host's workaround rather
+than leaving the user with two dashboards.
 
 When the Runtime is not running and no MCP tool can reach it, start it with
 `scripts/start-orbit.sh <absolute-project-path>` and open the URL it prints.
