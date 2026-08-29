@@ -41,6 +41,20 @@ ORBIT_DASHBOARD_HTML = r"""<!doctype html>
     .dot { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; background: #8a8a8a; }
     .dot.ready { background: #20a464; }
     .empty { padding: 24px 8px; text-align: center; color: color-mix(in srgb, CanvasText 60%, transparent); }
+    #activity { margin-top: 12px; padding: 11px 12px; border-radius: 12px;
+      border: 1px solid color-mix(in srgb, CanvasText 16%, transparent);
+      background: color-mix(in srgb, Canvas 92%, CanvasText 8%); }
+    .label { font-size: 12px; color: color-mix(in srgb, CanvasText 60%, transparent); }
+    .goal { margin: 4px 0 0; font-size: 13px; overflow-wrap: anywhere;
+      display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .pill { flex: 0 0 auto; padding: 2px 8px; border-radius: 999px; font-size: 11px;
+      background: color-mix(in srgb, CanvasText 12%, transparent); }
+    .pill.live { background: color-mix(in srgb, #20a464 26%, transparent); }
+    .pill.attention { background: color-mix(in srgb, #d08b1c 30%, transparent); }
+    .pill.bad { background: color-mix(in srgb, #d0453b 26%, transparent); }
+    .track { height: 3px; margin-top: 9px; border-radius: 999px; overflow: hidden;
+      background: color-mix(in srgb, CanvasText 12%, transparent); }
+    .track span { display: block; height: 100%; background: #20a464; }
     footer { margin-top: 14px; padding-top: 10px; font-size: 12px; line-height: 1.5;
       border-top: 1px solid color-mix(in srgb, CanvasText 12%, transparent);
       color: color-mix(in srgb, CanvasText 55%, transparent); }
@@ -49,6 +63,7 @@ ORBIT_DASHBOARD_HTML = r"""<!doctype html>
 <body>
 <main>
   <header><h1 id="title"></h1><button id="refresh" type="button"></button></header>
+  <section id="activity" hidden></section>
   <div id="status"></div>
   <section id="items"></section>
   <footer id="note"></footer>
@@ -81,6 +96,13 @@ ORBIT_DASHBOARD_HTML = r"""<!doctype html>
         ready: 'ready', needs_upgrade: 'upgrade needed',
         needs_migration: 'cannot upgrade',
       },
+      currentGoal: 'Current goal', lastGoal: 'Last goal',
+      progress: (done, total) => `step ${done} of ${total}`,
+      runStatus: {
+        running: 'running', waiting: 'waiting', interrupted: 'needs you',
+        completed: 'completed', failed: 'failed', cancelled: 'cancelled',
+        unknown: 'outcome unknown',
+      },
       note: 'Starting a goal and writing or changing a workflow are asked of '
         + 'the Agent in the conversation. This panel is read-only.',
     },
@@ -96,6 +118,13 @@ ORBIT_DASHBOARD_HTML = r"""<!doctype html>
       readiness: {
         ready: '可启动', needs_upgrade: '需要升级',
         needs_migration: '无法升级',
+      },
+      currentGoal: '当前目标', lastGoal: '上一个目标',
+      progress: (done, total) => `第 ${done} 步 / 共 ${total}`,
+      runStatus: {
+        running: '运行中', waiting: '等待中', interrupted: '待你处理',
+        completed: '已完成', failed: '已失败', cancelled: '已取消',
+        unknown: '结果未知',
       },
       note: '启动目标、生成或修改工作流，请在对话中交给 Agent。此面板只读。',
     },
@@ -132,13 +161,11 @@ ORBIT_DASHBOARD_HTML = r"""<!doctype html>
 
   // The two surfaces answer in different shapes: the tool returns the list at
   // the top level, the HTTP projection wraps it in `data`. Neither is wrong,
-  // so the page reads both rather than either caller reshaping for it.
-  function workflowsIn(payload) {
-    return payload?.workflows
-      || payload?.structuredContent?.workflows
-      || payload?.data?.workflows
-      || [];
-  }
+  // so the page reads both rather than either caller reshaping for it. One
+  // reader, because workflows, runs and steps all arrive this way.
+  const listIn = (payload, key) => payload?.[key]
+    || payload?.structuredContent?.[key] || payload?.data?.[key] || [];
+  const workflowsIn = payload => listIn(payload, 'workflows');
 
   // `node_count` is lifted out of `summary` by the tool and left in place by
   // the HTTP projection.
@@ -233,16 +260,19 @@ ORBIT_DASHBOARD_HTML = r"""<!doctype html>
     hostBridge.notify('ui/notifications/initialized');
   }
 
-  async function load() {
+  // One reader for every read the panel makes: same tool name on both
+  // bridges, same projection over HTTP. Read-only throughout — these are the
+  // only three the panel is allowed to name.
+  async function load(tool, args, httpPath) {
     if (window.openai?.callTool) {
-      const result = await window.openai.callTool('list_workflows', {});
+      const result = await window.openai.callTool(tool, args);
       return result?.structuredContent || result;
     }
     if (hostBridge) {
       try {
         // Standard MCP, proxied to the originating server by the host.
         return await hostBridge.request('tools/call', {
-          name: 'list_workflows', arguments: {},
+          name: tool, arguments: args,
         }, 15000);
       } catch (error) {
         // Whatever is out there is not answering as a host. Give up on it for
@@ -250,37 +280,134 @@ ORBIT_DASHBOARD_HTML = r"""<!doctype html>
         hostBridge = null;
       }
     }
-    const response = await fetch('/api/v1/workflows', {
+    const response = await fetch(httpPath, {
       headers: { accept: 'application/json' },
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     return await response.json();
   }
 
+  const loadWorkflows = () => load('list_workflows', {}, '/api/v1/workflows');
+  const loadRuns = () => load('list_runs', { limit: 5 }, '/api/v1/langgraph-runs?limit=5');
+  const loadSteps = runId => load(
+    'get_run_steps', { run_id: runId },
+    `/api/v1/langgraph-runs/${encodeURIComponent(runId)}/steps`,
+  );
+
+  // -- what Orbit is doing now --------------------------------------------
+  // The catalogue is what Orbit *can* do; beside a conversation the more
+  // useful question is what it is doing, so the run sits above the list. Only
+  // one goal is active at a time, which is why this is a card and not a list.
+  const activity = document.getElementById('activity');
+  const ACTIVE = new Set(['running', 'waiting', 'interrupted']);
+  const PILL = {
+    running: 'live', waiting: 'live', interrupted: 'attention',
+    failed: 'bad', unknown: 'bad',
+  };
+
+  function renderActivity(runs, progress) {
+    // The active one if there is one, else the newest, which is how a panel
+    // answers "did that goal finish?" after the run has ended.
+    const run = runs.find(item => ACTIVE.has(item.status)) || runs[0] || null;
+    activity.hidden = run === null;
+    if (run === null) return null;
+    const live = ACTIVE.has(run.status);
+    const status_ = run.status || 'unknown';
+    activity.innerHTML = `
+      <div class="row">
+        <span class="label">${escapeHtml(live ? t().currentGoal : t().lastGoal)}</span>
+        <span class="pill ${PILL[status_] || ''}">${escapeHtml(
+          t().runStatus[status_] || status_)}</span>
+      </div>
+      <p class="goal">${escapeHtml(run.goal || run.workflow_id || run.run_id)}</p>
+      ${progress ? `
+        <div class="meta">${escapeHtml(t().progress(progress.done, progress.total))}${
+          progress.label ? ` · ${escapeHtml(progress.label)}` : ''}</div>
+        <div class="track"><span style="width:${
+          Math.round(100 * progress.done / progress.total)}%"></span></div>` : ''}`;
+    return live ? run : null;
+  }
+
+  // Steps are a second read, so they are fetched only for a run still going.
+  // A finished goal has nothing left to watch, and its card says so already.
+  async function progressOf(run) {
+    const steps = listIn(await loadSteps(run.run_id), 'steps');
+    if (!steps.length) return null;
+    const done = steps.filter(step => step.status === 'succeeded').length;
+    const current = steps.find(step => step.status === 'running')
+      || steps.find(step => step.status !== 'succeeded');
+    return { done, total: steps.length, label: current?.label || '' };
+  }
+
+  // Polling, because it is the only way that works on all three surfaces: a
+  // sandboxed View cannot open the Runtime's WebSocket.
+  //
+  // Two speeds, and an idle panel keeps polling rather than stopping. The
+  // whole point of this card is the goal a person asks the Agent to start
+  // *while looking at it*, and a panel that only watches runs already under
+  // way when it loaded would never show one — it would sit on the last
+  // finished goal forever. So idle still looks, just rarely.
+  //
+  // Neither speed is free: each poll is a tool call the host may show its
+  // user. Nothing polls while the panel is hidden, and nothing polls faster
+  // than a person reads.
+  const POLL_LIVE_MS = 5000;
+  const POLL_IDLE_MS = 20000;
+  let poller = null;
+
+  function schedulePoll(live) {
+    clearTimeout(poller);
+    poller = setTimeout(() => {
+      if (document.visibilityState === 'hidden') return schedulePoll(live);
+      refreshActivity();
+    }, live ? POLL_LIVE_MS : POLL_IDLE_MS);
+  }
+
+  async function refreshActivity() {
+    try {
+      const runs = listIn(await loadRuns(), 'runs');
+      const live = renderActivity(runs, null);
+      schedulePoll(live !== null);
+      if (live === null) return;
+      renderActivity(runs, await progressOf(live));
+    } catch (error) {
+      // Supplementary to the catalogue: leave the last state on screen rather
+      // than replacing a good answer with a transient failure, and look again
+      // at the idle rate rather than giving up on the panel for good.
+      schedulePoll(false);
+    }
+  }
+
   async function refresh() {
     status.textContent = t().refreshing;
     try {
-      render(await load());
+      render(await loadWorkflows());
     } catch (error) {
       status.textContent = t().failed(error?.message || error);
     }
+    await refreshActivity();
   }
 
   applyLocale();
   status.textContent = t().connecting;
   document.getElementById('refresh').addEventListener('click', refresh);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') refreshActivity();
+  });
   window.addEventListener('openai:set_globals', event => {
     const globals = event.detail?.globals || event.detail || {};
     if (globals.toolOutput) render(globals.toolOutput);
   });
 
-  // The opening list arrives unasked on both bridges: Codex leaves it on the
+  // The catalogue arrives unasked on both bridges: Codex leaves it on the
   // global, an MCP Apps host pushes it as tool-result once the handshake is
-  // done. Only HTTP has to go and get it.
+  // done, and only HTTP has to go and get it. What Orbit is *doing* is never
+  // pushed, so that is a read this page makes for itself on every surface.
   if (window.openai?.toolOutput) {
     render(window.openai.toolOutput);
+    refreshActivity();
   } else if (hostBridge) {
-    hostBridge.onResult(render);
+    hostBridge.onResult(payload => { render(payload); refreshActivity(); });
     connectHost().catch(() => {
       // Not an MCP Apps host after all. Same origin may still answer, but
       // only once the parent is out of the way.

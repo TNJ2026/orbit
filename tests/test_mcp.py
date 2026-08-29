@@ -55,7 +55,10 @@ class HandshakeTests(ApiTestCase):
                 client, "resources/read", {"uri": resource["uri"]}, actor="reader",
             ).json()
         content = read["result"]["contents"][0]
-        self.assertIn("window.openai.callTool('list_workflows'", content["text"])
+        # The document a host mounts: it speaks the MCP Apps handshake, and it
+        # reads. What it reads with is pinned in tests/test_orbit_panel.py.
+        self.assertIn("'ui/initialize'", content["text"])
+        self.assertIn("list_workflows", content["text"])
 
     def test_a_notification_gets_no_response_body(self) -> None:
         with AsgiHarness(self.app) as client:

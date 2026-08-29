@@ -76,17 +76,23 @@ class NoWayToMutateTests(unittest.TestCase):
         self.assertEqual(1, len(buttons))
         self.assertIn('id="refresh"', buttons[0])
 
-    def test_it_calls_read_only_tools_only(self) -> None:
-        """`list_workflows` reads; `start_run` and `generate_workflow` do not."""
+    def test_it_names_read_only_tools_only(self) -> None:
+        """Reading what Orbit holds and is doing; changing neither.
 
-        called = re.findall(r"callTool\('([^']+)'", ORBIT_DASHBOARD_HTML)
-        self.assertEqual(["list_workflows"], called)
+        The panel names its tools in one place, so the whole of its authority
+        is this list. `start_run`, `resume_run`, `cancel_run` and
+        `generate_workflow` are the ones that must never join it.
+        """
+
+        named = set(re.findall(r"load\(\s*'([a-z_]+)'", ORBIT_DASHBOARD_HTML))
+        self.assertEqual({"list_workflows", "list_runs", "get_run_steps"}, named)
 
     def test_it_reaches_no_mutating_endpoint(self) -> None:
-        fetched = re.findall(r"fetch\('([^']+)'", ORBIT_DASHBOARD_HTML)
-        self.assertEqual(["/api/v1/workflows"], fetched)
         self.assertNotIn("method: 'POST'", ORBIT_DASHBOARD_HTML)
         self.assertNotIn('method: "POST"', ORBIT_DASHBOARD_HTML)
+        self.assertNotIn("idempotency-key", ORBIT_DASHBOARD_HTML.lower())
+        # The single fetch is a GET, and every path it is given is a read.
+        self.assertEqual(1, ORBIT_DASHBOARD_HTML.count("await fetch("))
 
     def test_it_says_where_those_actions_went(self) -> None:
         """A panel missing its controls without explanation reads as broken."""
@@ -133,6 +139,65 @@ class SpeaksBothLanguagesTests(unittest.TestCase):
             with self.subTest(state=state):
                 self.assertIn(state, ORBIT_DASHBOARD_HTML)
         self.assertIn("t().readiness[state] || state", ORBIT_DASHBOARD_HTML)
+
+
+class ActivityTests(unittest.TestCase):
+    """What Orbit is doing, which is the question a panel is there to answer.
+
+    The catalogue says what Orbit *can* run. Beside a conversation the live
+    goal matters more, and it is the one thing a static list cannot show: a
+    user who asks the Agent to start something and then watches the sidebar
+    should see it move.
+    """
+
+    def test_a_live_goal_is_the_one_it_shows(self) -> None:
+        for state in ("running", "waiting", "interrupted"):
+            with self.subTest(state=state):
+                self.assertIn(f"'{state}'", ORBIT_DASHBOARD_HTML)
+        self.assertIn("runs.find(item => ACTIVE.has(item.status))", ORBIT_DASHBOARD_HTML)
+
+    def test_it_falls_back_to_the_newest_run(self) -> None:
+        """So "did that finish?" is answerable after the run has ended."""
+
+        self.assertIn("|| runs[0] || null", ORBIT_DASHBOARD_HTML)
+
+    def test_every_run_status_has_words(self) -> None:
+        """An untranslated status is the bug this page already shipped once."""
+
+        for state in ("running", "waiting", "interrupted", "completed",
+                      "failed", "cancelled", "unknown"):
+            with self.subTest(state=state):
+                self.assertIn(f"{state}:", ORBIT_DASHBOARD_HTML)
+        self.assertIn("t().runStatus[status_] || status_", ORBIT_DASHBOARD_HTML)
+
+    def test_steps_are_read_only_for_a_run_still_going(self) -> None:
+        """A finished goal has nothing left to watch; do not pay for it."""
+
+        self.assertIn("if (live === null) return;", ORBIT_DASHBOARD_HTML)
+
+    def test_an_idle_panel_still_watches_for_a_goal_starting(self) -> None:
+        """The case the card is for, and the one it first got wrong.
+
+        A user asks the Agent to start a goal while looking at the panel. A
+        poll that runs only while something is already live never notices, and
+        the card sits on the last finished goal for good. Idle looks too, just
+        rarely.
+        """
+
+        self.assertIn("POLL_LIVE_MS = 5000", ORBIT_DASHBOARD_HTML)
+        self.assertIn("POLL_IDLE_MS = 20000", ORBIT_DASHBOARD_HTML)
+        self.assertIn("live ? POLL_LIVE_MS : POLL_IDLE_MS", ORBIT_DASHBOARD_HTML)
+
+    def test_nothing_polls_while_nobody_is_looking(self) -> None:
+        """Each poll is a tool call the host may show its user."""
+
+        self.assertIn("document.visibilityState === 'hidden'", ORBIT_DASHBOARD_HTML)
+        self.assertIn("visibilitychange", ORBIT_DASHBOARD_HTML)
+
+    def test_a_failed_read_leaves_the_last_answer_standing(self) -> None:
+        """Activity is supplementary; a blip must not blank the catalogue."""
+
+        self.assertIn("schedulePoll(false);", ORBIT_DASHBOARD_HTML)
 
 
 class HostContextTests(unittest.TestCase):
@@ -223,7 +288,8 @@ class BothDataPathsTests(unittest.TestCase):
     """
 
     def test_it_reads_the_list_from_either_shape(self) -> None:
-        for path in ("payload?.workflows", "payload?.data?.workflows"):
+        for path in ("payload?.[key]", "payload?.data?.[key]",
+                     "payload?.structuredContent?.[key]"):
             with self.subTest(path=path):
                 self.assertIn(path, ORBIT_DASHBOARD_HTML)
 
@@ -233,7 +299,11 @@ class BothDataPathsTests(unittest.TestCase):
 
     def test_it_falls_back_to_http_when_there_is_no_bridge(self) -> None:
         self.assertIn("window.openai?.callTool", ORBIT_DASHBOARD_HTML)
-        self.assertIn("fetch('/api/v1/workflows'", ORBIT_DASHBOARD_HTML)
+        self.assertIn("await fetch(httpPath", ORBIT_DASHBOARD_HTML)
+        for path in ("'/api/v1/workflows'", "'/api/v1/langgraph-runs?limit=5'",
+                     "/steps`"):
+            with self.subTest(path=path):
+                self.assertIn(path, ORBIT_DASHBOARD_HTML)
 
 
 if __name__ == "__main__":
